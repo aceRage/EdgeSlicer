@@ -59,6 +59,7 @@ using namespace nlohmann;
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/SlicingStatusCollector.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Format/AMF.hpp"
@@ -229,7 +230,12 @@ typedef struct _sliced_info {
     nlohmann::json      warnings = nlohmann::json::array();
     bool                strict_mode {false};
 }sliced_info_t;
-std::vector<PrintBase::SlicingStatus> g_slicing_warnings;
+// Warnings raised through the CLI status callbacks. The callbacks run on whichever thread raises the
+// status - Print::process() runs PrintObject::generate_support_material() (and its "enable support"
+// warning) from a tbb::parallel_for over the objects - so this must be thread-safe: a plain
+// std::vector here corrupted the heap (access violation, or a hang on the heap lock).
+// Readers take() a snapshot and walk it without the lock.
+SlicingStatusCollector g_slicing_warnings;
 
 #if defined(__linux__) || defined(__LINUX__)
 #define PIPE_BUFFER_SIZE 512
@@ -358,9 +364,11 @@ typedef struct _cli_callback_mgr {
         m_message = message;
         m_warning_step = warning_step;
         m_data_ready = true;
+        // Read under the lock: update() runs on whichever thread raises the status (TBB workers).
+        const int total_progress = m_total_progress;
         lck.unlock();
         m_condition.notify_one();
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": m_total_progress="<<m_total_progress;
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": m_total_progress="<<total_progress;
         return;
     }
 
@@ -417,7 +425,7 @@ cli_callback_mgr_t g_cli_callback_mgr;
 void cli_status_callback(const PrintBase::SlicingStatus& slicing_status)
 {
     if (slicing_status.warning_step != -1) {
-        g_slicing_warnings.push_back(slicing_status);
+        g_slicing_warnings.add(slicing_status);
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": percent=%1%, warning_step=%2%, message=%3%, message_type=%4%, flag=%5%")
             %slicing_status.percent %slicing_status.warning_step %slicing_status.text %(int)(slicing_status.message_type) %slicing_status.flags;
     }
@@ -429,7 +437,7 @@ void cli_status_callback(const PrintBase::SlicingStatus& slicing_status)
 void default_status_callback(const PrintBase::SlicingStatus& slicing_status)
 {
     if (slicing_status.warning_step != -1) {
-        g_slicing_warnings.push_back(slicing_status);
+        g_slicing_warnings.add(slicing_status);
     }
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": percent=%1%, warning_step=%2%, message=%3%, message_type=%4%")%slicing_status.percent %slicing_status.warning_step %slicing_status.text %(int)(slicing_status.message_type);
     emit_progress(slicing_status.percent, slicing_status.text, slicing_status.warning_step != -1);
@@ -6079,11 +6087,13 @@ int CLI::run(int argc, char **argv)
                                     }
 
                                     //check the warnings
-                                    if (!g_slicing_warnings.empty())
+                                    // take() empties the shared list, which is what the old clear() at the end did.
+                                    std::vector<PrintBase::SlicingStatus> pending_warnings = g_slicing_warnings.take();
+                                    if (!pending_warnings.empty())
                                     {
-                                        for (unsigned int i = 0; i < g_slicing_warnings.size(); i++)
+                                        for (unsigned int i = 0; i < pending_warnings.size(); i++)
                                         {
-                                            PrintBase::SlicingStatus& status = g_slicing_warnings[i];
+                                            PrintBase::SlicingStatus& status = pending_warnings[i];
                                             if ((status.warning_step != -1) && (status.message_type != PrintStateBase::SlicingDefaultNotification))
                                             {
                                                 sliced_plate_info.warning_message = status.text;
@@ -6116,7 +6126,6 @@ int CLI::run(int argc, char **argv)
                                                 }
                                             }
                                         }
-                                        g_slicing_warnings.clear();
                                     }
                                     sliced_plate_info.triangle_count = plate_triangle_counts[index];
 
@@ -6151,8 +6160,9 @@ int CLI::run(int argc, char **argv)
                                     // statuses (invalid print speed among them) must stay. Drop
                                     // only the Precise Seam entries we just recorded, or a later
                                     // plate's pre-export sweep would re-emit them under plate N+1.
-                                    for (unsigned int i = 0; i < g_slicing_warnings.size(); ) {
-                                        PrintBase::SlicingStatus& status = g_slicing_warnings[i];
+                                    std::vector<PrintBase::SlicingStatus> post_export_warnings = g_slicing_warnings.take();
+                                    for (unsigned int i = 0; i < post_export_warnings.size(); ) {
+                                        PrintBase::SlicingStatus& status = post_export_warnings[i];
                                         if (status.warning_step == -1) {
                                             ++i;
                                             continue;
@@ -6168,7 +6178,7 @@ int CLI::run(int argc, char **argv)
                                                 record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
                                                 flush_and_exit(CLI_SLICING_ERROR);
                                             }
-                                            g_slicing_warnings.erase(g_slicing_warnings.begin() + i);
+                                            post_export_warnings.erase(post_export_warnings.begin() + i);
                                             continue;
                                         }
                                         if (status.message_type != PrintStateBase::SlicingInvalidPrintSpeed) {
@@ -6188,6 +6198,8 @@ int CLI::run(int argc, char **argv)
                                         record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
                                         flush_and_exit(CLI_SLICING_ERROR);
                                     }
+                                    // Whatever the loop above did not consume stays queued, as before.
+                                    g_slicing_warnings.restore_front(std::move(post_export_warnings));
                                     // Ultra: estimates for result.json
                                     sliced_plate_info.gcode_path = outfile;
                                     if (gcode_result) {
