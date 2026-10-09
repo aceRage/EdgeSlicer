@@ -179,11 +179,20 @@ TEST_CASE("Type1 wipe-tower toolchange custom gcode is not split by FanMover", "
 
     Print print;
     Model model;
-    init_print({TestMesh::cube_20x20x20, TestMesh::cube_20x20x20}, print, model, config);
-    REQUIRE(model.objects.size() == 2);
-    model.objects[1]->volumes.front()->config.set("extruder", 2);
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
     print.apply(model, config);
     print.is_BBL_printer() = true;
+    print.set_status_silent();
     REQUIRE(print.has_wipe_tower());
 
     const std::string gcode = Test::gcode(print);
