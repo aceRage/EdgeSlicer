@@ -12,6 +12,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <array>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -684,4 +685,165 @@ SCENARIO("the geometric unprintables the grouping gets", "[ExtruderAreas][H2D]")
             CHECK(group->get_extruder_map(false) == std::vector<int>{ 1, 2 });
         }
     }
+}
+
+// ---- X2D -------------------------------------------------------------------------------------------------
+// 256 x 256 bed. Extruder 1 (the Direct Drive main nozzle) reaches the whole bed up to 261 mm; extruder 2 (the
+// Bowden auxiliary nozzle) reaches X 20.5..256 up to 256 mm (Bambu Studio's "Bambu Lab X2D 0.4 nozzle.json"),
+// so the strip X 0..20.5 is extruder 1 only and extruder 2 has no strip of its own.
+
+namespace {
+DynamicPrintConfig x2d_config(const std::string &mode, const std::string &filament_map)
+{
+    PresetBundle &b = bbl_bundle();
+    const std::string filament = "Bambu PLA Basic @BBL X2D 0.4 nozzle";
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab X2D 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL X2D", true));
+    REQUIRE(b.filaments.select_preset_by_name(filament, true));
+    b.filament_presets = { filament };
+    b.set_num_filaments(2, std::vector<std::string>{ "#E01919", "#1943E0" });
+    b.filament_presets = std::vector<std::string>(2, filament);
+    DynamicPrintConfig cfg = b.full_config_secure();
+    cfg.set_deserialize_strict({
+        { "print_sequence", "by layer" },
+        { "enable_prime_tower", "0" },
+        { "filament_map_mode", mode },
+        { "filament_map", filament_map },
+        { "gcode_comments", 0 },
+    });
+    return cfg;
+}
+
+// A 10 x 10 x 3 mm cube centred at (x, 128).
+void add_x2d_cube(Model &model, double x, int filament, double height_scale = 0.15f)
+{
+    add_cube(model, x, filament, height_scale);
+    model.objects.back()->instances.front()->set_offset(Vec3d(x, 128., model.objects.back()->instances.front()->get_offset().z()));
+}
+} // namespace
+
+SCENARIO("the X2D profile declares Bambu's per-nozzle areas", "[ExtruderAreas][X2D]")
+{
+    const DynamicPrintConfig cfg = x2d_config("Manual", "1,2");
+    CAPTURE(cfg.option("printable_area")->serialize());
+    CAPTURE(cfg.option("extruder_printable_area")->serialize());
+    CAPTURE(cfg.option("extruder_printable_height")->serialize());
+    const ExtruderAreas areas = extruder_areas_from_config(cfg);
+    REQUIRE(areas.multi());
+    CHECK(areas.has_exclusive_regions());
+    // The left strip, X 0..20.5, the whole depth of the bed: only extruder 1 reaches it.
+    CHECK(area_mm2(areas.only[0]) == Approx(20.5 * 256.).margin(0.01));
+    CHECK(areas.only[1].empty());
+    CHECK(point_in_area(Point::new_scale(10., 5.), areas.only[0]));
+    CHECK(point_in_area(Point::new_scale(10., 250.), areas.only[0]));
+    CHECK_FALSE(point_in_area(Point::new_scale(25., 128.), areas.only[0]));
+    CHECK(area_mm2(areas.shared) == Approx(235.5 * 256.).margin(0.01));
+    CHECK(areas.height_limit(0) == Approx(261.));
+    CHECK(areas.height_limit(1) == Approx(256.));
+}
+
+SCENARIO("X2D plates are refused when a filament cannot reach its object", "[ExtruderAreas][X2D]")
+{
+    GIVEN("manual assignment: filament 1 on extruder 2 (Bowden), filament 2 on extruder 1 (Direct Drive)")
+    {
+        const DynamicPrintConfig cfg = x2d_config("Manual", "2,1");
+        WHEN("filament 1 prints an object in the extruder-1-only strip")
+        {
+            Model model;
+            add_x2d_cube(model, 10., 1);
+            const std::string text = validate(cfg, model);
+            THEN("the plate is refused and names the filament and the object")
+            {
+                CAPTURE(text);
+                CHECK(reach_error(text));
+                CHECK(text.find("Filament 1") != std::string::npos);
+                CHECK(text.find("cube_x10") != std::string::npos);
+            }
+        }
+        WHEN("filament 2 prints it")
+        {
+            Model model;
+            add_x2d_cube(model, 10., 2);
+            THEN("the plate is fine") { CHECK_FALSE(reach_error(validate(cfg, model))); }
+        }
+        WHEN("both filaments print objects both extruders reach")
+        {
+            Model model;
+            add_x2d_cube(model, 60., 1);
+            add_x2d_cube(model, 240., 2);
+            THEN("the plate is fine") { CHECK_FALSE(reach_error(validate(cfg, model))); }
+        }
+        WHEN("filament 1 prints an object taller than extruder 2 reaches")
+        {
+            // 20 mm cube scaled by 12.9 -> 258 mm: above extruder 2's 256 mm, below extruder 1's 261 mm.
+            Model model;
+            add_x2d_cube(model, 128., 1, 12.9);
+            THEN("the plate is refused") { CHECK(reach_error(validate(cfg, model))); }
+        }
+    }
+    GIVEN("automatic grouping")
+    {
+        const DynamicPrintConfig cfg = x2d_config("Auto For Flush", "1,1");
+        WHEN("a filament prints an object in the strip")
+        {
+            Model model;
+            add_x2d_cube(model, 10., 1);
+            THEN("extruder 1 can take it, so the plate is fine") { CHECK_FALSE(reach_error(validate(cfg, model))); }
+        }
+    }
+}
+
+SCENARIO("the X2D machine model carries Bambu's plate art placement", "[ExtruderAreas][X2D]")
+{
+    // PartPlateList::init_bed_type_info draws the bed-type tab at bottom_texture_rect with the "_n" art and the
+    // plate name at middle_texture_rect. Without them the X2D got the H2D's tab at (45, -14.5), which hangs
+    // off the front of the X2D's 256 x 256 bed model (that model's lip ends at y = -10).
+    PresetBundle &b = bbl_bundle();
+    const auto vendor = b.vendors.find("BBL");
+    REQUIRE(vendor != b.vendors.end());
+    const VendorProfile::PrinterModel *x2d = nullptr;
+    for (const VendorProfile::PrinterModel &m : vendor->second.models)
+        if (m.id == "Bambu Lab X2D")
+            x2d = &m;
+    REQUIRE(x2d != nullptr);
+    CHECK(x2d->model_id == "N6");
+    CHECK(x2d->bottom_texture_end_name == "n");
+    std::array<float, 4> bottom{}, middle{};
+    REQUIRE(PresetUtils::parse_bed_texture_rect(x2d->bottom_texture_rect, bottom));
+    REQUIRE(PresetUtils::parse_bed_texture_rect(x2d->middle_texture_rect, middle));
+    CHECK(bottom == std::array<float, 4>{ 74.f, -10.f, 148.f, 12.f });
+    CHECK(middle[0] == Approx(13.f));
+    CHECK(middle[1] == Approx(240.f));
+    CHECK(middle[2] == Approx(236.12f));
+    CHECK(middle[3] == Approx(10.f));
+    for (const char *art : { "bbl_bed_pte_bottom_n.svg", "bbl_bed_pei_bottom_n.svg", "bbl_bed_ep_bottom_n.svg", "bbl_bed_st_bottom_n.svg" }) {
+        INFO(art);
+        CHECK(boost::filesystem::exists(boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "images" / art));
+    }
+
+    // Machines without their own placement keep the defaults.
+    for (const VendorProfile::PrinterModel &m : vendor->second.models)
+        if (m.id == "Bambu Lab H2D") {
+            CHECK(m.bottom_texture_end_name.empty());
+            CHECK(m.bottom_texture_rect.empty());
+            CHECK(m.middle_texture_rect.empty());
+        }
+}
+
+TEST_CASE("bed texture rects parse like Bambu Studio's", "[ExtruderAreas]")
+{
+    std::array<float, 4> r{ 1.f, 2.f, 3.f, 4.f };
+    CHECK(PresetUtils::parse_bed_texture_rect("74,-10,148,12", r));
+    CHECK(r == std::array<float, 4>{ 74.f, -10.f, 148.f, 12.f });
+    CHECK(PresetUtils::parse_bed_texture_rect("45, -14.5, 240, 8", r));
+    CHECK(r[1] == Approx(-14.5f));
+    // Rejected, and the output is left alone.
+    const std::array<float, 4> kept = r;
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,2,3", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,2,3,4,5", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,2,x,4", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,2,0,4", r));
+    CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,,3,4", r));
+    CHECK(r == kept);
 }

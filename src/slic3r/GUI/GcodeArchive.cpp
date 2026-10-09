@@ -717,12 +717,12 @@ bool normalize_printer(nlohmann::json& record, const std::vector<SnapmakerLan::D
 
 std::map<std::string, std::string> load_model_names(const std::string& printers_dir)
 {
-    // What resources/printers held on 2026-09-26, for a folder that cannot be read.
+    // What resources/printers holds (2026-10-09, X2D added), for a folder that cannot be read.
     std::map<std::string, std::string> names = {
         { "BL-P001", "Bambu Lab X1 Carbon" }, { "BL-P002", "Bambu Lab X1" }, { "C11", "Bambu Lab P1P" },
         { "C12", "Bambu Lab P1S" },           { "C13", "Bambu Lab X1E" },    { "N1", "Bambu Lab A1 mini" },
-        { "N2S", "Bambu Lab A1" },            { "O1C2", "Bambu Lab H2C" },   { "O1D", "Bambu Lab H2D" },
-        { "O1S", "Bambu Lab H2S" },
+        { "N2S", "Bambu Lab A1" },            { "N6", "Bambu Lab X2D" },     { "O1C2", "Bambu Lab H2C" },
+        { "O1D", "Bambu Lab H2D" },           { "O1S", "Bambu Lab H2S" },
     };
     boost::system::error_code ec;
     if (printers_dir.empty() || !fs::is_directory(printers_dir, ec)) return names;

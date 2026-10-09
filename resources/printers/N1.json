@@ -37,6 +37,7 @@
             "bed_temperature_limit": 100
         },
         "model_id": "N1",
+        "sn_prefix": "030",
         "compatible_machine":[],
         "printer_type": "N1",
         "ftp_folder" : "sdcard/",
