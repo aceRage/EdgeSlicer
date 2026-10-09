@@ -1265,8 +1265,16 @@ public:
     /*vi slot data*/
     AmsTray vt_tray;                        // virtual tray
     // Two-extruder machines report one external spool per extruder in print.vir_slot[] (ids 254 =
-    // deputy/left, 255 = main/right). Display only: vt_tray keeps driving the legacy paths.
+    // deputy/left, 255 = main/right). vt_tray keeps driving the one-extruder paths.
     std::vector<AmsTray> vir_slots;
+    // The external spool holders a two-extruder job can map filaments to: vir_slots, or, from a
+    // report without vir_slot[], vt_tray as the main extruder's (id 255) - BambuStudio's vt_slot.
+    // Empty on a one-extruder printer, whose send paths keep using vt_tray as they always did.
+    std::vector<AmsTray> external_spools() const;
+    // The external spool holder (ams id 254 / 255) as an AMS mapping candidate: tray_id = id = the
+    // holder's ams id, slot "0" (BambuStudio _parse_tray_info for EXT_SPOOL). False when the
+    // holder is not reported or holds no identified spool.
+    bool external_spool_mapping_info(int ext_ams_id, FilamentInfo& info) const;
     //std::vector<AmsTray> vt_trays;          // virtual tray for new
     AmsTray parse_vt_tray(json vtray);
     /*for parse new info*/

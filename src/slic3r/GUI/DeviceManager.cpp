@@ -11,6 +11,7 @@
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
 
 #include "GUI_App.hpp"
@@ -899,6 +900,41 @@ void MachineObject::get_ams_colors(std::vector<wxColour> &ams_colors) {
     }
 }
 
+std::vector<AmsTray> MachineObject::external_spools() const
+{
+    if (!is_multi_extruders())
+        return {};
+    if (!vir_slots.empty())
+        return vir_slots;
+    if (!ams_support_virtual_tray)
+        return {};
+    AmsTray main_slot = vt_tray;
+    main_slot.id      = std::to_string(BambuExtruderMap::external_spool_ams_id(0));
+    return { main_slot };
+}
+
+bool MachineObject::external_spool_mapping_info(int ext_ams_id, FilamentInfo &info) const
+{
+    if (!BambuExtruderMap::is_external_spool_ams_id(ext_ams_id))
+        return false;
+    for (AmsTray tray : external_spools()) {
+        if (atoi(tray.id.c_str()) != ext_ams_id || !tray.is_tray_info_ready())
+            continue;
+        info             = FilamentInfo();
+        info.id          = ext_ams_id;
+        info.tray_id     = ext_ams_id;
+        info.color       = tray.color;
+        info.type        = tray.get_filament_type();
+        info.filament_id = tray.setting_id;
+        info.ctype       = tray.ctype;
+        info.colors      = tray.cols;
+        info.ams_id      = std::to_string(ext_ams_id);
+        info.slot_id     = "0";
+        return true;
+    }
+    return false;
+}
+
 int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std::vector<FilamentInfo> &result, std::vector<int> exclude_id,
                                         int only_physical_extruder)
 {
@@ -943,6 +979,23 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
                 tray_filaments.emplace(std::make_pair(tray_index, info));
             }
         }
+    }
+
+    /* Two-extruder machine, one extruder's filaments: an extruder no AMS feeds prints from its own
+     * external spool holder (BambuStudio do_ams_mapping: use_left_ext = !has_left_ams, and the
+     * same for the right). Without this a filament sliced for such an extruder never got a tray,
+     * and the X2D with an AMS HT on the left and a spool on the right holder could not be sent
+     * (2026-10-09). An extruder that has an AMS keeps mapping against its AMS only; its external
+     * spool can still be picked by hand. Tray ids 254/255 cannot clash with an AMS tray index. */
+    if (only_physical_extruder >= 0 && is_multi_extruders()) {
+        bool extruder_has_ams = false;
+        for (const auto &ams : amsList)
+            if (ams.second && ams.second->nozzle == only_physical_extruder)
+                extruder_has_ams = true;
+        FilamentInfo ext_info;
+        const int    ext_id = BambuExtruderMap::external_spool_ams_id(only_physical_extruder);
+        if (!extruder_has_ams && external_spool_mapping_info(ext_id, ext_info))
+            tray_filaments.emplace(std::make_pair(ext_id, ext_info));
     }
 
     // tray info list
@@ -1192,7 +1245,12 @@ bool MachineObject::is_valid_mapping_result(std::vector<FilamentInfo>& result, b
         // invalid mapping result
         if (result[i].tray_id < 0)
             valid_ams_mapping_result = false;
-        else {
+        else if (is_multi_extruders() && result[i].tray_id == atoi(result[i].ams_id.c_str()) &&
+                 BambuExtruderMap::is_external_spool_ams_id(result[i].tray_id)) {
+            // A two-extruder printer's external spool holder (tray 254/255, ams_id "254"/"255"):
+            // not an AMS, valid as BambuStudio's is_valid_mapping_result accepts it. tray_id / 4
+            // below would look for "AMS 63" and throw the mapping away.
+        } else {
             int ams_id = result[i].tray_id / 4;
             auto ams_item = amsList.find(std::to_string(ams_id));
             if (ams_item == amsList.end()) {
@@ -1222,6 +1280,9 @@ bool MachineObject::is_mapping_exceed_filament(std::vector<FilamentInfo> & resul
 {
     bool is_exceed = false;
     for (int i = 0; i < result.size(); i++) {
+        if (is_multi_extruders() && result[i].tray_id == atoi(result[i].ams_id.c_str()) &&
+            BambuExtruderMap::is_external_spool_ams_id(result[i].tray_id))
+            continue; // an external spool holder, not an AMS slot (see is_valid_mapping_result)
         int ams_id = result[i].tray_id / 4;
         if (amsList.find(std::to_string(ams_id)) == amsList.end()) {
             exceed_index = result[i].tray_id;

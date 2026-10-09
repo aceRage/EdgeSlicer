@@ -196,9 +196,10 @@ static std::vector<int> preset_physical_extruder_map()
 
 // SelectMachineDialog::do_ams_mapping + get_ams_mapping_result, through the code they share
 // (BambuSendMapping): the three JSON strings PrintJob forwards (v0 tray list, v1 ams/slot list,
-// per-filament info). A two-nozzle plate maps each side against its own AMS units. Empty when
-// nothing maps.
-static void ams_mapping(MachineObject* obj, const std::vector<FilamentInfo>& filaments, std::string& v0, std::string& v1, std::string& info)
+// per-filament info). A two-nozzle plate maps each side against its own AMS units (or, on a side
+// without one, its external spool). Empty when nothing maps. Returns the mapping.
+static std::vector<FilamentInfo> ams_mapping(MachineObject* obj, const std::vector<FilamentInfo>& filaments, std::string& v0, std::string& v1,
+                                             std::string& info)
 {
     const std::vector<int>    fil_map = plate_filament_map();
     std::vector<FilamentInfo> result;
@@ -215,6 +216,7 @@ static void ams_mapping(MachineObject* obj, const std::vector<FilamentInfo>& fil
     }
     in.nozzle_filament_map = fil_map;
     BambuSendMapping::compose(result, filaments, in, v0, v1, info);
+    return result;
 }
 
 // SelectMachineDialog::build_nozzles_info: only the two-nozzle printers carry this. Per-nozzle
@@ -448,7 +450,10 @@ static std::pair<int, std::string> prepare_bambu(const Request& req, PartPlate* 
         if (!ps.nozzles_info.empty() && ps.nozzles_info != "[]")
             ps.auto_offset_cali = remembered("nozzle_offset_cali") ? 2 : 0;
         if (obj->is_support_ams_mapping() && ps.task_use_ams) {
-            ams_mapping(obj, plate_filaments(plate), ps.ams_mapping, ps.ams_mapping2, ps.ams_mapping_info);
+            const std::vector<FilamentInfo> mapped = ams_mapping(obj, plate_filaments(plate), ps.ams_mapping, ps.ams_mapping2, ps.ams_mapping_info);
+            // A two-extruder job printing from an external spool: BambuStudio's use_ams rule.
+            if (obj->is_multi_extruders())
+                ps.task_use_ams = BambuSendMapping::use_ams(mapped, ps.task_use_ams);
         } else if (!ps.task_use_ams) {
             const std::vector<FilamentInfo> fils = plate_filaments(plate);
             if (!fils.empty()) {
@@ -1036,6 +1041,9 @@ static std::pair<int, std::string> prepare_bambu_record(const Request& req, cons
         ps.task_record_timelapse     = ev->timelapse;
         ps.task_layer_inspect        = true;
         ps.task_use_ams              = ev->use_ams;
+        // A two-extruder job printing from an external spool: BambuStudio's use_ams rule.
+        if (job->dual() && ps.task_use_ams)
+            ps.task_use_ams = BambuSendMapping::use_ams(ev->result, true);
         ps.nozzles_info              = ev->nozzles_info;
         ps.auto_offset_cali          = ev->auto_offset_cali;
         ps.ams_mapping               = ev->ams_mapping;

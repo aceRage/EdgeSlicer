@@ -121,6 +121,29 @@ DualNozzleSync::PrinterState printer_state(MachineObject *obj)
         s.ams.push_back(unit);
     }
 
+    // Each extruder's external spool holder (vir_slot 255 = right/main, 254 = left/deputy): a
+    // source for that extruder's filaments when it holds an identified spool.
+    for (AmsTray ext : obj->external_spools()) {
+        int ams_id = -1;
+        try { ams_id = std::stoi(ext.id); } catch (...) { continue; }
+        if (!BambuExtruderMap::is_external_spool_ams_id(ams_id))
+            continue;
+        DualNozzleSync::AmsUnit unit;
+        unit.ams_id            = ams_id;
+        unit.physical_extruder = BambuExtruderMap::external_spool_physical_extruder(ams_id);
+        unit.slot_count        = 1;
+        if (ext.is_tray_info_ready()) {
+            DualNozzleSync::Tray tray;
+            tray.ams_id      = ams_id;
+            tray.slot_id     = 0;
+            tray.color       = ext.color;
+            tray.type        = ext.get_filament_type();
+            tray.filament_id = ext.setting_id;
+            unit.trays.push_back(tray);
+        }
+        s.ams.push_back(unit);
+    }
+
     for (const Nozzle &n : obj->m_nozzle_data.nozzles) {
         DualNozzleSync::PrinterNozzle pn;
         pn.pos      = n.on_rack() ? (0x10 + (n.id & 0xF)) : (n.id & 0xF);
@@ -414,7 +437,7 @@ bool confirm_before_slice(Plater *plater, bool slice_all)
 
         std::string trays;
         for (const auto &kv : arr.trays)
-            trays += "F" + std::to_string(kv.first + 1) + "->" + BambuExtruderMap::tray_name(kv.second.ams_id, kv.second.slot_id) + " ";
+            trays += "F" + std::to_string(kv.first + 1) + "->" + BambuExtruderMap::tray_display_name(kv.second.ams_id, kv.second.slot_id) + " ";
         BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] plate " << idx + 1 << " confirmed"
                                    << (c.synced ? " (synced with " + c.dev_id + ")" : std::string(" (not synced)"))
                                    << ": filament_map " << join_map(arr.filament_map) << "trays " << trays;
