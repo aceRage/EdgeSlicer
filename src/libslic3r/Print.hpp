@@ -104,6 +104,7 @@ namespace FillAdaptive {
     struct Octree;
     struct OctreeDeleter;
     using OctreePtr = std::unique_ptr<Octree, OctreeDeleter>;
+    struct RegionOctrees;
 };
 
 namespace FillLightning {
@@ -742,7 +743,7 @@ private:
     void discover_horizontal_shells();
     void combine_infill();
     void _generate_support_material();
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data(
+    FillAdaptive::RegionOctrees prepare_adaptive_infill_data(
         const std::vector<std::pair<const Surface*, float>>& surfaces_w_bottom_z) const;
     FillLightning::GeneratorPtr prepare_lightning_infill_data();
 
@@ -783,7 +784,7 @@ private:
     std::vector<Polygons>                   m_over_support_below;
     coord_t                                 m_over_support_bridgeable = 0;
 
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
+    FillAdaptive::RegionOctrees             m_adaptive_fill_octrees;
     FillLightning::GeneratorPtr m_lightning_generator;
 
     std::vector < VolumeSlices >            firstLayerObjSliceByVolume;
