@@ -586,6 +586,14 @@ std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase
 // in size or do not list the extruder.
 int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
 
+// extruder_type per extruder (ExtruderType values) as the 3MF slice_info reports it, `extruder_count` long.
+// PrintConfigDef::handle_legacy drops a profile's extruder_type on load, so the option usually holds its
+// one-element Direct Drive default; when it is shorter than the extruder count, each extruder's type is read
+// off its extruder_variant_list entry ("Bowden Standard,..." -> Bowden), which is what Bambu Studio's
+// extruder_type says for the same profile (X2D: Direct Drive, Bowden). Entries with nothing to go on repeat
+// the last known value.
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count);
+
 // The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
 // (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
 // one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine

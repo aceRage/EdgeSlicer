@@ -9391,6 +9391,38 @@ int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
     return first;
 }
 
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count)
+{
+    std::vector<int> types;
+    if (const auto *opt = config.option<ConfigOptionEnumsGeneric>("extruder_type"))
+        types = opt->values;
+    if (extruder_count == 0 || types.size() >= extruder_count) {
+        if (types.size() > extruder_count)
+            types.resize(extruder_count);
+        return types;
+    }
+    const auto *variants = config.option<ConfigOptionStrings>("extruder_variant_list");
+    std::vector<int> out(extruder_count, types.empty() ? int(etDirectDrive) : types.back());
+    for (size_t e = 0; e < extruder_count; ++e) {
+        if (variants != nullptr && e < variants->values.size()) {
+            const std::string &v = variants->values[e];
+            if (boost::starts_with(v, "Bowden")) {
+                out[e] = int(etBowden);
+                continue;
+            }
+            if (boost::starts_with(v, "Direct Drive")) {
+                out[e] = int(etDirectDrive);
+                continue;
+            }
+        }
+        if (e < types.size())
+            out[e] = types[e];
+        else if (e > 0)
+            out[e] = out[e - 1];
+    }
+    return out;
+}
+
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config)
 {
     const auto *semm = config.option<ConfigOptionBool>("single_extruder_multi_material");

@@ -847,3 +847,23 @@ TEST_CASE("bed texture rects parse like Bambu Studio's", "[ExtruderAreas]")
     CHECK_FALSE(PresetUtils::parse_bed_texture_rect("1,,3,4", r));
     CHECK(r == kept);
 }
+
+SCENARIO("slice_info reports the X2D's second extruder as Bowden", "[ExtruderAreas][X2D][3mf]")
+{
+    // Bambu Studio writes extruder_type "0 1" for an X2D plate. handle_legacy drops the profile's extruder_type,
+    // so the value comes from extruder_variant_list.
+    const DynamicPrintConfig x2d = x2d_config("Manual", "1,2");
+    CHECK(slice_info_extruder_types(x2d, 2) == std::vector<int>{ int(etDirectDrive), int(etBowden) });
+    const DynamicPrintConfig h2d = h2d_config("by layer", "Manual", "1,2");
+    CHECK(slice_info_extruder_types(h2d, 2) == std::vector<int>{ int(etDirectDrive), int(etDirectDrive) });
+
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etDirectDrive) }));
+    // No variant list: the single value is repeated (the old padding).
+    CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etDirectDrive), int(etDirectDrive) });
+    CHECK(slice_info_extruder_types(cfg, 1) == std::vector<int>{ int(etDirectDrive) });
+    // A full-length value is kept as it is.
+    cfg.set_key_value("extruder_type", new ConfigOptionEnumsGeneric({ int(etBowden), int(etDirectDrive) }));
+    cfg.set_key_value("extruder_variant_list", new ConfigOptionStrings({ "Direct Drive Standard", "Bowden Standard" }));
+    CHECK(slice_info_extruder_types(cfg, 2) == std::vector<int>{ int(etBowden), int(etDirectDrive) });
+}
