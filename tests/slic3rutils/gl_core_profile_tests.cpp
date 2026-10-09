@@ -47,11 +47,24 @@ using namespace Slic3r::GUI;
 
 namespace {
 
-struct HiddenCoreContext
+// The hidden window and its forward-compatible 3.3 core context, created once per process and shared by
+// every run of the test case below.
+//
+// Catch2 re-runs a test case from the top once per leaf SECTION, so a context made inside the test case is
+// made (and torn down) once per section. Creating a WGL core context is by far the slowest step of this
+// test on Windows/NVIDIA: the driver spins in SwitchToThread() waiting on its own worker thread, so with the
+// CPU busy (a build running next to the tests) one glfwCreateWindow() takes 3-35 s and the first GL
+// entry-point load after it a few more - a plain GLFW program that only makes and destroys contexts shows
+// the same, so it is the driver, not this code. With one context per section the run took 1.5-3 minutes
+// instead of 3 seconds and looked like a hang (its CPU time was ~2 s throughout: it was waiting, not
+// spinning, and it did finish).
+// One context for the process pays that cost once. Each run still builds its own OpenGLManager (GLAD
+// load, default VAO, every shader), and GlStateGuard puts the shared context back to a clean state.
+struct SharedCoreContext
 {
     GLFWwindow* window{ nullptr };
 
-    HiddenCoreContext()
+    SharedCoreContext()
     {
         if (glfwInit() == GLFW_FALSE)
             return;
@@ -67,7 +80,7 @@ struct HiddenCoreContext
         if (window != nullptr)
             glfwMakeContextCurrent(window);
     }
-    ~HiddenCoreContext()
+    ~SharedCoreContext()
     {
         if (window != nullptr) {
             glfwMakeContextCurrent(nullptr);
@@ -76,6 +89,13 @@ struct HiddenCoreContext
         glfwTerminate();
     }
 };
+
+// Made on first use, destroyed at exit. (If glfwInit() or the window fails, that is remembered: no retries.)
+SharedCoreContext& shared_core_context()
+{
+    static SharedCoreContext context;
+    return context;
+}
 
 struct ResourcesDirOverride
 {
@@ -185,11 +205,47 @@ GLint bound_vao()
     return vao;
 }
 
+// Leaves the shared context as a fresh one: the default VAO the run's OpenGLManager made is deleted (it
+// forgets the id when destroyed, and a second run would otherwise leak one per section), and the bindings and
+// switches the sections touch are put back. Make it right after OpenGLManager::init_gl() (it needs GLAD
+// loaded) and before the run's own render targets, so it is destroyed after them.
+struct GlStateGuard
+{
+    GLuint vao;
+    GlStateGuard() : vao(OpenGLManager::get_default_vao()) {}
+    ~GlStateGuard()
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glUseProgram(0);
+        glBindVertexArray(0);
+        if (vao != 0)
+            glDeleteVertexArrays(1, &vao);
+        for (GLenum unit = GL_TEXTURE0; unit <= GL_TEXTURE7; ++unit) {
+            glActiveTexture(unit);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindTexture(GL_TEXTURE_3D, 0);
+            glBindTexture(GL_TEXTURE_BUFFER, 0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glDisable(GL_SCISSOR_TEST);
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        drain_gl_errors();
+    }
+};
+
 } // namespace
 
 TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed-line draws", "[GL][CoreProfile]")
 {
-    HiddenCoreContext ctx;
+    SharedCoreContext& ctx = shared_core_context();
     if (ctx.window == nullptr) {
         WARN("No OpenGL 3.3 core context available here (no display or driver); core-profile smoke test skipped.");
         return;
@@ -198,6 +254,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
     ResourcesDirOverride resources(SLIC3R_TEST_RESOURCES_DIR);
     auto manager = std::make_unique<OpenGLManager>();
     REQUIRE(manager->init_gl(/*popup_error=*/false));
+    GlStateGuard state_guard;
 
     const OpenGLManager::GLInfo& info = OpenGLManager::get_gl_info();
     INFO("GL " << info.get_version() << ", GLSL " << info.get_glsl_version() << ", " << info.get_renderer());
