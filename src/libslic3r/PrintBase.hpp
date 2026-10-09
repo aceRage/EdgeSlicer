@@ -632,11 +632,15 @@ protected:
     // false, sets CANCELED_INTERNAL and throws CanceledException.
     // An atomic flag prevents concurrent dialog invocations from TBB workers.
     void                   check_memory_guard() {
-        auto now = std::chrono::steady_clock::now();
-        // Throttle to one sample per 500ms per Print instance.
-        if (now - m_last_mem_check < std::chrono::milliseconds(500))
+        // Throttle to one sample per 500ms per Print instance. This runs from every TBB worker
+        // (throw_if_canceled() is const, hence the const_cast at the caller), so the timestamp is an
+        // atomic and exactly one thread wins each sampling window.
+        const auto now_ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+        auto last_ticks = m_last_mem_check_ticks.load(std::memory_order_relaxed);
+        if (std::chrono::steady_clock::duration(now_ticks - last_ticks) < std::chrono::milliseconds(500))
             return;
-        m_last_mem_check = now;
+        if (! m_last_mem_check_ticks.compare_exchange_strong(last_ticks, now_ticks, std::memory_order_relaxed))
+            return;
 
         size_t avail = Slic3r::get_available_physical_memory();
         if (avail == 0)
@@ -710,7 +714,8 @@ private:
     std::atomic<int>                        m_low_mem_count{0};
 
     // Last memory-guard sample timestamp (throttle: 1 sample / 500ms).
-    std::chrono::steady_clock::time_point   m_last_mem_check{std::chrono::steady_clock::now()};
+    // Stored as steady_clock ticks so concurrent workers can update it atomically.
+    std::atomic<std::chrono::steady_clock::rep> m_last_mem_check_ticks{std::chrono::steady_clock::now().time_since_epoch().count()};
 
     // Mutex used for synchronization of the worker thread with the UI thread:
     // The mutex will be used to guard the worker thread against entering a stage

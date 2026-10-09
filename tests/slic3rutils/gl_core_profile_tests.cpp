@@ -1,0 +1,765 @@
+// Headless smoke test for the OpenGL core-profile switch (libslic3r_gui, libvgcode stage 2).
+//
+// Creates a hidden, never-focused GLFW window with a forward-compatible 3.3 core context - the kind
+// of context macOS hands out - and runs the real start-up path on it: OpenGLManager::init_gl()
+// (GLAD, the default VAO, every shader in resources/shaders/140), then draws into an off-screen
+// framebuffer the three ways the app does and reads the pixels back:
+//   * GLModel (its own VAO, then the default VAO bound back),
+//   * a plain VBO draw with no VAO of its own (what the legacy G-code viewer does),
+//   * the dashed_thick_lines geometry shader that replaces wide and stippled lines.
+// Each step must leave the GL error flag clean. Where no GL context can be made (a headless CI box
+// without a display) the test says so and passes.
+// libvgcode stage 3 adds a fourth draw: a small G-code (processor -> LibVGCodeWrapper -> libvgcode)
+// rendered top-down off screen, then libvgcode shut down, after which the app's GL must still work
+// (libvgcode shares the GLAD loader and must not unload it).
+
+#include <catch2/catch.hpp>
+
+#include <glad/gl.h>
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
+#include "libslic3r/Utils.hpp"
+#include "slic3r/GUI/OpenGLManager.hpp"
+#include "slic3r/GUI/GLModel.hpp"
+#include "slic3r/GUI/GLShader.hpp"
+#include "slic3r/GUI/GLTexture.hpp"
+#include "slic3r/GUI/LibVGCode/LibVGCodeWrapper.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/Geometry.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+
+#include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <sstream>
+
+#include <array>
+#include <map>
+#include <set>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace Slic3r;
+using namespace Slic3r::GUI;
+
+namespace {
+
+// Timestamped progress lines on stderr, flushed at once, when EDGESLICER_GL_TEST_TRACE is set in the
+// environment. If this test ever really hangs, the last line says which step it was in without a debugger.
+void gl_test_trace(const std::string& what)
+{
+    static const bool enabled = std::getenv("EDGESLICER_GL_TEST_TRACE") != nullptr;
+    if (!enabled)
+        return;
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "[gl-test %10.1f ms] %s\n", ms, what.c_str());
+    std::fflush(stderr);
+}
+
+// The hidden window, its forward-compatible 3.3 core context and the OpenGLManager that owns the shaders,
+// made once per process and shared by every run of the test case below.
+//
+// Catch2 re-runs a test case from the top once per leaf SECTION, so a context and an OpenGLManager made
+// inside the test case are made (and torn down) once per section. On Windows/NVIDIA that is what made this
+// test look hung. The driver's main thread spins in SwitchToThread() waiting on its own worker thread, and
+// every step that syncs with that worker - creating a WGL core context (glfwCreateWindow), the first GL
+// entry-point load, compiling and linking the shader set - crawls when the CPU is busy (a build running
+// next to the tests): 3-35 s per context and several seconds per shader set instead of milliseconds, nine
+// times over. A plain GLFW program that only makes and destroys contexts shows the same, and a HIGH
+// priority class makes it fast again, so it is CPU starvation of the driver's handshake, not a deadlock and
+// not the code under test. The process was waiting, not spinning (about 2 s of CPU in a 190 s run), and it
+// did finish: 85 s to 7 min instead of 3 s.
+// So the start-up path (context, GLAD load, default VAO, the shader set) is paid for once, in the first
+// run, which still asserts all of it; later runs find the manager initialised (init_gl() is idempotent) and
+// GlStateGuard puts the shared context back to a clean state, so sections stay independent.
+struct SharedGl
+{
+    GLFWwindow*                    window{ nullptr };
+    std::unique_ptr<OpenGLManager> manager;
+
+    SharedGl()
+    {
+        gl_test_trace("shared context: glfwInit");
+        if (glfwInit() == GLFW_FALSE)
+            return;
+        glfwDefaultWindowHints();
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+        gl_test_trace("shared context: glfwCreateWindow");
+        window = glfwCreateWindow(64, 64, "gl_core_profile_test", nullptr, nullptr);
+        if (window != nullptr) {
+            glfwMakeContextCurrent(window);
+            manager = std::make_unique<OpenGLManager>();
+        }
+        gl_test_trace(window != nullptr ? "shared context: current" : "shared context: none");
+    }
+    ~SharedGl()
+    {
+        gl_test_trace("shared context: teardown");
+        manager.reset(); // deletes the shaders: the context must still be current
+        if (window != nullptr) {
+            glfwMakeContextCurrent(nullptr);
+            glfwDestroyWindow(window);
+        }
+        glfwTerminate();
+        gl_test_trace("shared context: torn down");
+    }
+};
+
+// Made on first use, destroyed at exit. (If glfwInit() or the window fails, that is remembered: no retries.)
+SharedGl& shared_gl()
+{
+    static SharedGl gl;
+    return gl;
+}
+
+struct ResourcesDirOverride
+{
+    std::string old_res;
+    explicit ResourcesDirOverride(const std::string& dir) : old_res(Slic3r::resources_dir()) { Slic3r::set_resources_dir(dir); }
+    ~ResourcesDirOverride() { Slic3r::set_resources_dir(old_res); }
+};
+
+// An RGBA8 colour target with depth, bound for drawing and reading.
+struct OffscreenTarget
+{
+    GLuint fbo{ 0 }, color{ 0 }, depth{ 0 };
+    explicit OffscreenTarget(int size)
+    {
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glGenRenderbuffers(1, &color);
+        glBindRenderbuffer(GL_RENDERBUFFER, color);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, size, size);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, color);
+        glGenRenderbuffers(1, &depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, size, size);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+        glViewport(0, 0, size, size);
+    }
+    ~OffscreenTarget()
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteRenderbuffers(1, &depth);
+        glDeleteRenderbuffers(1, &color);
+        glDeleteFramebuffers(1, &fbo);
+    }
+    bool complete() const { return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE; }
+    void clear() const
+    {
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
+    static std::array<unsigned char, 4> pixel(int x, int y)
+    {
+        std::array<unsigned char, 4> rgba{ 0, 0, 0, 0 };
+        glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        return rgba;
+    }
+};
+
+GLenum drain_gl_errors()
+{
+    GLenum first = GL_NO_ERROR;
+    for (int i = 0; i < 16; ++i) {
+        const GLenum e = glGetError();
+        if (e == GL_NO_ERROR)
+            break;
+        if (first == GL_NO_ERROR)
+            first = e;
+    }
+    return first;
+}
+
+// What libvgcode's draw-check hook saw: one line per draw whose program samples something it cannot
+// (a 2D/3D sampler on an incomplete texture or texture 0, a buffer sampler with nothing bound, or two
+// samplers of different types on one unit). macOS reports each as "unit N ... is unloadable".
+std::vector<std::string> s_vgcode_draw_problems;
+int                      s_vgcode_draws_checked = 0;
+
+void check_vgcode_draw(const char* what)
+{
+    ++s_vgcode_draws_checked;
+    GLint program = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    if (program == 0) {
+        s_vgcode_draw_problems.push_back(std::string(what) + ": no program bound");
+        return;
+    }
+    std::map<GLint, std::set<unsigned int>> targets_by_unit;
+    for (const GLShaderProgram::SamplerUniform& sampler : GLShaderProgram::list_samplers(GLuint(program))) {
+        const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
+        if (target == 0)
+            continue;
+        GLint unit = -1;
+        glGetUniformiv(GLuint(program), sampler.location, &unit);
+        targets_by_unit[unit].insert(target);
+        std::string problem;
+        if (target == GL_TEXTURE_BUFFER) {
+            GLint previous = GL_TEXTURE0, id = 0;
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &previous);
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &id);
+            glActiveTexture(GLenum(previous));
+            if (id == 0)
+                problem = "no buffer texture bound";
+        } else
+            problem = OpenGLManager::describe_texture_incompleteness(target, GLuint(unit));
+        if (!problem.empty())
+            s_vgcode_draw_problems.push_back(std::string(what) + ": '" + sampler.name + "' on unit " + std::to_string(unit) + ": " + problem);
+    }
+    for (const auto& [unit, targets] : targets_by_unit)
+        if (targets.size() > 1)
+            s_vgcode_draw_problems.push_back(std::string(what) + ": samplers of different types share unit " + std::to_string(unit));
+}
+
+GLint bound_vao()
+{
+    GLint vao = -1;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+    return vao;
+}
+
+// Puts the shared context back as a run found it after OpenGLManager::init_gl(): the default VAO bound, the
+// bindings and switches the sections touch reset. Make it right after init_gl() (it needs GLAD loaded) and
+// before the run's own render targets, so it is destroyed after them.
+struct GlStateGuard
+{
+    GLuint vao;
+    GlStateGuard() : vao(OpenGLManager::get_default_vao()) {}
+    ~GlStateGuard()
+    {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glUseProgram(0);
+        glBindVertexArray(vao);
+        for (GLenum unit = GL_TEXTURE0; unit <= GL_TEXTURE7; ++unit) {
+            glActiveTexture(unit);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindTexture(GL_TEXTURE_3D, 0);
+            glBindTexture(GL_TEXTURE_BUFFER, 0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glDisable(GL_SCISSOR_TEST);
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        drain_gl_errors();
+    }
+};
+
+} // namespace
+
+TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed-line draws", "[GL][CoreProfile]")
+{
+    gl_test_trace("run begin");
+    SharedGl& gl = shared_gl();
+    if (gl.window == nullptr) {
+        WARN("No OpenGL 3.3 core context available here (no display or driver); core-profile smoke test skipped.");
+        return;
+    }
+
+    ResourcesDirOverride resources(SLIC3R_TEST_RESOURCES_DIR);
+    OpenGLManager* manager = gl.manager.get();
+    REQUIRE(manager->init_gl(/*popup_error=*/false));
+    GlStateGuard state_guard;
+    gl_test_trace("init_gl done");
+
+    const OpenGLManager::GLInfo& info = OpenGLManager::get_gl_info();
+    INFO("GL " << info.get_version() << ", GLSL " << info.get_glsl_version() << ", " << info.get_renderer());
+    REQUIRE(info.is_core_profile());
+    REQUIRE(info.is_version_greater_or_equal_to(3, 3));
+    REQUIRE(OpenGLManager::get_default_vao() != 0);
+    CHECK(bound_vao() == GLint(OpenGLManager::get_default_vao()));
+    CHECK(OpenGLManager::get_framebuffers_type() == OpenGLManager::EFramebufferType::Arb);
+    // Extensions come from glGetStringi() in a core profile.
+    CHECK_FALSE(OpenGLManager::GLInfo::get_extensions_string().empty());
+
+    // Every shader the 140 set ships has to compile and link in a forward-compatible core profile.
+    for (const char* name : { "imgui", "flat", "flat_clip", "flat_texture", "background", "dashed_thick_lines", "gouraud_light",
+                              "thumbnail", "printbed", "gouraud_light_instanced", "gouraud", "variable_layer_height", "mm_contour",
+                              "mm_gouraud", "texture_displacement_shaded", "texture_displacement_uvcheck", "selection_mask",
+                              "selection_composite", "selection_edge", "selection_area_downsample", "selection_gaussian" }) {
+        INFO("shader " << name);
+        CHECK(manager->get_shader(name) != nullptr);
+    }
+    CHECK(drain_gl_errors() == GL_NO_ERROR);
+    gl_test_trace("shaders checked");
+
+    const int size = 32;
+    OffscreenTarget target(size);
+    REQUIRE(target.complete());
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
+    GLShaderProgram* flat = manager->get_shader("flat");
+    REQUIRE(flat != nullptr);
+
+    SECTION("GLModel draws through its own VAO and binds the default one back")
+    {
+        gl_test_trace("SECTION GLModel draws through its own VAO and binds the default one ");
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        g.add_vertex(Vec3f(-1.f, -1.f, 0.f));
+        g.add_vertex(Vec3f(3.f, -1.f, 0.f));
+        g.add_vertex(Vec3f(-1.f, 3.f, 0.f));
+        g.add_triangle(0, 1, 2);
+        GLModel model;
+        model.init_from(std::move(g));
+        model.set_color(ColorRGBA(1.f, 0.f, 0.f, 1.f));
+
+        target.clear();
+        flat->start_using();
+        flat->set_uniform("view_model_matrix", Transform3d::Identity());
+        flat->set_uniform("projection_matrix", Transform3d::Identity());
+        model.render();
+        flat->stop_using();
+
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        CHECK(bound_vao() == GLint(OpenGLManager::get_default_vao()));
+        const auto px = OffscreenTarget::pixel(size / 2, size / 2);
+        CHECK(int(px[0]) == 255);
+        CHECK(int(px[1]) == 0);
+        CHECK(int(px[2]) == 0);
+        model.reset();
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
+    SECTION("a plain VBO draw (legacy G-code viewer style) works on the default VAO")
+    {
+        gl_test_trace("SECTION a plain VBO draw (legacy G-code viewer style) works on the d");
+        const std::array<float, 9> tri = { -1.f, -1.f, 0.f, 3.f, -1.f, 0.f, -1.f, 3.f, 0.f };
+        GLuint vbo = 0;
+        glGenBuffers(1, &vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(tri), tri.data(), GL_STATIC_DRAW);
+
+        target.clear();
+        flat->start_using();
+        flat->set_uniform("view_model_matrix", Transform3d::Identity());
+        flat->set_uniform("projection_matrix", Transform3d::Identity());
+        flat->set_uniform("uniform_color", ColorRGBA(0.f, 1.f, 0.f, 1.f));
+        const GLint position_id = flat->get_attrib_location("v_position");
+        REQUIRE(position_id != -1);
+        glVertexAttribPointer(position_id, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+        glEnableVertexAttribArray(position_id);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDisableVertexAttribArray(position_id);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        flat->stop_using();
+        glDeleteBuffers(1, &vbo);
+
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        const auto px = OffscreenTarget::pixel(size / 2, size / 2);
+        CHECK(int(px[0]) == 0);
+        CHECK(int(px[1]) == 255);
+        CHECK(int(px[2]) == 0);
+    }
+
+    SECTION("dashed_thick_lines (geometry shader) draws a thick line")
+    {
+        gl_test_trace("SECTION dashed_thick_lines (geometry shader) draws a thick line");
+        GLShaderProgram* lines = manager->get_shader("dashed_thick_lines");
+        REQUIRE(lines != nullptr);
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+        g.add_vertex(Vec3f(-1.f, 0.f, 0.f));
+        g.add_vertex(Vec3f(1.f, 0.f, 0.f));
+        g.add_line(0, 1);
+        GLModel model;
+        model.init_from(std::move(g));
+        model.set_color(ColorRGBA(0.f, 0.f, 1.f, 1.f));
+
+        target.clear();
+        lines->start_using();
+        lines->set_uniform("view_model_matrix", Transform3d::Identity());
+        lines->set_uniform("projection_matrix", Transform3d::Identity());
+        lines->set_uniform("viewport_size", Vec2d(double(size), double(size)));
+        lines->set_uniform("width", 4.0f);
+        lines->set_uniform("gap_size", 0.0f);
+        lines->set_uniform("dash_size", 0.0f);
+        model.render();
+        lines->stop_using();
+
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        // The line runs along y = 0 (the middle row); with width 4 it covers the rows next to it too.
+        const auto px = OffscreenTarget::pixel(size / 2, size / 2);
+        CHECK(int(px[2]) > 128);
+        const auto far_px = OffscreenTarget::pixel(size / 2, 2);
+        CHECK(int(far_px[2]) == 0);
+        model.reset();
+    }
+
+    SECTION("a plate thumbnail's off-screen render: framebuffer set-up and the thumbnail shader")
+    {
+        gl_test_trace("SECTION a plate thumbnail's off-screen render: framebuffer set-up an");
+        // The same set-up as GLCanvas3D::render_thumbnail_framebuffer() (non-multisampled path): RGBA8
+        // texture + sized GL_DEPTH_COMPONENT24 renderbuffer (macOS core rejects the unsized
+        // GL_DEPTH_COMPONENT these used: GL_INVALID_ENUM in every thumbnail), then a lit model.
+        const int w = 64, h = 64;
+        GLuint fbo = 0, tex = 0, depth = 0;
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        glGenRenderbuffers(1, &depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+        const GLenum draw_bufs[] = { GL_COLOR_ATTACHMENT0 };
+        glDrawBuffers(1, draw_bufs);
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        REQUIRE(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        glViewport(0, 0, w, h);
+
+        GLShaderProgram* thumbnail = manager->get_shader("thumbnail");
+        REQUIRE(thumbnail != nullptr);
+        GLModel model;
+        model.init_from(its_make_cube(1.0, 1.0, 1.0));
+        model.set_color(ColorRGBA(1.f, 0.5f, 0.f, 1.f));
+        glClearColor(0.f, 0.f, 0.f, 0.f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        thumbnail->start_using();
+        thumbnail->set_uniform("emission_factor", 0.1f);
+        thumbnail->set_uniform("ban_light", false);
+        const Transform3d world = Geometry::translation_transform(Vec3d(-0.5, -0.5, -0.5));
+        const Transform3d view  = Geometry::rotation_transform(Vec3d(0.6, 0.0, 0.7));
+        thumbnail->set_uniform("volume_world_matrix", world);
+        thumbnail->set_uniform("view_model_matrix", view * world);
+        Transform3d projection = Transform3d::Identity();
+        projection.matrix()(2, 2) = -0.5; // keep the unit cube inside the clip volume
+        thumbnail->set_uniform("projection_matrix", projection);
+        const Matrix3d view_normal_matrix = view.matrix().block(0, 0, 3, 3) * world.matrix().block(0, 0, 3, 3).inverse().transpose();
+        thumbnail->set_uniform("view_normal_matrix", view_normal_matrix);
+        model.render();
+        thumbnail->stop_using();
+        glDisable(GL_DEPTH_TEST);
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        std::vector<unsigned char> pixels(size_t(4 * w * h), 0);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        // The cube covers the middle of the image, lit and opaque.
+        const unsigned char* centre = pixels.data() + 4 * ((h / 2) * w + w / 2);
+        CHECK(int(centre[3]) > 0);
+        CHECK(int(centre[0]) > 0);
+        model.reset();
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteRenderbuffers(1, &depth);
+        glDeleteTextures(1, &tex);
+        glDeleteFramebuffers(1, &fbo);
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
+    SECTION("the G-code viewer's point size query is valid in a core profile")
+    {
+        gl_test_trace("SECTION the G-code viewer's point size query is valid in a core prof");
+        // GL_ALIASED_POINT_SIZE_RANGE is not a core-profile query (GL_INVALID_ENUM on macOS at the first slice).
+        float range[2] = { 0.f, 0.f };
+        OpenGLManager::query_point_size_range(range);
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        CHECK(range[0] > 0.f);
+        CHECK(range[1] >= range[0]);
+    }
+
+    SECTION("texture completeness: the check itself")
+    {
+        gl_test_trace("SECTION texture completeness: the check itself");
+        // What macOS reports as "unit N GLD_TEXTURE_INDEX_2D is unloadable ... using zero texture".
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+
+        std::vector<unsigned char> texels(4 * 4 * 4, 255);
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        // No image yet.
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+        // Level 0 only, with the default mipmap min filter: incomplete.
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        CHECK(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        // A chain that stops above 1x1 (what GLTexture::load_from_svg() allocates) with a mipmap filter
+        // and the default GL_TEXTURE_MAX_LEVEL: incomplete; with GL_TEXTURE_MAX_LEVEL at its last level: complete.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+        CHECK(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        // The full chain with the default GL_TEXTURE_MAX_LEVEL: complete.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+        glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+        CHECK(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        // A level of the wrong size breaks it again.
+        glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        // The check looks at the unit it is asked about and leaves the active unit alone.
+        glActiveTexture(GL_TEXTURE2);
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        GLint active = 0;
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+        CHECK(active == GL_TEXTURE2);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDeleteTextures(1, &tex);
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+
+        // The fallback textures are complete on their own.
+        for (const GLenum target : { GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_3D) }) {
+            const unsigned int fallback = OpenGLManager::get_fallback_texture(target);
+            REQUIRE(fallback != 0);
+            CHECK(OpenGLManager::get_fallback_texture(target) == fallback);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(target, fallback);
+            CHECK(OpenGLManager::describe_texture_incompleteness(target, 5).empty());
+            glBindTexture(target, 0);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
+    SECTION("textures GLTexture makes are complete from the start, compressed ones included")
+    {
+        gl_test_trace("SECTION textures GLTexture makes are complete from the start, compre");
+        auto complete = [](const GLTexture& texture) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, texture.get_id());
+            const std::string problem = OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            INFO(problem);
+            return problem.empty();
+        };
+        std::vector<unsigned char> rgba(size_t(6 * 5 * 4), 200);
+        {
+            GLTexture raw;
+            REQUIRE(raw.load_from_raw_data(rgba, 6, 5, false, /*use_mipmaps=*/true));
+            CHECK(complete(raw));
+            CHECK(raw.ready_to_sample());
+        }
+        {
+            GLTexture raw;
+            REQUIRE(raw.load_from_raw_data(rgba, 6, 5, false, /*use_mipmaps=*/false));
+            CHECK(complete(raw));
+        }
+        // The bed type / plate logo path: an SVG with mipmaps, compressed in the background when S3TC
+        // is there. It is drawn from the frame that creates it, before any level is compressed.
+        const std::string svg = std::string(SLIC3R_TEST_RESOURCES_DIR) + "/images/bbl-3dp-logo.svg";
+        for (const bool compress : { true, false }) {
+            INFO("compress " << compress << ", S3TC " << OpenGLManager::are_compressed_textures_supported());
+            GLTexture logo;
+            REQUIRE(logo.load_from_svg_file(svg, /*use_mipmaps=*/true, compress, /*apply_anisotropy=*/false, 256));
+            CHECK(complete(logo));
+            // Wait for the compressor, sending what it has, as PartPlate::render_logo_texture() does per frame.
+            for (int i = 0; i < 500 && !logo.all_compressed_data_sent_to_gpu(); ++i) {
+                if (logo.unsent_compressed_data_available())
+                    logo.send_compressed_data_to_gpu();
+                else
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                CHECK(complete(logo));
+            }
+            CHECK(logo.ready_to_sample());
+            CHECK(complete(logo));
+        }
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
+    SECTION("gouraud: its cut samplers (units 3 and 4) see complete fallback textures while no cut is active")
+    {
+        gl_test_trace("SECTION gouraud: its cut samplers (units 3 and 4) see complete fallb");
+        GLShaderProgram* gouraud = manager->get_shader("gouraud");
+        REQUIRE(gouraud != nullptr);
+        bool has_sheet = false, has_field = false;
+        for (const GLShaderProgram::SamplerUniform& sampler : gouraud->get_samplers()) {
+            has_sheet |= sampler.name == "curved_sheet_tex";
+            has_field |= sampler.name == "draw_field_tex";
+        }
+        CHECK(has_sheet);
+        CHECK(has_field);
+        // Leave nothing on those units, as the app does between cuts.
+        for (const GLenum unit : { GLenum(GL_TEXTURE3), GLenum(GL_TEXTURE4) }) {
+            glActiveTexture(unit);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindTexture(GL_TEXTURE_3D, 0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+        gouraud->start_using();
+        for (const GLShaderProgram::SamplerUniform& sampler : gouraud->get_samplers()) {
+            const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
+            if (target == 0)
+                continue;
+            GLint unit = -1;
+            glGetUniformiv(gouraud->get_id(), sampler.location, &unit);
+            INFO(sampler.name << " on unit " << unit);
+            CHECK(OpenGLManager::describe_texture_incompleteness(target, unit).empty());
+        }
+        GLint active = 0;
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+        CHECK(active == GL_TEXTURE0);
+        // The debug check runs clean on it too.
+        const bool debug = OpenGLManager::gl_debug_enabled();
+        OpenGLManager::set_gl_debug_enabled(true);
+        OpenGLManager::check_sampled_textures(gouraud, "the core-profile test");
+        OpenGLManager::set_gl_debug_enabled(debug);
+        gouraud->stop_using();
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
+    SECTION("libvgcode renders a small G-code scene, then shuts down without unloading the shared GL loader")
+    {
+        gl_test_trace("SECTION libvgcode renders a small G-code scene, then shuts down with");
+        // A square perimeter on two layers, processed by EdgeSlicer's GCodeProcessor.
+        std::ostringstream o;
+        const char nl = '\n';
+        o << "; generated by OrcaSlicer 2.4.2 on 2026-01-01 at 00:00:00 UTC" << nl << "G28" << nl << "G90" << nl << "M83" << nl << "G92 E0" << nl;
+        for (int layer = 1; layer <= 2; ++layer) {
+            o << "; CHANGE_LAYER" << nl << "; Z_HEIGHT: " << 0.2 * layer << nl << "; LAYER_HEIGHT: 0.2" << nl
+              << "G1 Z" << 0.2 * layer << " F600" << nl << "G1 X10 Y10 F6000" << nl;
+            o << "; FEATURE: Outer wall" << nl << "; LINE_WIDTH: 2" << nl << "G1 X60 Y10 E2 F1800" << nl << "G1 X60 Y60 E2" << nl
+              << "G1 X10 Y60 E2" << nl << "G1 X10 Y10 E2" << nl;
+        }
+        // An OrcaSlicer-produced G-code must carry its config block.
+        // (The processor refuses a block with suspiciously few values, so pad it.)
+        o << "; CONFIG_BLOCK_START" << nl << "; filament_diameter = 1.75" << nl << "; filament_density = 1.24" << nl;
+        for (int i = 0; i < 80; ++i)
+            o << "; layer_height = 0.2" << nl;
+        o << "; CONFIG_BLOCK_END" << nl;
+        const bool was_bbl = GCodeProcessor::s_IsBBLPrinter;
+        GCodeProcessor::s_IsBBLPrinter = true;
+        const boost::filesystem::path path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("edge_vgcode_gl_%%%%%%%%.gcode");
+        {
+            boost::nowide::ofstream out(path.string());
+            out << o.str();
+        }
+        GCodeProcessor processor;
+        processor.process_file(path.string());
+        boost::filesystem::remove(path);
+        GCodeProcessor::s_IsBBLPrinter = was_bbl;
+        const GCodeProcessorResult& result = processor.get_result();
+        REQUIRE(result.moves.size() > 8);
+
+        const int     big = 256;
+        OffscreenTarget scene(big);
+        REQUIRE(scene.complete());
+        {
+            libvgcode::Viewer viewer;
+            REQUIRE_NOTHROW(viewer.init(reinterpret_cast<const char*>(glGetString(GL_VERSION))));
+            libvgcode::GCodeInputData data = libvgcode::convert(result, { "#FF8000" }, {}, viewer);
+            viewer.load(std::move(data));
+            CHECK(viewer.get_layers_zs().size() == 2);
+            CHECK(drain_gl_errors() == GL_NO_ERROR);
+            viewer.set_view_type(libvgcode::EViewType::FeatureType);
+
+            // Every libvgcode draw checks what its program samples. Nothing of ours on any unit, the
+            // way GCodeViewer leaves it (no set_shadow_map() from the host): the segments program's
+            // shadow_map sampler2D must still see a complete texture, and must not share unit 0 with
+            // the position_tex samplerBuffer.
+            for (GLenum unit = GL_TEXTURE0; unit <= GL_TEXTURE5; ++unit) {
+                glActiveTexture(unit);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            glActiveTexture(GL_TEXTURE0);
+            s_vgcode_draw_problems.clear();
+            s_vgcode_draws_checked = 0;
+            libvgcode::Viewer::set_draw_check_hook(&check_vgcode_draw);
+
+            // Top-down orthographic camera over X/Y 0..70 mm.
+            Matrix4f view = Matrix4f::Identity();
+            view(2, 3) = -100.f;
+            const float l = 0.f, r = 70.f, b = 0.f, t = 70.f, n = 1.f, f = 200.f;
+            Matrix4f proj = Matrix4f::Zero();
+            proj(0, 0) = 2.f / (r - l);
+            proj(1, 1) = 2.f / (t - b);
+            proj(2, 2) = -2.f / (f - n);
+            proj(0, 3) = -(r + l) / (r - l);
+            proj(1, 3) = -(t + b) / (t - b);
+            proj(2, 3) = -(f + n) / (f - n);
+            proj(3, 3) = 1.f;
+
+            scene.clear();
+            glEnable(GL_DEPTH_TEST);
+            gl_test_trace("libvgcode: render");
+            viewer.render(libvgcode::convert(view), libvgcode::convert(proj));
+            gl_test_trace("libvgcode: rendered");
+            libvgcode::Viewer::set_draw_check_hook(nullptr);
+            CHECK(s_vgcode_draws_checked > 0);
+            for (const std::string& problem : s_vgcode_draw_problems)
+                FAIL_CHECK(problem);
+            CHECK(s_vgcode_draw_problems.empty());
+            // The shadow map fallback is put back: unit 4 has what it had before (nothing).
+            glActiveTexture(GL_TEXTURE4);
+            GLint unit4 = -1;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &unit4);
+            glActiveTexture(GL_TEXTURE0);
+            CHECK(unit4 == 0);
+            glDisable(GL_DEPTH_TEST);
+            CHECK(drain_gl_errors() == GL_NO_ERROR);
+            // libvgcode restores the VAO it found bound (the app's default VAO).
+            CHECK(bound_vao() == GLint(OpenGLManager::get_default_vao()));
+
+            // The wall along y = 10 mm (pixel row 10/70 * 256 ~ 37) is lit; the middle of the square is not.
+            int lit = 0;
+            for (int y = 30; y <= 44; ++y) {
+                const auto px = OffscreenTarget::pixel(big / 2, y);
+                if (int(px[0]) + int(px[1]) + int(px[2]) > 60)
+                    ++lit;
+            }
+            CHECK(lit > 0);
+            const auto centre = OffscreenTarget::pixel(big / 2, big / 2);
+            CHECK(int(centre[0]) + int(centre[1]) + int(centre[2]) == 0);
+
+            gl_test_trace("libvgcode: shutdown");
+            viewer.shutdown();
+            gl_test_trace("libvgcode: shut down");
+        }
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+
+        // GL entry points still loaded after libvgcode's shutdown: the app keeps drawing.
+        REQUIRE(glGetString != nullptr);
+        CHECK(glGetString(GL_VERSION) != nullptr);
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        g.add_vertex(Vec3f(-1.f, -1.f, 0.f));
+        g.add_vertex(Vec3f(3.f, -1.f, 0.f));
+        g.add_vertex(Vec3f(-1.f, 3.f, 0.f));
+        g.add_triangle(0, 1, 2);
+        GLModel model;
+        model.init_from(std::move(g));
+        model.set_color(ColorRGBA(1.f, 1.f, 1.f, 1.f));
+        scene.clear();
+        flat->start_using();
+        flat->set_uniform("view_model_matrix", Transform3d::Identity());
+        flat->set_uniform("projection_matrix", Transform3d::Identity());
+        model.render();
+        flat->stop_using();
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        CHECK(int(OffscreenTarget::pixel(big / 2, big / 2)[0]) == 255);
+        model.reset();
+    }
+
+    CHECK(OpenGLManager::report_gl_errors("in the core-profile smoke test") == 0);
+    gl_test_trace("run end");
+}

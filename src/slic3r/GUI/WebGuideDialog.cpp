@@ -8,6 +8,7 @@
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PrinterModelSpecs.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -254,6 +255,16 @@ wxString GuideFrame::SetStartPage(GuidePage startpage, bool load)
     } else if (startpage == BBL_MODELS_ONLY) {
         SetTitle("");
         TargetUrl = guide_url + "?target=24";
+        // The printer table has eight columns: open it wider than the wizard pages (the dialog is
+        // resizable for this page, see GUI_App::run_wizard), within the screen.
+        wxSize       size = FromDIP(wxSize(1000, 720));
+        const int    disp = wxDisplay::GetFromWindow(this);
+        const wxRect area = wxDisplay(disp == wxNOT_FOUND ? 0u : unsigned(disp)).GetClientArea();
+        size.x            = std::min(size.x, area.width * 9 / 10);
+        size.y            = std::min(size.y, area.height * 9 / 10);
+        SetMinSize(FromDIP(wxSize(720, 520)));
+        SetSize(size);
+        CenterOnScreen();
     }
     else {
         SetTitle(_L("Setup Wizard"));
@@ -455,6 +466,11 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
 
                         wxString s1 = TmpModel["model"];
                         wxString s2 = OneSelect["model"];
+                        // Match the vendor too when the page sends it, so a same-named model of
+                        // another vendor is not ticked along with this one.
+                        if (OneSelect.contains("vendor") && OneSelect["vendor"].is_string() && TmpModel["vendor"].is_string() &&
+                            OneSelect["vendor"].get<std::string>() != TmpModel["vendor"].get<std::string>())
+                            continue;
                         if (s1.compare(s2) == 0) {
                             m_ProfileJson["model"][m]["nozzle_selected"] = OneSelect["nozzle_diameter"];
                             break;
@@ -652,7 +668,7 @@ int GuideFrame::SaveProfile()
     m_MainPtr->app_config->set_bool("stealth_mode", StealthMode);
 
     //finish
-    m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "finish", "1");
+    m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "finish", true);
 
     m_MainPtr->app_config->save();
 
@@ -827,7 +843,7 @@ bool GuideFrame::apply_config(AppConfig *app_config, PresetBundle *preset_bundle
         //for (const auto& vendor_profile : preset_bundle->vendors) {
         for (const auto& model_it: model_maps) {
             if (model_it.second.size() > 0) {
-                variant = *model_it.second.begin();
+                variant = PresetBundle::default_printer_variant(model_it.second);
                 const auto config_old = old_enabled_vendors.find(bundle_name);
                 if (config_old == old_enabled_vendors.end())
                     return model_it.first;
@@ -835,11 +851,12 @@ bool GuideFrame::apply_config(AppConfig *app_config, PresetBundle *preset_bundle
                 if (model_it_old == config_old->second.end())
                     return model_it.first;
                 else if (model_it_old->second != model_it.second) {
-                    for (const auto& var : model_it.second)
-                        if (model_it_old->second.find(var) == model_it_old->second.end()) {
-                            variant = var;
-                            return model_it.first;
-                        }
+                    // Variants were added: activate the default one (0.4) when the model has it, not the first newly
+                    // added one (the smallest nozzle, "0.2", when only 0.4 was enabled before).
+                    if (std::string added = PresetBundle::variant_to_activate(model_it_old->second, model_it.second); !added.empty()) {
+                        variant = added;
+                        return model_it.first;
+                    }
                 }
             }
         }
@@ -955,8 +972,27 @@ bool GuideFrame::run()
 // only read (const access), never modified - keep it that way.
 int GuideFrame::GetFilamentInfo( std::string VendorDirectory, const json & pFilaList, std::string filepath, std::string &sVendor, std::string &sType)
 {
+    std::unordered_set<std::string> visiting;
+    return GetFilamentInfo(VendorDirectory, pFilaList, filepath, sVendor, sType, visiting);
+}
+
+int GuideFrame::GetFilamentInfo(const std::string& VendorDirectory, const json& pFilaList, const std::string& filepath,
+                                std::string& sVendor, std::string& sType, std::unordered_set<std::string>& visiting)
+{
     //GetStardardFilePath(filepath);
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << " GetFilamentInfo:VendorDirectory - " << VendorDirectory << ", Filepath - "<<filepath;
+
+    // Orca #15855: an `inherits` cycle between preset files would recurse forever (stack overflow).
+    // The scope entry is released on every exit path so sibling lookups of the same file still work.
+    if (!visiting.insert(filepath).second) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " inherits cycle at " << filepath;
+        return -1;
+    }
+    struct VisitingRelease {
+        std::unordered_set<std::string>& set;
+        const std::string&               path;
+        ~VisitingRelease() { set.erase(path); }
+    } visiting_release{visiting, filepath};
 
     try {
         std::string contents;
@@ -1003,7 +1039,7 @@ int GuideFrame::GetFilamentInfo( std::string VendorDirectory, const json & pFila
 
                 //boost::filesystem::path nf(strNewFile.c_str());
                 if (boost::filesystem::exists(inherits_path))
-                    return GetFilamentInfo(VendorDirectory,pFilaList, inherits_path.string(), sVendor, sType);
+                    return GetFilamentInfo(VendorDirectory,pFilaList, inherits_path.string(), sVendor, sType, visiting);
                 else {
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " inherits File Not Exist: " << inherits_path;
                     return -1;
@@ -1252,6 +1288,9 @@ int GuideFrame::LoadProfileFamily(std::string strVendor, std::string strFilePath
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(",  got %1% machine models") % nsize;
 
+        // This vendor's models are appended from here on; their bed size and toolhead count are
+        // filled in once the vendor's machine presets are read (below).
+        const size_t first_model = m_ProfileJson["model"].size();
         {
             const json &pmodels_ro = pmodels;
             load_section(nsize, m_destroy, [&](int n, json &slot) {
@@ -1308,6 +1347,9 @@ int GuideFrame::LoadProfileFamily(std::string strVendor, std::string strFilePath
         json pmachine = jLocal["machine_list"];
         nsize         = pmachine.size();
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(",  got %1% machines") % nsize;
+        // Every machine preset of this vendor, templates included, for the Printer Selection
+        // table's size and toolhead columns (they are usually inherited from a common base).
+        MachinePresetIndex machine_specs;
         {
             const json &pmachine_ro = pmachine;
             load_section(nsize, m_destroy, [&](int n, json &slot) {
@@ -1335,6 +1377,14 @@ int GuideFrame::LoadProfileFamily(std::string strVendor, std::string strFilePath
                     return;
                 }
 
+                // Only the keys MachinePresetIndex keeps (the G-code templates are large).
+                json spec = json::object();
+                for (const char *key : { "name", "inherits", "instantiation", "printer_model", "printable_area", "printable_height", "nozzle_diameter" })
+                    if (pm.contains(key)) spec[key] = pm[key];
+                if (!spec.contains("name")) spec["name"] = OneMachine["name"];
+                slot = json::object();
+                slot["spec"] = std::move(spec);
+
                 // json == const char* never throws: a missing or non-string
                 // "instantiation" simply compares unequal.
                 if (pm["instantiation"] == "true") {
@@ -1345,14 +1395,38 @@ int GuideFrame::LoadProfileFamily(std::string strVendor, std::string strFilePath
                     }
                     OneMachine["model"]  = pm["printer_model"];
                     OneMachine["nozzle"] = (nd.is_array() && !nd.empty()) ? nd[0] : json();
+                    // A mixed-nozzle machine (printer_variant "0.4+0.6") is its own entry in the model's nozzle list.
+                    // Keyed by its first head it would file its filaments under the plain 0.4 variant.
+                    if (pm.contains("printer_variant") && pm["printer_variant"].is_string() &&
+                        pm["printer_variant"].get<std::string>().find('+') != std::string::npos)
+                        OneMachine["nozzle"] = pm["printer_variant"];
 
-                    slot = std::move(OneMachine);
+                    slot["machine"] = std::move(OneMachine);
                 }
-            }, [this](json &item) {
-                std::string s1 = item["name"];
-                m_ProfileJson["machine"][s1] = std::move(item);
+            }, [this, &machine_specs](json &item) {
+                machine_specs.add(item["spec"]);
+                if (!item.contains("machine")) return;
+                json &machine = item["machine"];
+                std::string s1 = machine["name"];
+                m_ProfileJson["machine"][s1] = std::move(machine);
             });
             if (m_destroy) return 0;
+        }
+
+        // Bed size and toolhead count per model, from its default (0.4 mm) machine preset.
+        // null when unknown; the page shows a dash.
+        {
+            json &models = m_ProfileJson["model"];
+            for (size_t i = first_model; i < models.size(); ++i) {
+                json &m = models[i];
+                if (!m.is_object() || !m["model"].is_string()) continue;
+                const std::string nozzles = m["nozzle_diameter"].is_string() ? m["nozzle_diameter"].get<std::string>() : std::string();
+                const PrinterModelSpecs s = machine_specs.specs_for_model(m["model"].get<std::string>(), nozzles);
+                m["size_x"]    = s.size_x ? json(*s.size_x) : json();
+                m["size_y"]    = s.size_y ? json(*s.size_y) : json();
+                m["size_z"]    = s.size_z ? json(*s.size_z) : json();
+                m["extruders"] = s.extruders ? json(*s.extruders) : json();
+            }
         }
 
         // BBS:Filament

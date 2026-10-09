@@ -19,7 +19,9 @@
 #include "libslic3r.h"
 #include "Config.hpp"
 #include "Polygon.hpp"
+#include "BoundingBox.hpp"
 #include "PaintDepth.hpp"
+#include <algorithm>
 #include <boost/preprocessor/facilities/empty.hpp>
 #include <boost/preprocessor/punctuation/comma_if.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
@@ -568,6 +570,39 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
+// name one slot per (extruder, variant) pair, extruder-major, and the retraction settings below carry one
+// value per slot (upstream Orca's Custom MyToolChanger: 5 extruders x 3 variants = 15 values).
+bool is_printer_extruder_variant_option(const std::string &key);
+
+// The slots of each extruder in that layout (extruder e's at [e]), or empty when the config has none:
+// printer_extruder_id / printer_extruder_variant missing or of different sizes, ids not grouped as
+// 1, 1, .., 2, 2, .., n, or a single variant per extruder (where per-variant and per-extruder vectors are
+// the same thing).
+std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config);
+
+// The slot of extruder `extruder_idx`'s current variant (extruder_type + nozzle_volume_type), its first
+// slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
+// in size or do not list the extruder.
+int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
+
+// The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
+// (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
+// one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine
+// (support_different_extruders), the first value per extruder index as the slicer has always read them
+// there. Leaves any other config alone.
+class DynamicPrintConfig;
+void resolve_printer_extruder_variants(DynamicPrintConfig &config);
+
+// The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
+std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
+
+// The index of extruder `extruder_idx`'s value of `key` that the slicer uses: its slot from `sources`
+// (printer_extruder_variant_sources) when `key` is a per-variant vector of the layout's length, else
+// `extruder_idx`. The printer tab binds its extruder pages to it.
+size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
+                                            size_t extruder_idx);
+
 template<typename VectorOption>
 inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
     -> decltype(opt.get_at(0))
@@ -620,9 +655,14 @@ inline bool filament_flow_variants_active(const ConfigBase &config)
 // option lookups and get_config_idx on every path. The *_for accessors return the
 // same value the uncached expression gives, falling back to it for an id outside
 // the resolved range, so the G-code is identical either way.
+// process_config_idx is the slot get_config_idx(config, Process, id) picks, which
+// GCode::process_flow_value used to recompute (two string-keyed option lookups and a
+// variant-name search) for every option it read, a few dozen times per extrusion path
+// (the config-lookup caching of Orca #16028, adapted to the flow-variant lookup).
 struct ResolvedFilamentFlow
 {
     bool                       variants_active{false};
+    std::vector<size_t>        process_config_idx;
     std::vector<double>        flow_ratio;
     std::vector<double>        max_volumetric_speed;
     std::vector<unsigned char> enable_pressure_advance;
@@ -635,6 +675,11 @@ struct ResolvedFilamentFlow
     static double uncached_max_volumetric_speed(const ConfigBase &config, unsigned int filament_id);
     static bool   uncached_enable_pressure_advance(const ConfigBase &config, unsigned int filament_id);
 
+    size_t process_config_idx_for(const ConfigBase &config, unsigned int filament_id) const
+    {
+        return filament_id < process_config_idx.size() ? process_config_idx[filament_id] :
+                                                         get_config_idx(config, ConfigFlowDomain::Process, filament_id);
+    }
     double flow_ratio_for(const ConfigBase &config, unsigned int filament_id) const
     {
         return filament_id < flow_ratio.size() ? flow_ratio[filament_id] : uncached_flow_ratio(config, filament_id);
@@ -859,6 +904,20 @@ public:
     static void handle_legacy(t_config_option_key &opt_key, std::string &value);
     static void handle_legacy_composite(DynamicPrintConfig &config);
 
+    // Keys a bundled or user preset file may carry although this build deliberately does not load
+    // them into presets (yet). They are dropped on load exactly like any other key that is not part
+    // of the preset type, but they are expected, so Preset::remove_invalid_keys() reports them once
+    // per session at info level instead of one error per file. A genuinely unknown key is not listed
+    // here and keeps logging as an error. This is a "known to be absent" list, not a support list:
+    // adding a key here never changes a loaded value or the G-code.
+    enum class ForeignKeyOrigin {
+        BambuStudio,   // Bambu Studio option this fork has not implemented in presets (see docs/bambu-flush-keys.md)
+        ProjectScoped, // option that lives in the project config; older saves also wrote it into preset files
+    };
+    // True (and the origin) when opt_key is such a key.
+    static bool unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin = nullptr);
+    static const char *foreign_key_origin_label(ForeignKeyOrigin origin);
+
     // Array options growing with the number of extruders
     const std::vector<std::string>& extruder_option_keys() const { return m_extruder_option_keys; }
     // Options defining the extruder retract properties. These keys are sorted lexicographically.
@@ -903,6 +962,13 @@ class StaticPrintConfig;
 
 // Minimum object distance for arrangement, based on printer technology.
 double min_object_distance(const ConfigBase &cfg);
+
+// Whether any value is set, a nil value included.
+template<bool NULLABLE> bool any_enabled(const ConfigOptionBoolsTempl<NULLABLE> &option)
+{
+    return std::any_of(option.values.begin(), option.values.end(), [](unsigned char enabled) { return enabled != 0; });
+}
+
 // The clearance radius of print-by-object collision checks and arrange. Bambu Studio's
 // extruder_clearance_max_radius on a Bambu Lab printer (printer_model "Bambu Lab ..."), as Bambu
 // Studio uses it everywhere; extruder_clearance_radius on every other printer, whose profiles do not
@@ -968,7 +1034,7 @@ public:
     // Ultra (dual-nozzle): returns true when the printer's extruders carry more than one distinct
     // extruder variant (H2D/H2C/X2D), i.e. it is a multi-nozzle grouping machine. extruder_count is
     // filled with the nozzle count. Single-nozzle machines and same-variant toolchangers (U1) → false.
-    bool support_different_extruders(int& extruder_count);
+    bool support_different_extruders(int& extruder_count) const;
 };
 
 void handle_legacy_sla(DynamicPrintConfig &config);
@@ -1373,7 +1439,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,              tree_support_branch_diameter_angle))
     ((ConfigOptionFloat,              tree_support_angle_slow))
     ((ConfigOptionInt,                tree_support_wall_count))
-    ((ConfigOptionBool,               tree_support_adaptive_layer_height))
     ((ConfigOptionBool,               tree_support_auto_brim))
     ((ConfigOptionFloat,              tree_support_brim_width))
     // Side stabilizers (Support/Stabilizers.hpp)
@@ -1668,6 +1733,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,               machine_min_travel_rate))
     // M205 S... [mm/sec]
     ((ConfigOptionFloats,               machine_min_extruding_rate))
+    // Bed-slinger mass model (A2L): Y-axis drive force [N] and bed mass [g], 0 = not modelled.
+    ((ConfigOptionFloat,                machine_max_force_Y))
+    ((ConfigOptionFloat,                machine_bed_mass_Y))
 
     //resonance avoidance ported from qidi slicer
     ((ConfigOptionBool,                 resonance_avoidance))
@@ -2098,6 +2166,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
 
     ((ConfigOptionBools,               activate_chamber_temp_control))
     ((ConfigOptionInts ,               chamber_temperature))
+    ((ConfigOptionInts ,               chamber_minimal_temperature))
     
     // Orca: support adaptive bed mesh
     ((ConfigOptionFloat,               preferred_orientation))
@@ -2552,6 +2621,18 @@ std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_co
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);
 Points get_bed_shape(const SLAPrinterConfig &cfg);
+// bed_exclude_area is one flat point list that vendors author two ways: a list of 4-point
+// rectangles (Bambu, Qidi, Anycubic Kobra 3 Max, Snapmaker, Elegoo) or one polygon (upstream
+// Orca's Kobra 3 ring, the option's tooltip). Every reader goes through these helpers so that
+// validation, arrange, the plate's "object inside" check and the timelapse picker agree; see
+// bed_exclude_area_is_rectangles() in PrintConfig.cpp for the rule.
+bool bed_exclude_area_is_rectangles(const Pointfs &points);
+// The excluded region as hole-free, counter-clockwise, scaled polygons (zero-area pieces dropped).
+Slic3r::Polygons bed_exclude_area_polygons(const Pointfs &points);
+// Unscaled boxes for the GUI, which works in boxes (PartPlate exclusion boxes, arrange's fixed
+// items). For a rectangle list this is exactly the old "one box per 4 points" list, zero-area
+// boxes included; for a polygon it is one box per hole-free piece.
+std::vector<BoundingBoxf> bed_exclude_area_boxes(const Pointfs &points);
 Slic3r::Polygons get_bed_excluded_area(const PrintConfig& cfg);
 Slic3r::Polygon get_bed_shape_with_excluded_area(const PrintConfig& cfg);
 bool has_skirt(const DynamicPrintConfig& cfg);

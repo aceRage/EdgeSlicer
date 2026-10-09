@@ -3,6 +3,7 @@
 #include "3DScene.hpp"
 #include "OpaqueVolumeSort.hpp"
 #include "GLShader.hpp"
+#include "OpenGLManager.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Colors.hpp"
 #include "Plater.hpp"
@@ -35,6 +36,11 @@
 #include <assert.h>
 
 #include <boost/log/trivial.hpp>
+#include <boost/format.hpp>
+
+#include <cstring>
+#include <set>
+#include <string>
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -70,6 +76,41 @@ void glAssertRecentCallImpl(const char* file_name, unsigned int line, const char
     assert(false);
 }
 #endif // HAS_GLSAFE
+
+// EDGE: see 3DScene.hpp. Read once, before main(), so the flag is a plain bool for every glsafe().
+static bool read_gl_debug_env()
+{
+    const char* value = ::getenv("EDGESLICER_GL_DEBUG");
+    return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0;
+}
+bool edge_gl_debug_calls = read_gl_debug_env();
+
+void glReportRecentCallImpl(const char* file_name, unsigned int line, const char* function_name)
+{
+    GLenum first = ::glGetError();
+    if (first == GL_NO_ERROR)
+        return;
+    std::string errors;
+    for (int i = 0; i < 8 && first != GL_NO_ERROR; ++i, first = ::glGetError()) {
+        if (!errors.empty())
+            errors += ", ";
+        errors += (boost::format("%1% (0x%2$04X)") % Slic3r::GUI::OpenGLManager::gl_error_name(first) % first).str();
+    }
+    // Once per call site, within a budget: a per-frame error must not flood the log.
+    static std::set<std::pair<std::string, unsigned int>> logged;
+    static int                                            reports_left = 300;
+    const char* base = file_name;
+    for (const char* c = file_name; *c != '\0'; ++c)
+        if (*c == '/' || *c == '\\')
+            base = c + 1;
+    if (reports_left <= 0 || !logged.insert({ std::string(base), line }).second)
+        return;
+    --reports_left;
+    BOOST_LOG_TRIVIAL(warning) << "OpenGL debug: " << errors << " at " << base << ":" << line << " (" << function_name
+                               << "()), raised by that call or by an unchecked GL call just before it";
+    if (reports_left == 0)
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL debug: limit reached, further call sites are not logged this session";
+}
 
 // BBS
 std::vector<Slic3r::ColorRGBA> get_extruders_colors()
@@ -946,7 +987,11 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         return;
 
     GLShaderProgram* sink_shader  = GUI::wxGetApp().get_shader("flat");
-    GLShaderProgram* edges_shader = GUI::wxGetApp().get_shader("flat");
+#if SLIC3R_OPENGL_ES
+    GLShaderProgram* edges_shader = GUI::wxGetApp().get_shader("dashed_lines");
+#else
+    GLShaderProgram* edges_shader = GUI::OpenGLManager::get_gl_info().is_core_profile() ? GUI::wxGetApp().get_shader("dashed_thick_lines") : GUI::wxGetApp().get_shader("flat");
+#endif // SLIC3R_OPENGL_ES
 
     if (type == ERenderType::Transparent) {
         glsafe(::glEnable(GL_BLEND));
@@ -1057,13 +1102,18 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         // Curved cut: split the two halves by the sheet's height field rather
         // than by the flat plane. Texture unit 3 - 0/1/2 stay free for the
         // environment map and other scene textures; do not collide with paint/cut.
+        // The sampler units are set on EVERY draw, active or not: curved_sheet_tex is a
+        // sampler2D and draw_field_tex a sampler3D, and left on the default unit 0 together
+        // they make the program invalid at draw time - macOS then skips every object draw
+        // (see GLShadersManager::init, which also parks them once after linking).
+        shader->set_uniform("curved_sheet_tex", 3);
+        shader->set_uniform("draw_field_tex", 4);
         const bool curved_split = m_use_color_clip_plane && m_curved_sheet_tex != 0;
         shader->set_uniform("curved_sheet_active", curved_split);
         if (curved_split) {
             glsafe(::glActiveTexture(GL_TEXTURE3));
             glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint) m_curved_sheet_tex));
             glsafe(::glActiveTexture(GL_TEXTURE0));
-            shader->set_uniform("curved_sheet_tex", 3);
             shader->set_uniform("curved_sheet_matrix", m_curved_sheet_matrix);
             shader->set_uniform("curved_sheet_half_size", m_curved_sheet_half_size);
             shader->set_uniform("curved_sheet_range", m_curved_sheet_range);
@@ -1076,7 +1126,6 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
             glsafe(::glActiveTexture(GL_TEXTURE4));
             glsafe(::glBindTexture(GL_TEXTURE_3D, (GLuint) m_draw_field_tex));
             glsafe(::glActiveTexture(GL_TEXTURE0));
-            shader->set_uniform("draw_field_tex", 4);
             shader->set_uniform("draw_field_matrix", m_draw_field_matrix);
             shader->set_uniform("draw_field_origin", m_draw_field_origin);
             shader->set_uniform("draw_field_size", m_draw_field_size);
@@ -1351,7 +1400,7 @@ void GLVolumeCollection::update_colors_by_extruder(const DynamicPrintConfig* con
     using ColorItem = std::pair<std::string, ColorRGBA>;
     std::vector<ColorItem> colors;
 
-    if (static_cast<PrinterTechnology>(config->opt_int("printer_technology")) == ptSLA) {
+    if (config->has("printer_technology") && static_cast<PrinterTechnology>(config->opt_int("printer_technology")) == ptSLA) {
         const std::string& txt_color = config->opt_string("material_colour").empty() ?
                                            print_config_def.get("material_colour")->get_default_value<ConfigOptionString>()->value :
                                            config->opt_string("material_colour");

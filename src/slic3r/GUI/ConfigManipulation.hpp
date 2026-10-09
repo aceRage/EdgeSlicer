@@ -82,6 +82,10 @@ public:
     void    check_nozzle_temperature_initial_layer_range(DynamicPrintConfig* config, int variant_index = 0);
     void    check_filament_max_volumetric_speed(DynamicPrintConfig *config);
     void    check_chamber_temperature(DynamicPrintConfig* config);
+    void    check_chamber_minimal_temperature(DynamicPrintConfig* config);
+    bool    check_layer_height(DynamicPrintConfig* config);
+    bool    layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to);
+    void    layer_height_limits(double& min_layer_height, double& max_layer_height) const;
     void    set_is_BBL_Printer(bool is_bbl_printer) { is_BBL_Printer = is_bbl_printer; };
     void    set_reference_config(const DynamicPrintConfig *reference) { m_reference_config = reference; }
     // SLA print

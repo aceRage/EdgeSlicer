@@ -233,6 +233,10 @@ public:
     PresetsConfigSubstitutions load_project_embedded_presets(std::vector<Preset*> project_presets, ForwardCompatibilitySubstitutionRule substitution_rule);
     std::vector<Preset*> get_current_project_embedded_presets();
     void reset_project_embedded_presets();
+    // Ultra: the project presets in use (printer, process, filament slots) that `printer_name`
+    // cannot use, i.e. that switching to that printer would deselect and hide. Filament presets
+    // the loader made up for a slot that matched no preset ("<name>(<file>.3mf)") do not count.
+    std::vector<std::string> project_presets_lost_on_printer(const std::string &printer_name) const;
 
     //BBS: find printer model
     std::string get_texture_for_printer_model(std::string model_name);
@@ -530,7 +534,8 @@ public:
     // Save current preset of a provided type under a new name. If the name is different from the old one,
     // Unselected option would be reverted to the beginning values
     //BBS: add project embedded preset logic
-    void                        save_changes_for_preset(const std::string& new_name, Preset::Type type, const std::vector<std::string>& unselected_options, bool save_to_project = false);
+    void                        save_changes_for_preset(const std::string& new_name, Preset::Type type, const std::vector<std::string>& unselected_options, bool save_to_project = false,
+                                                        ProjectPresetPrinters project_printers = ProjectPresetPrinters::Keep);
 
     std::pair<PresetsConfigSubstitutions, std::string> load_system_models_from_json(ForwardCompatibilitySubstitutionRule compatibility_rule);
     std::pair<PresetsConfigSubstitutions, std::string> load_system_filaments_json(ForwardCompatibilitySubstitutionRule compatibility_rule);
@@ -540,6 +545,20 @@ public:
     static const char *SM_BUNDLE;
     static const char* SM_DEFAULT_PRINTER_MODEL;
     static const char* SM_DEFAULT_PRINTER_VARIANT;
+    // The variant to activate when a printer model is newly enabled with several nozzle variants
+    // (Setup Wizard, Add Printer). The variants arrive as a sorted set, so the first one is the
+    // smallest nozzle ("0.2"); that is never what a user wants by default, and on a four-head U1 it
+    // meant a 0.2 machine on a printer that ships with 0.4 nozzles. Prefers SM_DEFAULT_PRINTER_VARIANT
+    // ("0.4") when the model has it, otherwise the first variant. Empty when there are none.
+    static std::string          default_printer_variant(const std::set<std::string> &variants);
+    // The filament preset an alias stands for in filament slot `filament_slot` (0-based). On a machine with
+    // different nozzle sizes per head only presets cut for that head's nozzle qualify; otherwise (and when
+    // none qualifies) it is the plain alias lookup.
+    std::string                 get_filament_name_by_alias_for_slot(const std::string &alias, size_t filament_slot) const;
+    // The variant to activate when a model that already had `previous` variants enabled is saved with
+    // `enabled`: empty when nothing was added, otherwise default_printer_variant(enabled) (the first
+    // newly added variant would be the smallest nozzle, "0.2", when only 0.4 was enabled before).
+    static std::string          variant_to_activate(const std::set<std::string> &previous, const std::set<std::string> &enabled);
     static const char* SM_DEFAULT_FILAMENT;
     static const char *ORCA_FILAMENT_LIBRARY;
 

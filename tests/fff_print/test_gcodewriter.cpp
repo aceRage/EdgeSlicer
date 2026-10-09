@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCodeWriter.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -217,4 +220,119 @@ TEST_CASE("GCodeWriter::toolchange throws when the extruder is not registered", 
     writer.set_extruders({0});
     REQUIRE_THROWS_AS(writer.toolchange(2), SlicingError);
     REQUIRE(writer.extruder() == nullptr);
+}
+
+TEST_CASE("Acceleration and velocity limit commands print their values in general notation", "[GCodeWriter]")
+{
+    enum class Command { Print, Travel, KlipperLimits };
+    struct Case
+    {
+        GCodeFlavor              flavor;
+        Command                  command;
+        unsigned int             acceleration;
+        double                   jerk;
+        bool                     comments;
+        std::vector<std::string> present;
+        std::vector<std::string> absent;
+    };
+    // accel_to_decel_factor is 50%, so ACCEL_TO_DECEL is half the acceleration.
+    const Case cases[] = {
+        {gcfKlipper, Command::KlipperLimits, 2000000, 25. / 3., false,
+         {"SET_VELOCITY_LIMIT ACCEL=2000000 ", "ACCEL_TO_DECEL=1e+06 ", "SQUARE_CORNER_VELOCITY=8.33333\n"}, {}},
+        {gcfKlipper, Command::KlipperLimits, 12345, 0., false, {"ACCEL=12345 ", "ACCEL_TO_DECEL=6172.5\n"}, {"SQUARE_CORNER_VELOCITY"}},
+        {gcfKlipper, Command::KlipperLimits, 0, 0.25, true, {"SQUARE_CORNER_VELOCITY=0.25 ", "; adjust VELOCITY_LIMIT"}, {"ACCEL"}},
+        {gcfKlipper, Command::Print, 3001, 0., true, {"ACCEL=3001 ", "ACCEL_TO_DECEL=1500.5 ", "; adjust ACCEL_TO_DECEL", "; adjust acceleration"}, {}},
+        {gcfMarlinFirmware, Command::Print, 2500, 0., false, {"M204 P2500\n"}, {}},
+        {gcfMarlinFirmware, Command::Travel, 7000, 0., false, {"M204 T7000\n"}, {}},
+        {gcfRepRapFirmware, Command::Travel, 7000, 0., true, {"M204 T7000 ", "; adjust acceleration"}, {}},
+        {gcfMarlinLegacy, Command::Print, 2500, 0., false, {"M204 S2500\n"}, {}},
+        {gcfRepetier, Command::Print, 2500, 0., false, {"M201 X2500 Y2500\n"}, {}},
+        {gcfRepetier, Command::Travel, 7000, 0., false, {"M202 X7000 Y7000\n"}, {}},
+    };
+
+    for (const Case &c : cases) {
+        DYNAMIC_SECTION("flavor " << int(c.flavor) << " command " << int(c.command) << " accel " << c.acceleration) {
+            struct CommentGuard
+            {
+                bool saved = GCodeWriter::full_gcode_comment;
+                ~CommentGuard() { GCodeWriter::full_gcode_comment = saved; }
+            } comment_guard;
+            GCodeWriter::full_gcode_comment = c.comments;
+
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(c.flavor));
+            config.option<ConfigOptionBools>("accel_to_decel_enable")->values.assign(1, true);
+            config.option<ConfigOptionPercents>("accel_to_decel_factor")->values.assign(1, 50.);
+            for (const char *limit : {"machine_max_acceleration_extruding", "machine_max_acceleration_travel", "machine_max_acceleration_x",
+                                      "machine_max_acceleration_y", "machine_max_jerk_x", "machine_max_jerk_y"}) {
+                std::vector<double> &values = config.option<ConfigOptionFloats>(limit)->values;
+                std::fill(values.begin(), values.end(), 0.);
+            }
+            PrintConfig print_config;
+            print_config.apply(config, true);
+            GCodeWriter writer;
+            writer.apply_print_config(print_config);
+
+            const std::string line = c.command == Command::Print         ? writer.set_print_acceleration(c.acceleration) :
+                                     c.command == Command::Travel        ? writer.set_travel_acceleration(c.acceleration) :
+                                                                           writer.set_accel_and_jerk(c.acceleration, c.jerk);
+            INFO(line);
+            for (const std::string &token : c.present)
+                CHECK(line.find(token) != std::string::npos);
+            for (const std::string &token : c.absent)
+                CHECK(line.find(token) == std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("GCodeWriter append overloads emit the same line as the returning overloads", "[GCodeWriter]")
+{
+    GCodeWriter writer;
+    std::string appended;
+    writer.set_speed(appended, 1800.);
+    CHECK(appended == writer.set_speed(1800.));
+}
+
+// Port OrcaSlicer #12824 (#12244): Klipper's SET_VELOCITY_LIMIT ACCEL= limits every kind of motion, so the
+// writer must clamp to the smallest of the extruding limit and the X/Y limits, not the extruding limit alone.
+namespace {
+std::string klipper_accel_line(GCodeFlavor flavor, double extruding, double x, double y, unsigned int requested)
+{
+    PrintConfig print_config;
+    print_config.gcode_flavor.value = flavor;
+    print_config.machine_max_acceleration_extruding.values = { extruding, extruding };
+    print_config.machine_max_acceleration_x.values         = { x, x };
+    print_config.machine_max_acceleration_y.values         = { y, y };
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    return writer.set_print_acceleration(requested);
+}
+} // namespace
+
+TEST_CASE("Klipper acceleration is capped by the X and Y limits too", "[GCodeWriter][Klipper][U1]")
+{
+    SECTION("an X limit below the extruding limit wins") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 8700., 10000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=8700") != std::string::npos);
+    }
+    SECTION("a Y limit below the extruding limit wins") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 10000., 6000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=6000") != std::string::npos);
+    }
+    SECTION("the extruding limit still wins when it is the smallest") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 5000., 20000., 20000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=5000") != std::string::npos);
+    }
+    SECTION("equal limits (the U1 profile) change nothing") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 20000., 20000., 20000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=10000") != std::string::npos);
+    }
+    SECTION("a zero axis limit means unset and is ignored") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 0., 0., 12000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=10000") != std::string::npos);
+    }
+    SECTION("other flavours keep using only the extruding limit") {
+        const std::string gcode = klipper_accel_line(gcfMarlinFirmware, 10000., 8700., 8700., 12000);
+        CHECK(gcode.find("M204 P10000") != std::string::npos);
+    }
 }

@@ -750,6 +750,10 @@ void ObjectList::update_filament_values_for_items(const size_t filaments_count)
                 if (!object->volumes[id]->config.has("extruder") ||
                     size_t(object->volumes[id]->config.extruder()) > filaments_count) {
                     extruder = wxString::Format("%d", object->config.extruder());
+                    // Orca #14103: clear the stale per-part assignment so the part really follows its
+                    // object; before, only the list showed the object's filament and the out-of-range
+                    // index stayed in the config. filaments_count includes mixed filaments.
+                    object->volumes[id]->config.erase("extruder");
                 }
                 else {
                     extruder = wxString::Format("%d", object->volumes[id]->config.extruder());
@@ -4367,6 +4371,19 @@ static bool can_add_volumes_to_object(const ModelObject *object)
     return can;
 }
 
+void ObjectList::update_volume_text_svg_icons(size_t obj_idx)
+{
+    if (m_objects == nullptr || obj_idx >= m_objects->size())
+        return;
+    const ModelObject *object = (*m_objects)[obj_idx];
+    // A single-part object has no part rows (GetItemByVolumeId() then returns the object row, which
+    // SetVolumeTextSvg() ignores).
+    for (size_t vol_idx = 0; vol_idx < object->volumes.size(); ++vol_idx) {
+        const ModelVolume *volume = object->volumes[vol_idx];
+        m_objects_model->SetVolumeTextSvg(m_objects_model->GetItemByVolumeId(int(obj_idx), int(vol_idx)), volume->is_text(), volume->is_svg());
+    }
+}
+
 wxDataViewItemArray ObjectList::add_volumes_to_object_in_list(size_t obj_idx, std::function<bool(const ModelVolume *)> add_to_selection /* = nullptr*/)
 {
     const bool is_prevent_list_events = m_prevent_list_events;
@@ -7324,7 +7341,7 @@ void ObjectList::set_extruder_for_selected_items(const int extruder)
          * So, if Instance is selected, get its Object item and change it
          */
         ItemType sel_item_type = m_objects_model->GetItemType(sel_item);
-        wxDataViewItem item = (sel_item_type & itInstance) ? m_objects_model->GetObject(item) : sel_item;
+        wxDataViewItem item = (sel_item_type & itInstance) ? m_objects_model->GetObject(sel_item) : sel_item;
         ItemType type = m_objects_model->GetItemType(item);
         if (type & itVolume) {
             const int obj_idx = m_objects_model->GetObjectIdByItem(item);

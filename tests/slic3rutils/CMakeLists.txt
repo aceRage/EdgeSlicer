@@ -10,6 +10,7 @@ add_executable(${_TEST_NAME}_tests
     login_useragent_tests.cpp
     hub_home_tests.cpp
     hub_handover_tests.cpp
+    web_load_retry_tests.cpp
     home_tab_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp
@@ -54,16 +55,20 @@ add_executable(${_TEST_NAME}_tests
     blender_launcher_tests.cpp
     freecad_launcher_tests.cpp
     instance_routing_tests.cpp
+    startup_wizard_tests.cpp
     page_server_security_tests.cpp
     sentry_scrub_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
     device_controls_tests.cpp
+    bambu_fans_tests.cpp
     printer_timelapse_tests.cpp
     chamber_lights_tests.cpp
     filament_commands_tests.cpp
     ams_dual_layout_tests.cpp
     gizmo_selection_object_tests.cpp
+    emboss_picking_tests.cpp
+    emboss_free_transform_tests.cpp
     dark_mode_background_tests.cpp
     # After the other wx-window tests: it starts a plain wxApp when none is up, and the tests
     # that run before it (hms_lookup_tests) call wxGetApp() whenever an app exists.
@@ -71,6 +76,14 @@ add_executable(${_TEST_NAME}_tests
     bambu_send_diagnosis_tests.cpp
     win_firewall_tests.cpp
     bambu_setup_notice_tests.cpp
+    saved_printers_tests.cpp
+    ff_printer_sources_tests.cpp
+    ff_device_pid_tests.cpp
+    emboss_font_search_tests.cpp
+    printers_monitor_tests.cpp
+    # Hidden GLFW window + forward-compatible 3.3 core context; skips itself where none can be made.
+    gl_core_profile_tests.cpp
+    libvgcode_input_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp

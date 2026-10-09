@@ -16,6 +16,7 @@
 #include <miniz.h>
 
 // Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
+#include "libslic3r/CostOverrides.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
@@ -36,6 +37,7 @@
 //#include "RemovableDriveManager.hpp"
 
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/PlatePrintHistoryRecorder.hpp"
 
 namespace Slic3r {
 
@@ -689,11 +691,33 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 	// TODO: add partplate config
 	DynamicPrintConfig new_config = config;
 	new_config.apply(*m_current_plate->config());
+	// Your own costs (Costs window): filament prices and the machine rate replace filament_cost and
+	// time_cost here and only here, so the slice, its G-code and the statistics agree while presets, projects and every
+	// other export keep the preset prices. A change re-runs only the G-code export. Not in the
+	// G-code viewer mode, whose G-code is a file that is never exported again.
+	// mainframe can still be null here: on macOS the splash screen and the WebView creation run nested
+	// event loops during MainFrame construction, and the reslice timer can fire from them.
+	if (m_print->technology() == ptFFF) {
+		const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+		if (!(plater && plater->only_gcode_mode()))
+			CostOverrides::apply(new_config, *CostOverrides::global(), &GUI::wxGetApp().preset_bundle->filaments,
+			                    &GUI::wxGetApp().preset_bundle->printers);
+	}
 	Print::ApplyStatus invalidated = m_print->apply(model, new_config);
+
+	// "Include filament prices in exported G-code" (Preferences, default off). Not a config key:
+	// a change re-runs only the G-code export. Left alone in the G-code viewer mode, whose G-code
+	// is a file that is never exported again.
+	if (m_print->technology() == ptFFF) {
+		const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+		if (!(plater && plater->only_gcode_mode()) &&
+			m_fff_print->set_gcode_filament_prices(GUI::wxGetApp().app_config->get_bool("gcode_include_filament_prices")))
+			invalidated = PrintBase::APPLY_STATUS_INVALIDATED;
+	}
 
 	// Orca: prevent resetting under gcode viewer mode
     if (invalidated != PrintBase::APPLY_STATUS_UNCHANGED) {
-        const auto plater = GUI::wxGetApp().mainframe->m_plater;
+        const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
         if (plater && plater->only_gcode_mode()) {
             invalidated = PrintBase::APPLY_STATUS_UNCHANGED;
         }
@@ -844,6 +868,11 @@ void BackgroundSlicingProcess::finalize_gcode()
 		break;
 	}
 
+	// Plate print history: the G-code reached its file (every non-Bambu printer exports through here,
+	// Bambu printers through export_gcode() below). An export, not a send.
+	if (m_current_plate != nullptr)
+		GUI::PlateHistoryRecorder::record_export(m_current_plate->get_index(), export_path);
+
 	m_print->set_status(100, GUI::format(_L("G-code file exported to %1%"), export_path));
 }
 
@@ -896,6 +925,10 @@ void BackgroundSlicingProcess::export_gcode()
 	wxString output_gcode_str = wxString::FromUTF8(export_path.c_str(), export_path.length());
 	evt->SetString(output_gcode_str);
 	wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt);
+
+	// Plate print history: the G-code reached its file. An export, not a send.
+	if (m_current_plate != nullptr)
+		GUI::PlateHistoryRecorder::record_export(m_current_plate->get_index(), export_path);
 
 	// BBS: to be checked. Whether use export_path or output_path.
 	gcode_add_line_number(export_path, m_fff_print->full_print_config());

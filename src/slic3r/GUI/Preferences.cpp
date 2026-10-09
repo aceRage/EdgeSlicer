@@ -1,8 +1,10 @@
 #include "Preferences.hpp"
 #include "OptionsGroup.hpp"
 #include "GUI_App.hpp"
+#include "CostsDialog.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "GLCanvas3D.hpp"
 #include "FreeCADBridge.hpp"
 #include "NotificationManager.hpp"
 #include "MsgDialog.hpp"
@@ -1223,6 +1225,17 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
         if (param == "allow_filament_temp_mixing" && wxGetApp().plater())
             wxGetApp().plater()->notify_filament_usage_changed();
 
+        // OrcaSlicer #14705: apply the preview dimming change immediately to the loaded preview
+        if (param == "preview_dim_previous_layers") {
+            if (Plater* plater = wxGetApp().plater()) {
+                if (GLCanvas3D* canvas = plater->get_preview_canvas3D()) {
+                    canvas->get_gcode_viewer().set_dim_previous_layers(checkbox->GetValue());
+                    canvas->set_as_dirty();
+                    canvas->request_extra_frame();
+                }
+            }
+        }
+
         // Opt-in crash reports: takes effect at once, through Sentry's consent switch.
         if (param == "send_crash_reports") {
             setSentryUserConsent(checkbox->GetValue());
@@ -1255,6 +1268,11 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
             wxGetApp().mainframe->update_autosave_timer();
             if (m_autosave_interval_textinput != nullptr) { m_autosave_interval_textinput->Enable(pbool); }
         }
+
+        // Filament prices in G-code: every plate's G-code is out of date. The next slice of each plate
+        // re-runs only its G-code export (BackgroundSlicingProcess::apply()).
+        if (param == "gcode_include_filament_prices" && wxGetApp().plater())
+            wxGetApp().plater()->post_slice_state_change_update();
 
         // Print-by-object advisory notices: take effect immediately rather than waiting for the
         // next plate switch / slice attempt to re-evaluate.
@@ -1791,6 +1809,40 @@ wxWindow* PreferencesDialog::create_general_page()
         _L("Background opacity of the tool panels on the 3D view. Lower values let you see the model behind a docked panel. Applies immediately."));
     auto camera_orbit_mult = create_camera_orbit_mult_input(_L("Orbit speed multiplier"), page, _L("Multiplies the orbit speed for finer or coarser camera movement."));
     auto item_selection_highlight = create_item_selection_highlight(page);
+    // OrcaSlicer #15769 (libvgcode stage 3): the view type the sliced preview opens with.
+    std::vector<wxString>    preview_view_type_labels;
+    std::vector<std::string> preview_view_type_values;
+    for (const auto& [value, label] : GCodeViewer::default_view_type_choices()) {
+        preview_view_type_values.push_back(value);
+        preview_view_type_labels.push_back(from_u8(label));
+    }
+    auto item_preview_view_type = create_item_combobox(_L("Default preview view type"), page,
+        _L("The color scheme the sliced preview opens with.\n"
+           "Automatic: Filament for multi material prints, Line Type for single material ones.\n"
+           "Last used: the view type you selected last.\n"
+           "Any other value always opens that view type.\n"
+           "You can still switch the view type in the preview afterwards."),
+        "preview_default_view_type", preview_view_type_labels, preview_view_type_values);
+    // OrcaSlicer #14705 / #15001 (libvgcode stage 3): darken the layers below the one the layer slider shows.
+    auto item_dim_previous_layers = create_item_checkbox(_L("Dim lower layers in the G-code preview"), page,
+        _L("When scrubbing the layer slider in the sliced preview, render the layers below the current one darkened so that only the layer being viewed is shown at full brightness."),
+        50, "preview_dim_previous_layers");
+    auto item_dim_previous_layers_brightness = create_item_input(_L("Dimmed layer brightness"), _L("%"), page,
+        _L("How brightly the dimmed layers are rendered when \"Dim lower layers\" is on: 99% is barely darkened, 0% renders them black."),
+        "preview_dim_previous_layers_brightness", [this](wxString value) {
+            long brightness = 40;
+            if (!value.ToLong(&brightness))
+                brightness = 40;
+            brightness = std::clamp(brightness, 0L, 99L);
+            app_config->set("preview_dim_previous_layers_brightness", std::to_string(brightness));
+            if (Plater* plater = wxGetApp().plater()) {
+                if (GLCanvas3D* canvas = plater->get_preview_canvas3D()) {
+                    canvas->get_gcode_viewer().set_dim_previous_layers_brightness(0.01f * float(brightness));
+                    canvas->set_as_dirty();
+                    canvas->request_extra_frame();
+                }
+            }
+        });
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
@@ -1979,6 +2031,9 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_panel_opacity, 0, wxTOP, FromDIP(3));
     sizer_page->Add(camera_orbit_mult, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_selection_highlight, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_preview_view_type, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_dim_previous_layers, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_dim_previous_layers_brightness, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_check_updates, 0, wxTOP, FromDIP(3));
@@ -2095,6 +2150,23 @@ wxWindow* PreferencesDialog::create_ultra_page()
     auto item_hide_other_plates = create_item_checkbox(_L("Hide other plates while moving"), page,
         _L("While the Move tool is open, show only the plate you are working on. The other plates and their objects come back when the Move tool closes, and a plate you drag onto reappears when you release."), 50, "hide_other_plates_on_move");
 
+    auto title_cost = create_item_title(_L("Cost"), page, _L("Cost"));
+    // The key keeps its first name (gcode_include_filament_prices) so existing settings carry over.
+    auto item_gcode_prices = create_item_checkbox(_L("Include costs in exported G-code"), page,
+        _L("Write your costs into G-code you export or send to a printer, and into the settings of an exported "
+           "3MF with G-code: the filament prices (the \"; filament cost\" and \"; total filament cost\" lines, "
+           "filament_cost) and the machine rate (time_cost). Off by default, so a file you share does not tell "
+           "anyone what you pay for filament or charge per hour; the rest of the file is the same either way. "
+           "With it off, the cost of a G-code opened on its own reads \"not in file\"; projects and sliced plates "
+           "still show their cost here."), 50, "gcode_include_filament_prices");
+    currency_symbol(); // the locale's symbol becomes the stored default the first time
+    auto item_currency_symbol = create_item_text_input(_L("Currency symbol"), page,
+        _L("Shown before every price and cost (filament prices, machine rates, the cost after slicing). A label only: prices are never "
+           "converted. Leave it empty for plain numbers."), "cost_currency_symbol");
+    auto item_filament_prices = create_item_button(_L("Your own costs"), _L("Costs") + dots, page,
+        _L("Filament prices per kilogram and machine rates per hour that apply over the presets' values"),
+        _L("Open the Costs window"), [this]() { show_costs_dialog(this); });
+
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     auto item_prefer_last_print = create_item_checkbox(_L("Prefer Last Used Print Profile"), page,
         _L("When a project's print profile is not available, pick the profile you last used at the same layer height instead of the first compatible one."), 50, "prefer_last_print_profile");
@@ -2181,6 +2253,10 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(item_auto_drop, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bottom_z, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hide_other_plates, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(title_cost, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_gcode_prices, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_currency_symbol, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_filament_prices, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_prefer_last_print, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_shadow, 0, wxTOP, FromDIP(3));

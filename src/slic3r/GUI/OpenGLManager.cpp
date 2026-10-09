@@ -6,16 +6,28 @@
 #include "3DScene.hpp"
 
 #include "libslic3r/Platform.hpp"
+#include "libslic3r/AppConfig.hpp"
 
 #include <glad/gl.h>
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <wx/glcanvas.h>
 #include <wx/msgdlg.h>
 #include <wx/log.h>
+#include <wx/utils.h>
+
+#include <algorithm>
+#include <functional>
+#include <map>
+#include <set>
+#include <sstream>
 
 #ifdef __APPLE__
 // Part of hack to remove crash when closing the application on OSX 10.9.5 when building against newer wxWidgets
@@ -71,6 +83,14 @@ bool OpenGLManager::GLInfo::is_mesa() const
     return boost::icontains(m_version, "mesa");
 }
 
+bool OpenGLManager::GLInfo::is_core_profile() const
+{
+    // EDGE: no lazy detect() here (upstream does not have one either). GLModel::reset() asks this on
+    // every reset, also long before a context exists (bed and plate models are built at start-up),
+    // and detecting then would cache "N/A" for the whole session. init_gl() detects explicitly.
+    return m_detected && m_core_profile;
+}
+
 int OpenGLManager::GLInfo::get_max_tex_size() const
 {
     if (!m_detected)
@@ -94,6 +114,8 @@ float OpenGLManager::GLInfo::get_max_anisotropy() const
     return m_max_anisotropy;
 }
 
+static bool version_greater_or_equal_to(const std::string& version, unsigned int major, unsigned int minor);
+
 void OpenGLManager::GLInfo::detect() const
 {
     *const_cast<std::string*>(&m_version) = gl_get_string_safe(GL_VERSION, "N/A");
@@ -101,7 +123,7 @@ void OpenGLManager::GLInfo::detect() const
     *const_cast<std::string*>(&m_vendor) = gl_get_string_safe(GL_VENDOR, "N/A");
     *const_cast<std::string*>(&m_renderer) = gl_get_string_safe(GL_RENDERER, "N/A");
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("got opengl version %1%, glsl version %2%, vendor %3%")%m_version %m_glsl_version %m_vendor<< std::endl;
+    BOOST_LOG_TRIVIAL(info) << boost::format("got opengl version %1%, glsl version %2%, vendor %3%, renderer %4%")%m_version %m_glsl_version %m_vendor %m_renderer<< std::endl;
 
     int* max_tex_size = const_cast<int*>(&m_max_tex_size);
     glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, max_tex_size));
@@ -115,6 +137,18 @@ void OpenGLManager::GLInfo::detect() const
         float* max_anisotropy = const_cast<float*>(&m_max_anisotropy);
         glsafe(::glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, max_anisotropy));
     }
+
+    // Profiles exist from 3.2 on; a legacy 2.x context (the macOS compatibility fallback) is never
+    // core. Ask the context itself; a driver that leaves the mask empty is core when it does not
+    // advertise ARB_compatibility (upstream's test).
+    if (version_greater_or_equal_to(m_version, 3, 2)) {
+        GLint mask = 0;
+        ::glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &mask);
+        if (::glGetError() != GL_NO_ERROR)
+            mask = 0;
+        *const_cast<bool*>(&m_core_profile) = (mask & GL_CONTEXT_CORE_PROFILE_BIT) != 0 || (mask == 0 && !GLAD_GL_ARB_compatibility);
+    }
+
     *const_cast<bool*>(&m_detected) = true;
 }
 
@@ -183,13 +217,14 @@ std::string OpenGLManager::GLInfo::to_string(bool for_github) const
 
     out << h2_start << "OpenGL installation" << h2_end << line_end;
     out << b_start << "GL version:   " << b_end << m_version << line_end;
+    out << b_start << "Profile:      " << b_end << (m_core_profile ? "Core" : (version_greater_or_equal_to(m_version, 3, 2) ? "Compatibility" : "Legacy (no profile)")) << line_end;
     out << b_start << "Vendor:       " << b_end << m_vendor << line_end;
     out << b_start << "Renderer:     " << b_end << m_renderer << line_end;
     out << b_start << "GLSL version: " << b_end << m_glsl_version << line_end;
 
     {
         std::vector<std::string> extensions_list;
-        std::string extensions_str = gl_get_string_safe(GL_EXTENSIONS, "");
+        std::string extensions_str = get_extensions_string();
         boost::split(extensions_list, extensions_str, boost::is_any_of(" "), boost::token_compress_on);
 
         if (!extensions_list.empty()) {
@@ -211,11 +246,36 @@ std::string OpenGLManager::GLInfo::to_string(bool for_github) const
     return out.str();
 }
 
+std::string OpenGLManager::GLInfo::get_extensions_string()
+{
+    // glGetString(GL_EXTENSIONS) is GL_INVALID_ENUM in a core profile; glGetStringi() exists from 3.0
+    // and works on both profiles.
+    if (GLAD_GL_VERSION_3_0 && ::glGetStringi != nullptr) {
+        GLint count = 0;
+        ::glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+        std::string out;
+        for (GLint i = 0; i < count; ++i) {
+            const char* ext = reinterpret_cast<const char*>(::glGetStringi(GL_EXTENSIONS, GLuint(i)));
+            if (ext == nullptr)
+                continue;
+            if (!out.empty())
+                out += ' ';
+            out += ext;
+        }
+        while (::glGetError() != GL_NO_ERROR) {}
+        return out;
+    }
+    return gl_get_string_safe(GL_EXTENSIONS, "");
+}
+
 OpenGLManager::GLInfo OpenGLManager::s_gl_info;
 bool OpenGLManager::s_compressed_textures_supported = false;
 bool OpenGLManager::s_force_power_of_two_textures = false;
 OpenGLManager::EMultisampleState OpenGLManager::s_multisample = OpenGLManager::EMultisampleState::Unknown;
 OpenGLManager::EFramebufferType OpenGLManager::s_framebuffers_type = OpenGLManager::EFramebufferType::Unknown;
+unsigned int OpenGLManager::s_default_vao = 0;
+unsigned int OpenGLManager::s_fallback_texture_2d = 0;
+unsigned int OpenGLManager::s_fallback_texture_3d = 0;
 
 #ifdef __APPLE__
 // Part of hack to remove crash when closing the application on OSX 10.9.5 when building against newer wxWidgets
@@ -225,6 +285,13 @@ OpenGLManager::OSInfo OpenGLManager::s_os_info;
 OpenGLManager::~OpenGLManager()
 {
     m_shaders_manager.shutdown();
+    // The VAO dies with its context; just forget it (the context may not be current here).
+    s_default_vao = 0;
+    // Same for the fallback textures (1x1 each; they go with the context).
+    s_fallback_texture_2d = 0;
+    s_fallback_texture_3d = 0;
+    if (s_active == this)
+        s_active = nullptr;
 
 #ifdef __APPLE__
     // This is an ugly hack needed to solve the crash happening when closing the application on OSX 10.9.5 with newer wxWidgets
@@ -241,6 +308,72 @@ OpenGLManager::~OpenGLManager()
 
 OpenGLManager* OpenGLManager::s_active = nullptr;
 
+// Logs what the context actually is, not what was asked for: profile and the default
+// framebuffer's colour/depth/stencil/sample bits. A missing depth or alpha plane, or a legacy
+// context where a core one was expected, shows up here first (owner logs, macOS in particular).
+// Uses the raw GL calls and drains glGetError afterwards: some of these queries are invalid on
+// one profile or the other, and a debug-build glsafe() must not assert on a diagnostic.
+// EDGE: what init_glcontext() asked for, so the start-up log can put it next to the version granted
+// (macOS creates a 4.1 core context for a 4.6 request; the request alone said "4.6").
+static std::string s_context_request;
+
+static void log_gl_context_details()
+{
+    GLint major = 0, minor = 0;
+    if (GLAD_GL_VERSION_3_0) {
+        ::glGetIntegerv(GL_MAJOR_VERSION, &major);
+        ::glGetIntegerv(GL_MINOR_VERSION, &minor);
+    }
+
+    std::string profile = "legacy (pre-3.2, no profile)";
+    bool        core    = false;
+    if (GLAD_GL_VERSION_3_2) {
+        GLint mask = 0;
+        ::glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &mask);
+        core    = (mask & GL_CONTEXT_CORE_PROFILE_BIT) != 0;
+        profile = core ? "core" : ((mask & GL_CONTEXT_COMPATIBILITY_PROFILE_BIT) != 0 ? "compatibility" : "unknown");
+    }
+
+    GLint red = -1, green = -1, blue = -1, alpha = -1, depth = -1, stencil = -1;
+    if (core && GLAD_GL_VERSION_3_0) {
+        // GL_*_BITS are gone from the core profile; ask the default framebuffer instead.
+        ::glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &red);
+        ::glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, &green);
+        ::glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE, &blue);
+        ::glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE, &alpha);
+        ::glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH, GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &depth);
+        ::glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_STENCIL, GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &stencil);
+    } else {
+        ::glGetIntegerv(GL_RED_BITS, &red);
+        ::glGetIntegerv(GL_GREEN_BITS, &green);
+        ::glGetIntegerv(GL_BLUE_BITS, &blue);
+        ::glGetIntegerv(GL_ALPHA_BITS, &alpha);
+        ::glGetIntegerv(GL_DEPTH_BITS, &depth);
+        ::glGetIntegerv(GL_STENCIL_BITS, &stencil);
+    }
+    GLint sample_buffers = -1, samples = -1, max_texture_units = -1;
+    ::glGetIntegerv(GL_SAMPLE_BUFFERS, &sample_buffers);
+    ::glGetIntegerv(GL_SAMPLES, &samples);
+    ::glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &max_texture_units);
+
+    while (::glGetError() != GL_NO_ERROR) {}
+
+    // Logged at warning level on purpose: the default log_severity_level is "warning", and these
+    // two lines are what a user's log has to carry for a rendering report to be diagnosable.
+    BOOST_LOG_TRIVIAL(warning) << "OpenGL context: version " << OpenGLManager::get_gl_info().get_version()
+                            << " (granted " << major << "." << minor
+                            << (s_context_request.empty() ? std::string() : ", requested " + s_context_request) << "), profile " << profile
+                            << ", GLSL " << OpenGLManager::get_gl_info().get_glsl_version()
+                            << ", renderer " << OpenGLManager::get_gl_info().get_renderer()
+                            << ", vendor " << OpenGLManager::get_gl_info().get_vendor();
+    BOOST_LOG_TRIVIAL(warning) << "OpenGL default framebuffer: RGBA bits " << red << "/" << green << "/" << blue << "/" << alpha
+                            << ", depth bits " << depth << ", stencil bits " << stencil
+                            << ", sample buffers " << sample_buffers << ", samples " << samples
+                            << ", multisample " << (OpenGLManager::can_multisample() ? "enabled" : "disabled")
+                            << ", combined texture units " << max_texture_units
+                            << ", shader set " << (OpenGLManager::get_gl_info().is_version_greater_or_equal_to(3, 1) ? "140" : "110");
+}
+
 bool OpenGLManager::init_gl(bool popup_error)
 {
     s_active = this;
@@ -256,12 +389,39 @@ bool OpenGLManager::init_gl(bool popup_error)
         }
         BOOST_LOG_TRIVIAL(info) << "GLAD loaded OpenGL " << GLAD_VERSION_MAJOR(version) << "." << GLAD_VERSION_MINOR(version);
         m_gl_initialized = true;
+        // Drop whatever the context creation / loader left in the error flag, so the start-up check
+        // below only reports what our own initialisation does.
+        while (::glGetError() != GL_NO_ERROR) {}
+        // Detect now, with the context current: is_core_profile() does not detect by itself.
+        s_gl_info.get_version();
+        if (s_gl_info.is_core_profile()) {
+            // See get_default_vao(): without a bound VAO every draw and glVertexAttribPointer()
+            // call is GL_INVALID_OPERATION in a core profile.
+            GLuint vao = 0;
+            ::glGenVertexArrays(1, &vao);
+            ::glBindVertexArray(vao);
+            s_default_vao = vao;
+        }
+        log_gl_context_details();
         if (GLAD_GL_EXT_texture_compression_s3tc)
             s_compressed_textures_supported = true;
         else
             s_compressed_textures_supported = false;
+        // EDGE: the bed and logo textures take the asynchronous S3TC path only when this is on; say
+        // which one this machine takes, and whether the per-call GL checks are on.
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL textures: S3TC compression " << (s_compressed_textures_supported ? "available" : "not available")
+                                   << ", max texture size " << s_gl_info.get_max_tex_size()
+                                   << "; GL debug checks (EDGESLICER_GL_DEBUG) " << (gl_debug_enabled() ? "ON" : "off")
+                                   << "; skipped parts (EDGESLICER_GL_SKIP) "
+                                   << ((::getenv("EDGESLICER_GL_SKIP") != nullptr && *::getenv("EDGESLICER_GL_SKIP") != '\0') ? ::getenv("EDGESLICER_GL_SKIP") : "none");
 
-        if (GLAD_GL_ARB_framebuffer_object) {
+        if (s_gl_info.is_version_greater_or_equal_to(3, 0)) {
+            // ARB framebuffer objects are core from 3.0. A core profile (macOS) need not list the
+            // extension, and the EXT entry points are gone there, so never pick Ext on >= 3.0.
+            s_framebuffers_type = EFramebufferType::Arb;
+            BOOST_LOG_TRIVIAL(info) << "OpenGL >= 3.0, Framebuffer Type ARB." << std::endl;
+        }
+        else if (GLAD_GL_ARB_framebuffer_object) {
             s_framebuffers_type = EFramebufferType::Arb;
             BOOST_LOG_TRIVIAL(info) << "Found Framebuffer Type ARB."<< std::endl;
         }
@@ -293,13 +453,43 @@ bool OpenGLManager::init_gl(bool popup_error)
             auto [result, error] = m_shaders_manager.init();
             if (!result) {
                 BOOST_LOG_TRIVIAL(error) << "Unable to load shaders: "<<error<< std::endl;
+                // EDGE: a shader that a core profile rejects must not leave the user stuck with a
+                // blank canvas: remember to ask for a compatibility profile next time (what we ran
+                // on before the core-profile switch). GUI only (popup_error), never the CLI.
+                bool fallback_saved = false;
+                if (popup_error && s_gl_info.is_core_profile()) {
+                    wxString env;
+                    AppConfig* app_config = get_app_config();
+                    if (app_config != nullptr && !(wxGetEnv("EDGESLICER_OPENGL_PROFILE", &env) && !env.empty())) {
+                        app_config->set("opengl_profile", "compatibility");
+                        try {
+                            app_config->save();
+                            fallback_saved = true;
+                            BOOST_LOG_TRIVIAL(error) << "Shaders failed in a core profile: opengl_profile=compatibility saved for the next start";
+                        } catch (const std::exception& ex) {
+                            BOOST_LOG_TRIVIAL(error) << "Saving opengl_profile failed: " << ex.what();
+                        }
+                    }
+                }
                 if (popup_error) {
                     wxString message = from_u8((boost::format(
                         _utf8(L("Unable to load shaders:\n%s"))) % error).str());
+                    if (fallback_saved) {
+                        message += "\n";
+                        message += _L("Please restart the application. It will use the OpenGL compatibility profile from now on.");
+                    }
                     wxMessageBox(message, _L("Error loading shaders"), wxOK | wxICON_ERROR);
                 }
             }
         }
+
+        // EDGE: the sampler-unit guard (GLShadersManager::init) covers one macOS failure; this
+        // covers the rest of what a core profile rejects during start-up (context queries, the
+        // default VAO, shader compilation and linking, uniform and sampler set-up).
+        if (report_gl_errors("at start-up (context, default VAO, shaders)") == 0)
+            BOOST_LOG_TRIVIAL(warning) << "OpenGL start-up check: no GL errors ("
+                                       << (s_gl_info.is_core_profile() ? "core" : "compatibility/legacy")
+                                       << " profile, default VAO " << s_default_vao << ")";
 
 #ifdef _WIN32
         // Since AMD driver version 22.7.1, there is probably some bug in the driver that causes the issue with the missing
@@ -324,27 +514,85 @@ bool OpenGLManager::init_gl(bool popup_error)
     return true;
 }
 
+// EDGE: which context init_glcontext() should ask for. "auto" (default): core, then compatibility,
+// then the platform default. EDGESLICER_OPENGL_PROFILE in the environment wins over the app config's
+// "opengl_profile" (which init_gl() also sets by itself when the shaders fail in a core profile).
+static std::string requested_gl_profile(std::string& source)
+{
+    auto normalize = [](std::string value) {
+        boost::algorithm::to_lower(value);
+        boost::algorithm::trim(value);
+        if (value == "core")
+            return std::string("core");
+        if (value == "compatibility" || value == "compat")
+            return std::string("compatibility");
+        if (value == "default" || value == "legacy")
+            return std::string("default");
+        return std::string("auto");
+    };
+    wxString env;
+    if (wxGetEnv("EDGESLICER_OPENGL_PROFILE", &env) && !env.empty()) {
+        source = "environment EDGESLICER_OPENGL_PROFILE";
+        return normalize(env.ToStdString());
+    }
+    if (const AppConfig* app_config = get_app_config(); app_config != nullptr && app_config->has("opengl_profile")) {
+        source = "app config opengl_profile";
+        return normalize(app_config->get("opengl_profile"));
+    }
+    source = "default";
+    return "auto";
+}
+
+// Core profile versions to try, highest first (OrcaSlicer #10735: OpenGLVersions::core). macOS
+// only offers 3.2 and 4.1 core contexts, both forward-compatible; asking for more gives 4.1.
+static const std::vector<std::pair<int, int>> s_core_gl_versions = { {4, 6}, {4, 5}, {4, 4}, {4, 3}, {4, 2}, {4, 1}, {4, 0}, {3, 3}, {3, 2} };
+
 wxGLContext* OpenGLManager::init_glcontext(wxGLCanvas& canvas)
 {
     if (m_context == nullptr) {
-        // Request an explicit compatibility-profile context. The fork's renderer
-        // relies on compatibility-profile GL, and an explicitly attributed
-        // context is more robust than a bare `new wxGLContext(&canvas)`.
-        {
-            wxLogNull logNo; // silence wx error dialog if context creation fails
+        std::string source;
+        const std::string requested = requested_gl_profile(source);
+
+        // Silence wx's error dialog for every refused attempt: refusals are expected on the way down.
+        wxLogNull logNo;
+        auto try_create = [this, &canvas](const char* what, const std::function<void(wxGLContextAttrs&)>& setup) {
             wxGLContextAttrs attrs;
-            attrs.PlatformDefaults().CompatibilityProfile();
+            attrs.PlatformDefaults();
+            setup(attrs);
             attrs.EndList();
             m_context = new wxGLContext(&canvas, nullptr, &attrs);
-            if (m_context->IsOK())
-                BOOST_LOG_TRIVIAL(info) << "init_glcontext: created compatibility profile context";
-            else {
-                delete m_context;
-                m_context = nullptr;
+            if (m_context->IsOK()) {
+                // The context is not current yet: the version granted is logged at start-up ("OpenGL context:").
+                BOOST_LOG_TRIVIAL(warning) << "init_glcontext: context created for the request " << what;
+                s_context_request = what;
+                return true;
             }
+            delete m_context;
+            m_context = nullptr;
+            return false;
+        };
+
+        // 1) Core profile, highest version first, forward-compatible as macOS requires.
+        if (requested == "auto" || requested == "core") {
+            for (const auto& [major, minor] : s_core_gl_versions) {
+                const std::string what = "forward-compatible core profile " + std::to_string(major) + "." + std::to_string(minor);
+                if (try_create(what.c_str(), [major = major, minor = minor](wxGLContextAttrs& a) { a.MajorVersion(major).MinorVersion(minor).CoreProfile().ForwardCompatible(); }))
+                    break;
+            }
+            if (m_context == nullptr)
+                BOOST_LOG_TRIVIAL(warning) << "init_glcontext: no core profile context (4.6 down to 3.2) was granted";
         }
-        if (m_context == nullptr)
+        // 2) Compatibility profile: what we ran on before the core switch (macOS: legacy 2.1 + 110 shaders).
+        if (m_context == nullptr && requested != "default")
+            try_create("compatibility profile", [](wxGLContextAttrs& a) { a.CompatibilityProfile(); });
+        // 3) Whatever the platform hands out by default.
+        if (m_context == nullptr) {
+            BOOST_LOG_TRIVIAL(warning) << "init_glcontext: falling back to the platform default context";
             m_context = new wxGLContext(&canvas);
+            s_context_request = "platform default context";
+        }
+        BOOST_LOG_TRIVIAL(warning) << "init_glcontext: profile request '" << requested << "' (from " << source
+                                   << "); the GL context lines at OpenGL start-up show what was granted";
 
 #ifdef __APPLE__
         // Part of hack to remove crash when closing the application on OSX 10.9.5 when building against newer wxWidgets
@@ -385,6 +633,9 @@ wxGLCanvas* OpenGLManager::create_wxglcanvas(wxWindow& parent)
     if (! can_multisample())
         attribList[12] = 0;
 
+    BOOST_LOG_TRIVIAL(info) << "create_wxglcanvas: pixel format requests RGBA 8/8/8/8, depth 24"
+                            << (can_multisample() ? ", stencil 8, 4x multisample" : " (stencil and multisample dropped: multisample unsupported)");
+
     return new wxGLCanvas(&parent, wxID_ANY, attribList, wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS);
 }
 
@@ -401,6 +652,328 @@ void OpenGLManager::detect_multisample(int* attribList)
         ? EMultisampleState::Enabled : EMultisampleState::Disabled;
     // Alternative method: it was working on previous version of wxWidgets but not with the latest, at least on Windows
     // s_multisample = enable_multisample && wxGLCanvas::IsExtensionSupported("WGL_ARB_multisample");
+}
+
+void OpenGLManager::bind_default_vao()
+{
+    if (s_gl_info.is_core_profile())
+        glsafe(::glBindVertexArray(s_default_vao));
+}
+
+void OpenGLManager::set_line_width(float width)
+{
+    if (!s_gl_info.is_core_profile() || width <= 1.0f)
+        glsafe(::glLineWidth(width));
+}
+
+const char* OpenGLManager::gl_error_name(unsigned int error)
+{
+    switch (error) {
+    case GL_INVALID_ENUM:                  return "GL_INVALID_ENUM";
+    case GL_INVALID_VALUE:                 return "GL_INVALID_VALUE";
+    case GL_INVALID_OPERATION:             return "GL_INVALID_OPERATION";
+    case GL_INVALID_FRAMEBUFFER_OPERATION: return "GL_INVALID_FRAMEBUFFER_OPERATION";
+    case GL_OUT_OF_MEMORY:                 return "GL_OUT_OF_MEMORY";
+    case GL_STACK_OVERFLOW:                return "GL_STACK_OVERFLOW";
+    case GL_STACK_UNDERFLOW:               return "GL_STACK_UNDERFLOW";
+    default:                               return "unknown GL error";
+    }
+}
+
+int OpenGLManager::report_gl_errors(const std::string& where, unsigned int first_error)
+{
+    // The flag holds one error per kind until read; a bounded loop also ends on a lost context,
+    // where some drivers keep returning GL_CONTEXT_LOST.
+    std::map<GLenum, int> errors;
+    int count = 0;
+    if (first_error != GL_NO_ERROR) {
+        ++errors[GLenum(first_error)];
+        ++count;
+    }
+    for (int i = 0; i < 16; ++i) {
+        const GLenum error = ::glGetError();
+        if (error == GL_NO_ERROR)
+            break;
+        ++errors[error];
+        ++count;
+    }
+    if (count == 0)
+        return 0;
+
+    static int reports_left = 40;
+    if (reports_left > 0) {
+        --reports_left;
+        std::ostringstream out;
+        for (const auto& [error, n] : errors)
+            out << " " << gl_error_name(error) << boost::format(" (0x%04X)") % error << (n > 1 ? " x" + std::to_string(n) : std::string());
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL error(s) " << where << ":" << out.str()
+                                   << " [" << (s_gl_info.is_core_profile() ? "core" : "compatibility/legacy") << " profile, GL "
+                                   << s_gl_info.get_version() << "]";
+        if (reports_left == 0)
+            BOOST_LOG_TRIVIAL(warning) << "OpenGL error reports: limit reached, further errors are not logged this session";
+    }
+    return count;
+}
+
+bool OpenGLManager::gl_debug_enabled()
+{
+    return ::edge_gl_debug_calls;
+}
+
+void OpenGLManager::set_gl_debug_enabled(bool enabled)
+{
+    ::edge_gl_debug_calls = enabled;
+}
+
+unsigned int OpenGLManager::get_fallback_texture(unsigned int target)
+{
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_3D)
+        return 0;
+    unsigned int& id = (target == GL_TEXTURE_2D) ? s_fallback_texture_2d : s_fallback_texture_3d;
+    if (id != 0)
+        return id;
+    if (glGenTextures == nullptr || (target == GL_TEXTURE_3D && glTexImage3D == nullptr))
+        return 0;
+
+    // Created on whichever unit is active, then that unit's binding is put back.
+    const GLenum binding = (target == GL_TEXTURE_2D) ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_3D;
+    GLint previous = 0;
+    ::glGetIntegerv(binding, &previous);
+    GLint previous_alignment = 4;
+    ::glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_alignment);
+    const unsigned char white[4] = { 255, 255, 255, 255 };
+    GLuint tex = 0;
+    ::glGenTextures(1, &tex);
+    ::glBindTexture(target, tex);
+    ::glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    // One level, no mipmaps: complete with GL_LINEAR and GL_TEXTURE_MAX_LEVEL 0.
+    ::glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    ::glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    ::glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 0);
+    if (target == GL_TEXTURE_2D)
+        ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    else
+        ::glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    ::glPixelStorei(GL_UNPACK_ALIGNMENT, previous_alignment);
+    ::glBindTexture(target, static_cast<GLuint>(previous));
+    id = tex;
+    BOOST_LOG_TRIVIAL(info) << "OpenGL: " << (target == GL_TEXTURE_2D ? "2D" : "3D") << " fallback texture " << tex << " created";
+    return id;
+}
+
+static const char* gl_min_filter_name(GLint filter)
+{
+    switch (filter) {
+    case GL_NEAREST:                return "GL_NEAREST";
+    case GL_LINEAR:                 return "GL_LINEAR";
+    case GL_NEAREST_MIPMAP_NEAREST: return "GL_NEAREST_MIPMAP_NEAREST";
+    case GL_LINEAR_MIPMAP_NEAREST:  return "GL_LINEAR_MIPMAP_NEAREST";
+    case GL_NEAREST_MIPMAP_LINEAR:  return "GL_NEAREST_MIPMAP_LINEAR (the default)";
+    case GL_LINEAR_MIPMAP_LINEAR:   return "GL_LINEAR_MIPMAP_LINEAR";
+    default:                        return "unknown filter";
+    }
+}
+
+std::string OpenGLManager::describe_texture_incompleteness(unsigned int target, unsigned int unit)
+{
+    GLenum binding = 0;
+    if (target == GL_TEXTURE_2D)
+        binding = GL_TEXTURE_BINDING_2D;
+    else if (target == GL_TEXTURE_3D)
+        binding = GL_TEXTURE_BINDING_3D;
+    else
+        return {};
+
+    GLint previous_unit = GL_TEXTURE0;
+    ::glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_unit);
+    ::glActiveTexture(GL_TEXTURE0 + unit);
+
+    std::ostringstream out;
+    GLint id = 0;
+    ::glGetIntegerv(binding, &id);
+    if (id == 0)
+        out << "texture 0 is bound there, nothing to sample";
+    else {
+        GLint min_filter = 0, base = 0, max_level = 1000;
+        ::glGetTexParameteriv(target, GL_TEXTURE_MIN_FILTER, &min_filter);
+        ::glGetTexParameteriv(target, GL_TEXTURE_BASE_LEVEL, &base);
+        ::glGetTexParameteriv(target, GL_TEXTURE_MAX_LEVEL, &max_level);
+        auto level_size = [target](GLint level, GLint& w, GLint& h, GLint& d) {
+            w = h = d = 0;
+            ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_WIDTH, &w);
+            ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_HEIGHT, &h);
+            if (target == GL_TEXTURE_3D)
+                ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_DEPTH, &d);
+            else
+                d = (w > 0) ? 1 : 0;
+        };
+        GLint w0 = 0, h0 = 0, d0 = 0;
+        level_size(base, w0, h0, d0);
+        const bool mipmapped = min_filter != GL_NEAREST && min_filter != GL_LINEAR;
+        std::string problem;
+        if (w0 <= 0 || h0 <= 0 || d0 <= 0)
+            problem = "no image at its base level " + std::to_string(base);
+        else if (mipmapped) {
+            if (max_level < base)
+                problem = "GL_TEXTURE_MAX_LEVEL " + std::to_string(max_level) + " is below the base level";
+            else {
+                int largest = std::max(w0, std::max(h0, d0));
+                int levels  = 0;
+                while (largest > 1) {
+                    largest >>= 1;
+                    ++levels;
+                }
+                const GLint last = std::min<GLint>(base + levels, max_level);
+                for (GLint level = base + 1; level <= last && problem.empty(); ++level) {
+                    GLint w = 0, h = 0, d = 0;
+                    level_size(level, w, h, d);
+                    const int shift = level - base;
+                    const GLint ew = std::max(1, w0 >> shift), eh = std::max(1, h0 >> shift);
+                    const GLint ed = (target == GL_TEXTURE_3D) ? std::max(1, d0 >> shift) : 1;
+                    if (w <= 0)
+                        problem = "mipmap level " + std::to_string(level) + " of " + std::to_string(base) + ".." + std::to_string(last) + " is missing";
+                    else if (w != ew || h != eh || d != ed)
+                        problem = "mipmap level " + std::to_string(level) + " is " + std::to_string(w) + "x" + std::to_string(h) +
+                                  ", expected " + std::to_string(ew) + "x" + std::to_string(eh);
+                }
+                if (!problem.empty())
+                    problem = "a mipmap min filter needs every level up to GL_TEXTURE_MAX_LEVEL (" + std::to_string(max_level) + "): " + problem;
+            }
+        }
+        if (!problem.empty())
+            out << "texture " << id << " (" << w0 << "x" << h0 << (target == GL_TEXTURE_3D ? "x" + std::to_string(d0) : std::string())
+                << ", min filter " << gl_min_filter_name(min_filter) << ", levels " << base << ".." << max_level << ") is incomplete: " << problem;
+    }
+
+    ::glActiveTexture(static_cast<GLenum>(previous_unit));
+    return out.str();
+}
+
+static const char* sampler_target_name(unsigned int target)
+{
+    switch (target) {
+    case GL_TEXTURE_2D:     return "2D";
+    case GL_TEXTURE_3D:     return "3D";
+    case GL_TEXTURE_BUFFER: return "buffer";
+    default:                return "?";
+    }
+}
+
+static bool texture_check_budget(const std::string& key)
+{
+    static std::set<std::string> logged;
+    static int                   reports_left = 80;
+    if (reports_left <= 0 || !logged.insert(key).second)
+        return false;
+    if (--reports_left == 0)
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: limit reached, further problems are not logged this session";
+    return true;
+}
+
+static void check_samplers(unsigned int program, const std::string& program_name,
+                           const std::vector<GLShaderProgram::SamplerUniform>& samplers, const char* what)
+{
+    std::map<GLint, std::vector<std::pair<std::string, unsigned int>>> by_unit;
+    for (const GLShaderProgram::SamplerUniform& sampler : samplers) {
+        const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
+        if (target == 0)
+            continue;
+        GLint unit = 0;
+        ::glGetUniformiv(program, sampler.location, &unit);
+        by_unit[unit].emplace_back(sampler.name, target);
+        std::string problem;
+        if (target == GL_TEXTURE_BUFFER) {
+            GLint previous_unit = GL_TEXTURE0, id = 0;
+            ::glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_unit);
+            ::glActiveTexture(GL_TEXTURE0 + unit);
+            ::glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &id);
+            ::glActiveTexture(static_cast<GLenum>(previous_unit));
+            if (id == 0)
+                problem = "no buffer texture is bound there";
+        } else
+            problem = OpenGLManager::describe_texture_incompleteness(target, static_cast<unsigned int>(unit));
+        if (problem.empty() || !texture_check_budget(program_name + "|" + sampler.name + "|" + what + "|" + problem))
+            continue;
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: " << what << " draws with shader '" << program_name << "', which samples unit "
+                                   << unit << " ('" << sampler.name << "', " << sampler_target_name(target) << "): " << problem
+                                   << " (macOS: \"unit " << unit << " GLD_TEXTURE_INDEX_" << sampler_target_name(target) << " is unloadable\")";
+    }
+    for (const auto& [unit, uses] : by_unit) {
+        bool mixed = false;
+        for (const auto& use : uses)
+            mixed |= use.second != uses.front().second;
+        if (!mixed)
+            continue;
+        std::string list;
+        for (const auto& [name, target] : uses)
+            list += (list.empty() ? "'" : ", '") + name + "' (" + sampler_target_name(target) + ")";
+        if (!texture_check_budget(program_name + "|unit" + std::to_string(unit) + "|" + what))
+            continue;
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: " << what << " draws with shader '" << program_name
+                                   << "', whose samplers of different types share unit " << unit << ": " << list
+                                   << ". The program is invalid at this draw (GL_INVALID_OPERATION); macOS samples zero for the one"
+                                   << " whose target has nothing complete bound (\"unit " << unit << " ... is unloadable\")";
+    }
+}
+
+void OpenGLManager::check_sampled_textures(const GLShaderProgram* shader, const char* what)
+{
+    if (!gl_debug_enabled() || shader == nullptr || shader->get_id() == 0)
+        return;
+    check_samplers(shader->get_id(), shader->get_name(), shader->get_samplers(), what);
+}
+
+void OpenGLManager::check_current_program_samplers(const char* what)
+{
+    if (!gl_debug_enabled())
+        return;
+    GLint program = 0;
+    ::glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    if (program == 0) {
+        if (texture_check_budget(std::string("noprogram|") + what))
+            BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: " << what << " draws with no program bound";
+        return;
+    }
+    check_samplers(static_cast<unsigned int>(program), std::string(what) + " program " + std::to_string(program),
+                   GLShaderProgram::list_samplers(static_cast<unsigned int>(program)), what);
+}
+
+bool OpenGLManager::gl_skip(const char* part)
+{
+    static const std::set<std::string> parts = []() {
+        std::set<std::string> out;
+        const char* value = ::getenv("EDGESLICER_GL_SKIP");
+        if (value == nullptr)
+            return out;
+        std::string token;
+        for (const char* c = value;; ++c) {
+            if (*c == '\0' || *c == ',' || *c == '|' || *c == ';' || *c == ' ') {
+                if (!token.empty())
+                    out.insert(boost::algorithm::to_lower_copy(token));
+                token.clear();
+                if (*c == '\0')
+                    break;
+            } else
+                token += *c;
+        }
+        return out;
+    }();
+    return !parts.empty() && parts.count(part) > 0;
+}
+
+void OpenGLManager::query_point_size_range(float range[2])
+{
+    range[0] = 1.0f;
+    range[1] = 1.0f;
+    GLfloat values[2] = { 1.0f, 1.0f };
+    // GL_POINT_SIZE_RANGE (== GL_SMOOTH_POINT_SIZE_RANGE) is in both profiles; the aliased range only
+    // in compatibility ones, where it is what the G-code viewer always used.
+    if (s_gl_info.is_core_profile())
+        ::glGetFloatv(GL_POINT_SIZE_RANGE, values);
+    else
+        ::glGetFloatv(GL_ALIASED_POINT_SIZE_RANGE, values);
+    range[0] = values[0];
+    range[1] = values[1];
 }
 
 } // namespace GUI

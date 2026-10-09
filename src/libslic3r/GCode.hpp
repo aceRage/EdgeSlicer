@@ -31,6 +31,7 @@
 
 #include <memory>
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <string>
 #include <cfloat>
@@ -50,7 +51,11 @@ public:
     bool enable;
 
     OozePrevention() : enable(false) {}
-    std::string pre_toolchange(GCode &gcodegen);
+    // print_z is the print-wide Z of the layer currently being processed (as passed to
+    // GCode::set_extruder), used to look the extruder up in ToolOrdering::tools_for_layer()
+    // so the "last use" check stays print-wide-index-correct regardless of which object or
+    // support layer we are on.
+    std::string pre_toolchange(GCode &gcodegen, double print_z);
     std::string post_toolchange(GCode &gcodegen);
 
 private:
@@ -603,6 +608,9 @@ private:
     
     bool m_enable_exclude_object;
     std::vector<size_t> m_label_objects_ids;
+    // Object label names by instance, built on first use from the ids assign_object_and_instance_ids() assigns.
+    std::unordered_map<const PrintInstance*, std::string> m_instance_names;
+    const std::string& instance_name(const PrintInstance &instance);
     std::string _encode_label_ids_to_base64(std::vector<size_t> ids);
     // ORCA: Add support for role based fan speed control
     std::array<bool, ExtrusionRole::erCount> m_is_role_based_fan_on;
@@ -634,6 +642,8 @@ private:
     // zaa_enabled off emits byte-identical G-code.
     bool                                m_zaa_z_dirty{ false };
     float                               m_max_layer_z{ 0.0f };
+    // Filament mass (g) printed up to the previous layer change, for curr_layer_mass.
+    double                              m_last_layer_accumulated_mass{ 0.0 };
     float                               m_last_width{ 0.0f };
 
     // SM_Orca
@@ -782,15 +792,16 @@ private:
     // accommodates the highest-temperature filament of a compatible mixed print (e.g. PLA + TPU).
     int get_bed_temperature_max(const Print& print, const bool is_first_layer) const;
 
-    std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1);
+    std::string _extrude(const ExtrusionPath &path, const std::string &path_description = "", double speed = -1);
     bool _needSAFC(const ExtrusionPath &path);
 
     // Snapmaker: flow variant — read a process-domain vector option
     template<typename VectorOption>
     auto process_flow_value(const VectorOption &opt) const -> decltype(opt.get_at(0))
     {
-        return get_value_at(m_config, opt, ConfigFlowDomain::Process,
-                            m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0);
+        // The slot is resolved once per export (m_filament_flow.process_config_idx); the same
+        // slot get_value_at(m_config, opt, ConfigFlowDomain::Process, id) picks.
+        return opt.get_at(m_filament_flow.process_config_idx_for(m_config, m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0));
     }
 
     void print_machine_envelope(GCodeOutputStream &file, Print &print);
@@ -819,6 +830,7 @@ private:
         size_t                                                  num_objects,
         size_t                                                  num_islands);
 
+    friend class OozePrevention;
     friend class Wipe;
     friend class WipeTowerIntegration;
     friend class PressureEqualizer;
@@ -827,6 +839,10 @@ private:
 };
 
 std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Print& print, bool init_order = false);
+
+// The overhang data ExtrusionQualityEstimator needs for the object layers in `layers` that process_layer() prepares it
+// for, computed ahead of the generator.
+std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vector<GCode::LayerToPrint> &layers);
 
 }
 

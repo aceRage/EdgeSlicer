@@ -1,5 +1,6 @@
 // Implementation of web communication protocol for Slicer Studio
 #include "SSWCP.hpp"
+#include "libslic3r/NozzleSync.hpp"
 #include "FilamentColorUtils.hpp"
 #include "SpoolmanDialog.hpp"
 #include "GUI_App.hpp"
@@ -8,6 +9,8 @@
 #include "RemoteSnapmaker.hpp" // Ultra: the phone's own connect reuses this connect's credentials
 #include "SnapmakerLan.hpp"    // Ultra: an archived U1 send is recorded under its LAN card
 #include "GcodeArchive.hpp"    // Ultra: the desktop's Snapmaker send is archived when it finishes
+#include "PlatePrintHistoryRecorder.hpp" // the plate's print history
+#include "PartPlate.hpp"
 #include "SnapmakerTaskConfig.hpp" // Ultra: END_UNLOAD_FILAMENT is built in one place for every send path
 #include "Timelapse/TimelapseDownloadPopup.hpp"
 #include "nlohmann/json.hpp"
@@ -6828,6 +6831,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         DeviceInfo query_info;
                                         bool       exist = wxGetApp().app_config->get_device_info(info.dev_id, query_info);
                                         if (nozzle_diameters.empty()) {
+                                            BOOST_LOG_TRIVIAL(warning) << "[connect] " << machine_type << " at " << ip
+                                                                       << " reported no nozzle sizes: keeping the current preset name, no variant is chosen";
                                             if (exist) {
                                                 query_info.connected = true;
                                                 wxGetApp().app_config->save_device_info(query_info);
@@ -6848,7 +6853,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         } else {
 
                                             info.nozzle_sizes = nozzle_diameters;
-                                            info.preset_name  = machine_type + " (" + nozzle_diameters[0] + " nozzle)";
+                                            info.preset_name  = NozzleSync::device_preset_name(machine_type, nozzle_diameters, info.preset_name);
                                             wxGetApp().app_config->save_device_info(info);
 
                                             m_dialog->m_device_id = ip;
@@ -6863,8 +6868,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                         isFind                      = true;
                                                         std::string nozzle_selected = m_ProfileJson["model"][m]["nozzle_selected"]
                                                                                               .get<std::string>();
-                                                        std::string se_nozz_selected = nozzle_diameters[0];
-                                                        if (nozzle_selected.find(se_nozz_selected) == std::string::npos) {
+                                                        std::string se_nozz_selected = NozzleSync::first_nozzle(nozzle_diameters);
+                                                        if (!se_nozz_selected.empty() && nozzle_selected.find(se_nozz_selected) == std::string::npos) {
                                                             nozzle_selected += ";" + se_nozz_selected;
                                                             m_ProfileJson["model"][m]["nozzle_selected"] = nozzle_selected;
                                                         }
@@ -6877,7 +6882,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     json new_item;
                                                     new_item["vendor"]          = "Snapmaker";
                                                     new_item["model"]           = info.model_name;
-                                                    new_item["nozzle_selected"] = nozzle_diameters[0];
+                                                    new_item["nozzle_selected"] = NozzleSync::first_nozzle(nozzle_diameters);
                                                     m_ProfileJson["model"].push_back(new_item);
                                                 }
                                             }
@@ -6964,7 +6969,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     if (info.nozzle_sizes.empty())
                                                         info.nozzle_sizes.push_back("0.4");
 
-                                                    info.preset_name = machine_type + " (" + info.nozzle_sizes[0] + " nozzle)";
+                                                    info.preset_name = NozzleSync::device_preset_name(machine_type, info.nozzle_sizes, info.preset_name);
 
                                                     wxGetApp().app_config->save_device_info(info);
                                                 } else {
@@ -7668,8 +7673,106 @@ bool SSWCP::unload_at_end_was_sent() { return m_unload_at_end_was_sent; }
 //
 // Nothing here may fail a send: archive() swallows its own errors, and every precondition just
 // returns.
+// Plate print history for the same send: once per file, the first hook records it, a later "print"
+// turns an upload into a started print. Independent of the G-code archive being on.
+//
+// The pre-print page gives no completion signal an upload-only send can rely on (see above), so this
+// is recorded when the page takes the file / starts the print, exactly where the archive stores it.
+namespace {
+struct PlateHistoryState
+{
+    std::string                file;
+    int                        plate { -1 };
+    std::string                uid;
+    PlateHistory::Action       action { PlateHistory::Action::UploadedOnly };
+};
+PlateHistoryState g_plate_history;
+} // namespace
+
+static void record_plate_history_once(const std::string& mode)
+{
+    try {
+        const std::string file = SSWCP::get_active_filename();
+        if (file.empty()) return;
+        const PlateHistory::Action wanted = mode == "print" ? PlateHistory::Action::SentAndStarted : PlateHistory::Action::UploadedOnly;
+        if (file == g_plate_history.file) {
+            if (wanted == PlateHistory::Action::SentAndStarted && g_plate_history.action != PlateHistory::Action::SentAndStarted &&
+                !g_plate_history.uid.empty()) {
+                PlateHistoryRecorder::upgrade(g_plate_history.plate, g_plate_history.uid, PlateHistory::Action::SentAndStarted);
+                g_plate_history.action = PlateHistory::Action::SentAndStarted;
+            }
+            return;
+        }
+
+        Plater* plater = wxGetApp().plater();
+        if (!plater) return;
+
+        // Which printer: its LAN card when this connection is one of them, else the connected Device-tab entry.
+        std::shared_ptr<PrintHost> host = nullptr;
+        wxGetApp().get_connect_host(host);
+        PlateHistoryRecorder::Send s;
+        DeviceInfo which;
+        bool       known = false;
+        if (host && wxGetApp().app_config)
+            for (const DeviceInfo& d : wxGetApp().app_config->get_devices()) {
+                if (!d.connected) continue;
+                const bool same_addr = !d.ip.empty() && host->get_host().compare(0, d.ip.size(), d.ip) == 0;
+                if (!known || same_addr) { which = d; known = true; }
+                if (same_addr) break;
+            }
+        SnapmakerLan::Device lan;
+        if (host && (SnapmakerLan::device_for_host(host->get_host(), lan) ||
+                     (known && !which.sn.empty() && SnapmakerLan::find(which.sn, lan)))) {
+            s.printer_name  = GcodeArchive::display_printer_name(lan.name, lan.model, "snapmaker");
+            s.printer_model = lan.model;
+            s.connection    = "snapmaker_lan";
+        } else {
+            s.printer_model = known ? which.model_name : std::string();
+            s.printer_name  = GcodeArchive::display_printer_name(known ? which.dev_name : "", s.printer_model, "connect");
+            s.connection    = "snapmaker_cloud";
+        }
+        if (s.printer_model.empty()) {
+            // The model the file was sliced for, as the archive's meta does.
+            if (PresetBundle* bundle = wxGetApp().preset_bundle)
+                if (auto* model = bundle->printers.get_edited_preset().config.option<ConfigOptionString>("printer_model"))
+                    s.printer_model = model->value;
+        }
+        s.file_name = SSWCP::get_display_filename();
+        s.action    = wanted;
+        s.uid       = PlateHistory::make_uid();
+        s.plates    = { plater->get_partplate_list().get_curr_plate_index() };
+        g_plate_history.file   = file;
+        g_plate_history.plate  = s.plates.front();
+        g_plate_history.uid    = s.uid;
+        g_plate_history.action = wanted;
+        PlateHistoryRecorder::record(s);
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "SSWCP: recording the plate history failed";
+    }
+}
+
+// The pre-print dialog is opening: nothing of an earlier send may suppress this one's entry. The
+// state is keyed on the G-code path, which is the same temporary file for every send of a plate,
+// and the page never calls sw_FinishPreprint to clear it.
+void SSWCP::plate_history_begin()
+{
+    g_plate_history = PlateHistoryState();
+}
+
+// The pre-print dialog is closing. `finished` is the dialog's own success flag (the page's
+// sw_SetFilamentMappingComplete "success"), the one signal both Upload and Upload + Print give:
+// an upload-only send on the current page reaches no other hook. Records the send if no earlier
+// hook did (an Upload + Print was recorded when the print started), then closes the state.
+void SSWCP::plate_history_finish(bool send_page, bool finished)
+{
+    if (finished)
+        record_plate_history_once(send_page ? "upload" : "print");
+    g_plate_history = PlateHistoryState();
+}
+
 void SSWCP::archive_print_once(const std::string& mode, const std::string& remote_path)
 {
+    record_plate_history_once(mode);
     if (!GcodeArchive::enabled()) return;
     const std::string file = SSWCP::get_active_filename();
     if (file.empty()) {
@@ -7743,6 +7846,7 @@ void SSWCP::archive_print_once(const std::string& mode, const std::string& remot
 // A send is over: the next one must be able to store its own file even when it is the same path.
 void SSWCP::clear_archived_print()
 {
+    g_plate_history = PlateHistoryState();
     m_archived_print_file.clear();
     m_archived_record_id.clear();
     m_archived_mode.clear();
@@ -7799,54 +7903,10 @@ bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& ou
                     out_model = product_info["machine_type"].get<std::string>();
                 }
 
-                // get diameter
-                if(product_info.contains("nozzle_diameter")){
-                    {
-                        if (product_info["nozzle_diameter"].is_array()) {
-                            for (const auto& nozzle : product_info["nozzle_diameter"]) {
-                                // todo not sure is string
-                                if (nozzle.is_number()) {
-                                    double temp = nozzle.get<double>();
-                                    if (fabs(temp - 0.2) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.2");
-                                    } else if (fabs(temp - 0.4) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.4");
-                                    } else if (fabs(temp - 0.6) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.6");
-                                    } else if (fabs(temp - 0.8) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.8");
-                                    }
-
-                                } else {
-                                    std::string temp = nozzle.get<std::string>();
-                                    if (temp == "0.2" || temp == "0.4" || temp == "0.6" || temp == "0.8") {
-                                        out_nozzle_diameters.push_back(temp);
-                                    }
-                                }
-
-                            }
-                        } else {                            
-                            if (product_info["nozzle_diameter"].is_number()) {
-                                double temp = product_info["nozzle_diameter"].get<double>();
-                                if (fabs(temp - 0.2) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.4) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.6) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.8) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                }
-
-                            } else {
-                                std::string temp = product_info["nozzle_diameter"].get<std::string>();
-                                if (temp == "0.2" || temp == "0.4" || temp == "0.6" || temp == "0.8") {
-                                    out_nozzle_diameters.push_back(temp);
-                                }
-                            }
-                        }
-                    }
-                }
+                // get diameter (NozzleSync: array or scalar, number or string; a scalar 0.4 / 0.6 / 0.8 used
+                // to come back as "0.2")
+                if (product_info.contains("nozzle_diameter"))
+                    out_nozzle_diameters = NozzleSync::parse_reported_nozzles(product_info["nozzle_diameter"]);
                 if (product_info.contains("device_name")) {
                     device_name = product_info["device_name"].get<std::string>();
                 }

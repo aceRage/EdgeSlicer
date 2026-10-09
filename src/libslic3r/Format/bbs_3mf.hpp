@@ -112,6 +112,8 @@ struct PlateData
     std::vector<int>          limit_filament_maps;
     // EdgeSlicer: DualNozzleSync::Confirmation JSON of the plate (empty = none).
     std::string               dual_nozzle_confirm;
+    // EdgeSlicer: the plate's print history (PlateHistory::History::serialize() JSON; empty = none).
+    std::string               print_history;
     std::vector<unsigned int> filament_change_sequence;
     std::vector<unsigned int> nozzle_change_sequence;
     std::vector<int>          optimal_assignment;
@@ -263,6 +265,12 @@ struct StoreParams
     // Studio's vocabulary (Format/BambuExport.hpp). What had to change is added to bambu_report.
     bool bambu_compat = false;
     BambuExport::Report* bambu_report = nullptr;
+    // A sliced-plate file (.gcode.3mf, the config 3MF of a cloud send) made while the preference
+    // "Include filament prices in exported G-code" is off: filament_cost is left out of
+    // project_settings.config and of the embedded filament presets, and time_cost from it and the
+    // embedded printer presets (CostOverrides::strip_prices()).
+    // Project saves never set it.
+    bool strip_filament_prices = false;
 
     StoreParams() {}
 };

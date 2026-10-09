@@ -177,6 +177,7 @@ PartPlate::~PartPlate()
 void PartPlate::init()
 {
 	m_locked = false;
+	m_history_key = PlateHistory::make_uid();
 	m_ready_for_slice = true;
 	m_slice_result_valid = false;
 	m_slice_percent = 0.0f;
@@ -349,7 +350,7 @@ void PartPlate::set_spiral_vase_mode(bool spiral_mode, bool as_global)
 	}
 }
 
-bool PartPlate::valid_instance(int obj_id, int instance_id)
+bool PartPlate::valid_instance(int obj_id, int instance_id) const
 {
 	if ((obj_id >= 0) && (obj_id < m_model->objects.size()))
 	{
@@ -381,23 +382,17 @@ void PartPlate::calc_bounding_boxes() const {
 	extended_bounding_box->merge(m_grabber_box);
 
     //calc exclude area bounding box
+    // One box per 4-point rectangle, or per hole-free piece of a polygon exclusion (the Kobra 3
+    // ring); the same reading of bed_exclude_area as print validation (get_bed_excluded_area).
     m_exclude_bounding_box.clear();
-    BoundingBoxf3 exclude_bb;
-    for (int index = 0; index < m_exclude_area.size(); index ++) {
-		const Vec2d& p = m_exclude_area[index];
-
-		if (index % 4 == 0)
-			exclude_bb = BoundingBoxf3();
-
-		exclude_bb.merge({ p(0), p(1), 0.0 });
-
-		if (index % 4 == 3)
-		{
-			exclude_bb.max(2) = m_depth;
-			exclude_bb.min(2) = GROUND_Z;
-			m_exclude_bounding_box.emplace_back(exclude_bb);
-		}
-	}
+    for (const BoundingBoxf &bb : bed_exclude_area_boxes(m_exclude_area)) {
+        BoundingBoxf3 exclude_bb;
+        exclude_bb.merge({ bb.min.x(), bb.min.y(), 0.0 });
+        exclude_bb.merge({ bb.max.x(), bb.max.y(), 0.0 });
+        exclude_bb.max(2) = m_depth;
+        exclude_bb.min(2) = GROUND_Z;
+        m_exclude_bounding_box.emplace_back(exclude_bb);
+    }
 }
 
 void PartPlate::calc_triangles(const ExPolygon &poly)
@@ -624,7 +619,7 @@ void PartPlate::calc_vertex_for_icons(int index, PickingModel &model)
     p += Vec2d(gap_left,-1 * (index * (size + gap_y) + gap_top));
 
     if (m_plater && m_plater->get_build_volume_type() == BuildVolume_Type::Circle)
-        p[1] -= std::max(0.0, (bed_ext.size()(1) - (size + gap_y) * 6 /* bed_icon_count */) / 2);
+        p[1] -= std::max(0.0, (bed_ext.size()(1) - (size + gap_y) * 7 /* bed_icon_count */) / 2);
 
     poly.contour.append({ scale_(p(0))       , scale_(p(1) - size) });
     poly.contour.append({ scale_(p(0) + size), scale_(p(1) - size) });
@@ -687,6 +682,17 @@ void PartPlate::render_logo_texture(GLTexture &logo_texture, GLModel& logo_buffe
 	if (logo_texture.unsent_compressed_data_available()) {
 		// sends to gpu the already available compressed levels of the main texture
 		logo_texture.send_compressed_data_to_gpu();
+	}
+
+	// EDGE (core profile): the bed type and logo textures are compressed in the background and drawn
+	// from the frame that creates them; until level 0 arrives there is no image to sample (macOS:
+	// "unit 0 GLD_TEXTURE_INDEX_2D is unloadable"). Skip those few frames instead of drawing black.
+	if (!logo_texture.ready_to_sample()) {
+		if (logo_texture.get_id() != 0) {
+			if (GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D(); canvas != nullptr)
+				canvas->request_extra_frame();
+		}
+		return;
 	}
 
 	if (logo_buffer.is_initialized()) {
@@ -964,13 +970,8 @@ void PartPlate::render_exclude_area(bool force_default_color) {
 	// draw exclude area
 	glsafe(::glDepthMask(GL_FALSE));
 
-	if (m_selected) {
-		glsafe(::glColor4fv(select_color.data()));
-	}
-	else {
-		glsafe(::glColor4fv(unselect_color.data()));
-	}
-
+	// EDGE (core profile): no glColor4fv() - fixed-function colour is gone from core profiles and the
+	// shader takes the colour from set_color() below anyway.
 	m_exclude_triangles.set_color(m_selected ? select_color : unselect_color);
     m_exclude_triangles.render();
 	glsafe(::glDepthMask(GL_TRUE));
@@ -989,10 +990,33 @@ void PartPlate::render_exclude_area(bool force_default_color) {
 	glsafe(::glDepthMask(GL_TRUE));
 }*/
 
-void PartPlate::render_grid(bool bottom) {
+void PartPlate::render_grid(bool bottom, const Transform3d& view_matrix, const Transform3d& projection_matrix) {
 	//glsafe(::glEnable(GL_MULTISAMPLE));
 	// draw grid
-	glsafe(::glLineWidth(1.0f * m_scale_factor));
+
+    // ORCA: OpenGL Core Profile support
+    // FIXME: ideally, we'd use the same shader for both the thin and thick lines, but for some reason setting the uniforms has no effect
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr) {
+        return;
+    }
+
+    shader->start_using();
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    // EDGE: the matrices render() was given (not the plater camera), and the viewport actually bound,
+    // so an off-screen pass (thumbnails, phone capture) draws the grid with its own camera.
+    std::array<GLint, 4> viewport = { 0, 0, 1, 1 };
+    glsafe(::glGetIntegerv(GL_VIEWPORT, viewport.data()));
+
+    shader->set_uniform("view_model_matrix", view_matrix);
+    shader->set_uniform("projection_matrix", projection_matrix);
+
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(1.0f * m_scale_factor));
+#endif // !SLIC3R_OPENGL_ES
 
     ColorRGBA color;
 	if (bottom)
@@ -1006,9 +1030,41 @@ void PartPlate::render_grid(bool bottom) {
     m_gridlines.set_color(color);
     m_gridlines.render();
 
-	glsafe(::glLineWidth(2.0f * m_scale_factor));
+    shader->stop_using();
+
+    // ORCA: OpenGL Core Profile support
+#if SLIC3R_OPENGL_ES
+    shader = wxGetApp().get_shader("dashed_lines");
+#else
+    shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");
+#endif // SLIC3R_OPENGL_ES
+    if (shader == nullptr) {
+        return;
+    }
+    shader->start_using();
+
+    shader->set_uniform("view_model_matrix", view_matrix);
+    shader->set_uniform("projection_matrix", projection_matrix);
+
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
+        shader->set_uniform("width", 0.25f);
+        // EDGE: uniforms keep their last value per program; the selection rectangle leaves dashes set.
+        shader->set_uniform("gap_size", 0.0f);
+#if !SLIC3R_OPENGL_ES
+    } else {
+        glsafe(::glLineWidth(2.0f * m_scale_factor));
+    }
+#endif // !SLIC3R_OPENGL_ES
+
     m_gridlines_bolder.set_color(color);
     m_gridlines_bolder.render();
+    // EDGE: render() used to disable blending after the grid; the grid now draws after that point.
+    glsafe(::glDisable(GL_BLEND));
+
+    shader->stop_using();
 }
 
 void PartPlate::render_height_limit(PartPlate::HeightLimitMode mode)
@@ -1022,20 +1078,32 @@ void PartPlate::render_height_limit(PartPlate::HeightLimitMode mode)
 	if (relevant_for_print_mode && mode != HEIGHT_LIMIT_NONE)
 	{
 		// draw lower limit
-		glsafe(::glLineWidth(3.0f * m_scale_factor));
+	    // ORCA: OpenGL Core Profile
+#if !SLIC3R_OPENGL_ES
+	    if (!OpenGLManager::get_gl_info().is_core_profile())
+	        glsafe(::glLineWidth(3.0f * m_scale_factor));
+#endif // !SLIC3R_OPENGL_ES
         m_height_limit_common.set_color(HEIGHT_LIMIT_BOTTOM_COLOR);
         m_height_limit_common.render();
 
 		if ((mode == HEIGHT_LIMIT_BOTTOM) || (mode == HEIGHT_LIMIT_BOTH)) {
-			glsafe(::glLineWidth(3.0f * m_scale_factor));
-            m_height_limit_bottom.set_color(HEIGHT_LIMIT_BOTTOM_COLOR);
+		    // ORCA: OpenGL Core Profile
+#if !SLIC3R_OPENGL_ES
+		    if (!OpenGLManager::get_gl_info().is_core_profile())
+		        glsafe(::glLineWidth(3.0f * m_scale_factor));
+#endif // !SLIC3R_OPENGL_ES
+		    m_height_limit_bottom.set_color(HEIGHT_LIMIT_BOTTOM_COLOR);
             m_height_limit_bottom.render();
 		}
 
 		// draw upper limit
 		if ((mode == HEIGHT_LIMIT_TOP) || (mode == HEIGHT_LIMIT_BOTH)){
-            glsafe(::glLineWidth(3.0f * m_scale_factor));
-            m_height_limit_top.set_color(HEIGHT_LIMIT_TOP_COLOR);
+		    // ORCA: OpenGL Core Profile
+#if !SLIC3R_OPENGL_ES
+		    if (!OpenGLManager::get_gl_info().is_core_profile())
+		        glsafe(::glLineWidth(3.0f * m_scale_factor));
+#endif // !SLIC3R_OPENGL_ES
+		    m_height_limit_top.set_color(HEIGHT_LIMIT_TOP_COLOR);
             m_height_limit_top.render();
 		}
 	}
@@ -1043,6 +1111,9 @@ void PartPlate::render_height_limit(PartPlate::HeightLimitMode mode)
 
 void PartPlate::render_icon_texture(GLModel &buffer, GLTexture &texture)
 {
+	// EDGE (core profile): an icon that failed to load (id 0) has nothing to sample.
+	if (!texture.ready_to_sample())
+		return;
 	GLuint tex_id = (GLuint)texture.get_id();
 	glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
     buffer.render();
@@ -1053,6 +1124,9 @@ void PartPlate::render_plate_name_texture()
 {
 	if (m_name_texture.get_id() == 0)
 		generate_plate_name_texture();
+	// EDGE (core profile): still no texture (the text could not be rendered): nothing to sample.
+	if (m_name_texture.get_id() == 0)
+		return;
 
 	GLuint tex_id = (GLuint)m_name_texture.get_id();
 	glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
@@ -1146,6 +1220,16 @@ void PartPlate::render_icons(bool bottom, bool only_name, int hover_id)
                 show_tooltip(_u8L("Move plate to the front"));
             } else
                 render_icon_texture(m_move_front_icon.model, m_partplate_list->m_move_front_texture);
+
+            {
+                // Print history: tinted green once the plate has been sent to a printer.
+                const bool printed = was_sent_to_printer();
+                if (hover_id == int(HISTORY_HOVER_ID)) {
+                    render_icon_texture(m_history_icon.model, printed ? m_partplate_list->m_history_printed_hovered_texture : m_partplate_list->m_history_hovered_texture);
+                    show_tooltip(printed ? _u8L("Print history (this plate was sent to a printer)") : _u8L("Print history"));
+                } else
+                    render_icon_texture(m_history_icon.model, printed ? m_partplate_list->m_history_printed_texture : m_partplate_list->m_history_texture);
+            }
 
 
 			if (m_partplate_list->render_plate_settings) {
@@ -1473,6 +1557,7 @@ void PartPlate::register_raycasters_for_picking(GLCanvas3D &canvas)
     }
     register_model_for_picking(canvas, m_plate_name_edit_icon, picking_id_component(6));
     register_model_for_picking(canvas, m_move_front_icon, picking_id_component(7));
+    register_model_for_picking(canvas, m_history_icon, picking_id_component(HISTORY_HOVER_ID));
 }
 
 int PartPlate::picking_id_component(int idx) const
@@ -1900,6 +1985,9 @@ void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, int height
 		for (std::set<std::pair<int, int>>::iterator it = obj_to_instance_set.begin(); it != obj_to_instance_set.end(); ++it) {
 			int obj_id = it->first;
 			int instance_id = it->second;
+			if (!valid_instance(obj_id, instance_id))
+				continue;
+
 			ModelObject* object = m_model->objects[obj_id];
 			ModelInstance* instance = object->instances[instance_id];
 
@@ -1963,6 +2051,12 @@ void PartPlate::generate_plate_name_texture()
 {
 	auto canvas = (m_partplate_list != nullptr && m_partplate_list->m_plater != nullptr) ? m_partplate_list->m_plater->get_view3D_canvas3D() : nullptr;
 	if (canvas == nullptr)
+		return;
+	// EDGE: set_shape() runs before the 3D canvas has initialised OpenGL (the bed is set while the main
+	// window is built); the texture cannot be made yet and render_plate_name_texture() makes it on the
+	// first frame. Without this the "failed" error was logged at every start and the icon geometry was
+	// built from a 0 x 0 texture (a 0/0 aspect ratio).
+	if (glGenTextures == nullptr)
 		return;
 
     m_plate_name_icon.reset();
@@ -2389,7 +2483,7 @@ void PartPlate::duplicate_all_instance(unsigned int dup_count, bool need_skip, s
         int obj_id = it->first;
         int instance_id = it->second;
 
-        if ((obj_id >= 0) && (obj_id < m_model->objects.size()))
+        if (valid_instance(obj_id, instance_id))
         {
             ModelObject* object = m_model->objects[obj_id];
             ModelInstance* instance = object->instances[instance_id];
@@ -2422,7 +2516,7 @@ void PartPlate::duplicate_all_instance(unsigned int dup_count, bool need_skip, s
         int obj_id = it->first;
         int instance_id = it->second;
 
-        if ((obj_id >= 0) && (obj_id < m_model->objects.size()))
+        if (valid_instance(obj_id, instance_id))
         {
             ModelObject* object = m_model->objects[obj_id];
             ModelInstance* instance = object->instances[instance_id];
@@ -2540,8 +2634,8 @@ int PartPlate::printable_instance_size()
         int obj_id      = it->first;
         int instance_id = it->second;
 
-        if (obj_id >= m_model->objects.size())
-			continue;
+        if (!valid_instance(obj_id, instance_id))
+            continue;
 
         ModelObject *  object   = m_model->objects[obj_id];
         ModelInstance *instance = object->instances[instance_id];
@@ -2563,7 +2657,7 @@ bool PartPlate::has_printable_instances()
 		int obj_id = it->first;
 		int instance_id = it->second;
 
-		if (obj_id >= m_model->objects.size())
+		if (!valid_instance(obj_id, instance_id))
 			continue;
 
 		ModelObject* object = m_model->objects[obj_id];
@@ -2587,7 +2681,8 @@ bool PartPlate::is_all_instances_unprintable()
         int obj_id      = it->first;
         int instance_id = it->second;
 
-        if (obj_id >= m_model->objects.size()) continue;
+        if (!valid_instance(obj_id, instance_id))
+            continue;
 
         ModelObject *  object   = m_model->objects[obj_id];
         ModelInstance *instance = object->instances[instance_id];
@@ -2726,6 +2821,16 @@ void PartPlate::generate_exclude_polygon(ExPolygon &exclude_polygon)
 		}
 	}
 	else {
+		// A polygon exclusion (not a list of rectangles) can be a ring - the Kobra 3's outline
+		// plus a reversed inner outline. Draw its filled region, with the hole, rather than the
+		// raw outline with its zero-width slit.
+		if (!bed_exclude_area_is_rectangles(m_exclude_area)) {
+			ExPolygons region = union_ex(bed_exclude_area_polygons(m_exclude_area));
+			if (region.size() == 1) {
+				exclude_polygon = std::move(region.front());
+				return;
+			}
+		}
 		for (const Vec2d& p : m_exclude_area) {
 			exclude_polygon.contour.append({ scale_(p(0)), scale_(p(1)) });
 		}
@@ -2803,6 +2908,7 @@ bool PartPlate::set_shape(const Pointfs& shape, const Pointfs& exclude_areas, Ve
 			calc_vertex_for_icons(3, m_lock_icon);
 			calc_vertex_for_icons(4, m_plate_settings_icon);
 			calc_vertex_for_icons(5, m_move_front_icon);
+			calc_vertex_for_icons(6, m_history_icon);
 			// ORCA also change bed_icon_count number in calc_vertex_for_icons() after adding or removing icons for circular shaped beds that uses vertical alingment for icons
 
 			//calc_vertex_for_number(0, (m_plate_index < 9), m_plate_idx_icon);
@@ -2879,9 +2985,6 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
             render_extruder_only_areas(force_background_color);
         }
 
-        if (show_grid)
-            render_grid(bottom);
-
         render_height_limit(mode);
 
         glsafe(::glDisable(GL_BLEND));
@@ -2893,17 +2996,25 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
         shader->stop_using();
     }
 
+    if (show_grid)
+        render_grid(bottom, view_matrix, projection_matrix);
+
     if (!bottom && m_selected && !force_background_color) {
-        if (m_partplate_list)
-            render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
-        else
-            render_logo(bottom);
+        // EDGE: EDGESLICER_GL_SKIP=plate_logo / plate_icons (OpenGLManager::gl_skip).
+        if (!OpenGLManager::gl_skip("plate_logo")) {
+            if (m_partplate_list)
+                render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
+            else
+                render_logo(bottom);
+        }
         render_extruder_only_labels(bottom);
     }
 
-    render_icons(bottom, only_body, hover_id);
-    if (!force_background_color) {
-        render_only_numbers(bottom);
+    if (!OpenGLManager::gl_skip("plate_icons")) {
+        render_icons(bottom, only_body, hover_id);
+        if (!force_background_color) {
+            render_only_numbers(bottom);
+        }
     }
 
     glsafe(::glDisable(GL_DEPTH_TEST));
@@ -3037,6 +3148,9 @@ int PartPlate::load_gcode_from_file(const std::string& filename)
 		assert(m_tmp_gcode_path.empty());
 		m_tmp_gcode_path = filename;
 		m_gcode_result->filename = filename;
+		// The G-code is taken as it is in the 3MF: match the filament prices switch to the current
+		// preference first, so the next apply does not throw the loaded G-code away over it.
+		m_print->set_gcode_filament_prices(wxGetApp().app_config->get_bool("gcode_include_filament_prices"));
 		m_print->set_gcode_file_ready();
 
 		update_slice_result_valid_state(true);
@@ -3246,6 +3360,90 @@ void PartPlate::print() const
 	return;
 }
 
+// ---- print history ----------------------------------------------------------------------------
+
+const PlateHistory::History& PartPlate::print_history() const
+{
+    static const PlateHistory::History none;
+    if (m_partplate_list == nullptr || m_history_key.empty())
+        return none;
+    const auto it = m_partplate_list->m_print_histories.find(m_history_key);
+    return it == m_partplate_list->m_print_histories.end() ? none : it->second;
+}
+
+void PartPlate::set_print_history(const PlateHistory::History& history)
+{
+    if (m_partplate_list == nullptr || m_history_key.empty())
+        return;
+    if (history.empty())
+        m_partplate_list->m_print_histories.erase(m_history_key);
+    else
+        m_partplate_list->m_print_histories[m_history_key] = history;
+}
+
+bool PartPlate::was_sent_to_printer() const
+{
+    return print_history().was_sent();
+}
+
+std::string PartPlate::input_fingerprint() const
+{
+    if (m_model == nullptr)
+        return {};
+    std::vector<std::pair<int, int>> objects_and_instances(obj_to_instance_set.begin(), obj_to_instance_set.end());
+    return PlateHistory::plate_input_fingerprint(*m_model, objects_and_instances, m_origin);
+}
+
+bool PartPlate::modified_since_last_send() const
+{
+    const PlateHistory::History& h = print_history();
+    if (!h.was_sent())
+        return false;
+    return h.modified_since_last_send(input_fingerprint());
+}
+
+std::string PartPlate::add_print_history_entry(PlateHistory::Entry entry)
+{
+    if (m_partplate_list == nullptr || m_history_key.empty())
+        return {};
+    if (entry.uid.empty())
+        entry.uid = PlateHistory::make_uid();
+    if (entry.input_hash.empty())
+        entry.input_hash = input_fingerprint();
+    if (entry.plate_number <= 0)
+        entry.plate_number = m_plate_index + 1;
+    if (entry.plate_name.empty())
+        entry.plate_name = m_name;
+    if (entry.title.empty() && m_plater != nullptr)
+        entry.title = m_plater->get_project_name().ToUTF8().data();
+    const std::string uid = entry.uid;
+    m_partplate_list->m_print_histories[m_history_key].add(std::move(entry));
+    // A new entry changes what the project file holds: ask the user to save it, like any other edit.
+    if (m_plater != nullptr)
+        m_plater->set_plater_dirty(true);
+    return uid;
+}
+
+bool PartPlate::set_print_history_action(const std::string& uid, PlateHistory::Action action)
+{
+    if (m_partplate_list == nullptr || m_history_key.empty())
+        return false;
+    const auto it = m_partplate_list->m_print_histories.find(m_history_key);
+    if (it == m_partplate_list->m_print_histories.end() || !it->second.set_action(uid, action))
+        return false;
+    if (m_plater != nullptr)
+        m_plater->set_plater_dirty(true);
+    return true;
+}
+
+void PartPlate::clear_print_history()
+{
+    if (m_partplate_list == nullptr || m_history_key.empty())
+        return;
+    if (m_partplate_list->m_print_histories.erase(m_history_key) > 0 && m_plater != nullptr)
+        m_plater->set_plater_dirty(true);
+}
+
 void PartPlate::clear_filament_map()
 {
     if (m_config.has("filament_map"))
@@ -3345,7 +3543,10 @@ void PartPlate::on_filament_deleted(int filament_count, int filament_id)
 {
     if (m_config.has("filament_map")) {
         std::vector<int>& filament_maps = m_config.option<ConfigOptionInts>("filament_map")->values;
-        filament_maps.erase(filament_maps.begin() + filament_id);
+        // Orca #14055: the per-plate filament_map can be out of sync with the global filament
+        // count after a profile switch; erasing at/past end() is an out-of-bounds memmove.
+        if (filament_id >= 0 && filament_id < (int) filament_maps.size())
+            filament_maps.erase(filament_maps.begin() + filament_id);
     }
     update_first_layer_print_sequence_when_delete_filament(filament_id);
 }
@@ -3505,6 +3706,21 @@ void PartPlateList::generate_icon_textures()
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
         }
     }
+
+	// Print history icon: normal, hovered, and the green "sent to a printer" pair.
+	{
+		const struct { GLTexture* texture; const char* light; const char* dark; } history_icons[] = {
+			{ &m_history_texture,                 "plate_history.svg",               "plate_history_dark.svg" },
+			{ &m_history_hovered_texture,         "plate_history_hover.svg",         "plate_history_hover_dark.svg" },
+			{ &m_history_printed_texture,         "plate_history_printed.svg",       "plate_history_printed_dark.svg" },
+			{ &m_history_printed_hovered_texture, "plate_history_printed_hover.svg", "plate_history_printed_hover_dark.svg" },
+		};
+		for (const auto& icon : history_icons) {
+			file_name = path + (m_is_dark ? icon.dark : icon.light);
+			if (!icon.texture->load_from_svg_file(file_name, true, false, false, icon_size))
+				BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
+		}
+	}
 
 	//if (m_arrange_texture.get_id() == 0)
 	{
@@ -3670,6 +3886,10 @@ void PartPlateList::release_icon_textures()
 	m_plate_settings_hovered_texture.reset();
 	m_plate_name_edit_texture.reset();
 	m_plate_name_edit_hovered_texture.reset();
+	m_history_texture.reset();
+	m_history_hovered_texture.reset();
+	m_history_printed_texture.reset();
+	m_history_printed_hovered_texture.reset();
 	for (int i = 0;i < MAX_PLATE_COUNT; i++) {
 		m_idx_textures[i].reset();
 	}
@@ -3861,6 +4081,7 @@ void PartPlateList::reset(bool do_init)
 void PartPlateList::reinit()
 {
 	clear(true, true);
+	m_print_histories.clear();
 
 	init();
 
@@ -3899,6 +4120,9 @@ int PartPlateList::create_plate(bool adjust_position)
 		return -1;
 	int cols = compute_colum_count(new_index + 1);
 	int old_cols = compute_colum_count(new_index);
+	// Orca #14850: rebuild plate membership before the grid reflow moves instances with their plates
+	if (adjust_position && old_cols != cols)
+		reload_all_objects();
 
 	origin = compute_origin(new_index, cols);
 	plate = new PartPlate(this, origin, m_plate_width, m_plate_depth, m_plate_height, m_plater, m_model, true, printer_technology);
@@ -4379,6 +4603,9 @@ int PartPlateList::move_plate_to_index(int old_index, int new_index)
 		BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(":should not happen, the same index %1%") % old_index;
 		return -1;
 	}
+
+	// Orca #14850: rebuild plate membership before the plates (and their instances) are moved
+	reload_all_objects();
 
 	if (old_index < new_index)
 	{
@@ -5690,6 +5917,7 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 			%(i+1) %plate_data_item->plate_thumbnail.width %plate_data_item->plate_thumbnail.height %plate_data_item->plate_thumbnail.pixels.size();
 		plate_data_item->config.apply(*m_plate_list[i]->config());
 		plate_data_item->dual_nozzle_confirm = m_plate_list[i]->dual_nozzle_confirm();
+		plate_data_item->print_history = m_plate_list[i]->print_history().serialize();
 
 		if (m_plate_list[i]->no_light_thumbnail_data.is_valid())
 			plate_data_item->no_light_thumbnail_file = "valid_no_light";
@@ -5824,12 +6052,15 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list)
 		return -1;
 	}
 	clear(true, true);
+	// A different project: nothing of the previous one's print history carries over.
+	m_print_histories.clear();
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_dual_nozzle_confirm(plate_data_list[i]->dual_nozzle_confirm);
+		m_plate_list[index]->set_print_history(PlateHistory::History::deserialize(plate_data_list[i]->print_history));
 		m_plate_list[index]->set_plate_name(plate_data_list[i]->plate_name);
 		if (plate_data_list[i]->plate_index != index)
 		{

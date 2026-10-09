@@ -10,6 +10,7 @@
 #include "libslic3r/MixedFilamentCliGates.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Slicing.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include "test_data.hpp"
@@ -1197,4 +1198,26 @@ TEST_CASE("Exporting a sliced print again gives the same G-code", "[Print][GCode
         });
         check_reexport(TestMesh::overhang);
     }
+}
+
+TEST_CASE("Adaptive layer height profile is bounded by the uncompensated object height", "[Print][Slicing][Orca12080]")
+{
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, DynamicPrintConfig::full_print_config());
+
+    SlicingParameters sp = print.objects().front()->slicing_parameters();
+    REQUIRE(sp.valid);
+    const double uncompensated_height = sp.object_print_z_uncompensated_height();
+    REQUIRE(uncompensated_height > 1.);
+    // Emulate 110 % Z shrinkage compensation: the compensated height is 10 % taller than the real one.
+    sp.object_print_z_max = sp.object_print_z_min + uncompensated_height * 1.1;
+    REQUIRE(sp.object_print_z_height() > uncompensated_height + 1.);
+
+    const std::vector<double> profile = layer_height_profile_adaptive(sp, *model.objects.front(), 0.5f);
+    REQUIRE(profile.size() >= 4);
+    // The profile is validated against the uncompensated height; running past it made the profile get dropped.
+    const double last_z = profile[profile.size() - 2];
+    CHECK(last_z <= uncompensated_height + 1e-6);
+    CHECK(last_z > uncompensated_height - sp.max_layer_height - 1e-6);
 }
