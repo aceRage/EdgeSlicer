@@ -1178,6 +1178,39 @@ else ()
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
 endif ()
 
+# EdgeSlicer: the remote hub's camera tools on Linux (the macOS app gets the same two files from
+# build_release_macos.sh, which assembles the bundle by hand). Stage a folder holding the binaries,
+# unmodified, named exactly `go2rtc` and `ffmpeg`, and point the build at it:
+#
+#   -DGO2RTC_BIN_DIR=/path/to/go2rtc_linux/ship    (go2rtc, MIT, github.com/AlexxIT/go2rtc)
+#   -DFFMPEG_BIN_DIR=/path/to/ffmpeg_linux/ship    (an LGPL build + FFMPEG-LICENSE.txt, as for Windows)
+#
+# They install beside the hub page assets as <resources>/tools/go2rtc/{go2rtc,ffmpeg}, which is
+# where RemoteHub.cpp looks first; without them the hub falls back to a system go2rtc / ffmpeg
+# (/usr/local/bin, /usr/bin, PATH) and, with neither, to relayed video only. Provenance, pinned
+# release tags and sha256 are recorded in docs/superpowers/specs/2026-10-09-hub-posix-parity.md.
+if (UNIX AND NOT APPLE)
+    if (SLIC3R_FHS)
+        set(_hub_tools_dest "${SLIC3R_FHS_RESOURCES}/tools/go2rtc")
+    else ()
+        set(_hub_tools_dest "${CMAKE_INSTALL_PREFIX}/resources/tools/go2rtc")
+    endif ()
+    foreach (_tool go2rtc ffmpeg)
+        string(TOUPPER "${_tool}" _TOOL)
+        if (${_TOOL}_BIN_DIR AND EXISTS "${${_TOOL}_BIN_DIR}/${_tool}")
+            install(PROGRAMS "${${_TOOL}_BIN_DIR}/${_tool}" DESTINATION "${_hub_tools_dest}")
+            foreach (_note FFMPEG-LICENSE.txt LICENSE-NOTE.txt)
+                if (EXISTS "${${_TOOL}_BIN_DIR}/${_note}")
+                    install(FILES "${${_TOOL}_BIN_DIR}/${_note}" DESTINATION "${_hub_tools_dest}")
+                endif ()
+            endforeach ()
+            message(STATUS "EdgeSlicer: shipping ${_tool} for the remote hub from ${${_TOOL}_BIN_DIR}")
+        else ()
+            message(STATUS "EdgeSlicer: no ${_TOOL}_BIN_DIR with a ${_tool} in it - the hub will use a system ${_tool} if there is one")
+        endif ()
+    endforeach ()
+endif ()
+
 install(FILES ${CMAKE_SOURCE_DIR}/LICENSE.txt DESTINATION ".")
 configure_file(${LIBDIR}/dev-utils/platform/unix/fhs.hpp.in ${LIBDIR_BIN}/dev-utils/platform/unix/fhs.hpp)
 

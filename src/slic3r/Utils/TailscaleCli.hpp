@@ -34,6 +34,9 @@ namespace TailscaleCli {
 
 enum class Platform { Windows, MacOS, Linux };
 
+// BackendState stand-in for "the CLI ran too long and was killed" (never a value tailscaled sends).
+inline constexpr const char* BACKEND_NO_ANSWER = "NoAnswer";
+
 constexpr Platform current_platform()
 {
 #if defined(_WIN32)
@@ -170,9 +173,16 @@ inline void close_fd(int& fd)
 // - On timeout the child is SIGKILLed; in every case it is waitpid()ed, so there is no zombie.
 // - A failed exec is reported through a close-on-exec pipe (the child writes its errno), so a
 //   program that exists but cannot run is "could not be started" rather than exit status 127.
+//
+// `timed_out` (optional) says which kind of "false" it was. `stop_early` (optional) sees all the
+// output so far after every read; when it returns true the child is killed at once and the call
+// returns false with timed_out unset - for a command that prints what it is waiting for (`tailscale
+// serve` printing the admin-console link) and would otherwise sit until the timeout.
 inline bool run_capture_posix(const std::vector<std::string>& args, std::string& out, int& exit_code, int timeout_ms,
-                              size_t max_out = 1024 * 1024)
+                              size_t max_out = 1024 * 1024, bool* timed_out_flag = nullptr,
+                              const std::function<bool(const std::string&)>& stop_early = nullptr)
 {
+    if (timed_out_flag) *timed_out_flag = false;
     out.clear();
     exit_code = -1;
     if (args.empty()) return false;
@@ -262,6 +272,7 @@ inline bool run_capture_posix(const std::vector<std::string>& args, std::string&
     ::close(er);
 
     bool timed_out = false;
+    bool stopped   = false;
     bool eof       = false;
     char buf[4096];
     while (!eof) {
@@ -278,6 +289,7 @@ inline bool run_capture_posix(const std::vector<std::string>& args, std::string&
         const ssize_t n = ::read(rd, buf, sizeof(buf));
         if (n > 0) {
             if (out.size() < max_out) out.append(buf, std::min<size_t>((size_t) n, max_out - out.size()));
+            if (stop_early && stop_early(out)) { stopped = true; break; }
         } else if (n == 0) {
             eof = true;
         } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -288,7 +300,7 @@ inline bool run_capture_posix(const std::vector<std::string>& args, std::string&
 
     // stdout closed (or we ran out of time): now wait for the process itself, against the same deadline.
     int status = 0;
-    if (!timed_out) {
+    if (!timed_out && !stopped) {
         for (;;) {
             const pid_t w = ::waitpid(pid, &status, WNOHANG);
             if (w == pid) {
@@ -307,6 +319,7 @@ inline bool run_capture_posix(const std::vector<std::string>& args, std::string&
     ::kill(pid, SIGKILL);
     reap(status);
     exit_code = 128 + SIGKILL;
+    if (timed_out_flag) *timed_out_flag = timed_out && !stopped;
     return false;
 }
 
