@@ -1645,8 +1645,12 @@ void TreeSupport::generate_toolpaths(const TreeSupportGroupContext *groups)
                     // object-wide, in draw_circles(); only its fill follows the group. Skipped on
                     // the first layer, where the interface carries the brim and the object's own
                     // flow is what has to draw it.
+                    // The lowest roof layer is filled from the area itself, as the object path below
+                    // does. `polys` is that area grown by half a base line width, which only this group
+                    // path used, so a grouped roof came out wider than the same roof without groups.
                     if (group_mode && layer_id > 0 && area_group.type != SupportLayer::BaseType &&
-                        extrude_interface_grouped(area_group, polys, interface_flow))
+                        extrude_interface_grouped(area_group, area_group.type == SupportLayer::Roof1stLayer ? ExPolygons{ poly } : polys,
+                                                  interface_flow))
                         continue;
                     if (area_group.type == SupportLayer::Roof1stLayer) {
                         // roof_1st_layer
