@@ -839,3 +839,17 @@ TEST_CASE("A security classification assignment does not crash import", "[StepEx
     CHECK(facets >= 4);
     CHECK(facets <= 24);
 }
+
+// The fixture is a truncated cone whose seam pcurves have the direction (2.1e-16, -1).
+// Unpatched OCCT 8.0.1 evaluates Geom2d_Line::FirstParameter() (-Infinite) and leaves ~541
+// open edges; Orca #16290 / OCCT#572 evaluates the pcurve at the edge parameter instead.
+TEST_CASE("A cone with a slightly tilted seam imports as a closed mesh", "[StepExport]")
+{
+    const std::string path = std::string(TEST_DATA_DIR) + "/cone_tilted_seam_pcurve.step";
+    Model             model;
+    bool              cancel = false;
+    REQUIRE(load_step(path.c_str(), &model, cancel));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    CHECK(its_num_open_edges(model.objects.front()->volumes.front()->mesh().its) == 0);
+}

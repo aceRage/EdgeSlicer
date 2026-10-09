@@ -18,9 +18,22 @@ endif()
 # Font_FTFont HAVE_FREETYPE guards (upstream already has them), and StdPrs_BRepFont FT_Outline
 # tags (upstream 0033808). RelWithDebInfo / Debug still land in bin/occti and bin/occtd;
 # Windows packaging reads the directory from the imported TKernel target.
+#
+# 0001-BRepMesh-seam-pcurve-at-edge-parameter.patch is a GIT-FORMAT diff, so --directory is
+# load-bearing: without it git apply resolves the paths against the repo root, skips every hunk
+# and exits 0. The patch evaluates a seam pcurve at the edge parameter instead of
+# Geom2d_Line::FirstParameter() (Open-Cascade-SAS/OCCT#572 / Orca #16290). Remove it once an
+# OCCT release includes the fix.
+if (IN_GIT_REPO)
+    set(OCCT_DIRECTORY_FLAG -DDIRECTORY=${BINARY_DIR_REL}/dep_OCCT-prefix/src/dep_OCCT)
+endif ()
+
 Snapmaker_Orca_add_cmake_project(OCCT
     URL https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V8_0_1.zip
     URL_HASH SHA256=7c033d917ee8f040c0512d289dcc5f02c148889d5bac17c3e25639accb44f0da
+    PATCH_COMMAND ${CMAKE_COMMAND} -DGIT=${GIT_EXECUTABLE} ${OCCT_DIRECTORY_FLAG} -DLOOSE_WS=ON
+                  -DP1=${CMAKE_CURRENT_LIST_DIR}/0001-BRepMesh-seam-pcurve-at-edge-parameter.patch
+                  -P ${CMAKE_CURRENT_LIST_DIR}/../apply_patch.cmake
     #DEPENDS dep_Boost
     DEPENDS ${FREETYPE_PKG}
     CMAKE_ARGS
