@@ -303,3 +303,33 @@ TEST_CASE("Mesh Boolean gizmo: the second part as the source", "[MeshBoolean]")
     check_same_box(world_bbox(*mo, *mo->volumes[0]), a_before);
     check_same_box(world_bbox(*mo, *mo->volumes[2]), c_before);
 }
+
+TEST_CASE("mcut difference handles source splits between cuts", "[MeshBoolean]")
+{
+    // Orca #16275: a multi-component tool (slab + two holes) used to skip cuts after
+    // the first successful split. This is the export-with-negative-parts path
+    // (Plater::combine_mesh_fff → perform_csgmesh_booleans_mcut).
+    TriangleMesh body{its_make_cube(30., 10., 10.)};
+
+    TriangleMesh slab{its_make_cube(2., 12., 20.)};
+    slab.translate(14.f, -1.f, -5.f);
+    TriangleMesh hole_a{its_make_cube(4., 4., 20.)};
+    hole_a.translate(3.f, 3.f, -5.f);
+    TriangleMesh hole_b{its_make_cube(4., 4., 20.)};
+    hole_b.translate(21.f, 3.f, -5.f);
+    indexed_triangle_set tool_its = slab.its;
+    its_merge(tool_its, hole_a.its);
+    its_merge(tool_its, hole_b.its);
+    TriangleMesh tool{tool_its};
+
+    std::vector<TriangleMesh> result;
+    MeshBoolean::mcut::make_boolean(body, tool, result, "A_NOT_B");
+    REQUIRE(result.size() == 1);
+    REQUIRE(its_split(result.front().its).size() == 2);
+    CHECK(result.front().volume() == Approx(2480.).epsilon(1e-3));
+
+    std::vector<TriangleMesh> mfd_result;
+    REQUIRE(MeshBoolean::mfd::make_boolean(body, tool, mfd_result, "A_NOT_B"));
+    REQUIRE_FALSE(mfd_result.empty());
+    CHECK(signed_volume(mfd_result.front().its) == Approx(2480.).epsilon(0.02));
+}
