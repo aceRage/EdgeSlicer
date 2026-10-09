@@ -987,6 +987,148 @@ TEST_CASE("First object layer over a raft takes the first layer speeds and the s
     CHECK_THAT(feeds[3], Catch::Matchers::WithinAbs(3600., 1.5));
 }
 
+namespace {
+// Feed rates (mm/min) of the extruding moves, per layer Z (in microns) and per feature label.
+using FeedsByLayerFeature = std::map<std::pair<int, std::string>, std::set<int>>;
+
+FeedsByLayerFeature feeds_by_layer_and_feature(const std::string &gcode)
+{
+    FeedsByLayerFeature out;
+    std::string         feature;
+    GCodeReader         parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        feature = feature_after(line.raw(), feature);
+        if (line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0)
+            out[{ int(std::lround(double(self.z()) * 1000.)), feature }].insert(int(std::lround(double(line.new_F(self)))));
+    });
+    return out;
+}
+
+const std::set<int> *feeds_for(const FeedsByLayerFeature &feeds, int z_micron, const std::string &feature)
+{
+    auto it = feeds.find({ z_micron, feature });
+    return it == feeds.end() ? nullptr : &it->second;
+}
+
+// Distinct speeds per role, all well under the volumetric cap, so every F value below is the configured speed.
+std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> first_layer_speed_items()
+{
+    static const std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> items = {
+        { "gcode_comments",              "1" },
+        { "machine_start_gcode",         "" },
+        { "enable_arc_fitting",          "0" },
+        { "z_hop",                       "0" },
+        { "layer_height",                "0.2" },
+        { "initial_layer_print_height",  "0.2" },
+        { "slow_down_layers",            "0" },
+        { "initial_layer_speed",         "20" },   // F1200
+        { "initial_layer_infill_speed",  "40" },   // F2400
+        { "support_speed",               "60" },   // F3600
+        { "support_interface_speed",     "70" },   // F4200
+        { "outer_wall_speed",            "60" },
+        { "inner_wall_speed",            "60" },
+        { "gap_infill_speed",            "50" },
+        { "filament_max_volumetric_speed", "100" },
+        { "enable_overhang_speed",       "0" },
+        { "slow_down_for_layer_cooling", "0" },
+    };
+    return items;
+}
+} // namespace
+
+TEST_CASE("First layer support follows Initial layer speed, not Initial layer infill speed", "[PrintGCode][InitialLayerSpeed]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(first_layer_speed_items());
+    config.set_deserialize_strict({
+        { "enable_support",              "1" },
+        { "support_type",                "normal(auto)" },
+        { "support_on_build_plate_only", "0" },
+        { "raft_layers",                 "0" },
+    });
+    const std::string gcode = Slic3r::Test::slice({ TestMesh::overhang }, config);
+    const FeedsByLayerFeature feeds = feeds_by_layer_and_feature(gcode);
+
+    // First layer: support at Initial layer speed; the solid bottom surface keeps Initial layer infill speed.
+    const std::set<int> *first_support = feeds_for(feeds, 200, "Support");
+    REQUIRE(first_support != nullptr);
+    CHECK(*first_support == std::set<int>{ 1200 });
+    if (const std::set<int> *first_interface = feeds_for(feeds, 200, "Support interface"))
+        CHECK(*first_interface == std::set<int>{ 1200 });
+    if (const std::set<int> *bottom = feeds_for(feeds, 200, "Bottom surface"))
+        CHECK(*bottom == std::set<int>{ 2400 });
+
+    // Support further up keeps support_speed / support_interface_speed.
+    bool found_normal_support = false;
+    for (const auto &kv : feeds)
+        if (kv.first.first > 400 && kv.first.second == "Support") {
+            found_normal_support = true;
+            CHECK(kv.second.count(1200) == 0);
+            CHECK(kv.second.count(3600) == 1);
+        }
+    CHECK(found_normal_support);
+}
+
+TEST_CASE("The first raft layer follows Initial layer speed, raft layers above and the layer over the raft behave as before",
+          "[PrintGCode][InitialLayerSpeed]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(first_layer_speed_items());
+    config.set_deserialize_strict({
+        { "enable_support", "0" },
+        { "raft_layers",    "3" },
+    });
+    const std::string gcode = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, config);
+    const FeedsByLayerFeature feeds = feeds_by_layer_and_feature(gcode);
+
+    // Raft base on the bed: Initial layer speed.
+    const std::set<int> *base = feeds_for(feeds, 200, "Support");
+    REQUIRE(base != nullptr);
+    CHECK(*base == std::set<int>{ 1200 });
+
+    // Raft layers above the base keep the support / interface speeds (they are not first layers).
+    bool upper_raft_layers = false;
+    for (const auto &kv : feeds)
+        if (kv.first.first > 200 && kv.first.first <= 600 && (kv.first.second == "Support" || kv.first.second == "Support interface")) {
+            upper_raft_layers = true;
+            CHECK(kv.second.count(1200) == 0);
+            CHECK(kv.second.count(2400) == 0);
+        }
+    CHECK(upper_raft_layers);
+
+    // First object layer over the raft (z = 0.8): walls at Initial layer speed, as before.
+    const std::set<int> *wall = feeds_for(feeds, 800, "Outer wall");
+    REQUIRE(wall != nullptr);
+    CHECK(*wall == std::set<int>{ 1200 });
+}
+
+TEST_CASE("First layer gap fill stays on Initial layer infill speed", "[PrintGCode][InitialLayerSpeed]")
+{
+    // A 1.0 mm wide plate: two classic walls leave a gap that is filled with gap infill.
+    TriangleMesh plate = Slic3r::Test::mesh(TestMesh::cube_20x20x20);
+    plate.scale(Vec3f(0.05f, 1.f, 0.5f));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(first_layer_speed_items());
+    config.set_deserialize_strict({
+        { "enable_support",    "0" },
+        { "raft_layers",       "0" },
+        { "wall_generator",    "classic" },
+        { "wall_loops",        "2" },
+        { "detect_thin_wall",  "0" },
+        { "filter_out_gap_fill", "0" },
+    });
+    const std::string gcode = Slic3r::Test::slice({ plate }, config);
+    const FeedsByLayerFeature feeds = feeds_by_layer_and_feature(gcode);
+
+    const std::set<int> *gap = feeds_for(feeds, 200, "Gap infill");
+    REQUIRE(gap != nullptr);
+    CHECK(*gap == std::set<int>{ 2400 });
+    // Above the first layer gap fill runs at gap_infill_speed again.
+    const std::set<int> *gap_above = feeds_for(feeds, 600, "Gap infill");
+    REQUIRE(gap_above != nullptr);
+    CHECK(*gap_above == std::set<int>{ 3000 });
+}
+
 TEST_CASE("AdaptivePAProcessor base PA follows the High-Flow column", "[PrintGCode][GCode][PAVariant]")
 {
     const DynamicPrintConfig config = high_flow_pa_config(true, true, true);
