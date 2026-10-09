@@ -1278,6 +1278,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         //BBS: plater related structures
         bool m_is_bbl_3mf { false };
+        // True only when the Application metadata starts with "BambuStudio-".
+        // Edge also stamps its own and Snapmaker Orca 3MFs as From_BBS, so callers
+        // that want a genuine BambuStudio project must use this flag, not From_BBS.
+        bool m_is_bambu_studio_generator { false };
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
         PlateData* m_curr_plater;
@@ -1293,7 +1297,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         //BBS: add plate data related logic
         // add backup & restore logic
         bool load_model_from_file(const std::string& filename, Model& model, PlateDataPtrs& plate_data_list, std::vector<Preset*>& project_presets, DynamicPrintConfig& config,
-            ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn = nullptr, BBLProject *project = nullptr, int plate_id = 0);
+            ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn = nullptr, BBLProject *project = nullptr, int plate_id = 0, bool *is_bambu_studio = nullptr);
         bool get_thumbnail(const std::string &filename, std::string &data);
         bool load_gcode_3mf_from_stream(std::istream & data, Model& model, PlateDataPtrs& plate_data_list, DynamicPrintConfig& config, Semver& file_version);
         unsigned int version() const { return m_version; }
@@ -1511,7 +1515,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     //BBS: add plate data related logic
         // add backup & restore logic
     bool _BBS_3MF_Importer::load_model_from_file(const std::string& filename, Model& model, PlateDataPtrs& plate_data_list, std::vector<Preset*>& project_presets, DynamicPrintConfig& config,
-        ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn, BBLProject *project, int plate_id)
+        ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn, BBLProject *project, int plate_id, bool *is_bambu_studio)
     {
         m_version = 0;
         m_fdm_supports_painting_version = 0;
@@ -1546,6 +1550,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_curr_instance.object_id = -1;
         m_curr_instance.instance_id = -1;
         m_curr_instance.identify_id = 0;
+        m_is_bambu_studio_generator = false;
         clear_errors();
 
         // restore
@@ -1569,6 +1574,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         bool result = _load_model_from_file(filename, model, plate_data_list, project_presets, config, config_substitutions, proFn, project, plate_id);
         is_bbl_3mf = m_is_bbl_3mf;
+        if (is_bambu_studio)
+            *is_bambu_studio = m_is_bambu_studio_generator;
         if (m_bambuslicer_generator_version)
             file_version = *m_bambuslicer_generator_version;
         // save for restore
@@ -4678,6 +4685,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // SLIC3R_APP_KEY - Snapmaker_VERSION
             if (boost::starts_with(m_curr_characters, "BambuStudio-")) {
                 m_is_bbl_3mf = true;
+                m_is_bambu_studio_generator = true;
                 m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(12));
             }
             else if (boost::starts_with(m_curr_characters, std::string(SLIC3R_APP_NAME) + "-")) {
@@ -10471,7 +10479,7 @@ private:
 
 //BBS: add plate data list related logic
 bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, PlateDataPtrs* plate_data_list, std::vector<Preset*>* project_presets,
-                    bool* is_bbl_3mf, Semver* file_version, Import3mfProgressFn proFn, LoadStrategy strategy, BBLProject *project, int plate_id)
+                    bool* is_bbl_3mf, Semver* file_version, Import3mfProgressFn proFn, LoadStrategy strategy, BBLProject *project, int plate_id, bool *is_bambu_studio)
 {
     if (path == nullptr || config == nullptr || model == nullptr)
         return false;
@@ -10479,7 +10487,7 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
     // All import should use "C" locales for number formatting.
     CNumericLocalesSetter locales_setter;
     _BBS_3MF_Importer importer;
-    bool res = importer.load_model_from_file(path, *model, *plate_data_list, *project_presets, *config, *config_substitutions, strategy, *is_bbl_3mf, *file_version, proFn, project, plate_id);
+    bool res = importer.load_model_from_file(path, *model, *plate_data_list, *project_presets, *config, *config_substitutions, strategy, *is_bbl_3mf, *file_version, proFn, project, plate_id, is_bambu_studio);
     importer.log_errors();
     //BBS: remove legacy project logic currently
     //handle_legacy_project_loaded(importer.version(), *config);

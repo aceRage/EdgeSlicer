@@ -1010,7 +1010,7 @@ static void store_painted_cube(const std::string &path, Model *out_model = nullp
 }
 
 // Loads `path` through the BBS importer into `model`, releasing the plates it returns.
-static bool load_project(const std::string &path, Model &model)
+static bool load_project(const std::string &path, Model &model, bool *is_bambu_studio = nullptr)
 {
     DynamicPrintConfig        config;
     ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Enable};
@@ -1019,7 +1019,8 @@ static bool load_project(const std::string &path, Model &model)
     bool                      is_bbl_3mf = false;
     Semver                    file_version;
     const bool loaded = load_bbs_3mf(path.c_str(), &config, &ctxt, &model, &plates, &project_presets, &is_bbl_3mf,
-                                     &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence);
+                                     &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence,
+                                     nullptr, 0, is_bambu_studio);
     release_PlateData_list(plates);
     for (Preset *preset : project_presets)
         delete preset;
@@ -1228,6 +1229,49 @@ TEST_CASE("Paint states 20, 200 and 255 round-trip through a 3MF byte-identicall
     REQUIRE_NOTHROW(restored.deserialize(dst_vol.mmu_segmentation_facets.get_data()));
     for (int i = 0; i < 3; ++i)
         REQUIRE(restored.num_facets(static_cast<EnforcerBlockerType>(states[i])) == 1);
+}
+
+TEST_CASE("The BambuStudio generator flag is set only for a BambuStudio Application stamp", "[3mf][Regression]")
+{
+    // Orca #16153 / D-13a: Edge stamps its own and Snapmaker Orca 3MFs as From_BBS, so
+    // the substitution-dialog gate must key on the generator stamp, not From_BBS.
+    const std::string path    = make_temp_3mf_path("generator_stamp.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    auto load_flag = [&](bool &flag) {
+        Model model;
+        flag          = true;
+        const bool ok = load_project(path, model, &flag);
+        REQUIRE(ok);
+        return flag;
+    };
+
+    bool is_bambu = true;
+    CHECK_FALSE(load_flag(is_bambu));
+
+    auto stamp = [](const std::string &value) {
+        return rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+            if (!boost::algorithm::ends_with(name, "3dmodel.model"))
+                return false;
+            const std::string key = "name=\"Application\">";
+            const size_t      pos = data.find(key);
+            if (pos == std::string::npos)
+                return false;
+            const size_t val_beg = pos + key.size();
+            const size_t val_end = data.find("</metadata>", val_beg);
+            if (val_end == std::string::npos)
+                return false;
+            data.replace(val_beg, val_end - val_beg, value);
+            return true;
+        });
+    };
+
+    REQUIRE(stamp("BambuStudio-02.03.00.70"));
+    CHECK(load_flag(is_bambu));
+
+    REQUIRE(stamp("Snapmaker_Orca-2.2.0"));
+    CHECK_FALSE(load_flag(is_bambu));
 }
 
 // Object and volume config are written as double-quoted XML attributes. ConfigOptionString
