@@ -362,6 +362,55 @@ TEST_CASE("Top interface layer count equals the configured value for every suppo
     REQUIRE(support_interface_layer_count(g) == 4u);
 }
 
+// PR 395 owner check: organic printed no interface at all on a project with "build plate only" on.
+// Under a flat overhang every tree style, organic included, prints exactly the configured number of
+// top interface layers with build plate only too.
+TEST_CASE("Tree support with build plate only prints the configured top interface layers", "[SupportInterface]")
+{
+    const char *style = GENERATE("organic", "tree_slim", "tree_strong", "tree_hybrid");
+    const int   top   = GENERATE(2, 3);
+    CAPTURE(style, top);
+    const std::string g = slice_with_comments({ TestMesh::overhang }, {
+        { "enable_support",                  1 },
+        { "layer_height",                    0.2 },
+        { "support_on_build_plate_only",     1 },
+        { "support_type",                    "tree(auto)" },
+        { "support_style",                   style },
+        { "support_interface_top_layers",    top },
+        { "support_interface_bottom_layers", 0 },
+    });
+    REQUIRE(support_base_layer_count(g)      > 0);
+    REQUIRE(support_interface_layer_count(g) == size_t(top));
+}
+
+// An upside-down cone: its underside is a 27 degree slope, so each layer adds only a ring a few tenths
+// of a millimetre wide. Organic support cannot lay an interface slab under such a ring (it lies within
+// the tip radius plus the XY distance of the wall below, the area tips must avoid), so its interface
+// comes from tips that carry the roof themselves, which they do once the tip covers more than the
+// minimum roof area (1 mm2, a tip diameter above 1.13 mm). Upstream behaviour, see PR 395.
+TEST_CASE("Organic support puts interface on a sloped overhang through roof-carrying tips", "[SupportInterface]")
+{
+    // Apex down, standing on a small pedestal so the first layers are not a single point.
+    TriangleMesh cone = make_cone(20., 10.);
+    cone.rotate_x(float(M_PI));                                          // z -10..0, apex at the bottom
+    cone.translate(0.f, 0.f, 12.f);                                      // z 2..12
+    TriangleMesh pedestal = make_cube(6., 6., 2.5); pedestal.translate(-3.f, -3.f, 0.f);
+    cone.merge(pedestal);
+    const std::string g = slice_with_comments({ cone }, {
+        { "enable_support",                  1 },
+        { "layer_height",                    0.2 },
+        { "support_on_build_plate_only",     1 },
+        { "support_type",                    "tree(auto)" },
+        { "support_style",                   "organic" },
+        { "support_threshold_angle",         30 },
+        { "tree_support_tip_diameter",       1.2 },
+        { "support_interface_top_layers",    3 },
+        { "support_interface_bottom_layers", 0 },
+    });
+    REQUIRE(support_base_layer_count(g)      > 0);
+    REQUIRE(support_interface_layer_count(g) > 3);
+}
+
 // The bottom interface was dropped in earlier versions when support started on the model rather
 // than the plate.
 TEST_CASE("Non-organic tree support generates a bottom interface on internal geometry", "[SupportInterface]")
