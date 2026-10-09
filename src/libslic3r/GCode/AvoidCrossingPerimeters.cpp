@@ -1019,7 +1019,9 @@ static ExPolygons inner_offset(const ExPolygons &ex_polygons, double offset_dis)
     // remove too small holes from the ex_poly
     for (ExPolygon &ex_poly : ex_poly_result) {
         for (auto iter = ex_poly.holes.begin(); iter != ex_poly.holes.end();) {
-            auto out_offset_holes = offset(*iter, scale_(1.0f));
+            // Orca (#10942): this was scale_(1.0f), which dropped every hole up to 2 mm wide from the
+            // avoid-crossing boundary; now only holes up to 0.2 mm wide are dropped.
+            auto out_offset_holes = offset(*iter, scale_(0.1f));
             if (out_offset_holes.empty()) {
                 iter = ex_poly.holes.erase(iter);
             } else {
