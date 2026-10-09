@@ -2298,8 +2298,10 @@ TEST_CASE("The first extrusion of every layer is at that layer's Z", "[PrintGCod
     }
 }
 
-// Orca #12937: with supports on their own layer height, a per-object skirt / draft shield was also printed on the
-// interlaced support-only layers (and with many objects that could crash). It now follows the object's own layers.
+// Orca #12937: with supports on their own layer height, a per-object skirt / draft shield was generated from the
+// shared layer at that print_z, which can be a thicker support layer: the skirt was then extruded for that layer's
+// height (twice the flow at a 0.4 mm support layer over 0.2 mm object layers), and with many objects it could
+// crash. It now follows the object's own layers.
 TEST_CASE("A per-object draft shield follows the object layers, not interlaced support layers", "[PrintGCode][Orca12937]")
 {
     const std::string gcode = Slic3r::Test::slice({ TestMesh::overhang, TestMesh::overhang }, {
@@ -2321,14 +2323,19 @@ TEST_CASE("A per-object draft shield follows the object layers, not interlaced s
 
     std::set<long> wall_z, skirt_z, support_z;
     std::string    feature;
+    double         height = 0., max_skirt_height = 0.;
     GCodeReader    parser;
     parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         feature = feature_after(line.raw(), feature);
+        if (line.raw().rfind(";HEIGHT:", 0) == 0)
+            height = std::stod(line.raw().substr(8));
         if (!(line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0))
             return;
         const long z = std::lround(double(self.z()) * 1000.);
-        if (feature == "Skirt")
+        if (feature == "Skirt") {
             skirt_z.insert(z);
+            max_skirt_height = std::max(max_skirt_height, height);
+        }
         else if (feature == "Outer wall" || feature == "Inner wall")
             wall_z.insert(z);
         else if (feature.rfind("Support", 0) == 0)
@@ -2344,4 +2351,6 @@ TEST_CASE("A per-object draft shield follows the object layers, not interlaced s
     for (long z : skirt_z)
         skirt_off_object_layers += wall_z.count(z) == 0;
     CHECK(skirt_off_object_layers == 0);
+    // Every object layer is 0.2 mm, so is every skirt layer.
+    CHECK(max_skirt_height < 0.2 + 1e-3);
 }
