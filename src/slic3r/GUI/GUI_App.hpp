@@ -18,7 +18,7 @@
 #include "slic3r/GUI/WebPreprintDialog.hpp"
 #include "slic3r/GUI/BindDialog.hpp"
 #include "slic3r/GUI/HMS.hpp"
-#include "slic3r/GUI/Jobs/UpgradeNetworkJob.hpp"
+#include "slic3r/GUI/PluginInstallStatus.hpp"
 #include "slic3r/GUI/HttpServer.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "slic3r/GUI/SSWCP.hpp"
@@ -351,7 +351,9 @@ private:
     // Ultra (plug-in guards): cached "data_dir/plugins holds our own plug-in" answer.
     bool m_ultranet_plugin_installed { false };
     bool m_networking_cancel_update { false };
-    std::shared_ptr<UpgradeNetworkJob> m_upgrade_network_job;
+    // "The network plug-in is missing" has been shown this session / is open right now.
+    bool m_network_plugin_missing_shown { false };
+    bool m_network_plugin_missing_open { false };
 
     // login widget
     ZUserLogin*     login_dlg { nullptr };
@@ -596,7 +598,15 @@ private:
 
     wxString transition_tridid(int trid_id);
     void            ShowUserGuide();
-    void            ShowDownNetPluginDlg();
+    // EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). Everything that
+    // used to offer that download - sign-in, the Device tab, the setup wizard, Preferences, the
+    // home-page banner, the start-up check - calls this instead: it tells the user that the
+    // plug-in is missing from this install and that reinstalling EdgeSlicer restores it. Silent
+    // when UltraNet is installed. user_requested = the user just clicked something that needs the
+    // plug-in (always answered); false = an automatic trigger (shown at most once per session).
+    // See network_plugin_missing_notice() in PluginGuard.hpp.
+    void            ShowNetworkPluginMissing(bool user_requested = true);
+    static wxString network_plugin_missing_text();
     void            ShowUserLogin(bool show = true);
     // Ultra (plug-in guards): true when data_dir/plugins holds OUR clean-room plug-in (a
     // bambu_networking library sitting next to the ultranet marker file). Every Bambu CDN
@@ -605,7 +615,7 @@ private:
     bool            is_ultranet_plugin_installed() const { return m_ultranet_plugin_installed; }
     void            refresh_ultranet_plugin_state();
     // The one guarded entry point for "the user asked to sign in to a Bambu account": with no
-    // agent loaded it offers the plug-in download (or asks for a restart, when our own plug-in is
+    // agent loaded it says the plug-in is missing (or asks for a restart, when our own plug-in is
     // already installed) instead of opening a sign-in page whose ticket has nowhere to go.
     void            ShowUserLoginGuarded();
     void            ShowOnlyFilament();
@@ -957,14 +967,16 @@ private:
     bool            is_web_download(const boost::filesystem::path& path) const;
 
     std::string     get_plugin_url(std::string name, std::string country_code);
+    // The Bambu CDN fetch. Refuses everything except the camera component package
+    // (bambu_cdn_package_allowed()); Bambu's network plug-in is never downloaded. There is no
+    // install_plugin() any more.
     int             download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
-    int             install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
 
     // Ultra (live view): Bambu's camera component (BambuSource), the DirectShow source filter the
     // Device-tab live view plays through. It is NOT part of UltraNet - we ship only a placeholder
     // of that name so the agent's LoadLibrary probe succeeds - so this is the one Bambu CDN path
-    // that stays open while UltraNet is installed. It downloads Bambu's network plug-in package
-    // and extracts ONLY BambuSource (and live555 when present) into plugins/ and cameratools/;
+    // that stays open (Windows, after the user says yes). It fetches the component package
+    // (camera_component.zip) and extracts ONLY BambuSource (and live555 when present) into plugins/ and cameratools/;
     // bambu_networking and the UltraNet marker are never touched. Returns 0 on success.
     int             install_bambu_camera_component(InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
     // Ask the user whether to fetch the component, then do it with a progress dialog and register
@@ -987,7 +999,6 @@ private:
     void            check_config_updates_from_updater(bool updateByuser = false) { check_updates(updateByuser); }
 
 private:
-    int             updating_bambu_networking();
     bool            on_init_inner();
     void            copy_network_if_available();
     bool            on_init_network(bool try_backup = false);
