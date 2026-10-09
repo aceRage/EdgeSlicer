@@ -620,6 +620,14 @@ inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int fila
     return get_value_at(config, *opt, ConfigFlowDomain::Filament, filament_id);
 }
 
+// BBS: how far a filament's nozzle cools below its print temperature before the BBL wipe tower
+// (filament_cooling_before_tower at the filament's flow-variant slot; nil reads as 0, no cooling).
+// with_switcher_extra adds Bambu Studio's 10 degrees for a filament switcher that feeds extruders of
+// different types (GCode.cpp g_filament_switcher_extra_cooling_before_tower), which Bambu applies to
+// the toolchange through the tower. GCode's M620.15 C and the tower's "Wipe tower reheat before wipe"
+// both read this, so a toolchange that cools always heats back.
+double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
+
 // Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
 // count is filament_diameter, not the packed length.
 inline size_t flow_variant_filament_count(const ConfigBase &config)
@@ -1780,9 +1788,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
-    ((ConfigOptionInts,                filament_flush_temp))  // Ultra: BBS 2.x flush temp (0 = use nozzle_temperature_range_high)
-    ((ConfigOptionFloats,              filament_flush_volumetric_speed))  // Ultra: BBS 2.x flush speed (0 = use filament_max_volumetric_speed)
-    ((ConfigOptionFloats,              filament_cooling_before_tower))  // Ultra: BBS 2.x change_filament (per-filament, °C)
+    // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
+    // stored per flow variant (read them with get_value_at, ConfigFlowDomain::Filament).
+    ((ConfigOptionIntsNullable,        filament_flush_temp))  // 0 = use nozzle_temperature_range_high
+    ((ConfigOptionIntsNullable,        filament_flush_temp_fast))  // prime_volume_mode Fast; 0 = range high
+    ((ConfigOptionFloatsNullable,      filament_flush_volumetric_speed))  // 0 = use filament_max_volumetric_speed
+    ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
     ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature
