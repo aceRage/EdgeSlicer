@@ -13,6 +13,8 @@
 
 #include "FillBase.hpp"
 
+#include <vector>
+
 struct indexed_triangle_set;
 
 namespace Slic3r {
@@ -27,11 +29,23 @@ struct Octree;
 struct OctreeDeleter { void operator()(Octree *p); };
 using  OctreePtr = std::unique_ptr<Octree, OctreeDeleter>;
 
-// Calculate line spacing for
-// 1) adaptive cubic infill
-// 2) adaptive internal support cubic infill
-// Returns zero for a particular infill type if no such infill is to be generated.
-std::pair<double, double>       adaptive_fill_line_spacing(const PrintObject &print_object);
+inline bool is_octree_infill_pattern(InfillPattern p) { return p == ipAdaptiveCubic || p == ipSupportCubic; }
+
+// Orca #16295 (Edge: without per-body octrees): one octree per line spacing the regions fill with.
+struct RegionOctrees
+{
+    std::vector<OctreePtr> sets;       // one per distinct (spacing, support cubic)
+    std::vector<int>       region_set; // per printing region, -1 = no adaptive/support cubic infill
+
+    Octree *region(size_t region_id) const
+    {
+        return region_id < region_set.size() && region_set[region_id] >= 0 ? sets[region_set[region_id]].get() : nullptr;
+    }
+};
+
+// Line spacing of the adaptive or support cubic infill of each region of the object,
+// zero for a region that generates no such infill.
+std::vector<double>             adaptive_fill_line_spacing(const PrintObject &print_object);
 
 // Rotation of the octree to stand on one of its corners.
 Eigen::Quaterniond              transform_to_world();
