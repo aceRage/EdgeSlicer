@@ -7,7 +7,8 @@
     "setting_id": "POLY_SILK_PLA_U1_001",
     "inherits": "Polymaker Silk PLA Family @U1 base",
     "compatible_printers": [
-        "Snapmaker U1 (0.4 nozzle)"
+        "Snapmaker U1 (0.4 nozzle)",
+        "Snapmaker U1 (0.4+0.6 nozzle)"
     ],
     "filament_density": [
         "1.34"
