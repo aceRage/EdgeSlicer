@@ -549,7 +549,7 @@ inline long spawn_child_posix(const std::vector<std::string>& args, const std::s
         ::setpgid(0, 0);
         ::signal(SIGPIPE, SIG_DFL);
         sigset_t none;
-        ::sigemptyset(&none);
+        sigemptyset(&none); // no ::, macOS defines sigemptyset as a macro
         ::sigprocmask(SIG_SETMASK, &none, nullptr);
         if (devnull >= 0) ::dup2(devnull, 0);
         if (logfd >= 0) { ::dup2(logfd, 1); ::dup2(logfd, 2); }
