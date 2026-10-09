@@ -266,7 +266,7 @@ static ExPolygons top_level_outer_brim_area(const Print& print, const ConstPrint
         top_level_objects_idx.insert(object->id().id);
 
     unsigned int support_material_extruder = 1;
-    if (print.has_support_material()) {
+    if (print.uses_support_filament()) {
         assert(top_level_objects_with_brim.front()->config().support_filament >= 0);
         if (top_level_objects_with_brim.front()->config().support_filament > 0)
             support_material_extruder = top_level_objects_with_brim.front()->config().support_filament;
@@ -434,7 +434,7 @@ static ExPolygons inner_brim_area(const Print& print, const ConstPrintObjectPtrs
         top_level_objects_idx.insert(object->id().id);
 
     unsigned int support_material_extruder = 1;
-    if (print.has_support_material()) {
+    if (print.uses_support_filament()) {
         assert(top_level_objects_with_brim.front()->config().support_filament >= 0);
         if (top_level_objects_with_brim.front()->config().support_filament > 0)
             support_material_extruder = top_level_objects_with_brim.front()->config().support_filament;
@@ -1040,7 +1040,7 @@ static ExPolygons outer_inner_brim_area(const Print& print,
                     expolygons_append(brim_area, brimAreaMap[object->id()]);
             }
             support_material_extruder = object->config().support_filament;
-            if (support_material_extruder == 0 && object->has_support_material()) {
+            if (support_material_extruder == 0 && object->uses_support_filament()) {
                 if (print.config().print_sequence == PrintSequence::ByObject)
                     support_material_extruder = objectWithExtruder.second;
                 else
@@ -1390,7 +1390,7 @@ static void make_inner_island_brim(const Print& print, const ConstPrintObjectPtr
     };
 
     unsigned int support_material_extruder = 1;
-    if (print.has_support_material()) {
+    if (print.uses_support_filament()) {
         assert(top_level_objects_with_brim.front()->config().support_filament >= 0);
         if (top_level_objects_with_brim.front()->config().support_filament > 0)
             support_material_extruder = top_level_objects_with_brim.front()->config().support_filament;
