@@ -67,7 +67,23 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     m_single_extruder_multi_material = print_config.single_extruder_multi_material.value;
     bool use_mach_limits = print_config.gcode_flavor.value == gcfMarlinLegacy || print_config.gcode_flavor.value == gcfMarlinFirmware ||
                            print_config.gcode_flavor.value == gcfKlipper || print_config.gcode_flavor.value == gcfRepRapFirmware;
-    m_max_acceleration = std::lrint(use_mach_limits ? print_config.machine_max_acceleration_extruding.values.front() : 0);
+    if (use_mach_limits) {
+        // Port OrcaSlicer #12824 (#12244): on Klipper, SET_VELOCITY_LIMIT ACCEL= caps every kind of
+        // motion, so the effective cap is the smallest of the extruding limit and the per-axis X/Y
+        // limits. A zero limit means "unset" and is ignored.
+        unsigned int cap = (unsigned int) std::lrint(print_config.machine_max_acceleration_extruding.values.front());
+        if (print_config.gcode_flavor.value == gcfKlipper) {
+            const unsigned int x_limit = (unsigned int) std::lrint(print_config.machine_max_acceleration_x.values.front());
+            const unsigned int y_limit = (unsigned int) std::lrint(print_config.machine_max_acceleration_y.values.front());
+            if (x_limit > 0)
+                cap = cap > 0 ? std::min(cap, x_limit) : x_limit;
+            if (y_limit > 0)
+                cap = cap > 0 ? std::min(cap, y_limit) : y_limit;
+        }
+        m_max_acceleration = cap;
+    } else {
+        m_max_acceleration = 0;
+    }
     m_max_travel_acceleration = static_cast<unsigned int>(
         std::round((use_mach_limits && supports_separate_travel_acceleration(print_config.gcode_flavor.value)) ?
                        print_config.machine_max_acceleration_travel.values.front() :

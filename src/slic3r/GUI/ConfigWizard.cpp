@@ -2519,7 +2519,7 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
             if (const auto model_it = config->second.find(model.id);
                 model_it != config->second.end() && model_it->second.size() > 0 &&
                 preferred_pt == model.technology) {
-                variant = *model_it->second.begin();
+                variant = PresetBundle::default_printer_variant(model_it->second);
                 const auto config_old = enabled_vendors_old.find(bundle_name);
                 if (config_old == enabled_vendors_old.end())
                     return model.id;
@@ -2527,11 +2527,12 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
                 if (model_it_old == config_old->second.end())
                     return model.id;
                 else if (model_it_old->second != model_it->second) {
-                    for (const auto& var : model_it->second)
-                        if (model_it_old->second.find(var) == model_it_old->second.end()) {
-                            variant = var;
-                            return model.id;
-                        }
+                    // Variants were added: activate the default one (0.4) when the model has it, not the first newly
+                    // added one (the smallest nozzle, "0.2", when only 0.4 was enabled before).
+                    if (std::string added = PresetBundle::variant_to_activate(model_it_old->second, model_it->second); !added.empty()) {
+                        variant = added;
+                        return model.id;
+                    }
                 }
             }
         }
