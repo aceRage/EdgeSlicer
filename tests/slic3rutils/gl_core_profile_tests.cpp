@@ -37,6 +37,8 @@
 #include <map>
 #include <set>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <thread>
@@ -47,25 +49,43 @@ using namespace Slic3r::GUI;
 
 namespace {
 
-// The hidden window and its forward-compatible 3.3 core context, created once per process and shared by
-// every run of the test case below.
-//
-// Catch2 re-runs a test case from the top once per leaf SECTION, so a context made inside the test case is
-// made (and torn down) once per section. Creating a WGL core context is by far the slowest step of this
-// test on Windows/NVIDIA: the driver spins in SwitchToThread() waiting on its own worker thread, so with the
-// CPU busy (a build running next to the tests) one glfwCreateWindow() takes 3-35 s and the first GL
-// entry-point load after it a few more - a plain GLFW program that only makes and destroys contexts shows
-// the same, so it is the driver, not this code. With one context per section the run took 1.5-3 minutes
-// instead of 3 seconds and looked like a hang (its CPU time was ~2 s throughout: it was waiting, not
-// spinning, and it did finish).
-// One context for the process pays that cost once. Each run still builds its own OpenGLManager (GLAD
-// load, default VAO, every shader), and GlStateGuard puts the shared context back to a clean state.
-struct SharedCoreContext
+// Timestamped progress lines on stderr, flushed at once, when EDGESLICER_GL_TEST_TRACE is set in the
+// environment. If this test ever really hangs, the last line says which step it was in without a debugger.
+void gl_test_trace(const std::string& what)
 {
-    GLFWwindow* window{ nullptr };
+    static const bool enabled = std::getenv("EDGESLICER_GL_TEST_TRACE") != nullptr;
+    if (!enabled)
+        return;
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "[gl-test %10.1f ms] %s\n", ms, what.c_str());
+    std::fflush(stderr);
+}
 
-    SharedCoreContext()
+// The hidden window, its forward-compatible 3.3 core context and the OpenGLManager that owns the shaders,
+// made once per process and shared by every run of the test case below.
+//
+// Catch2 re-runs a test case from the top once per leaf SECTION, so a context and an OpenGLManager made
+// inside the test case are made (and torn down) once per section. On Windows/NVIDIA that is what made this
+// test look hung. The driver's main thread spins in SwitchToThread() waiting on its own worker thread, and
+// every step that syncs with that worker - creating a WGL core context (glfwCreateWindow), the first GL
+// entry-point load, compiling and linking the shader set - crawls when the CPU is busy (a build running
+// next to the tests): 3-35 s per context and several seconds per shader set instead of milliseconds, nine
+// times over. A plain GLFW program that only makes and destroys contexts shows the same, and a HIGH
+// priority class makes it fast again, so it is CPU starvation of the driver's handshake, not a deadlock and
+// not the code under test. The process was waiting, not spinning (about 2 s of CPU in a 190 s run), and it
+// did finish: 85 s to 7 min instead of 3 s.
+// So the start-up path (context, GLAD load, default VAO, the shader set) is paid for once, in the first
+// run, which still asserts all of it; later runs find the manager initialised (init_gl() is idempotent) and
+// GlStateGuard puts the shared context back to a clean state, so sections stay independent.
+struct SharedGl
+{
+    GLFWwindow*                    window{ nullptr };
+    std::unique_ptr<OpenGLManager> manager;
+
+    SharedGl()
     {
+        gl_test_trace("shared context: glfwInit");
         if (glfwInit() == GLFW_FALSE)
             return;
         glfwDefaultWindowHints();
@@ -76,25 +96,32 @@ struct SharedCoreContext
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
         glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+        gl_test_trace("shared context: glfwCreateWindow");
         window = glfwCreateWindow(64, 64, "gl_core_profile_test", nullptr, nullptr);
-        if (window != nullptr)
+        if (window != nullptr) {
             glfwMakeContextCurrent(window);
+            manager = std::make_unique<OpenGLManager>();
+        }
+        gl_test_trace(window != nullptr ? "shared context: current" : "shared context: none");
     }
-    ~SharedCoreContext()
+    ~SharedGl()
     {
+        gl_test_trace("shared context: teardown");
+        manager.reset(); // deletes the shaders: the context must still be current
         if (window != nullptr) {
             glfwMakeContextCurrent(nullptr);
             glfwDestroyWindow(window);
         }
         glfwTerminate();
+        gl_test_trace("shared context: torn down");
     }
 };
 
 // Made on first use, destroyed at exit. (If glfwInit() or the window fails, that is remembered: no retries.)
-SharedCoreContext& shared_core_context()
+SharedGl& shared_gl()
 {
-    static SharedCoreContext context;
-    return context;
+    static SharedGl gl;
+    return gl;
 }
 
 struct ResourcesDirOverride
@@ -205,10 +232,9 @@ GLint bound_vao()
     return vao;
 }
 
-// Leaves the shared context as a fresh one: the default VAO the run's OpenGLManager made is deleted (it
-// forgets the id when destroyed, and a second run would otherwise leak one per section), and the bindings and
-// switches the sections touch are put back. Make it right after OpenGLManager::init_gl() (it needs GLAD
-// loaded) and before the run's own render targets, so it is destroyed after them.
+// Puts the shared context back as a run found it after OpenGLManager::init_gl(): the default VAO bound, the
+// bindings and switches the sections touch reset. Make it right after init_gl() (it needs GLAD loaded) and
+// before the run's own render targets, so it is destroyed after them.
 struct GlStateGuard
 {
     GLuint vao;
@@ -219,9 +245,7 @@ struct GlStateGuard
         glBindRenderbuffer(GL_RENDERBUFFER, 0);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glUseProgram(0);
-        glBindVertexArray(0);
-        if (vao != 0)
-            glDeleteVertexArrays(1, &vao);
+        glBindVertexArray(vao);
         for (GLenum unit = GL_TEXTURE0; unit <= GL_TEXTURE7; ++unit) {
             glActiveTexture(unit);
             glBindTexture(GL_TEXTURE_2D, 0);
@@ -245,16 +269,18 @@ struct GlStateGuard
 
 TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed-line draws", "[GL][CoreProfile]")
 {
-    SharedCoreContext& ctx = shared_core_context();
-    if (ctx.window == nullptr) {
+    gl_test_trace("run begin");
+    SharedGl& gl = shared_gl();
+    if (gl.window == nullptr) {
         WARN("No OpenGL 3.3 core context available here (no display or driver); core-profile smoke test skipped.");
         return;
     }
 
     ResourcesDirOverride resources(SLIC3R_TEST_RESOURCES_DIR);
-    auto manager = std::make_unique<OpenGLManager>();
+    OpenGLManager* manager = gl.manager.get();
     REQUIRE(manager->init_gl(/*popup_error=*/false));
     GlStateGuard state_guard;
+    gl_test_trace("init_gl done");
 
     const OpenGLManager::GLInfo& info = OpenGLManager::get_gl_info();
     INFO("GL " << info.get_version() << ", GLSL " << info.get_glsl_version() << ", " << info.get_renderer());
@@ -275,6 +301,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
         CHECK(manager->get_shader(name) != nullptr);
     }
     CHECK(drain_gl_errors() == GL_NO_ERROR);
+    gl_test_trace("shaders checked");
 
     const int size = 32;
     OffscreenTarget target(size);
@@ -287,6 +314,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("GLModel draws through its own VAO and binds the default one back")
     {
+        gl_test_trace("SECTION GLModel draws through its own VAO and binds the default one ");
         GLModel::Geometry g;
         g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
         g.add_vertex(Vec3f(-1.f, -1.f, 0.f));
@@ -316,6 +344,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("a plain VBO draw (legacy G-code viewer style) works on the default VAO")
     {
+        gl_test_trace("SECTION a plain VBO draw (legacy G-code viewer style) works on the d");
         const std::array<float, 9> tri = { -1.f, -1.f, 0.f, 3.f, -1.f, 0.f, -1.f, 3.f, 0.f };
         GLuint vbo = 0;
         glGenBuffers(1, &vbo);
@@ -346,6 +375,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("dashed_thick_lines (geometry shader) draws a thick line")
     {
+        gl_test_trace("SECTION dashed_thick_lines (geometry shader) draws a thick line");
         GLShaderProgram* lines = manager->get_shader("dashed_thick_lines");
         REQUIRE(lines != nullptr);
         GLModel::Geometry g;
@@ -379,6 +409,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("a plate thumbnail's off-screen render: framebuffer set-up and the thumbnail shader")
     {
+        gl_test_trace("SECTION a plate thumbnail's off-screen render: framebuffer set-up an");
         // The same set-up as GLCanvas3D::render_thumbnail_framebuffer() (non-multisampled path): RGBA8
         // texture + sized GL_DEPTH_COMPONENT24 renderbuffer (macOS core rejects the unsized
         // GL_DEPTH_COMPONENT these used: GL_INVALID_ENUM in every thumbnail), then a lit model.
@@ -443,6 +474,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("the G-code viewer's point size query is valid in a core profile")
     {
+        gl_test_trace("SECTION the G-code viewer's point size query is valid in a core prof");
         // GL_ALIASED_POINT_SIZE_RANGE is not a core-profile query (GL_INVALID_ENUM on macOS at the first slice).
         float range[2] = { 0.f, 0.f };
         OpenGLManager::query_point_size_range(range);
@@ -453,6 +485,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("texture completeness: the check itself")
     {
+        gl_test_trace("SECTION texture completeness: the check itself");
         // What macOS reports as "unit N GLD_TEXTURE_INDEX_2D is unloadable ... using zero texture".
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -511,6 +544,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("textures GLTexture makes are complete from the start, compressed ones included")
     {
+        gl_test_trace("SECTION textures GLTexture makes are complete from the start, compre");
         auto complete = [](const GLTexture& texture) {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, texture.get_id());
@@ -555,6 +589,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("gouraud: its cut samplers (units 3 and 4) see complete fallback textures while no cut is active")
     {
+        gl_test_trace("SECTION gouraud: its cut samplers (units 3 and 4) see complete fallb");
         GLShaderProgram* gouraud = manager->get_shader("gouraud");
         REQUIRE(gouraud != nullptr);
         bool has_sheet = false, has_field = false;
@@ -595,6 +630,7 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     SECTION("libvgcode renders a small G-code scene, then shuts down without unloading the shared GL loader")
     {
+        gl_test_trace("SECTION libvgcode renders a small G-code scene, then shuts down with");
         // A square perimeter on two layers, processed by EdgeSlicer's GCodeProcessor.
         std::ostringstream o;
         const char nl = '\n';
@@ -665,7 +701,9 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
             scene.clear();
             glEnable(GL_DEPTH_TEST);
+            gl_test_trace("libvgcode: render");
             viewer.render(libvgcode::convert(view), libvgcode::convert(proj));
+            gl_test_trace("libvgcode: rendered");
             libvgcode::Viewer::set_draw_check_hook(nullptr);
             CHECK(s_vgcode_draws_checked > 0);
             for (const std::string& problem : s_vgcode_draw_problems)
@@ -693,7 +731,9 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
             const auto centre = OffscreenTarget::pixel(big / 2, big / 2);
             CHECK(int(centre[0]) + int(centre[1]) + int(centre[2]) == 0);
 
+            gl_test_trace("libvgcode: shutdown");
             viewer.shutdown();
+            gl_test_trace("libvgcode: shut down");
         }
         CHECK(drain_gl_errors() == GL_NO_ERROR);
 
@@ -721,5 +761,5 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
     }
 
     CHECK(OpenGLManager::report_gl_errors("in the core-profile smoke test") == 0);
-    manager.reset();
+    gl_test_trace("run end");
 }
