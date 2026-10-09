@@ -28,6 +28,11 @@ using namespace Slic3r;
 // the defaults (M620.15 C245 / C220 for PETG HF 245 + PLA 220 on an H2D, where Bambu Studio writes
 // C235 / C210). Filament presets hold them now, per flow variant, and GCode.cpp publishes them the
 // way Bambu Studio does (no pre-tower cooling on the first layer).
+//
+// A toolchange that cools before the tower must heat back up before the new filament prints: Bambu
+// Studio's tower writes "M104 T<extruder> S<print temperature> N0 ;Wipe tower reheat before wipe"
+// (WipeTower.cpp toolchange_wipe_new). Without it an H2D printed the rest of the plate 10 degrees cold
+// (owner's hardware test of #392). check_reheats() below is the G-code-level rule.
 
 namespace {
 
@@ -81,44 +86,62 @@ std::vector<double> floats_of(const DynamicPrintConfig &cfg, const char *key)
 const std::string H2D_PLA     = "Bambu PLA Basic @BBL H2D";           // 220 C, range high 240
 const std::string H2D_PETG_HF = "Bambu PETG HF @BBL H2D 0.4 nozzle";  // 245 C, range high 270
 
-// Two H2D filaments with a prime tower, one 20 x 20 x 2 mm block each; every layer changes filament twice.
-DynamicPrintConfig h2d_config(const std::vector<std::string> &filaments, const std::string &nozzles = "Standard,Standard",
+struct Machine
+{
+    std::string printer;
+    std::string process;
+};
+const Machine H2D{ "Bambu Lab H2D 0.4 nozzle", "0.20mm Standard @BBL H2D" };
+const Machine H2C{ "Bambu Lab H2C 0.4 nozzle", "0.20mm Standard @BBL H2C" };
+
+// BBL filaments with a prime tower; nozzles / map empty = the profile's own.
+DynamicPrintConfig bbl_config(const Machine &m, const std::vector<std::string> &filaments, const std::string &nozzles = "Standard,Standard",
                               const std::string &map = "1,2")
 {
     PresetBundle &b = vendor_bundle("BBL");
-    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H2D 0.4 nozzle", true));
-    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL H2D", true));
+    REQUIRE(b.printers.select_preset_by_name(m.printer, true));
+    REQUIRE(b.prints.select_preset_by_name(m.process, true));
     REQUIRE(b.filaments.select_preset_by_name(filaments.front(), true));
     b.filament_presets = { filaments.front() };
-    b.set_num_filaments(unsigned(filaments.size()), std::vector<std::string>{ "#E01919", "#1943E0" });
+    std::vector<std::string> colours{ "#E01919", "#1943E0", "#19E043", "#E0E019" };
+    colours.resize(filaments.size(), "#FFFFFF");
+    b.set_num_filaments(unsigned(filaments.size()), colours);
     b.filament_presets = filaments;
     DynamicPrintConfig cfg = b.full_config_secure();
     cfg.set_deserialize_strict({
-        { "nozzle_volume_type", nozzles },
-        { "filament_map_mode", "Manual" },
-        { "filament_map", map },
         { "enable_prime_tower", "1" },
         { "wipe_tower_x", 40. },
         { "wipe_tower_y", 250. },
         { "wipe_tower_rotation_angle", 0 },
         { "gcode_comments", 0 },
     });
+    if (!nozzles.empty())
+        cfg.set_deserialize_strict({ { "nozzle_volume_type", nozzles } });
+    if (!map.empty())
+        cfg.set_deserialize_strict({ { "filament_map_mode", "Manual" }, { "filament_map", map } });
     return cfg;
 }
 
-std::string slice_h2d(Print &print, const DynamicPrintConfig &cfg)
+DynamicPrintConfig h2d_config(const std::vector<std::string> &filaments, const std::string &nozzles = "Standard,Standard",
+                              const std::string &map = "1,2")
+{
+    return bbl_config(H2D, filaments, nozzles, map);
+}
+
+// One 20 x 20 x 2 mm block per filament; every layer changes filament on each block.
+std::string slice_bbl(Print &print, const DynamicPrintConfig &cfg, size_t filaments = 2)
 {
     Model model;
-    for (int i = 0; i < 2; ++i) {
+    for (size_t i = 0; i < filaments; ++i) {
         TriangleMesh cube = Test::mesh(Test::TestMesh::cube_20x20x20);
         cube.scale(Vec3f(1.f, 1.f, 0.1f));
         ModelObject *object = model.add_object();
         object->name        = "block" + std::to_string(i + 1);
         object->add_volume(cube);
-        object->config.set("extruder", i + 1);
+        object->config.set("extruder", int(i + 1));
         object->add_instance();
         object->center_around_origin();
-        object->instances.front()->set_offset(Vec3d(150. + 40. * i, 160., 0.));
+        object->instances.front()->set_offset(Vec3d(130. + 40. * double(i), 160., 0.));
         object->ensure_on_bed();
     }
     print.is_BBL_printer() = true;
@@ -128,17 +151,28 @@ std::string slice_h2d(Print &print, const DynamicPrintConfig &cfg)
     return Test::gcode(print);
 }
 
+std::string slice_h2d(Print &print, const DynamicPrintConfig &cfg) { return slice_bbl(print, cfg, 2); }
+
+std::vector<std::string> gcode_lines(const std::string &gcode)
+{
+    std::vector<std::string> out;
+    std::istringstream       ss(gcode);
+    for (std::string line; std::getline(ss, line);) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        out.push_back(line);
+    }
+    return out;
+}
+
 // The G-code lines matching `re` (first capture group), with the layer they are on
 // ("; layer num/total_layer_count: N/M"; 0 before the first layer).
 std::vector<std::pair<int, std::string>> lines_by_layer(const std::string &gcode, const std::regex &re)
 {
     static const std::regex                  re_layer(R"(^; layer num/total_layer_count: (\d+)/)");
     std::vector<std::pair<int, std::string>> out;
-    std::istringstream                       ss(gcode);
     int                                      layer = 0;
-    for (std::string line; std::getline(ss, line);) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
+    for (const std::string &line : gcode_lines(gcode)) {
         std::smatch m;
         if (std::regex_search(line, m, re_layer))
             layer = std::stoi(m[1].str());
@@ -158,6 +192,71 @@ std::set<std::string> values_on(const std::vector<std::pair<int, std::string>> &
 }
 
 const std::regex re_m620_15(R"(^M620\.15 C(-?\d+(\.\d+)?)$)");
+const std::regex re_reheat(R"(^M104 T(\d+) S(\d+) N0 ;Wipe tower reheat before wipe$)");
+
+// The rule the H2D hardware test asked for. For every M620.15 C<c> below the print temperature P of the
+// filament being loaded (the template's "M620.10 A1 ... P[new_filament_temp] S1" just before it), the
+// tower's "M104 T<e> S<P> N0 ;Wipe tower reheat before wipe" follows, before the toolchange ends
+// ("; CP TOOLCHANGE END") and before any printing move (X/Y with positive E). Every reheat answers such
+// a cool-down (Bambu Studio writes it only after one).
+struct ReheatCheck
+{
+    size_t                   cooled  = 0;
+    size_t                   reheats = 0;
+    std::vector<std::string> reheat_lines;
+    std::vector<std::string> errors;
+};
+
+ReheatCheck check_reheats(const std::string &gcode)
+{
+    static const std::regex re_new_temp(R"(^M620\.10 A1 .* P(\d+) S1$)");
+    static const std::regex re_print_move(R"(^G[123] [^;]*[XY]-?[\d.]+[^;]*E(\d*\.?\d+))");
+    ReheatCheck out;
+    int         new_temp = -1;
+    int         pending  = -1; // print temperature still owed after a cool-down
+    size_t      n        = 0;
+    for (const std::string &line : gcode_lines(gcode)) {
+        ++n;
+        std::smatch m;
+        if (std::regex_search(line, m, re_new_temp)) {
+            new_temp = std::stoi(m[1].str());
+        } else if (std::regex_search(line, m, re_m620_15)) {
+            if (pending >= 0)
+                out.errors.push_back("line " + std::to_string(n) + ": a second cool-down before the reheat");
+            if (new_temp >= 0 && std::stod(m[1].str()) < double(new_temp)) {
+                pending = new_temp;
+                ++out.cooled;
+            }
+        } else if (std::regex_search(line, m, re_reheat)) {
+            ++out.reheats;
+            out.reheat_lines.push_back(line);
+            if (pending < 0)
+                out.errors.push_back("line " + std::to_string(n) + ": reheat without a cool-down: " + line);
+            else if (std::stoi(m[2].str()) != pending)
+                out.errors.push_back("line " + std::to_string(n) + ": reheat to " + m[2].str() + ", print temperature " + std::to_string(pending));
+            pending = -1;
+        } else if (pending >= 0 && line.rfind("; CP TOOLCHANGE END", 0) == 0) {
+            out.errors.push_back("line " + std::to_string(n) + ": toolchange ended still cooled to below " + std::to_string(pending));
+            pending = -1;
+        } else if (pending >= 0 && std::regex_search(line, m, re_print_move) && std::stod(m[1].str()) > 0.) {
+            out.errors.push_back("line " + std::to_string(n) + ": printing while cooled below " + std::to_string(pending) + ": " + line);
+            pending = -1;
+        }
+    }
+    if (pending >= 0)
+        out.errors.push_back("end of file still cooled below " + std::to_string(pending));
+    return out;
+}
+
+void require_reheats(const ReheatCheck &check)
+{
+    std::string errors;
+    for (const std::string &e : check.errors)
+        errors += e + "\n";
+    INFO(errors);
+    CHECK(check.errors.empty());
+    CHECK(check.reheats == check.cooled);
+}
 
 } // namespace
 
@@ -181,13 +280,17 @@ TEST_CASE("BBL filament presets keep the Bambu flush keys", "[BambuFlushKeys][BB
     {
         CHECK(ints_of(filament_preset("BBL", "Bambu PLA Basic @BBL A2L 0.4 nozzle"), "filament_flush_temp_fast") == std::vector<int>{ 220 });
     }
-    SECTION("X1C PLA Basic carries none of the keys: the defaults")
+    SECTION("X1C and A2L PLA Basic carry no cooling key: 0, as Bambu Studio's fdm_filament_common.json says")
     {
+        for (const char *name : { "Bambu PLA Basic @BBL X1C", "Bambu PLA Basic @BBL A2L 0.4 nozzle" }) {
+            INFO("preset: " << name);
+            const DynamicPrintConfig &cfg     = filament_preset("BBL", name);
+            const std::vector<double> cooling = floats_of(cfg, "filament_cooling_before_tower");
+            REQUIRE_FALSE(cooling.empty());
+            for (double c : cooling)
+                CHECK(c == 0.);
+        }
         const DynamicPrintConfig &x1c = filament_preset("BBL", "Bambu PLA Basic @BBL X1C");
-        const std::vector<double> cooling = floats_of(x1c, "filament_cooling_before_tower");
-        REQUIRE_FALSE(cooling.empty());
-        for (double c : cooling)
-            CHECK(c == 10.);
         for (int t : ints_of(x1c, "filament_flush_temp"))
             CHECK(t == 0);
         for (int t : ints_of(x1c, "filament_flush_temp_fast"))
@@ -210,10 +313,10 @@ TEST_CASE("Anycubic filament presets load their nil flush keys", "[BambuFlushKey
     CHECK(speed->is_nil(0));
 }
 
-TEST_CASE("H2D PLA + PETG HF: M620.15 cools 10 degrees before the tower, not on the first layer", "[BambuFlushKeys][BBLProfiles]")
+TEST_CASE("H2D PLA + PETG HF: M620.15 cools 10 degrees before the tower, the tower heats back", "[BambuFlushKeys][BBLProfiles]")
 {
     Print             print;
-    const std::string gcode = slice_h2d(print, h2d_config({ H2D_PLA, H2D_PETG_HF }));
+    const std::string gcode   = slice_h2d(print, h2d_config({ H2D_PLA, H2D_PETG_HF }));
     const auto        m620_15 = lines_by_layer(gcode, re_m620_15);
     REQUIRE(m620_15.size() >= 4);
 
@@ -227,8 +330,56 @@ TEST_CASE("H2D PLA + PETG HF: M620.15 cools 10 degrees before the tower, not on 
     // Every later layer: 10 degrees below, C235 for the PETG HF and C210 for the PLA, as Bambu Studio writes.
     CHECK(values_on(m620_15, false) == std::set<std::string>{ "235", "210" });
 
+    // Each of those cool-downs is answered by the tower's reheat to the print temperature, on the
+    // physical extruder of the filament (H2D: left = 1, right = 0; filament 1 left, filament 2 right).
+    const ReheatCheck check = check_reheats(gcode);
+    require_reheats(check);
+    CHECK(check.cooled >= 2);
+    CHECK(std::set<std::string>(check.reheat_lines.begin(), check.reheat_lines.end()) ==
+          std::set<std::string>{ "M104 T1 S220 N0 ;Wipe tower reheat before wipe", "M104 T0 S245 N0 ;Wipe tower reheat before wipe" });
+    // None on the first layer.
+    CHECK(values_on(lines_by_layer(gcode, re_reheat), true).empty());
+
     // The CONFIG_BLOCK records the presets' values, not dropped defaults.
     CHECK(gcode.find("\n; filament_cooling_before_tower = 10,10,10,10\n") != std::string::npos);
+}
+
+TEST_CASE("Without the tower, or by object without it, nothing cools before the tower", "[BambuFlushKeys][BBLProfiles]")
+{
+    // Bambu Studio publishes filament_cooling_before_tower as zeros for a toolchange that does not go
+    // through its tower (GCode.cpp set_extruder), so M620.15 C is the print temperature and no reheat is due.
+    for (const char *sequence : { "by layer", "by object" }) {
+        INFO("print_sequence " << sequence);
+        DynamicPrintConfig cfg = h2d_config({ H2D_PLA, H2D_PETG_HF });
+        cfg.set_deserialize_strict({ { "enable_prime_tower", "0" }, { "print_sequence", sequence } });
+        Print             print;
+        const std::string gcode = slice_h2d(print, cfg);
+        CHECK_FALSE(lines_by_layer(gcode, re_m620_15).empty());
+        // cooled == 0: every M620.15 C is the print temperature of the filament being loaded.
+        const ReheatCheck check = check_reheats(gcode);
+        require_reheats(check);
+        CHECK(check.cooled == 0);
+        CHECK(check.reheats == 0);
+    }
+}
+
+TEST_CASE("By object with the tower: every cool-down is reheated", "[BambuFlushKeys][BBLProfiles]")
+{
+    DynamicPrintConfig cfg = h2d_config({ H2D_PLA, H2D_PETG_HF });
+    cfg.set_deserialize_strict({ { "print_sequence", "by object" } });
+    Print             print;
+    const std::string gcode = slice_h2d(print, cfg);
+    require_reheats(check_reheats(gcode));
+}
+
+TEST_CASE("H2C, three filaments on two extruders: every cool-down is reheated", "[BambuFlushKeys][BBLProfiles]")
+{
+    DynamicPrintConfig cfg = bbl_config(H2C, { "Bambu PLA Basic @BBL H2C", "Bambu PETG HF @BBL H2C", "Bambu PLA Basic @BBL H2C" }, "", "1,2,2");
+    Print             print;
+    const std::string gcode = slice_bbl(print, cfg, 3);
+    const ReheatCheck check = check_reheats(gcode);
+    require_reheats(check);
+    CHECK(check.cooled >= 2);
 }
 
 TEST_CASE("Nil flush keys read as their defaults in the G-code", "[BambuFlushKeys][BBLProfiles]")
@@ -244,8 +395,9 @@ TEST_CASE("Nil flush keys read as their defaults in the G-code", "[BambuFlushKey
     Print             print;
     const std::string gcode = slice_h2d(print, cfg);
 
-    // filament_cooling_before_tower nil -> its default 10.
-    CHECK(values_on(lines_by_layer(gcode, re_m620_15), false) == std::set<std::string>{ "235", "210" });
+    // filament_cooling_before_tower nil -> 0: no cool-down, no reheat.
+    CHECK(values_on(lines_by_layer(gcode, re_m620_15), false) == std::set<std::string>{ "245", "220" });
+    CHECK(check_reheats(gcode).reheats == 0);
     // filament_flush_temp nil -> 0 -> the top of the recommended range (PLA 240, PETG HF 270).
     const std::set<std::string> flush_temps = values_on(lines_by_layer(gcode, std::regex(R"(^M620\.10 A1 .* T(\d+) P\d+ S1$)")), false);
     CHECK(flush_temps == std::set<std::string>{ "240", "270" });
@@ -272,4 +424,6 @@ TEST_CASE("The flush keys are read from each filament's flow-variant column", "[
     // filament 1's High Flow slot says 231.
     const std::set<std::string> flush_temps = values_on(lines_by_layer(gcode, std::regex(R"(^M620\.10 A1 .* T(\d+) P\d+ S1$)")), false);
     CHECK(flush_temps == std::set<std::string>{ "240", "231" });
+    // The tower reheats from the same columns.
+    require_reheats(check_reheats(gcode));
 }

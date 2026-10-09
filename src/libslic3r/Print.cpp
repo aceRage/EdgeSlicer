@@ -623,13 +623,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // BBS (H2C rack): only read by change_filament_gcode (M620.11 O1 T<len>).
         "filament_retract_length_nc",
         // BBS: only read through the change_filament / machine start / end G-code placeholders
-        // (flush_temperatures, flush_volumetric_speeds, filament_cooling_before_tower). Bambu Studio
-        // also invalidates its wipe tower on filament_cooling_before_tower because its tower writes a
-        // reheat M104 from it; ours does not (see the follow-up in docs/bambu-flush-keys.md).
+        // (flush_temperatures, flush_volumetric_speeds). filament_cooling_before_tower also drives the
+        // tower's "Wipe tower reheat before wipe", so it invalidates psWipeTower (below), as in Bambu Studio.
         "filament_flush_temp",
         "filament_flush_temp_fast",
         "filament_flush_volumetric_speed",
-        "filament_cooling_before_tower",
         // BBS: read only by the idle-nozzle pre-cooling / pre-heating of the G-code post-processor.
         "enable_pre_heating",
         "filament_pre_cooling_temperature",
@@ -890,6 +888,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "slow_down_layers"
             || opt_key == "idle_temperature" 
             || opt_key == "filament_tower_ironing_area"
+            // BBS: the tower writes "Wipe tower reheat before wipe" from it (Bambu Studio Print.cpp 328).
+            || opt_key == "filament_cooling_before_tower"
             || opt_key == "wipe_tower_cone_angle"
             || opt_key == "wipe_tower_extra_spacing"
             || opt_key == "wipe_tower_max_purge_speed"

@@ -620,6 +620,14 @@ inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int fila
     return get_value_at(config, *opt, ConfigFlowDomain::Filament, filament_id);
 }
 
+// BBS: how far a filament's nozzle cools below its print temperature before the BBL wipe tower
+// (filament_cooling_before_tower at the filament's flow-variant slot; nil reads as 0, no cooling).
+// with_switcher_extra adds Bambu Studio's 10 degrees for a filament switcher that feeds extruders of
+// different types (GCode.cpp g_filament_switcher_extra_cooling_before_tower), which Bambu applies to
+// the toolchange through the tower. GCode's M620.15 C and the tower's "Wipe tower reheat before wipe"
+// both read this, so a toolchange that cools always heats back.
+double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
+
 // Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
 // count is filament_diameter, not the packed length.
 inline size_t flow_variant_filament_count(const ConfigBase &config)

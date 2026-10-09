@@ -9531,6 +9531,27 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
     return 0;
 }
 
+double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra)
+{
+    double      cooling = 0.;
+    const auto *opt     = dynamic_cast<const ConfigOptionFloatsNullable *>(config.option("filament_cooling_before_tower"));
+    if (opt != nullptr && !opt->values.empty()) {
+        size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, filament_id);
+        if (idx >= opt->values.size())
+            idx = 0; // ConfigOptionVector::get_at's fallback
+        if (!opt->is_nil(idx) && !std::isnan(opt->values[idx]))
+            cooling = opt->values[idx];
+    }
+    if (with_switcher_extra) {
+        const auto *switcher = dynamic_cast<const ConfigOptionBool *>(config.option("has_filament_switcher"));
+        const auto *types    = dynamic_cast<const ConfigOptionEnumsGeneric *>(config.option("extruder_type"));
+        if (switcher != nullptr && switcher->value && types != nullptr && types->values.size() > 1 &&
+            std::adjacent_find(types->values.begin(), types->values.end(), [](int lhs, int rhs) { return lhs != rhs; }) != types->values.end())
+            cooling += 10.;
+    }
+    return cooling;
+}
+
 double ResolvedFilamentFlow::uncached_flow_ratio(const ConfigBase &config, unsigned int filament_id)
 {
     const auto *opt = config.option<ConfigOptionFloats>("filament_flow_ratio");

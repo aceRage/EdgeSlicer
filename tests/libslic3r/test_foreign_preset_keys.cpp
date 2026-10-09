@@ -320,7 +320,8 @@ TEST_CASE("Loading presets that carry foreign keys logs no error and loads the s
             REQUIRE(without.filament_prints[i].find("filament_flush_temp=0;") != std::string::npos);
             REQUIRE(without.filament_prints[i].find("filament_flush_temp_fast=0;") != std::string::npos);
             REQUIRE(without.filament_prints[i].find("filament_flush_volumetric_speed=0;") != std::string::npos);
-            REQUIRE(without.filament_prints[i].find("filament_cooling_before_tower=10;") != std::string::npos);
+            // Bambu Studio's fdm_filament_common.json: no cooling for a filament that does not ask for it.
+            REQUIRE(without.filament_prints[i].find("filament_cooling_before_tower=0;") != std::string::npos);
         }
         REQUIRE(with_flush.process_prints == without.process_prints);
     }

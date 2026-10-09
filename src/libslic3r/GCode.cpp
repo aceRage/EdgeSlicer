@@ -456,16 +456,6 @@ static T filament_variant_value(const ConfigBase& config, const NullableVector& 
     return value;
 }
 
-// BBS: Bambu Studio adds this much pre-tower cooling when a filament switcher feeds extruders of
-// different types (GCode.cpp g_filament_switcher_extra_cooling_before_tower).
-static double filament_switcher_extra_cooling_before_tower(const PrintConfig& config)
-{
-    const std::vector<int>& types = config.extruder_type.values;
-    const bool mixed_extruder_types =
-        types.size() > 1 && std::adjacent_find(types.begin(), types.end(), [](int lhs, int rhs) { return lhs != rhs; }) != types.end();
-    return config.has_filament_switcher.value && mixed_extruder_types ? 10. : 0.;
-}
-
 // BBS: the flush / pre-tower cooling placeholders of the BBL machine templates, one entry per
 // filament, as Bambu Studio builds them (GCode.cpp 1001-1026 for a toolchange through the wipe tower,
 // 8318-8337 for any other toolchange, 8061-8075 for the start G-code):
@@ -473,8 +463,9 @@ static double filament_switcher_extra_cooling_before_tower(const PrintConfig& co
 //   flush_temperatures             filament_flush_temp (filament_flush_temp_fast in Fast prime-volume
 //                                  mode), 0 = the top of the recommended nozzle temperature range
 //   filament_cooling_before_tower  the drop below the print temperature before the tower
-//                                  (M620.15 C{new_filament_temp - ...}); the callers zero it where
-//                                  Bambu Studio does
+//                                  (M620.15 C{new_filament_temp - ...}); nil = 0. The callers zero it
+//                                  where Bambu Studio does; the tower toolchange that keeps it also
+//                                  gets the tower's "Wipe tower reheat before wipe" M104
 struct BambuFlushPlaceholders
 {
     std::vector<double> volumetric_speeds;
@@ -489,7 +480,7 @@ struct BambuFlushPlaceholders
     }
 };
 
-static BambuFlushPlaceholders bambu_flush_placeholders(const PrintConfig& config, double extra_cooling_before_tower = 0.)
+static BambuFlushPlaceholders bambu_flush_placeholders(const PrintConfig& config, bool tower_toolchange)
 {
     BambuFlushPlaceholders out;
     const size_t num_filaments  = flow_variant_filament_count(config);
@@ -509,9 +500,7 @@ static BambuFlushPlaceholders bambu_flush_placeholders(const PrintConfig& config
             temp = config.nozzle_temperature_range_high.get_at(i);
         out.temperatures.push_back(temp);
 
-        out.cooling_before_tower.push_back(
-            filament_variant_value<double>(config, config.filament_cooling_before_tower, i, "filament_cooling_before_tower") +
-            extra_cooling_before_tower);
+        out.cooling_before_tower.push_back(filament_cooling_before_tower_at(config, static_cast<unsigned int>(i), tower_toolchange));
     }
     return out;
 }
@@ -1028,11 +1017,14 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         }
         // BBS: flush speed / temperature and pre-tower cooling for the change_filament template
         // (Bambu Studio GCode.cpp 1001-1026). Bambu cools nothing before the tower on the first layer
-        // or on a tower interface (contact) layer; this tower has no interface layers.
+        // or on a tower interface (contact) toolchange. The tower says which toolchanges it reheats
+        // (tcr.reheats_after_cooling: not its first layer, not an interface); only those may cool, so
+        // every M620.15 C below the print temperature is followed by the tower's
+        // "Wipe tower reheat before wipe" M104 back to it.
         {
             const FullPrintConfig &cfg = gcodegen.config();
-            BambuFlushPlaceholders flush = bambu_flush_placeholders(cfg, filament_switcher_extra_cooling_before_tower(cfg));
-            if (gcodegen.m_layer_index == 0)
+            BambuFlushPlaceholders flush = bambu_flush_placeholders(cfg, true);
+            if (gcodegen.m_layer_index == 0 || !tcr.reheats_after_cooling)
                 std::fill(flush.cooling_before_tower.begin(), flush.cooling_before_tower.end(), 0.);
             flush.set(config);
         }
@@ -3546,7 +3538,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // filament_flush_volumetric_speed[next_extruder]) must not see the packed vector.
         const size_t num_filaments = flow_variant_filament_count(m_config);
         {
-            const BambuFlushPlaceholders flush = bambu_flush_placeholders(m_config);
+            const BambuFlushPlaceholders flush = bambu_flush_placeholders(m_config, false);
             this->placeholder_parser().set("flush_volumetric_speeds", new ConfigOptionFloats(flush.volumetric_speeds));
             this->placeholder_parser().set("flush_temperatures", new ConfigOptionInts(flush.temperatures));
             this->placeholder_parser().set("filament_cooling_before_tower", new ConfigOptionFloats(flush.cooling_before_tower));
@@ -11497,7 +11489,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         // 8318-8337). A toolchange that does not go through the BBL wipe tower never cools before the
         // tower: Bambu publishes filament_cooling_before_tower as all zeros here.
         {
-            BambuFlushPlaceholders flush = bambu_flush_placeholders(m_config);
+            BambuFlushPlaceholders flush = bambu_flush_placeholders(m_config, false);
             std::fill(flush.cooling_before_tower.begin(), flush.cooling_before_tower.end(), 0.);
             flush.set(dyn_config);
         }
