@@ -9993,12 +9993,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             // regardless of which role we are printing.
             // Orca (#14616): brim is attached to the first layer walls like a wall, not like infill.
             // EdgeSlicer divergence from Orca #13224: Support, Support interface and Support transition
-            // (which includes the raft layers, they are support extrusions) follow Initial layer speed
-            // on the first layer and on the first object layer over a raft, so a user can slow the
-            // first layer of supports and rafts down with the one setting. Orca moved them to
-            // initial_layer_infill_speed. Raft layers above the first one, and the layers above the
-            // first object layer, are not in this branch and keep their normal support speeds.
-            // Gap infill and the other infill roles still use initial_layer_infill_speed.
+            // (the raft is made of support extrusions) follow Initial layer speed on the first layer, so a
+            // user can slow the first layer of supports and the raft base down with the one setting. Orca
+            // moved them to initial_layer_infill_speed. Raft layers above the base are not in this branch
+            // and keep their support / interface speeds. Support printed on the first object layer over a
+            // raft is extruded with m_object_layer_over_raft cleared (process_layer), so it never gets here
+            // and keeps its normal speed, as in Orca. Gap infill and the other infill roles still use
+            // initial_layer_infill_speed.
             const bool use_first_layer_speed = is_perimeter(path.role()) || path.role() == erBrim ||
                                                path.role() == erSupportMaterial || path.role() == erSupportMaterialInterface ||
                                                path.role() == erSupportTransition;
