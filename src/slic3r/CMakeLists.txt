@@ -127,8 +127,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/DownloaderFileGet.cpp
     GUI/DownloaderFileGet.hpp
     GUI/Downloader.hpp
-    GUI/DownloadProgressDialog.cpp
-    GUI/DownloadProgressDialog.hpp
     GUI/DragCanvas.cpp
     GUI/DragCanvas.hpp
     GUI/EditGCodeDialog.cpp
@@ -382,8 +380,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/TextureDisplacementPreviewJob.cpp
     GUI/Jobs/TextureDisplacementPreviewJob.hpp
     GUI/Jobs/ThreadSafeQueue.hpp
-    GUI/Jobs/UpgradeNetworkJob.cpp
-    GUI/Jobs/UpgradeNetworkJob.hpp
     GUI/Jobs/Worker.hpp
     GUI/KBShortcutsDialog.cpp
     GUI/KBShortcutsDialog.hpp
@@ -782,8 +778,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/UserNotification.hpp
     GUI/UVEditorCanvas.cpp
     GUI/UVEditorCanvas.hpp
-    GUI/WebDownPluginDlg.cpp
-    GUI/WebDownPluginDlg.hpp
     GUI/WebGuideDialog.cpp
     GUI/WebGuideDialog.hpp
     GUI/WebUserLoginDialog.cpp

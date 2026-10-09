@@ -1336,12 +1336,11 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
 
         if (param == "installed_networking") {
             bool pbool = app_config->get_bool("installed_networking");
-            // Ultra (plug-in guards): with UltraNet installed there is nothing to download - the
-            // plug-in is already there, and this offer would replace it with Bambu's package.
-            if (pbool && GUI::wxGetApp().is_ultranet_plugin_installed()) {
-                BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Preferences checkbox offer suppressed)";
-            } else if (pbool) {
-                GUI::wxGetApp().CallAfter([] { GUI::wxGetApp().ShowDownNetPluginDlg(); });
+            // Turning the network plug-in on used to offer Bambu's download. EdgeSlicer never
+            // downloads it: with UltraNet installed this is silent, otherwise the user is told the
+            // plug-in is missing from this install.
+            if (pbool && GUI::wxGetApp().getAgent() == nullptr) {
+                GUI::wxGetApp().CallAfter([] { GUI::wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true); });
             }
             if (m_legacy_networking_ckeckbox != nullptr) { m_legacy_networking_ckeckbox->Enable(pbool); }
         }
@@ -2271,12 +2270,9 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_legacy, 0, wxTOP, FromDIP(3));
-    // Ultra (plug-in guards): hidden after the Add so the sizer keeps no space for it. The switch
-    // only picks WHICH Bambu CDN build to download; with UltraNet installed nothing is downloaded.
-    if (wxGetApp().is_ultranet_plugin_installed()) {
-        sizer_page->Hide(item_bambu_legacy, true);
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Preferences legacy-plugin switch hidden)";
-    }
+    // Hidden after the Add so the sizer keeps no space for it. The switch only picks WHICH Bambu
+    // CDN build to download, and nothing is downloaded any more.
+    sizer_page->Hide(item_bambu_legacy, true);
     sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_spoolman_enabled, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_spoolman_url, 0, wxTOP, FromDIP(3));
