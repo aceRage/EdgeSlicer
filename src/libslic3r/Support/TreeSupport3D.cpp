@@ -125,6 +125,9 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
 {
     std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> grouped_meshes;
 
+    // Orca: Recompute static mesh-group state for this support generation pass.
+    TreeSupportSettings::zero_top_z_gap = false;
+
     //FIXME this is ugly, it does not belong here.
     for (size_t object_id : print_object_ids) {
         const PrintObject       &print_object  = *print.get_object(object_id);
@@ -138,9 +141,11 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
             // value is object-wide behaviour (SlicingParameters::zero_gap_interface_*, bottom-surface
             // classification, and this very static). Do NOT "fix" this to look at the volumes.
             //
-            // R4.2: the static is process-global and is never reset, so one soluble object makes
-            // every other object on the plate behave as if it were soluble too. Groups do not make
-            // that worse, but they make it easier to reach - say so in the log.
+            // R4.2: the static is reset above for every pass (Orca #13936), so a zero gap no longer
+            // sticks to every later slice of the process. It is still process-global though, and the
+            // objects of a plate generate their supports in parallel, so another object on the plate
+            // can still see it while this one is being generated. Groups make a zero gap easier to
+            // reach - say so in the log.
             if (! TreeSupportSettings::zero_top_z_gap)
                 for (const PrintObject *other : print.objects())
                     if (other != &print_object && other->has_support() &&
@@ -149,7 +154,8 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
                             << "Tree support: object \"" << print_object.model_object()->name
                             << "\" asks for a soluble interface, and TreeSupportSettings::zero_top_z_gap is a"
                                " process-global static - object \"" << other->model_object()->name
-                            << "\" has a non-zero top Z distance and will be built as if it were soluble too.";
+                            << "\" has a non-zero top Z distance and may be built as if it were soluble too while"
+                               " both generate their supports.";
                         break;
                     }
             TreeSupportSettings::zero_top_z_gap = true;

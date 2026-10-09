@@ -23,6 +23,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Support/TreeSupportCommon.hpp"
 #include "libslic3r/libslic3r.h"
 
 #include "test_data.hpp"
@@ -235,4 +236,40 @@ TEST_CASE("Organic tree support toolpaths do not depend on the thread count", "[
         REQUIRE(many.size() == one.size());
         REQUIRE(first_difference(many, one) == one.size());
     }
+}
+
+// TreeSupportSettings::zero_top_z_gap is a process-global static that a zero top Z distance sets and
+// that widens the minimum XY distance of every organic tree built while it is set. It was never
+// reset, so once one slice of the process had a zero gap, every later slice was built as if it had
+// one too: the same project sliced differently depending on what had been sliced before it (Orca
+// #13936 resets it per pass). The small XY distance is what makes the widening visible.
+TEST_CASE("Organic tree support: a zero top Z distance does not leak into the next slice", "[TreeSupport][Regression]")
+{
+    using Slic3r::TreeSupport3D::TreeSupportSettings;
+    const TriangleMesh mesh = two_tier_mesh();
+    auto slice = [&mesh](Slic3r::Print &print, double top_z_distance) {
+        slice_with_tree_support(mesh, print, "organic", 30, 0, 0, {
+            { "support_top_z_distance",     top_z_distance },
+            { "support_object_xy_distance", 0.05 },
+        });
+    };
+    // What a fresh process starts with.
+    TreeSupportSettings::zero_top_z_gap = false;
+    Slic3r::Print before;
+    slice(before, 0.2);
+    CHECK(! TreeSupportSettings::zero_top_z_gap);
+
+    Slic3r::Print zero_gap;
+    slice(zero_gap, 0.);
+    CHECK(TreeSupportSettings::zero_top_z_gap);
+
+    Slic3r::Print after;
+    slice(after, 0.2);
+    CHECK(! TreeSupportSettings::zero_top_z_gap);
+
+    const Points first  = support_points(before);
+    const Points second = support_points(after);
+    REQUIRE(first.size() > 1000);
+    REQUIRE(second.size() == first.size());
+    REQUIRE(first_difference(first, second) == first.size());
 }
