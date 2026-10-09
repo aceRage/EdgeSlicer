@@ -505,6 +505,7 @@ set(lisbslic3r_sources
     PrintBase.cpp
     MemoryGuardPolicy.hpp
     PrintBase.hpp
+    SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
     LayerTimeSpeedSmoothing.cpp
