@@ -174,3 +174,163 @@ TEST_CASE("hub handover: only well-formed UTF-8 goes into hub.json", "[HubHandov
     CHECK(!is_valid_utf8("\xC0\x80"));                                 // overlong
     CHECK(!is_valid_utf8("\xED\xA0\x80"));                             // surrogate
 }
+
+TEST_CASE("hub handover: waiting for the old hub to go and its port to free", "[HubHandover]")
+{
+    QuitFacts q;
+    SECTION("still running inside the wait: look again")
+    {
+        q.old_gone  = false;
+        q.waited_ms = QUIT_WAIT_MS - 1;
+        CHECK(after_quit_step(q) == QuitStep::Wait);
+    }
+    SECTION("still running when the wait is over: leave it, as after_quit() always did")
+    {
+        q.old_gone  = false;
+        q.waited_ms = QUIT_WAIT_MS;
+        CHECK(after_quit_step(q) == QuitStep::LeaveRunning);
+        CHECK(after_quit(false) == Outcome::LeaveRunning);
+    }
+    SECTION("gone and its port is free: start ours")
+    {
+        q.old_gone  = true;
+        q.port_free = true;
+        CHECK(after_quit_step(q) == QuitStep::SpawnOwn);
+    }
+    SECTION("gone but the port is still held: wait for it, not for ever")
+    {
+        q.old_gone      = true;
+        q.port_free     = false;
+        q.waited_ms     = 2000;
+        q.since_gone_ms = PORT_FREE_WAIT_MS - 1;
+        CHECK(after_quit_step(q) == QuitStep::Wait);
+        q.since_gone_ms = PORT_FREE_WAIT_MS;
+        CHECK(after_quit_step(q) == QuitStep::SpawnOwnPortHeld);
+    }
+    SECTION("the port wait counts from the exit, not from the request")
+    {
+        q.old_gone      = true;
+        q.port_free     = false;
+        q.waited_ms     = QUIT_WAIT_MS + PORT_FREE_WAIT_MS; // it took the whole quit wait to exit
+        q.since_gone_ms = 100;
+        CHECK(after_quit_step(q) == QuitStep::Wait);
+    }
+}
+
+TEST_CASE("hub handover: no second hub while one is starting", "[HubHandover]")
+{
+    Starting s;
+    SECTION("nobody starting: spawn")
+    {
+        CHECK(start_plan(s) == StartPlan::Spawn);
+    }
+    SECTION("our earlier spawn is still starting: wait for it (the 2026-10-08 orphan)")
+    {
+        s.own_pending_pid   = 73744;
+        s.own_pending_alive = true;
+        CHECK(start_plan(s) == StartPlan::WaitOwn);
+        s.lock_held = true; // it took the lock meanwhile: still ours to wait for
+        CHECK(start_plan(s) == StartPlan::WaitOwn);
+    }
+    SECTION("our earlier spawn died: free to spawn again")
+    {
+        s.own_pending_pid   = 73744;
+        s.own_pending_alive = false;
+        CHECK(start_plan(s) == StartPlan::Spawn);
+    }
+    SECTION("another process's hub holds the lock: wait for that one")
+    {
+        s.lock_held = true;
+        CHECK(start_plan(s) == StartPlan::WaitOther);
+    }
+}
+
+TEST_CASE("hub handover: one look while a hub starts", "[HubHandover]")
+{
+    WaitFacts w;
+    w.own           = true;
+    w.process_alive = true;
+    SECTION("it answers: up, whatever else is true")
+    {
+        w.hub_answers = true;
+        w.elapsed_ms  = START_DEADLINE_MS * 2;
+        CHECK(wait_step(w) == WaitStep::Up);
+    }
+    SECTION("slow but alive: keep waiting - 14 s is not a failure any more")
+    {
+        w.elapsed_ms = 14000;
+        CHECK(wait_step(w) == WaitStep::Wait);
+        w.elapsed_ms = 105000; // the slowest start in the 2026-10-08 log
+        CHECK(wait_step(w) == WaitStep::Wait);
+    }
+    SECTION("ours past the deadline: terminate it rather than leave an orphan")
+    {
+        w.elapsed_ms = START_DEADLINE_MS;
+        CHECK(wait_step(w) == WaitStep::Terminate);
+    }
+    SECTION("someone else's past the deadline: give up, never kill it")
+    {
+        w.own        = false;
+        w.lock_held  = true;
+        w.elapsed_ms = START_DEADLINE_MS;
+        CHECK(wait_step(w) == WaitStep::GiveUp);
+    }
+    SECTION("ours exited and nobody holds the lock: it failed")
+    {
+        w.process_alive = false;
+        CHECK(wait_step(w) == WaitStep::Exited);
+    }
+    SECTION("ours exited because another hub has the lock: wait for that one")
+    {
+        w.process_alive = false;
+        w.lock_held     = true;
+        CHECK(wait_step(w) == WaitStep::WaitOther);
+    }
+    SECTION("someone else's let go of the lock without answering: it failed")
+    {
+        w.own           = false;
+        w.process_alive = false; // for another's hub, alive means the lock is held
+        w.lock_held     = false;
+        CHECK(wait_step(w) == WaitStep::Exited);
+    }
+}
+
+TEST_CASE("hub handover: replaying the 2026-10-08 handover", "[HubHandover]")
+{
+    // Caller 1 spawns A; A takes 30 s to answer. Caller 2 (the Stream tab), parked on the same
+    // mutex, comes in after caller 1 used to give up at 12 s. Under the old rules it found no hub
+    // and spawned B. Now caller 1 is still waiting at 12 s, and caller 2 waits for A.
+    const int a_answers_at = 30000;
+    WaitFacts w;
+    w.own           = true;
+    w.process_alive = true;
+    int t = 0;
+    for (; t < a_answers_at; t += 200) {
+        w.elapsed_ms = t;
+        REQUIRE(wait_step(w) == WaitStep::Wait);
+    }
+    w.hub_answers = true;
+    w.elapsed_ms  = t;
+    CHECK(wait_step(w) == WaitStep::Up);
+
+    // Had caller 1 given up anyway (a deadline, an exception), caller 2 still does not double it.
+    Starting s;
+    s.own_pending_pid   = 73744;
+    s.own_pending_alive = true;
+    CHECK(start_plan(s) != StartPlan::Spawn);
+}
+
+TEST_CASE("hub handover: a quitting hub leaves another hub's record alone", "[HubHandover]")
+{
+    CHECK(remove_record_on_quit(1234, 1234));
+    CHECK(!remove_record_on_quit(5678, 1234));
+    CHECK(remove_record_on_quit(0, 1234)); // unreadable record: nothing to protect
+}
+
+TEST_CASE("hub handover: the timeouts hang together", "[HubHandover]")
+{
+    CHECK(START_DEADLINE_MS > 105000);           // the slowest real start seen
+    CHECK(LOCK_RETRY_MS < START_DEADLINE_MS);
+    CHECK(LOCK_RETRY_MS >= 500);                 // a probe holds the lock for microseconds; a few retries ride it out
+    CHECK(QUIT_WAIT_MS + PORT_FREE_WAIT_MS <= 30000);
+}

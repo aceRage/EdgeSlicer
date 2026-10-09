@@ -455,6 +455,8 @@ set(lisbslic3r_sources
     MutablePriorityQueue.hpp
     NormalUtils.cpp
     NormalUtils.hpp
+    NozzleSync.cpp
+    NozzleSync.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     ObjColorMatch.cpp
@@ -503,6 +505,7 @@ set(lisbslic3r_sources
     PrintBase.cpp
     MemoryGuardPolicy.hpp
     PrintBase.hpp
+    SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
     LayerTimeSpeedSmoothing.cpp

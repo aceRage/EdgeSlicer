@@ -22,6 +22,7 @@
 #include <wx/webview.h>
 #include <boost/algorithm/string.hpp>
 #include "slic3r/GUI/SSWCP.hpp"
+#include "slic3r/Utils/WebLoadRetry.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
 
 namespace pt = boost::property_tree;
@@ -49,6 +50,8 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
     Bind(wxEVT_WEBVIEW_ERROR, &PrinterWebView::OnError, this, m_browser->GetId());
     Bind(wxEVT_WEBVIEW_LOADED, &PrinterWebView::OnLoaded, this, m_browser->GetId());
     m_browser->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &PrinterWebView::OnScriptMessage, this, m_browser->GetId());
+    m_retry_timer.SetOwner(this);
+    Bind(wxEVT_TIMER, &PrinterWebView::OnRetryTimer, this, m_retry_timer.GetId());
 
     // The device picker, above the page. Created empty and hidden; Sidebar::update_all_preset_
     // comboboxes fills it in for a print-host printer whose model has devices.
@@ -79,6 +82,7 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
 PrinterWebView::~PrinterWebView()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Start";
+    m_retry_timer.Stop();
     SetEvtHandlerEnabled(false);
     SSWCP::on_webview_delete(m_browser);
 
@@ -93,6 +97,11 @@ void PrinterWebView::load_url(wxString& url, wxString apikey)
     if (m_browser == nullptr)
         return;
     m_apikey = apikey;
+    // A page asked for on purpose starts with a clean slate: no retry of whatever failed before.
+    m_retry_timer.Stop();
+    m_retry_url.clear();
+    m_retry_page.clear();
+    m_retry_count = 0;
 
     if (url.find("path=2") != std::string::npos) {
         wxGetApp().fltviews().add_printer_view(this, url, apikey);
@@ -292,9 +301,11 @@ void PrinterWebView::OnError(wxWebViewEvent &evt)
 {
     evt.Skip();
     auto e = "unknown error";
+    WebLoadRetry::Failure failure = WebLoadRetry::Failure::Other;
     switch (evt.GetInt()) {
       case wxWEBVIEW_NAV_ERR_CONNECTION:
         e = "wxWEBVIEW_NAV_ERR_CONNECTION";
+        failure = WebLoadRetry::Failure::Connection;
         break;
       case wxWEBVIEW_NAV_ERR_CERTIFICATE:
         e = "wxWEBVIEW_NAV_ERR_CERTIFICATE";
@@ -313,12 +324,51 @@ void PrinterWebView::OnError(wxWebViewEvent &evt)
         break;
       case wxWEBVIEW_NAV_ERR_USER_CANCELLED:
         e = "wxWEBVIEW_NAV_ERR_USER_CANCELLED";
+        failure = WebLoadRetry::Failure::Cancelled;
         break;
       case wxWEBVIEW_NAV_ERR_OTHER:
         e = "wxWEBVIEW_NAV_ERR_OTHER";
         break;
       }
-    BOOST_LOG_TRIVIAL(fatal) << __FUNCTION__<< boost::format(":PrinterWebView error loading page %1% %2% %3% %4%") %evt.GetURL() %evt.GetTarget() %e %evt.GetString();
+    const std::string url  = evt.GetURL().ToUTF8().data();
+    const std::string page = WebLoadRetry::page_of(url);
+    // Another load has replaced this one since: nothing anybody is looking at failed.
+    const std::string current = m_browser ? std::string(m_browser->GetCurrentURL().ToUTF8().data()) : std::string();
+    if (page != m_retry_page) {
+        m_retry_page  = page;
+        m_retry_count = 0;
+    }
+    WebLoadRetry::Facts facts;
+    facts.failure        = failure;
+    facts.loopback       = WebLoadRetry::is_loopback_url(url);
+    facts.superseded     = !current.empty() && WebLoadRetry::page_of(current) != page;
+    facts.retries_so_far = m_retry_count;
+    const WebLoadRetry::Decision d = WebLoadRetry::decide(facts);
+    // Never fatal: a page that does not load is not the application failing.
+    const auto what = boost::format(":PrinterWebView error loading page %1% %2% %3% %4%") % evt.GetURL() % evt.GetTarget() % e % evt.GetString();
+    if (d.retry) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << what << "; retrying in " << d.delay_ms << " ms (" << (m_retry_count + 1) << "/"
+                                   << WebLoadRetry::MAX_RETRIES << ")";
+        ++m_retry_count;
+        m_retry_url = url;
+        m_retry_timer.StartOnce(d.delay_ms);
+    } else if (d.log == WebLoadRetry::Log::Info) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << what << (facts.superseded ? " (replaced by another page)" : "");
+    } else {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << what << (m_retry_count > 0 ? " (gave up after retrying)" : "");
+    }
+}
+
+void PrinterWebView::OnRetryTimer(wxTimerEvent&)
+{
+    if (m_browser == nullptr || m_retry_url.empty())
+        return;
+    // Only if the view is still on that page; a page chosen since wins.
+    const std::string current = m_browser->GetCurrentURL().ToUTF8().data();
+    if (!current.empty() && WebLoadRetry::page_of(current) != m_retry_page)
+        return;
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": loading " << WebLoadRetry::page_of(m_retry_url) << " again";
+    m_browser->LoadURL(wxString::FromUTF8(m_retry_url));
 }
 
 void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
@@ -328,6 +378,11 @@ void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
         return;
     if (evt.GetURL() != m_browser->GetCurrentURL())
         return;
+    if (WebLoadRetry::page_of(evt.GetURL().ToUTF8().data()) == m_retry_page) {
+        if (m_retry_count > 0)
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << m_retry_page << " loaded after " << m_retry_count << " retr" << (m_retry_count == 1 ? "y" : "ies");
+        m_retry_count = 0;
+    }
     SendAPIKey();
 }
 

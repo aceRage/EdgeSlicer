@@ -1231,8 +1231,12 @@ std::string PlaterPresetComboBox::CurrentFilamentPresetName() const
     if (presetName.empty() && GetSelection() != wxNOT_FOUND)
         presetName = Preset::remove_suffix_modified(GetString(GetSelection()).ToUTF8().data());
 
-    if (!presetName.empty() && m_collection != nullptr)
-        presetName = Preset::remove_suffix_modified(m_collection->get_preset_name_by_alias(presetName));
+    if (!presetName.empty() && m_collection != nullptr) {
+        if (m_type == Preset::TYPE_FILAMENT && m_preset_bundle != nullptr && m_filament_idx >= 0)
+            presetName = Preset::remove_suffix_modified(m_preset_bundle->get_filament_name_by_alias_for_slot(presetName, size_t(m_filament_idx)));
+        else
+            presetName = Preset::remove_suffix_modified(m_collection->get_preset_name_by_alias(presetName));
+    }
 
     return presetName;
 }

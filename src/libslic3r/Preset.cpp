@@ -3770,10 +3770,33 @@ void PresetCollection::set_printer_hold_alias(const std::string &alias, Preset &
             if (m_printer_hold_alias[printer_name].end() == alias_iter) {
                 m_printer_hold_alias[printer_name].insert(alias);
             } else {
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << printer_name << "already has alias: " << alias << " and the preset name: " << preset.name;
+                // Several nozzle variants of one filament share an alias on a machine compatible with all of
+                // them (the U1 0.4+0.6). That is expected; count it, log_printer_alias_duplicates() reports it.
+                ++m_printer_alias_duplicates[printer_name];
             }
         }
     }
+}
+
+void PresetCollection::log_printer_alias_duplicates()
+{
+    for (const auto &[printer, count] : m_printer_alias_duplicates)
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << printer << " has " << count << " presets sharing an alias already held (nozzle variants of one filament)";
+    m_printer_alias_duplicates.clear();
+}
+
+std::string PresetCollection::get_preset_name_by_alias(const std::string& alias, const std::function<bool(const Preset&)>& accept) const
+{
+    for (auto it = Slic3r::lower_bound_by_predicate(m_map_alias_to_profile_name.begin(), m_map_alias_to_profile_name.end(), [&alias](auto &l){ return l.first < alias; });
+         it != m_map_alias_to_profile_name.end() && it->first == alias; ++ it)
+        for (const std::string &preset_name : it->second) {
+            if (auto it_preset = this->find_preset_internal(preset_name);
+                it_preset != m_presets.end() && it_preset->name == preset_name &&
+                it_preset->is_visible && (it_preset->is_compatible || size_t(it_preset - m_presets.begin()) == m_idx_selected) &&
+                (!accept || accept(*it_preset)))
+                return it_preset->name;
+        }
+    return this->get_preset_name_by_alias(alias);
 }
 
 std::string PresetCollection::name() const
