@@ -83,7 +83,7 @@ chat, commits or logs.
    `sign=true`; a run whose ref the environment refuses fails before it starts).
    - Environment secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
    - Environment variables: `ARTIFACT_SIGNING_ENDPOINT` (the account's regional endpoint, e.g. the
-     East US one), `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE`, `WINDOWS_SIGNER_SUBJECT`
+     East US one), `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE`, and `WINDOWS_SIGNER_SUBJECT` (preferably as an environment secret, so the name and location stay out of public logs; a variable also works)
      (the certificate's CN, i.e. the validated legal name), optionally `EDGESLICER_SIGN_FLASHNETWORK`.
 4. GitHub, repository settings, Variables (repository level, not the environment):
    `EDGESLICER_SIGN_WINDOWS` = `1`. This is the switch. Deleting it turns signing off again.

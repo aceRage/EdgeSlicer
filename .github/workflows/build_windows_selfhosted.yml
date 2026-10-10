@@ -122,7 +122,7 @@ jobs:
       ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
       ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
       ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
-      WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_SIGNER_SUBJECT }}
+      WINDOWS_SIGNER_SUBJECT: ${{ secrets.WINDOWS_SIGNER_SUBJECT || vars.WINDOWS_SIGNER_SUBJECT }}
       # FlashNetwork.dll stays unsigned until the owner sets this to '1' (licence decision).
       EDGESLICER_SIGN_FLASHNETWORK: ${{ vars.EDGESLICER_SIGN_FLASHNETWORK }}
 
@@ -281,7 +281,7 @@ jobs:
             exit 1
           }
           Write-Host "signing is on: endpoint $env:ARTIFACT_SIGNING_ENDPOINT, account $env:ARTIFACT_SIGNING_ACCOUNT, profile $env:ARTIFACT_SIGNING_PROFILE"
-          Write-Host "expected signer: $env:WINDOWS_SIGNER_SUBJECT; FlashNetwork.dll signed: $(if ($env:EDGESLICER_SIGN_FLASHNETWORK -eq '1') { 'yes' } else { 'no (left unsigned)' })"
+          Write-Host "expected signer: (set); FlashNetwork.dll signed: $(if ($env:EDGESLICER_SIGN_FLASHNETWORK -eq '1') { 'yes' } else { 'no (left unsigned)' })"
 
       - name: Signing - install pinned signtool and Artifact Signing dlib
         if: env.EDGESLICER_SIGN_WINDOWS == '1'
