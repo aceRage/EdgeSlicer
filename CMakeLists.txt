@@ -1309,7 +1309,7 @@ SnapmakerOrcaPre_close:
 
   StrCmp $0 "" SnapmakerOrcaPre_finish
 
-  MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "A previous version (EdgeSlicer, UltraOne or Snapmaker-Ultra) is already installed.$\n$\nDo you want to uninstall the old version before installing the new one?" /SD IDYES IDYES SnapmakerOrcaPre_uninst IDNO SnapmakerOrcaPre_finish
+  MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "A previous version of EdgeSlicer is already installed.$\n$\nDo you want to uninstall the old version before installing the new one?" /SD IDYES IDYES SnapmakerOrcaPre_uninst IDNO SnapmakerOrcaPre_finish
   Abort
 
 SnapmakerOrcaPre_uninst:
