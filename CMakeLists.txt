@@ -1095,7 +1095,8 @@ if (WIN32)
     #
     #   -DFLASHNETWORK_BIN_DIR=C:/path/to/flashnetwork_out/ship
     #
-    # The library is redistributed unmodified; see docs/superpowers/specs/2026-09-11-flashforge-lan-ship.md
+    # The library is redistributed unmodified (Windows release signing leaves it unsigned unless the
+    # owner opts in, see docs/windows-signing.md); see docs/superpowers/specs/2026-09-11-flashforge-lan-ship.md
     # for its provenance (Flash Studio Desktop 1.7.13) and the sha256 it is pinned to. It is x64 and
     # needs only the MSVC runtime we already ship, so no companion DLLs travel with it.
     #
@@ -1133,7 +1134,8 @@ if (WIN32)
     #
     # The build is **LGPL-3.0** (BtbN/FFmpeg-Builds, --disable-libx264 --disable-libx265), chosen
     # over a GPL one so the tool carries no copyleft stronger than the app's own AGPL-3.0. It is
-    # redistributed unmodified as a separate executable that the hub invokes as a subprocess; its
+    # redistributed unmodified (apart from the Authenticode signature Windows release builds add,
+    # docs/windows-signing.md) as a separate executable that the hub invokes as a subprocess; its
     # LICENSE.txt ships beside it and it is listed in CopyrightsDialog::fill_entries(). See
     # docs/superpowers/specs/2026-09-12-bundled-ffmpeg.md for the pinned release tag, the sha256,
     # and why the H.264 encoder is libopenh264 rather than libx264.
@@ -1457,4 +1459,6 @@ FunctionEnd
     file(WRITE "${_snapmaker_nsis_tpl_dir}/NSIS.template.in" "${_snapmaker_nsis_tpl}")
     list(PREPEND CMAKE_MODULE_PATH "${_snapmaker_nsis_tpl_dir}")
 endif ()
+# Authenticode signing hooks (option EDGESLICER_SIGN_WINDOWS, default OFF: adds nothing).
+include(${CMAKE_SOURCE_DIR}/cmake/signing/WindowsSigning.cmake)
 include(CPack)
