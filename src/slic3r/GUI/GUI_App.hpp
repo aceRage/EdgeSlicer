@@ -377,6 +377,9 @@ private:
     // Signed out in this app: the token and account details are dropped, and the Account menu and
     // the pages are told (only when there was something to drop).
     void            sm_sign_out_locally();
+    // Deletes id.snapmaker.com's session cookies from the shared browser profile (only those), so
+    // the next sign-in shows the form instead of handing back the same session. `why` is logged.
+    void            sm_clear_web_session(const char* why);
 
     // Bambu Lab startup sync (BambuSyncPolicy.hpp, PresetUpdater::sync_bambu): started at most once
     // per session, as soon as a Bambu printer or a Bambu login exists. Until then this timer looks

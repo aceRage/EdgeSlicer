@@ -156,6 +156,13 @@ AccountAnswer read_account_answer(unsigned http_status, const std::string& body)
     return a;
 }
 
+std::vector<std::string> session_cookie_names() { return {"login_access_token", "login_refresh_token"}; }
+
+std::string session_cookie_uri(bool china_region)
+{
+    return china_region ? "https://id.snapmaker.cn/" : "https://id.snapmaker.com/";
+}
+
 const char* outcome_name(Outcome o)
 {
     switch (o) {

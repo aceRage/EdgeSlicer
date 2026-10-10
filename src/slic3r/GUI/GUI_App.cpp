@@ -5760,6 +5760,8 @@ void GUI_App::sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentR
             app_config->set_bool(SMSilentLogin::k_session_key, false);
         sm_sign_out_locally();
         sm_finish_silent_login(SMSilentLogin::log_line(o, "account lookup: " + a.why));
+        if (a.rejected)
+            sm_clear_web_session("startup session refused");
     });
 }
 
@@ -5802,6 +5804,17 @@ void GUI_App::sm_sign_out_locally()
         m_login_userinfo.set_user_login(false); // notify: Account menu and pages say signed out
 }
 
+void GUI_App::sm_clear_web_session(const char* why)
+{
+    const bool china = app_config != nullptr && app_config->get_country_code().find("CN") != std::string::npos;
+    // Elsewhere than Windows the cookies go by script, from a view showing id.snapmaker.com.
+    wxWebView* page = sm_login_dlg != nullptr ? sm_login_dlg->browser() :
+                      sm_silent_login_dlg != nullptr ? sm_silent_login_dlg->browser() : nullptr;
+    const bool done = WebView::DeleteSiteCookies(SMSilentLogin::session_cookie_names(), SMSilentLogin::session_cookie_uri(china), page);
+    BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: web session cookies " << (done ? "cleared" : "not cleared (no web view)")
+                               << " (" << why << ")";
+}
+
 void GUI_App::sm_finish_sign_in(const std::string& token, const std::string& user_info_url, bool shown)
 {
     const unsigned gen = m_sm_signin_gen;
@@ -5823,6 +5836,10 @@ void GUI_App::sm_finish_sign_in(const std::string& token, const std::string& use
             app_config->set_bool(SMSilentLogin::k_session_key, false);
         sm_sign_out_locally();
         BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: not signed in (account lookup: " << a.why << ")";
+        // A refused session would come straight back at the next try (the window flashes and
+        // closes): drop it, so the next sign-in shows the form.
+        if (a.rejected)
+            sm_clear_web_session("session refused");
         flush_logs();
         if (shown && mainframe != nullptr && !m_is_closing) {
             const wxString msg = a.rejected ?
@@ -5870,6 +5887,8 @@ void GUI_App::sm_request_user_logout()
     // The token is dropped with the rest of the account (it used to stay in memory after a sign-out).
     const std::string token = m_login_userinfo.get_user_token();
     sm_sign_out_locally();
+    // Signing out also ends the web session; before, the next sign-in got it straight back.
+    sm_clear_web_session("signed out");
     // Nothing to revoke without a token: a page asking to sign out somebody who never signed in
     // must not reach Snapmaker either.
     if (token.empty())

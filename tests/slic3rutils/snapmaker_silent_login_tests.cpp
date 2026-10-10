@@ -259,3 +259,13 @@ TEST_CASE("silent login: a refused session signs out and stops startup attempts"
     CHECK(log_line(Outcome::Rejected, "account lookup: rejected: code 110002 (Missing authorization)") ==
           "Snapmaker silent login: session rejected (account lookup: rejected: code 110002 (Missing authorization))");
 }
+
+TEST_CASE("web session: only Snapmaker's own session cookies are named for deletion", "[SMSilentLogin]")
+{
+    const std::vector<std::string> names = session_cookie_names();
+    REQUIRE(names.size() == 2);
+    CHECK(names[0] == "login_access_token");
+    CHECK(names[1] == "login_refresh_token");
+    CHECK(session_cookie_uri(false) == "https://id.snapmaker.com/");
+    CHECK(session_cookie_uri(true) == "https://id.snapmaker.cn/");
+}

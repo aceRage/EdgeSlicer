@@ -2,6 +2,7 @@
 #define slic3r_SnapmakerSilentLogin_hpp_
 
 #include <string>
+#include <vector>
 
 // Silent Snapmaker sign-in at startup (GUI_App::sm_start_silent_login, SMUserLogin's silent mode).
 // The login state itself lives only in memory; what survives a restart is the id.snapmaker.com
@@ -92,6 +93,14 @@ struct AccountAnswer
     bool        rejected = false;
 };
 AccountAnswer read_account_answer(unsigned http_status, const std::string& body);
+
+// The cookies id.snapmaker.com keeps its web session in (its sign-in page's setCookies, domain
+// .snapmaker.com / .snapmaker.cn). While they exist the page hands that session straight back to
+// the slicer, so the sign-in window closes at once. After a refused session and on sign-out they
+// are deleted (only these, never the shared browser profile), so the next sign-in shows the form.
+std::vector<std::string> session_cookie_names();
+// The address those cookies are sent to: https://id.snapmaker.com/ (or .cn for the China region).
+std::string session_cookie_uri(bool china_region);
 
 enum class Outcome
 {

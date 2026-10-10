@@ -60,6 +60,7 @@ public:
     // Silent mode only: stop the watchdog and drop the callback (teardown / cancel).
     void stop_silent();
     bool is_silent() const { return m_silent; }
+    wxWebView *browser() const { return m_browser; }
 
     // Both paths end here once the account service accepted the token (SMSilentLogin::
     // read_account_answer said ok): fills GUI_App::SMUserInfo and marks the user signed in. Must
