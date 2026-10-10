@@ -124,6 +124,9 @@
 #include <set>
 #include <cwctype>
 #include "PluginGuard.hpp"
+#include "slic3r/Utils/PluginLoadDiagnostics.hpp"
+#include "slic3r/Utils/VendorConnector.hpp"
+#include "HomePanel.hpp"
 #include "PresetMirror.hpp"
 #include "Tab.hpp"
 #include "SysInfoDialog.hpp"
@@ -1434,7 +1437,9 @@ void GUI_App::post_init()
             %this->init_params->input_files.size() %this->init_params->input_gcode;
         const auto first_url = this->init_params->input_files.front();
         if (this->init_params->input_files.size() == 1 && is_supported_open_protocol(first_url)) {
-            switch_to_3d = true;
+            // A connector link shows Home > Vendors: no model is loaded, so the usual start-up applies.
+            std::string connector_url;
+            switch_to_3d = !Vendors::parse_connector_link(first_url, connector_url);
             start_download(first_url);
             m_open_method = "url";
         } else {
@@ -1863,7 +1868,7 @@ std::string GUI_App::get_plugin_url(std::string name, std::string country_code)
 {
     std::string url = get_http_url(country_code);
 
-    std::string curr_version = NetworkAgent::use_legacy_network ? BAMBU_NETWORK_AGENT_VERSION_LEGACY : BAMBU_NETWORK_AGENT_VERSION;
+    std::string curr_version = NetworkAgent::expected_version();
     std::string using_version = curr_version.substr(0, 9) + "00";
     if (name == "cameratools")
         using_version = curr_version.substr(0, 6) + "00.00";
@@ -1920,7 +1925,7 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
     tmp_path += format(".%1%%2%", get_current_pid(), ".tmp");
 
 #if defined(__WINDOWS__)
-    if (is_running_on_arm64() && !NetworkAgent::use_legacy_network) {
+    if (is_running_on_arm64()) {
         //set to arm64 for plugins
         std::map<std::string, std::string> current_headers = Slic3r::Http::get_extra_headers();
         current_headers["X-BBL-OS-Type"] = "windows_arm";
@@ -1988,7 +1993,7 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
         }).perform_sync();
 
 #if defined(__WINDOWS__)
-    if (is_running_on_arm64() && !NetworkAgent::use_legacy_network) {
+    if (is_running_on_arm64()) {
         //set back
         std::map<std::string, std::string> current_headers = Slic3r::Http::get_extra_headers();
         current_headers["X-BBL-OS-Type"] = "windows";
@@ -2345,13 +2350,25 @@ bool GUI_App::check_networking_version()
     if (!network_ver.empty()) {
         BOOST_LOG_TRIVIAL(info) << "get_network_agent_version=" << network_ver;
     }
-    std::string studio_ver = NetworkAgent::use_legacy_network ? BAMBU_NETWORK_AGENT_VERSION_LEGACY : BAMBU_NETWORK_AGENT_VERSION;
-    if (network_ver.length() >= 8) {
-        if (network_ver.substr(0,8) == studio_ver.substr(0,8)) {
-            m_networking_compatible = true;
-            return true;
-        }
+    // Only the current plug-in version is accepted: EdgeSlicer ships one network plug-in, and the
+    // old "legacy_networking" switch no longer selects another expected version.
+    const std::string studio_ver = NetworkAgent::expected_version();
+    if (NetworkAgent::is_compatible_version(network_ver)) {
+        m_networking_compatible = true;
+        return true;
     }
+
+    // The library loaded but reports a version this EdgeSlicer cannot use (or none: "00.00.00.00"
+    // is what get_version() answers for a debug/release mismatch or a missing export).
+    BOOST_LOG_TRIVIAL(warning) << "[plugin] network plug-in rejected: it reports version \"" << network_ver
+                               << "\" but this EdgeSlicer needs \"" << studio_ver << "\" (first 8 characters must match)";
+    PluginLoadFailure rejected;
+    rejected.kind        = PluginLoadFailureKind::Incompatible;
+    rejected.detail           = "version " + network_ver + ", expected " + studio_ver;
+    rejected.found_version    = network_ver;
+    rejected.expected_version = studio_ver;
+    rejected.file_exists = true;
+    record_plugin_load_failure(rejected);
 
     m_networking_compatible = false;
     return false;
@@ -3747,8 +3764,16 @@ bool GUI_App::on_init_inner()
         }
     } catch (...) {}
 
-    // Orca: select network plugin version
-    NetworkAgent::use_legacy_network = app_config->get_bool("legacy_networking");
+    // EdgeSlicer ships one network plug-in. The Orca "legacy_networking" switch (it made the
+    // version check expect the old 01.10 ABI, so UltraNet was rejected on every start) is ignored,
+    // and reset so nothing else reads it either. Its Preferences switch is gone, so a stale true
+    // could otherwise never be undone.
+    NetworkAgent::use_legacy_network = false;
+    if (app_config->get_bool("legacy_networking")) {
+        BOOST_LOG_TRIVIAL(warning) << "[plugin] ignoring legacy_networking=true (EdgeSlicer ships one network plug-in)";
+        app_config->set_bool("legacy_networking", false);
+        app_config->save();
+    }
     // Force legacy network plugin if debugger attached
     // See https://github.com/bambulab/BambuStudio/issues/6726
     /* if (!NetworkAgent::use_legacy_network) {
@@ -3947,6 +3972,11 @@ bool GUI_App::on_init_inner()
             this->post_init();
 
             update_publish_status();
+            if (!m_pending_connector_link.empty()) {
+                const std::string link = std::move(m_pending_connector_link);
+                m_pending_connector_link.clear();
+                open_connector_link(link);
+            }
         }
 
         if (m_post_initialized && app_config->dirty() && app_config->save_due())
@@ -4123,6 +4153,7 @@ __retry:
     }
 
     if (create_network_agent) {
+        clear_plugin_load_failure(); // everything loaded (possibly from the backup folder): nothing to report
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", create network agent...");
         //std::string data_dir = wxStandardPaths::Get().GetUserDataDir().ToUTF8().data();
         std::string data_directory = data_dir();
@@ -5038,6 +5069,53 @@ wxString GUI_App::network_plugin_missing_text()
               "Reinstall EdgeSlicer to restore it.");
 }
 
+// The message for "the plug-in is installed but there is no network agent". A restart only helps
+// when nothing failed (the plug-in was copied in after start-up's load point); every other cause
+// repeats on each start, so the text says what actually went wrong (NetworkAgent recorded it, with
+// the Windows error code, when LoadLibrary failed).
+wxString GUI_App::network_plugin_not_loaded_text(bool *load_failed)
+{
+    const PluginLoadFailure failure = last_plugin_load_failure();
+
+    // Is the file that failed to load there now? The first-run copy runs after the load point, so a
+    // "missing" failure followed by a file on disk is the restart case after all.
+    bool          exists_now = false;
+    std::uint64_t size_now   = 0;
+    plugin_file_facts(failure.library, exists_now, size_now);
+
+    const PluginLoadMessage kind = plugin_load_message(failure.kind, exists_now, size_now);
+    if (load_failed)
+        *load_failed = kind != PluginLoadMessage::Restart;
+    if (kind != PluginLoadMessage::Restart)
+        BOOST_LOG_TRIVIAL(warning) << "[plugin] network plug-in not loaded: error=" << plugin_load_error_text(failure)
+                                   << " file=" << failure.library << " detail=" << failure.detail;
+
+    const wxString code = wxString::FromUTF8(plugin_load_error_text(failure));
+    switch (kind) {
+    case PluginLoadMessage::Blocked:
+        return wxString::Format(_L("Windows blocked EdgeSlicer's network plug-in (a security policy such as Smart App Control, or antivirus software). "
+                                   "Allow the EdgeSlicer folder in your antivirus, or check Windows Security > App & browser control > Smart App Control, "
+                                   "then restart EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::MissingDependency:
+        return wxString::Format(_L("The network plug-in could not load because a Windows component is missing (usually the Microsoft Visual C++ Redistributable). "
+                                   "Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::MissingFile:
+        return wxString::Format(_L("The network plug-in is missing or damaged, possibly removed by antivirus. Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::BadImage:
+        return wxString::Format(_L("The network plug-in is damaged or for a different system. Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::Incompatible:
+        return wxString::Format(_L("The network plug-in does not match this version of EdgeSlicer (plug-in version %s, needed %s). "
+                                   "Reinstall EdgeSlicer, and send the log (Help > Export Logs) if it keeps happening."),
+                                wxString::FromUTF8(failure.found_version), wxString::FromUTF8(failure.expected_version));
+    case PluginLoadMessage::Other:
+        return wxString::Format(_L("The network plug-in could not be loaded (error %s). Reinstall EdgeSlicer, "
+                                   "and send the log (Help > Export Logs) if it keeps happening."), code);
+    case PluginLoadMessage::Restart:
+        break;
+    }
+    return _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again.");
+}
+
 // EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). This is what every
 // former "offer the download" entry point does instead; see PluginGuard.hpp for when it speaks.
 void GUI_App::ShowNetworkPluginMissing(bool user_requested)
@@ -5086,10 +5164,11 @@ void GUI_App::ShowUserLoginGuarded()
     }
 
     if (action == LoginGuardAction::RestartRequired) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no agent but UltraNet is installed, asking for a restart";
-        MessageDialog dlg(nullptr,
-                          _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again."),
-                          _L("Sign in to Bambu Lab"), wxOK | wxICON_INFORMATION);
+        bool load_failed = false;
+        const wxString text = network_plugin_not_loaded_text(&load_failed);
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no agent but UltraNet is installed, "
+                                << (load_failed ? "the plug-in failed to load this session" : "asking for a restart");
+        MessageDialog dlg(nullptr, text, _L("Sign in to Bambu Lab"), load_failed ? (wxOK | wxICON_ERROR) : (wxOK | wxICON_INFORMATION));
         dlg.ShowModal();
         return;
     }
@@ -8363,6 +8442,11 @@ void GUI_App::MacOpenURL(const wxString& url)
     // post_init() decides whether to start a blank project based on init_params->input_files,
     // which is always empty here: macOS launches the app first and delivers the URL afterwards.
     // Without this flag post_init resets the project that this download is about to load.
+    std::string connector_url;
+    if (Vendors::parse_connector_link(into_u8(url), connector_url)) {
+        start_download(into_u8(url)); // Home > Vendors, not a model: the blank project is still wanted
+        return;
+    }
     m_url_open_pending = true;
     start_download(into_u8(url));
 }
@@ -9393,8 +9477,34 @@ bool GUI_App::is_web_download(const boost::filesystem::path& path) const
     return !path.empty() && m_web_downloads.count(web_download_key(path)) > 0;
 }
 
+void GUI_App::open_connector_link(const std::string& url)
+{
+    if (!m_post_initialized) {
+        m_pending_connector_link = url;
+        return;
+    }
+    if (mainframe == nullptr || mainframe->m_home == nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "Connector link: there is no Home tab to open it in.";
+        show_error(nullptr, _u8L("The connector link could not be opened because the Home tab is not available."));
+        return;
+    }
+    // After the event that delivered the link (and, at start-up, after post_init) is done: it opens dialogs.
+    CallAfter([this, url]() {
+        if (mainframe == nullptr || mainframe->m_home == nullptr)
+            return;
+        mainframe->Raise();
+        mainframe->select_tab(size_t(MainFrame::tpHome));
+        mainframe->m_home->open_connector_link(url);
+    });
+}
+
 void GUI_App::start_download(std::string url)
 {
+    std::string connector_url;
+    if (Vendors::parse_connector_link(url, connector_url)) {
+        open_connector_link(connector_url);
+        return;
+    }
     if (!plater_) {
         BOOST_LOG_TRIVIAL(error) << "Could not start URL download: plater is nullptr.";
         return;

@@ -123,6 +123,59 @@ using HttpFn = std::function<Response(const Request&)>;
 Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url, bool credentials,
                const std::function<bool(const char*, size_t)>& sink = nullptr, int max_redirects = 5);
 
+// ---- Importing a connector somebody shared (a file, a pasted text, a link) ----
+// A connector that came from outside is checked more strictly than one the user typed: it is always
+// a NEW connector (any "id" is dropped), it must not carry a credential (the format has no place for
+// one: credentials are set with Credentials > Set and live in the system credential store), and the
+// JSON that is saved is rebuilt from the checked spec, so nothing the checker did not look at is kept.
+constexpr size_t IMPORT_MAX_BYTES = 256 * 1024;
+struct ImportResult
+{
+    bool           ok { false };
+    bool           credentials { false }; // refused because the JSON holds a credential
+    std::string    error;                 // for the user
+    Spec           spec;                  // its id is empty
+    nlohmann::json json;                  // spec_to_json(spec) without "id": what to save
+};
+ImportResult import_check(const std::string& text);
+
+// A link a connector may be fetched from: https only, the default port, no user:password@, a host
+// NAME on the public internet (no localhost, no single-label or .local/.internal/.lan names, no IP
+// address in any spelling). `error` says why not. (A name that resolves to a private address is not
+// caught here: only the HTTP layer sees the address.)
+bool is_importable_link(const std::string& url, std::string* error = nullptr);
+
+// GET the connector text behind `url` through `http`: no credentials or cookies, every hop of up to
+// 3 redirects checked with is_importable_link(), a 2xx answer, at most IMPORT_MAX_BYTES. false with
+// `error` (for the user) otherwise.
+bool fetch_connector_text(const HttpFn& http, const std::string& url, std::string& text, std::string& error);
+
+// "edgeslicer://connector?url=<percent-encoded https url>" -> the url (decoded, not yet checked).
+bool parse_connector_link(const std::string& link, std::string& url);
+
+// ---- Importing something the user already has: update it or add a second one ----
+// The connectors an imported one would replace: the same name (case and surrounding spaces ignored),
+// or the same non-empty vendor on the same API origin when the names differ. Indices into `existing`.
+std::vector<size_t> find_matching(const std::vector<Spec>& existing, const Spec& imported);
+// scheme://host[:port] of an address, lower case, without the default https port.
+std::string api_origin(const std::string& url);
+// What an update of `old_spec` by `imported` does. An update keeps the old connector's id (so its
+// secrets in the credential store stay attached) and nothing else of it.
+struct UpdatePlan
+{
+    bool                     origin_changed { false }; // the saved credentials would go to another site
+    std::string              old_origin, new_origin;
+    std::vector<std::string> keep_slots;               // secret_slots() keys that stay stored
+    std::vector<std::string> drop_slots;               // keys whose slot is gone or now asks for something else: forget them
+    bool                     reset_cache { false };    // it reads another list (address, list path, items, query): drop what was fetched
+    bool                     needs_full { false };     // needs_full_fetch(old, imported)
+};
+UpdatePlan plan_update(const Spec& old_spec, const Spec& imported);
+// True when changing `old_spec` into `now` changes how items are read from the same answers (address,
+// list, paging, since, fields, files, download, licence): what was fetched must be read again, in full.
+// Credentials, sign-in, headers, quota and the name do not.
+bool needs_full_fetch(const Spec& old_spec, const Spec& now);
+
 struct SubItem
 {
     std::string              id, name, variant;
@@ -159,6 +212,9 @@ struct Cache
     int64_t           synced_at { 0 };
     Quota             quota;
     std::string       last_error;
+    // The connector's settings changed in a way that affects how items are read: the next sync
+    // fetches every model again (an incremental one would keep the old reading of unchanged ones).
+    bool needs_full { false };
 };
 nlohmann::json cache_to_json(const Cache& c);
 Cache          cache_from_json(const nlohmann::json& j);
@@ -222,6 +278,16 @@ std::string    fill_template(const std::string& templ, const nlohmann::json& ite
 
 // Items mapped from one parsed response page.
 std::vector<Item> map_items(const Spec& spec, const nlohmann::json& page);
+
+// The model file extension a name ends with, lower case with its dot: ".3mf" ".stl" ".step" ".stp"
+// ".obj" ".amf" ".zip", or ".gcode.3mf" as one extension; "" when it ends with none.
+std::string model_extension(const std::string& name);
+// The default name of a downloaded file from the vendor's label for it (which may itself end in
+// ".3mf") and the extension the download address gave ("" = it gave none: an indirect download).
+// The extension is the address's, else the label's, else ".3mf"; it is never doubled. `sanitize`
+// (optional) cleans the base name for the file system before the extension is added.
+std::string download_file_name(const std::string& label, const std::string& url_ext,
+                               const std::function<std::string(std::string)>& sanitize = nullptr);
 
 // CSV of the items, one row per file (one row for an item without files): UTF-8, RFC 4180 quoting,
 // and a cell that a spreadsheet would run as a formula (= + - @ tab CR) prefixed with '.

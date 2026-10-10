@@ -1241,35 +1241,25 @@ set (CPACK_NSIS_MUI_UNIICON "${CPACK_PACKAGE_ICON}")
 set (CPACK_NSIS_INSTALLED_ICON_NAME "$INSTDIR\\\\EdgeSlicer.exe")
 set(CPACK_NSIS_UNINSTALL_NAME "Uninstall")
 # Preinstall guard in one place:
-# 1) Block while app is running.
-# 2) If old version exists, uninstall it with clear failure reason.
+# 1) Find the previous install (its folder is also scanned below).
+# 2) Close every EdgeSlicer process that runs from the new or the previous install folder:
+#    the phone/camera hub (`EdgeSlicer.exe --hub`) and its go2rtc / ffmpeg, which run headless
+#    and used to make the old tasklist check say "EdgeSlicer is still running" with nothing to
+#    close. A window the user has open is asked about, never killed. See SnapmakerCloseRunning.nsh.
+#    This comes BEFORE the old uninstaller runs: that one is the old version's code and only
+#    deletes files, it cannot cope with a hub holding them.
+# 3) If an old version exists, uninstall it with clear failure reason.
 # We keep this in EXTRA_PREINSTALL because CPack's default .onInit uninstall prompt runs before section logic.
 set(CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS [=[
-SnapmakerOrcaPre_check_loop:
-  ; Three arms: the name we ship now, and the two names this fork shipped under before the
-  ; binary rename. An upgrade over either old install must still be blocked while it runs.
-  ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq EdgeSlicer.exe" 2>nul | find /i "EdgeSlicer.exe" >nul' $0
-  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_try_legacy1 SnapmakerOrcaPre_try_legacy1
-SnapmakerOrcaPre_try_legacy1:
-  ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq snapmaker-orca.exe" 2>nul | find /i "snapmaker-orca.exe" >nul' $0
-  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_try_legacy2 SnapmakerOrcaPre_try_legacy2
-SnapmakerOrcaPre_try_legacy2:
-  ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq Snapmaker_Orca.exe" 2>nul | find /i "Snapmaker_Orca.exe" >nul' $0
-  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_idle SnapmakerOrcaPre_idle
-SnapmakerOrcaPre_idle:
-  Goto SnapmakerOrcaPre_done
-SnapmakerOrcaPre_in_use:
-  IfSilent SnapmakerOrcaPre_silent SnapmakerOrcaPre_prompt
-SnapmakerOrcaPre_silent:
-  SetErrorLevel 7
-  Quit
-SnapmakerOrcaPre_prompt:
-  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "EdgeSlicer is still running.$\nClose the program, then click Retry to continue, or Cancel to exit the installer." IDRETRY SnapmakerOrcaPre_check_loop
-  Abort
-SnapmakerOrcaPre_done:
-  ; Only look for a previous install of OURS - never touch the official Snapmaker Orca entry.
-  ; Every name this fork has shipped under is checked, newest first, so the first EdgeSlicer
-  ; installer still finds an UltraOne or a Snapmaker-Ultra install and offers to remove it.
+  ; The closer script travels inside the installer; the uninstaller gets its own copy (see
+  ; SnapmakerURLProtocols_install.nsh) because it cannot extract files.
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\close_edgeslicer.ps1" "@SNORCA_CLOSER_PS1@"
+
+  ; Where was the previous install? Every name this fork has shipped under is checked, newest
+  ; first, so the first EdgeSlicer installer still finds an UltraOne or a Snapmaker-Ultra install
+  ; and offers to remove it. Only look for a previous install of OURS - never touch the official
+  ; Snapmaker Orca entry.
   ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\EdgeSlicer" "UninstallString"
   StrCmp $0 "" 0 +2
   ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\UltraOne" "UninstallString"
@@ -1283,13 +1273,10 @@ SnapmakerOrcaPre_read_hkcu_uninst:
   StrCmp $0 "" 0 +2
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Snapmaker-Ultra" "UninstallString"
 SnapmakerOrcaPre_has_uninst:
-  StrCmp $0 "" SnapmakerOrcaPre_finish
-
-  MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "A previous version (EdgeSlicer, UltraOne or Snapmaker-Ultra) is already installed.$\n$\nDo you want to uninstall the old version before installing the new one?" /SD IDYES IDYES SnapmakerOrcaPre_uninst IDNO SnapmakerOrcaPre_finish
-  Abort
-
-SnapmakerOrcaPre_uninst:
-  ClearErrors
+  ; $0 = the old uninstaller's path (quotes trimmed), $3 = the old install folder. Both "" when
+  ; there is no previous install.
+  StrCpy $3 ""
+  StrCmp $0 "" SnapmakerOrcaPre_close
   StrCpy $2 $0 1 0
   StrCmp $2 "$\"" SnapmakerOrcaPre_trim_first_quote SnapmakerOrcaPre_check_last_quote
 SnapmakerOrcaPre_trim_first_quote:
@@ -1300,18 +1287,33 @@ SnapmakerOrcaPre_check_last_quote:
 SnapmakerOrcaPre_trim_last_quote:
   StrCpy $0 $0 -1
 SnapmakerOrcaPre_have_uninst_path:
-
   StrLen $2 "Uninstall.exe"
   StrCpy $3 $0 -$2
-  ; $3 ends with "\" (e.g. ...\Snapmaker_Orca\). _?="...\" breaks Windows cmdline parsing
-  ; (\" escapes the closing quote), truncating _?= at the first space — strip trailing backslashes.
+  ; $3 ends with "\" (e.g. ...\Snapmaker_Orca\). _?=$DIR breaks Windows cmdline parsing with
+  ; a trailing backslash (\" escapes the closing quote), so strip trailing backslashes.
 SnapmakerOrcaPre_trim_inst_slash:
   StrCpy $2 $3 1 -1
-  StrCmp $2 "\" SnapmakerOrcaPre_do_trim_slash SnapmakerOrcaPre_trim_slash_done
+  StrCmp $2 "\" SnapmakerOrcaPre_do_trim_slash SnapmakerOrcaPre_close
 SnapmakerOrcaPre_do_trim_slash:
   StrCpy $3 $3 -1
   Goto SnapmakerOrcaPre_trim_inst_slash
-SnapmakerOrcaPre_trim_slash_done:
+
+SnapmakerOrcaPre_close:
+  StrCpy $R0 "$INSTDIR"
+  StrCmp $3 "" +2
+    StrCpy $R0 "$INSTDIR|$3"
+  StrCpy $R1 "$PLUGINSDIR\close_edgeslicer.ps1"
+  Call EdgeSlicerCloseRunning
+  StrCmp $R9 "0" +2
+    Abort
+
+  StrCmp $0 "" SnapmakerOrcaPre_finish
+
+  MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "A previous version (EdgeSlicer, UltraOne or Snapmaker-Ultra) is already installed.$\n$\nDo you want to uninstall the old version before installing the new one?" /SD IDYES IDYES SnapmakerOrcaPre_uninst IDNO SnapmakerOrcaPre_finish
+  Abort
+
+SnapmakerOrcaPre_uninst:
+  ClearErrors
   IfFileExists "$0" 0 SnapmakerOrcaPre_uninst_launch_failed
   ; Same as CMake CPack NSIS.template.in and NSIS maintainer guidance: use _?=$DIR with NO
   ; extra quotes around the directory. _?="C:\Program Files\..." breaks parsing (log shows
@@ -1330,8 +1332,35 @@ SnapmakerOrcaPre_uninst_launch_failed:
 
 SnapmakerOrcaPre_finish:
 ]=])
+# The closer script path, as the NSIS File command wants it, goes in where the token is.
+file(TO_NATIVE_PATH "${CMAKE_SOURCE_DIR}/cmake/nsis/close_edgeslicer.ps1" SNORCA_CLOSER_PS1)
+string(REPLACE "@SNORCA_CLOSER_PS1@" "${SNORCA_CLOSER_PS1}" CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS "${CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS}")
+# Function definitions (EdgeSlicerCloseRunning and its un. twin) go to the top level of the script.
+file(READ "${CMAKE_SOURCE_DIR}/cmake/nsis/SnapmakerCloseRunning.nsh" CPACK_NSIS_DEFINES)
 file(READ "${CMAKE_SOURCE_DIR}/cmake/nsis/SnapmakerURLProtocols_install.nsh" CPACK_NSIS_EXTRA_INSTALL_COMMANDS)
 file(READ "${CMAKE_SOURCE_DIR}/cmake/nsis/SnapmakerURLProtocols_uninstall.nsh" CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS)
+# The uninstaller cannot extract files, so the installer leaves the closer script next to it.
+# Uninstalling closes the hub the same way installing does, then removes the copy again.
+string(APPEND CPACK_NSIS_EXTRA_INSTALL_COMMANDS [=[
+
+; Copy of the closer script for the uninstaller (see SnapmakerCloseRunning.nsh).
+SetOutPath "$INSTDIR\installer_helpers"
+File "/oname=$INSTDIR\installer_helpers\close_edgeslicer.ps1" "@SNORCA_CLOSER_PS1@"
+SetOutPath "$INSTDIR"
+]=])
+string(REPLACE "@SNORCA_CLOSER_PS1@" "${SNORCA_CLOSER_PS1}" CPACK_NSIS_EXTRA_INSTALL_COMMANDS "${CPACK_NSIS_EXTRA_INSTALL_COMMANDS}")
+string(PREPEND CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS [=[
+; Close the hub (EdgeSlicer.exe --hub), its go2rtc / ffmpeg and anything else running from this
+; folder first, or the delete below leaves the files they hold behind.
+StrCpy $R0 "$INSTDIR"
+StrCpy $R1 "$INSTDIR\installer_helpers\close_edgeslicer.ps1"
+Call un.EdgeSlicerCloseRunning
+StrCmp $R9 "0" +2
+  Abort
+Delete "$INSTDIR\installer_helpers\close_edgeslicer.ps1"
+RMDir "$INSTDIR\installer_helpers"
+
+]=])
 # Desktop shortcut inside MUI_STARTMENU_WRITE_BEGIN: respects "do not create shortcuts" on the start menu page.
 set(CPACK_NSIS_CREATE_ICONS_EXTRA [=[
   SetShellVarContext current
