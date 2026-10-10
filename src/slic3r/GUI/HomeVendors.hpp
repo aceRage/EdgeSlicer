@@ -39,6 +39,9 @@ public:
     void send_state();
     // The Vendor tags of all connectors, for the Library's folder editor.
     std::vector<std::string> vendor_tags() const;
+    // Import a connector from a link (asks for the address first, `preset` pre-fills it; the user
+    // confirms the connector before it is saved). Also the target of edgeslicer://connector?url=...
+    void import_from_link(const std::string& preset);
 
 private:
     struct Connector
@@ -68,8 +71,10 @@ private:
     void save_connector(const nlohmann::json& spec_json);
     void delete_connector(const std::string& id);
     void ask_secret(const std::string& id, const std::string& key);
-    void import_spec();
+    void import_spec(bool pasted);
+    void confirm_import(const std::string& text, const std::string& origin_host);
     void export_spec(const std::string& id);
+    void copy_spec(const std::string& id);
     void export_csv(const nlohmann::json& keys);
     void send_thumbnails(const std::vector<std::string>& keys);
     void download(const std::string& key, const std::string& sub_id);
@@ -92,6 +97,7 @@ private:
     std::shared_ptr<std::atomic<bool>> m_cancel { std::make_shared<std::atomic<bool>>(false) };
     std::set<std::string>              m_thumbs_asked;
     bool                               m_thumbs_busy { false };
+    bool                               m_import_busy { false }; // a link is being fetched
     std::vector<std::string>           m_thumbs_queue;
 };
 

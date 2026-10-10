@@ -106,6 +106,17 @@ HomePanel::~HomePanel()
     *m_library_cancel = true;
 }
 
+void HomePanel::open_connector_link(const std::string& url)
+{
+    show_home();
+    wxGetApp().app_config->set(SECTION_KEY, "vendors");
+    if (m_page_ready)
+        send({{"type", "show_section"}, {"section", "vendors"}});
+    if (!m_vendors)
+        m_vendors = std::make_unique<HomeVendors>(this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); });
+    m_vendors->import_from_link(url);
+}
+
 void HomePanel::ensure_browser()
 {
     if (m_browser != nullptr)
@@ -526,6 +537,10 @@ void HomePanel::send_init()
     s["connector"]         = _u8L("Connector");
     s["add_connector"]     = _u8L("Add connector");
     s["import"]            = _u8L("Import");
+    s["import_file"]       = _u8L("From file...");
+    s["import_link"]       = _u8L("From link...");
+    s["import_paste"]      = _u8L("Paste JSON...");
+    s["copy_json"]         = _u8L("Copy JSON");
     s["export"]            = _u8L("Export");
     s["export_csv"]        = _u8L("Export CSV");
     s["edit"]              = _u8L("Edit");

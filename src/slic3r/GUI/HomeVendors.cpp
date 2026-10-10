@@ -16,6 +16,7 @@
 #include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <random>
@@ -23,7 +24,11 @@
 #include <thread>
 
 #include <wx/clipbrd.h>
+#include <wx/dialog.h>
 #include <wx/filedlg.h>
+#include <wx/sizer.h>
+#include <wx/stattext.h>
+#include <wx/textctrl.h>
 #include <wx/secretstore.h>
 #include <wx/stdpaths.h>
 #include <wx/textdlg.h>
@@ -53,7 +58,7 @@ static std::string lower(std::string s)
 // not followed here: Vendors::fetch() follows them and decides, per hop, whether the connector's
 // credentials go along (curl would pass custom headers to any host). A request with a sink streams
 // its 2xx body there instead of into memory.
-static Vendors::Response http_call(const Vendors::Request& req, size_t limit)
+static Vendors::Response http_call(const Vendors::Request& req, size_t limit, int timeout_seconds = 0)
 {
     Vendors::Response out;
     if (!Vendors::is_allowed_url(req.url)) {
@@ -62,7 +67,7 @@ static Vendors::Response http_call(const Vendors::Request& req, size_t limit)
     }
     std::string raw_headers;
     auto        http = Http::get(req.url);
-    http.clear_headers().follow_redirects(false).timeout_connect(15).timeout_max(limit > LIST_LIMIT ? 1800 : 120).size_limit(limit);
+    http.clear_headers().follow_redirects(false).timeout_connect(15).timeout_max(timeout_seconds > 0 ? timeout_seconds : limit > LIST_LIMIT ? 1800 : 120).size_limit(limit);
     for (const auto& [k, v] : req.headers)
         http.header(k, v);
     if (req.sink)
@@ -483,11 +488,18 @@ bool HomeVendors::handle(const json& msg)
             forget_secrets(c->spec);
             send_state();
         }
-    } else if (command == "vendor_import")
-        import_spec();
-    else if (command == "vendor_export_spec") {
+    } else if (command == "vendor_import") {
+        const std::string source = msg.value("source", std::string("file"));
+        if (source == "link")
+            import_from_link(std::string());
+        else
+            import_spec(source == "paste");
+    } else if (command == "vendor_export_spec") {
         if (find(id))
             export_spec(id);
+    } else if (command == "vendor_copy_spec") {
+        if (find(id))
+            copy_spec(id);
     } else if (command == "vendor_csv") {
         export_csv(msg.contains("keys") ? msg["keys"] : json::array());
     } else if (command == "vendor_thumbs") {
@@ -577,23 +589,161 @@ void HomeVendors::delete_connector(const std::string& id)
     send_state();
 }
 
-void HomeVendors::import_spec()
+// The clipboard's text ("" when it holds none).
+static std::string clipboard_text()
 {
-    wxFileDialog dlg(m_parent, _L("Import a vendor connector"), wxEmptyString, wxEmptyString, "JSON (*.json)|*.json",
-                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    std::string out;
+    if (wxTheClipboard->Open()) {
+        if (wxTheClipboard->IsSupported(wxDF_UNICODETEXT)) {
+            wxTextDataObject data;
+            if (wxTheClipboard->GetData(data))
+                out = into_u8(data.GetText());
+        }
+        wxTheClipboard->Close();
+    }
+    return out;
+}
+
+static std::string host_of_link(const std::string& url)
+{
+    const size_t s = url.find("://");
+    if (s == std::string::npos)
+        return std::string();
+    const size_t e = url.find_first_of("/?#", s + 3);
+    return url.substr(s + 3, e == std::string::npos ? std::string::npos : e - s - 3);
+}
+
+namespace {
+// A multi-line box for a connector's JSON.
+class PasteDialog : public wxDialog
+{
+public:
+    PasteDialog(wxWindow* parent, const wxString& title, const wxString& prompt, const wxString& initial)
+        : wxDialog(parent, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+    {
+        auto* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(new wxStaticText(this, wxID_ANY, prompt), 0, wxALL, FromDIP(10));
+        m_text = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(560), FromDIP(300)),
+                                wxTE_MULTILINE | wxTE_DONTWRAP);
+        m_text->SetMaxLength(Vendors::IMPORT_MAX_BYTES); // a multi-line box stops at 32 KB otherwise
+        m_text->SetValue(initial);
+        sizer->Add(m_text, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
+        sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, FromDIP(10));
+        SetSizerAndFit(sizer);
+        wxGetApp().UpdateDlgDarkUI(this);
+        CentreOnParent();
+        m_text->SetFocus();
+    }
+    wxString value() const { return m_text->GetValue(); }
+
+private:
+    wxTextCtrl* m_text { nullptr };
+};
+} // namespace
+
+void HomeVendors::import_spec(bool pasted)
+{
+    std::string text;
+    if (pasted) {
+        // The clipboard goes in the box when it already is a connector.
+        std::string initial = clipboard_text();
+        if (!Vendors::import_check(initial).ok)
+            initial.clear();
+        PasteDialog dlg(m_parent, _L("Import a vendor connector"), _L("Paste the connector's JSON here."), wxString::FromUTF8(initial));
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        text = into_u8(dlg.value());
+    } else {
+        wxFileDialog dlg(m_parent, _L("Import a vendor connector"), wxEmptyString, wxEmptyString, "JSON (*.json)|*.json",
+                         wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        text = read_file(into_path(dlg.GetPath()), Vendors::IMPORT_MAX_BYTES);
+        if (text.empty()) {
+            notice(_u8L("That file is empty or larger than 256 KB, so it is not a connector."), true);
+            return;
+        }
+    }
+    confirm_import(text, std::string());
+}
+
+void HomeVendors::import_from_link(const std::string& preset)
+{
+    if (m_import_busy)
+        return;
+    std::string initial = preset;
+    if (initial.empty()) {
+        initial = clipboard_text();
+        while (!initial.empty() && std::isspace((unsigned char) initial.back()))
+            initial.pop_back();
+        if (!Vendors::is_importable_link(initial))
+            initial.clear();
+    }
+    wxTextEntryDialog dlg(m_parent, _L("Address (https://) of the connector's JSON file:"), _L("Import a connector from a link"),
+                          wxString::FromUTF8(initial));
+    dlg.SetMinSize(wxSize(m_parent->FromDIP(520), -1));
     if (dlg.ShowModal() != wxID_OK)
         return;
-    const std::string text = read_file(into_path(dlg.GetPath()), 256 * 1024);
-    json              j;
-    try {
-        j = json::parse(text);
-        j.erase("id"); // always a new connector
-        Vendors::spec_from_json(j);
-    } catch (const std::exception& e) {
-        notice(_u8L("That file is not a connector this version can use:") + " " + e.what(), true);
+    std::string url = into_u8(dlg.GetValue());
+    url.erase(0, url.find_first_not_of(" \t\r\n"));
+    url.erase(url.find_last_not_of(" \t\r\n") + 1);
+    std::string why;
+    if (!Vendors::is_importable_link(url, &why)) {
+        notice(_u8L("That link can't be used:") + " " + why, true);
         return;
     }
-    save_connector(j);
+    m_import_busy = true;
+    notice(_u8L("Fetching the connector..."));
+    std::weak_ptr<bool> alive = m_alive;
+    std::thread([this, alive, url]() {
+        // Nothing of ours goes along (no credentials, cookies or app headers); every redirect hop is
+        // checked again by fetch_connector_text().
+        std::string text, error;
+        const bool  ok = Vendors::fetch_connector_text(
+            [](const Vendors::Request& q) { return http_call(q, Vendors::IMPORT_MAX_BYTES + 1, 20); }, url, text, error);
+        wxGetApp().CallAfter([this, alive, ok, text = std::move(text), error = std::move(error), host = host_of_link(url)]() {
+            if (alive.expired())
+                return;
+            m_import_busy = false;
+            if (!ok)
+                notice(_u8L("The connector could not be fetched:") + " " + error, true);
+            else
+                confirm_import(text, host);
+        });
+    }).detach();
+}
+
+// Checks the text (a file, pasted or fetched), shows what it is, and saves it as a new connector once
+// the user agrees. `origin_host` is the site a link came from ("" for a file or pasted text).
+void HomeVendors::confirm_import(const std::string& text, const std::string& origin_host)
+{
+    const Vendors::ImportResult r = Vendors::import_check(text);
+    if (r.credentials) {
+        MessageDialog dlg(m_parent,
+                          _L("This connector contains a credential (a key, token, password or secret value), so it was not imported.\n\n"
+                             "Credentials are never part of a connector. Remove it from the JSON, import the connector, then set the "
+                             "credentials with Credentials > Set."),
+                          _L("Vendors"), wxOK | wxICON_WARNING);
+        dlg.ShowModal();
+        return;
+    }
+    if (!r.ok) {
+        notice(_u8L("That is not a connector this version can use:") + " " + r.error, true);
+        return;
+    }
+    wxString message = wxString::Format(_L("Import the connector \"%s\" for %s?"), wxString::FromUTF8(r.spec.name),
+                                        wxString::FromUTF8(r.spec.base_url));
+    message += "\n\n" + _L("Vendor:") + " " + wxString::FromUTF8(r.spec.vendor.empty() ? r.spec.name : r.spec.vendor) + "\n" +
+               _L("API address:") + " " + wxString::FromUTF8(r.spec.base_url);
+    if (!origin_host.empty())
+        message += "\n" + _L("Fetched from:") + " " + wxString::FromUTF8(origin_host);
+    message += "\n\n" + _L("EdgeSlicer will send the credentials you set for it to that address. Only import connectors from people you trust.");
+    MessageDialog dlg(m_parent, message, _L("Import a vendor connector"), wxYES_NO | wxICON_QUESTION);
+    dlg.SetButtonLabel(wxID_YES, _L("Import"));
+    dlg.SetButtonLabel(wxID_NO, _L("Cancel"));
+    if (dlg.ShowModal() != wxID_YES)
+        return;
+    save_connector(r.json); // a new connector: the JSON has no id and no credential
     notice(_u8L("Connector imported. Set its credentials, then Refresh."));
 }
 
@@ -608,6 +758,19 @@ void HomeVendors::export_spec(const std::string& id)
     j.erase("id");
     if (!write_atomic(into_path(dlg.GetPath()), j.dump(2)))
         notice(_u8L("The file could not be written."), true);
+}
+
+void HomeVendors::copy_spec(const std::string& id)
+{
+    Connector* c = find(id);
+    json       j = Vendors::spec_to_json(c->spec);
+    j.erase("id");
+    if (wxTheClipboard->Open()) {
+        wxTheClipboard->SetData(new wxTextDataObject(wxString::FromUTF8(j.dump(2))));
+        wxTheClipboard->Close();
+        notice(_u8L("Connector JSON copied (without credentials)."));
+    } else
+        notice(_u8L("The clipboard could not be opened."), true);
 }
 
 void HomeVendors::export_csv(const json& keys)

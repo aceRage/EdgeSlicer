@@ -835,6 +835,7 @@
       { label: t('test', 'Test connection'), run: () => post('vendor_test', { id: c.id }) },
       { label: t('edit', 'Edit'), run: () => openEditor(c) },
       { label: t('export', 'Export'), run: () => post('vendor_export_spec', { id: c.id }) },
+      { label: t('copy_json', 'Copy JSON'), run: () => post('vendor_copy_spec', { id: c.id }) },
     ];
     if ((c.slots || []).some((s) => s.set)) menu.push({ label: t('forget', 'Forget credentials'), run: () => post('vendor_forget', { id: c.id }) });
     menu.push('-');
@@ -1427,6 +1428,9 @@
         case 'vendor_thumbs':
           applyVendorThumbs(msg.images || {});
           break;
+        case 'show_section':
+          if (msg.section) showSection(String(msg.section), true);
+          break;
         case 'vendor_notice':
           toast(String(msg.text || ''), !!msg.error);
           break;
@@ -1462,7 +1466,16 @@
   $('history-settings').addEventListener('click', () => post('history_settings'));
   $('lib-manage').addEventListener('click', openFolders);
   $('ven-add').addEventListener('click', () => openEditor(null));
-  $('ven-import').addEventListener('click', () => post('vendor_import'));
+  $('ven-import').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const btn = $('ven-import');
+    if (menuFor === btn) { closeMenu(); return; }
+    openMenu(btn, [
+      { label: t('import_file', 'From file...'), run: () => post('vendor_import', { source: 'file' }) },
+      { label: t('import_link', 'From link...'), run: () => post('vendor_import', { source: 'link' }) },
+      { label: t('import_paste', 'Paste JSON...'), run: () => post('vendor_import', { source: 'paste' }) },
+    ]);
+  });
   $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key) }));
   $('ven-detail-close').addEventListener('click', closeDetail);
   $('ven-detail').addEventListener('click', (e) => { if (e.target === $('ven-detail')) closeDetail(); });

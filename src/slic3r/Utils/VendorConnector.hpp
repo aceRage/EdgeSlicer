@@ -123,6 +123,36 @@ using HttpFn = std::function<Response(const Request&)>;
 Response fetch(const Spec& spec, const Secrets& secrets, const HttpFn& http, const std::string& url, bool credentials,
                const std::function<bool(const char*, size_t)>& sink = nullptr, int max_redirects = 5);
 
+// ---- Importing a connector somebody shared (a file, a pasted text, a link) ----
+// A connector that came from outside is checked more strictly than one the user typed: it is always
+// a NEW connector (any "id" is dropped), it must not carry a credential (the format has no place for
+// one: credentials are set with Credentials > Set and live in the system credential store), and the
+// JSON that is saved is rebuilt from the checked spec, so nothing the checker did not look at is kept.
+constexpr size_t IMPORT_MAX_BYTES = 256 * 1024;
+struct ImportResult
+{
+    bool           ok { false };
+    bool           credentials { false }; // refused because the JSON holds a credential
+    std::string    error;                 // for the user
+    Spec           spec;                  // its id is empty
+    nlohmann::json json;                  // spec_to_json(spec) without "id": what to save
+};
+ImportResult import_check(const std::string& text);
+
+// A link a connector may be fetched from: https only, the default port, no user:password@, a host
+// NAME on the public internet (no localhost, no single-label or .local/.internal/.lan names, no IP
+// address in any spelling). `error` says why not. (A name that resolves to a private address is not
+// caught here: only the HTTP layer sees the address.)
+bool is_importable_link(const std::string& url, std::string* error = nullptr);
+
+// GET the connector text behind `url` through `http`: no credentials or cookies, every hop of up to
+// 3 redirects checked with is_importable_link(), a 2xx answer, at most IMPORT_MAX_BYTES. false with
+// `error` (for the user) otherwise.
+bool fetch_connector_text(const HttpFn& http, const std::string& url, std::string& text, std::string& error);
+
+// "edgeslicer://connector?url=<percent-encoded https url>" -> the url (decoded, not yet checked).
+bool parse_connector_link(const std::string& link, std::string& url);
+
 struct SubItem
 {
     std::string              id, name, variant;

@@ -1102,5 +1102,256 @@ std::string to_csv(const std::string& connector, const std::string& vendor, cons
     return out;
 }
 
+// ------------------------------------------------------------------------------ import ----
+
+// A key that names a credential. Nothing the connector format itself uses matches (no key of the
+// format has "token", "secret", "password"... in it), so a match is somebody's secret.
+static bool is_secret_name(const std::string& name)
+{
+    const std::string l = lower(name);
+    for (const char* w : {"token", "secret", "password", "passwd", "api_key", "api-key", "apikey", "authorization", "credential", "bearer"})
+        if (l.find(w) != std::string::npos)
+            return true;
+    return false;
+}
+
+static bool has_value(const json& v)
+{
+    if (v.is_null() || v.is_boolean())
+        return false;
+    if (v.is_string())
+        return !trim(v.get<std::string>()).empty();
+    if (v.is_object() || v.is_array())
+        return !v.empty();
+    return true;
+}
+
+static bool scan_secret_keys(const json& j, int depth)
+{
+    if (depth > 32)
+        return true; // nothing legitimate is nested this deep
+    if (j.is_object()) {
+        for (auto it = j.begin(); it != j.end(); ++it)
+            if ((is_secret_name(it.key()) && has_value(it.value())) || scan_secret_keys(it.value(), depth + 1))
+                return true;
+    } else if (j.is_array()) {
+        for (const json& v : j)
+            if (scan_secret_keys(v, depth + 1))
+                return true;
+    }
+    return false;
+}
+
+// True when `j` carries a credential value anywhere the format could hold one.
+static bool holds_credential(const json& j)
+{
+    if (scan_secret_keys(j, 0))
+        return true;
+    // The sign-in block says how the key is sent (type, name); nothing else belongs in it.
+    const json& auth = obj(j, "auth");
+    for (auto it = auth.begin(); it != auth.end(); ++it)
+        if (it.key() != "type" && it.key() != "name" && has_value(it.value()))
+            return true;
+    // A header is either fixed (name + value) or secret (name + secret:true, the value comes from the
+    // credential store). A secret one with a value, or a fixed one that is plainly a credential, is a leak.
+    if (j.contains("headers") && j["headers"].is_array())
+        for (const json& h : j["headers"]) {
+            if (!h.is_object())
+                continue;
+            const bool        secret = h.value("secret", false);
+            const bool        value  = h.contains("value") && has_value(h["value"]);
+            const std::string name   = h.contains("name") && h["name"].is_string() ? h["name"].get<std::string>() : std::string();
+            if (value && (secret || is_secret_name(name)))
+                return true;
+        }
+    // A fixed query parameter that is a key.
+    const json& q = obj(obj(j, "list"), "query");
+    for (auto it = q.begin(); it != q.end(); ++it) {
+        const std::string k = lower(it.key());
+        if ((is_secret_name(k) || k == "key" || k == "auth" || k == "sig" || k == "signature") && has_value(it.value()))
+            return true;
+    }
+    return false;
+}
+
+ImportResult import_check(const std::string& raw)
+{
+    ImportResult r;
+    std::string  text = raw;
+    if (text.size() >= 3 && text.compare(0, 3, "\xEF\xBB\xBF") == 0)
+        text.erase(0, 3);
+    if (text.size() > IMPORT_MAX_BYTES) {
+        r.error = "That is too large to be a connector (the limit is 256 KB).";
+        return r;
+    }
+    text = trim(text);
+    if (text.empty()) {
+        r.error = "There is nothing to import.";
+        return r;
+    }
+    json j;
+    try {
+        j = json::parse(text);
+    } catch (const std::exception&) {
+        r.error = "That is not valid JSON.";
+        return r;
+    }
+    if (!j.is_object()) {
+        r.error = "A connector is a JSON object.";
+        return r;
+    }
+    if (j.contains("format") && !(j["format"].is_string() && j["format"].get<std::string>() == "edgeslicer-vendor-connector")) {
+        r.error = "That is not an EdgeSlicer connector.";
+        return r;
+    }
+    if (j.contains("version") && j["version"].is_number() && j["version"].get<double>() > 1) {
+        r.error = "That connector was made by a newer EdgeSlicer.";
+        return r;
+    }
+    if (holds_credential(j)) {
+        r.credentials = true;
+        r.error       = "It contains a credential (a key, token, password or secret value). Credentials are never imported.";
+        return r;
+    }
+    j.erase("id"); // always a new connector
+    try {
+        r.spec = spec_from_json(j);
+    } catch (const std::exception& e) {
+        r.error = e.what();
+        return r;
+    }
+    r.spec.id.clear();
+    r.json = spec_to_json(r.spec);
+    r.json.erase("id");
+    r.ok = true;
+    return r;
+}
+
+bool is_importable_link(const std::string& url, std::string* error)
+{
+    auto fail = [error](const char* why) {
+        if (error)
+            *error = why;
+        return false;
+    };
+    if (url.empty() || url.size() > 2048 || has_control(url) || url.find_first_of(" \\") != std::string::npos)
+        return fail("That is not a web address.");
+    const std::string l = lower(url);
+    if (!starts_with(l, "https://"))
+        return fail(starts_with(l, "http://") ? "Only https:// links are accepted." : "The link must start with https://.");
+    const size_t      s         = 8;
+    const size_t      e         = l.find_first_of("/?#", s);
+    const std::string authority = l.substr(s, e == std::string::npos ? std::string::npos : e - s);
+    if (authority.empty())
+        return fail("The link has no host name.");
+    if (authority.find('@') != std::string::npos)
+        return fail("Links with a user name or password are not accepted.");
+    if (authority[0] == '[')
+        return fail("IP addresses are not accepted; use a host name.");
+    std::string  host  = authority;
+    const size_t colon = host.find(':');
+    if (colon != std::string::npos) {
+        if (host.substr(colon + 1) != "443")
+            return fail("Only the standard https port is accepted.");
+        host.resize(colon);
+    }
+    while (!host.empty() && host.back() == '.')
+        host.pop_back();
+    if (host.empty() || host.size() > 253)
+        return fail("The link has no host name.");
+    if (!std::all_of(host.begin(), host.end(), [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '.'; }))
+        return fail("The host name has characters that are not allowed.");
+    std::vector<std::string> labels;
+    for (size_t b = 0;;) {
+        const size_t d = host.find('.', b);
+        labels.push_back(host.substr(b, d == std::string::npos ? std::string::npos : d - b));
+        if (d == std::string::npos)
+            break;
+        b = d + 1;
+    }
+    for (const std::string& lab : labels)
+        if (lab.empty() || lab.size() > 63 || lab.front() == '-' || lab.back() == '-')
+            return fail("The host name is not valid.");
+    const std::string& tld = labels.back();
+    if (is_digits(tld) || starts_with(tld, "0x")) // 127.0.0.1, 2130706433, 0x7f.1, 0177.0.0.1
+        return fail("IP addresses are not accepted; use a host name.");
+    if (labels.size() < 2)
+        return fail("Links to this computer or a local network are not accepted.");
+    for (const char* local : {"localhost", "local", "internal", "lan", "home", "arpa", "corp", "intranet", "localdomain", "test", "invalid", "example"})
+        if (tld == local)
+            return fail("Links to this computer or a local network are not accepted.");
+    return true;
+}
+
+bool fetch_connector_text(const HttpFn& http, const std::string& url, std::string& text, std::string& error)
+{
+    std::string current = trim(url);
+    for (int hop = 0;; ++hop) {
+        std::string why;
+        if (!is_importable_link(current, &why)) {
+            error = hop == 0 ? why : "The link redirects to an address that is not accepted. " + why;
+            return false;
+        }
+        Request req; // no headers: nothing of ours goes to the site
+        req.url             = current;
+        Response   resp     = http(req);
+        const bool redirect = resp.status == 301 || resp.status == 302 || resp.status == 303 || resp.status == 307 || resp.status == 308;
+        auto       location = resp.headers.find("location");
+        if (redirect && location != resp.headers.end() && !location->second.empty()) {
+            if (hop >= 3) {
+                error = "The link redirects too many times.";
+                return false;
+            }
+            current = join_url(current, location->second);
+            continue;
+        }
+        if (resp.status == 0) {
+            error = "Could not reach " + host_of(current) + (resp.error.empty() ? std::string() : ": " + resp.error.substr(0, 200));
+            return false;
+        }
+        if (resp.status < 200 || resp.status >= 300) {
+            error = "The site answered with status " + std::to_string(resp.status) + ".";
+            return false;
+        }
+        if (resp.body.size() > IMPORT_MAX_BYTES) {
+            error = "That is too large to be a connector (the limit is 256 KB).";
+            return false;
+        }
+        text = std::move(resp.body);
+        return true;
+    }
+}
+
+bool parse_connector_link(const std::string& link, std::string& url)
+{
+    static const std::string head = "edgeslicer://connector";
+    const std::string        l    = lower(link);
+    if (!starts_with(l, head))
+        return false;
+    size_t at = head.size();
+    if (at < l.size() && l[at] == '/')
+        ++at;
+    if (l.compare(at, 5, "?url=") != 0)
+        return false;
+    std::string  payload = link.substr(at + 5);
+    const size_t amp     = payload.find('&');
+    if (amp != std::string::npos)
+        payload.resize(amp);
+    auto        hex = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+    std::string out;
+    for (size_t i = 0; i < payload.size(); ++i) {
+        if (payload[i] == '%' && i + 2 < payload.size() && hex(payload[i + 1]) >= 0 && hex(payload[i + 2]) >= 0) {
+            out.push_back(char(hex(payload[i + 1]) * 16 + hex(payload[i + 2])));
+            i += 2;
+        } else
+            out.push_back(payload[i]);
+    }
+    out = trim(out);
+    if (out.empty())
+        return false;
+    url = out;
+    return true;
+}
+
 } // namespace Vendors
 } // namespace Slic3r

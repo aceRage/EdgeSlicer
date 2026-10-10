@@ -3,6 +3,7 @@
 #include "slic3r/Utils/VendorConnector.hpp"
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -728,4 +729,365 @@ TEST_CASE("vendors: the cache round-trips", "[Vendors]")
     CHECK(cache_to_json(c).dump().find(KEY) == std::string::npos);
     CHECK(cache_from_json(json::array()).items.empty());
     CHECK(cache_from_json(json::parse(R"({"items":[{"name":"no id"},5]})")).items.empty());
+}
+
+// ---- importing a shared connector (file, pasted text or link) ----
+
+namespace {
+// A connector template as it is shared (the CPL3D one: it holds no secret).
+const char* const CPL3D_TEMPLATE = R"JSON({
+  "format": "edgeslicer-vendor-connector",
+  "version": 1,
+  "name": "CPL3D",
+  "vendor": "CPL3D",
+  "license": "",
+  "base_url": "https://www.cpl3d.com",
+  "auth": { "type": "bearer", "name": "Authorization" },
+  "headers": [],
+  "list": {
+    "path": "/api/v1/library",
+    "items": "models",
+    "query": {},
+    "paging": {
+      "type": "page",
+      "param": "page",
+      "start": 1,
+      "size_param": "limit",
+      "size": 100,
+      "has_more": "has_next",
+      "total": "total",
+      "cursor": ""
+    },
+    "since": { "param": "updated_since", "field": "files_updated_at" }
+  },
+  "fields": {
+    "id": "id",
+    "name": "name",
+    "thumbnail": "thumbnail",
+    "page_url": "https://www.cpl3d.com/dashboard/models/{slug}",
+    "tags": "type",
+    "updated": "files_updated_at",
+    "description": "description"
+  },
+  "files": {
+    "path": "print_profiles",
+    "fields": {
+      "id": "id",
+      "name": "name",
+      "variant": "variant",
+      "size": "fileSize",
+      "plates": "numberOfPlates",
+      "print_time": "estimatedPrintTime",
+      "colours": "filamentColors",
+      "colour": "hex"
+    }
+  },
+  "download": {
+    "path": "/api/v1/models/{sub.id}/download",
+    "url_field": "download_url",
+    "direct_field": "",
+    "limited": true
+  },
+  "quota": {
+    "used": "X-Api-Calls-Used",
+    "limit": "X-Api-Calls-Limit",
+    "resets": "X-Api-Period-Resets"
+  }
+})JSON";
+
+json template_json() { return json::parse(CPL3D_TEMPLATE); }
+std::string with(const std::function<void(json&)>& change)
+{
+    json j = template_json();
+    change(j);
+    return j.dump();
+}
+} // namespace
+
+TEST_CASE("vendors: a link a connector may be fetched from", "[Vendors]")
+{
+    std::string why;
+    for (const char* ok : {"https://raw.githubusercontent.com/someone/repo/main/cpl3d.json",
+                           "https://gist.githubusercontent.com/someone/0123abcd/raw/cpl3d.edgeslicer-connector.json",
+                           "https://example.com/a.json?x=1&y=2", "HTTPS://Example.COM:443/a.json", "https://sub.domain.example.org/a/b/c.json#frag"})
+        CHECK(is_importable_link(ok, &why));
+    CHECK(is_importable_link("https://example.com/a.json"));
+
+    const std::vector<std::pair<const char*, const char*>> refused {
+        {"", "not a web address"},
+        {"http://example.com/a.json", "https"},
+        {"ftp://example.com/a.json", "https"},
+        {"file:///C:/connector.json", "https"},
+        {"javascript:alert(1)", "https"},
+        {"example.com/a.json", "https"},
+        {"https://", "host"},
+        {"https:///a.json", "host"},
+        {"https://localhost/a.json", "local"},
+        {"https://localhost./a.json", "local"},
+        {"https://LOCALHOST:443/a.json", "local"},
+        {"https://foo.localhost/a.json", "local"},
+        {"https://printer.local/a.json", "local"},
+        {"https://nas/a.json", "local"},
+        {"https://router.lan/a.json", "local"},
+        {"https://wiki.internal/a.json", "local"},
+        {"https://fritz.box.home.arpa/a.json", "local"},
+        {"https://127.0.0.1/a.json", "IP"},
+        {"https://127.1/a.json", "IP"},
+        {"https://10.0.0.5/a.json", "IP"},
+        {"https://192.168.1.10/a.json", "IP"},
+        {"https://172.16.0.1/a.json", "IP"},
+        {"https://169.254.169.254/latest/meta-data", "IP"},
+        {"https://8.8.8.8/a.json", "IP"},
+        {"https://2130706433/a.json", "IP"},
+        {"https://0x7f.0.0.1/a.json", "IP"},
+        {"https://0177.0.0.1/a.json", "IP"},
+        {"https://[::1]/a.json", "IP"},
+        {"https://[fd00::1]:443/a.json", "IP"},
+        {"https://user:password@example.com/a.json", "user name"},
+        {"https://example.com@evil.example.org/a.json", "user name"},
+        {"https://example.com:8443/a.json", "port"},
+        {"https://example.com:80/a.json", "port"},
+        {"https://exa mple.com/a.json", "web address"},
+        {"https://example.com\\evil.example.org/a.json", "web address"},
+        {"https://%31%32%37.0.0.1/a.json", "characters"},
+        {"https://-bad.example.com/a.json", "not valid"},
+        {"https://bad..example.com/a.json", "not valid"},
+        {"https://example.com/a\njson", "web address"},
+    };
+    for (const auto& [url, fragment] : refused) {
+        INFO(url);
+        why.clear();
+        CHECK_FALSE(is_importable_link(url, &why));
+        CHECK(why.find(fragment) != std::string::npos);
+    }
+    CHECK_FALSE(is_importable_link("https://example.com/" + std::string(3000, 'a')));
+}
+
+TEST_CASE("vendors: a connector link is fetched without credentials and every hop is checked", "[Vendors]")
+{
+    std::vector<Request>                 seen;
+    std::map<std::string, Response>      site;
+    HttpFn http = [&](const Request& q) {
+        seen.push_back(q);
+        auto it = site.find(q.url);
+        if (it == site.end()) {
+            Response r;
+            r.status = 404;
+            return r;
+        }
+        return it->second;
+    };
+    auto redirect = [](int status, const std::string& to) {
+        Response r;
+        r.status              = status;
+        r.headers["location"] = to;
+        return r;
+    };
+    auto ok = [](const std::string& body) {
+        Response r;
+        r.status = 200;
+        r.body   = body;
+        return r;
+    };
+    std::string text, error;
+
+    SECTION("a plain answer")
+    {
+        site["https://example.com/c.json"] = ok("{}");
+        CHECK(fetch_connector_text(http, "  https://example.com/c.json \n", text, error));
+        CHECK(text == "{}");
+        REQUIRE(seen.size() == 1);
+        CHECK(seen[0].headers.empty()); // nothing of ours goes along
+    }
+    SECTION("redirects within https are followed, relative ones too")
+    {
+        site["https://example.com/a"]     = redirect(302, "/b");
+        site["https://example.com/b"]     = redirect(301, "https://cdn.example.org/c.json");
+        site["https://cdn.example.org/c.json"] = ok("{\"x\":1}");
+        CHECK(fetch_connector_text(http, "https://example.com/a", text, error));
+        CHECK(text == "{\"x\":1}");
+        CHECK(seen.size() == 3);
+        for (const Request& q : seen)
+            CHECK(q.headers.empty());
+    }
+    SECTION("a redirect to http, to localhost or to a private address is refused before it is requested")
+    {
+        for (const char* to : {"http://example.org/c.json", "https://localhost/c.json", "https://192.168.0.2/c.json",
+                               "https://[::1]/c.json", "file:///C:/x.json", "https://internal.corp/c.json"}) {
+            seen.clear();
+            site["https://example.com/a"] = redirect(302, to);
+            INFO(to);
+            CHECK_FALSE(fetch_connector_text(http, "https://example.com/a", text, error));
+            CHECK(error.find("redirects to an address that is not accepted") != std::string::npos);
+            CHECK(seen.size() == 1); // only the first hop was requested
+        }
+    }
+    SECTION("too many redirects")
+    {
+        site["https://example.com/a"] = redirect(302, "https://example.com/a");
+        CHECK_FALSE(fetch_connector_text(http, "https://example.com/a", text, error));
+        CHECK(error.find("too many") != std::string::npos);
+        CHECK(seen.size() == 4); // the first request and 3 redirects
+    }
+    SECTION("the first link is checked too")
+    {
+        CHECK_FALSE(fetch_connector_text(http, "http://example.com/c.json", text, error));
+        CHECK_FALSE(fetch_connector_text(http, "https://127.0.0.1/c.json", text, error));
+        CHECK(seen.empty());
+    }
+    SECTION("errors")
+    {
+        CHECK_FALSE(fetch_connector_text(http, "https://example.com/missing.json", text, error));
+        CHECK(error.find("404") != std::string::npos);
+        Response down;
+        down.error                          = "timeout";
+        site["https://example.com/down"]    = down;
+        CHECK_FALSE(fetch_connector_text(http, "https://example.com/down", text, error));
+        CHECK(error.find("Could not reach example.com") != std::string::npos);
+        site["https://example.com/big"] = ok(std::string(IMPORT_MAX_BYTES + 1, ' '));
+        CHECK_FALSE(fetch_connector_text(http, "https://example.com/big", text, error));
+        CHECK(error.find("256 KB") != std::string::npos);
+        site["https://example.com/edge"] = ok(std::string(IMPORT_MAX_BYTES, ' '));
+        CHECK(fetch_connector_text(http, "https://example.com/edge", text, error));
+    }
+}
+
+TEST_CASE("vendors: a valid shared connector is accepted", "[Vendors]")
+{
+    const ImportResult r = import_check(CPL3D_TEMPLATE);
+    REQUIRE(r.ok);
+    CHECK_FALSE(r.credentials);
+    CHECK(r.spec.name == "CPL3D");
+    CHECK(r.spec.vendor == "CPL3D");
+    CHECK(r.spec.base_url == "https://www.cpl3d.com");
+    CHECK(r.spec.auth_type == "bearer");
+    CHECK(r.spec.list_path == "/api/v1/library");
+    CHECK(r.spec.paging == "page");
+    CHECK(r.spec.downloads_limited);
+    CHECK(r.spec.id.empty());
+    // What is saved is rebuilt from the checked spec, has no id, and is itself a valid connector.
+    CHECK_FALSE(r.json.contains("id"));
+    CHECK(r.json.at("format") == "edgeslicer-vendor-connector");
+    const ImportResult again = import_check(r.json.dump(2));
+    REQUIRE(again.ok);
+    CHECK(again.json == r.json);
+    // The same text with a byte order mark and spaces around it (a file saved by an editor, a paste).
+    CHECK(import_check("\xEF\xBB\xBF  \r\n" + std::string(CPL3D_TEMPLATE) + "\r\n\r\n").ok);
+    // Exporting a connector and importing it again keeps it (Copy JSON, then Paste JSON).
+    Spec s = spec_from_json(template_json());
+    s.id   = "cpl3d-1a2b";
+    json exported = spec_to_json(s);
+    exported.erase("id");
+    const ImportResult round = import_check(exported.dump(2));
+    REQUIRE(round.ok);
+    CHECK(round.json == r.json);
+}
+
+TEST_CASE("vendors: an imported connector is always new and keeps nothing unchecked", "[Vendors]")
+{
+    const ImportResult r = import_check(with([](json& j) {
+        j["id"]          = "cpl3d-abcd";
+        j["extra"]       = {{"anything", "else"}};
+        j["notes"]       = "hello";
+        j["auth"]["foo"] = "";
+    }));
+    REQUIRE(r.ok);
+    CHECK(r.spec.id.empty());
+    CHECK_FALSE(r.json.contains("id"));
+    CHECK_FALSE(r.json.contains("extra"));
+    CHECK_FALSE(r.json.contains("notes"));
+    CHECK(r.json.dump().find("hello") == std::string::npos);
+    // A bad id is not an error either: it is dropped before the connector is checked.
+    CHECK(import_check(with([](json& j) { j["id"] = "NOT/valid id"; })).ok);
+}
+
+TEST_CASE("vendors: a connector with a credential is refused, never stored", "[Vendors]")
+{
+    const std::string SECRET = "sk_live_0123456789";
+    const std::vector<std::pair<const char*, std::function<void(json&)>>> leaks {
+        {"secret header with a value", [&](json& j) { j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}, {"value", SECRET}}}); }},
+        {"Authorization header with a value", [&](json& j) { j["headers"] = json::array({{{"name", "Authorization"}, {"value", "Bearer " + SECRET}}}); }},
+        {"X-Api-Key header with a value", [&](json& j) { j["headers"] = json::array({{{"name", "X-Api-Key"}, {"value", SECRET}}}); }},
+        {"top-level token", [&](json& j) { j["token"] = SECRET; }},
+        {"top-level secret", [&](json& j) { j["secret"] = SECRET; }},
+        {"top-level password", [&](json& j) { j["password"] = SECRET; }},
+        {"top-level api_key", [&](json& j) { j["api_key"] = SECRET; }},
+        {"top-level apiKey", [&](json& j) { j["apiKey"] = SECRET; }},
+        {"top-level access_token", [&](json& j) { j["access_token"] = SECRET; }},
+        {"top-level Token (case)", [&](json& j) { j["Token"] = SECRET; }},
+        {"nested secret", [&](json& j) { j["list"]["paging"]["client_secret"] = SECRET; }},
+        {"auth key", [&](json& j) { j["auth"]["key"] = SECRET; }},
+        {"auth value", [&](json& j) { j["auth"]["value"] = SECRET; }},
+        {"fixed query api_key", [&](json& j) { j["list"]["query"]["api_key"] = SECRET; }},
+        {"fixed query key", [&](json& j) { j["list"]["query"]["key"] = SECRET; }},
+    };
+    for (const auto& [what, change] : leaks) {
+        INFO(what);
+        const ImportResult r = import_check(with(change));
+        CHECK_FALSE(r.ok);
+        CHECK(r.credentials);
+        CHECK(r.error.find("credential") != std::string::npos);
+        CHECK(r.error.find(SECRET) == std::string::npos); // the message never repeats it
+        CHECK(r.json.is_null());                           // and nothing is offered for saving
+    }
+
+    // What the format itself writes is fine: a secret header and the auth block name the slot only.
+    CHECK(import_check(with([](json& j) { j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); })).ok);
+    CHECK(import_check(with([](json& j) { j["headers"] = json::array({{{"name", "X-Client"}, {"value", "EdgeSlicer"}}}); })).ok);
+    CHECK(import_check(with([](json& j) { j["auth"] = {{"type", "header"}, {"name", "X-Api-Key"}}; })).ok);
+    // Empty values are not credentials (a template that lists the field blank).
+    CHECK(import_check(with([](json& j) { j["token"] = ""; j["password"] = nullptr; j["secret"] = false; })).ok);
+    // A secret header never keeps a value that slipped through spec_from_json either.
+    const ImportResult fine = import_check(with([](json& j) { j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); }));
+    REQUIRE(fine.ok);
+    CHECK(fine.json.at("headers")[0].at("secret") == true);
+    CHECK_FALSE(fine.json.at("headers")[0].contains("value"));
+}
+
+TEST_CASE("vendors: text that is not a usable connector is refused with a reason", "[Vendors]")
+{
+    CHECK(import_check("").error == "There is nothing to import.");
+    CHECK(import_check(" \r\n\t").error == "There is nothing to import.");
+    CHECK(import_check("not json at all").error == "That is not valid JSON.");
+    CHECK(import_check("{\"name\":").error == "That is not valid JSON.");
+    CHECK(import_check("[1,2,3]").error == "A connector is a JSON object.");
+    CHECK(import_check("\"text\"").error == "A connector is a JSON object.");
+    CHECK(import_check(with([](json& j) { j["format"] = "something-else"; })).error == "That is not an EdgeSlicer connector.");
+    CHECK(import_check(with([](json& j) { j["version"] = 2; })).error.find("newer") != std::string::npos);
+    CHECK(import_check(std::string(IMPORT_MAX_BYTES + 1, ' ')).error.find("256 KB") != std::string::npos);
+    CHECK(import_check("{\"x\":\"" + std::string(IMPORT_MAX_BYTES, 'a') + "\"}").error.find("256 KB") != std::string::npos);
+    // spec_from_json's own rules apply: its messages reach the user.
+    const ImportResult http = import_check(with([](json& j) { j["base_url"] = "http://www.cpl3d.com"; }));
+    CHECK_FALSE(http.ok);
+    CHECK_FALSE(http.credentials);
+    CHECK(http.error.find("https://") != std::string::npos);
+    CHECK_FALSE(import_check(with([](json& j) { j.erase("name"); })).ok);
+    CHECK_FALSE(import_check(with([](json& j) { j["list"]["path"] = "https://elsewhere.example/x"; })).ok);
+    // A failure never carries a half-checked connector.
+    CHECK(import_check("{}").json.is_null());
+}
+
+TEST_CASE("vendors: an edgeslicer://connector link", "[Vendors]")
+{
+    std::string url;
+    CHECK(parse_connector_link("edgeslicer://connector?url=https%3A%2F%2Fraw.githubusercontent.com%2Fa%2Fb%2Fmain%2Fc.json", url));
+    CHECK(url == "https://raw.githubusercontent.com/a/b/main/c.json");
+    CHECK(parse_connector_link("edgeslicer://connector/?url=https%3A%2F%2Fexample.com%2Fc.json", url));
+    CHECK(url == "https://example.com/c.json");
+    CHECK(parse_connector_link("EdgeSlicer://Connector?URL=https%3a%2f%2fexample.com%2fc.json&utm=x", url));
+    CHECK(url == "https://example.com/c.json");
+    CHECK(parse_connector_link("edgeslicer://connector?url=https://example.com/c.json", url)); // not encoded: taken as it is
+    CHECK(url == "https://example.com/c.json");
+    // It only extracts: the address is still checked by the import (and then confirmed by the user).
+    CHECK(parse_connector_link("edgeslicer://connector?url=http%3A%2F%2F10.0.0.1%2Fc.json", url));
+    CHECK_FALSE(is_importable_link(url));
+
+    url = "unchanged";
+    for (const char* no : {"", "edgeslicer://connector", "edgeslicer://connector?url=", "edgeslicer://connector?file=x",
+                           "edgeslicer://open?file=https%3A%2F%2Fexample.com%2Fm.3mf", "https://example.com/connector?url=x",
+                           "ultraone://connector?url=https%3A%2F%2Fexample.com", "edgeslicer://connectors?url=x"}) {
+        INFO(no);
+        CHECK_FALSE(parse_connector_link(no, url));
+    }
+    CHECK(url == "unchanged");
 }
