@@ -18,6 +18,7 @@
 #include "slic3r/Utils/ServerLifetime.hpp"
 #include "slic3r/Utils/HubHandover.hpp"
 #include "slic3r/Utils/WinFirewall.hpp"
+#include "slic3r/Utils/TailscaleCli.hpp" // where the CLI lives per platform, and the POSIX way to run it
 
 #include <boost/asio.hpp>
 #include <boost/beast/core/detail/base64.hpp>
@@ -116,9 +117,9 @@ static const int         IDLE_EXIT_SECONDS  = 60;
 // How long shutdown() waits for connection and helper threads once it has shut their sockets.
 // Past it the server is left alive for them rather than destroyed underneath them.
 static const int         SHUTDOWN_DRAIN_MS  = 3000;
-// Where the remote-access card sends people who have no Tailscale yet, and where the one error
-// nobody can fix from this PC (tailnet-wide HTTPS certificates) is actually switched on.
-static const char* const TAILSCALE_DOWNLOAD_URL  = "https://tailscale.com/download/windows";
+// Where the remote-access card sends people who have no Tailscale yet (the download page for the
+// platform this hub runs on, TailscaleCli::download_url), and where the one error nobody can fix
+// from this PC (tailnet-wide HTTPS certificates) is actually switched on.
 static const char* const TAILSCALE_DNS_ADMIN_URL = "https://login.tailscale.com/admin/dns";
 // Request hygiene. The head cap is generous for a browser (cookies + a long referer) and small
 // enough that a dribbling client cannot grow the buffer. The connection caps leave room for a
@@ -1096,7 +1097,9 @@ static void pump(tcp::socket& from, tcp::socket& to)
 
 // Splice the client onto 127.0.0.1:<port>, replaying the (rewritten) request head first.
 // Works for plain responses and WebSocket upgrades alike.
-// Run a command to completion and capture what it prints (the tailscale CLI). Windows only for now.
+// Run a command to completion and capture what it prints (the tailscale CLI; on Windows also netstat
+// and friends). True when it ran to completion; false when it could not be started or had to be
+// killed for taking longer than `timeout_ms`. Off Windows this is TailscaleCli::run_capture_posix.
 static bool run_capture(const std::vector<std::string>& args, std::string& out, int& exit_code, int timeout_ms)
 {
     out.clear();
@@ -1138,8 +1141,7 @@ static bool run_capture(const std::vector<std::string>& args, std::string& out, 
     ::CloseHandle(rd);
     return w == WAIT_OBJECT_0;
 #else
-    (void) args; (void) timeout_ms;
-    return false;
+    return TailscaleCli::run_capture_posix(args, out, exit_code, timeout_ms);
 #endif
 }
 
@@ -1151,12 +1153,13 @@ static std::string tailscale_exe()
     // that the remote-access paths can be exercised without a tailnet - and without this PC's
     // real Serve configuration being touched. Unset or empty falls through to the real locations.
     if (const char* over = std::getenv("SNORCA_TAILSCALE_EXE"); over && *over) return over;
-#ifdef _WIN32
-    const char*       pf = std::getenv("ProgramFiles");
-    const std::string p  = std::string(pf ? pf : "C:\\Program Files") + "\\Tailscale\\tailscale.exe";
-    if (fs::exists(p)) return p;
-#endif
-    return "tailscale"; // PATH
+    // The platform's known install locations (a GUI app on macOS gets a minimal PATH, so
+    // /Applications/Tailscale.app and Homebrew are named outright), then whatever PATH has.
+    const char* pf = std::getenv("ProgramFiles"); // Windows only; unset elsewhere
+    return TailscaleCli::pick_exe(TailscaleCli::current_platform(), pf ? pf : "", [](const std::string& p) {
+        boost::system::error_code ec;
+        return fs::exists(p, ec);
+    });
 }
 
 struct TailscaleState
@@ -1179,7 +1182,7 @@ static TailscaleState tailscale_query()
     int            code = 0;
     t.checked_at = (long long) std::time(nullptr);
     if (!run_capture({ tailscale_exe(), "status", "--json" }, out, code, 15000)) {
-        t.error = "Tailscale is not installed on this PC";
+        t.error = std::string("Tailscale is not installed on ") + TailscaleCli::this_computer(TailscaleCli::current_platform());
         return t;
     }
     t.installed = true;
@@ -1200,7 +1203,9 @@ static TailscaleState tailscale_query()
         return t;
     }
     if (t.backend != "Running") {
-        t.error = t.backend == "NeedsLogin" ? "Tailscale is installed but not signed in on this PC" : "Tailscale is not running (" + t.backend + ")";
+        t.error = t.backend == "NeedsLogin" ?
+                      std::string("Tailscale is installed but not signed in on ") + TailscaleCli::this_computer(TailscaleCli::current_platform()) :
+                      "Tailscale is not running (" + t.backend + ")";
         return t;
     }
     if (run_capture({ tailscale_exe(), "serve", "status", "--json" }, out, code, 15000) && code == 0) {
@@ -1235,25 +1240,33 @@ const char* Testing::remote_access_state_name(Testing::RemoteAccessState st)
 Testing::RemoteAccessInfo Testing::classify_remote_access(bool installed, const std::string& backend, bool https,
                                                           bool serving, bool on, const std::string& error)
 {
+    return classify_remote_access(TailscaleCli::current_platform(), installed, backend, https, serving, on, error);
+}
+
+Testing::RemoteAccessInfo Testing::classify_remote_access(TailscaleCli::Platform platform, bool installed, const std::string& backend,
+                                                          bool https, bool serving, bool on, const std::string& error)
+{
     RemoteAccessInfo r;
     if (!installed) {
         r.state      = RemoteAccessState::NotInstalled;
-        r.message    = "Remote access uses Tailscale, a free private network between your PC and your phone. "
-                       "Install it on both and sign in with the same account.";
+        r.message    = std::string("Remote access uses Tailscale, a free private network between ") + TailscaleCli::your_computer(platform) +
+                       " and your phone. Install it on both and sign in with the same account.";
         r.action     = "Install Tailscale";
-        r.action_url = TAILSCALE_DOWNLOAD_URL;
+        r.action_url = TailscaleCli::download_url(platform);
         return r;
     }
     if (backend == "NeedsLogin" || backend == "Starting") {
         r.state   = RemoteAccessState::NotSignedIn;
-        r.message = "Tailscale is installed but not signed in on this PC. Open Tailscale from the system tray "
-                    "(or run `tailscale login`) and sign in with the same account as your phone, then try again.";
+        r.message = std::string("Tailscale is installed but not signed in on ") + TailscaleCli::this_computer(platform) +
+                    ". Open Tailscale from " + TailscaleCli::sign_in_place(platform) +
+                    " (or run `tailscale login`) and sign in with the same account as your phone, then try again.";
         r.action  = "Try again";
         return r;
     }
     if (backend != "Running") {
         r.state   = RemoteAccessState::NotRunning;
-        r.message = backend.empty() ? "Tailscale is not running on this PC." : "Tailscale is not running (" + backend + ").";
+        r.message = backend.empty() ? std::string("Tailscale is not running on ") + TailscaleCli::this_computer(platform) + "." :
+                                      "Tailscale is not running (" + backend + ").";
         r.action  = "Try again";
         return r;
     }

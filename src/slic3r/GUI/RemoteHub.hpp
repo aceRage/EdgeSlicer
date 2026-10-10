@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "slic3r/Utils/HubHomeLogic.hpp"
+#include "slic3r/Utils/TailscaleCli.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -113,7 +114,7 @@ int serve_status_target_port(const std::string& serve_status_json_text);
 // --json` said into exactly one of these, so the page never has to re-derive "installed but not
 // signed in" out of three separate booleans.
 enum class RemoteAccessState {
-    NotInstalled,  // no tailscale CLI on this PC -> offer the download
+    NotInstalled,  // no tailscale CLI on this computer -> offer the download
     NotSignedIn,   // installed, BackendState=NeedsLogin -> `tailscale login`
     NotRunning,    // installed and signed in, backend is Stopped/NoState/... -> start it
     HttpsOff,      // running, but the tailnet issues no certificates -> admin console > DNS
@@ -139,6 +140,10 @@ const char* remote_access_state_name(RemoteAccessState s); // "not_installed", "
 // the root to our loopback port", `on` is the hub's own remote_on switch, `error` is whatever the
 // CLI printed (only used for RemoteAccessState::Error).
 RemoteAccessInfo classify_remote_access(bool installed, const std::string& backend, bool https,
+                                        bool serving, bool on, const std::string& error);
+// The same for a named platform (the wording says "Mac"/"menu bar" there and the install link goes
+// to that platform's download page); the one above uses the platform this build runs on.
+RemoteAccessInfo classify_remote_access(TailscaleCli::Platform platform, bool installed, const std::string& backend, bool https,
                                         bool serving, bool on, const std::string& error);
 
 // ---- hub identity (design_hosted_relay.md section 2) ----

@@ -228,6 +228,10 @@ public:
     int get_model_mall_detail_url(std::string* url, std::string id);
     int get_my_profile(std::string token, unsigned int* http_code, std::string* http_body);
     int get_my_token(std::string ticket, unsigned int* http_code, std::string* http_body);
+    // What get_my_token / get_my_profile log of a failed call's response body: the credential
+    // the call carried is cut out by value, then the text is scrubbed (tokens, e-mail, account
+    // and user values) and cut to max_len. Public for the unit test.
+    static std::string login_failure_body_for_log(const std::string& body, const std::string& credential, size_t max_len = 300);
     int track_enable(bool enable);
     int track_remove_files();
     int track_event(std::string evt_key, std::string content);

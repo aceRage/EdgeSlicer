@@ -40,6 +40,7 @@ add_executable(${_TEST_NAME}_tests
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp
     hub_addresses_tests.cpp
+    tailscale_cli_tests.cpp
     update_feed_tests.cpp
     paint_cli_tests.cpp
     hms_lookup_tests.cpp
@@ -59,6 +60,7 @@ add_executable(${_TEST_NAME}_tests
     startup_wizard_tests.cpp
     page_server_security_tests.cpp
     sentry_scrub_tests.cpp
+    login_diagnostics_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
     device_controls_tests.cpp
