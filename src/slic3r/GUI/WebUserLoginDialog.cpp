@@ -370,8 +370,8 @@ void ZUserLogin::OnScriptMessage(wxWebViewEvent &evt)
         else if (strCmd == "get_localhost_url") {
             BOOST_LOG_TRIVIAL(info) << "thirdparty_login: get_localhost_url";
             // Ultra P4: actually start the loopback OAuth-callback server (was gutted) so
-            // the third-party sign-in redirect to 127.0.0.1:<port> is caught. Advertise the
-            // REAL bound port in case LOCALHOST_PORT was busy.
+            // the third-party sign-in redirect to localhost:<port> is caught. Advertise the
+            // REAL bound port in case BBL_LOGIN_CALLBACK_PORT was busy.
             wxGetApp().start_http_server();
             std::string sequence_id = j["sequence_id"].get<std::string>();
             CallAfter([this, sequence_id] {
@@ -379,18 +379,17 @@ void ZUserLogin::OnScriptMessage(wxWebViewEvent &evt)
                 ack_j["command"] = "get_localhost_url";
                 // Ultra: advertise http://localhost:<port> (NOT 127.0.0.1) - bambulab's
                 // sign-in callback validates redirect_url and rejects the 127.0.0.1 form.
-                // Report the port the server actually bound; it is LOCALHOST_PORT (13618),
-                // the port bambulab's third-party redirect is registered against. If the
-                // bind fell back to another port (13618 already taken by another slicer),
-                // the third-party leg cannot work at all - log it loudly so the owner sees
-                // why, instead of the user just getting a 404 in the browser.
+                // Report the port the server actually bound. GUI_App::start_http_server asks
+                // for BBL_LOGIN_CALLBACK_PORT (13650, not Bambu Studio's 13618), and bambulab.com
+                // redirects to whatever port we advertise here, so a fallback port (13650 taken
+                // by another EdgeSlicer window) still works; it is only noted.
                 auto bound_port = wxGetApp().get_http_port();
-                if (bound_port != LOCALHOST_PORT) {
-                    BOOST_LOG_TRIVIAL(error) << "thirdparty_login: loopback bound to port " << bound_port
-                                             << " instead of " << LOCALHOST_PORT
-                                             << " - third-party (Google) sign-in will fail; is another "
-                                                "Bambu Studio / OrcaSlicer running?";
-                }
+                if (bound_port != BBL_LOGIN_CALLBACK_PORT)
+                    BOOST_LOG_TRIVIAL(warning) << "thirdparty_login: callback listener on port " << bound_port
+                                               << " instead of " << BBL_LOGIN_CALLBACK_PORT
+                                               << " (in use); advertising " << bound_port;
+                else
+                    BOOST_LOG_TRIVIAL(info) << "thirdparty_login: callback listener on port " << bound_port;
                 ack_j["response"]["base_url"] = std::string(BBL_LOGIN_LOCALHOST_URL) + std::to_string(bound_port);
                 ack_j["response"]["result"] = "success";
                 ack_j["sequence_id"] = sequence_id;

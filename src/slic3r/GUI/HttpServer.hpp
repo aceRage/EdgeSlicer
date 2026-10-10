@@ -17,6 +17,11 @@
 #include <vector>
 
 #define LOCALHOST_PORT      13618
+// EdgeSlicer: the port the Bambu sign-in (OAuth / third-party) callback listener asks for
+// (GUI_App::start_http_server). Deliberately not Bambu Studio's LOCALHOST_PORT, so a Bambu
+// Studio or OrcaSlicer running alongside cannot take our callback. The sign-in page is told the
+// port that was actually bound (get_localhost_url), so a fallback port still works.
+#define BBL_LOGIN_CALLBACK_PORT 13650
 #define PAGE_HTTP_PORT      13619
 #define LOCALHOST_URL       "http://127.0.0.1:"
 // Ultra: the base URL advertised to bambulab.com/sign-in via get_localhost_url. Bambu

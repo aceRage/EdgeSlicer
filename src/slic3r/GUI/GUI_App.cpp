@@ -25,6 +25,7 @@
 #include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/Config/Version.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 
 // Localization headers: include libslic3r version first so everything in this file
 // uses the slic3r/GUI version (the macros will take precedence over the functions).
@@ -5409,15 +5410,27 @@ void GUI_App::load_gcode(wxWindow* parent, wxString& input_file) const
 wxString GUI_App::transition_tridid(int trid_id)
 {
     wxString maping_dict[] = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z" };
+    constexpr int dict_size = int(sizeof(maping_dict) / sizeof(maping_dict[0]));
+
+    // The external spool holders of a two-extruder printer (tray 254 = left, 255 = right) are
+    // mapped like trays; "AMS 63" indexed past the end of the table.
+    if (trid_id == 254 || trid_id == 255)
+        return wxString::FromUTF8(BambuExtruderMap::tray_display_name(trid_id, 0));
+    if (trid_id < 0)
+        return "-";
 
     if (trid_id >= 128 * 4) {
         trid_id -= 128 * 4;
         int id_index = trid_id / 4;
+        if (id_index >= dict_size)
+            return "?";
         return wxString::Format("%s", maping_dict[id_index]);
     }
     else {
         int id_index = ceil(trid_id / 4);
         int id_suffix = trid_id % 4 + 1;
+        if (id_index >= dict_size)
+            return "?";
         return wxString::Format("%s%d", maping_dict[id_index], id_suffix);
     }
 }
@@ -7314,7 +7327,7 @@ void GUI_App::start_http_server()
         // report of 2026-09-08 carried the URL http://localhost:13650/?ticket=...&redirect_url=...,
         // i.e. Google's redirect reached this port. That 404 was ours - the ticket exchange had no
         // network plugin to run through - and is now a redirect with result=fail instead.
-        m_http_server.setPort(13650);
+        m_http_server.setPort(BBL_LOGIN_CALLBACK_PORT);
         m_http_server.start();
     }
     // The OAuth callback listener is short-lived; the 5s health-check auto-restart can

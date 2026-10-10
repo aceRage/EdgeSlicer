@@ -38,9 +38,13 @@ struct Tray
 struct AmsUnit
 {
     int               ams_id{ -1 };            // 0..3 four-slot units, 128.. AMS HT, 254/255 external
-    int               physical_extruder{ -1 }; // Ams::nozzle from the report
+    int               physical_extruder{ -1 }; // Ams::nozzle from the report (external: 255 -> 0, 254 -> 1)
     int               slot_count{ 4 };         // 1 for AMS HT / N3S, 4 otherwise (Bambu's ams_cnt_map key)
-    std::vector<Tray> trays;                   // loaded trays only
+    std::vector<Tray> trays;                   // loaded trays only (an external spool holder: slot 0)
+
+    // The external spool holder of one extruder (vir_slot 254 / 255), not an AMS: it is never
+    // counted in extruder_ams_count, and it is offered for a filament on its own extruder only.
+    bool external() const;
 };
 
 struct PrinterNozzle
@@ -72,9 +76,13 @@ struct PrinterState
     // Logical extruder a nozzle belongs to: rack nozzles belong to the main (physical 0) extruder,
     // as in BambuStudio Sidebar::priv::get_nozzle_options.
     int logical_extruder_of(const PrinterNozzle &nozzle) const;
-    // Every tray of every AMS unit with its logical extruder.
-    struct TrayOnSide { Tray tray; int logical_extruder; int slot_count; };
+    // Every loaded tray of every AMS unit and external spool holder with its logical extruder.
+    struct TrayOnSide { Tray tray; int logical_extruder; int slot_count; bool external{ false }; };
     std::vector<TrayOnSide> all_trays() const;
+    // Whether an AMS unit (not an external spool holder) with a loaded tray feeds this logical
+    // extruder. The external spool of an extruder that has one is not picked automatically
+    // (BambuStudio do_ams_mapping / FilamentGroupUtils::build_machine_filaments).
+    bool has_loaded_ams_tray(int logical_extruder) const;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -150,6 +158,9 @@ double color_distance(const std::string &a, const std::string &b);
 // tray used at most once while free trays remain, and the filament goes to the extruder that
 // tray feeds. Filaments that get no tray keep prior_map's side (else the extruder with more free
 // trays). With no printer state at all the prior map is returned unchanged.
+// An extruder's external spool is a candidate only when no AMS with a loaded tray feeds that
+// extruder, which is the rule Bambu's grouping and send mapping use (an X2D with an AMS HT on one
+// extruder and a spool on the other extruder's holder).
 // prior_map: 1-based, may be empty or short (missing entries default to 1).
 Arrangement propose_arrangement(const PrinterState &state, const std::vector<ProjectFilament> &used,
                                 size_t filament_count, const std::vector<int> &prior_map);
@@ -160,7 +171,9 @@ Arrangement propose_arrangement(const PrinterState &state, const std::vector<Pro
 bool all_on_one_side_with_trays_on_both(const Arrangement &arr, const PrinterState &state,
                                         const std::vector<ProjectFilament> &used);
 
-// Trays offered for a filament on the given logical extruder (0 = left, 1 = right).
+// Trays offered for a filament on the given logical extruder (0 = left, 1 = right): that
+// extruder's AMS trays, then its external spool when one is loaded (a manual pick may always
+// choose it, as in BambuStudio's tray picker).
 std::vector<Tray> trays_for_extruder(const PrinterState &state, int logical_extruder);
 
 // Problems that make an arrangement unusable as confirmed (empty = fine). The GUI words them.

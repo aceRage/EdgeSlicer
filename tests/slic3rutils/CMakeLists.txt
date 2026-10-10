@@ -40,6 +40,7 @@ add_executable(${_TEST_NAME}_tests
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp
     hub_addresses_tests.cpp
+    tailscale_cli_tests.cpp
     update_feed_tests.cpp
     paint_cli_tests.cpp
     hms_lookup_tests.cpp
@@ -60,6 +61,7 @@ add_executable(${_TEST_NAME}_tests
     page_server_security_tests.cpp
     login_result_page_tests.cpp
     sentry_scrub_tests.cpp
+    login_diagnostics_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
     device_controls_tests.cpp
@@ -70,6 +72,7 @@ add_executable(${_TEST_NAME}_tests
     ams_dual_layout_tests.cpp
     gizmo_selection_object_tests.cpp
     emboss_picking_tests.cpp
+    svg_import_routing_tests.cpp
     emboss_free_transform_tests.cpp
     dark_mode_background_tests.cpp
     # After the other wx-window tests: it starts a plain wxApp when none is up, and the tests

@@ -682,6 +682,7 @@ wxMenu* MenuFactory::append_submenu_add_generic(wxMenu* menu, ModelVolumeType ty
 
     append_menu_item_add_text(sub_menu, type);
     append_menu_item_add_svg(sub_menu, type);
+    append_menu_item_add_svg_split(sub_menu, type);
     append_menu_item_add_image(sub_menu, type);
     append_menu_item_add_code(sub_menu, type);
     append_menu_item_add_shape(sub_menu, type);
@@ -872,6 +873,27 @@ void MenuFactory::append_menu_item_add_shape(wxMenu *menu, ModelVolumeType type)
     };
     append_menu_item(menu, wxID_ANY, _L("Shape") + dots, _L("Emboss a circle, square, star or other simple shape"), add_shape,
                      "menu_obj_svg", menu);
+}
+
+// "SVG (Split)": one part per shape of the SVG, as Bambu Studio imports it, later shapes win.
+// Only for parts (and new objects): a negative volume or a modifier of the split parts would act
+// exactly as the union, which the plain "SVG" item already creates.
+void MenuFactory::append_menu_item_add_svg_split(wxMenu *menu, ModelVolumeType type)
+{
+    if (type != ModelVolumeType::MODEL_PART && type != ModelVolumeType::INVALID)
+        return;
+    auto add_svg_split = [type](const wxCommandEvent & /*unnamed*/) {
+        const GLCanvas3D *canvas = plater()->canvas3D();
+        auto *svg = dynamic_cast<GLGizmoSVG *>(canvas->get_gizmos_manager().get_gizmo(GLGizmosManager::Svg));
+        assert(svg != nullptr);
+        if (svg == nullptr)
+            return;
+        // INVALID .. no selected object, parts are created as new object
+        svg->create_volume_split(type, canvas->get_popup_menu_position());
+    };
+    append_menu_item(menu, wxID_ANY, _L("SVG (Split)"),
+                     _L("Import an SVG as one part per shape. Shapes painted later cut away what they cover, so the parts keep the picture"),
+                     add_svg_split, "menu_obj_svg", menu);
 }
 
 void MenuFactory::append_menu_item_add_image(wxMenu *menu, ModelVolumeType type)

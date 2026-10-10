@@ -21,6 +21,19 @@ bool is_ams_ht_id(int ams_id) { return ams_id >= 128 && ams_id < 153; }
 
 bool is_external_spool_ams_id(int ams_id) { return ams_id == 254 || ams_id == 255; }
 
+int external_spool_physical_extruder(int ams_id) { return ams_id == 255 ? 0 : ams_id == 254 ? 1 : -1; }
+
+int external_spool_ams_id(int physical_extruder) { return physical_extruder == 0 ? 255 : physical_extruder == 1 ? 254 : -1; }
+
+std::string tray_display_name(int ams_id, int slot_id)
+{
+    if (ams_id == 255)
+        return "Ext-R";
+    if (ams_id == 254)
+        return "Ext-L";
+    return tray_name(ams_id, slot_id);
+}
+
 std::string tray_name(int ams_id, int slot_id)
 {
     if (is_external_spool_ams_id(ams_id))
