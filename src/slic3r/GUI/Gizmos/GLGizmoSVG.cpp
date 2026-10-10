@@ -233,6 +233,20 @@ bool GLGizmoSVG::create_volume(std::string_view svg_file, ModelVolumeType volume
     return start_create_volume_without_position(input, std::move(base));
 }
 
+bool GLGizmoSVG::create_object(std::string_view svg_file)
+{
+    CreateVolumeParams input = create_input(m_parent, m_raycast_manager, ModelVolumeType::MODEL_PART);
+    input.gl_volume          = nullptr; // never onto an object under the mouse
+    // own cancel flag: several imported files must not cancel each other's job
+    std::shared_ptr<std::atomic<bool>> cancel;
+    DataBasePtr base = create_emboss_data_base(cancel, ModelVolumeType::MODEL_PART, svg_file);
+    if (!base)
+        return false; // Uninterpretable svg
+    Size  size = m_parent.get_canvas_size();
+    Vec2d screen_center(size.get_width() / 2., size.get_height() / 2.);
+    return start_create_volume(input, std::move(base), screen_center);
+}
+
 bool GLGizmoSVG::create_volume(std::string_view svg_file, const Vec2d &mouse_pos, ModelVolumeType volume_type)
 {
     CreateVolumeParams input = create_input(m_parent, m_raycast_manager, volume_type);

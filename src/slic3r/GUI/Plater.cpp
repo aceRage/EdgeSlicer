@@ -10470,6 +10470,41 @@ bool emboss_svg(Plater& plater, const wxString &svg_file, const Vec2d& mouse_dro
     return svg->create_volume(svg_file_str, mouse_drop_position, ModelVolumeType::MODEL_PART);
 }
 
+// File > Import (Ctrl+I) and several dropped files: every .svg asks "SVG" or "SVG (Split)" and is
+// created by the SVG gizmo as a new object, the same as Add Primitive > SVG / SVG (Split).
+// (Model::read_from_file keeps its own SVG loader for the command line.)
+// Returns the other files, which are loaded by load_files().
+std::vector<fs::path> import_svg_files(Plater &plater, const std::vector<fs::path> &paths)
+{
+    std::vector<fs::path> svgs, others;
+    for (const fs::path &path : paths)
+        (is_svg_file(path.string()) ? svgs : others).push_back(path);
+    if (svgs.empty())
+        return others;
+    GLCanvas3D *canvas = plater.canvas3D();
+    GLGizmoSVG *svg    = canvas != nullptr ? dynamic_cast<GLGizmoSVG *>(canvas->get_gizmos_manager().get_gizmo(GLGizmosManager::Svg)) : nullptr;
+    if (svg == nullptr)
+        return paths; // no gizmo: the model loader takes them
+    std::optional<SvgDropAction> for_all;
+    for (size_t i = 0; i < svgs.size(); ++i) {
+        SvgDropAction action;
+        if (for_all.has_value()) {
+            action = *for_all;
+        } else {
+            bool apply_to_all = false;
+            action = ask_svg_drop_action(nullptr, from_path(svgs[i].filename()), i + 1 < svgs.size() ? &apply_to_all : nullptr);
+            if (apply_to_all)
+                for_all = action;
+        }
+        const std::string file = into_u8(from_path(svgs[i]));
+        if (action == SvgDropAction::Split)
+            svg->create_volume_split(ModelVolumeType::INVALID, {}, file);
+        else if (action == SvgDropAction::Plain)
+            svg->create_object(file);
+    }
+    return others;
+}
+
 bool is_traceable_image(const wxString &file)
 {
     wxString ext = wxFileName(file).GetExt().Lower();
@@ -21128,6 +21163,14 @@ bool Plater::load_files(const wxArrayString& filenames, bool from_url)
     //        return true;
     //}
 
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive (a single dropped .svg is handled
+    // by the drop target already)
+    if (!this->m_only_gcode && !this->m_exported_file) {
+        normal_paths = import_svg_files(*this, normal_paths);
+        if (normal_paths.empty())
+            return true;
+    }
+
     //// other files
     std::string snapshot_label;
     assert(!normal_paths.empty());
@@ -21336,6 +21379,10 @@ void Plater::add_file()
 
     std::vector<fs::path> paths;
     for (const auto &file : input_files) paths.emplace_back(into_path(file));
+
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive
+    paths = import_svg_files(*this, paths);
+    if (paths.empty()) return;
 
     std::string snapshot_label;
     assert(!paths.empty());

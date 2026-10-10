@@ -69,6 +69,12 @@ public:
     bool create_volume(std::string_view svg_file, ModelVolumeType volume_type = ModelVolumeType::MODEL_PART);
 
     /// <summary>
+    /// Plain "SVG" of a file as a new object in the center of the screen, never onto the selected
+    /// object (File > Import)
+    /// </summary>
+    bool create_object(std::string_view svg_file);
+
+    /// <summary>
     /// Ask user for QR code / barcode and create its parts (dark, light, logo) as SVG volumes
     /// </summary>
     /// <param name="volume_type">Object part / Negative volume / Modifier, INVALID means new object</param>

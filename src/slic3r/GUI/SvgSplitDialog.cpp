@@ -12,6 +12,7 @@
 #include <wx/bitmap.h>
 #include <wx/bmpcbox.h>
 #include <wx/button.h>
+#include <wx/checkbox.h>
 #include <wx/dialog.h>
 #include <wx/image.h>
 #include <wx/scrolwin.h>
@@ -20,6 +21,8 @@
 #include <wx/stattext.h>
 
 #include <algorithm>
+
+#include <boost/algorithm/string/predicate.hpp>
 
 namespace Slic3r { namespace GUI {
 
@@ -219,9 +222,11 @@ private:
 
 } // namespace
 
-SvgDropAction ask_svg_drop_action(wxWindow *parent, const wxString &file_name)
+bool is_svg_file(const std::string &path) { return boost::algorithm::iends_with(path, ".svg"); }
+
+SvgDropAction ask_svg_drop_action(wxWindow *parent, const wxString &file_name, bool *apply_to_all)
 {
-    wxDialog dialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY, _L("SVG dropped"), wxDefaultPosition,
+    wxDialog dialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY, _L("Import SVG"), wxDefaultPosition,
                     wxDefaultSize, wxDEFAULT_DIALOG_STYLE);
     wxBoxSizer *root = new wxBoxSizer(wxVERTICAL);
     root->Add(new wxStaticText(&dialog, wxID_ANY, GUI::format_wxstr(_L("How should \"%1%\" be imported?"), file_name)), 0, wxALL,
@@ -249,6 +254,11 @@ SvgDropAction ask_svg_drop_action(wxWindow *parent, const wxString &file_name)
         });
         root->Add(button, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, dialog.FromDIP(12));
     }
+    wxCheckBox *all = nullptr;
+    if (apply_to_all != nullptr) {
+        all = new wxCheckBox(&dialog, wxID_ANY, _L("Use this answer for the other SVG files of this import"));
+        root->Add(all, 0, wxLEFT | wxRIGHT | wxBOTTOM, dialog.FromDIP(12));
+    }
     wxStdDialogButtonSizer *buttons = new wxStdDialogButtonSizer();
     buttons->AddButton(new wxButton(&dialog, wxID_CANCEL));
     buttons->Realize();
@@ -256,7 +266,10 @@ SvgDropAction ask_svg_drop_action(wxWindow *parent, const wxString &file_name)
     dialog.SetSizerAndFit(root);
     dialog.CenterOnParent();
     wxGetApp().UpdateDlgDarkUI(&dialog);
-    if (dialog.ShowModal() != wxID_OK)
+    int answer = dialog.ShowModal();
+    if (apply_to_all != nullptr)
+        *apply_to_all = all != nullptr && all->GetValue();
+    if (answer != wxID_OK)
         return SvgDropAction::Cancel;
     return result;
 }

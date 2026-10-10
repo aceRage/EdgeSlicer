@@ -17,10 +17,17 @@ namespace Slic3r { namespace GUI {
 enum class SvgDropAction { Cancel, Plain, Split };
 
 /// <summary>
-/// A single .svg file was dropped onto the plate: import it as "SVG" (one part, union of the
-/// shapes) or as "SVG (Split)" (one part per shape). Esc / Cancel cancels the drop.
+/// An .svg file is dropped onto the plate or imported (File > Import): import it as "SVG" (one
+/// part, union of the shapes) or as "SVG (Split)" (one part per shape). Esc / Cancel skips the file.
 /// </summary>
-SvgDropAction ask_svg_drop_action(wxWindow *parent, const wxString &file_name);
+/// <param name="apply_to_all">When not null (more SVG files follow), a check box offers to use the
+/// answer for the other SVG files too; receives its state</param>
+SvgDropAction ask_svg_drop_action(wxWindow *parent, const wxString &file_name, bool *apply_to_all = nullptr);
+
+/// <summary>
+/// Is the file imported by the SVG gizmo (SVG / SVG (Split)) instead of the model loader?
+/// </summary>
+bool is_svg_file(const std::string &path);
 
 /// <summary>
 /// Choose a filament for every colour of an SVG split into parts. Every colour starts on the
