@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace Slic3r;
@@ -1237,4 +1238,46 @@ TEST_CASE("vendors: what an update keeps, forgets and clears", "[Vendors]")
             CHECK_FALSE(plan_update(old, in).reset_cache);
         }
     }
+}
+
+TEST_CASE("vendors: the default name of a downloaded file never has a doubled extension", "[Vendors]")
+{
+    // label, extension from the address ("" = indirect download), expected
+    const std::vector<std::tuple<std::string, std::string, std::string>> cases {
+        {"x.3mf", "", "x.3mf"},
+        {"x", "", "x.3mf"},
+        {"x", ".3mf", "x.3mf"},
+        {"x.STL", ".stl", "x.stl"},
+        {"x.STL", "", "x.stl"},
+        {"x.gcode.3mf", "", "x.gcode.3mf"},
+        {"x.gcode.3mf", ".3mf", "x.gcode.3mf"},
+        {"x.3mf", ".stl", "x.stl"},
+        {"x.3mf.3mf", "", "x.3mf"},
+        {"x.3mf.3mf", ".3mf", "x.3mf"},
+        {"Alolan Vulpix - 0037 Alolan Vulpix MC.3mf", "", "Alolan Vulpix - 0037 Alolan Vulpix MC.3mf"},
+        {"Alolan Vulpix - 0037 Alolan Vulpix MC.3MF ", ".3mf", "Alolan Vulpix - 0037 Alolan Vulpix MC.3mf"},
+        {"a.step", "", "a.step"},
+        {"a.zip", ".3mf", "a.3mf"},
+        {"v1.2 final", "", "v1.2 final.3mf"}, // ".2 final" is no model extension
+        {"x.obj", ".STP", "x.stp"},
+        {"x", "stl", "x.3mf"},               // an address extension must start with a dot
+        {".3mf", "", ".3mf"},
+    };
+    for (const auto& [label, url_ext, expected] : cases) {
+        INFO(label << " + [" << url_ext << "]");
+        // ".3mf" alone has no base name: the sanitizer used by the app gives it one
+        const auto name = download_file_name(label, url_ext, [](std::string n) { return n.empty() ? std::string("model") : n; });
+        if (label == ".3mf")
+            CHECK(name == "model.3mf");
+        else
+            CHECK(name == expected);
+        // and the result never ends in two model extensions
+        const std::string ext = model_extension(name);
+        CHECK(model_extension(name.substr(0, name.size() - ext.size())).empty());
+    }
+    CHECK(model_extension("a.GCODE.3MF") == ".gcode.3mf");
+    CHECK(model_extension("a.3mf") == ".3mf");
+    CHECK(model_extension("https://x.example.com/f/a.stl") == ".stl");
+    CHECK(model_extension("noext").empty());
+    CHECK(model_extension("a.gcode").empty());
 }

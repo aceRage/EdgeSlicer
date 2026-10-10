@@ -271,6 +271,16 @@ std::string    fill_template(const std::string& templ, const nlohmann::json& ite
 // Items mapped from one parsed response page.
 std::vector<Item> map_items(const Spec& spec, const nlohmann::json& page);
 
+// The model file extension a name ends with, lower case with its dot: ".3mf" ".stl" ".step" ".stp"
+// ".obj" ".amf" ".zip", or ".gcode.3mf" as one extension; "" when it ends with none.
+std::string model_extension(const std::string& name);
+// The default name of a downloaded file from the vendor's label for it (which may itself end in
+// ".3mf") and the extension the download address gave ("" = it gave none: an indirect download).
+// The extension is the address's, else the label's, else ".3mf"; it is never doubled. `sanitize`
+// (optional) cleans the base name for the file system before the extension is added.
+std::string download_file_name(const std::string& label, const std::string& url_ext,
+                               const std::function<std::string(std::string)>& sanitize = nullptr);
+
 // CSV of the items, one row per file (one row for an item without files): UTF-8, RFC 4180 quoting,
 // and a cell that a spreadsheet would run as a formula (= + - @ tab CR) prefixed with '.
 std::string to_csv(const std::string& connector, const std::string& vendor, const std::vector<Item>& items);

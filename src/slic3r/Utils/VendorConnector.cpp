@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <set>
 #include <stdexcept>
 
@@ -1401,6 +1402,38 @@ UpdatePlan plan_update(const Spec& old_spec, const Spec& imported)
         (std::find(now.begin(), now.end(), old) != now.end() ? p.keep_slots : p.drop_slots).push_back(old.first);
     p.reset_cache = list_definition_differs(old_spec, imported);
     return p;
+}
+
+// ---- download file names ----
+
+std::string model_extension(const std::string& name)
+{
+    const std::string l = lower(trim(name));
+    for (const char* e : {".gcode.3mf", ".3mf", ".stl", ".step", ".stp", ".obj", ".amf", ".zip"}) {
+        const size_t n = std::strlen(e);
+        if (l.size() >= n && l.compare(l.size() - n, n, e) == 0)
+            return e;
+    }
+    return std::string();
+}
+
+std::string download_file_name(const std::string& label, const std::string& url_ext, const std::function<std::string(std::string)>& sanitize)
+{
+    std::string base = trim(label);
+    const std::string label_ext = model_extension(base);
+    if (!label_ext.empty())
+        base.resize(base.size() - label_ext.size());
+    // Whatever model extensions are left on the base would double up ("x.3mf.3mf").
+    for (std::string e; !(e = model_extension(base)).empty();)
+        base.resize(base.size() - e.size());
+    std::string ext = lower(trim(url_ext));
+    if (ext.empty() || ext[0] != '.')
+        ext = label_ext.empty() ? std::string(".3mf") : label_ext;
+    else if (!label_ext.empty() && label_ext.size() > ext.size() && label_ext.compare(label_ext.size() - ext.size(), ext.size(), ext) == 0)
+        ext = label_ext; // ".gcode.3mf" from a ".3mf" address
+    if (sanitize)
+        base = sanitize(base);
+    return base + ext;
 }
 
 } // namespace Vendors

@@ -1090,14 +1090,13 @@ void HomeVendors::download(const std::string& key, const std::string& sub_id)
     const std::vector<Library::Folder> folders = Library::folders_from_json(wxGetApp().app_config->get("home_library_folders"));
     if (!folders.empty())
         dir = wxString::FromUTF8(folders.front().path);
-    std::string ext = ".3mf";
-    if (direct) {
-        const std::string path = lower(url.substr(0, url.find_first_of("?#")));
-        for (const char* e : {".3mf", ".stl", ".step", ".stp", ".obj", ".amf", ".zip"})
-            if (path.size() > strlen(e) && path.compare(path.size() - strlen(e), strlen(e), e) == 0)
-                ext = e;
-    }
-    wxFileDialog dlg(m_parent, _L("Save the model"), dir, wxString::FromUTF8(safe_file_name(label) + ext), "*" + ext,
+    // The extension the address gives, when it is a direct link to the file; else the label's own, else .3mf.
+    std::string url_ext;
+    if (direct)
+        url_ext = Vendors::model_extension(url.substr(0, url.find_first_of("?#")));
+    const std::string file_name = Vendors::download_file_name(label, url_ext, safe_file_name);
+    const std::string ext       = Vendors::model_extension(file_name);
+    wxFileDialog dlg(m_parent, _L("Save the model"), dir, wxString::FromUTF8(file_name), "*" + wxString::FromUTF8(ext),
                      wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
     if (dlg.ShowModal() != wxID_OK)
         return;
