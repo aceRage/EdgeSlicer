@@ -183,4 +183,36 @@ TEST_CASE("run_capture_posix gives the child a closed stdin and no leaked descri
     ::close(base);
 }
 
+TEST_CASE("run_capture_posix tells a timeout from a program that is not there", "[TailscaleCli]")
+{
+    std::string out;
+    int         code = 0;
+    bool        timed_out = true;
+    REQUIRE_FALSE(run_capture_posix({ "/definitely/not/installed/tailscale" }, out, code, 10000, 1 << 20, &timed_out));
+    REQUIRE_FALSE(timed_out);
+    REQUIRE_FALSE(run_capture_posix({ "/bin/sleep", "30" }, out, code, 200, 1 << 20, &timed_out));
+    REQUIRE(timed_out);
+    REQUIRE(run_capture_posix({ "/bin/echo", "ok" }, out, code, 10000, 1 << 20, &timed_out));
+    REQUIRE_FALSE(timed_out);
+}
+
+TEST_CASE("run_capture_posix can be stopped as soon as the output says what it is waiting for", "[TailscaleCli]")
+{
+    // `yes` prints the phrase at once and never stops, like a command that prints what it is
+    // waiting for and then waits.
+    std::string out;
+    int         code = 0;
+    bool        timed_out = true;
+    int         calls = 0;
+    const auto  t0 = std::chrono::steady_clock::now();
+    REQUIRE_FALSE(run_capture_posix({ "/usr/bin/yes", "Serve is not enabled" }, out, code, 60000, 1 << 20, &timed_out,
+                                    [&](const std::string& so_far) { ++calls; return so_far.find("not enabled") != std::string::npos; }));
+    REQUIRE(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() < 5000);
+    REQUIRE_FALSE(timed_out); // stopped on purpose, not by the clock
+    REQUIRE(calls >= 1);
+    REQUIRE(out.find("Serve is not enabled") != std::string::npos);
+    int status = 0;
+    REQUIRE(::waitpid(-1, &status, WNOHANG) == -1); // killed and reaped
+}
+
 #endif // !_WIN32

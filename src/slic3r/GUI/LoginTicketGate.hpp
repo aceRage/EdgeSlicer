@@ -12,7 +12,7 @@
 //
 // The rule: a ticket is exchanged once. The first request to carry it owns the exchange; any other
 // request for the same ticket, whether it arrives while the exchange is running or after, gets the
-// owner's result (the same redirect) without a second call. A result is remembered for RESULT_TTL_MS
+// owner's result (the same result page) without a second call. A result is remembered for RESULT_TTL_MS
 // when it was a success (long enough for any browser retry) and FAILURE_TTL_MS when it was not (so
 // a person who really does try again a few seconds later is not told the old answer).
 //
@@ -32,12 +32,12 @@ namespace GUI {
 class LoginTicketGate
 {
 public:
-    // What the first request made of the ticket: where the browser was sent, and whether the
-    // sign-in worked.
+    // What the first request made of the ticket: whether the sign-in worked and, when it did not,
+    // the short error code of ours that the result page carries (HttpServer::ResponseLoginResult).
     struct Outcome
     {
         bool        success { false };
-        std::string location; // the redirect (or "" when the answer was a plain page)
+        std::string error;
     };
 
     enum class Role {

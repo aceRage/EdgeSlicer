@@ -41,6 +41,7 @@ add_executable(${_TEST_NAME}_tests
     http_tls_policy_tests.cpp
     hub_addresses_tests.cpp
     tailscale_cli_tests.cpp
+    hub_platform_tests.cpp
     update_feed_tests.cpp
     paint_cli_tests.cpp
     hms_lookup_tests.cpp
@@ -59,6 +60,7 @@ add_executable(${_TEST_NAME}_tests
     instance_routing_tests.cpp
     startup_wizard_tests.cpp
     page_server_security_tests.cpp
+    login_result_page_tests.cpp
     sentry_scrub_tests.cpp
     login_diagnostics_tests.cpp
     login_ticket_gate_tests.cpp

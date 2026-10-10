@@ -15,18 +15,17 @@ using Role = LoginTicketGate::Role;
 // sign-in that had worked. The gate makes a ticket exchange happen once.
 
 namespace {
-LoginTicketGate::Outcome ok(const std::string& to = "https://bambulab.com/done")
+LoginTicketGate::Outcome ok()
 {
     LoginTicketGate::Outcome o;
-    o.success  = true;
-    o.location = to + "?result=success";
+    o.success = true;
     return o;
 }
 LoginTicketGate::Outcome bad()
 {
     LoginTicketGate::Outcome o;
-    o.success  = false;
-    o.location = "https://bambulab.com/done?result=fail&error=ticket_exchange_failed";
+    o.success = false;
+    o.error   = "ticket_exchange_failed";
     return o;
 }
 } // namespace
@@ -42,7 +41,7 @@ TEST_CASE("[LoginTicketGate] the first request owns the ticket, a repeat gets th
         const LoginTicketGate::Claim c = g.claim(t, at);
         REQUIRE(c.role == Role::Repeat);
         CHECK(c.outcome.success);
-        CHECK(c.outcome.location == ok().location);
+        CHECK(c.outcome.error.empty());
     }
 }
 
@@ -66,6 +65,7 @@ TEST_CASE("[LoginTicketGate] a failed exchange is repeated back briefly, then tr
     LoginTicketGate::Claim c = g.claim("Ab12Cd", 900);
     REQUIRE(c.role == Role::Repeat);
     CHECK_FALSE(c.outcome.success);
+    CHECK(c.outcome.error == "ticket_exchange_failed");
     // A person who really tries again after the window gets a real exchange.
     CHECK(g.claim("Ab12Cd", 100 + LoginTicketGate::FAILURE_TTL_MS + 1).role == Role::Owner);
 }
@@ -100,7 +100,6 @@ TEST_CASE("[LoginTicketGate] a repeat that arrives mid-exchange waits for the ow
     REQUIRE(got.load());
     CHECK(seen.role == Role::Repeat);
     CHECK(seen.outcome.success);
-    CHECK(seen.outcome.location == ok().location);
 }
 
 TEST_CASE("[LoginTicketGate] only a whole ticket parameter makes a request a callback", "[LoginTicketGate]")
