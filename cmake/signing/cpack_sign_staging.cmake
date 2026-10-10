@@ -9,6 +9,9 @@
 # is spent. Finally every PE file in the staging tree is verified; anything left unsigned fails
 # the package.
 #
+# Before that it makes signed copies of the NSIS plug-ins for the installer (see "NSIS plug-ins"
+# in docs/windows-signing.md).
+#
 # Does nothing unless the EDGESLICER_SIGN_WINDOWS environment variable is 1.
 
 if (NOT "$ENV{EDGESLICER_SIGN_WINDOWS}" STREQUAL "1")
@@ -31,6 +34,54 @@ else ()
     if (_signed STREQUAL _stage)
         message(FATAL_ERROR "EdgeSlicer signing: the signed tree and the staging tree are the same directory")
     endif ()
+    # ---- NSIS plug-ins ------------------------------------------------------------------------
+    # The installer and the uninstaller unpack the plug-in DLLs they call (System, nsExec,
+    # UserInfo, StartMenu, InstallOptions, ...) to $PLUGINSDIR at run time. Copy the plug-in
+    # folder of the makensis cpack is about to run, sign the copies, and let the !addplugindir
+    # that WindowsSigning.cmake put at the top of the script point makensis at them. The whole
+    # folder is signed, not only today's five, so a plug-in call added later is covered too.
+    # The NSIS install is only read.
+    set(_makensis "${CPACK_INSTALLER_PROGRAM}")
+    if (NOT _makensis OR NOT EXISTS "${_makensis}")
+        message(FATAL_ERROR "EdgeSlicer signing: CPack did not report the makensis it runs (CPACK_INSTALLER_PROGRAM='${_makensis}')")
+    endif ()
+    get_filename_component(_nsis_dir "${_makensis}" DIRECTORY)
+    set(_plug_src "${_nsis_dir}/Plugins/x86-unicode")
+    if (NOT EXISTS "${_plug_src}/System.dll")
+        # makensis.exe in <NSISDIR>\Bin rather than the launcher in <NSISDIR>
+        get_filename_component(_nsis_dir "${_nsis_dir}" DIRECTORY)
+        set(_plug_src "${_nsis_dir}/Plugins/x86-unicode")
+    endif ()
+    if (NOT EXISTS "${_plug_src}/System.dll")
+        message(FATAL_ERROR "EdgeSlicer signing: no NSIS plug-in folder next to ${_makensis} (looked for Plugins/x86-unicode)")
+    endif ()
+    set(_plug_dst "${CPACK_EDGESLICER_NSIS_PLUGIN_DIR}")
+    if (NOT _plug_dst)
+        message(FATAL_ERROR "EdgeSlicer signing: CPACK_EDGESLICER_NSIS_PLUGIN_DIR is not set - reconfigure with -DEDGESLICER_SIGN_WINDOWS=ON")
+    endif ()
+    file(REMOVE_RECURSE "${_plug_dst}")
+    file(MAKE_DIRECTORY "${_plug_dst}")
+    file(GLOB _plug_dlls LIST_DIRECTORIES false "${_plug_src}/*.dll")
+    file(COPY ${_plug_dlls} DESTINATION "${_plug_dst}")
+    list(LENGTH _plug_dlls _plug_n)
+    message(STATUS "EdgeSlicer signing: signing ${_plug_n} NSIS plug-in copies from ${_plug_src} in ${_plug_dst}")
+    file(TO_NATIVE_PATH "${_plug_dst}" _plug_dst_native)
+    execute_process(
+        COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File "${CPACK_EDGESLICER_SIGN_SCRIPT}" -Path "${_plug_dst_native}"
+        RESULT_VARIABLE _rc)
+    if (NOT _rc EQUAL 0)
+        message(FATAL_ERROR "EdgeSlicer signing: signing the NSIS plug-in copies failed (exit ${_rc}) - not packaging")
+    endif ()
+    execute_process(
+        COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File "${CPACK_EDGESLICER_VERIFY_SCRIPT}" -Path "${_plug_dst_native}"
+        RESULT_VARIABLE _rc)
+    if (NOT _rc EQUAL 0)
+        message(FATAL_ERROR "EdgeSlicer signing: the signed NSIS plug-in copies failed verification (exit ${_rc}) - not packaging")
+    endif ()
+
+    # ---- the staging tree ---------------------------------------------------------------------
     message(STATUS "EdgeSlicer signing: overlaying signed PE files from ${_signed} onto ${_stage}")
 
     file(GLOB_RECURSE _pe LIST_DIRECTORIES false RELATIVE "${_stage}" "${_stage}/*.exe" "${_stage}/*.dll")

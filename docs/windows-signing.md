@@ -24,6 +24,7 @@ one run of `build_windows_selfhosted.yml`:
 | `sentry.dll`, `crashpad_handler.exe` (and `crashpad_wer.dll` when built) | same |
 | `resources\tools\go2rtc\go2rtc.exe`, `resources\tools\go2rtc\ffmpeg.exe` | same (unmodified apart from the appended signature) |
 | `ultranet\bambu_networking.dll`, `ultranet\BambuSource.dll` | same (so the network plug-in zip cut from the portable zip is signed too) |
+| NSIS plug-ins (`System.dll`, `nsExec.dll`, `UserInfo.dll`, `StartMenu.dll`, `InstallOptions.dll`, ...) | copies signed by the CPack pre-build hook, embedded through `!addplugindir` (see "NSIS plug-ins") |
 | `Uninstall.exe` | makensis `!uninstfinalize`, before it is embedded in the installer |
 | `EdgeSlicer_Windows_Installer_V<ver>.exe` | makensis `!finalize` |
 
@@ -36,16 +37,46 @@ Not signed unless the owner opts in: `FlashNetwork.dll`. Its redistribution term
 Set the variable `EDGESLICER_SIGN_FLASHNETWORK` to `1` to sign it; until then it ships unsigned and
 every verifier lists it as an allowed exception.
 
-Not signable by us: the stock NSIS plug-in DLLs (`System.dll`, `StartMenu.dll`, `UserInfo.dll`,
-`InstallOptions.dll`) that the installer unpacks to `%TEMP%` while it runs. They are reported as
-allowed exceptions (`$PLUGINSDIR\*`). Whether Smart App Control blocks them inside a signed installer
-needs a test on a machine with SAC enforcing (plan, risk 3).
-
-About 45 signatures per release; the Basic SKU includes 5,000 a month.
+About 60 signatures per release (16 of them the NSIS plug-in copies); the Basic SKU includes 5,000
+a month.
 
 The portable zip and the installer contain byte-identical files: CPack re-installs the build into
 its own staging folder, and a pre-build hook (`cmake/signing/cpack_sign_staging.cmake`) copies the
 signed files over that copy and verifies it before NSIS packs it.
+
+## NSIS plug-ins
+
+The installer and the uninstaller unpack the NSIS plug-in DLLs they call to `$PLUGINSDIR` (a
+folder under `%TEMP%`) and load them from there: `System.dll`, `nsExec.dll`, `UserInfo.dll`,
+`StartMenu.dll` and `InstallOptions.dll` today (the uninstaller only `nsExec.dll` and
+`UserInfo.dll`). NSIS ships them unsigned, so a signing run embeds signed copies instead:
+
+1. The CPack pre-build hook (`cmake/signing/cpack_sign_staging.cmake`) reads which makensis CPack
+   is about to run (`CPACK_INSTALLER_PROGRAM`), copies that install's whole `Plugins\x86-unicode`
+   folder to `build\nsis_signed_plugins\x86-unicode`, signs the copies with `windows_sign.ps1` and
+   verifies them. The whole folder, so a plug-in call added later is covered without a change
+   here. The NSIS install on the VM is only read, never modified.
+2. `cmake/signing/WindowsSigning.cmake` puts `!addplugindir /x86-unicode "<that folder>"` at the very
+   top of `CPACK_NSIS_DEFINES`, guarded by `!if "$%EDGESLICER_SIGN_WINDOWS%" == "1"` (the
+   environment makensis inherits), with an `!error` if the folder is empty or the target is not
+   Unicode.
+
+Why makensis then uses the copies: it loads its default folder (`<NSISDIR>\Plugins\x86-unicode`;
+x86-unicode is the default target since NSIS 3.07, and the CPack script sets no other) before the
+first script command, and a later `!addplugindir` for the same target replaces the path of each DLL
+name it finds there. That holds only while no plug-in DLL has been added to the installer yet, which
+is why the directive goes first in the defines: they land right after `!include "MUI.nsh"` and before
+the first plug-in call (the `nsExec` calls in `SnapmakerCloseRunning.nsh`). Checked locally with
+makensis 3.12 on the generated `project.nsi`: with marked copies in the folder, every DLL 7-Zip
+unpacks from the installer and from the uninstaller was the copy, not the stock file; the signed VM
+trial confirms it with NSIS 3.10.
+
+With signing off nothing changes: the CMake option OFF adds none of this, and with the option ON
+but `EDGESLICER_SIGN_WINDOWS` not `1` in cpack's environment the guarded block is skipped and the
+pre-build hook does nothing, so makensis embeds its stock plug-ins as before.
+
+The verifiers therefore have no `$PLUGINSDIR\*` allowance any more: an unsigned plug-in in the
+installer fails the run.
 
 ## The pieces
 
@@ -61,8 +92,8 @@ signed files over that copy and verifies it before NSIS packs it.
   `-AllowUnsigned` lists exceptions; `-HashOnly` prints signature-independent Authenticode
   hashes (see "Pinned hashes" below).
 - `cmake/signing/WindowsSigning.cmake`: the CMake option `EDGESLICER_SIGN_WINDOWS` (default OFF).
-  ON adds the two makensis hooks through `CPACK_NSIS_DEFINES` and the CPack pre-build script.
-  OFF adds nothing.
+  ON adds the two makensis hooks and the plug-in `!addplugindir` through `CPACK_NSIS_DEFINES`, and
+  the CPack pre-build script. OFF adds nothing.
 - `.github/workflows/build_windows_selfhosted.yml`: the `Signing -` steps.
 
 ## How to turn it on
@@ -95,8 +126,8 @@ as before.
 
 Order inside the job: configuration check and tool install (before the build, so a mistake costs
 a minute, not 25), build and tests, install, `azure/login` (OIDC), sign the portable tree and
-verify it, Sentry symbols, `cpack` (which signs `Uninstall.exe` and the installer through the
-hooks), zip, verify the zip and the installer, upload. The run also uploads
+verify it, Sentry symbols, `cpack` (which signs the NSIS plug-in copies, `Uninstall.exe` and the
+installer through the hooks), zip, verify the zip and the installer, upload. The run also uploads
 `SigningManifest_Windows_V<ver>` (the pre-signing sha256 of every file it signed).
 
 ## Verify locally
@@ -106,7 +137,7 @@ No SDK needed; Windows PowerShell 5.1 is enough:
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows_verify_signatures.ps1 ^
   -Path "C:\path\EdgeSlicer_Windows_V2.4.6.0_portable.zip;C:\path\EdgeSlicer_Windows_Installer_V2.4.6.0.exe" ^
-  -ExtractInstaller -ExpectedSubject "<certificate CN>" -AllowUnsigned "$PLUGINSDIR\*;FlashNetwork.dll"
+  -ExtractInstaller -ExpectedSubject "<certificate CN>" -AllowUnsigned "FlashNetwork.dll"
 ```
 
 Exit 0 means every PE file passed; the table names any that did not. On an unsigned build it lists
