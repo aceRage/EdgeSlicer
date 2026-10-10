@@ -186,6 +186,7 @@
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
+#include "SvgSplitDialog.hpp" // Drop SVG file: SVG or SVG (Split)
 #include "Gizmos/GizmoObjectManipulation.hpp"
 
 // BBS
@@ -10451,11 +10452,38 @@ bool emboss_svg(Plater& plater, const wxString &svg_file, const Vec2d& mouse_dro
         return false;
 
     // Refresh hover state to find surface point under mouse
-    wxMouseEvent evt(wxEVT_MOTION);
-    evt.SetPosition(wxPoint(mouse_drop_position.x(), mouse_drop_position.y()));
-    canvas->on_mouse(evt); // call render where is call GLCanvas3D::_picking_pass()
+    auto refresh_hover = [canvas, &mouse_drop_position]() {
+        wxMouseEvent evt(wxEVT_MOTION);
+        evt.SetPosition(wxPoint(mouse_drop_position.x(), mouse_drop_position.y()));
+        canvas->on_mouse(evt); // call render where is call GLCanvas3D::_picking_pass()
+    };
+    refresh_hover();
 
+    // "SVG" (one part) or "SVG (Split)" (one part per shape)?
+    SvgDropAction action = ask_svg_drop_action(nullptr, wxFileName(svg_file).GetFullName());
+    if (action == SvgDropAction::Cancel)
+        return false;
+    // the question took the mouse out of the canvas
+    refresh_hover();
+    if (action == SvgDropAction::Split)
+        return svg->create_volume_split(ModelVolumeType::MODEL_PART, mouse_drop_position, svg_file_str);
     return svg->create_volume(svg_file_str, mouse_drop_position, ModelVolumeType::MODEL_PART);
+}
+
+// Every file import of the GUI: .svg files are created by the SVG gizmo after the SVG / SVG (Split)
+// question, as new objects (import_svg_files_by_gizmo). Model::read_from_file keeps its own SVG
+// loader for the command line. Returns the other files, which are loaded by load_files().
+std::vector<fs::path> import_svg_files(Plater &plater, const std::vector<fs::path> &paths)
+{
+    std::vector<std::string> files;
+    for (const fs::path &path : paths)
+        files.push_back(into_u8(from_path(path)));
+    if (partition_svg_files(files).svg.empty())
+        return paths;
+    std::vector<fs::path> others;
+    for (const std::string &file : import_svg_files_by_gizmo(files, ModelVolumeType::INVALID))
+        others.push_back(into_path(from_u8(file)));
+    return others;
 }
 
 bool is_traceable_image(const wxString &file)
@@ -19486,6 +19514,12 @@ bool Plater::add_model(bool imperial_units, std::string fname)
         paths.emplace_back(fname);
     }
 
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive (before the snapshot, the gizmo
+    // jobs take their own)
+    paths = import_svg_files(*this, paths);
+    if (paths.empty())
+        return false;
+
     std::string snapshot_label;
     assert(! paths.empty());
     if (paths.size() == 1) {
@@ -20654,7 +20688,17 @@ void Plater::force_update_all_plate_thumbnails()
 }
 
 // BBS: backup
-std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi) {
+std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_in, LoadStrategy strategy, bool ask_multi) {
+    // Every model import of the GUI ends here (menu File > Import, toolbar, Home, recent files,
+    // downloads, files handed to the running app, ...): .svg files go to the SVG gizmo after the
+    // SVG / SVG (Split) question, the same as Add Primitive. The callers which route them already
+    // (Ctrl+I, drop, File > Import) pass no .svg here any more.
+    std::vector<fs::path> input_files = input_files_in;
+    if ((strategy & LoadStrategy::LoadModel) && !m_only_gcode && !m_exported_file) {
+        input_files = import_svg_files(*this, input_files);
+        if (input_files.empty())
+            return {};
+    }
     //BBS: wish to reset state when load a new file
     p->m_slice_all_only_has_gcode = false;
     //BBS: wish to reset all plates stats item selected state when load a new file
@@ -21116,6 +21160,14 @@ bool Plater::load_files(const wxArrayString& filenames, bool from_url)
     //        return true;
     //}
 
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive (a single dropped .svg is handled
+    // by the drop target already)
+    if (!this->m_only_gcode && !this->m_exported_file) {
+        normal_paths = import_svg_files(*this, normal_paths);
+        if (normal_paths.empty())
+            return true;
+    }
+
     //// other files
     std::string snapshot_label;
     assert(!normal_paths.empty());
@@ -21324,6 +21376,10 @@ void Plater::add_file()
 
     std::vector<fs::path> paths;
     for (const auto &file : input_files) paths.emplace_back(into_path(file));
+
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive
+    paths = import_svg_files(*this, paths);
+    if (paths.empty()) return;
 
     std::string snapshot_label;
     assert(!paths.empty());
