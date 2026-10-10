@@ -6,10 +6,17 @@
 # is roughly 25 min instead of 90. Artifact names match build_orca.yml's Windows job so the
 # release flow can consume either one.
 #
-# What this workflow deliberately does NOT do: it does not sign, does not deploy to a
-# release, and does not build the private network plugins unless they have been staged on
-# the runner (see "Detect optional plugin payloads" below). Releases still go through
-# build_all.yml plus the owner's local pack step.
+# What this workflow deliberately does NOT do: it does not deploy to a release, and does not
+# build the private network plugins unless they have been staged on the runner (see "Detect
+# optional plugin payloads" below). Releases still go through the owner's publisher script.
+#
+# Authenticode signing (docs/windows-signing.md) is OFF unless the repository variable
+# EDGESLICER_SIGN_WINDOWS is '1'. Without that variable the job runs exactly as before: no
+# environment, every "Signing -" step skipped, the CMake option off. With it, runs on ci/**,
+# release/**, main and tags (or a dispatch with sign=true) take the "windows-signing"
+# environment, log in to Azure with OIDC, sign every PE file of the portable tree and, through
+# NSIS hooks, the uninstaller and the installer, verify all of it, and fail the job on any
+# signing or verification failure rather than ship something unsigned.
 #
 # Shell note: PowerShell steps spell out their own interpreter rather than using the Actions
 # defaults, for two reasons that both come from this VM. PowerShell 7 is not installed, so
@@ -32,6 +39,11 @@ on:
         default: ''
       refresh_deps:
         description: 'Force a dependency rebuild even if the stamp matches'
+        required: false
+        type: boolean
+        default: false
+      sign:
+        description: 'Authenticode-sign this run even on a branch outside ci/**, release/**, main (only when the EDGESLICER_SIGN_WINDOWS repository variable is 1)'
         required: false
         type: boolean
         default: false
@@ -69,12 +81,50 @@ env:
   # https://api.github.com/repos/getsentry/sentry-cli/releases/tags/<version> (same pin as sentry_cli.yml).
   SENTRY_CLI_VERSION: '3.8.0'
   SENTRY_CLI_SHA256_WINDOWS: '2257cf6805a616f5c3ee291a549ebbba021190048b646adc006beb4e8cdef7fd'
+  # Authenticode signing (docs/windows-signing.md). '1' only when the repository variable
+  # EDGESLICER_SIGN_WINDOWS is '1' AND this is a ref releases come from (or a dispatch with
+  # sign=true); otherwise '0' and scripts/windows_sign.ps1 does nothing. The job's
+  # `environment:` below repeats this expression (that key cannot read env) - keep them in sync.
+  EDGESLICER_SIGN_WINDOWS: ${{ (vars.EDGESLICER_SIGN_WINDOWS == '1' && (startsWith(github.ref, 'refs/heads/ci/') || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || inputs.sign == true)) && '1' || '0' }}
+  # Signing tools, pinned and sha256-verified like NSIS and sentry-cli, unpacked under
+  # C:\Dev\tools\signing (writable by the runner's NETWORK SERVICE account). To update: the
+  # version from https://www.nuget.org/packages/<id> and the sha256 of the downloaded .nupkg.
+  # Microsoft.ArtifactSigning.Client is the renamed Microsoft.Trusted.Signing.Client (1.0.113+).
+  SIGN_TOOLS_DIR: 'C:\Dev\tools\signing'
+  SDK_BUILDTOOLS_VERSION: '10.0.28000.2705'
+  SDK_BUILDTOOLS_SHA256: '8bfdfb6ca2633f531cf80b5fa22512ba61a394d7988f0970db83baadc67929ed'
+  ARTIFACT_SIGNING_CLIENT_VERSION: '1.0.128'
+  ARTIFACT_SIGNING_CLIENT_SHA256: '74bd7d27e6ce1051409c38d9b46bc8df0400ecd643d51ffbf2ac00869061e40b'
+  # Installed machine-wide on the VM by its admin (the runner account cannot): the dlib needs
+  # the .NET 8 runtime, azure/login and the dlib's AzureCliCredential need the Azure CLI.
+  DOTNET_DIR: 'C:\Program Files\dotnet'
+  AZ_CLI_DIR: 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin'
 
 jobs:
   build:
     name: Build slicer
     runs-on: [self-hosted, Windows, edgeslicer-build]
     timeout-minutes: 240
+    # Signing only: the "windows-signing" environment holds the Artifact Signing variables and
+    # the Azure identity secrets, and the Entra federated credential trusts only this
+    # environment's OIDC subject. An empty name means no environment, so with the repository
+    # variable absent the job runs exactly as it did. Same condition as env.EDGESLICER_SIGN_WINDOWS.
+    environment: ${{ (vars.EDGESLICER_SIGN_WINDOWS == '1' && (startsWith(github.ref, 'refs/heads/ci/') || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || inputs.sign == true)) && 'windows-signing' || '' }}
+    # id-token: write lets azure/login request a GitHub OIDC token. It cannot be made
+    # conditional; without the environment the token's subject matches no Azure federated
+    # credential, so it grants nothing. contents: read is all the rest of the job needs
+    # (checkout; artifact uploads use the runtime token, not GITHUB_TOKEN).
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # From the windows-signing environment; empty (and unused) when signing is off.
+      ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+      ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+      ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+      WINDOWS_SIGNER_SUBJECT: ${{ secrets.WINDOWS_SIGNER_SUBJECT || vars.WINDOWS_SIGNER_SUBJECT }}
+      # FlashNetwork.dll stays unsigned until the owner sets this to '1' (licence decision).
+      EDGESLICER_SIGN_FLASHNETWORK: ${{ vars.EDGESLICER_SIGN_FLASHNETWORK }}
 
     steps:
       - name: Checkout
@@ -201,6 +251,96 @@ jobs:
           }
           & $makensis /VERSION
           "NSIS_DIR=$target" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding ascii
+
+      # ---- Signing: fail fast, before the 25-minute build -------------------------------------
+      # Every "Signing -" step is skipped when env.EDGESLICER_SIGN_WINDOWS is '0' (the default).
+      # When it is '1' a missing setting is an error, not a warning: an accidentally unsigned
+      # release is exactly what this is here to prevent.
+      - name: Signing - check configuration
+        if: env.EDGESLICER_SIGN_WINDOWS == '1'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
+        env:
+          HAS_AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID != '' }}
+          HAS_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID != '' }}
+          HAS_AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID != '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $missing = @()
+          foreach ($v in 'ARTIFACT_SIGNING_ENDPOINT', 'ARTIFACT_SIGNING_ACCOUNT', 'ARTIFACT_SIGNING_PROFILE', 'WINDOWS_SIGNER_SUBJECT') {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($v))) { $missing += "variable $v" }
+          }
+          foreach ($v in 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID') {
+            if ([Environment]::GetEnvironmentVariable("HAS_$v") -ne 'true') { $missing += "secret $v" }
+          }
+          # The scripts' local test mode (a throwaway self-signed certificate) must never reach CI.
+          if ($env:EDGESLICER_SIGN_TEST_THUMBPRINT) { Write-Host "::error::EDGESLICER_SIGN_TEST_THUMBPRINT is set - that is a local test switch, refusing to sign"; exit 1 }
+          if ($missing.Count) {
+            Write-Host ("::error::Signing is on (repository variable EDGESLICER_SIGN_WINDOWS=1) but the windows-signing " +
+                        "environment lacks: $($missing -join ', '). Add them (docs/windows-signing.md) or delete the " +
+                        "EDGESLICER_SIGN_WINDOWS variable to build unsigned.")
+            exit 1
+          }
+          Write-Host "signing is on: endpoint $env:ARTIFACT_SIGNING_ENDPOINT, account $env:ARTIFACT_SIGNING_ACCOUNT, profile $env:ARTIFACT_SIGNING_PROFILE"
+          Write-Host "expected signer: (set); FlashNetwork.dll signed: $(if ($env:EDGESLICER_SIGN_FLASHNETWORK -eq '1') { 'yes' } else { 'no (left unsigned)' })"
+
+      - name: Signing - install pinned signtool and Artifact Signing dlib
+        if: env.EDGESLICER_SIGN_WINDOWS == '1'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Machine-wide prerequisites the runner account cannot install itself.
+          $dotnetExe = Join-Path $env:DOTNET_DIR 'dotnet.exe'
+          $az = Join-Path $env:AZ_CLI_DIR 'az.cmd'
+          $net8 = Get-ChildItem -LiteralPath (Join-Path $env:DOTNET_DIR 'shared\Microsoft.NETCore.App') -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -like '8.*' } | Select-Object -First 1
+          if (-not (Test-Path -LiteralPath $dotnetExe) -or -not $net8) { Write-Host "::error::the .NET 8 runtime is not installed under $env:DOTNET_DIR (the Artifact Signing dlib needs it)"; exit 1 }
+          if (-not (Test-Path -LiteralPath $az)) { Write-Host "::error::the Azure CLI is not installed at $az (azure/login and the dlib need it)"; exit 1 }
+          Write-Host "dotnet runtime: $($net8.Name); az: $az"
+
+          # The runner service started before these were installed would not see them on PATH.
+          $env:AZ_CLI_DIR | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding ascii
+          $env:DOTNET_DIR | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding ascii
+          "DOTNET_ROOT=$($env:DOTNET_DIR)" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding ascii
+          # A per-run Azure CLI profile: nothing from the login outlives the job on the VM.
+          "AZURE_CONFIG_DIR=$(Join-Path $env:RUNNER_TEMP 'azure-cli')" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding ascii
+
+          # The two NuGet packages, pinned by version and sha256, unpacked once per version.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $pkgs = @(
+            @{ id = 'Microsoft.Windows.SDK.BuildTools'; ver = $env:SDK_BUILDTOOLS_VERSION;           sha = $env:SDK_BUILDTOOLS_SHA256 },
+            @{ id = 'Microsoft.ArtifactSigning.Client'; ver = $env:ARTIFACT_SIGNING_CLIENT_VERSION;  sha = $env:ARTIFACT_SIGNING_CLIENT_SHA256 }
+          )
+          $dirs = @{}
+          foreach ($p in $pkgs) {
+            $dir = Join-Path $env:SIGN_TOOLS_DIR ("{0}.{1}" -f $p.id, $p.ver)
+            $stamp = Join-Path $dir '.sha256'
+            if ((Test-Path -LiteralPath $stamp) -and ((Get-Content -LiteralPath $stamp -Raw).Trim() -eq $p.sha)) {
+              Write-Host "cached: $dir"
+            } else {
+              $nupkg = Join-Path $env:RUNNER_TEMP ("{0}.{1}.zip" -f $p.id, $p.ver)
+              $url = "https://api.nuget.org/v3-flatcontainer/$($p.id.ToLowerInvariant())/$($p.ver)/$($p.id.ToLowerInvariant()).$($p.ver).nupkg"
+              Write-Host "downloading $url"
+              & curl.exe -sL --fail --retry 3 --max-time 600 -o $nupkg $url
+              if ($LASTEXITCODE -ne 0) { Write-Host "::error::could not download $($p.id) $($p.ver) (curl $LASTEXITCODE)"; exit 1 }
+              $got = (Get-FileHash -LiteralPath $nupkg -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($got -ne $p.sha) { Remove-Item -LiteralPath $nupkg -Force; Write-Host "::error::$($p.id) $($p.ver) sha256 mismatch (got $got) - not using it"; exit 1 }
+              if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+              [System.IO.Compression.ZipFile]::ExtractToDirectory($nupkg, $dir)
+              Set-Content -LiteralPath $stamp -Value $p.sha -NoNewline -Encoding ascii
+              Remove-Item -LiteralPath $nupkg -Force
+              Write-Host "unpacked into $dir"
+            }
+            $dirs[$p.id] = $dir
+          }
+          $signtool = Get-ChildItem -LiteralPath (Join-Path $dirs['Microsoft.Windows.SDK.BuildTools'] 'bin') -Recurse -Filter signtool.exe |
+                      Where-Object { $_.Directory.Name -eq 'x64' } | Select-Object -First 1
+          $dlib = Join-Path $dirs['Microsoft.ArtifactSigning.Client'] 'bin\x64\Azure.CodeSigning.Dlib.dll'
+          if (-not $signtool) { Write-Host "::error::no x64 signtool.exe in the SDK build tools package"; exit 1 }
+          if (-not (Test-Path -LiteralPath $dlib)) { Write-Host "::error::no $dlib in the Artifact Signing package"; exit 1 }
+          "SIGNTOOL_PATH=$($signtool.FullName)" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding ascii
+          "ARTIFACT_SIGNING_DLIB=$dlib"         | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding ascii
+          Write-Host "signtool: $($signtool.FullName)"
+          Write-Host "dlib:     $dlib"
 
       - name: Ensure the runner account can read the shared deps
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
@@ -522,6 +662,10 @@ jobs:
           @rem payload flags ahead of the SDK path regardless.
           set "SDKVER=%WindowsSDKVersion%"
           if "%SDKVER:~-1%"=="\" set "SDKVER=%SDKVER:~0,-1%"
+          @rem Signing hooks in the NSIS package (cmake/signing/WindowsSigning.cmake) only when this
+          @rem run signs; otherwise SIGNFLAG is empty and the configure is the same as before.
+          set "SIGNFLAG="
+          if "%EDGESLICER_SIGN_WINDOWS%"=="1" set "SIGNFLAG=-DEDGESLICER_SIGN_WINDOWS=ON"
           if not exist build mkdir build
           cd build
           cmake .. -G "Visual Studio 17 2022" -A x64 ^
@@ -531,7 +675,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="%DEPS%/usr/local" ^
             -DCMAKE_INSTALL_PREFIX="./EdgeSlicer" ^
             -DCMAKE_BUILD_TYPE=Release ^
-            ${{ steps.ship.outputs.flags }} ^
+            ${{ steps.ship.outputs.flags }} %SIGNFLAG% ^
             -DWIN10SDK_PATH="%WindowsSdkDir%Include\%SDKVER%" || exit /b 1
           cmake --build . --config Release --target ALL_BUILD -- -m || exit /b 1
 
@@ -617,6 +761,41 @@ jobs:
             }
           }
           if ($missing.Count -gt 0) { throw "found on the VM but not in the package: $($missing -join ', ')" }
+
+      # ---- Signing: the portable tree --------------------------------------------------------
+      # Logged in here, right before the first signature, rather than at job start: the Azure CLI
+      # session from the OIDC token is short-lived and the build above takes ~25 minutes. The
+      # NSIS hooks in "Build the NSIS installer" reuse this session a few minutes later.
+      - name: Signing - Azure login (OIDC)
+        if: env.EDGESLICER_SIGN_WINDOWS == '1'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          # The signing identity holds only "Certificate Profile Signer" on the profile (least
+          # privilege), so it sees no subscription; without this az login fails with
+          # "No subscriptions found". Signing needs only the token, not a subscription.
+          allow-no-subscriptions: true
+
+      # Signs every PE file of build\EdgeSlicer that has no valid signature yet: our exe/dll, OCCT,
+      # freetype, GMP/MPFR, Sentry, go2rtc, ffmpeg, the UltraNet DLLs (FlashNetwork.dll only with
+      # EDGESLICER_SIGN_FLASHNETWORK=1). Microsoft's VC runtime and WebView2Loader are skipped.
+      # Before the Sentry upload so the uploaded PE files are the shipped bytes (the debug IDs
+      # do not change either way). The sha256 of each file before signing is kept as an artifact
+      # so pinned upstream hashes (ffmpeg, UltraNet) stay checkable.
+      - name: Signing - sign the portable tree
+        if: env.EDGESLICER_SIGN_WINDOWS == '1'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tree = Join-Path $env:GITHUB_WORKSPACE 'build\EdgeSlicer'
+          $manifest = Join-Path $env:GITHUB_WORKSPACE 'build\signing_manifest.csv'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\windows_sign.ps1') -Path $tree -ManifestPath $manifest
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::signing the portable tree failed - not packaging an unsigned build"; exit 1 }
+          $allow = @()
+          if ($env:EDGESLICER_SIGN_FLASHNETWORK -ne '1') { $allow = @('FlashNetwork.dll') }
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\windows_verify_signatures.ps1') -Path $tree -AllowUnsigned $allow
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::the signed portable tree failed verification"; exit 1 }
 
       # ---- Sentry: debug symbols for opt-in crash reports ------------------------------------
       # Skipped (green, with a notice) without the SENTRY_* secrets. A Sentry outage turns the
@@ -713,6 +892,10 @@ jobs:
         working-directory: build
         run: |
           set "PATH=%CMAKE_DIR%;%NSIS_DIR%;%PATH%"
+          @rem When this run signs, the CPack hooks (configured by -DEDGESLICER_SIGN_WINDOWS=ON) copy the
+          @rem signed files of this tree into CPack's staging copy, verify it, and sign Uninstall.exe and
+          @rem the installer itself through makensis' !uninstfinalize / !finalize. Unused otherwise.
+          if "%EDGESLICER_SIGN_WINDOWS%"=="1" set "EDGESLICER_SIGNED_TREE=%GITHUB_WORKSPACE%\build\EdgeSlicer"
           cpack -G NSIS || exit /b 1
 
       - name: Pack the portable zip
@@ -720,6 +903,28 @@ jobs:
         working-directory: build
         run: |
           "%SEVENZIP%" a -tzip "EdgeSlicer_Windows_%ver%_portable.zip" "%GITHUB_WORKSPACE%\build\EdgeSlicer" || exit /b 1
+
+      # Last check before anything is uploaded: the portable zip as it will be published, and the
+      # installer itself plus everything 7-Zip unpacks from it. Uninstall.exe is not unpacked by
+      # 7-Zip (NSIS writes it at install time); makensis' !uninstfinalize hook signed and
+      # verified it, and makensis stops if that fails. The stock NSIS plug-in DLLs the installer
+      # extracts to %TEMP% at run time ($PLUGINSDIR) are not ours and are not signed: they are
+      # listed as allowed, see "NSIS plug-ins" in docs/windows-signing.md.
+      - name: Signing - verify the packages before upload
+        if: env.EDGESLICER_SIGN_WINDOWS == '1'
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = Join-Path $env:GITHUB_WORKSPACE 'build'
+          $verify = Join-Path $env:GITHUB_WORKSPACE 'scripts\windows_verify_signatures.ps1'
+          $allow = @('$PLUGINSDIR\*')
+          if ($env:EDGESLICER_SIGN_FLASHNETWORK -ne '1') { $allow += 'FlashNetwork.dll' }
+          $targets = @((Join-Path $build "EdgeSlicer_Windows_$($env:ver)_portable.zip"))
+          $installer = Get-ChildItem -LiteralPath $build -Filter '*.exe' -File | Where-Object { $_.Name -match 'Installer' } | Select-Object -First 1
+          if ($installer) { $targets += $installer.FullName }
+          elseif (-not [string]::IsNullOrEmpty($env:NSIS_DIR)) { Write-Host "::error::NSIS is present but there is no installer to verify"; exit 1 }
+          & $verify -Path $targets -ExtractInstaller -AllowUnsigned $allow
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::signature verification failed - nothing is uploaded"; exit 1 }
 
       - name: Collect artifacts and checksums
         id: pack
@@ -784,4 +989,14 @@ jobs:
         with:
           name: SHA256SUMS_Windows_${{ env.ver }}
           path: artifacts/SHA256SUMS
+          if-no-files-found: error
+
+      # Each signed file's sha256 BEFORE signing (scripts/windows_sign.ps1 -ManifestPath): signing
+      # changes a file's bytes, so a pinned upstream hash (ffmpeg, UltraNet) is checked against this.
+      - name: Signing - upload the pre-signing manifest
+        if: env.EDGESLICER_SIGN_WINDOWS == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SigningManifest_Windows_${{ env.ver }}
+          path: build/signing_manifest.csv
           if-no-files-found: error
