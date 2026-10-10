@@ -41,6 +41,7 @@ add_executable(${_TEST_NAME}_tests
     http_tls_policy_tests.cpp
     hub_addresses_tests.cpp
     tailscale_cli_tests.cpp
+    hub_platform_tests.cpp
     update_feed_tests.cpp
     paint_cli_tests.cpp
     hms_lookup_tests.cpp

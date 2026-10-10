@@ -361,6 +361,19 @@ TEST_CASE("classify_remote_access speaks about the platform it is asked about", 
     REQUIRE(classify_remote_access(Platform::MacOS, true, "Stopped", false, false, false, "").message == "Tailscale is not running (Stopped).");
 }
 
+TEST_CASE("classify_remote_access: a Tailscale that did not answer is not a Tailscale that is missing", "[RemoteHub]")
+{
+    using Slic3r::TailscaleCli::Platform;
+    for (Platform p : { Platform::Windows, Platform::MacOS, Platform::Linux }) {
+        const auto info = classify_remote_access(p, true, Slic3r::TailscaleCli::BACKEND_NO_ANSWER, false, false, false, "");
+        REQUIRE(info.state == RemoteAccessState::NoAnswer);
+        REQUIRE(std::string(remote_access_state_name(info.state)) == "no_answer");
+        REQUIRE_THAT(info.message, Catch::Matchers::Contains("did not answer"));
+        REQUIRE(info.action_url.empty()); // no download link: it is installed
+        REQUIRE_FALSE(info.action.empty());
+    }
+}
+
 TEST_CASE("classify_remote_access sends the HTTPS-certificates error to the admin console", "[RemoteHub]")
 {
     // The one error nobody can fix from this PC: it is a tailnet-wide setting, so the card links
