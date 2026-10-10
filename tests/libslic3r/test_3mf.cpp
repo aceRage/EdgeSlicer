@@ -1230,6 +1230,49 @@ TEST_CASE("Paint states 20, 200 and 255 round-trip through a 3MF byte-identicall
         REQUIRE(restored.num_facets(static_cast<EnforcerBlockerType>(states[i])) == 1);
 }
 
+TEST_CASE("A project whose components reference themselves fails to load", "[3mf][Regression]")
+{
+    // Point the assembly object's component back at itself. Without a visit cap the BFS
+    // in _generate_current_object_list walks A→A forever. Do not add <regex>: rewrite
+    // the objectid attributes with string find (D-03a).
+    const std::string path    = make_temp_3mf_path("cyclic_components.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    REQUIRE(rewrite_3mf_entries(path, [](std::string &name, std::string &data) {
+        if (!boost::algorithm::ends_with(name, "3dmodel.model"))
+            return false;
+        const size_t components = data.find("<components");
+        if (components == std::string::npos)
+            return false;
+        const size_t object_tag = data.rfind("<object id=\"", components);
+        if (object_tag == std::string::npos)
+            return false;
+        const size_t id_beg = object_tag + 12;
+        const size_t id_end = data.find('"', id_beg);
+        if (id_end == std::string::npos)
+            return false;
+        const std::string object_id = data.substr(id_beg, id_end - id_beg);
+        const std::string key       = "objectid=\"";
+        bool              changed   = false;
+        for (size_t pos = data.find(key, components); pos != std::string::npos; pos = data.find(key, pos + key.size())) {
+            const size_t val_beg = pos + key.size();
+            const size_t val_end = data.find('"', val_beg);
+            if (val_end == std::string::npos)
+                break;
+            data.replace(val_beg, val_end - val_beg, object_id);
+            changed = true;
+            pos     = val_beg + object_id.size();
+        }
+        return changed;
+    }));
+
+    Model model;
+    bool  loaded = true;
+    REQUIRE_NOTHROW(loaded = load_project(path, model));
+    REQUIRE_FALSE(loaded);
+}
+
 // Object and volume config are written as double-quoted XML attributes. ConfigOptionString
 // serializes C-style (so '"' becomes '\"' and a tab stays a tab); the 3MF writers must then
 // XML-escape that serialized text. Unescaped quotes break the attribute; an unescaped tab is
