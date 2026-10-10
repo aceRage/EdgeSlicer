@@ -1,4 +1,4 @@
-@REM Snapmaker_Orca build script for Windows
+@REM EdgeSlicer build script for Windows
 @echo off
 set WP=%CD%
 
@@ -68,7 +68,7 @@ goto openssl_checked
 if "%1"=="deps" exit /b 0
 
 :slicer
-echo "building Snapmaker Orca..."
+echo "building EdgeSlicer..."
 cd %WP%
 mkdir %build_dir%
 cd %build_dir%

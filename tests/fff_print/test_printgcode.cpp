@@ -49,7 +49,7 @@ SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
                 REQUIRE(gcode.size() > 0);
             }
             THEN("Exported text contains slic3r version") {
-                // The exported header is branded "Snapmaker Orca <Snapmaker_VERSION>"
+                // The exported header is branded "EdgeSlicer <Snapmaker_VERSION>"
                 // (utils.cpp header_slic3r_generated()), not the SLIC3R_VERSION macro.
                 REQUIRE(gcode.find(Snapmaker_VERSION) != std::string::npos);
             }

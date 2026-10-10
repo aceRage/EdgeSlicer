@@ -106,7 +106,7 @@ if(ORCA_TOOLS)
         add_executable(Snapmaker_Orca_profile_validator MACOSX_BUNDLE dev-utils/Snapmaker_Orca_profile_validator.cpp dev-utils/nanosvg_impl.cpp)
         set_target_properties(Snapmaker_Orca_profile_validator PROPERTIES
             MACOSX_BUNDLE TRUE
-            MACOSX_BUNDLE_BUNDLE_NAME "Snapmaker_Orca Profile Validator"
+            MACOSX_BUNDLE_BUNDLE_NAME "EdgeSlicer Profile Validator"
             MACOSX_BUNDLE_BUNDLE_VERSION "${SLIC3R_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${SLIC3R_VERSION}"
             MACOSX_BUNDLE_IDENTIFIER "io.github.acerage.EdgeSlicer.profile-validator"

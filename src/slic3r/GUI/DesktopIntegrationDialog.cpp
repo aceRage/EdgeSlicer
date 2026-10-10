@@ -330,7 +330,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             // Write slicer desktop file
             std::string desktop_file = GUI::format(
                 "[Desktop Entry]\n"
-                "Name=Snapmaker_Orca%1%\n"
+                "Name=EdgeSlicer%1%\n"
                 "GenericName=3D Printing Software\n"
                 "Icon=Snapmaker_Orca%2%\n"
                 "Exec=\"%3%\" %%F\n"
@@ -531,7 +531,7 @@ void DesktopIntegrationDialog::perform_downloader_desktop_integration(std::strin
 
     std::string desktop_file_downloader = GUI::format(
         "[Desktop Entry]\n"
-        "Name=Snapmaker_Orca URL Protocol %1% %2%\n"
+        "Name=EdgeSlicer URL Protocol %1% %2%\n"
         "Exec=%3% %%u\n"
         "Terminal=false\n"
         "Type=Application\n"
