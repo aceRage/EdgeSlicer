@@ -32,6 +32,8 @@ struct PluginLoadFailure
     unsigned long         nt_status   = 0;     // RtlGetLastNtStatus() right after LoadLibrary (Windows), 0 if unknown
     std::string           library;             // full path that was tried
     std::string           detail;              // FormatMessage / dlerror text
+    std::string           found_version;       // Incompatible: the version the plug-in reported
+    std::string           expected_version;    // Incompatible: the version this EdgeSlicer needs
     bool                  file_exists = false; // at the time of the attempt
     std::uint64_t         file_size   = 0;     // at the time of the attempt
 };

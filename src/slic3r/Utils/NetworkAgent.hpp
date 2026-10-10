@@ -130,7 +130,16 @@ public:
 #endif
     static std::string get_version();
     static void* get_network_function(const char* name);
+    // Always false: EdgeSlicer ships one network plug-in (its own, the current ABI). The old
+    // "legacy_networking" setting no longer reaches this flag (GUI_App resets it at start-up), and
+    // neither the expected plug-in version nor the version check read it.
     static bool use_legacy_network;
+    // The plug-in version this EdgeSlicer needs (BAMBU_NETWORK_AGENT_VERSION), whatever
+    // use_legacy_network says.
+    static std::string expected_version();
+    // The plug-in's reported version against expected_version(): the first 8 characters
+    // ("MM.mm.pp") must match. "00.00.00.00" (inconsistent build / no get_version export) never does.
+    static bool is_compatible_version(const std::string &plugin_version);
     NetworkAgent(std::string log_dir);
     ~NetworkAgent();
 

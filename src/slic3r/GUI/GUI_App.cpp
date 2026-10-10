@@ -1864,7 +1864,7 @@ std::string GUI_App::get_plugin_url(std::string name, std::string country_code)
 {
     std::string url = get_http_url(country_code);
 
-    std::string curr_version = NetworkAgent::use_legacy_network ? BAMBU_NETWORK_AGENT_VERSION_LEGACY : BAMBU_NETWORK_AGENT_VERSION;
+    std::string curr_version = NetworkAgent::expected_version();
     std::string using_version = curr_version.substr(0, 9) + "00";
     if (name == "cameratools")
         using_version = curr_version.substr(0, 6) + "00.00";
@@ -1921,7 +1921,7 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
     tmp_path += format(".%1%%2%", get_current_pid(), ".tmp");
 
 #if defined(__WINDOWS__)
-    if (is_running_on_arm64() && !NetworkAgent::use_legacy_network) {
+    if (is_running_on_arm64()) {
         //set to arm64 for plugins
         std::map<std::string, std::string> current_headers = Slic3r::Http::get_extra_headers();
         current_headers["X-BBL-OS-Type"] = "windows_arm";
@@ -1989,7 +1989,7 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
         }).perform_sync();
 
 #if defined(__WINDOWS__)
-    if (is_running_on_arm64() && !NetworkAgent::use_legacy_network) {
+    if (is_running_on_arm64()) {
         //set back
         std::map<std::string, std::string> current_headers = Slic3r::Http::get_extra_headers();
         current_headers["X-BBL-OS-Type"] = "windows";
@@ -2346,21 +2346,23 @@ bool GUI_App::check_networking_version()
     if (!network_ver.empty()) {
         BOOST_LOG_TRIVIAL(info) << "get_network_agent_version=" << network_ver;
     }
-    std::string studio_ver = NetworkAgent::use_legacy_network ? BAMBU_NETWORK_AGENT_VERSION_LEGACY : BAMBU_NETWORK_AGENT_VERSION;
-    if (network_ver.length() >= 8) {
-        if (network_ver.substr(0,8) == studio_ver.substr(0,8)) {
-            m_networking_compatible = true;
-            return true;
-        }
+    // Only the current plug-in version is accepted: EdgeSlicer ships one network plug-in, and the
+    // old "legacy_networking" switch no longer selects another expected version.
+    const std::string studio_ver = NetworkAgent::expected_version();
+    if (NetworkAgent::is_compatible_version(network_ver)) {
+        m_networking_compatible = true;
+        return true;
     }
 
     // The library loaded but reports a version this EdgeSlicer cannot use (or none: "00.00.00.00"
     // is what get_version() answers for a debug/release mismatch or a missing export).
     BOOST_LOG_TRIVIAL(warning) << "[plugin] network plug-in rejected: it reports version \"" << network_ver
-                               << "\" but this EdgeSlicer needs " << studio_ver.substr(0, 8) << ".*";
+                               << "\" but this EdgeSlicer needs \"" << studio_ver << "\" (first 8 characters must match)";
     PluginLoadFailure rejected;
     rejected.kind        = PluginLoadFailureKind::Incompatible;
-    rejected.detail      = "version " + network_ver + ", expected " + studio_ver;
+    rejected.detail           = "version " + network_ver + ", expected " + studio_ver;
+    rejected.found_version    = network_ver;
+    rejected.expected_version = studio_ver;
     rejected.file_exists = true;
     record_plugin_load_failure(rejected);
 
@@ -3758,8 +3760,16 @@ bool GUI_App::on_init_inner()
         }
     } catch (...) {}
 
-    // Orca: select network plugin version
-    NetworkAgent::use_legacy_network = app_config->get_bool("legacy_networking");
+    // EdgeSlicer ships one network plug-in. The Orca "legacy_networking" switch (it made the
+    // version check expect the old 01.10 ABI, so UltraNet was rejected on every start) is ignored,
+    // and reset so nothing else reads it either. Its Preferences switch is gone, so a stale true
+    // could otherwise never be undone.
+    NetworkAgent::use_legacy_network = false;
+    if (app_config->get_bool("legacy_networking")) {
+        BOOST_LOG_TRIVIAL(warning) << "[plugin] ignoring legacy_networking=true (EdgeSlicer ships one network plug-in)";
+        app_config->set_bool("legacy_networking", false);
+        app_config->save();
+    }
     // Force legacy network plugin if debugger attached
     // See https://github.com/bambulab/BambuStudio/issues/6726
     /* if (!NetworkAgent::use_legacy_network) {
@@ -5085,8 +5095,9 @@ wxString GUI_App::network_plugin_not_loaded_text(bool *load_failed)
     case PluginLoadMessage::BadImage:
         return wxString::Format(_L("The network plug-in is damaged or for a different system. Reinstall EdgeSlicer. (error %s)"), code);
     case PluginLoadMessage::Incompatible:
-        return _L("The network plug-in does not match this version of EdgeSlicer. Reinstall EdgeSlicer, "
-                  "and send the log (Help > Export Logs) if it keeps happening.");
+        return wxString::Format(_L("The network plug-in does not match this version of EdgeSlicer (plug-in version %s, needed %s). "
+                                   "Reinstall EdgeSlicer, and send the log (Help > Export Logs) if it keeps happening."),
+                                wxString::FromUTF8(failure.found_version), wxString::FromUTF8(failure.expected_version));
     case PluginLoadMessage::Other:
         return wxString::Format(_L("The network plug-in could not be loaded (error %s). Reinstall EdgeSlicer, "
                                    "and send the log (Help > Export Logs) if it keeps happening."), code);

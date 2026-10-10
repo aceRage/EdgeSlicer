@@ -5,6 +5,7 @@
 #include <catch2/catch.hpp>
 
 #include "slic3r/Utils/PluginLoadDiagnostics.hpp"
+#include "slic3r/Utils/NetworkAgent.hpp"
 
 #include <boost/filesystem.hpp>
 
@@ -155,4 +156,24 @@ TEST_CASE("File facts: absent, empty and non-empty", "[PluginLoad]")
     fs::remove(dir / "empty.dll", ec);
     fs::remove(dir / "full.dll", ec);
     fs::remove(dir, ec);
+}
+
+TEST_CASE("The legacy_networking flag does not change the version the plug-in must report", "[PluginLoad]")
+{
+    // The reported bug: legacy_networking=true made the check expect the old 01.10 ABI, so the
+    // plug-in we ship ("02.01.01.xx") was rejected on every start and no restart could help.
+    const bool saved = NetworkAgent::use_legacy_network;
+    for (bool legacy : {false, true}) {
+        NetworkAgent::use_legacy_network = legacy;
+        INFO("use_legacy_network = " << legacy);
+        CHECK(NetworkAgent::expected_version() == std::string(BAMBU_NETWORK_AGENT_VERSION));
+        CHECK(NetworkAgent::is_compatible_version("02.01.01.53")); // our plug-in: same MM.mm.pp, other build number
+        CHECK(NetworkAgent::is_compatible_version(BAMBU_NETWORK_AGENT_VERSION));
+        CHECK_FALSE(NetworkAgent::is_compatible_version(BAMBU_NETWORK_AGENT_VERSION_LEGACY)); // never accepted any more
+        CHECK_FALSE(NetworkAgent::is_compatible_version("00.00.00.00")); // inconsistent build / no get_version export
+        CHECK_FALSE(NetworkAgent::is_compatible_version("02.01.0"));      // too short to compare
+        CHECK_FALSE(NetworkAgent::is_compatible_version(""));
+    }
+    NetworkAgent::use_legacy_network = saved;
+    CHECK_FALSE(NetworkAgent::use_legacy_network); // the default: nothing sets it any more
 }

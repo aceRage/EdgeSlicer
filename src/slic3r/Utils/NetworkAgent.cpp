@@ -30,7 +30,18 @@ static void* netwoking_module = NULL;
 static void* source_module = NULL;
 #endif
 
-bool NetworkAgent::use_legacy_network = true;
+bool NetworkAgent::use_legacy_network = false;
+
+std::string NetworkAgent::expected_version()
+{
+    return BAMBU_NETWORK_AGENT_VERSION;
+}
+
+bool NetworkAgent::is_compatible_version(const std::string &plugin_version)
+{
+    const std::string expected = expected_version();
+    return plugin_version.length() >= 8 && plugin_version.substr(0, 8) == expected.substr(0, 8);
+}
 
 namespace {
 
