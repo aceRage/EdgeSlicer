@@ -5826,8 +5826,8 @@ void GUI_App::sm_finish_sign_in(const std::string& token, const std::string& use
         flush_logs();
         if (shown && mainframe != nullptr && !m_is_closing) {
             const wxString msg = a.rejected ?
-                _L("Snapmaker did not accept the sign-in, so you are still signed out of your Snapmaker account. Please try signing in again.") :
-                _L("Could not reach the Snapmaker account service to finish signing in. Please check the connection and try again.");
+                _L("Snapmaker sign-in didn't complete, so you are still signed out of your Snapmaker account. Snapmaker's sign-in service may be having problems; please try again later.") :
+                _L("Snapmaker sign-in didn't complete: Snapmaker's sign-in service could not be reached. Please check the connection and try again later.");
             MessageDialog(mainframe, msg, _L("Snapmaker sign-in"), wxOK | wxICON_WARNING).ShowModal();
         }
     });
