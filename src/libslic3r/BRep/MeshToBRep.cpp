@@ -32,7 +32,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
-#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
@@ -162,9 +162,9 @@ TopoDS_Shape merge_collinear_edges(const TopoDS_Shape &shape, double tol, double
         const TopTools_ListOfShape &f1 = edge_faces.FindFromKey(e1), &f2 = edge_faces.FindFromKey(e2);
         if (f1.Extent() != f2.Extent())
             return false;
-        for (TopTools_ListIteratorOfListOfShape i(f1); i.More(); i.Next()) {
+        for (TopTools_ListOfShape::Iterator i(f1); i.More(); i.Next()) {
             bool found = false;
-            for (TopTools_ListIteratorOfListOfShape j(f2); j.More() && !found; j.Next())
+            for (TopTools_ListOfShape::Iterator j(f2); j.More() && !found; j.Next())
                 found = i.Value().IsSame(j.Value());
             if (!found)
                 return false;
@@ -389,7 +389,7 @@ TopoDS_Shape mesh_to_brep(const indexed_triangle_set &its, const MeshToBRepParam
             builder.Add(wire, get_edge(t[0], t[1]));
             builder.Add(wire, get_edge(t[1], t[2]));
             builder.Add(wire, get_edge(t[2], t[0]));
-            wire.Closed(Standard_True);
+            wire.Closed(true);
             TopoDS_Face face;
             builder.MakeFace(face, new Geom_Plane(gp_Pln(gp_Pnt(pa.x(), pa.y(), pa.z()), gp_Dir(n.x(), n.y(), n.z()))), tol);
             builder.Add(face, wire);
@@ -412,7 +412,7 @@ TopoDS_Shape mesh_to_brep(const indexed_triangle_set &its, const MeshToBRepParam
             open_shells.push_back(shell);
             continue;
         }
-        shell.Closed(Standard_True);
+        shell.Closed(true);
         TopoDS_Solid solid;
         builder.MakeSolid(solid);
         builder.Add(solid, shell);
@@ -482,10 +482,10 @@ TopoDS_Shape mesh_to_brep(const indexed_triangle_set &its, const MeshToBRepParam
             // Faces only: UnifySameDomain's edge unification is far worse than linear (134 s for
             // the 52k-triangle Stanford bunny against 1.3 s for the faces), so the collinear
             // edges left on the merged faces' boundaries are joined by merge_collinear_edges().
-            ShapeUpgrade_UnifySameDomain unifier(shape, Standard_False, Standard_True, Standard_False);
+            ShapeUpgrade_UnifySameDomain unifier(shape, false, true, false);
             unifier.SetLinearTolerance(tol);
             unifier.SetAngularTolerance(params.merge_angle_deg * M_PI / 180.);
-            unifier.AllowInternalEdges(Standard_False);
+            unifier.AllowInternalEdges(false);
             unifier.Build();
             TopoDS_Shape merged = unifier.Shape();
             if (!merged.IsNull()) {
@@ -539,14 +539,14 @@ ShapeInfo shape_info(const TopoDS_Shape &shape, bool check_validity)
     BRepGProp::SurfaceProperties(shape, sprops);
     info.area = sprops.Mass();
     Bnd_Box box;
-    BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+    BRepBndLib::AddOptimal(shape, box, false, false);
     if (!box.IsVoid()) {
         double x0, y0, z0, x1, y1, z1;
         box.Get(x0, y0, z0, x1, y1, z1);
         info.bbox = BoundingBoxf3(Vec3d(x0, y0, z0), Vec3d(x1, y1, z1));
     }
     if (check_validity)
-        info.valid = BRepCheck_Analyzer(shape).IsValid() == Standard_True;
+        info.valid = BRepCheck_Analyzer(shape).IsValid() == true;
     return info;
 }
 
@@ -555,7 +555,7 @@ indexed_triangle_set brep_to_its(const TopoDS_Shape &shape, double linear_deflec
     indexed_triangle_set its;
     if (shape.IsNull())
         return its;
-    BRepMesh_IncrementalMesh mesher(shape, linear_deflection, Standard_False, angular_deflection, Standard_True);
+    BRepMesh_IncrementalMesh mesher(shape, linear_deflection, false, angular_deflection, true);
     for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
         const TopoDS_Face          &face = TopoDS::Face(ex.Current());
         TopLoc_Location             loc;
