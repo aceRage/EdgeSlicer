@@ -5738,35 +5738,99 @@ void GUI_App::sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentR
         return;
     }
 
-    // The session was valid. Look the account up off the UI thread, then fill SMUserInfo on it
-    // (the same end state as a manual sign-in: Account menu, pages told through the login events).
+    // The page handed over a token. That alone proves nothing (the account service answers HTTP 200
+    // to a token it refuses): look the account up off the UI thread, and sign in only with a
+    // verified answer (the same end state as a manual sign-in: Account menu, pages told through
+    // the login events).
     const std::string token = r.token;
-    Http http = Http::get(r.user_info_url);
+    sm_lookup_account(token, r.user_info_url, [this, gen, token](const SMSilentLogin::AccountAnswer& a) {
+        if (gen != m_sm_silent_gen || !m_sm_silent_active)
+            return;
+        if (a.ok) {
+            SMUserLogin::apply_account_info(a, token);
+            sm_get_login_info();
+            sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::SignedIn));
+            return;
+        }
+        // Refused: the saved session is no good. Stay (or become) signed out everywhere, and do not
+        // ask again at the next start; the sign-in dialog works as on a fresh install. A transport
+        // or server problem says nothing about the session: try again next start.
+        const SMSilentLogin::Outcome o = a.rejected ? SMSilentLogin::Outcome::Rejected : SMSilentLogin::Outcome::Failed;
+        if (SMSilentLogin::session_marker_after(o) == SMSilentLogin::SessionMarker::Clear)
+            app_config->set_bool(SMSilentLogin::k_session_key, false);
+        sm_sign_out_locally();
+        sm_finish_silent_login(SMSilentLogin::log_line(o, "account lookup: " + a.why));
+    });
+}
+
+void GUI_App::sm_lookup_account(const std::string& token, const std::string& user_info_url,
+                                std::function<void(const SMSilentLogin::AccountAnswer&)> done)
+{
+    if (token.empty()) {
+        SMSilentLogin::AccountAnswer a;
+        a.why      = "the sign-in page handed over an empty token";
+        a.rejected = true;
+        done(a);
+        return;
+    }
+    auto shared_done = std::make_shared<std::function<void(const SMSilentLogin::AccountAnswer&)>>(std::move(done));
+    Http http = Http::get(user_info_url);
     http.header("Authorization", token);
     http.timeout_max(15);
-    http.on_complete([this, gen, token](std::string body, unsigned status) {
-            CallAfter([this, gen, token, body, status] {
-                if (gen != m_sm_silent_gen || !m_sm_silent_active)
-                    return;
-                if (status == 200 && SMUserLogin::apply_account_info(body, token)) {
-                    sm_get_login_info();
-                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::SignedIn));
-                } else {
-                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
-                                                                   "account lookup HTTP " + std::to_string(status)));
-                }
-            });
+    http.on_complete([this, shared_done](std::string body, unsigned status) {
+            SMSilentLogin::AccountAnswer a = SMSilentLogin::read_account_answer(status, body);
+            CallAfter([shared_done, a] { (*shared_done)(a); });
         })
-        .on_error([this, gen](std::string /*body*/, std::string error, unsigned status) {
-            CallAfter([this, gen, error, status] {
-                if (gen != m_sm_silent_gen || !m_sm_silent_active)
-                    return;
-                sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
-                                                               "account lookup HTTP " + std::to_string(status) +
-                                                                   (error.empty() ? std::string() : ", " + error)));
-            });
+        .on_error([this, shared_done](std::string body, std::string error, unsigned status) {
+            SMSilentLogin::AccountAnswer a = SMSilentLogin::read_account_answer(status, body);
+            if (status == 0)
+                a.why = "no answer" + (error.empty() ? std::string() : ": " + error);
+            else if (!error.empty() && !a.rejected)
+                a.why += ", " + error;
+            sentryReportLog(SENTRY_LOG_TRACE, BP_LOGIN_HTTP_CODE + std::string(":") + std::to_string(status), BP_LOGIN);
+            CallAfter([shared_done, a] { (*shared_done)(a); });
         })
         .perform();
+}
+
+void GUI_App::sm_sign_out_locally()
+{
+    const bool had_something = m_login_userinfo.is_user_login() || !m_login_userinfo.get_user_token().empty() ||
+                               !m_login_userinfo.get_user_id().empty();
+    m_login_userinfo.clear();
+    if (had_something)
+        m_login_userinfo.set_user_login(false); // notify: Account menu and pages say signed out
+}
+
+void GUI_App::sm_finish_sign_in(const std::string& token, const std::string& user_info_url, bool shown)
+{
+    const unsigned gen = m_sm_signin_gen;
+    sm_lookup_account(token, user_info_url, [this, gen, token, shown](const SMSilentLogin::AccountAnswer& a) {
+        if (gen != m_sm_signin_gen) {
+            BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: dropped (signed out while the account was looked up)";
+            return;
+        }
+        if (a.ok) {
+            SMUserLogin::apply_account_info(a, token);
+            sm_get_login_info();
+            BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: signed in";
+            flush_logs();
+            return;
+        }
+        // Not verified: signed out everywhere (no half state where the Account menu says signed in
+        // and the Device page does not), and no startup attempt with a session that is no good.
+        if (a.rejected && app_config)
+            app_config->set_bool(SMSilentLogin::k_session_key, false);
+        sm_sign_out_locally();
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: not signed in (account lookup: " << a.why << ")";
+        flush_logs();
+        if (shown && mainframe != nullptr && !m_is_closing) {
+            const wxString msg = a.rejected ?
+                _L("Snapmaker did not accept the sign-in, so you are still signed out of your Snapmaker account. Please try signing in again.") :
+                _L("Could not reach the Snapmaker account service to finish signing in. Please check the connection and try again.");
+            MessageDialog(mainframe, msg, _L("Snapmaker sign-in"), wxOK | wxICON_WARNING).ShowModal();
+        }
+    });
 }
 
 void GUI_App::sm_finish_silent_login(const std::string& log_line)
@@ -5802,12 +5866,13 @@ void GUI_App::sm_request_user_logout()
         sm_cancel_silent_login("signed out");
     // Signed out on purpose: no silent sign-in at the next start (SnapmakerSilentLogin.hpp).
     app_config->set_bool(SMSilentLogin::k_session_key, false);
-    if (m_login_userinfo.is_user_login()) {
-        m_login_userinfo.set_user_login(false);
-    }
+    ++m_sm_signin_gen; // a sign-in lookup still in flight is dropped when it answers
+    // The token is dropped with the rest of the account (it used to stay in memory after a sign-out).
+    const std::string token = m_login_userinfo.get_user_token();
+    sm_sign_out_locally();
     // Nothing to revoke without a token: a page asking to sign out somebody who never signed in
     // must not reach Snapmaker either.
-    if (m_login_userinfo.get_user_token().empty())
+    if (token.empty())
         return;
     try {
         wxString region = wxString::FromUTF8(app_config->get_country_code());
@@ -5819,7 +5884,7 @@ void GUI_App::sm_request_user_logout()
         }
 
         Http http = Http::post(url);
-        http.form_add("token", m_login_userinfo.get_user_token()).perform();
+        http.form_add("token", token).perform();
     } catch (std::exception&) {
         ;
     }

@@ -144,3 +144,118 @@ TEST_CASE("silent login: a fresh config has no Snapmaker sign-in to come back to
     // The Preferences toggle keeps its default; it only matters once somebody has signed in.
     CHECK(cfg.get_bool(k_pref_key));
 }
+
+// 2.4.5.2 and earlier: the token ran on to the next '?', so id.snapmaker.com's
+// "?token=<T>&_act=login_success" became "<T>&_act=login_success", which the account service
+// refuses (HTTP 200, code 110002) - and that refusal was taken for a sign-in.
+TEST_CASE("silent login: the token stops at the next parameter", "[SMSilentLogin]")
+{
+    const std::string redirect = "https://account.snapmaker.com/?token=abc.DEF-123_x&_act=login_success";
+    CHECK(has_token_param(redirect));
+    CHECK(token_from_url(redirect) == "abc.DEF-123_x");
+    CHECK(token_from_url("https://account.snapmaker.com/?redirect=y&token=t1&_act=login_success") == "t1");
+    CHECK(token_from_url("https://example.invalid/cb#token=t2&x=1") == "t2");
+}
+
+TEST_CASE("silent login: only the parameter named token counts", "[SMSilentLogin]")
+{
+    CHECK_FALSE(has_token_param("https://example.invalid/cb?access_token=zzz"));
+    CHECK(token_from_url("https://example.invalid/cb?access_token=zzz").empty());
+    CHECK_FALSE(has_token_param("https://example.invalid/cb?refresh_token=r"));
+    CHECK(token_from_url("https://example.invalid/cb?access_token=zzz&token=abc") == "abc");
+    CHECK_FALSE(has_token_param("https://id.snapmaker.com?from=orca"));
+    // Present but empty: the dialog reports an empty token rather than ignoring the redirect.
+    CHECK(has_token_param("https://example.invalid/cb?token=&_act=login_success"));
+    CHECK(token_from_url("https://example.invalid/cb?token=&_act=login_success").empty());
+}
+
+TEST_CASE("silent login: a percent-encoded token is decoded", "[SMSilentLogin]")
+{
+    CHECK(token_from_url("https://example.invalid/?token=a%2Bb%2Fc%3D%3D&_act=login_success") == "a+b/c==");
+    // A literal '+' stays (a token has no spaces); a stray '%' is kept as it is.
+    CHECK(token_from_url("https://example.invalid/?token=a+b") == "a+b");
+    CHECK(token_from_url("https://example.invalid/?token=50%") == "50%");
+    CHECK(token_from_url("https://example.invalid/?token=5%zz") == "5%zz");
+}
+
+TEST_CASE("account answer: HTTP 200 with a refusal code is not a sign-in", "[SMSilentLogin]")
+{
+    // What id.snapmaker.com answers for a token it does not accept (checked 2026-10-10).
+    const AccountAnswer a = read_account_answer(200, R"({"code":110002,"msg":"Missing authorization"})");
+    CHECK_FALSE(a.ok);
+    CHECK(a.rejected);
+    CHECK(a.user_id.empty());
+    CHECK(a.why == "rejected: code 110002 (Missing authorization)");
+}
+
+TEST_CASE("account answer: an account with an id is a sign-in", "[SMSilentLogin]")
+{
+    const AccountAnswer a = read_account_answer(200,
+        R"({"code":200,"msg":"ok","data":{"id":4242,"nickname":"Nick","icon":"https://example.invalid/i.png","account":"a@example.invalid"}})");
+    REQUIRE(a.ok);
+    CHECK(a.user_id == "4242");
+    CHECK(a.nickname == "Nick");
+    CHECK(a.icon == "https://example.invalid/i.png");
+    CHECK(a.account == "a@example.invalid");
+    CHECK(a.why.empty());
+
+    // No code at all, an id beyond 32 bits, or an id sent as text: still an account.
+    const AccountAnswer big = read_account_answer(200, R"({"data":{"id":12345678901234}})");
+    REQUIRE(big.ok);
+    CHECK(big.user_id == "12345678901234");
+    const AccountAnswer text = read_account_answer(200, R"({"code":0,"data":{"id":"u-77"}})");
+    REQUIRE(text.ok);
+    CHECK(text.user_id == "u-77");
+    CHECK(text.nickname.empty());
+    // Odd types for the details are dropped, not fatal.
+    const AccountAnswer odd = read_account_answer(200, R"({"data":{"id":1,"nickname":null,"icon":5}})");
+    REQUIRE(odd.ok);
+    CHECK(odd.nickname.empty());
+    CHECK(odd.icon.empty());
+}
+
+TEST_CASE("account answer: no account id means no sign-in", "[SMSilentLogin]")
+{
+    for (const char* body : {R"({"code":200})", R"({"code":200,"data":null})", R"({"code":200,"data":{}})",
+                             R"({"code":200,"data":{"id":""}})", R"({"code":200,"data":{"id":null,"nickname":"N"}})",
+                             R"({"code":200,"data":[1,2]})"}) {
+        INFO(body);
+        const AccountAnswer a = read_account_answer(200, body);
+        CHECK_FALSE(a.ok);
+        CHECK(a.rejected);
+        CHECK(a.user_id.empty());
+    }
+}
+
+TEST_CASE("account answer: transport and server trouble is not a refusal", "[SMSilentLogin]")
+{
+    const AccountAnswer bad_gateway = read_account_answer(502, "<html>Bad gateway</html>");
+    CHECK_FALSE(bad_gateway.ok);
+    CHECK_FALSE(bad_gateway.rejected);
+    CHECK(bad_gateway.why == "HTTP 502");
+    const AccountAnswer none = read_account_answer(0, "");
+    CHECK_FALSE(none.ok);
+    CHECK_FALSE(none.rejected);
+    const AccountAnswer html = read_account_answer(200, "<html>maintenance</html>");
+    CHECK_FALSE(html.ok);
+    CHECK_FALSE(html.rejected);
+    CHECK(html.why == "unreadable answer");
+    // 401 / 403: the service looked at the token and refused it.
+    CHECK(read_account_answer(401, "").rejected);
+    CHECK(read_account_answer(403, "").rejected);
+}
+
+TEST_CASE("account answer: the reason never carries more than a short server message", "[SMSilentLogin]")
+{
+    const std::string long_msg(500, 'x');
+    const AccountAnswer a = read_account_answer(200, R"({"code":1,"msg":")" + long_msg + R"("})");
+    CHECK_FALSE(a.ok);
+    CHECK(a.why.size() < 120);
+}
+
+TEST_CASE("silent login: a refused session signs out and stops startup attempts", "[SMSilentLogin]")
+{
+    CHECK(session_marker_after(Outcome::Rejected) == SessionMarker::Clear);
+    CHECK(log_line(Outcome::Rejected, "account lookup: rejected: code 110002 (Missing authorization)") ==
+          "Snapmaker silent login: session rejected (account lookup: rejected: code 110002 (Missing authorization))");
+}

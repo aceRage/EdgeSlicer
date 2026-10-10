@@ -64,14 +64,40 @@ enum class Tick
 //   since_load_ms     time since the most recent such page finished loading (ignored if !page_loaded)
 Tick on_tick(int elapsed_ms, bool page_loaded, int since_load_ms);
 
-// The token carried by a navigation address, or "" when there is none. Same rule the sign-in
-// dialog has always used: the text after "token=" up to the next '?' or the end.
+// Whether a navigation address carries a "token" parameter (in the query or the fragment). Only
+// the parameter named exactly "token": access_token=, refresh_token= and the like do not count.
+bool has_token_param(const std::string& url);
+
+// The value of that "token" parameter, percent-decoded, or "" when there is none. The value ends
+// at the next '&', '#' or '?'. id.snapmaker.com redirects to <redirect>?token=<T>&_act=login_success
+// (URLSearchParams.append then set("_act")); up to 2.4.5.2 the value ran on to the next '?' and
+// so carried "&_act=login_success", which the account service rejects (Snapmaker upstream #741).
 std::string token_from_url(const std::string& url);
+
+// The answer of GET /api/common/accounts/current, read. Snapmaker answers HTTP 200 even for a
+// token it does not accept - {"code":110002,"msg":"Missing authorization"} - so the status alone
+// says nothing: only an answer with an account id is a verified session.
+struct AccountAnswer
+{
+    bool        ok = false;
+    std::string user_id;  // never empty when ok
+    std::string nickname;
+    std::string icon;
+    std::string account;
+    // When !ok: why, for the log line ("HTTP 502", "rejected: code 110002 (Missing authorization)",
+    // "no account in the answer", ...). Never the token, never account details.
+    std::string why;
+    // When !ok: true when the service answered and refused the token (the session is not valid),
+    // false for a transport or server problem that says nothing about the session.
+    bool        rejected = false;
+};
+AccountAnswer read_account_answer(unsigned http_status, const std::string& body);
 
 enum class Outcome
 {
     SignedIn,
     NoSession,
+    Rejected,  // the page handed over a token, but the account service did not accept it
     TimedOut,
     Failed,    // page or account lookup error
     Cancelled, // the user opened the sign-in dialog (or signed out) meanwhile
@@ -80,9 +106,9 @@ enum class Outcome
 
 const char* outcome_name(Outcome o);
 
-// What an attempt's outcome does to k_session_key: a sign-in sets it, "no session" clears it (the
-// saved web session is gone, so the next start must not ask Snapmaker again), and everything else
-// (timed out, failed, cancelled, skipped) leaves it as it was.
+// What an attempt's outcome does to k_session_key: a sign-in sets it, "no session" and "session
+// rejected" clear it (the saved web session is gone or no good, so the next start must not ask
+// Snapmaker again), and everything else (timed out, failed, cancelled, skipped) leaves it as it was.
 enum class SessionMarker
 {
     Set,
