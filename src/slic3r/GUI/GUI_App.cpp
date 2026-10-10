@@ -125,6 +125,8 @@
 #include <cwctype>
 #include "PluginGuard.hpp"
 #include "slic3r/Utils/PluginLoadDiagnostics.hpp"
+#include "slic3r/Utils/VendorConnector.hpp"
+#include "HomePanel.hpp"
 #include "PresetMirror.hpp"
 #include "Tab.hpp"
 #include "SysInfoDialog.hpp"
@@ -1435,7 +1437,9 @@ void GUI_App::post_init()
             %this->init_params->input_files.size() %this->init_params->input_gcode;
         const auto first_url = this->init_params->input_files.front();
         if (this->init_params->input_files.size() == 1 && is_supported_open_protocol(first_url)) {
-            switch_to_3d = true;
+            // A connector link shows Home > Vendors: no model is loaded, so the usual start-up applies.
+            std::string connector_url;
+            switch_to_3d = !Vendors::parse_connector_link(first_url, connector_url);
             start_download(first_url);
             m_open_method = "url";
         } else {
@@ -3968,6 +3972,11 @@ bool GUI_App::on_init_inner()
             this->post_init();
 
             update_publish_status();
+            if (!m_pending_connector_link.empty()) {
+                const std::string link = std::move(m_pending_connector_link);
+                m_pending_connector_link.clear();
+                open_connector_link(link);
+            }
         }
 
         if (m_post_initialized && app_config->dirty() && app_config->save_due())
@@ -8433,6 +8442,11 @@ void GUI_App::MacOpenURL(const wxString& url)
     // post_init() decides whether to start a blank project based on init_params->input_files,
     // which is always empty here: macOS launches the app first and delivers the URL afterwards.
     // Without this flag post_init resets the project that this download is about to load.
+    std::string connector_url;
+    if (Vendors::parse_connector_link(into_u8(url), connector_url)) {
+        start_download(into_u8(url)); // Home > Vendors, not a model: the blank project is still wanted
+        return;
+    }
     m_url_open_pending = true;
     start_download(into_u8(url));
 }
@@ -9463,8 +9477,34 @@ bool GUI_App::is_web_download(const boost::filesystem::path& path) const
     return !path.empty() && m_web_downloads.count(web_download_key(path)) > 0;
 }
 
+void GUI_App::open_connector_link(const std::string& url)
+{
+    if (!m_post_initialized) {
+        m_pending_connector_link = url;
+        return;
+    }
+    if (mainframe == nullptr || mainframe->m_home == nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "Connector link: there is no Home tab to open it in.";
+        show_error(nullptr, _u8L("The connector link could not be opened because the Home tab is not available."));
+        return;
+    }
+    // After the event that delivered the link (and, at start-up, after post_init) is done: it opens dialogs.
+    CallAfter([this, url]() {
+        if (mainframe == nullptr || mainframe->m_home == nullptr)
+            return;
+        mainframe->Raise();
+        mainframe->select_tab(size_t(MainFrame::tpHome));
+        mainframe->m_home->open_connector_link(url);
+    });
+}
+
 void GUI_App::start_download(std::string url)
 {
+    std::string connector_url;
+    if (Vendors::parse_connector_link(url, connector_url)) {
+        open_connector_link(connector_url);
+        return;
+    }
     if (!plater_) {
         BOOST_LOG_TRIVIAL(error) << "Could not start URL download: plater is nullptr.";
         return;

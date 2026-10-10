@@ -260,6 +260,7 @@ private:
     // post_init must not start a blank project in that case, or it discards the model the
     // URL is in the middle of loading.
     bool            m_url_open_pending { false };
+    std::string     m_pending_connector_link;
     bool            m_app_conf_exists{ false };
     EAppMode        m_app_mode{ EAppMode::Editor };
     bool            m_is_recreating_gui{ false };
@@ -967,6 +968,9 @@ private:
 
     // URL download - PrusaSlicer gets system call to open prusaslicer:// URL which should contain address of download
     void            start_download(std::string url);
+    // edgeslicer://connector?url=<https link>: Home > Vendors > Import from link, address filled in.
+    // Before the first idle pass of start-up it is kept and run once the main window is ready.
+    void            open_connector_link(const std::string& url);
     // Files this session downloaded from the web (an "Open in" link, a MakerWorld import, the model
     // browser). Opening one of them always shows the modified-G-code warning, whatever "Don't show
     // again" said for local files.

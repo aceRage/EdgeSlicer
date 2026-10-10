@@ -63,6 +63,10 @@ public:
     void on_tab_changed(bool selected);
     void sys_color_changed();
 
+    // edgeslicer://connector?url=<https link>: shows Home > Vendors and starts "Import from link"
+    // with the address filled in (the user still confirms the address and then the connector).
+    void open_connector_link(const std::string& url);
+
 private:
     void ensure_browser();
     void notify_start_page(bool active);
