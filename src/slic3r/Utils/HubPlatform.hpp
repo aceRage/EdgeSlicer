@@ -222,6 +222,7 @@ enum class AppListing { Unknown, NotListed, Allowed, Blocked };
 
 inline AppListing parse_mac_fw_listapps(const std::string& text, const std::string& app_path)
 {
+    if (app_path.empty()) return AppListing::Unknown;
     const std::vector<std::string> lines = detail::split_lines(text);
     bool                           header = false;
     for (size_t i = 0; i < lines.size(); ++i) {
