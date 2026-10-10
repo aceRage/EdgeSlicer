@@ -10470,38 +10470,19 @@ bool emboss_svg(Plater& plater, const wxString &svg_file, const Vec2d& mouse_dro
     return svg->create_volume(svg_file_str, mouse_drop_position, ModelVolumeType::MODEL_PART);
 }
 
-// File > Import (Ctrl+I) and several dropped files: every .svg asks "SVG" or "SVG (Split)" and is
-// created by the SVG gizmo as a new object, the same as Add Primitive > SVG / SVG (Split).
-// (Model::read_from_file keeps its own SVG loader for the command line.)
-// Returns the other files, which are loaded by load_files().
+// Every file import of the GUI: .svg files are created by the SVG gizmo after the SVG / SVG (Split)
+// question, as new objects (import_svg_files_by_gizmo). Model::read_from_file keeps its own SVG
+// loader for the command line. Returns the other files, which are loaded by load_files().
 std::vector<fs::path> import_svg_files(Plater &plater, const std::vector<fs::path> &paths)
 {
-    std::vector<fs::path> svgs, others;
+    std::vector<std::string> files;
     for (const fs::path &path : paths)
-        (is_svg_file(path.string()) ? svgs : others).push_back(path);
-    if (svgs.empty())
-        return others;
-    GLCanvas3D *canvas = plater.canvas3D();
-    GLGizmoSVG *svg    = canvas != nullptr ? dynamic_cast<GLGizmoSVG *>(canvas->get_gizmos_manager().get_gizmo(GLGizmosManager::Svg)) : nullptr;
-    if (svg == nullptr)
-        return paths; // no gizmo: the model loader takes them
-    std::optional<SvgDropAction> for_all;
-    for (size_t i = 0; i < svgs.size(); ++i) {
-        SvgDropAction action;
-        if (for_all.has_value()) {
-            action = *for_all;
-        } else {
-            bool apply_to_all = false;
-            action = ask_svg_drop_action(nullptr, from_path(svgs[i].filename()), i + 1 < svgs.size() ? &apply_to_all : nullptr);
-            if (apply_to_all)
-                for_all = action;
-        }
-        const std::string file = into_u8(from_path(svgs[i]));
-        if (action == SvgDropAction::Split)
-            svg->create_volume_split(ModelVolumeType::INVALID, {}, file);
-        else if (action == SvgDropAction::Plain)
-            svg->create_object(file);
-    }
+        files.push_back(into_u8(from_path(path)));
+    if (partition_svg_files(files).svg.empty())
+        return paths;
+    std::vector<fs::path> others;
+    for (const std::string &file : import_svg_files_by_gizmo(files, ModelVolumeType::INVALID))
+        others.push_back(into_path(from_u8(file)));
     return others;
 }
 
@@ -19533,6 +19514,12 @@ bool Plater::add_model(bool imperial_units, std::string fname)
         paths.emplace_back(fname);
     }
 
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive (before the snapshot, the gizmo
+    // jobs take their own)
+    paths = import_svg_files(*this, paths);
+    if (paths.empty())
+        return false;
+
     std::string snapshot_label;
     assert(! paths.empty());
     if (paths.size() == 1) {
@@ -20701,7 +20688,17 @@ void Plater::force_update_all_plate_thumbnails()
 }
 
 // BBS: backup
-std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi) {
+std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_in, LoadStrategy strategy, bool ask_multi) {
+    // Every model import of the GUI ends here (menu File > Import, toolbar, Home, recent files,
+    // downloads, files handed to the running app, ...): .svg files go to the SVG gizmo after the
+    // SVG / SVG (Split) question, the same as Add Primitive. The callers which route them already
+    // (Ctrl+I, drop, File > Import) pass no .svg here any more.
+    std::vector<fs::path> input_files = input_files_in;
+    if ((strategy & LoadStrategy::LoadModel) && !m_only_gcode && !m_exported_file) {
+        input_files = import_svg_files(*this, input_files);
+        if (input_files.empty())
+            return {};
+    }
     //BBS: wish to reset state when load a new file
     p->m_slice_all_only_has_gcode = false;
     //BBS: wish to reset all plates stats item selected state when load a new file

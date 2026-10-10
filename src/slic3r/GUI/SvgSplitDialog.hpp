@@ -12,6 +12,10 @@
 
 class wxWindow;
 
+namespace Slic3r {
+enum class ModelVolumeType : int;
+}
+
 namespace Slic3r { namespace GUI {
 
 enum class SvgDropAction { Cancel, Plain, Split };
@@ -28,6 +32,34 @@ SvgDropAction ask_svg_drop_action(wxWindow *parent, const wxString &file_name, b
 /// Is the file imported by the SVG gizmo (SVG / SVG (Split)) instead of the model loader?
 /// </summary>
 bool is_svg_file(const std::string &path);
+
+// Files of one import split into SVG files (SVG gizmo) and the others (model loader), as indices
+// into the input in their order
+struct SvgImportPartition
+{
+    std::vector<size_t> svg;
+    std::vector<size_t> other;
+};
+SvgImportPartition partition_svg_files(const std::vector<std::string> &paths);
+
+/// <summary>
+/// Does an imported SVG ask "SVG" / "SVG (Split)" for this target? A new object (INVALID) and an
+/// object part ask; a negative volume or a modifier is always the plain SVG (split parts would act
+/// exactly like their union).
+/// </summary>
+bool svg_import_asks(ModelVolumeType target);
+
+/// <summary>
+/// The one route of every file import of the GUI (File > Import menu and Ctrl+I, toolbar, Home,
+/// recent files, drop of several files, downloads, files given to the running app, Add part >
+/// Load...): every .svg is created by the SVG gizmo, after the SVG / SVG (Split) / Cancel question
+/// (with "use this answer for the other SVG files"), the same code as Add Primitive.
+/// </summary>
+/// <param name="paths">Files of the import (UTF-8)</param>
+/// <param name="target">INVALID: every SVG becomes a new object in the center of the view;
+/// a volume type: the SVG is added to the selected object as that type</param>
+/// <returns>The files which are not .svg (all files when the SVG gizmo is not available)</returns>
+std::vector<std::string> import_svg_files_by_gizmo(const std::vector<std::string> &paths, ModelVolumeType target);
 
 /// <summary>
 /// Choose a filament for every colour of an SVG split into parts. Every colour starts on the

@@ -5,7 +5,12 @@
 #include "I18N.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "GLCanvas3D.hpp"
+#include "Gizmos/GLGizmoSVG.hpp"
+#include "Gizmos/GLGizmosManager.hpp"
 #include "format.hpp"
+
+#include "libslic3r/Model.hpp"
 
 #include "libslic3r/PresetBundle.hpp"
 
@@ -21,8 +26,10 @@
 #include <wx/stattext.h>
 
 #include <algorithm>
+#include <optional>
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/path.hpp>
 
 namespace Slic3r { namespace GUI {
 
@@ -223,6 +230,61 @@ private:
 } // namespace
 
 bool is_svg_file(const std::string &path) { return boost::algorithm::iends_with(path, ".svg"); }
+
+SvgImportPartition partition_svg_files(const std::vector<std::string> &paths)
+{
+    SvgImportPartition result;
+    for (size_t i = 0; i < paths.size(); ++i)
+        (is_svg_file(paths[i]) ? result.svg : result.other).push_back(i);
+    return result;
+}
+
+bool svg_import_asks(ModelVolumeType target) { return target == ModelVolumeType::INVALID || target == ModelVolumeType::MODEL_PART; }
+
+std::vector<std::string> import_svg_files_by_gizmo(const std::vector<std::string> &paths, ModelVolumeType target)
+{
+    SvgImportPartition partition = partition_svg_files(paths);
+    if (partition.svg.empty())
+        return paths;
+    // the SVG gizmo creates only these
+    if (target != ModelVolumeType::INVALID && target != ModelVolumeType::MODEL_PART && target != ModelVolumeType::NEGATIVE_VOLUME &&
+        target != ModelVolumeType::PARAMETER_MODIFIER)
+        return paths;
+    Plater     *plater = wxGetApp().is_editor() ? wxGetApp().plater() : nullptr;
+    GLCanvas3D *canvas = plater != nullptr ? plater->canvas3D() : nullptr;
+    GLGizmoSVG *svg    = canvas != nullptr ? dynamic_cast<GLGizmoSVG *>(canvas->get_gizmos_manager().get_gizmo(GLGizmosManager::Svg)) : nullptr;
+    if (svg == nullptr)
+        return paths; // no SVG gizmo: the model loader takes them
+
+    std::optional<SvgDropAction> for_all;
+    for (size_t k = 0; k < partition.svg.size(); ++k) {
+        const std::string &file   = paths[partition.svg[k]];
+        SvgDropAction      action = SvgDropAction::Plain;
+        if (!svg_import_asks(target)) {
+            action = SvgDropAction::Plain;
+        } else if (for_all.has_value()) {
+            action = *for_all;
+        } else {
+            bool apply_to_all = false;
+            action = ask_svg_drop_action(nullptr, from_u8(boost::filesystem::path(file).filename().string()),
+                                         k + 1 < partition.svg.size() ? &apply_to_all : nullptr);
+            if (apply_to_all)
+                for_all = action;
+        }
+        if (action == SvgDropAction::Split)
+            svg->create_volume_split(target, {}, file);
+        else if (action == SvgDropAction::Plain) {
+            if (target == ModelVolumeType::INVALID)
+                svg->create_object(file);
+            else
+                svg->create_volume(file, target);
+        }
+    }
+    std::vector<std::string> others;
+    for (size_t i : partition.other)
+        others.push_back(paths[i]);
+    return others;
+}
 
 SvgDropAction ask_svg_drop_action(wxWindow *parent, const wxString &file_name, bool *apply_to_all)
 {
