@@ -323,8 +323,42 @@ TEST_CASE("classify_remote_access offers the install link when Tailscale is miss
     REQUIRE_THAT(info.message, Catch::Matchers::Contains("Tailscale"));
     REQUIRE_THAT(info.message, Catch::Matchers::Contains("free private network"));
     REQUIRE_THAT(info.message, Catch::Matchers::Contains("same account"));
-    REQUIRE(info.action_url == "https://tailscale.com/download/windows");
+    // The download page of the platform the test runs on (Windows keeps /download/windows).
+    REQUIRE(info.action_url == Slic3r::TailscaleCli::download_url(Slic3r::TailscaleCli::current_platform()));
     REQUIRE_FALSE(info.action.empty());
+}
+
+TEST_CASE("classify_remote_access speaks about the platform it is asked about", "[RemoteHub]")
+{
+    using Slic3r::TailscaleCli::Platform;
+    const auto win = classify_remote_access(Platform::Windows, false, "", false, false, false, "");
+    const auto mac = classify_remote_access(Platform::MacOS, false, "", false, false, false, "");
+    const auto lin = classify_remote_access(Platform::Linux, false, "", false, false, false, "");
+    REQUIRE(win.action_url == "https://tailscale.com/download/windows");
+    REQUIRE(mac.action_url == "https://tailscale.com/download/mac");
+    REQUIRE(lin.action_url == "https://tailscale.com/download/linux");
+    REQUIRE_THAT(win.message, Catch::Matchers::Contains("your PC"));
+    REQUIRE_THAT(mac.message, Catch::Matchers::Contains("your Mac"));
+    REQUIRE_THAT(lin.message, Catch::Matchers::Contains("your computer"));
+    for (const auto* i : { &win, &mac, &lin }) {
+        REQUIRE(i->state == RemoteAccessState::NotInstalled);
+        REQUIRE_THAT(i->message, Catch::Matchers::Contains("free private network"));
+        REQUIRE_THAT(i->message, Catch::Matchers::Contains("same account"));
+    }
+
+    // Signed out: the tray on Windows, the menu bar on a Mac; `tailscale login` everywhere.
+    const auto win_in = classify_remote_access(Platform::Windows, true, "NeedsLogin", false, false, false, "");
+    const auto mac_in = classify_remote_access(Platform::MacOS, true, "NeedsLogin", false, false, false, "");
+    REQUIRE_THAT(win_in.message, Catch::Matchers::Contains("not signed in on this PC"));
+    REQUIRE_THAT(win_in.message, Catch::Matchers::Contains("system tray"));
+    REQUIRE_THAT(mac_in.message, Catch::Matchers::Contains("not signed in on this Mac"));
+    REQUIRE_THAT(mac_in.message, Catch::Matchers::Contains("menu bar"));
+    REQUIRE_THAT(mac_in.message, Catch::Matchers::Contains("tailscale login"));
+
+    // Stopped: no backend name, then the computer's name.
+    REQUIRE(classify_remote_access(Platform::Windows, true, "", false, false, false, "").message == "Tailscale is not running on this PC.");
+    REQUIRE(classify_remote_access(Platform::MacOS, true, "", false, false, false, "").message == "Tailscale is not running on this Mac.");
+    REQUIRE(classify_remote_access(Platform::MacOS, true, "Stopped", false, false, false, "").message == "Tailscale is not running (Stopped).");
 }
 
 TEST_CASE("classify_remote_access sends the HTTPS-certificates error to the admin console", "[RemoteHub]")

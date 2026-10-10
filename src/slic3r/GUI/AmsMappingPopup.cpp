@@ -3,6 +3,7 @@
 
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Thread.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Preview.hpp"
@@ -321,6 +322,8 @@ void MaterialItem::doRender(wxDC &dc)
      auto left_ams_title_text = new wxStaticText(this, wxID_ANY, _L("Left AMS"));
      auto right_ams_title_text = new wxStaticText(this, wxID_ANY, _L("Right AMS"));
 
+     m_left_ams_title  = left_ams_title_text;
+     m_right_ams_title = right_ams_title_text;
      m_sizer_ams_left->Add(left_ams_title_text, 0, wxALIGN_CENTER, 0);
      m_sizer_ams_right->Add(right_ams_title_text, 0, wxALIGN_CENTER, 0);
   
@@ -447,7 +450,7 @@ void AmsMapingPopup::update_ams_data_multi_machines()
     Fit();
 }
 
-void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList) 
+void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList, const std::vector<AmsTray>& ext_spools, int only_physical_extruder)
 { 
     std::map<std::string, Ams *>::iterator ams_iter;
     BOOST_LOG_TRIVIAL(trace) << "ams_mapping total count " << amsList.size();
@@ -466,6 +469,9 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList)
         int ams_indx = atoi(ams_iter->first.c_str());
         int ams_type = ams_iter->second->type;
         int nozzle_id = ams_iter->second->nozzle;
+        // A filament sliced for one extruder is only offered that extruder's AMS units.
+        if (only_physical_extruder >= 0 && nozzle_id != only_physical_extruder)
+            continue;
 
         if (ams_type >=1 || ams_type <= 3) { //1:ams 2:ams-lite 3:n3f
 
@@ -536,6 +542,46 @@ void AmsMapingPopup::update_ams_data(std::map<std::string, Ams*> amsList)
     }
 
     /*extra tray*/
+    // The external spool holders of a two-extruder printer, each on its own extruder's side
+    // (BambuStudio AmsMapingPopup::update_mapping_items + add_ext_ams_mapping: tray id = ams id =
+    // 254 / 255, slot 0; a holder without an identified spool shows "?" and can still be picked).
+    for (const AmsTray& ext : ext_spools) {
+        const int ext_id   = atoi(ext.id.c_str());
+        const int physical = BambuExtruderMap::external_spool_physical_extruder(ext_id);
+        if (physical < 0 || (only_physical_extruder >= 0 && physical != only_physical_extruder))
+            continue;
+        AmsTray  tray = ext;
+        TrayData td;
+        td.id      = ext_id;
+        td.ams_id  = ext_id;
+        td.slot_id = 0;
+        if (!tray.is_tray_info_ready()) {
+            td.type = THIRD;
+        } else {
+            td.type          = NORMAL;
+            td.colour        = AmsTray::decode_color(tray.color);
+            td.name          = tray.get_display_filament_type();
+            td.filament_type = tray.get_filament_type();
+            td.ctype         = tray.ctype;
+            for (const auto& col : tray.cols)
+                td.material_cols.push_back(AmsTray::decode_color(col));
+        }
+        auto* sizer_mapping_list         = new wxBoxSizer(wxHORIZONTAL);
+        auto* ams_mapping_item_container = new MappingContainer(this);
+        ams_mapping_item_container->SetSizer(sizer_mapping_list);
+        ams_mapping_item_container->Layout();
+        ams_mapping_item_container->Show();
+        add_ams_mapping({ td }, ams_mapping_item_container, sizer_mapping_list);
+        m_amsmapping_container_sizer_list.push_back(sizer_mapping_list);
+        m_amsmapping_container_list.push_back(ams_mapping_item_container);
+        // main (physical 0) = right
+        (physical == 0 ? m_sizer_ams_right : m_sizer_ams_left)->Add(ams_mapping_item_container, 0, wxALIGN_CENTER | wxTOP, FromDIP(4));
+    }
+
+    if (m_left_ams_title)
+        m_left_ams_title->Show(only_physical_extruder < 0 || only_physical_extruder == 1);
+    if (m_right_ams_title)
+        m_right_ams_title->Show(only_physical_extruder < 0 || only_physical_extruder == 0);
 
     Layout();
     Fit();

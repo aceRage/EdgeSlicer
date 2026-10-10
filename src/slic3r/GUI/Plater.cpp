@@ -14485,6 +14485,12 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
     int nozzles = 0;
     for (auto& kv : obj->amsList)
         if (kv.second) nozzles = std::max(nozzles, kv.second->nozzle + 1);
+    // A two-extruder printer whose only AMS feeds one extruder while the other is fed from its
+    // external spool (an X2D, 2026-10-09) has two extruders to group for, not one. Without a loaded
+    // external spool this stays what it was.
+    if (obj->is_multi_extruders())
+        for (AmsTray ext : obj->external_spools())
+            if (ext.is_tray_info_ready()) nozzles = std::max(nozzles, 2);
     if (nozzles < 2) return infos;
     infos.resize(nozzles);
     std::vector<std::map<int, int>> cap_per_noz(nozzles); // logical extruder -> map<bank_slot_count, num_banks>
@@ -14515,6 +14521,23 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
             cfg.set_key_value("tray_name",       new ConfigOptionStrings{ tray_name });
             infos[nz].push_back(std::move(cfg));
         }
+    }
+    // Each extruder's external spool, named "Ext" as BambuStudio's build_filament_ams_list names
+    // it: the grouping (FilamentGroupUtils::build_machine_filaments) offers it for an extruder that
+    // has no AMS filament, so a match-mode slice can put a filament on the extruder whose spool
+    // holder carries it. Not an AMS: it adds nothing to the slot budget below.
+    for (AmsTray ext : obj->external_spools()) {
+        const int ext_id = atoi(ext.id.c_str());
+        const int physical = BambuExtruderMap::external_spool_physical_extruder(ext_id);
+        if (physical < 0 || !ext.is_tray_info_ready()) continue;
+        const int nz = BambuExtruderMap::physical_to_logical(physical_extruder_map, physical);
+        if (nz < 0 || nz >= nozzles) continue;
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("filament_type",   new ConfigOptionStrings{ ext.get_filament_type() });
+        cfg.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + ext.color).GetAsString(wxC2S_HTML_SYNTAX)) });
+        cfg.set_key_value("filament_id",     new ConfigOptionStrings{ ext.setting_id });
+        cfg.set_key_value("tray_name",       new ConfigOptionStrings{ BambuExtruderMap::tray_name(ext_id, 0) });
+        infos[nz].push_back(std::move(cfg));
     }
     if (out_ams_count) {
         out_ams_count->assign(nozzles, "");
