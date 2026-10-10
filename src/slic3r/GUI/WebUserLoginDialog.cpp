@@ -59,25 +59,18 @@ ZUserLogin::ZUserLogin() : wxDialog((wxWindow *) (wxGetApp().mainframe), wxID_AN
         m_line_top->SetBackgroundColour(wxColour(166, 169, 170));
         m_sizer_main->Add(m_line_top, 0, wxEXPAND, 0);
 
-        // Ultra (plug-in guards): with our own plug-in installed but not loaded, the download link
-        // would fetch Bambu's package over it. A restart is what is actually needed.
+        // With our own plug-in installed but not loaded a restart is what is needed; with none the
+        // plug-in is missing from this install. Either way there is no download link: EdgeSlicer
+        // never fetches Bambu's plug-in.
         const bool ultranet = wxGetApp().is_ultranet_plugin_installed();
         auto* m_message = new wxStaticText(this, wxID_ANY,
             ultranet ? _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again.")
-                     : _L("Bambu Network plug-in not detected."),
+                     : GUI_App::network_plugin_missing_text(),
             wxDefaultPosition, wxDefaultSize, 0);
         m_message->SetForegroundColour(*wxBLACK);
         m_message->Wrap(FromDIP(360));
 
         m_sizer_main->Add(m_message, 0, wxALIGN_CENTER | wxALL, FromDIP(15));
-        if (! ultranet) {
-            auto m_download_hyperlink = new wxHyperlinkCtrl(this, wxID_ANY, _L("Click here to download it."), wxEmptyString, wxDefaultPosition, wxDefaultSize, wxHL_DEFAULT_STYLE);
-            m_download_hyperlink->Bind(wxEVT_HYPERLINK, [this](wxCommandEvent& event) {
-                this->Close();
-                wxGetApp().ShowDownNetPluginDlg();
-                });
-            m_sizer_main->Add(m_download_hyperlink, 0, wxALIGN_CENTER | wxALL, FromDIP(10));
-        }
         m_sizer_main->Add(0, 0, 1, wxBOTTOM, 10);
 
         SetSizer(m_sizer_main);

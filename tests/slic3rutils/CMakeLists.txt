@@ -20,6 +20,7 @@ add_executable(${_TEST_NAME}_tests
     http_body_redirect_tests.cpp
     snapmaker_silent_login_tests.cpp
     bambu_sync_policy_tests.cpp
+    preset_sync_policy_tests.cpp
     ff_diagnostics_tests.cpp
     elegoo_canvas_tests.cpp
     splash_animation_tests.cpp
