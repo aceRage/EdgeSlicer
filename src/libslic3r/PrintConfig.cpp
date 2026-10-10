@@ -7279,7 +7279,8 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Support");
     def->tooltip = L("Add thin struts that touch tall, slender parts on their sides with a small pinpoint tip "
                      "and stand on the build plate next to it. They keep the part from wobbling while it prints "
-                     "and snap off at the tip afterwards. Printed as support, so supports must be enabled.\n\n"
+                     "and snap off at the tip afterwards. Printed with the support filament, speed and line width; "
+                     "Enable supports does not need to be on.\n\n"
                      "Off: no stabilizers.\n"
                      "Auto: rings of touch points up the part's height, plus any stabilizer points painted with "
                      "the support painting tool.\n"
