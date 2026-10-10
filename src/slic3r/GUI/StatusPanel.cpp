@@ -4467,15 +4467,28 @@ void StatusBasePanel::remove_controls()
 {
     const std::string js_cleanup_video_element = R"(
         document.body.style.overflow='hidden';
-        const video = document.querySelector('video');
-        video.setAttribute('style', 'width: 100% !important;');
-        video.removeAttribute('controls');
-        video.addEventListener('leavepictureinpicture', () => {
-            window.wx.postMessage('leavepictureinpicture');
-        });
-        video.addEventListener('enterpictureinpicture', () => {
-            window.wx.postMessage('enterpictureinpicture');
-        });
+        (() => {
+        const cleanup = (video) => {
+            video.setAttribute('style', 'width: 100% !important;');
+            video.removeAttribute('controls');
+            video.addEventListener('leavepictureinpicture', () => {
+                window.wx.postMessage('leavepictureinpicture');
+            });
+            video.addEventListener('enterpictureinpicture', () => {
+                window.wx.postMessage('enterpictureinpicture');
+            });
+        };
+        // The page may run this before its <video> exists: do it as soon as one appears.
+        const existing = document.querySelector('video');
+        if (existing) {
+            cleanup(existing);
+        } else {
+            new MutationObserver((mutations, observer) => {
+                const found = document.querySelector('video');
+                if (found) { observer.disconnect(); cleanup(found); }
+            }).observe(document.documentElement, { childList: true, subtree: true });
+        }
+        })();
     )";
     m_custom_camera_view->RunScript(js_cleanup_video_element);
 }

@@ -1164,6 +1164,8 @@ elseif (SLIC3R_FHS)
     set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/${SLIC3R_APP_KEY}")
     install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/ DESTINATION ${SLIC3R_FHS_RESOURCES}
         PATTERN "*/udev" EXCLUDE
+        # Windows tool binaries (go2rtc.exe, ffmpeg.exe, DLLs) are no use in a Linux package.
+        REGEX "/resources/tools/.*[.](exe|dll)$" EXCLUDE
     )
     install(FILES src/dev-utils/platform/unix/Snapmaker_Orca.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
     foreach(SIZE 32 128 192)
@@ -1175,7 +1177,9 @@ elseif (CMAKE_MACOSX_BUNDLE)
     # install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/Snapmaker Orca.app/Contents/resources")
 else ()
     install(FILES src/dev-utils/platform/unix/Snapmaker_Orca.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
-    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
+    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources"
+        REGEX "/resources/tools/.*[.](exe|dll)$" EXCLUDE
+    )
 endif ()
 
 # EdgeSlicer: the remote hub's camera tools on Linux (the macOS app gets the same two files from

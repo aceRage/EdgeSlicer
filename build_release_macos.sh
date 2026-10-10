@@ -223,6 +223,10 @@ function build_slicer() {
         cp -R "$resources_path" "./EdgeSlicer.app/Contents/Resources"
         # delete .DS_Store file
         find "./EdgeSlicer.app/" -name '.DS_Store' -delete
+        # The resources folder is shared with the Windows package, whose tools (go2rtc.exe, ffmpeg.exe and
+        # any DLLs beside them) are Windows binaries that are no use in a Mac app. The macOS go2rtc is
+        # bundled below as a Mach-O named go2rtc.
+        find "./EdgeSlicer.app/Contents/Resources/tools" -type f \( -name '*.exe' -o -name '*.dll' \) -delete 2>/dev/null || true
 
         # EdgeSlicer: the bundled network plug-in (UltraNet, a private clean-room component that is
         # built separately - CI does it with a deploy key). Set ULTRANET_BIN_DIR to a folder holding

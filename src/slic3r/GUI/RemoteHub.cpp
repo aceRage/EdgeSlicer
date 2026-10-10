@@ -2074,10 +2074,19 @@ static std::string port_holder_description(int port)
 
 #ifdef _WIN32
 static const char* const FIREWALL_NAME = "Windows Firewall";
-#elif defined(__APPLE__)
-static const char* const FIREWALL_NAME = "macOS firewall";
+static const char* const GO2RTC_LABEL  = "go2rtc.exe";
+// How long a firewall answer is reused before the next page poll refreshes it. Unchanged on Windows.
+static const long long   FIREWALL_CACHE_S = 300;
 #else
+static const char* const GO2RTC_LABEL  = "go2rtc";
+// The page should notice a firewall switched on or an Allow clicked within seconds, and the macOS /
+// Linux reads are a few cheap commands, so the answer is reused for 30 s only.
+static const long long   FIREWALL_CACHE_S = 30;
+#  ifdef __APPLE__
+static const char* const FIREWALL_NAME = "macOS firewall";
+#  else
 static const char* const FIREWALL_NAME = "Firewall";
+#  endif
 #endif
 
 // What Windows Firewall thinks of go2rtc.exe. WebRTC media arrives inbound on the port above, so
@@ -2120,19 +2129,36 @@ static FirewallState firewall_query_posix(const std::string& exe, int port_lo, i
     fw.checked_at = (long long) std::time(nullptr);
     HubPlatform::FirewallVerdict v;
 #  ifdef __APPLE__
-    const std::string sfw = "/usr/libexec/ApplicationFirewall/socketfilterfw";
-    std::string       state_text, block_text, app_text;
+    // The macOS firewall lists applications by bundle, and go2rtc inside EdgeSlicer.app has no entry of
+    // its own (it inherits the app's), so a go2rtc in the bundle is judged, and named, as EdgeSlicer.
+    const std::string app        = HubPlatform::mac_app_bundle_of(exe);
+    const std::string shown_name = app != exe ? std::string("EdgeSlicer") : label;
+    const std::string sfw        = "/usr/libexec/ApplicationFirewall/socketfilterfw";
+    std::string       state_text, block_text, app_text, list_text, signed_text, sign_text;
     int               code = 0;
     const bool        ok   = path_exists(sfw) && run_capture({ sfw, "--getglobalstate" }, state_text, code, 5000) && code == 0;
     HubPlatform::Tri  enabled = ok ? HubPlatform::parse_mac_fw_enabled(state_text) : HubPlatform::Tri::Unknown;
-    HubPlatform::Tri  block_all = HubPlatform::Tri::Unknown, app_blocked = HubPlatform::Tri::Unknown;
+    HubPlatform::Tri  block_all = HubPlatform::Tri::Unknown, app_blocked = HubPlatform::Tri::Unknown, signed_covered = HubPlatform::Tri::Unknown;
+    HubPlatform::AppListing listing = HubPlatform::AppListing::Unknown;
     if (enabled == HubPlatform::Tri::Yes) {
         run_capture({ sfw, "--getblockall" }, block_text, code, 5000); // State = 2 in --getglobalstate says the same
         block_all = HubPlatform::parse_mac_fw_block_all(block_text, state_text);
-        if (run_capture({ sfw, "--getappblocked", HubPlatform::mac_app_bundle_of(exe) }, app_text, code, 5000) && code == 0)
+        if (run_capture({ sfw, "--getappblocked", app }, app_text, code, 5000) && code == 0)
             app_blocked = HubPlatform::parse_mac_fw_app_blocked(app_text);
+        // "permitted" from --getappblocked is also what an app the firewall has never heard of gets, so
+        // the list itself is read; an app that is not on it is let in only by the signed-software rule.
+        if (run_capture({ sfw, "--listapps" }, list_text, code, 5000) && code == 0)
+            listing = HubPlatform::parse_mac_fw_listapps(list_text, app);
+        if (listing == HubPlatform::AppListing::NotListed) {
+            HubPlatform::Tri downloaded = HubPlatform::Tri::Unknown, dev_id = HubPlatform::Tri::Unknown;
+            if (run_capture({ sfw, "--getallowsigned" }, signed_text, code, 5000) && code == 0)
+                downloaded = HubPlatform::parse_mac_fw_allow_downloaded_signed(signed_text);
+            if (path_exists("/usr/bin/codesign") && run_capture({ "/usr/bin/codesign", "-dv", "--verbose=2", app }, sign_text, code, 5000))
+                dev_id = HubPlatform::parse_codesign_developer_id(sign_text);
+            signed_covered = (downloaded == HubPlatform::Tri::Yes && dev_id == HubPlatform::Tri::Yes) ? HubPlatform::Tri::Yes : HubPlatform::Tri::No;
+        }
     }
-    v = HubPlatform::classify_mac_firewall(enabled, block_all, app_blocked, label);
+    v = HubPlatform::classify_mac_firewall(enabled, block_all, app_blocked, listing, signed_covered, shown_name);
 #  else
     bool ufw_on = HubPlatform::ufw_conf_enabled(HubPlatform::read_file_posix("/etc/ufw/ufw.conf", 16384));
     bool fwd_on = false;
@@ -3971,6 +3997,30 @@ void HubServer::start_go2rtc()
 #endif
         return;
     }
+#ifndef _WIN32
+    // A hub that was killed outright leaves its go2rtc running (Windows has the kill-on-close job for
+    // that), holding the WebRTC port. go2rtc.pid names it; it is stopped only if that pid's
+    // executable really is this go2rtc (never a recycled pid) - and waited for, so the port pick
+    // below sees 8555 free again instead of drifting to 8556.
+    {
+        const std::string pid_file = (fs::path(hub_dir()) / "go2rtc.pid").string();
+        const long        stale    = std::atol(HubPlatform::read_file_posix(pid_file, 64).c_str());
+        boost::system::error_code cec;
+        const fs::path            real_exe    = fs::canonical(fs::path(exe), cec); // the image path the OS reports is the real one
+        const std::string         stale_image = stale > 1 ? HubPlatform::process_image_path_posix(stale) : std::string();
+        if (stale > 1 && stale != current_pid() && !cec && !stale_image.empty() && stale_image == real_exe.string()) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: stopping a go2rtc (pid " << stale << ") left by an earlier hub";
+            ::kill((pid_t) stale, SIGTERM);
+            for (int waited = 0; waited < 2000 && pid_alive(stale); waited += 50) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (pid_alive(stale)) {
+                ::kill((pid_t) stale, SIGKILL);
+                for (int waited = 0; waited < 500 && pid_alive(stale); waited += 50) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        boost::system::error_code ig;
+        fs::remove(pid_file, ig);
+    }
+#endif
     // A random loopback port and per-run credentials: nothing on this PC reaches go2rtc's API
     // except through the hub. local_auth makes go2rtc check them for loopback peers too, and
     // allow_paths leaves only the three routes the hub uses registered (go2rtc 1.9.14 then also
@@ -4066,22 +4116,8 @@ void HubServer::start_go2rtc()
     m_go2rtc_pid = spawn_process({ exe, "-config", cfg_path }, {}, true, m_job);
 #else
     // macOS / Linux: a child we own (fork + exec, no shell), stopped and reaped by shutdown() and
-    // loop(). A hub that was killed outright cannot stop its go2rtc (Windows has the kill-on-close
-    // job for that), so the pid is written down and a later hub stops a leftover - but only one whose
-    // executable really is this go2rtc, never a recycled pid.
+    // loop(). A leftover from an earlier hub was already stopped at the top of this function.
     const std::string pid_file = (fs::path(hub_dir()) / "go2rtc.pid").string();
-    {
-        const long stale = std::atol(HubPlatform::read_file_posix(pid_file, 64).c_str());
-        boost::system::error_code cec;
-        const fs::path            real_exe = fs::canonical(fs::path(exe), cec); // the image path the OS reports is the real one
-        const std::string         stale_image = stale > 1 ? HubPlatform::process_image_path_posix(stale) : std::string();
-        if (stale > 1 && stale != current_pid() && !cec && !stale_image.empty() && stale_image == real_exe.string()) {
-            BOOST_LOG_TRIVIAL(info) << "RemoteHub: stopping a go2rtc (pid " << stale << ") left by an earlier hub";
-            ::kill((pid_t) stale, SIGTERM);
-        }
-        boost::system::error_code ig;
-        fs::remove(pid_file, ig);
-    }
     const std::string log_path = (fs::path(hub_dir()) / "go2rtc.log").string();
     {
         boost::system::error_code ig;
@@ -4139,7 +4175,7 @@ FirewallState HubServer::firewall_state(bool refresh)
         port = m_webrtc_port;
         // Re-checked every few minutes so the hub page notices by itself once the user has
         // allowed go2rtc in the firewall (or removed the rule again).
-        if (!refresh && m_fw.checked_at && (long long) std::time(nullptr) - m_fw.checked_at < 300) return m_fw;
+        if (!refresh && m_fw.checked_at && (long long) std::time(nullptr) - m_fw.checked_at < FIREWALL_CACHE_S) return m_fw;
     }
     if (port > 0 && !m_fw_busy.exchange(true)) {
         const bool started = m_life.spawn([this, port]() {
@@ -4149,7 +4185,7 @@ FirewallState HubServer::firewall_state(bool refresh)
                 m_fw = fw;
             }
             if (fw.state != "allowed")
-                BOOST_LOG_TRIVIAL(info) << "RemoteHub: " << FIREWALL_NAME << " for go2rtc.exe: " << fw.state << " (" << fw.note
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: " << FIREWALL_NAME << " for " << GO2RTC_LABEL << ": " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_fw_busy = false;
         });
@@ -4171,7 +4207,7 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
         std::lock_guard<std::mutex> lock(m_mutex);
         on   = m_phone && m_lan && m_port > 0;
         port = m_port;
-        if (!refresh && m_lan_fw.checked_at && (long long) std::time(nullptr) - m_lan_fw.checked_at < 300) return m_lan_fw;
+        if (!refresh && m_lan_fw.checked_at && (long long) std::time(nullptr) - m_lan_fw.checked_at < FIREWALL_CACHE_S) return m_lan_fw;
     }
     if (on && !m_lan_fw_busy.exchange(true)) {
         const bool started = m_life.spawn([this, port]() {

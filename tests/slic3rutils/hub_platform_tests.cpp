@@ -74,18 +74,54 @@ TEST_CASE("the H.264 encoder is read from ffmpeg -encoders", "[HubPlatform]")
     REQUIRE(h264_template_override(H264Encoder::None).empty());
 }
 
-TEST_CASE("macOS firewall output is parsed", "[HubPlatform]")
+// Verbatim socketfilterfw output from macOS 26.6.2 (owner's Mac), in the three states that matter.
+namespace {
+const char* const FW_OFF_GLOBAL   = "Firewall is disabled. (State = 0)\n";
+const char* const FW_OFF_BLOCKALL = "Firewall has block all state set to disabled.\n";
+const char* const FW_ON_GLOBAL    = "Firewall is enabled. (State = 1)\n";
+const char* const FW_ON_BLOCKALL  = "Firewall has block all state set to disabled.\n";
+const char* const FW_BLK_GLOBAL   = "Firewall is blocking all non-essential incoming connections. (State = 2)\n";
+const char* const FW_BLK_BLOCKALL = "Firewall is blocking all non-essential incoming connections.\n";
+
+const char* const APP = "/Applications/EdgeSlicer.app";
+const char* const LISTAPPS_WITH_APP =
+    "Total number of apps = 3 \n\n"
+    "1 :  /Applications/Safari.app \n"
+    "\t\t ( Allow incoming connections ) \n\n"
+    "2 :  /Applications/EdgeSlicer.app \n"
+    "\t\t ( Allow incoming connections ) \n\n"
+    "3 :  /Applications/Other.app \n"
+    "\t\t ( Block incoming connections ) \n";
+const char* const LISTAPPS_WITHOUT_APP =
+    "Total number of apps = 1 \n\n"
+    "1 :  /Applications/Safari.app \n"
+    "\t\t ( Allow incoming connections ) \n";
+} // namespace
+
+TEST_CASE("macOS firewall output is parsed (real socketfilterfw text)", "[HubPlatform]")
 {
-    REQUIRE(parse_mac_fw_enabled("Firewall is enabled. (State = 1)") == Tri::Yes);
-    REQUIRE(parse_mac_fw_enabled("Firewall is disabled. (State = 0)\n") == Tri::No);
-    REQUIRE(parse_mac_fw_enabled("Firewall is enabled. (State = 2)") == Tri::Yes);
+    // Off, on, block all - the number first, the words as the fallback.
+    REQUIRE(parse_mac_fw_enabled(FW_OFF_GLOBAL) == Tri::No);
+    REQUIRE(parse_mac_fw_enabled(FW_ON_GLOBAL) == Tri::Yes);
+    REQUIRE(parse_mac_fw_enabled(FW_BLK_GLOBAL) == Tri::Yes);
+    REQUIRE(parse_mac_fw_state_number(FW_BLK_GLOBAL) == 2);
+    REQUIRE(parse_mac_fw_state_number("nothing") == -1);
+    // The words alone, for a version that prints no "(State = N)".
+    REQUIRE(parse_mac_fw_enabled("Firewall is disabled.") == Tri::No);
+    REQUIRE(parse_mac_fw_enabled("Firewall is enabled.") == Tri::Yes);
+    REQUIRE(parse_mac_fw_enabled("Firewall is blocking all non-essential incoming connections.") == Tri::Yes);
     REQUIRE(parse_mac_fw_enabled("") == Tri::Unknown);
     REQUIRE(parse_mac_fw_enabled("socketfilterfw: permission denied") == Tri::Unknown);
 
-    // Block-all comes from State = 2 when the global state said so, else from --getblockall.
-    REQUIRE(parse_mac_fw_block_all("", "Firewall is enabled. (State = 2)") == Tri::Yes);
-    REQUIRE(parse_mac_fw_block_all("", "Firewall is enabled. (State = 1)") == Tri::No);
-    REQUIRE(parse_mac_fw_block_all("Block all DISABLED! \n", "") == Tri::No);
+    // Block all: State = 2 says it; --getblockall says it in words ("blocking all" / "set to disabled").
+    REQUIRE(parse_mac_fw_block_all(FW_OFF_BLOCKALL, FW_OFF_GLOBAL) == Tri::No);
+    REQUIRE(parse_mac_fw_block_all(FW_ON_BLOCKALL, FW_ON_GLOBAL) == Tri::No);
+    REQUIRE(parse_mac_fw_block_all(FW_BLK_BLOCKALL, FW_BLK_GLOBAL) == Tri::Yes);
+    REQUIRE(parse_mac_fw_block_all("", FW_BLK_GLOBAL) == Tri::Yes);
+    REQUIRE(parse_mac_fw_block_all(FW_BLK_BLOCKALL, "") == Tri::Yes);
+    REQUIRE(parse_mac_fw_block_all(FW_ON_BLOCKALL, "") == Tri::No);
+    REQUIRE(parse_mac_fw_block_all("Firewall has block all state set to enabled.", "") == Tri::Yes);
+    REQUIRE(parse_mac_fw_block_all("Block all DISABLED! \n", "") == Tri::No); // the older wording
     REQUIRE(parse_mac_fw_block_all("Block all ENABLED! \n", "") == Tri::Yes);
     REQUIRE(parse_mac_fw_block_all("", "") == Tri::Unknown);
 
@@ -95,31 +131,76 @@ TEST_CASE("macOS firewall output is parsed", "[HubPlatform]")
     REQUIRE(parse_mac_fw_app_blocked("") == Tri::Unknown);
 }
 
+TEST_CASE("macOS --listapps tells listed from not listed", "[HubPlatform]")
+{
+    REQUIRE(parse_mac_fw_listapps(LISTAPPS_WITH_APP, APP) == AppListing::Allowed);
+    REQUIRE(parse_mac_fw_listapps(LISTAPPS_WITHOUT_APP, APP) == AppListing::NotListed);
+    REQUIRE(parse_mac_fw_listapps(LISTAPPS_WITH_APP, "/Applications/Other.app") == AppListing::Blocked);
+    // A longer path that merely starts the same is a different entry; the inner executable of the bundle is the same app.
+    REQUIRE(parse_mac_fw_listapps(LISTAPPS_WITHOUT_APP + std::string("2 :  /Applications/EdgeSlicer.app.old \n\t\t ( Allow incoming connections ) \n"), APP) == AppListing::NotListed);
+    REQUIRE(parse_mac_fw_listapps("1 :  /Applications/EdgeSlicer.app/Contents/MacOS/EdgeSlicer \n\t\t ( Block incoming connections ) \nTotal number of apps = 1", APP) == AppListing::Blocked);
+    // Output we do not recognise never claims "not listed".
+    REQUIRE(parse_mac_fw_listapps("", APP) == AppListing::Unknown);
+    REQUIRE(parse_mac_fw_listapps("socketfilterfw: permission denied", APP) == AppListing::Unknown);
+    REQUIRE(parse_mac_fw_listapps(LISTAPPS_WITHOUT_APP, "") == AppListing::Unknown);
+}
+
+TEST_CASE("macOS --getallowsigned and codesign output", "[HubPlatform]")
+{
+    const std::string on  = "Automatically allow built-in signed software ENABLED.\nAutomatically allow downloaded signed software ENABLED.\n";
+    const std::string off = "Automatically allow built-in signed software ENABLED.\nAutomatically allow downloaded signed software DISABLED.\n";
+    REQUIRE(parse_mac_fw_allow_downloaded_signed(on) == Tri::Yes);
+    REQUIRE(parse_mac_fw_allow_downloaded_signed(off) == Tri::No);
+    REQUIRE(parse_mac_fw_allow_downloaded_signed("") == Tri::Unknown);
+
+    REQUIRE(parse_codesign_developer_id("Identifier=com.edge\nAuthority=Developer ID Application: Someone (ABCDE12345)\nAuthority=Developer ID Certification Authority\n") == Tri::Yes);
+    REQUIRE(parse_codesign_developer_id("CodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1\nSignature=adhoc\n") == Tri::No);
+    REQUIRE(parse_codesign_developer_id("") == Tri::Unknown);
+}
+
 TEST_CASE("macOS firewall verdicts", "[HubPlatform]")
 {
+    const std::string L = "EdgeSlicer.exe";
     // Off: nothing to say. Never a netsh line.
-    auto v = classify_mac_firewall(Tri::No, Tri::No, Tri::Unknown, "EdgeSlicer.exe");
+    auto v = classify_mac_firewall(Tri::No, Tri::No, Tri::Unknown, AppListing::Unknown, Tri::Unknown, L);
     REQUIRE(v.state == "allowed");
     REQUIRE(v.note.empty());
     REQUIRE(v.command.empty());
-    // On and block-all: blocked, with the System Settings path, label without ".exe".
-    v = classify_mac_firewall(Tri::Yes, Tri::Yes, Tri::Unknown, "EdgeSlicer.exe");
-    REQUIRE(v.state == "blocked");
+    // The real three states, end to end through the parsers.
+    v = classify_mac_firewall(parse_mac_fw_enabled(FW_OFF_GLOBAL), parse_mac_fw_block_all(FW_OFF_BLOCKALL, FW_OFF_GLOBAL), Tri::Unknown,
+                              AppListing::Unknown, Tri::Unknown, L);
+    REQUIRE(v.state == "allowed");
+    v = classify_mac_firewall(parse_mac_fw_enabled(FW_ON_GLOBAL), parse_mac_fw_block_all(FW_ON_BLOCKALL, FW_ON_GLOBAL), Tri::No,
+                              parse_mac_fw_listapps(LISTAPPS_WITH_APP, APP), Tri::Unknown, L);
+    REQUIRE(v.state == "allowed"); // on, listed and allowed
+    v = classify_mac_firewall(parse_mac_fw_enabled(FW_BLK_GLOBAL), parse_mac_fw_block_all(FW_BLK_BLOCKALL, FW_BLK_GLOBAL), Tri::No,
+                              parse_mac_fw_listapps(LISTAPPS_WITH_APP, APP), Tri::Yes, L);
+    REQUIRE(v.state == "blocked"); // block all wins over everything, even a listed allowed app
     REQUIRE_THAT(v.note, Catch::Matchers::Contains("block all incoming connections"));
     REQUIRE_THAT(v.note, Catch::Matchers::Contains("System Settings > Network > Firewall"));
     REQUIRE_THAT(v.note, Catch::Matchers::Contains("EdgeSlicer"));
     REQUIRE_THAT(v.note, !Catch::Matchers::Contains(".exe"));
     REQUIRE(v.command.empty());
-    // The app on the list as blocked (the user pressed Deny once).
-    v = classify_mac_firewall(Tri::Yes, Tri::No, Tri::Yes, "go2rtc.exe");
+    // The app on the list as blocked (the user pressed Deny once), by either command.
+    v = classify_mac_firewall(Tri::Yes, Tri::No, Tri::Unknown, AppListing::Blocked, Tri::Unknown, "go2rtc.exe");
     REQUIRE(v.state == "blocked");
     REQUIRE_THAT(v.note, Catch::Matchers::Contains("go2rtc"));
-    // On, app allowed / not listed yet / could not be asked.
-    REQUIRE(classify_mac_firewall(Tri::Yes, Tri::No, Tri::No, "EdgeSlicer.exe").state == "allowed");
-    REQUIRE(classify_mac_firewall(Tri::Yes, Tri::No, Tri::Unknown, "EdgeSlicer.exe").state == "unknown");
-    REQUIRE(classify_mac_firewall(Tri::Yes, Tri::No, Tri::Unknown, "EdgeSlicer.exe").note.empty());
+    REQUIRE(classify_mac_firewall(Tri::Yes, Tri::No, Tri::Yes, AppListing::Unknown, Tri::Unknown, L).state == "blocked");
+    // On, and the app is NOT on the list although --getappblocked says "permitted": a soft warning,
+    // unless a Developer ID signed app is let in by "allow downloaded signed software".
+    v = classify_mac_firewall(Tri::Yes, Tri::No, Tri::No, AppListing::NotListed, Tri::No, L);
+    REQUIRE(v.state == "active");
+    REQUIRE_THAT(v.note, Catch::Matchers::Contains("may block incoming connections"));
+    REQUIRE_THAT(v.note, Catch::Matchers::Contains("System Settings > Network > Firewall > Options"));
+    REQUIRE_THAT(v.note, Catch::Matchers::Contains("restart the hub"));
+    REQUIRE(classify_mac_firewall(Tri::Yes, Tri::No, Tri::No, AppListing::NotListed, Tri::Unknown, L).state == "active");
+    REQUIRE(classify_mac_firewall(Tri::Yes, Tri::No, Tri::No, AppListing::NotListed, Tri::Yes, L).state == "allowed");
+    // On, list unreadable: nothing we can be sure of, nothing said.
+    v = classify_mac_firewall(Tri::Yes, Tri::No, Tri::No, AppListing::Unknown, Tri::Unknown, L);
+    REQUIRE(v.state == "unknown");
+    REQUIRE(v.note.empty());
     // Could not read the firewall at all.
-    v = classify_mac_firewall(Tri::Unknown, Tri::Unknown, Tri::Unknown, "EdgeSlicer.exe");
+    v = classify_mac_firewall(Tri::Unknown, Tri::Unknown, Tri::Unknown, AppListing::Unknown, Tri::Unknown, L);
     REQUIRE(v.state == "unknown");
     REQUIRE_THAT(v.note, Catch::Matchers::Contains("could not be checked"));
 }

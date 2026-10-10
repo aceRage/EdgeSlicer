@@ -156,11 +156,29 @@ inline std::string h264_template_override(H264Encoder e)
 
 enum class Tri { Unknown, No, Yes };
 
-// `socketfilterfw --getglobalstate`: "Firewall is enabled. (State = 1)", "... disabled. (State = 0)",
-// and State = 2 when "Block all incoming connections" is on.
+// socketfilterfw prints, verbatim (macOS 26):
+//   --getglobalstate  "Firewall is disabled. (State = 0)"
+//                     "Firewall is enabled. (State = 1)"
+//                     "Firewall is blocking all non-essential incoming connections. (State = 2)"
+//   --getblockall     "Firewall has block all state set to disabled."
+//                     "Firewall is blocking all non-essential incoming connections."
+// The number in "(State = N)" is the reliable part (0 off, 1 on, 2 block all); the words are the
+// fallback for a version that does not print it.
+inline int parse_mac_fw_state_number(const std::string& text)
+{
+    const std::string g = detail::lower(text);
+    const size_t      s = g.find("state = ");
+    if (s == std::string::npos || s + 8 >= g.size() || !std::isdigit((unsigned char) g[s + 8])) return -1;
+    return g[s + 8] - '0';
+}
+
 inline Tri parse_mac_fw_enabled(const std::string& text)
 {
+    const int n = parse_mac_fw_state_number(text);
+    if (n == 0) return Tri::No;
+    if (n >= 1) return Tri::Yes;
     const std::string t = detail::lower(text);
+    if (t.find("blocking all") != std::string::npos) return Tri::Yes;
     if (t.find("disabled") != std::string::npos) return Tri::No;
     if (t.find("enabled") != std::string::npos) return Tri::Yes;
     return Tri::Unknown;
@@ -168,25 +186,85 @@ inline Tri parse_mac_fw_enabled(const std::string& text)
 
 inline Tri parse_mac_fw_block_all(const std::string& getblockall_text, const std::string& getglobalstate_text)
 {
-    const std::string g = detail::lower(getglobalstate_text);
-    const size_t      s = g.find("state = ");
-    if (s != std::string::npos && s + 8 < g.size() && std::isdigit((unsigned char) g[s + 8])) return g[s + 8] == '2' ? Tri::Yes : Tri::No;
+    const int n = parse_mac_fw_state_number(getglobalstate_text);
+    if (n == 2) return Tri::Yes;
+    if (n == 0 || n == 1) return Tri::No;
     const std::string t = detail::lower(getblockall_text);
+    if (t.find("blocking all") != std::string::npos) return Tri::Yes;
     if (t.find("block all") == std::string::npos) return Tri::Unknown;
     if (t.find("disabled") != std::string::npos) return Tri::No;
     if (t.find("enabled") != std::string::npos) return Tri::Yes;
     return Tri::Unknown;
 }
 
-// `socketfilterfw --getappblocked <path>`. Yes = the app is on the list as blocked, No = it is
-// allowed, Unknown = not on the list / not understood (macOS asks the user the first time a
-// signed app listens, so "not listed" is not a problem by itself).
+// `socketfilterfw --getappblocked <path>`. Yes = the app is on the list as blocked, No = it says
+// permitted / not blocked, Unknown = not understood. NOTE: "permitted" does not mean the app is on
+// the list - macOS answers that for an app it has never heard of too, and an ad-hoc signed app that
+// is not listed has its incoming connections held until somebody clicks Allow on macOS's prompt.
+// That is what parse_mac_fw_listapps() is for.
 inline Tri parse_mac_fw_app_blocked(const std::string& text)
 {
     const std::string t = detail::lower(text);
     if (t.find("not part of") != std::string::npos) return Tri::Unknown;
     if (t.find("not blocked") != std::string::npos || t.find("is permitted") != std::string::npos || t.find("allowed") != std::string::npos) return Tri::No;
     if (t.find("blocked") != std::string::npos) return Tri::Yes;
+    return Tri::Unknown;
+}
+
+// `socketfilterfw --listapps`: "Total number of apps = N", then per app
+//     1 :  /Applications/EdgeSlicer.app
+//          ( Allow incoming connections )
+// (or "Block incoming connections"). Parsed tolerantly: an entry is the numbered line that names the
+// path (followed by whitespace, end of line or a '/'), and its verdict is the first Allow / Block
+// word before the next numbered line. NotListed is only claimed when the "Total number of apps"
+// header was there, so unreadable output stays Unknown.
+enum class AppListing { Unknown, NotListed, Allowed, Blocked };
+
+inline AppListing parse_mac_fw_listapps(const std::string& text, const std::string& app_path)
+{
+    const std::vector<std::string> lines = detail::split_lines(text);
+    bool                           header = false;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string low = detail::lower(lines[i]);
+        if (low.find("total number of apps") != std::string::npos) header = true;
+        const size_t at = app_path.empty() ? std::string::npos : lines[i].find(app_path);
+        if (at == std::string::npos) continue;
+        const size_t end = at + app_path.size();
+        if (end < lines[i].size() && !std::isspace((unsigned char) lines[i][end]) && lines[i][end] != '/') continue; // a longer path
+        for (size_t j = i; j < lines.size(); ++j) {
+            if (j > i) {
+                const std::vector<std::string> w = detail::split_ws(lines[j]);
+                if (w.size() >= 2 && w[1] == ":" && std::isdigit((unsigned char) w[0][0])) break; // the next entry
+            }
+            const std::string l = detail::lower(lines[j]);
+            if (l.find("block") != std::string::npos) return AppListing::Blocked;
+            if (l.find("allow") != std::string::npos) return AppListing::Allowed;
+        }
+        return AppListing::Unknown; // named, but no verdict we understand
+    }
+    return header ? AppListing::NotListed : AppListing::Unknown;
+}
+
+// `socketfilterfw --getallowsigned`: "Automatically allow built-in signed software ENABLED." and
+// "Automatically allow downloaded signed software ENABLED." (or DISABLED). The second is what lets a
+// Developer ID signed app in without being listed.
+inline Tri parse_mac_fw_allow_downloaded_signed(const std::string& text)
+{
+    for (const std::string& line : detail::split_lines(text)) {
+        const std::string l = detail::lower(line);
+        if (l.find("downloaded") == std::string::npos) continue;
+        if (l.find("disabled") != std::string::npos) return Tri::No;
+        if (l.find("enabled") != std::string::npos) return Tri::Yes;
+    }
+    return Tri::Unknown;
+}
+
+// `codesign -dv --verbose=2 <app>` (prints to stderr; merged by the runner): a Developer ID build has
+// "Authority=Developer ID Application: ...", an ad-hoc one "Signature=adhoc".
+inline Tri parse_codesign_developer_id(const std::string& text)
+{
+    if (text.find("Authority=Developer ID Application") != std::string::npos) return Tri::Yes;
+    if (text.find("Signature=adhoc") != std::string::npos || text.find("(adhoc)") != std::string::npos) return Tri::No;
     return Tri::Unknown;
 }
 
@@ -207,7 +285,10 @@ inline std::string program_label(const std::string& label)
     return label;
 }
 
-inline FirewallVerdict classify_mac_firewall(Tri enabled, Tri block_all, Tri app_blocked, const std::string& label)
+// `app_blocked` is --getappblocked, `listing` is --listapps, `signed_covered` is "downloaded signed
+// software is allowed automatically AND this app is Developer ID signed" (Yes), or No / Unknown.
+inline FirewallVerdict classify_mac_firewall(Tri enabled, Tri block_all, Tri app_blocked, AppListing listing, Tri signed_covered,
+                                             const std::string& label)
 {
     FirewallVerdict v;
     const std::string name = program_label(label);
@@ -222,15 +303,26 @@ inline FirewallVerdict classify_mac_firewall(Tri enabled, Tri block_all, Tri app
                   ". Turn that off in System Settings > Network > Firewall > Options.";
         return v;
     }
-    if (app_blocked == Tri::Yes) {
+    if (listing == AppListing::Blocked || app_blocked == Tri::Yes) {
         v.state = "blocked";
         v.note  = "The macOS firewall blocks incoming connections to " + name +
                   ". Set it to Allow in System Settings > Network > Firewall > Options.";
         return v;
     }
-    // On, and either allowed or not on the list yet (macOS asks once, and signed apps are let in
-    // by default): nothing to warn about that we can be sure of.
-    v.state = app_blocked == Tri::No ? "allowed" : "unknown";
+    if (listing == AppListing::Allowed) { v.state = "allowed"; return v; }
+    if (listing == AppListing::NotListed) {
+        if (signed_covered == Tri::Yes) { v.state = "allowed"; return v; }
+        // The firewall is on and the app is not on its list. macOS asks the user once, when the app
+        // first listens - but a hub that was already running when the firewall was switched on never
+        // triggers the question, and an ad-hoc signed build is not let in by the "signed software"
+        // rule. Its incoming connections then time out, with nothing on screen to say why.
+        v.state = "active";
+        v.note  = "macOS may block incoming connections to " + name + " until it is allowed: System Settings > Network > Firewall > Options, "
+                  "add " + name + " (or click Allow when macOS asks). If the firewall was turned on after the hub started, restart the hub.";
+        return v;
+    }
+    // On, and what the list says could not be read: nothing we can be sure of.
+    v.state = "unknown";
     return v;
 }
 
