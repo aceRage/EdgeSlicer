@@ -1,5 +1,8 @@
 #include "HttpServer.hpp"
 #include "PageServerSecurity.hpp"
+#include "LoginTicketGate.hpp"
+#include <chrono>
+#include <functional>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string.hpp>
@@ -1025,8 +1028,6 @@ void HttpServer::set_request_handler(const std::function<std::shared_ptr<Respons
 
 std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const std::string& url)
 {
-    BOOST_LOG_TRIVIAL(info) << "thirdparty_login: get_response";
-
     std::string   redirect_url           = url_get_param(url, "redirect_url");
     std::string   access_token           = url_get_param(url, "access_token");
     std::string   refresh_token          = url_get_param(url, "refresh_token");
@@ -1049,9 +1050,61 @@ std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const 
     // redirect_url with ?result=success / ?result=fail - upstream NEVER answers a
     // well-formed ticket callback with a 404, even when the exchange fails, because the
     // browser would then show a bare 404 page instead of bambulab's own failure page.
-    const bool has_ticket = boost::contains(url, "ticket");
+    //
+    // Only a request that carries a whole `ticket=` parameter (or tokens) is a callback. The
+    // browser also asks this port for /favicon.ico and may preload the page; those are answered
+    // with a 404 before anything about the login is looked at, logged or changed.
+    const std::string ticket_param = LoginTicketGate::extract_ticket(url);
+    const bool        has_ticket   = !ticket_param.empty();
+    if (!has_ticket && access_token.empty()) {
+        BOOST_LOG_TRIVIAL(debug) << "thirdparty_login: not a sign-in callback, ignored: " << url.substr(0, url.find('?'));
+        return std::make_shared<ResponseNotFound>();
+    }
+    BOOST_LOG_TRIVIAL(info) << "thirdparty_login: get_response";
+
+    // A ticket is single use and the browser can deliver the same callback twice (a retried
+    // navigation, a prefetch beating the real request). The first request exchanges it; a repeat
+    // gets the first one's answer and never calls get_my_token again (which would 401 and, worse,
+    // send the browser to result=fail after a sign-in that worked). LoginTicketGate.hpp.
+    LoginTicketGate& gate  = LoginTicketGate::instance();
+    const auto       gate_now = [] {
+        return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    bool owns_ticket = false;
     if (access_token.empty() && agent && has_ticket) {
-        std::string  ticket  = url_get_param(url, "ticket");
+        const LoginTicketGate::Claim claim = gate.claim(ticket_param, gate_now());
+        if (claim.role == LoginTicketGate::Role::Repeat) {
+            BOOST_LOG_TRIVIAL(info) << "thirdparty_login: ticket " << LoginTicketGate::mask(ticket_param)
+                                    << " was already handled, answering with the same page (" << (claim.outcome.success ? "success" : "fail") << ")";
+            if (!claim.outcome.location.empty()) return std::make_shared<ResponseRedirect>(claim.outcome.location);
+            return std::make_shared<ResponseLoginFailed>();
+        }
+        owns_ticket = true;
+    }
+    // The owner records its answer on every way out, an exception included.
+    struct TicketOwner
+    {
+        LoginTicketGate& gate;
+        std::string      ticket;
+        bool             armed;
+        std::function<long long()> now;
+        ~TicketOwner()
+        {
+            if (armed) gate.finish(ticket, LoginTicketGate::Outcome(), now());
+        }
+        void answer(bool success, const std::string& location)
+        {
+            if (!armed) return;
+            armed = false;
+            LoginTicketGate::Outcome o;
+            o.success  = success;
+            o.location = location;
+            gate.finish(ticket, o, now());
+        }
+    } owner { gate, ticket_param, owns_ticket, gate_now };
+
+    if (access_token.empty() && agent && has_ticket) {
+        const std::string& ticket  = ticket_param;
         unsigned int tk_code = 0;
         std::string  tk_body;
         if (agent->get_my_token(ticket, &tk_code, &tk_body) == 0) {
@@ -1114,10 +1167,12 @@ std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const 
             }
             GUI::wxGetApp().CallAfter([] { wxGetApp().ShowUserLogin(false); });
             std::string location_str = (boost::format("%1%?result=success") % redirect_url).str();
+            owner.answer(true, location_str);
             return std::make_shared<ResponseRedirect>(location_str);
         } else {
             std::string error_str    = "get_user_profile_error_" + std::to_string(result);
             std::string location_str = (boost::format("%1%?result=fail&error=%2%") % redirect_url % error_str).str();
+            owner.answer(false, location_str);
             return std::make_shared<ResponseRedirect>(location_str);
         }
     } else if (has_ticket && !redirect_url.empty()) {
@@ -1125,11 +1180,13 @@ std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const 
         // answers this with a 302 to redirect_url?result=fail, not a 404.
         BOOST_LOG_TRIVIAL(info) << "thirdparty_login: ticket exchange failed, redirecting with result=fail";
         std::string location_str = (boost::format("%1%?result=fail&error=ticket_exchange_failed") % redirect_url).str();
+        owner.answer(false, location_str);
         return std::make_shared<ResponseRedirect>(location_str);
     } else if (has_ticket) {
         // A ticket arrived but no redirect_url to send the browser back to; show a plain
         // failure page rather than a 404 so the user sees why nothing happened.
         BOOST_LOG_TRIVIAL(info) << "thirdparty_login: ticket present but redirect_url missing";
+        owner.answer(false, std::string());
         return std::make_shared<ResponseLoginFailed>();
     } else {
         return std::make_shared<ResponseNotFound>();
@@ -1167,6 +1224,17 @@ std::shared_ptr<HttpServer::Response> HttpServer::web_server_handle_request(cons
 //       a file inside the installed resources dir.
 // Paths are resolved to the real file (symlinks, junctions, 8.3 names, case) before the check.
 // Returns "" to refuse.
+const char* HttpServer::app_icon_file_for_page(const std::string& url_path)
+{
+    // The names the hub's own routes serve (RemoteHub: /icon-192.png ...) in the folder the Stream
+    // tab page is loaded from, and the file each is.
+    if (url_path == "/web/orca/icon-192.png") return "Snapmaker_Orca_192px.png";
+    if (url_path == "/web/orca/icon-512.png") return "Snapmaker_Orca_512px.png";
+    if (url_path == "/web/orca/icon-512-maskable.png") return "Snapmaker_Orca_512px_maskable.png";
+    if (url_path == "/web/orca/apple-touch-icon.png") return "Snapmaker_Orca_180px.png";
+    return nullptr;
+}
+
 std::string HttpServer::map_url_to_file_path(const std::string& url)
 {
     page_server::FileRoots roots;
@@ -1182,6 +1250,13 @@ std::string HttpServer::map_url_to_file_path(const std::string& url)
 
     if (trimmed_url == "/") {
         trimmed_url = "/web/flutter_web/index.html"; // default home page
+    }
+    else if (const char* icon = app_icon_file_for_page(trimmed_url.ToStdString(wxConvUTF8))) {
+        // The Stream tab page (web/orca/stream_center.html) declares its icons relative to itself,
+        // for the phone, where the hub serves them. Loaded here its icon request lands on
+        // /web/orca/icon-192.png, which is not a file, and logged "file path is null" every time
+        // the tab opened. Answer from the installed images instead (a closed list, see the helper).
+        trimmed_url = wxString("/images/") + icon;
     }
     else if (trimmed_url.substr(0, 11) == "/localfile/") {
         auto real_path = trimmed_url.substr(11);

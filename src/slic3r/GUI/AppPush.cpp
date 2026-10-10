@@ -1194,7 +1194,7 @@ std::pair<int, std::string> test()
 static const char* severity_of_kind(const std::string& kind)
 {
     if (kind == "failed" || kind == "error") return "error";
-    if (kind == "paused" || kind == "runout" || kind == "cancelled") return "warning";
+    if (kind == "paused" || kind == "runout") return "warning";
     return "info";
 }
 
