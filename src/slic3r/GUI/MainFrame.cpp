@@ -54,10 +54,13 @@
 #include "Preferences.hpp"
 #include "Widgets/ProgressDialog.hpp"
 #include "BindDialog.hpp"
+#include "AccountStatus.hpp"
+#include "RemoteHub.hpp"
 #include "../Utils/MacDarkMode.hpp"
 
 #include <fstream>
 #include <string_view>
+#include <thread>
 #include <iomanip>
 #include <sstream>
 #include <cstdlib>
@@ -2902,6 +2905,65 @@ void MainFrame::refresh_account_menu(wxMenu* menu)
     }
 }
 
+// What refresh_account_menu() would show right now, as one string: the selected printer's vendor and
+// each provider's sign-in state and name. Lets the macOS menu bar skip rebuilding an unchanged menu.
+static std::string account_menu_signature()
+{
+    auto&       app = wxGetApp();
+    std::string sig = AccountStatus::current_printer_vendor_id();
+    sig += "|bbl:";
+    if (app.is_user_login())
+        sig += app.get_bambu_user_name();
+    else
+        sig += "-";
+    sig += "|sm:";
+    auto* ui = app.sm_get_userinfo();
+    if (ui && ui->is_user_login())
+        sig += ui->get_user_name();
+    else
+        sig += "-";
+    return sig;
+}
+
+void MainFrame::update_account_menubar()
+{
+    if (m_account_menubar_menu == nullptr)
+        return;
+    const std::string sig = account_menu_signature();
+    if (sig == m_account_menubar_sig)
+        return;
+    m_account_menubar_sig = sig;
+    refresh_account_menu(m_account_menubar_menu);
+}
+
+void MainFrame::open_mobile_hub()
+{
+    // The hub is a separate process. Asking it where it lives - and starting it when it is not
+    // running - takes seconds, so it happens on a worker thread and the browser is opened back
+    // on the GUI thread. The seeds are the ones GUI_App::start_remote_access() uses, so a hub
+    // started from here comes up exactly as the slicer itself would have started it,
+    // phone access included (or not) as the user left it.
+    const std::string token = wxGetApp().app_config->get("stream_phone_token");
+    const bool        phone = wxGetApp().app_config->get("stream_phone_access") == "1";
+    std::thread([token, phone]() {
+        RemoteHub::Info info = RemoteHub::query();
+        if (!info.alive || info.admin_port == 0)
+            info = RemoteHub::ensure_running(token, phone);
+        wxGetApp().CallAfter([info]() {
+            if (info.alive && info.admin_port > 0) {
+                // The hub page is served by the loopback-only control plane, never by the
+                // listener a tunnel can front. No secret in the URL: /hub/ itself is the one
+                // route that does not need it, and the page sends it as a header afterwards.
+                wxLaunchDefaultBrowser(wxString::Format("http://127.0.0.1:%d/hub/", info.admin_port));
+            } else {
+                MessageDialog(nullptr, _L("The Mobile Hub did not start. Please try again in a moment."),
+                              _L("Mobile Hub"), wxOK | wxICON_INFORMATION)
+                    .ShowModal();
+            }
+        });
+    }).detach();
+}
+
 void MainFrame::init_menubar_as_editor()
 {
 #ifdef __APPLE__
@@ -3557,6 +3619,13 @@ void MainFrame::init_menubar_as_editor()
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
 #else
+    // The title bar's Mobile Hub button has no menu bar equivalent on macOS; it goes at the end of View.
+    if (viewMenu) {
+        viewMenu->AppendSeparator();
+        append_menu_item(viewMenu, wxID_ANY, _L("Mobile Hub") + dots, _L("Open the Mobile Hub page in your browser (phone access, cameras, open windows)"),
+            [this](wxCommandEvent&) { open_mobile_hub(); }, "", nullptr,
+            []() { return true; }, this);
+    }
     m_menubar->Append(fileMenu, wxString::Format("&%s", _L("File")));
     if (editMenu)
         m_menubar->Append(editMenu, wxString::Format("&%s", _L("Edit")));
@@ -3671,8 +3740,13 @@ void MainFrame::init_menubar_as_editor()
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
     m_menubar->Append(calib_menu,wxString::Format("&%s", _L("Calibration")));
-    // Ultra: the Account entry lives in the custom top bar (BBLTopbar), not this native
-    // menubar (which the fork hides) - see BBLTopbar's ID_ACCOUNT tool + refresh_account_menu.
+    // Ultra: on Windows / Linux the Account entry is a button in the custom top bar (BBLTopbar's
+    // ID_ACCOUNT tool). macOS keeps its native title bar and menu bar, so the same contextual menu
+    // (refresh_account_menu) is an Account menu here, kept current by update_account_menubar().
+    m_account_menubar_menu = new wxMenu();
+    refresh_account_menu(m_account_menubar_menu);
+    m_account_menubar_sig = account_menu_signature();
+    m_menubar->Append(m_account_menubar_menu, wxString::Format("&%s", _L("Account")));
     if (helpMenu)
         m_menubar->Append(helpMenu, wxString::Format("&%s", _L("Help")));
     SetMenuBar(m_menubar);
@@ -4843,6 +4917,10 @@ void MainFrame::update_side_preset_ui()
 
 void MainFrame::on_select_default_preset(SimpleEvent& evt)
 {
+    // The "synchronize from Bambu Cloud" question: user presets are never synced (PresetSyncPolicy.hpp).
+    if (!PresetSync::cloud_sync_enabled())
+        return;
+
     MessageDialog dialog(this,
                     _L("Do you want to synchronize your personal data from Bambu Cloud?\n"
                         "It contains the following information:\n"

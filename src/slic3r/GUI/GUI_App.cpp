@@ -140,7 +140,6 @@
 #include "SendSystemInfoDialog.hpp"
 #include "ParamsDialog.hpp"
 #include "KBShortcutsDialog.hpp"
-#include "DownloadProgressDialog.hpp"
 
 #include "BitmapCache.hpp"
 #include "Notebook.hpp"
@@ -149,7 +148,6 @@
 #include "Widgets/ProgressDialog.hpp"
 
 //BBS: DailyTip and UserGuide Dialog
-#include "WebDownPluginDlg.hpp"
 #include "WebGuideDialog.hpp"
 #include "ReleaseNote.hpp"
 #include "PrivacyUpdateDialog.hpp"
@@ -1558,29 +1556,24 @@ void GUI_App::post_init()
     hms_query = new HMSQuery();
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
-    // Ultra (plug-in guards): "the plug-in needs updating" means "its version does not match the
-    // Bambu build we were forked from", which is true of our own plug-in by construction. Acting on
-    // it would download Bambu's package over ours, so it is dropped while UltraNet is installed.
+    // "The plug-in needs updating" means the plug-in is absent, did not load, or its version does
+    // not match the Bambu build we were forked from (true of our own plug-in by construction).
+    // EdgeSlicer never downloads Bambu's plug-in, so there is nothing to update: with UltraNet
+    // installed the flag is dropped silently, without it the user is told the plug-in is missing
+    // (once per session).
     if (m_networking_need_update && m_ultranet_plugin_installed) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (network plug-in update prompt skipped)";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, network plug-in update prompt skipped";
         m_networking_need_update = false;
     }
-    if (m_networking_need_update && m_hub_managed && RemoteAccess::get().hidden()) {
-        RemoteAccess::get().raise_attention("the network plug-in needs updating", "manual");
-    } else if (m_networking_need_update) {
-        //updating networking
-        int ret = updating_bambu_networking();
-        if (!ret) {
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__<<":networking plugin updated successfully";
-            //restart_networking();
-        }
-        else {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<<":networking plugin updated failed";
-        }
+    if (m_networking_need_update) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": the network plug-in is missing or unusable; Bambu's is never downloaded";
+        ShowNetworkPluginMissing(/*user_requested*/ false);
     }
 
     // Start preset sync after project opened, otherwise we could have preset change during project opening which could cause crash
-    if (app_config->get("sync_user_preset") == "true") {
+    if (!PresetSync::cloud_sync_enabled()) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " user preset cloud sync: disabled";
+    } else if (app_config->get("sync_user_preset") == "true") {
         // BBS loading user preset
         // Always async, not such startup step
         // BOOST_LOG_TRIVIAL(info) << "Loading user presets...";
@@ -1896,6 +1889,17 @@ static std::string decode(std::string const& extra, std::string const& path = {}
 
 int GUI_App::download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
 {
+    // The one gate in front of the Bambu CDN: EdgeSlicer never downloads Bambu's network plug-in
+    // (owner decision, 2026-10), nor the virtual-camera tools. Only the camera component, which the
+    // user is asked about first, may pass (see bambu_cdn_package_allowed()).
+    if (!bambu_cdn_package_allowed(package_name)) {
+        BOOST_LOG_TRIVIAL(warning) << "[download_plugin]: refused '" << name << "/" << package_name
+                                   << "' - EdgeSlicer does not download Bambu plug-ins";
+        bool cancel = false;
+        if (pro_fn) pro_fn(InstallStatusDownloadFailed, 0, cancel);
+        return -1;
+    }
+
     int result = 0;
     json j;
     std::string err_msg;
@@ -2069,209 +2073,16 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
     return result;
 }
 
-int GUI_App::install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
-{
-    bool cancel = false;
-    std::string target_file_path = (fs::temp_directory_path() / package_name).string();
-
-    BOOST_LOG_TRIVIAL(info) << "[install_plugin] enter";
-    // Ultra (plug-in guards): this unzips Bambu's CDN package straight over data_dir/plugins. When
-    // our own clean-room plug-in lives there, that would silently replace it - refuse. The check is
-    // re-read from disk rather than taken from the cache so a late first-run copy is still seen.
-    refresh_ultranet_plugin_state();
-    if (m_ultranet_plugin_installed) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install_plugin refused)";
-        return -1;
-    }
-    // get plugin folder
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto plugin_folder = data_dir_path / name;
-    //auto plugin_folder = boost::filesystem::path(wxStandardPaths::Get().GetUserDataDir().ToUTF8().data()) / "plugins";
-    auto backup_folder = plugin_folder/"backup";
-    if (!boost::filesystem::exists(plugin_folder)) {
-        BOOST_LOG_TRIVIAL(info) << "[install_plugin] will create directory "<<plugin_folder.string();
-        boost::filesystem::create_directory(plugin_folder);
-    }
-    if (!boost::filesystem::exists(backup_folder)) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", will create directory %1%")%backup_folder.string();
-        boost::filesystem::create_directory(backup_folder);
-    }
-
-    if (m_networking_cancel_update) {
-        BOOST_LOG_TRIVIAL(info) << boost::format("[install_plugin]: %1%, cancelled by user")%__LINE__;
-        return -1;
-    }
-    if (pro_fn) {
-        pro_fn(InstallStatusNormal, 50, cancel);
-    }
-    // unzip
-    mz_zip_archive archive;
-    mz_zip_zero_struct(&archive);
-    if (!open_zip_reader(&archive, target_file_path)) {
-        BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, open zip file failed")%__LINE__;
-        if (pro_fn) pro_fn(InstallStatusDownloadFailed, 0, cancel);
-        return InstallStatusUnzipFailed;
-    }
-
-    mz_uint num_entries = mz_zip_reader_get_num_files(&archive);
-    mz_zip_archive_file_stat stat;
-    BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, got %2% files")%__LINE__ %num_entries;
-
-    // The entry name goes through the same normalisation as every confined extractor (backslash
-    // separators, "./" prefixes and "a//b" are accepted; ".." anywhere, absolute / drive / UNC /
-    // ':' names and look-alikes are not), then is flattened to its file name.
-    auto plugin_entry_name = [&](const mz_zip_archive_file_stat &st, std::string &leaf) {
-        std::string raw;
-        if (st.m_is_utf8)
-            raw = st.m_filename;
-        else {
-            std::string extra(1024, 0);
-            size_t      n = mz_zip_reader_get_extra(&archive, st.m_file_index, extra.data(), extra.size());
-            raw           = decode(extra.substr(0, n), st.m_filename);
-        }
-        std::string normalized;
-        const untrusted::ArchiveEntryName verdict = untrusted::normalize_archive_entry_path(raw, normalized);
-        if (verdict == untrusted::ArchiveEntryName::Ok)
-            leaf = untrusted::archive_entry_leaf(normalized);
-        else if (verdict == untrusted::ArchiveEntryName::Reject)
-            BOOST_LOG_TRIVIAL(error) << "[install_plugin] unsafe entry name " << st.m_filename;
-        return verdict;
-    };
-    auto plugin_entry_ok = [&](const std::string &dest_file, const boost::filesystem::path &dest_path) {
-        if (dest_file.empty() || !untrusted::is_safe_archive_relative_path(dest_file) ||
-            !untrusted::is_path_within_root(plugin_folder, dest_path)) {
-            BOOST_LOG_TRIVIAL(error) << "[install_plugin] entry flattened name " << dest_file << " resolves outside "
-                                     << plugin_folder.string();
-            return false;
-        }
-        return true;
-    };
-
-    // Pass 1: validate every extractable entry before writing anything. Traversal / absolute /
-    // escaping names still refuse the whole zip. Symlink entries are skipped (logged), not a
-    // whole-archive reject: names are flattened to the basename anyway, and macOS plugin
-    // packages ship dylib version symlinks. PresetUpdater / extract_archive_confined stays
-    // strict (D3).
-    for (mz_uint i = 0; i < num_entries; i++) {
-        if (m_networking_cancel_update || cancel) {
-            BOOST_LOG_TRIVIAL(info) << boost::format("[install_plugin]: %1%, cancelled by user")%__LINE__;
-            close_zip_reader(&archive);
-            return -1;
-        }
-        if (!mz_zip_reader_file_stat(&archive, i, &stat)) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, mz_zip_reader_file_stat for file %2% failed")%__LINE__%i;
-            close_zip_reader(&archive);
-            if (pro_fn) { pro_fn(InstallStatusUnzipFailed, 0, cancel); }
-            return InstallStatusUnzipFailed;
-        }
-        if (zip_entry_is_symlink(stat)) {
-            BOOST_LOG_TRIVIAL(info) << "[install_plugin] skipping symlink entry: " << stat.m_filename;
-            continue;
-        }
-        if (stat.m_uncomp_size == 0)
-            continue;
-        std::string dest_file;
-        const untrusted::ArchiveEntryName verdict = plugin_entry_name(stat, dest_file);
-        if (verdict == untrusted::ArchiveEntryName::Skip)
-            continue;
-        const auto dest_path = plugin_folder / dest_file;
-        if (verdict == untrusted::ArchiveEntryName::Reject || !plugin_entry_ok(dest_file, dest_path)) {
-            close_zip_reader(&archive);
-            if (pro_fn) { pro_fn(InstallStatusUnzipFailed, 0, cancel); }
-            return InstallStatusUnzipFailed;
-        }
-    }
-
-    for (mz_uint i = 0; i < num_entries; i++) {
-        if (m_networking_cancel_update || cancel) {
-            BOOST_LOG_TRIVIAL(info) << boost::format("[install_plugin]: %1%, cancelled by user")%__LINE__;
-            return -1;
-        }
-        if (mz_zip_reader_file_stat(&archive, i, &stat)) {
-            if (zip_entry_is_symlink(stat)) {
-                BOOST_LOG_TRIVIAL(info) << "[install_plugin] skipping symlink entry: " << stat.m_filename;
-                continue;
-            }
-            if (stat.m_uncomp_size > 0) {
-                std::string dest_file;
-                if (plugin_entry_name(stat, dest_file) != untrusted::ArchiveEntryName::Ok)
-                    continue;
-                auto dest_path = plugin_folder / dest_file;
-                try {
-                    // symlink_status so an existing symlink, dangling or not, is replaced rather than written through.
-                    if (fs::is_symlink(fs::symlink_status(dest_path)) || fs::exists(dest_path))
-                        fs::remove(dest_path);
-                    // Wide API on Windows: the entry name is validated as UTF-8, so it must not be
-                    // narrowed through the ANSI code page (best-fit maps fullwidth "../" look-alikes
-                    // to a real "../").
-                    const bool res = extract_entry_to_file(archive, stat.m_file_index, dest_path);
-                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", extract  %1% from plugin zip %2%\n") % dest_file % stat.m_filename;
-                    if (!res) {
-                        mz_zip_error zip_error = mz_zip_get_last_error(&archive);
-                        BOOST_LOG_TRIVIAL(error) << "[install_plugin]Archive read error:" << mz_zip_get_error_string(zip_error) << std::endl;
-                        close_zip_reader(&archive);
-                        if (pro_fn) { pro_fn(InstallStatusUnzipFailed, 0, cancel); }
-                        return InstallStatusUnzipFailed;
-                    }
-                    else {
-                        if (pro_fn) {
-                            pro_fn(InstallStatusNormal, 50 + i/num_entries, cancel);
-                        }
-                        try {
-                            auto backup_path = boost::filesystem::path(backup_folder.string() + "/" + dest_file);
-                            if (fs::exists(backup_path))
-                                fs::remove(backup_path);
-                            std::string error_message;
-                            CopyFileResult cfr = copy_file(dest_path.string(), backup_path.string(), error_message, false);
-                            if (cfr != CopyFileResult::SUCCESS) {
-                                BOOST_LOG_TRIVIAL(error) << "Copying to backup failed(" << cfr << "): " << error_message;
-                            }
-                        }
-                        catch (const std::exception& e)
-                        {
-                            BOOST_LOG_TRIVIAL(error) << "Copying to backup failed: " << e.what();
-                            //continue
-                        }
-                    }
-                }
-                catch (const std::exception& e)
-                {
-                    // ensure the zip archive is closed and rethrow the exception
-                    close_zip_reader(&archive);
-                    BOOST_LOG_TRIVIAL(error) << "[install_plugin]Archive read exception:"<<e.what();
-                    if (pro_fn) {
-                        pro_fn(InstallStatusUnzipFailed, 0, cancel);
-                    }
-                    return InstallStatusUnzipFailed;
-                }
-            }
-        }
-        else {
-            BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, mz_zip_reader_file_stat for file %2% failed")%__LINE__%i;
-        }
-    }
-
-    close_zip_reader(&archive);
-
-    if (pro_fn)
-        pro_fn(InstallStatusInstallCompleted, 100, cancel);
-    if (name == "plugins")
-        app_config->set_bool("installed_networking", true);
-    BOOST_LOG_TRIVIAL(info) << "[install_plugin] success";
-    return 0;
-}
-
 // ---------------------------------------------------------------------------------------------
 // Ultra (live view): Bambu's camera component.
 //
 // The Device-tab live view plays through BambuSource, a proprietary DirectShow source filter. It
 // is not something UltraNet replaces - we ship a ~9.7 KB placeholder under that name purely so the
 // agent's LoadLibrary probe of the plug-ins folder succeeds. The filter itself only ever arrives in
-// Bambu's network plug-in package, and every other route to that package is (correctly) shut off
-// while UltraNet is installed. This is the one deliberate exception, and it is surgical: only
-// BambuSource and live555 are taken out of the zip, so bambu_networking.dll and the ultranet.txt
-// marker are never at risk.
+// Bambu's package, and every other route to the Bambu CDN is shut off (download_plugin() refuses
+// all other packages). This is the one deliberate exception, asked about first, and it is
+// surgical: only BambuSource and live555 are taken out of the zip, so bambu_networking.dll and the
+// ultranet.txt marker are never at risk and the network plug-in itself is never installed.
 
 bool GUI_App::has_bambu_camera_component() const
 {
@@ -2285,8 +2096,8 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
     bool cancel = false;
 
     const std::string package_name = "camera_component.zip";
-    // Deliberately NOT install_plugin(): that unzips the whole package over plugins/ and is refused
-    // while UltraNet is installed. download_plugin() only fetches, so it is safe to reuse as is.
+    // download_plugin() only fetches (and lets this one package name through); nothing here
+    // unzips the whole package over plugins/.
     int result = download_plugin("plugins", package_name, pro_fn, cancel_fn);
     if (result < 0) {
         BOOST_LOG_TRIVIAL(error) << "[camera component] download failed";
@@ -2349,7 +2160,7 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
         // Extract to a temp file first, so a half-written download can never leave a truncated
         // filter sitting where a working one used to be.
         const fs::path staged = fs::temp_directory_path() / (std::string("edgeslicer_cam_") + leaf);
-        // Wide API on Windows, never narrowed through the ANSI code page (see install_plugin).
+        // Wide API on Windows, never narrowed through the ANSI code page (see the confined extractors).
         const bool res = extract_entry_to_file(archive, stat.m_file_index, staged);
         if (!res) {
             BOOST_LOG_TRIVIAL(error) << "[camera component] failed to extract " << leaf;
@@ -2438,9 +2249,7 @@ bool GUI_App::offer_bambu_camera_component(wxWindow *parent)
     if (dlg.ShowModal() != wxID_YES)
         return false;
 
-    // The DownloadProgressDialog job machinery routes through install_plugin(), which must stay
-    // refused while UltraNet is installed, so run the fetch synchronously behind a busy cursor
-    // rather than reusing that dialog.
+    // Run the fetch synchronously behind a busy cursor.
     int result = 0;
     {
         wxBusyCursor busy;
@@ -2528,13 +2337,6 @@ void GUI_App::remove_old_networking_plugins()
             BOOST_LOG_TRIVIAL(error) << "Failed  removing the plugins directory " << plugin_folder.string();
         }
     }
-}
-
-int GUI_App::updating_bambu_networking()
-{
-    DownloadProgressDialog dlg(_L("Downloading Bambu Network Plug-in"));
-    dlg.ShowModal();
-    return 0;
 }
 
 bool GUI_App::check_networking_version()
@@ -3830,8 +3632,8 @@ bool GUI_App::on_init_inner()
 
         auto write_marker = [&]() {
             // The library name is Bambu's, so the file alone cannot say whose plug-in this is; the
-            // marker is what stops install_plugin() and the update prompts from replacing ours with
-            // a CDN download. The sidecar folder may ship its own copy - prefer that one.
+            // marker is what tells our plug-in from a foreign one. The sidecar folder may ship its
+            // own copy - prefer that one.
             if (fs::exists(bundled / kUltraNetMarkerName, ec)) {
                 fs::copy_file(bundled / kUltraNetMarkerName, pf / kUltraNetMarkerName, fs::copy_option::overwrite_if_exists, ec);
             } else {
@@ -4245,109 +4047,28 @@ void GUI_App::machine_find()
 
 void GUI_App::copy_network_if_available()
 {
-    // Never over UltraNet (privacy audit follow-up, 2026-10): the staged package is Bambu's and its
-    // library has our plug-in's file name. refresh_ultranet_plugin_state() has run just before this.
-    const OtaPluginInstall ota = ota_plugin_install_decision(app_config->get("update_network_plugin") == "true",
-                                                             m_ultranet_plugin_installed,
-                                                             app_config->get_bool("ultranet_keep_foreign_plugin"));
-    if (ota == OtaPluginInstall::Refuse) {
-        app_config->set("update_network_plugin", "false");
-        namespace fs = boost::filesystem;
-        const fs::path ota_dir = fs::path(data_dir()) / "ota";
-        size_t n = 0;
-        const char *const *names = ota_plugin_staged_names(n);
-        int removed = 0;
-        for (size_t i = 0; i < n; ++i) {
-            boost::system::error_code ec;
-            const fs::path f = ota_dir / names[i]; // exact names, directly inside ota/ only
-            if (fs::is_regular_file(f, ec) && fs::remove(f, ec))
-                ++removed;
-            else if (ec)
-                BOOST_LOG_TRIVIAL(warning) << "[UltraNet] could not remove the staged " << names[i] << ": " << ec.message();
-        }
-        BOOST_LOG_TRIVIAL(warning) << "[UltraNet] refused to install a staged Bambu network plug-in over UltraNet; "
-                                   << "cleared update_network_plugin and removed " << removed << " staged file(s) from "
-                                   << ota_dir.string();
+    // EdgeSlicer never installs Bambu's network plug-in (owner decision, 2026-10). An older build
+    // could stage one in <data_dir>/ota (`update_network_plugin` = true) and copy it over
+    // data_dir/plugins at the next start; a data dir carried over from such a build is cleaned up
+    // here instead: clear the flag and remove the staged files by exact name.
+    if (ota_plugin_install_decision(app_config->get("update_network_plugin") == "true") == OtaPluginInstall::NothingStaged)
         return;
-    }
-    if (ota == OtaPluginInstall::NothingStaged)
-        return;
-    std::string network_library, player_library, live555_library, network_library_dst, player_library_dst, live555_library_dst;
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto plugin_folder = data_dir_path / "plugins";
-    auto cache_folder = data_dir_path / "ota";
-    std::string changelog_file = cache_folder.string() + "/network_plugins.json";
-#if defined(_MSC_VER) || defined(_WIN32)
-    network_library = cache_folder.string() + "/bambu_networking.dll";
-    player_library      = cache_folder.string() + "/BambuSource.dll";
-    live555_library     = cache_folder.string() + "/live555.dll";
-    network_library_dst = plugin_folder.string() + "/bambu_networking.dll";
-    player_library_dst  = plugin_folder.string() + "/BambuSource.dll";
-    live555_library_dst = plugin_folder.string() + "/live555.dll";
-#elif defined(__WXMAC__)
-    network_library = cache_folder.string() + "/libbambu_networking.dylib";
-    player_library = cache_folder.string() + "/libBambuSource.dylib";
-    live555_library = cache_folder.string() + "/liblive555.dylib";
-    network_library_dst = plugin_folder.string() + "/libbambu_networking.dylib";
-    player_library_dst = plugin_folder.string() + "/libBambuSource.dylib";
-    live555_library_dst = plugin_folder.string() + "/liblive555.dylib";
-#else
-    network_library = cache_folder.string() + "/libbambu_networking.so";
-    player_library      = cache_folder.string() + "/libBambuSource.so";
-    live555_library     = cache_folder.string() + "/liblive555.so";
-    network_library_dst = plugin_folder.string() + "/libbambu_networking.so";
-    player_library_dst  = plugin_folder.string() + "/libBambuSource.so";
-    live555_library_dst = plugin_folder.string() + "/liblive555.so";
-#endif
-
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": checking network_library " << network_library << ", player_library " << player_library;
-    if (!boost::filesystem::exists(plugin_folder)) {
-        BOOST_LOG_TRIVIAL(info)<< __FUNCTION__ << ": create directory "<<plugin_folder.string();
-        boost::filesystem::create_directory(plugin_folder);
-    }
-    std::string error_message;
-    if (boost::filesystem::exists(network_library)) {
-        CopyFileResult cfr = copy_file(network_library, network_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(network_library_dst, perms);
-        fs::remove(network_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": Copying network library from" << network_library << " to " << network_library_dst<<" successfully.";
-    }
-
-    if (boost::filesystem::exists(player_library)) {
-        CopyFileResult cfr = copy_file(player_library, player_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(player_library_dst, perms);
-        fs::remove(player_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": Copying player library from" << player_library << " to " << player_library_dst<<" successfully.";
-    }
-
-    if (boost::filesystem::exists(live555_library)) {
-        CopyFileResult cfr = copy_file(live555_library, live555_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(live555_library_dst, perms);
-        fs::remove(live555_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": Copying live555 library from" << live555_library << " to " << live555_library_dst<<" successfully.";
-    }
-    if (boost::filesystem::exists(changelog_file))
-        fs::remove(changelog_file);
     app_config->set("update_network_plugin", "false");
+    namespace fs = boost::filesystem;
+    const fs::path ota_dir = fs::path(data_dir()) / "ota";
+    size_t n = 0;
+    const char *const *names = ota_plugin_staged_names(n);
+    int removed = 0;
+    for (size_t i = 0; i < n; ++i) {
+        boost::system::error_code ec;
+        const fs::path f = ota_dir / names[i]; // exact names, directly inside ota/ only
+        if (fs::is_regular_file(f, ec) && fs::remove(f, ec))
+            ++removed;
+        else if (ec)
+            BOOST_LOG_TRIVIAL(warning) << "[plugin] could not remove the staged " << names[i] << ": " << ec.message();
+    }
+    BOOST_LOG_TRIVIAL(warning) << "[plugin] refused to install a staged Bambu network plug-in; cleared update_network_plugin and removed "
+                               << removed << " staged file(s) from " << ota_dir.string();
 }
 
 bool GUI_App::on_init_network(bool try_backup)
@@ -5302,19 +5023,55 @@ void GUI_App::refresh_ultranet_plugin_state()
     const bool was = m_ultranet_plugin_installed;
     m_ultranet_plugin_installed = is_ultranet_plugin(plugin_present, marker);
     if (m_ultranet_plugin_installed)
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present";
     else if (was)
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet no longer present, Bambu CDN download re-enabled";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet no longer present; the network plug-in is missing (Bambu's is never downloaded)";
     else
         BOOST_LOG_TRIVIAL(info) << "[UltraNet] no UltraNet plugin (present=" << plugin_present
-                                << ", marker=" << marker << "), Bambu CDN download path available";
+                                << ", marker=" << marker << "); the network plug-in is missing (Bambu's is never downloaded)";
+}
+
+// The user-facing text of every "network plug-in missing" message.
+wxString GUI_App::network_plugin_missing_text()
+{
+    return _L("EdgeSlicer's network plug-in is missing, so Bambu Lab sign-in and printing are unavailable. "
+              "Reinstall EdgeSlicer to restore it.");
+}
+
+// EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). This is what every
+// former "offer the download" entry point does instead; see PluginGuard.hpp for when it speaks.
+void GUI_App::ShowNetworkPluginMissing(bool user_requested)
+{
+    try {
+        if (network_plugin_missing_notice(m_ultranet_plugin_installed, user_requested, m_network_plugin_missing_shown) ==
+            PluginMissingNotice::Suppress) {
+            BOOST_LOG_TRIVIAL(info) << "[plugin] network plug-in missing message suppressed (ultranet=" << m_ultranet_plugin_installed
+                                    << ", user_requested=" << user_requested << ", shown_before=" << m_network_plugin_missing_shown << ")";
+            return;
+        }
+        m_network_plugin_missing_shown = true;
+        BOOST_LOG_TRIVIAL(warning) << "[plugin] the network plug-in is missing from this install; Bambu's is never downloaded. "
+                                   << "Reinstall EdgeSlicer (developers: build with ULTRANET_BIN_DIR).";
+        if (m_hub_managed && RemoteAccess::get().hidden()) {
+            RemoteAccess::get().raise_attention("the network plug-in is missing; reinstall EdgeSlicer", "manual");
+            return;
+        }
+        if (m_network_plugin_missing_open)
+            return;
+        m_network_plugin_missing_open = true;
+        MessageDialog dlg(nullptr, network_plugin_missing_text(), _L("Network plug-in missing"), wxOK | wxICON_ERROR);
+        dlg.ShowModal();
+        m_network_plugin_missing_open = false;
+    } catch (std::exception &) {
+        m_network_plugin_missing_open = false;
+    }
 }
 
 // Ultra (plug-in guards): the guarded way in to Account > Login. Bambu cloud sign-in ends with the
 // system browser hitting our loopback on 13650 and the ticket being handed to the network plug-in;
 // with no agent loaded there is nothing to hand it to and the user just watches the sign-in page
-// fail. Offer the plug-in instead - or, when our own plug-in is already installed, ask for the
-// restart that actually loads it (never the CDN download, which would overwrite ours).
+// fail. Say so instead - or, when our own plug-in is already installed, ask for the restart that
+// actually loads it. Never a download: EdgeSlicer does not fetch Bambu's plug-in.
 void GUI_App::ShowUserLoginGuarded()
 {
     const LoginGuardAction action = plugin_guard_decision(
@@ -5337,37 +5094,8 @@ void GUI_App::ShowUserLoginGuarded()
         return;
     }
 
-    BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no network agent, offering the plug-in download instead of the sign-in page";
-    MessageDialog dlg(nullptr,
-                      _L("Signing in to a Bambu account needs the network plugin. Install it now?"),
-                      _L("Sign in to Bambu Lab"), wxYES_NO | wxICON_QUESTION);
-    if (dlg.ShowModal() != wxID_YES)
-        return;
-    ShowDownNetPluginDlg();
-    // After a successful install the plug-in still needs the restart before an agent exists, so
-    // the retry is the user's: the next Login click either signs in or lands on the branch above.
-    refresh_ultranet_plugin_state();
-}
-
-void GUI_App::ShowDownNetPluginDlg() {
-    try {
-        // Ultra (plug-in guards): our own plug-in is installed. This dialog downloads Bambu's
-        // package from their CDN and unzips it over data_dir/plugins, which would replace it.
-        if (m_ultranet_plugin_installed) {
-            BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (download dialog suppressed)";
-            return;
-        }
-        if (m_hub_managed && RemoteAccess::get().hidden()) { RemoteAccess::get().raise_attention("the network plug-in needs installing", "manual"); return; }
-        auto iter = std::find_if(dialogStack.begin(), dialogStack.end(), [](auto dialog) {
-            return dynamic_cast<DownloadProgressDialog *>(dialog) != nullptr;
-        });
-        if (iter != dialogStack.end())
-            return;
-        DownloadProgressDialog dlg(_L("Downloading Bambu Network Plug-in"));
-        dlg.ShowModal();
-    } catch (std::exception &) {
-        ;
-    }
+    BOOST_LOG_TRIVIAL(info) << "[plugin] login guard armed: no network agent and no plug-in, showing the plug-in-missing message instead of the sign-in page";
+    ShowNetworkPluginMissing(/*user_requested*/ true);
 }
 
 void GUI_App::ShowUserLogin(bool show)
@@ -5869,9 +5597,6 @@ void GUI_App::maybe_start_bambu_sync(const char* why)
     BambuSync::Inputs in;
     in.stealth_mode    = app_config->get_stealth_mode();
     in.bambu_login     = m_agent != nullptr && m_agent->is_user_login();
-    const std::string plugin_version = Slic3r::NetworkAgent::get_version();
-    in.network_plugin  = m_agent != nullptr && plugin_version != "00.00.00.00";
-    in.ultranet_plugin = m_ultranet_plugin_installed;
     // Saved Bambu LAN printers, then the Device tab's lists (bound to the account, or found on the LAN).
     in.bambu_device = false;
     for (const auto& saved : app_config->get_local_machines()) {
@@ -5912,7 +5637,7 @@ void GUI_App::maybe_start_bambu_sync(const char* why)
         CallAfter([t] { delete t; }); // may be inside its own event handler
     }
     BOOST_LOG_TRIVIAL(info) << "Bambu startup sync: starting (" << why << "; " << plan.reason << ")";
-    preset_updater->sync_bambu(get_http_url(app_config->get_country_code()), plugin_version, plan.plugin_check);
+    preset_updater->sync_bambu(get_http_url(app_config->get_country_code()));
 }
 
 void GUI_App::sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentResult& r)
@@ -6369,12 +6094,10 @@ std::string GUI_App::handle_web_request(std::string cmd)
                 }
             }
             else if (command_str.compare("begin_network_plugin_download") == 0) {
-                // Ultra (plug-in guards): the home-page banner. ShowDownNetPluginDlg() refuses on
-                // its own when our plug-in is installed; logging here says which entry point asked.
-                if (m_ultranet_plugin_installed)
-                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (home-page banner ignored)";
-                else
-                    CallAfter([this] { wxGetApp().ShowDownNetPluginDlg(); });
+                // The home-page banner's "download the network plug-in" link. There is no download;
+                // ShowNetworkPluginMissing() is silent when our plug-in is installed and otherwise
+                // says the plug-in is missing.
+                CallAfter([this] { wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true); });
             }
             else if (command_str.compare("get_web_shortcut") == 0) {
                 if (root.get_child_optional("key_event") != boost::none) {
@@ -7268,6 +6991,10 @@ void  GUI_App::push_notification(wxString msg, wxString title, UserNotificationS
 
 void GUI_App::reload_settings()
 {
+    // load_user_presets() with a cloud list deletes the local presets that list does not know, so it
+    // must never run while the cloud sync is off.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     if (preset_bundle && m_agent) {
         std::map<std::string, std::map<std::string, std::string>> user_presets;
         m_agent->get_user_presets(&user_presets);
@@ -7295,6 +7022,9 @@ void GUI_App::remove_user_presets()
 
 void GUI_App::sync_preset(Preset* preset)
 {
+    // Cloud preset sync is off (PresetSyncPolicy.hpp): never talk to the cloud about a preset.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     int result = -1;
     unsigned int http_code = 200;
     std::string updated_info;
@@ -7427,6 +7157,14 @@ void GUI_App::sync_preset(Preset* preset)
 
 void GUI_App::start_sync_user_preset(bool with_progress_dlg)
 {
+    // Cloud preset sync is off (PresetSyncPolicy.hpp): no sync thread, no get_setting_list2 /
+    // request_setting_id / put_setting / delete_setting call, and no cloud list that could remove or
+    // replace a local preset (reload_settings runs only when this thread finishes).
+    if (!PresetSync::cloud_sync_enabled()) {
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": user preset cloud sync is disabled";
+        return;
+    }
+
     if (app_config->get_stealth_mode())
         return;
 
@@ -8555,6 +8293,9 @@ std::vector<std::string> GUI_App::get_delete_cache_presets_lock()
 
 void GUI_App::delete_preset_from_cloud(std::string setting_id)
 {
+    // Nothing is deleted in the cloud (cloud preset sync is off); do not queue the id either.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     std::scoped_lock l(mutex_delete_cache_presets);
     need_delete_presets.push_back(setting_id);
 }
