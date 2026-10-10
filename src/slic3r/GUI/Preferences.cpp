@@ -2016,6 +2016,9 @@ wxWindow* PreferencesDialog::create_general_page()
 
     auto title_develop_mode = create_item_title(_L("Develop mode"), page, _L("Develop mode"));
     auto item_develop_mode  = create_item_checkbox(_L("Develop mode"), page, _L("Develop mode"), 50, "developer_mode");
+    auto item_per_plate_presets = create_item_checkbox(_L("Per-plate printer and filament presets (experimental)"), page,
+        _L("SPIKE: let each plate keep its own full_config() snapshot for slicing. Off by default; G-code must match main when this is off. Help → SPIKE: Capture presets onto current plate."),
+        50, "per_plate_presets");
     auto item_skip_ams_blacklist_check  = create_item_checkbox(_L("Skip AMS blacklist check"), page, _L("Skip AMS blacklist check"), 50, "skip_ams_blacklist_check");
 
     sizer_page->Add(title_general_settings, 0, wxEXPAND, 0);
@@ -2120,6 +2123,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(crash_reports_text, 0, wxLEFT | wxTOP, FromDIP(50));
     sizer_page->Add(title_develop_mode, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_develop_mode, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_per_plate_presets, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_skip_ams_blacklist_check, 0, wxTOP, FromDIP(3));
 
     page->SetSizer(sizer_page);

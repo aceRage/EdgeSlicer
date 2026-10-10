@@ -17,6 +17,7 @@
 
 // Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
 #include "libslic3r/CostOverrides.hpp"
+#include "libslic3r/PlatePresetSpike.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
@@ -197,7 +198,10 @@ std::string BackgroundSlicingProcess::output_filepath_for_project(const boost::f
 void BackgroundSlicingProcess::process_fff()
 {
     assert(m_print == m_fff_print);
-    m_fff_print->is_BBL_printer() = wxGetApp().preset_bundle->is_bbl_vendor();
+    if (Slic3r::per_plate_presets_spike_enabled(wxGetApp().app_config) && m_current_plate && m_current_plate->has_spike_cfg())
+        m_fff_print->is_BBL_printer() = Slic3r::is_bbl_printer_from_config(*m_current_plate->spike_cfg());
+    else
+        m_fff_print->is_BBL_printer() = wxGetApp().preset_bundle->is_bbl_vendor();
 	//BBS: add the logic to process from an existed gcode file
 	if (m_print->finished()) {
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: skip slicing, to process previous gcode file")%__LINE__;
@@ -678,7 +682,10 @@ StringObjectException BackgroundSlicingProcess::validate(StringObjectException *
 	assert(m_print != nullptr);
     assert(m_print == m_fff_print);
 
-    m_fff_print->is_BBL_printer() = wxGetApp().preset_bundle->is_bbl_vendor();
+    if (Slic3r::per_plate_presets_spike_enabled(wxGetApp().app_config) && m_current_plate && m_current_plate->has_spike_cfg())
+        m_fff_print->is_BBL_printer() = Slic3r::is_bbl_printer_from_config(*m_current_plate->spike_cfg());
+    else
+        m_fff_print->is_BBL_printer() = wxGetApp().preset_bundle->is_bbl_vendor();
     return m_print->validate(warning, collison_polygons, height_polygons);
 }
 

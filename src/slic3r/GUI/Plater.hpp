@@ -845,6 +845,8 @@ public:
 
     //BBS: partplate list related functions
     PartPlateList& get_partplate_list();
+    // SPIKE: store preset_bundle->full_config() on the current plate. No-op when the gate is off.
+    void spike_capture_current_plate_presets();
     void validate_current_plate(bool& model_fits, bool& validate_error);
     //BBS: select the plate by index
     int select_plate(int plate_index, bool need_slice = false);

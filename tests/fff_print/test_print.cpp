@@ -8,6 +8,7 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
+#include "libslic3r/PlatePresetSpike.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Slicing.hpp"
@@ -1220,4 +1221,112 @@ TEST_CASE("Adaptive layer height profile is bounded by the uncompensated object 
     const double last_z = profile[profile.size() - 2];
     CHECK(last_z <= uncompensated_height + 1e-6);
     CHECK(last_z > uncompensated_height - sp.max_layer_height - 1e-6);
+}
+
+namespace {
+
+DynamicPrintConfig spike_printer_config(const std::string &printer_model,
+                                        const std::string &printer_settings_id,
+                                        const std::string &start_marker,
+                                        const std::string &bed,
+                                        unsigned           nozzles,
+                                        const std::string &flavor)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(nozzles);
+    config.set_num_filaments(nozzles);
+    config.option<ConfigOptionFloats>("filament_diameter")->values.assign(nozzles, 1.75);
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values.assign(nozzles, 0.4);
+    config.set_key_value("printer_model", new ConfigOptionString(printer_model));
+    config.set_key_value("printer_settings_id", new ConfigOptionString(printer_settings_id));
+    config.set_key_value("machine_start_gcode", new ConfigOptionString(start_marker));
+    config.set_deserialize_strict({
+        {"printable_area", bed},
+        {"gcode_flavor",   flavor},
+        {"layer_height",   "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"brim_type",      "no_brim"},
+        {"skirt_loops",    "0"},
+    });
+    return config;
+}
+
+#ifdef _WIN32
+void spike_set_env(const std::string &key, const std::string &value) { _putenv_s(key.c_str(), value.c_str()); }
+void spike_unset_env(const std::string &key) { _putenv_s(key.c_str(), ""); }
+#else
+void spike_set_env(const std::string &key, const std::string &value) { setenv(key.c_str(), value.c_str(), 1); }
+void spike_unset_env(const std::string &key) { unsetenv(key.c_str()); }
+#endif
+
+} // namespace
+
+TEST_CASE("Two Print objects keep their own printer headers when applied on one Model", "[PerPlatePresets][Print]")
+{
+    DynamicPrintConfig config_u1 = spike_printer_config("Snapmaker U1", "U1 0.4 nozzle", "; SPIKE_U1_START",
+                                                        "0x0,330x0,330x330,0x330", 4, "klipper");
+    DynamicPrintConfig config_x1c = spike_printer_config("Bambu Lab X1 Carbon", "Bambu Lab X1 Carbon 0.4 nozzle",
+                                                         "; SPIKE_X1C_START", "0x0,256x0,256x256,0x256", 1, "marlin");
+
+    REQUIRE_FALSE(is_bbl_printer_from_config(config_u1));
+    REQUIRE(is_bbl_printer_from_config(config_x1c));
+
+    Model model;
+    Print print_u1;
+    Print print_x1c;
+    init_print({TestMesh::cube_20x20x20}, print_u1, model, config_u1);
+    print_u1.is_BBL_printer() = is_bbl_printer_from_config(config_u1);
+    print_x1c.apply(model, config_x1c);
+    print_x1c.is_BBL_printer() = is_bbl_printer_from_config(config_x1c);
+    print_x1c.set_status_silent();
+
+    print_u1.process();
+    print_x1c.process();
+
+    const std::string gcode_u1  = Test::gcode(print_u1);
+    const std::string gcode_x1c = Test::gcode(print_x1c);
+
+    REQUIRE_THAT(gcode_u1, Catch::Matchers::Contains("SPIKE_U1_START"));
+    REQUIRE_THAT(gcode_u1, Catch::Matchers::Contains("Snapmaker U1"));
+    REQUIRE_THAT(gcode_u1, Catch::Matchers::Contains("U1 0.4 nozzle"));
+    REQUIRE_THAT(gcode_u1, Catch::Matchers::Contains("330x330"));
+    REQUIRE_THAT(gcode_u1, Catch::Matchers::Contains("0.4,0.4,0.4,0.4"));
+    REQUIRE(gcode_u1.find("SPIKE_X1C_START") == std::string::npos);
+    REQUIRE(gcode_u1.find("Bambu Lab X1 Carbon") == std::string::npos);
+
+    REQUIRE_THAT(gcode_x1c, Catch::Matchers::Contains("SPIKE_X1C_START"));
+    REQUIRE(gcode_x1c.find("SPIKE_U1_START") == std::string::npos);
+    REQUIRE(gcode_x1c.find("Snapmaker U1") == std::string::npos);
+
+    CHECK(print_u1.apply(model, config_u1) == PrintBase::APPLY_STATUS_UNCHANGED);
+    CHECK(print_x1c.apply(model, config_x1c) == PrintBase::APPLY_STATUS_UNCHANGED);
+}
+
+TEST_CASE("CLI per-plate config env replaces the project base for that plate only", "[PerPlatePresets]")
+{
+    DynamicPrintConfig project = DynamicPrintConfig::full_print_config();
+    project.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
+
+    const DynamicPrintConfig unchanged = cli_base_config_for_plate(project, 1);
+    REQUIRE(unchanged.opt_string("printer_model") == "Snapmaker U1");
+
+    const auto path = Test::scratch_path(".ini");
+    {
+        std::ofstream out(path.string());
+        REQUIRE(out.good());
+        out << "printer_model = Bambu Lab X1 Carbon\n";
+        out << "printer_settings_id = Bambu Lab X1 Carbon 0.4 nozzle\n";
+    }
+
+    const std::string key = spike_plate_config_env_key(1);
+    spike_set_env(key, path.string());
+    const DynamicPrintConfig loaded = cli_base_config_for_plate(project, 1);
+    const DynamicPrintConfig plate0 = cli_base_config_for_plate(project, 0);
+    spike_unset_env(key);
+
+    REQUIRE(loaded.opt_string("printer_model") == "Bambu Lab X1 Carbon");
+    REQUIRE(loaded.opt_string("printer_settings_id") == "Bambu Lab X1 Carbon 0.4 nozzle");
+    REQUIRE(plate0.opt_string("printer_model") == "Snapmaker U1");
+    REQUIRE(is_bbl_printer_from_config(loaded));
+    REQUIRE_FALSE(is_bbl_printer_from_config(plate0));
 }

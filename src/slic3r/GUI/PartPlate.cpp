@@ -35,6 +35,7 @@
 #include "GUI_App.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PlatePresetSpike.hpp"
 #include "BackgroundSlicingProcess.hpp"
 #include "Widgets/Label.hpp"
 #include "2DBed.hpp"
@@ -2272,6 +2273,31 @@ bool PartPlate::check_outside(int obj_id, int instance_id, BoundingBoxf3* boundi
 	BoundingBoxf3 instance_box = bounding_box? *bounding_box: object->instance_convex_hull_bounding_box(instance_id);
 	Polygon hull = instance->convex_hull_2d();
 	BoundingBoxf3 plate_box = get_plate_box();
+	Pointfs       volume_shape = get_shape();
+	double        printable_height = m_plater ? m_plater->build_volume().printable_height() : get_plate_box().max.z();
+
+	// SPIKE S8: a captured snapshot validates against that printer's bed, not the shared grid.
+	// CLI has no Plater / wx app; the snapshot is only ever set when the GUI gate is on.
+	bool spike_gate = Slic3r::per_plate_presets_spike_env_enabled();
+	if (!spike_gate && m_plater)
+		spike_gate = Slic3r::per_plate_presets_spike_enabled(wxGetApp().app_config);
+	const bool spike_own_bed = spike_gate && static_cast<bool>(m_spike_cfg);
+	if (spike_own_bed) {
+		if (const auto *area = m_spike_cfg->option<ConfigOptionPoints>("printable_area")) {
+			volume_shape.clear();
+			volume_shape.reserve(area->values.size());
+			for (const Vec2d &p : area->values)
+				volume_shape.emplace_back(p.x() + m_origin.x(), p.y() + m_origin.y());
+		}
+		if (m_spike_cfg->has("printable_height"))
+			printable_height = m_spike_cfg->opt_float("printable_height");
+		if (!volume_shape.empty()) {
+			const BoundingBoxf bb(volume_shape);
+			plate_box = BoundingBoxf3(Vec3d(bb.min.x(), bb.min.y(), m_origin.z()),
+			                          Vec3d(bb.max.x(), bb.max.y(), m_origin.z() + printable_height));
+		}
+	}
+
 	if (instance_box.max.z() > plate_box.min.z())
 		plate_box.min.z() += instance_box.min.z(); // not considering outsize if sinking
 
@@ -2280,8 +2306,9 @@ bool PartPlate::check_outside(int obj_id, int instance_id, BoundingBoxf3* boundi
 		if (plate_box.intersects(instance_box)) {
 			// TODO: FIXME: this does not take exclusion area into account
 			// Ultra: no Plater in the CLI — the plate box already carries the printable height.
-			const double printable_height = m_plater ? m_plater->build_volume().printable_height() : get_plate_box().max.z();
-			const BuildVolume build_volume(get_shape(), printable_height);
+			if (!spike_own_bed)
+				printable_height = m_plater ? m_plater->build_volume().printable_height() : get_plate_box().max.z();
+			const BuildVolume build_volume(volume_shape, printable_height);
 			const auto state = instance->calc_print_volume_state(build_volume);
 			outside = state == ModelInstancePVS_Partly_Outside;
 		}
@@ -4407,6 +4434,32 @@ const PartPlate* PartPlateList::get_plate(int index) const
 		return nullptr;
 	}
 	return m_plate_list[index];
+}
+
+DynamicPrintConfig PartPlateList::config_for_plate(int index) const
+{
+	const AppConfig *app_cfg = nullptr;
+	if (m_plater)
+		app_cfg = wxGetApp().app_config;
+	if (Slic3r::per_plate_presets_spike_enabled(app_cfg)) {
+		const PartPlate *plate = get_plate(index);
+		if (plate && plate->has_spike_cfg())
+			return *plate->spike_cfg();
+	}
+	if (wxGetApp().preset_bundle)
+		return wxGetApp().preset_bundle->full_config();
+	return DynamicPrintConfig::full_print_config();
+}
+
+DynamicPrintConfig PartPlateList::config_for_current_plate() const { return config_for_plate(m_current_plate); }
+
+bool PartPlateList::any_plate_has_spike_cfg() const
+{
+	for (const PartPlate *plate : m_plate_list) {
+		if (plate && plate->has_spike_cfg())
+			return true;
+	}
+	return false;
 }
 
 PartPlate* PartPlateList::get_selected_plate()
