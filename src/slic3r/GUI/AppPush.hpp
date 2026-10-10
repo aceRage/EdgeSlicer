@@ -109,6 +109,13 @@ int ttl(const std::string& kind);
 // "time-sensitive" when the device asked for the hint and listed this kind; "" otherwise.
 std::string interruption_level(const DevicePrefs& d, const std::string& kind);
 
+// Whether an APNs push of this kind also asks iOS to wake the app in the background
+// (`content-available`), so the app can re-read the hub and update its Live Activity. True for
+// every print-state kind (started, paused, resumed, finished, failed, cancelled, runout, error):
+// each changes what the activity should say, and a print makes only a handful of them, inside
+// Apple's guidance of a few background wakes an hour. False for anything else.
+bool wakes_app(const std::string& kind);
+
 } // namespace policy
 
 // DELETE /r/<token>/push/device - the app unpairing. Answers {"ok":true} whether or not the row
