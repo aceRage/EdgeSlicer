@@ -459,6 +459,8 @@ set(lisbslic3r_sources
     NozzleSync.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
+    SvgSplit.cpp
+    SvgSplit.hpp
     ObjColorMatch.cpp
     ObjColorMatch.hpp
     ObjColorUtils.hpp
