@@ -63,6 +63,8 @@ add_executable(${_TEST_NAME}_tests
     login_result_page_tests.cpp
     sentry_scrub_tests.cpp
     login_diagnostics_tests.cpp
+    login_ticket_gate_tests.cpp
+    stream_page_icon_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
     device_controls_tests.cpp

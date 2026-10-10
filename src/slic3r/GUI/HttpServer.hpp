@@ -271,6 +271,10 @@ public:
 
     static std::string map_url_to_file_path(const std::string& url);
 
+    // The installed image (a file name under resources/images) behind one of the icon URLs the
+    // Stream tab page asks for next to itself, or nullptr for any other path. Closed list.
+    static const char* app_icon_file_for_page(const std::string& url_path);
+
     static std::shared_ptr<Response> bbl_auth_handle_request(const std::string& url);
 
     static std::shared_ptr<Response> web_server_handle_request(const std::string& url);

@@ -647,3 +647,157 @@ TEST_CASE("[RemoteEvents] a start is keyed on the printer's job id when it has o
         REQUIRE(count_of(d.poll(job("Cube", "0")), "started") == 0);
     }
 }
+
+// ---- a print the person cancelled is a cancel, not a failure and not an error ----
+//
+// On 2026-10-09 the owner cancelled a print on an H2C and the hub logged "failed" and then, five
+// seconds later, "error". The printer says both in the same breath of its own: gcode_state FAILED,
+// and print_error 0300400C "The task was canceled." in a push of its own after it.
+namespace {
+
+PrinterState failed_waiting(const std::string& job = "bench.gcode")
+{
+    PrinterState p     = pr("failed", job, "FAILED");
+    p.error_may_follow = true;
+    return p;
+}
+
+PrinterState with_code(PrinterState p, const char* code, const char* text = "")
+{
+    p.error_code = code;
+    p.error_text = text;
+    p.active_codes.push_back(code);
+    return p;
+}
+
+bool any_of_kind(const std::vector<Event>& v, const char* kind) { return count_of(v, kind) > 0; }
+
+} // namespace
+
+TEST_CASE("[RemoteEvents] the Bambu user-cancel codes are recognised in every spelling", "[RemoteEvents]")
+{
+    CHECK(is_user_cancel_code("0300400C"));
+    CHECK(is_user_cancel_code("0300400c"));
+    CHECK(is_user_cancel_code("0300 400C"));
+    CHECK(is_user_cancel_code("0300-400C"));
+    CHECK(is_user_cancel_code("0x0300400C"));
+    CHECK(is_user_cancel_code("0500400E"));
+    // Real errors, even close ones, are not cancels.
+    CHECK_FALSE(is_user_cancel_code(""));
+    CHECK_FALSE(is_user_cancel_code("05004046"));
+    CHECK_FALSE(is_user_cancel_code("03008003"));
+    CHECK_FALSE(is_user_cancel_code("0300400D"));
+    CHECK_FALSE(is_user_cancel_code("error"));
+}
+
+TEST_CASE("[RemoteEvents] FAILED with the cancel code in the same push is one cancelled", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    std::vector<Event> ev = d.poll(with_code(pr("failed", "bench.gcode", "FAILED"), "0300400C", "The task was canceled."));
+    REQUIRE(count_of(ev, "cancelled") == 1);
+    CHECK_FALSE(any_of_kind(ev, "failed"));
+    CHECK_FALSE(any_of_kind(ev, "error"));
+    CHECK(ev[0].severity == "info");
+    // Still FAILED with the same code, poll after poll: nothing more.
+    for (int i = 0; i < 3; ++i) CHECK(d.poll(with_code(pr("failed", "bench.gcode", "FAILED"), "0300400C", "The task was canceled."), 5000).empty());
+    // And the print is over: the same file again is a new start.
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+}
+
+TEST_CASE("[RemoteEvents] FAILED first and the cancel code a poll later is still one cancelled", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    // The state arrives alone: nothing is said yet.
+    CHECK(d.poll(failed_waiting(), 5000).empty());
+    // The reason follows: a cancel. Not a failure, and no "error" for the code either.
+    std::vector<Event> ev = d.poll(with_code(failed_waiting(), "0300400C", "The task was canceled."), 5000);
+    REQUIRE(ev.size() == 1);
+    CHECK(ev[0].kind == "cancelled");
+    CHECK(ev[0].job == "bench.gcode");
+    // Nothing later brings the failure back.
+    for (int i = 0; i < 4; ++i) CHECK(d.poll(with_code(failed_waiting(), "0300400C", "The task was canceled."), 5000).empty());
+}
+
+TEST_CASE("[RemoteEvents] FAILED first and a real error a poll later is one failure, not a failure and an error", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    CHECK(d.poll(failed_waiting(), 5000).empty());
+    std::vector<Event> ev = d.poll(with_code(failed_waiting(), "05004046", "The nozzle is clogged."), 5000);
+    REQUIRE(ev.size() == 1);
+    CHECK(ev[0].kind == "failed");
+    CHECK(ev[0].code == "05004046");
+    CHECK(ev[0].severity == "error");
+}
+
+TEST_CASE("[RemoteEvents] FAILED that never says why is announced as a failure once the window is over", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    CHECK(d.poll(failed_waiting(), 5000).empty());
+    CHECK(d.poll(failed_waiting(), 4000).empty()); // 4 s in
+    std::vector<Event> ev = d.poll(failed_waiting(), FAIL_SETTLE_MS);
+    REQUIRE(count_of(ev, "failed") == 1);
+    CHECK(d.poll(failed_waiting(), 5000).empty()); // announced once
+}
+
+TEST_CASE("[RemoteEvents] a held failure is not lost when the printer moves on first", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    CHECK(d.poll(failed_waiting(), 5000).empty());
+    // It goes straight to idle before any reason: the failure still goes out, with the job it was on.
+    std::vector<Event> ev = d.poll(pr("idle", ""), 5000);
+    REQUIRE(count_of(ev, "failed") == 1);
+    CHECK(ev[0].job == "bench.gcode");
+}
+
+TEST_CASE("[RemoteEvents] a failure that comes with its code in the same push is not delayed", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    REQUIRE(count_of(d.poll(with_code(pr("failed", "bench.gcode", "FAILED"), "05004046", "The nozzle is clogged."), 5000), "failed") == 1);
+}
+
+TEST_CASE("[RemoteEvents] a leftover cancel code is never an error", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    // The printer idles with the old cancel code still up: seeding, then a code that appears.
+    CHECK(d.poll(pr("idle", "")).empty());
+    CHECK(d.poll(with_code(pr("idle", ""), "0300400C", "The task was canceled.")).empty());
+    CHECK(d.poll(with_code(pr("idle", ""), "0500400E", "Job was cancelled.")).empty());
+}
+
+TEST_CASE("[RemoteEvents] a Klipper cancel stays a cancel and a Klipper error stays an error", "[RemoteEvents]")
+{
+    Driver d;
+    PrinterState p = pr("idle", "");
+    p.kind         = "snapmaker";
+    d.poll(p);
+    PrinterState run = pr("printing");
+    run.kind         = "snapmaker";
+    REQUIRE(count_of(d.poll(run), "started") == 1);
+    PrinterState c = pr("cancelled", "bench.gcode", "cancelled");
+    c.kind         = "snapmaker";
+    std::vector<Event> ev = d.poll(c);
+    REQUIRE(count_of(ev, "cancelled") == 1);
+    CHECK(ev[0].severity == "info");
+    CHECK_FALSE(any_of_kind(ev, "failed"));
+
+    // A Klipper "error" (its words for a print that broke) is still a failure with its message.
+    d.poll(p);
+    REQUIRE(count_of(d.poll(run), "started") == 1);
+    PrinterState e = with_code(pr("failed", "bench.gcode", "error"), "error", "Heater extruder not heating at expected rate");
+    e.kind         = "snapmaker";
+    CHECK(count_of(d.poll(e), "failed") == 1);
+}
