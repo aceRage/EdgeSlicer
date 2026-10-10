@@ -269,6 +269,10 @@ void AppConfig::set_defaults()
     if (get("developer_mode").empty())
         set_bool("developer_mode", false);
 
+    // SPIKE (Option A): default off. Gate-off path must stay byte-identical to main.
+    if (get("per_plate_presets").empty())
+        set_bool("per_plate_presets", false);
+
     if (get("enable_ssl_for_mqtt").empty())
         set_bool("enable_ssl_for_mqtt", true);
 

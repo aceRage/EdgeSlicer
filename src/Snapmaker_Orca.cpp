@@ -59,6 +59,7 @@ using namespace nlohmann;
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PlatePresetSpike.hpp"
 #include "libslic3r/SlicingStatusCollector.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -5902,7 +5903,8 @@ int CLI::run(int argc, char **argv)
                         //BOOST_LOG_TRIVIAL(info) << boost::format("print_volume {%1%,%2%,%3%}->{%4%, %5%, %6%}, has %7% printables") % print_volume.min(0) % print_volume.min(1)
                         //    % print_volume.min(2) % print_volume.max(0) % print_volume.max(1) % print_volume.max(2) % count << std::endl;
 #endif
-                        DynamicPrintConfig new_print_config = m_print_config;
+                        // SPIKE S9: EDGE_PLATE_PRESET_CONFIG_<n> replaces m_print_config as the base.
+                        DynamicPrintConfig new_print_config = cli_base_config_for_plate(m_print_config, index);
                         new_print_config.apply(*part_plate->config());
                         new_print_config.apply(m_extra_config, true);
                         print->apply(model, new_print_config);

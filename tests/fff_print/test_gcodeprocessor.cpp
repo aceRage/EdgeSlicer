@@ -1,6 +1,8 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -177,4 +179,46 @@ TEST_CASE("post-process lines_ends match newline offsets", "[GCodeProcessor]")
 
     SECTION("BySize") { run_case(make_config(false), false); }
     SECTION("ByTime") { run_case(make_config(true), true); }
+}
+
+TEST_CASE("A small-bed config marks an object near the large-bed edge outside", "[PerPlatePresets][GCodeProcessor]")
+{
+    DynamicPrintConfig large = DynamicPrintConfig::full_print_config();
+    large.set_deserialize_strict({
+        {"printable_area", "0x0,256x0,256x256,0x256"},
+        {"printable_height", "250"},
+        {"brim_type", "no_brim"},
+        {"skirt_loops", "0"},
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+    });
+
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, large);
+    REQUIRE_FALSE(model.objects.empty());
+    REQUIRE_FALSE(model.objects.front()->instances.empty());
+    // 20 mm cube sitting around (200, 10): inside a 256 mm bed, outside a 180 mm A1-mini bed.
+    model.objects.front()->instances.front()->set_offset(Vec3d(200., 10., 0.));
+    model.objects.front()->ensure_on_bed();
+
+    DynamicPrintConfig small = large;
+    small.set_deserialize_strict({{"printable_area", "0x0,180x0,180x180,0x180"}, {"printable_height", "180"}});
+    const Pointfs small_area = small.option<ConfigOptionPoints>("printable_area")->values;
+    model.update_print_volume_state(BuildVolume(small_area, small.opt_float("printable_height")));
+    REQUIRE(model.objects.front()->instances.front()->print_volume_state != ModelInstancePVS_Inside);
+
+    // Processor records the Print's own bed. toolpath_outside is only reset (never set true)
+    // in GCodeProcessor.cpp, so P7 uses print_volume_state / PartPlate::check_outside.
+    Print inside;
+    Model inside_model;
+    init_print({TestMesh::cube_20x20x20}, inside, inside_model, small);
+    inside.is_BBL_printer() = false;
+    GCodeProcessorResult result;
+    Test::gcode(inside, result);
+    REQUIRE_FALSE(result.printable_area.empty());
+    const BoundingBoxf bed(result.printable_area);
+    CHECK(bed.max.x() <= 180. + 1e-3);
+    CHECK(bed.max.y() <= 180. + 1e-3);
+    CHECK_FALSE(result.toolpath_outside);
 }
