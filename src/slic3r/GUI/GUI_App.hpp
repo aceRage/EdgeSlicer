@@ -608,6 +608,12 @@ private:
     // See network_plugin_missing_notice() in PluginGuard.hpp.
     void            ShowNetworkPluginMissing(bool user_requested = true);
     static wxString network_plugin_missing_text();
+    // The text for "no network agent although the plug-in is installed". When a load attempt
+    // failed this session it names the cause (blocked by Windows / security software, a missing
+    // Windows component, a missing or damaged file, a bad image) and carries the error code; only
+    // when nothing failed does it ask for the restart that loads a just-copied plug-in.
+    // *load_failed is set when the text describes a failure rather than the restart case.
+    static wxString network_plugin_not_loaded_text(bool *load_failed = nullptr);
     void            ShowUserLogin(bool show = true);
     // Ultra (plug-in guards): true when data_dir/plugins holds OUR clean-room plug-in (a
     // bambu_networking library sitting next to the ultranet marker file). Every Bambu CDN

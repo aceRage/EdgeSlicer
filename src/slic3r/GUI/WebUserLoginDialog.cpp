@@ -59,12 +59,13 @@ ZUserLogin::ZUserLogin() : wxDialog((wxWindow *) (wxGetApp().mainframe), wxID_AN
         m_line_top->SetBackgroundColour(wxColour(166, 169, 170));
         m_sizer_main->Add(m_line_top, 0, wxEXPAND, 0);
 
-        // With our own plug-in installed but not loaded a restart is what is needed; with none the
+        // With our own plug-in installed but not loaded the text says why (blocked by Windows, a
+        // missing or damaged file, ...) or, when nothing failed, asks for the restart; with none the
         // plug-in is missing from this install. Either way there is no download link: EdgeSlicer
         // never fetches Bambu's plug-in.
         const bool ultranet = wxGetApp().is_ultranet_plugin_installed();
         auto* m_message = new wxStaticText(this, wxID_ANY,
-            ultranet ? _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again.")
+            ultranet ? GUI_App::network_plugin_not_loaded_text()
                      : GUI_App::network_plugin_missing_text(),
             wxDefaultPosition, wxDefaultSize, 0);
         m_message->SetForegroundColour(*wxBLACK);

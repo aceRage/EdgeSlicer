@@ -124,6 +124,7 @@
 #include <set>
 #include <cwctype>
 #include "PluginGuard.hpp"
+#include "slic3r/Utils/PluginLoadDiagnostics.hpp"
 #include "PresetMirror.hpp"
 #include "Tab.hpp"
 #include "SysInfoDialog.hpp"
@@ -2353,6 +2354,16 @@ bool GUI_App::check_networking_version()
         }
     }
 
+    // The library loaded but reports a version this EdgeSlicer cannot use (or none: "00.00.00.00"
+    // is what get_version() answers for a debug/release mismatch or a missing export).
+    BOOST_LOG_TRIVIAL(warning) << "[plugin] network plug-in rejected: it reports version \"" << network_ver
+                               << "\" but this EdgeSlicer needs " << studio_ver.substr(0, 8) << ".*";
+    PluginLoadFailure rejected;
+    rejected.kind        = PluginLoadFailureKind::Incompatible;
+    rejected.detail      = "version " + network_ver + ", expected " + studio_ver;
+    rejected.file_exists = true;
+    record_plugin_load_failure(rejected);
+
     m_networking_compatible = false;
     return false;
 }
@@ -4123,6 +4134,7 @@ __retry:
     }
 
     if (create_network_agent) {
+        clear_plugin_load_failure(); // everything loaded (possibly from the backup folder): nothing to report
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", create network agent...");
         //std::string data_dir = wxStandardPaths::Get().GetUserDataDir().ToUTF8().data();
         std::string data_directory = data_dir();
@@ -5038,6 +5050,52 @@ wxString GUI_App::network_plugin_missing_text()
               "Reinstall EdgeSlicer to restore it.");
 }
 
+// The message for "the plug-in is installed but there is no network agent". A restart only helps
+// when nothing failed (the plug-in was copied in after start-up's load point); every other cause
+// repeats on each start, so the text says what actually went wrong (NetworkAgent recorded it, with
+// the Windows error code, when LoadLibrary failed).
+wxString GUI_App::network_plugin_not_loaded_text(bool *load_failed)
+{
+    const PluginLoadFailure failure = last_plugin_load_failure();
+
+    // Is the file that failed to load there now? The first-run copy runs after the load point, so a
+    // "missing" failure followed by a file on disk is the restart case after all.
+    bool          exists_now = false;
+    std::uint64_t size_now   = 0;
+    plugin_file_facts(failure.library, exists_now, size_now);
+
+    const PluginLoadMessage kind = plugin_load_message(failure.kind, exists_now, size_now);
+    if (load_failed)
+        *load_failed = kind != PluginLoadMessage::Restart;
+    if (kind != PluginLoadMessage::Restart)
+        BOOST_LOG_TRIVIAL(warning) << "[plugin] network plug-in not loaded: error=" << plugin_load_error_text(failure)
+                                   << " file=" << failure.library << " detail=" << failure.detail;
+
+    const wxString code = wxString::FromUTF8(plugin_load_error_text(failure));
+    switch (kind) {
+    case PluginLoadMessage::Blocked:
+        return wxString::Format(_L("Windows blocked EdgeSlicer's network plug-in (a security policy such as Smart App Control, or antivirus software). "
+                                   "Allow the EdgeSlicer folder in your antivirus, or check Windows Security > App & browser control > Smart App Control, "
+                                   "then restart EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::MissingDependency:
+        return wxString::Format(_L("The network plug-in could not load because a Windows component is missing (usually the Microsoft Visual C++ Redistributable). "
+                                   "Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::MissingFile:
+        return wxString::Format(_L("The network plug-in is missing or damaged, possibly removed by antivirus. Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::BadImage:
+        return wxString::Format(_L("The network plug-in is damaged or for a different system. Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::Incompatible:
+        return _L("The network plug-in does not match this version of EdgeSlicer. Reinstall EdgeSlicer, "
+                  "and send the log (Help > Export Logs) if it keeps happening.");
+    case PluginLoadMessage::Other:
+        return wxString::Format(_L("The network plug-in could not be loaded (error %s). Reinstall EdgeSlicer, "
+                                   "and send the log (Help > Export Logs) if it keeps happening."), code);
+    case PluginLoadMessage::Restart:
+        break;
+    }
+    return _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again.");
+}
+
 // EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). This is what every
 // former "offer the download" entry point does instead; see PluginGuard.hpp for when it speaks.
 void GUI_App::ShowNetworkPluginMissing(bool user_requested)
@@ -5086,10 +5144,11 @@ void GUI_App::ShowUserLoginGuarded()
     }
 
     if (action == LoginGuardAction::RestartRequired) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no agent but UltraNet is installed, asking for a restart";
-        MessageDialog dlg(nullptr,
-                          _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again."),
-                          _L("Sign in to Bambu Lab"), wxOK | wxICON_INFORMATION);
+        bool load_failed = false;
+        const wxString text = network_plugin_not_loaded_text(&load_failed);
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no agent but UltraNet is installed, "
+                                << (load_failed ? "the plug-in failed to load this session" : "asking for a restart");
+        MessageDialog dlg(nullptr, text, _L("Sign in to Bambu Lab"), load_failed ? (wxOK | wxICON_ERROR) : (wxOK | wxICON_INFORMATION));
         dlg.ShowModal();
         return;
     }
