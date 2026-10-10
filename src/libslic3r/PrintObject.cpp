@@ -835,7 +835,7 @@ void PrintObject::generate_support_material()
         // Ultra (support groups, Stage 5): the three notices the plan's Stage 5 list asks for.
         // All NON_CRITICAL, all raised here for the same reason as the two above.
         // 1. The soluble rule of 3.6. A zero top Z distance is not a per-part quantity - it sets
-        //    SlicingParameters::soluble_interface, the bottom surface classification and the
+        //    SlicingParameters::zero_gap_interface_* (Slicing.cpp), the bottom surface classification and the
         //    organic-tree static - so the strictest group wins and the WHOLE object follows it.
         //    Groups asking for a larger gap do not get their own; say so.
         if (const std::string soluble_group = this->support_group_soluble_name(); ! soluble_group.empty())
@@ -3830,7 +3830,7 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
     clamp_exturder_to_default(config.support_filament,           num_extruders);
     clamp_exturder_to_default(config.support_interface_filament, num_extruders);
     // Ultra (support groups): support_top_z_distance is object-wide behaviour - it decides
-    // SlicingParameters::soluble_interface (Slicing.cpp), bottom surface classification in
+    // SlicingParameters::zero_gap_interface_top and _bottom (Slicing.cpp), bottom surface classification in
     // detect_surfaces_type, and the organic-tree soluble static (TreeSupport3D.cpp). A per-part
     // value cannot be honoured, so the strictest group wins: any group asking for a soluble
     // interface makes the whole object soluble. No group -> no change, so this is a no-op for

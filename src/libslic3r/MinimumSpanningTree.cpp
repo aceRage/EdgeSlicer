@@ -49,8 +49,8 @@ auto MinimumSpanningTree::prim(std::vector<Point> vertices) const -> AdjacencyGr
     // ties are the normal case for support points sitting on a grid - was broken by where the
     // vertices happened to be allocated. That is why classic tree support put its branches in
     // different places from one slice of a project to the next, on the same binary and the same
-    // input. Keep the candidates in index order instead: a tie now goes to the lowest index, which
-    // is a property of the input alone.
+    // input. Keep the candidates in a vector instead and break a tie on the coordinates (see the
+    // selection below), which is a property of the points alone.
     const size_t          n = vertices_list.size();
     std::vector<coordf_t> smallest_distance(n, 0.);    //The shortest distance to the current tree.
     std::vector<size_t>   smallest_distance_to(n, 0);  //Which vertex the shortest distance goes towards.
@@ -68,9 +68,12 @@ auto MinimumSpanningTree::prim(std::vector<Point> vertices) const -> AdjacencyGr
         //This search is O(V) right now, which can be made down to O(log(V)). This reduces the overall time complexity from O(V*V) to O(V*log(E)).
         //However that requires an implementation of a heap that supports the decreaseKey operation, which is not in the std library.
         //TODO: Implement this?
+        // Break equal-distance ties on the coordinates (Orca #15565), not on the position in the input:
+        // the tree is then a property of the set of points alone, whatever order they were given in.
         size_t closest_index = size_t(-1);
         for (size_t i = 0; i < n; i++)
-            if (is_candidate[i] && (closest_index == size_t(-1) || smallest_distance[i] < smallest_distance[closest_index]))
+            if (is_candidate[i] && (closest_index == size_t(-1) || smallest_distance[i] < smallest_distance[closest_index] ||
+                                    (smallest_distance[i] == smallest_distance[closest_index] && vertices_list[i] < vertices_list[closest_index])))
                 closest_index = i;
         if (closest_index == size_t(-1))
             break; //Duplicate vertices can leave the tree smaller than the input; do not spin.
