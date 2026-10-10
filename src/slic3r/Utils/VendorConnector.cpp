@@ -1353,5 +1353,55 @@ bool parse_connector_link(const std::string& link, std::string& url)
     return true;
 }
 
+// ---- updating a connector the user already has ----
+
+// scheme://host[:port], lower case, the default https port left out.
+std::string api_origin(const std::string& url)
+{
+    std::string o = origin_of(url);
+    if (o.size() > 4 && o.compare(o.size() - 4, 4, ":443") == 0 && starts_with(o, "https://"))
+        o.resize(o.size() - 4);
+    return o;
+}
+
+std::vector<size_t> find_matching(const std::vector<Spec>& existing, const Spec& imported)
+{
+    const std::string name   = lower(trim(imported.name));
+    const std::string vendor = lower(trim(imported.vendor));
+    const std::string origin = api_origin(imported.base_url);
+    std::vector<size_t> out;
+    for (size_t i = 0; i < existing.size(); ++i) {
+        const Spec& s = existing[i];
+        if (lower(trim(s.name)) == name || (!vendor.empty() && lower(trim(s.vendor)) == vendor && api_origin(s.base_url) == origin))
+            out.push_back(i);
+    }
+    return out;
+}
+
+// Everything a fetched list depends on: when any of it changes, what was fetched no longer fits.
+static bool list_definition_differs(const Spec& a, const Spec& b)
+{
+    return a.base_url != b.base_url || a.license != b.license || a.list_path != b.list_path || a.list_query != b.list_query ||
+           a.items_path != b.items_path || a.paging != b.paging || a.page_param != b.page_param || a.page_start != b.page_start ||
+           a.size_param != b.size_param || a.page_size != b.page_size || a.has_more_path != b.has_more_path ||
+           a.total_path != b.total_path || a.cursor_path != b.cursor_path || a.since_param != b.since_param ||
+           a.since_field != b.since_field || a.fields != b.fields || a.subs_path != b.subs_path || a.sub_fields != b.sub_fields;
+}
+
+UpdatePlan plan_update(const Spec& old_spec, const Spec& imported)
+{
+    UpdatePlan p;
+    p.old_origin     = api_origin(old_spec.base_url);
+    p.new_origin     = api_origin(imported.base_url);
+    p.origin_changed = p.old_origin != p.new_origin;
+    // A stored secret stays only where the new connector asks for the same thing under the same key
+    // and label ("auth" as a bearer token is not "auth" as the X-Api-Key header, or a password).
+    const auto now = secret_slots(imported);
+    for (const auto& old : secret_slots(old_spec))
+        (std::find(now.begin(), now.end(), old) != now.end() ? p.keep_slots : p.drop_slots).push_back(old.first);
+    p.reset_cache = list_definition_differs(old_spec, imported);
+    return p;
+}
+
 } // namespace Vendors
 } // namespace Slic3r

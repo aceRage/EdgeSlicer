@@ -73,6 +73,7 @@ private:
     void ask_secret(const std::string& id, const std::string& key);
     void import_spec(bool pasted);
     void confirm_import(const std::string& text, const std::string& origin_host);
+    void update_connector(const std::string& id, const nlohmann::json& imported);
     void export_spec(const std::string& id);
     void copy_spec(const std::string& id);
     void export_csv(const nlohmann::json& keys);

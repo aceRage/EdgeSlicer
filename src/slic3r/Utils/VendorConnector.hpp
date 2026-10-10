@@ -153,6 +153,24 @@ bool fetch_connector_text(const HttpFn& http, const std::string& url, std::strin
 // "edgeslicer://connector?url=<percent-encoded https url>" -> the url (decoded, not yet checked).
 bool parse_connector_link(const std::string& link, std::string& url);
 
+// ---- Importing something the user already has: update it or add a second one ----
+// The connectors an imported one would replace: the same name (case and surrounding spaces ignored),
+// or the same non-empty vendor on the same API origin when the names differ. Indices into `existing`.
+std::vector<size_t> find_matching(const std::vector<Spec>& existing, const Spec& imported);
+// scheme://host[:port] of an address, lower case, without the default https port.
+std::string api_origin(const std::string& url);
+// What an update of `old_spec` by `imported` does. An update keeps the old connector's id (so its
+// secrets in the credential store stay attached) and nothing else of it.
+struct UpdatePlan
+{
+    bool                     origin_changed { false }; // the saved credentials would go to another site
+    std::string              old_origin, new_origin;
+    std::vector<std::string> keep_slots;               // secret_slots() keys that stay stored
+    std::vector<std::string> drop_slots;               // keys whose slot is gone or now asks for something else: forget them
+    bool                     reset_cache { false };    // the fetched list no longer fits: drop it
+};
+UpdatePlan plan_update(const Spec& old_spec, const Spec& imported);
+
 struct SubItem
 {
     std::string              id, name, variant;

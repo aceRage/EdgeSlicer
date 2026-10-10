@@ -23,6 +23,7 @@
 #include <sstream>
 #include <thread>
 
+#include <wx/choicdlg.h>
 #include <wx/clipbrd.h>
 #include <wx/dialog.h>
 #include <wx/filedlg.h>
@@ -713,8 +714,9 @@ void HomeVendors::import_from_link(const std::string& preset)
     }).detach();
 }
 
-// Checks the text (a file, pasted or fetched), shows what it is, and saves it as a new connector once
-// the user agrees. `origin_host` is the site a link came from ("" for a file or pasted text).
+// Checks the text (a file, pasted or fetched), shows what it is, and saves it once the user agrees:
+// as a new connector, or as an update of one they already have (same name, or same vendor on the same
+// API address). `origin_host` is the site a link came from ("" for a file or pasted text).
 void HomeVendors::confirm_import(const std::string& text, const std::string& origin_host)
 {
     const Vendors::ImportResult r = Vendors::import_check(text);
@@ -737,14 +739,123 @@ void HomeVendors::confirm_import(const std::string& text, const std::string& ori
                _L("API address:") + " " + wxString::FromUTF8(r.spec.base_url);
     if (!origin_host.empty())
         message += "\n" + _L("Fetched from:") + " " + wxString::FromUTF8(origin_host);
-    message += "\n\n" + _L("EdgeSlicer will send the credentials you set for it to that address. Only import connectors from people you trust.");
-    MessageDialog dlg(m_parent, message, _L("Import a vendor connector"), wxYES_NO | wxICON_QUESTION);
-    dlg.SetButtonLabel(wxID_YES, _L("Import"));
-    dlg.SetButtonLabel(wxID_NO, _L("Cancel"));
-    if (dlg.ShowModal() != wxID_YES)
+
+    std::vector<Vendors::Spec> existing;
+    for (const Connector& c : m_connectors)
+        existing.push_back(c.spec);
+    const std::vector<size_t> matches = Vendors::find_matching(existing, r.spec);
+
+    auto changes_address = [](const Vendors::UpdatePlan& p) {
+        return wxString::Format(_L("This update changes the API address from %s to %s; your saved credentials would be sent to %s."),
+                                wxString::FromUTF8(p.old_origin), wxString::FromUTF8(p.new_origin), wxString::FromUTF8(p.new_origin));
+    };
+    const wxString trust = _L("EdgeSlicer will send the credentials you set for it to that address. Only import connectors from people you trust.");
+
+    std::string update_id; // the connector to update; empty = add a new one
+    if (matches.empty()) {
+        message += "\n\n" + trust;
+        MessageDialog dlg(m_parent, message, _L("Import a vendor connector"), wxYES_NO | wxICON_QUESTION);
+        dlg.SetButtonLabel(wxID_YES, _L("Import"), true);
+        dlg.SetButtonLabel(wxID_NO, _L("Cancel"));
+        if (dlg.ShowModal() != wxID_YES)
+            return;
+    } else if (matches.size() == 1) {
+        const Vendors::Spec&      old  = existing[matches[0]];
+        const Vendors::UpdatePlan plan = Vendors::plan_update(old, r.spec);
+        message += "\n\n" + wxString::Format(_L("You already have the connector \"%s\" (%s)."), wxString::FromUTF8(old.name),
+                                             wxString::FromUTF8(old.base_url));
+        if (plan.origin_changed)
+            message += "\n" + changes_address(plan) + " " + _L("Adding it as a new connector leaves the old one as it is.");
+        else
+            message += "\n" + _L("Updating keeps its saved credentials and replaces all its other settings with the imported ones.");
+        message += "\n\n" + trust;
+        MessageDialog dlg(m_parent, message, _L("Import a vendor connector"), wxYES_NO | wxCANCEL | wxICON_QUESTION);
+        // The safe choice has the focus: an update that sends the credentials elsewhere is never the default.
+        dlg.SetButtonLabel(wxID_YES, wxString::Format(_L("Update \"%s\""), wxString::FromUTF8(old.name)), !plan.origin_changed);
+        dlg.SetButtonLabel(wxID_NO, _L("Add as a new connector"), plan.origin_changed);
+        dlg.SetButtonLabel(wxID_CANCEL, _L("Cancel"));
+        const int answer = dlg.ShowModal();
+        if (answer == wxID_YES)
+            update_id = old.id;
+        else if (answer != wxID_NO)
+            return;
+    } else {
+        // Several connectors match: the user picks which one to update, or adds a new one.
+        message += "\n\n" + _L("You already have more than one connector like this. Choose what to do:");
+        wxArrayString choices;
+        int           preselect = -1;
+        for (size_t k = 0; k < matches.size(); ++k) {
+            const Vendors::Spec&      old  = existing[matches[k]];
+            const Vendors::UpdatePlan plan = Vendors::plan_update(old, r.spec);
+            wxString                  label = wxString::Format(_L("Update \"%s\" (%s)"), wxString::FromUTF8(old.name), wxString::FromUTF8(old.base_url));
+            if (plan.origin_changed)
+                label += " - " + _L("changes the API address");
+            else if (preselect < 0)
+                preselect = int(k);
+            choices.Add(label);
+        }
+        choices.Add(_L("Add as a new connector"));
+        if (preselect < 0)
+            preselect = int(matches.size()); // every update would move the credentials: add a new one by default
+        wxSingleChoiceDialog dlg(m_parent, message, _L("Import a vendor connector"), choices);
+        dlg.SetSelection(preselect);
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        const size_t pick = size_t(dlg.GetSelection());
+        if (pick < matches.size()) {
+            const Vendors::Spec&      old  = existing[matches[pick]];
+            const Vendors::UpdatePlan plan = Vendors::plan_update(old, r.spec);
+            if (plan.origin_changed) {
+                MessageDialog sure(m_parent, changes_address(plan) + "\n\n" + _L("Update it anyway?"), _L("Import a vendor connector"),
+                                   wxYES_NO | wxICON_WARNING);
+                sure.SetButtonLabel(wxID_YES, _L("Update"));
+                sure.SetButtonLabel(wxID_NO, _L("Cancel"), true);
+                if (sure.ShowModal() != wxID_YES)
+                    return;
+            }
+            update_id = old.id;
+        }
+    }
+
+    if (update_id.empty()) {
+        save_connector(r.json); // a new connector: the JSON has no id and no credential
+        notice(_u8L("Connector imported. Set its credentials, then Refresh."));
+    } else
+        update_connector(update_id, r.json);
+}
+
+// Replaces the connector `id` with the imported spec. Only its id and its stored secrets carry over
+// (the slots the new spec still has); everything else, the settings and the fetched list when it no
+// longer fits, comes from the import.
+void HomeVendors::update_connector(const std::string& id, const json& imported)
+{
+    Connector* c = find(id);
+    if (c == nullptr)
         return;
-    save_connector(r.json); // a new connector: the JSON has no id and no credential
-    notice(_u8L("Connector imported. Set its credentials, then Refresh."));
+    Vendors::Spec spec;
+    try {
+        spec = Vendors::spec_from_json(imported);
+    } catch (const std::exception& e) {
+        notice(e.what(), true);
+        return;
+    }
+    spec.id = id;
+    const Vendors::UpdatePlan plan = Vendors::plan_update(c->spec, spec);
+    for (const std::string& slot : plan.drop_slots)
+        set_secret(id, slot, std::string());
+    c->spec = spec;
+    if (plan.reset_cache) {
+        c->cache        = Vendors::Cache();
+        c->cache_loaded = true;
+        m_thumbs_asked.clear();
+        write_atomic(fs::path(cache_dir(id)) / "items.json", Vendors::cache_to_json(c->cache).dump());
+    }
+    save_specs();
+    send_state();
+    BOOST_LOG_TRIVIAL(info) << "HomeVendors: connector " << id << " updated by an import; kept " << plan.keep_slots.size()
+                            << " secret(s), forgot " << plan.drop_slots.size() << (plan.reset_cache ? ", cleared its list" : "");
+    notice(plan.reset_cache ? _u8L("Connector updated. Refresh to fetch with the updated connector.") :
+                              _u8L("Connector updated. Its saved credentials and fetched list are kept."));
 }
 
 void HomeVendors::export_spec(const std::string& id)

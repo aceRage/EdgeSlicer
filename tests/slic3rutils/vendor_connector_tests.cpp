@@ -1091,3 +1091,150 @@ TEST_CASE("vendors: an edgeslicer://connector link", "[Vendors]")
     }
     CHECK(url == "unchanged");
 }
+
+// ---- importing a connector the user already has ----
+
+namespace {
+Spec spec_with(const std::function<void(json&)>& change)
+{
+    json j = json::parse(CPL3D_TEMPLATE);
+    change(j);
+    return spec_from_json(j);
+}
+Spec cpl3d() { return spec_from_json(json::parse(CPL3D_TEMPLATE)); }
+} // namespace
+
+TEST_CASE("vendors: which existing connectors an import would replace", "[Vendors]")
+{
+    Spec a = cpl3d();
+    a.id   = "cpl3d-1111";
+    Spec other = spec_with([](json& j) { j["name"] = "Other"; j["vendor"] = "Other"; j["base_url"] = "https://api.other.example"; });
+    other.id = "other-2222";
+    const std::vector<Spec> have { other, a };
+
+    SECTION("by name, ignoring case and surrounding spaces")
+    {
+        for (const char* name : {"CPL3D", "cpl3d", "  Cpl3D \t"}) {
+            Spec in = cpl3d();
+            in.name = name;
+            const auto m = find_matching(have, in);
+            REQUIRE(m.size() == 1);
+            CHECK(m[0] == 1);
+        }
+    }
+    SECTION("by vendor on the same API address when the names differ")
+    {
+        Spec in = spec_with([](json& j) { j["name"] = "CPL3D (my account)"; });
+        CHECK(find_matching(have, in) == std::vector<size_t> { 1 });
+        // the same address spelled with the default port and a different case
+        in.base_url = "HTTPS://WWW.CPL3D.COM:443";
+        CHECK(find_matching(have, in) == std::vector<size_t> { 1 });
+        CHECK(api_origin("HTTPS://WWW.CPL3D.COM:443/api") == "https://www.cpl3d.com");
+        CHECK(api_origin("https://www.cpl3d.com/x") == api_origin("https://www.cpl3d.com"));
+    }
+    SECTION("not by vendor alone, nor by a different address, nor by an empty vendor")
+    {
+        CHECK(find_matching(have, spec_with([](json& j) { j["name"] = "Mine"; j["base_url"] = "https://api.cpl3d.example"; })).empty());
+        Spec novendor = spec_with([](json& j) { j["name"] = "Mine"; j["vendor"] = ""; });
+        Spec held     = spec_with([](json& j) { j["name"] = "Held"; j["vendor"] = ""; });
+        CHECK(find_matching({held}, novendor).empty()); // two blank vendors on one address are not "the same vendor"
+        CHECK(find_matching({}, cpl3d()).empty());
+    }
+    SECTION("several matches come back in order")
+    {
+        Spec second = spec_with([](json& j) { j["name"] = "Second"; });
+        second.id   = "second-3333";
+        Spec third = spec_with([](json& j) { j["name"] = "cpl3d"; j["base_url"] = "https://elsewhere.example.com"; });
+        third.id = "third-4444";
+        CHECK(find_matching({a, other, second, third}, cpl3d()) == std::vector<size_t> { 0, 2, 3 });
+    }
+}
+
+TEST_CASE("vendors: what an update keeps, forgets and clears", "[Vendors]")
+{
+    const Spec old = spec_with([](json& j) { j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); });
+
+    SECTION("the same connector again: everything stays")
+    {
+        const UpdatePlan p = plan_update(old, old);
+        CHECK_FALSE(p.origin_changed);
+        CHECK(p.old_origin == "https://www.cpl3d.com");
+        CHECK(p.new_origin == p.old_origin);
+        CHECK(p.keep_slots == std::vector<std::string> { "auth", "header:X-App-Key" });
+        CHECK(p.drop_slots.empty());
+        CHECK_FALSE(p.reset_cache);
+    }
+    SECTION("another API address is flagged, and the list no longer fits")
+    {
+        const UpdatePlan p = plan_update(old, spec_with([](json& j) { j["base_url"] = "https://evil.example.org";
+                                                                         j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); }));
+        CHECK(p.origin_changed);
+        CHECK(p.old_origin == "https://www.cpl3d.com");
+        CHECK(p.new_origin == "https://evil.example.org");
+        CHECK(p.reset_cache);
+        CHECK(p.keep_slots.size() == 2); // the caller must not apply it without the user's explicit choice
+    }
+    SECTION("a port or scheme change is a different origin, a path under the same host is not")
+    {
+        CHECK(plan_update(old, spec_with([](json& j) { j["base_url"] = "https://www.cpl3d.com:8443"; })).origin_changed);
+        CHECK(plan_update(old, spec_with([](json& j) { j["base_url"] = "https://cpl3d.com"; })).origin_changed);
+        const UpdatePlan same_host = plan_update(old, spec_with([](json& j) { j["base_url"] = "https://www.cpl3d.com/api/v2"; }));
+        CHECK_FALSE(same_host.origin_changed);
+        CHECK(same_host.reset_cache); // but the list comes from somewhere else now
+    }
+    SECTION("secret slots that are gone, or that now ask for something else, are forgotten")
+    {
+        // the secret header removed
+        UpdatePlan p = plan_update(old, cpl3d());
+        CHECK(p.keep_slots == std::vector<std::string> { "auth" });
+        CHECK(p.drop_slots == std::vector<std::string> { "header:X-App-Key" });
+        // a bearer token that becomes the X-Api-Key header: the old value was a different credential
+        p = plan_update(old, spec_with([](json& j) { j["auth"] = {{"type", "header"}, {"name", "X-Api-Key"}};
+                                                       j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); }));
+        CHECK(p.keep_slots == std::vector<std::string> { "header:X-App-Key" });
+        CHECK(p.drop_slots == std::vector<std::string> { "auth" });
+        // bearer to basic: the token is not the password
+        p = plan_update(old, spec_with([](json& j) { j["auth"] = {{"type", "basic"}}; }));
+        CHECK(p.keep_slots.empty());
+        CHECK(p.drop_slots == std::vector<std::string> { "auth", "header:X-App-Key" });
+        // no sign-in any more
+        p = plan_update(old, spec_with([](json& j) { j["auth"] = {{"type", "none"}}; }));
+        CHECK(p.drop_slots == std::vector<std::string> { "auth", "header:X-App-Key" });
+        // the same header under another case/name is a different slot
+        p = plan_update(old, spec_with([](json& j) { j["headers"] = json::array({{{"name", "X-Other-Key"}, {"secret", true}}}); }));
+        CHECK(p.keep_slots == std::vector<std::string> { "auth" });
+        CHECK(p.drop_slots == std::vector<std::string> { "header:X-App-Key" });
+        // a new secret slot has nothing stored yet and is simply not listed
+        p = plan_update(cpl3d(), old);
+        CHECK(p.keep_slots == std::vector<std::string> { "auth" });
+        CHECK(p.drop_slots.empty());
+    }
+    SECTION("the fetched list is cleared only when what it depends on changed")
+    {
+        for (const std::function<void(json&)>& change : std::vector<std::function<void(json&)>> {
+                 [](json& j) { j["list"]["path"] = "/api/v2/library"; },
+                 [](json& j) { j["list"]["items"] = "results"; },
+                 [](json& j) { j["list"]["query"] = {{"sort", "name"}}; },
+                 [](json& j) { j["list"]["paging"]["type"] = "offset"; },
+                 [](json& j) { j["list"]["paging"]["size"] = 50; },
+                 [](json& j) { j["list"]["since"] = {{"param", ""}, {"field", ""}}; },
+                 [](json& j) { j["fields"]["name"] = "title"; },
+                 [](json& j) { j["files"]["path"] = "versions"; },
+                 [](json& j) { j["files"]["fields"]["size"] = "bytes"; },
+                 [](json& j) { j["license"] = "Commercial"; },
+             }) {
+            const Spec in = spec_with([&](json& j) { change(j); j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); });
+            CHECK(plan_update(old, in).reset_cache);
+        }
+        for (const std::function<void(json&)>& change : std::vector<std::function<void(json&)>> {
+                 [](json& j) { j["name"] = "CPL3D (renamed)"; },
+                 [](json& j) { j["download"]["path"] = "/api/v2/download/{sub.id}"; },
+                 [](json& j) { j["download"]["limited"] = false; },
+                 [](json& j) { j["quota"]["limit"] = "X-Other-Limit"; },
+                 [](json& j) { j["download"]["direct_field"] = "file_url"; },
+             }) {
+            const Spec in = spec_with([&](json& j) { change(j); j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); });
+            CHECK_FALSE(plan_update(old, in).reset_cache);
+        }
+    }
+}
