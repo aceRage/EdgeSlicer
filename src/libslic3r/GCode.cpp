@@ -1036,6 +1036,14 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         toolchange_gcode_str = gcodegen.placeholder_parser_process("change_filament_gcode", change_filament_gcode, new_extruder_id, &config);
         check_add_eol(toolchange_gcode_str);
 
+        // FanMover skips spans bracketed by "; custom gcode" ... "; custom gcode end" (prefix match,
+        // and it ignores comments shorter than 17 chars). "; custom gcode start" satisfies both.
+        // Same markers as GCode::set_extruder (Edge #170). Unconditional: Edge does not gate on
+        // FanMover (D-05a). Keep toolchange_retract_str, ;_FORCE_RESUME_FAN_SPEED, the Z read-back
+        // and the #15441 Z-restore outside this span.
+        if (!toolchange_gcode_str.empty())
+            toolchange_gcode_str = "; custom gcode start\n" + toolchange_gcode_str + "; custom gcode end\n";
+
         // retract before toolchange
         toolchange_gcode_str = toolchange_retract_str + toolchange_gcode_str;
         // BBS
