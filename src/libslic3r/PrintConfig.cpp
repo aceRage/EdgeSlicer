@@ -5824,8 +5824,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("raft_contact_distance", coFloat);
     def->label = L("Raft contact Z distance");
     def->category = L("Support");
-    def->tooltip = L("Z gap between object and raft. Ignored for soluble interface.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between raft and object. "
+                    "If Support Top Z Distance is 0, this value is ignored and "
+                    "the object is printed in direct contact with the raft (no gap).");
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.1));
@@ -6822,8 +6824,8 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Top Z distance");
     def->min = 0;
     def->category = L("Support");
-    def->tooltip = L("The Z gap between the top support interface and object.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between the support's top and object.");
 //    def->min = 0;
 #if 0
     //def->enum_values.push_back("0");
@@ -6839,8 +6841,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("support_bottom_z_distance", coFloat);
     def->label = L("Bottom Z distance");
     def->category = L("Support");
-    def->tooltip = L("The Z gap between the bottom support interface and object.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between the object and the support bottom. "
+                    "If Support Top Z Distance is 0 and the bottom has interface layers, this value "
+                    "is ignored and the support is printed in direct contact with the object (no gap).");
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.2));
@@ -7275,7 +7279,8 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Support");
     def->tooltip = L("Add thin struts that touch tall, slender parts on their sides with a small pinpoint tip "
                      "and stand on the build plate next to it. They keep the part from wobbling while it prints "
-                     "and snap off at the tip afterwards. Printed as support, so supports must be enabled.\n\n"
+                     "and snap off at the tip afterwards. Printed with the support filament, speed and line width; "
+                     "Enable supports does not need to be on.\n\n"
                      "Off: no stabilizers.\n"
                      "Auto: rings of touch points up the part's height, plus any stabilizer points painted with "
                      "the support painting tool.\n"
