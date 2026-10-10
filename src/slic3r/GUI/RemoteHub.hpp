@@ -117,6 +117,7 @@ enum class RemoteAccessState {
     NotInstalled,  // no tailscale CLI on this computer -> offer the download
     NotSignedIn,   // installed, BackendState=NeedsLogin -> `tailscale login`
     NotRunning,    // installed and signed in, backend is Stopped/NoState/... -> start it
+    NoAnswer,      // installed, but the CLI ran too long and was stopped (not the same as missing)
     HttpsOff,      // running, but the tailnet issues no certificates -> admin console > DNS
     Serving,       // running, certificates on, Serve is pointed at this hub: the URL works
     Ready,         // running, certificates on, remote access simply switched off

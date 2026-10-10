@@ -48,6 +48,7 @@ while getopts ":dpa:snt:xbc:1h" opt; do
         echo "   -c: Set CMake build configuration, default is Release"
         echo "   -1: Use single job for building"
         echo "   env ULTRANET_BIN_DIR: bundle the network plug-in (libbambu_networking.dylib) from this folder"
+        echo "   env GO2RTC_BIN_DIR / FFMPEG_BIN_DIR: bundle go2rtc / ffmpeg for the remote hub's camera video (optional GO2RTC_SHA256 / FFMPEG_SHA256 to verify)"
         exit 0
         ;;
     * )
@@ -222,6 +223,10 @@ function build_slicer() {
         cp -R "$resources_path" "./EdgeSlicer.app/Contents/Resources"
         # delete .DS_Store file
         find "./EdgeSlicer.app/" -name '.DS_Store' -delete
+        # The resources folder is shared with the Windows package, whose tools (go2rtc.exe, ffmpeg.exe and
+        # any DLLs beside them) are Windows binaries that are no use in a Mac app. The macOS go2rtc is
+        # bundled below as a Mach-O named go2rtc.
+        find "./EdgeSlicer.app/Contents/Resources/tools" -type f \( -name '*.exe' -o -name '*.dll' \) -delete 2>/dev/null || true
 
         # EdgeSlicer: the bundled network plug-in (UltraNet, a private clean-room component that is
         # built separately - CI does it with a deploy key). Set ULTRANET_BIN_DIR to a folder holding
@@ -249,6 +254,42 @@ function build_slicer() {
         elif [ -n "${ULTRANET_BIN_DIR:-}" ]; then
             echo "Warning: ULTRANET_BIN_DIR=${ULTRANET_BIN_DIR} holds no libbambu_networking.dylib - no network plug-in bundled"
         fi
+
+        # EdgeSlicer: the remote hub's camera tools. Set GO2RTC_BIN_DIR (a folder holding an
+        # unmodified `go2rtc`, MIT, https://github.com/AlexxIT/go2rtc) and/or FFMPEG_BIN_DIR (an
+        # unmodified LGPL `ffmpeg` for this architecture, plus FFMPEG-LICENSE.txt) to bundle them under
+        # Contents/Resources/tools/go2rtc, where RemoteHub.cpp looks first. Without them the hub uses
+        # a go2rtc / ffmpeg it finds in /opt/homebrew/bin, /usr/local/bin or PATH, and with none of
+        # them camera video falls back to the relayed stream. Each is checked against an expected
+        # sha256 when GO2RTC_SHA256 / FFMPEG_SHA256 is set (the pinned values live in
+        # docs/superpowers/specs/2026-10-09-hub-posix-parity.md); nothing is downloaded here.
+        # A Developer ID build re-signs these Mach-O files (scripts/macos_sign_app.sh); ad-hoc here.
+        for tool in go2rtc ffmpeg; do
+            tool_var=$(echo "${tool}" | tr '[:lower:]' '[:upper:]')
+            dir_var="${tool_var}_BIN_DIR"; sha_var="${tool_var}_SHA256"
+            tool_dir="${!dir_var:-}"; tool_sha="${!sha_var:-}"
+            [ -n "${tool_dir}" ] || continue
+            if [ ! -f "${tool_dir}/${tool}" ]; then
+                echo "Warning: ${dir_var}=${tool_dir} holds no ${tool} - not bundled"
+                continue
+            fi
+            if [ -n "${tool_sha}" ]; then
+                actual_sha=$(shasum -a 256 "${tool_dir}/${tool}" | cut -d' ' -f1)
+                if [ "${actual_sha}" != "${tool_sha}" ]; then
+                    echo "Error: ${tool_dir}/${tool} has sha256 ${actual_sha}, expected ${tool_sha} (${sha_var})"
+                    exit 1
+                fi
+            fi
+            HUB_TOOLS_DIR='./EdgeSlicer.app/Contents/Resources/tools/go2rtc'
+            mkdir -p "${HUB_TOOLS_DIR}"
+            echo "Bundling ${tool} from ${tool_dir}..."
+            cp -f "${tool_dir}/${tool}" "${HUB_TOOLS_DIR}/${tool}"
+            chmod 755 "${HUB_TOOLS_DIR}/${tool}"
+            for note in FFMPEG-LICENSE.txt LICENSE-NOTE.txt; do
+                [ -f "${tool_dir}/${note}" ] && cp -f "${tool_dir}/${note}" "${HUB_TOOLS_DIR}/${note}"
+            done
+            codesign --force --sign - "${HUB_TOOLS_DIR}/${tool}" 2>/dev/null || true
+        done
 
         # Copy Sentry crashpad_handler and libsentry.dylib for crash reporting
         CRASHPAD_HANDLER="${DEPS}/usr/local/bin/crashpad_handler"
