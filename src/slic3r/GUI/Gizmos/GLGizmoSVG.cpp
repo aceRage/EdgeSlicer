@@ -12,6 +12,7 @@
 #include "slic3r/GUI/CodeEmbossDialog.hpp"
 #include "slic3r/GUI/SimpleShapeDialog.hpp"
 #include "slic3r/GUI/ImageTraceDialog.hpp"
+#include "slic3r/GUI/SvgSplitDialog.hpp"
 #include "slic3r/GUI/Jobs/EmbossJob.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -531,7 +532,13 @@ std::optional<EmbossShape> create_split_part_shape(const SvgSplitPart &part, con
 bool GLGizmoSVG::create_volume_split(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos, const std::string &svg_path)
 {
     CreateTarget target = capture_create_target(m_parent, volume_type, mouse_pos);
-    volume_type         = target.volume_type;
+    // SVG dropped beside objects creates a new object under the mouse (as the plain SVG drop)
+    if (!svg_path.empty() && !target.is_new_object && mouse_pos.has_value() && !target.hovered_id.has_value()) {
+        target.is_new_object = true;
+        target.volume_type   = ModelVolumeType::MODEL_PART;
+        target.has_object    = false;
+    }
+    volume_type = target.volume_type;
 
     EmbossShape::SvgFile svg;
     svg.path = svg_path.empty() ? choose_svg_file() : svg_path;
@@ -567,6 +574,17 @@ bool GLGizmoSVG::create_volume_split(ModelVolumeType volume_type, const std::opt
     std::string name = get_file_name(svg.path);
     if (name.empty())
         name = "SVG shape";
+
+    // Filament per colour, asked before the parts are created, so the import stays one undo step.
+    // Cancel keeps every part on the default filament of the object.
+    std::vector<int>           part_extruders(split.parts.size(), 0);
+    std::vector<SvgSplitColor> colors = svg_split_colors(split);
+    std::vector<int>           color_extruders;
+    if (ask_svg_split_filaments(nullptr, from_u8(name), colors, split.parts.size(), color_extruders))
+        for (size_t c = 0; c < colors.size() && c < color_extruders.size(); ++c)
+            for (size_t part : colors[c].parts)
+                part_extruders[part] = color_extruders[c];
+
     const std::string group_id = create_code_group_id();
     CreateVolumeParts parts;
     for (size_t i = 0; i < split.parts.size(); ++i) {
@@ -581,7 +599,7 @@ bool GLGizmoSVG::create_volume_split(ModelVolumeType volume_type, const std::opt
         auto base        = std::make_unique<DataBase>(name + "_" + std::to_string(i), cancel, std::move(*shape));
         base->is_outside = volume_type == ModelVolumeType::MODEL_PART;
         // 0 .. filament of the object, as the plain SVG import
-        CreateVolumePart part{std::move(base), volume_type, 0};
+        CreateVolumePart part{std::move(base), volume_type, part_extruders[i]};
         // every part is centered by its own bounding box, move it back to its place in the drawing
         part.offset = split.parts[i].offset;
         parts.push_back(std::move(part));

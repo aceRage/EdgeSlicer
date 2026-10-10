@@ -5,7 +5,9 @@
 #include <libslic3r/ClipperUtils.hpp>
 #include <libslic3r/NSVGUtils.hpp>
 
+#include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -261,5 +263,114 @@ TEST_CASE("SVG split: statistics of a file", "[.SvgSplitFile]")
     }
     for (const auto &[hex, c] : by_color)
         std::cout << "  colour " << hex << ": " << c.first << " parts, " << c.second << " mm2\n";
+    std::cout << "  speck rule: islands < " << r.min_area << " mm2, slivers < " << r.min_width << " mm\n";
+
+    // Which filament the colour dialog pre-selects
+    const std::vector<std::pair<std::string, std::vector<std::string>>> palettes = {
+        // new project: default filament + 3 x "+" (Plater::get_next_color_for_filament from the start)
+        {"default 4 filaments", {"#F2754E", "#00C1AE", "#F4E2C1", "#ED1C24"}},
+        {"svgtest.3mf (8 filaments)", {"#000000", "#CBC6B8", "#FFFFFF", "#E4BD68", "#0078BF", "#DE4343", "#F55A74", "#FEC600"}},
+    };
+    for (const auto &[name, filaments] : palettes) {
+        std::cout << "  " << name << ":\n";
+        for (const SvgSplitColor &c : svg_split_colors(r)) {
+            double d = 0.;
+            int    f = svg_split_nearest_filament(c.color, filaments, &d);
+            std::cout << "    " << svg_split_color_to_hex(c.color) << " -> filament " << f << " " << filaments[size_t(f - 1)]
+                      << " (dE2000 " << d << (d > SVG_SPLIT_UNMATCHED_DELTA_E ? ", unmatched" : "") << ")\n";
+        }
+    }
     CHECK(overlap_mm2(r) < 1.);
+}
+
+TEST_CASE("SVG split: speck limits scale with the drawing", "[SvgSplit]")
+{
+    auto box = [](double w, double h) { return BoundingBox(Point(0, 0), Point(coord_t(scale_(w)), coord_t(scale_(h)))); };
+    // small drawings keep the absolute floors
+    CHECK_THAT(svg_split_min_area(box(100., 100.)), WithinRel(0.01, 1e-9));
+    CHECK_THAT(svg_split_min_width(box(100., 100.)), WithinRel(0.005, 1e-9));
+    CHECK_THAT(svg_split_min_area(box(10., 10.)), WithinRel(0.01, 1e-9));
+    // big drawings: a millionth of the area, 1e-5 of the diagonal
+    CHECK_THAT(svg_split_min_area(box(1000., 1000.)), WithinRel(1., 1e-9));
+    CHECK_THAT(svg_split_min_width(box(1000., 1000.)), WithinRel(1e-5 * std::sqrt(2.) * 1000., 1e-9));
+    CHECK_THAT(svg_split_min_area(box(410.705, 512.098)), WithinRel(0.2103, 1e-3));
+
+    // The same 0.8 x 0.8 mm square painted on top of a background
+    auto drawing = [](double size) {
+        std::string s = std::to_string(int(size));
+        std::string c = std::to_string(size / 2.);
+        return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + s + "mm\" height=\"" + s + "mm\" viewBox=\"0 0 " + s + " " + s +
+               "\"><rect x=\"0\" y=\"0\" width=\"" + s + "\" height=\"" + s + "\" fill=\"#000000\"/>" + "<rect x=\"" + c + "\" y=\"" + c +
+               "\" width=\"0.8\" height=\"0.8\" fill=\"#ffffff\"/></svg>";
+    };
+    SECTION("is kept in a 100 mm drawing")
+    {
+        SvgSplitResult r = split(drawing(100.));
+        REQUIRE(r.parts.size() == 2);
+        CHECK_THAT(area_mm2(r.parts[1].shape), WithinRel(0.64, 1e-3));
+    }
+    SECTION("is a speck of a 1000 mm drawing: dropped, the background keeps the area")
+    {
+        SvgSplitResult r = split(drawing(1000.));
+        CHECK_THAT(r.min_area, WithinRel(1., 1e-6));
+        REQUIRE(r.parts.size() == 1);
+        CHECK(r.covered == 1);
+        REQUIRE(r.parts[0].shape.size() == 1);
+        CHECK(r.parts[0].shape.front().holes.empty());
+        CHECK_THAT(area_mm2(r.parts[0].shape), WithinRel(1e6, 1e-6));
+    }
+}
+
+TEST_CASE("SVG split: colours of the parts", "[SvgSplit]")
+{
+    const std::string svg = svg_100mm("<rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"#00003b\"/>"
+                                      "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" fill=\"#ffffff\"/>"
+                                      "<rect x=\"30\" y=\"30\" width=\"10\" height=\"20\" fill=\"#ffad00\"/>"
+                                      "<rect x=\"60\" y=\"60\" width=\"10\" height=\"10\" fill=\"#ffffff\"/>");
+    SvgSplitResult r = split(svg, false);
+    REQUIRE(r.parts.size() == 4);
+    std::vector<SvgSplitColor> colors = svg_split_colors(r);
+    REQUIRE(colors.size() == 3);
+    CHECK(colors[0].color == std::array<uint8_t, 3>{0x00, 0x00, 0x3b});
+    CHECK(colors[1].color == std::array<uint8_t, 3>{0xff, 0xff, 0xff});
+    CHECK(colors[2].color == std::array<uint8_t, 3>{0xff, 0xad, 0x00});
+    CHECK(colors[0].parts == std::vector<size_t>{0});
+    CHECK(colors[1].parts == std::vector<size_t>{1, 3});
+    CHECK(colors[2].parts == std::vector<size_t>{2});
+    CHECK_THAT(colors[0].area, WithinRel(10000. - 400., 1e-3));
+    CHECK_THAT(colors[1].area, WithinRel(200., 1e-3));
+    CHECK_THAT(colors[2].area, WithinRel(200., 1e-3));
+}
+
+TEST_CASE("SVG split: nearest filament by colour", "[SvgSplit]")
+{
+    std::array<uint8_t, 3> rgb;
+    CHECK(svg_split_parse_hex("#FFad00", rgb));
+    CHECK(rgb == std::array<uint8_t, 3>{0xff, 0xad, 0x00});
+    CHECK(svg_split_parse_hex("#11223380", rgb)); // alpha ignored
+    CHECK(rgb == std::array<uint8_t, 3>{0x11, 0x22, 0x33});
+    CHECK_FALSE(svg_split_parse_hex("red", rgb));
+    CHECK_FALSE(svg_split_parse_hex("#12345", rgb));
+    CHECK_FALSE(svg_split_parse_hex("#12g456", rgb));
+
+    CHECK(svg_split_color_distance({10, 20, 30}, {10, 20, 30}) < 1e-6);
+
+    const std::vector<std::string> filaments = {"#000000", "#FFFFFF", "#FF0000", "#0000FF"};
+    double d = -1.;
+    CHECK(svg_split_nearest_filament({0x10, 0x10, 0x10}, filaments, &d) == 1); // dark grey -> black
+    CHECK(d < SVG_SPLIT_UNMATCHED_DELTA_E);
+    CHECK(svg_split_nearest_filament({0xfe, 0xfe, 0xfe}, filaments, &d) == 2);
+    CHECK(d < 1.);
+    CHECK(svg_split_nearest_filament({0xe0, 0x00, 0x00}, filaments) == 3);
+    CHECK(svg_split_nearest_filament({0x00, 0x00, 0xe0}, filaments) == 4);
+    // green is far from all of them
+    svg_split_nearest_filament({0x00, 0xc0, 0x00}, filaments, &d);
+    CHECK(d > SVG_SPLIT_UNMATCHED_DELTA_E);
+
+    // a tie keeps the lowest filament
+    CHECK(svg_split_nearest_filament({0xff, 0xff, 0xff}, {"#808080", "#FFFFFF", "#FFFFFF"}) == 2);
+    // unreadable colours are skipped
+    CHECK(svg_split_nearest_filament({0xff, 0xff, 0xff}, {"", "#FFFFFF"}) == 2);
+    CHECK(svg_split_nearest_filament({0xff, 0xff, 0xff}, {}, &d) == 0);
+    CHECK(d == std::numeric_limits<double>::max());
 }

@@ -57,6 +57,9 @@ struct SvgSplitResult
     // Size of the whole drawing [in mm]
     double width  = 0.;
     double height = 0.;
+    // Speck rule used: smaller islands / holes [mm^2] and thinner slivers [mm] were dropped
+    double min_area  = 0.;
+    double min_width = 0.;
     // The SVG is over the complexity limits (NSVGLineParams::max_flat_points or untrusted::SVG_*)
     bool too_complex = false;
     // Empty on success
@@ -65,14 +68,64 @@ struct SvgSplitResult
     bool is_valid() const { return error.empty() && !parts.empty(); }
 };
 
+// Speck rule. What is left of a shape after the shapes above it are cut away can be specks: tiny
+// islands and slivers between nearly matching outlines (typical for image-trace SVGs). They are
+// dropped (their area stays with the shape below). The limits scale with the drawing, because an
+// SVG is scaled to the print size afterwards, with absolute floors for small drawings:
+//   island / hole area  < max(0.01 mm^2, 1e-6 x width x height of the drawing)
+//   sliver width        < max(0.005 mm,  1e-5 x diagonal of the drawing)
+// e.g. 100 x 100 mm: 0.01 mm^2 / 0.005 mm,  410 x 512 mm: 0.21 mm^2 / 0.0066 mm.
+constexpr double SVG_SPLIT_MIN_AREA_FLOOR           = 0.01;  // [mm^2]
+constexpr double SVG_SPLIT_MIN_WIDTH_FLOOR          = 0.005; // [mm]
+constexpr double SVG_SPLIT_SPECK_AREA_FRACTION      = 1e-6;  // of the area of the bounding box
+constexpr double SVG_SPLIT_SLIVER_DIAGONAL_FRACTION = 1e-5;  // of the diagonal of the bounding box
+
+/// Smallest island / hole kept for a drawing with this bounding box (scaled mm) [in mm^2]
+double svg_split_min_area(const BoundingBox &drawing, double floor = SVG_SPLIT_MIN_AREA_FLOOR);
+/// Thinnest sliver kept for a drawing with this bounding box (scaled mm) [in mm]
+double svg_split_min_width(const BoundingBox &drawing, double floor = SVG_SPLIT_MIN_WIDTH_FLOOR);
+
 /// <summary>
 /// Split a parsed SVG into parts, one per visible fill / stroke, later shapes win over earlier ones.
 /// </summary>
 /// <param name="image">Parsed SVG</param>
 /// <param name="params">Conversion of curves to lines, same as for the whole SVG volume</param>
-/// <param name="min_area">Islands and holes smaller than this are dropped [in mm^2]</param>
+/// <param name="min_area_floor">Floor of the speck area, see svg_split_min_area() [in mm^2]</param>
 /// <param name="write_svg">False skips the SVG text of the parts (tests, statistics)</param>
-SvgSplitResult split_svg_by_shapes(const NSVGimage &image, const NSVGLineParams &params, double min_area = 0.01, bool write_svg = true);
+SvgSplitResult split_svg_by_shapes(const NSVGimage &image, const NSVGLineParams &params, double min_area_floor = SVG_SPLIT_MIN_AREA_FLOOR,
+                                   bool write_svg = true);
+
+// One colour of the split parts, for choosing filaments
+struct SvgSplitColor
+{
+    std::array<uint8_t, 3> color{0, 0, 0};
+    // indices into SvgSplitResult::parts
+    std::vector<size_t> parts;
+    // sum of the areas of the parts [in mm^2]
+    double area = 0.;
+};
+
+/// Distinct colours of the parts, in the order of their first part
+std::vector<SvgSplitColor> svg_split_colors(const SvgSplitResult &result);
+
+/// "#rrggbb" (or "#rrggbbaa", alpha ignored) to RGB
+bool svg_split_parse_hex(const std::string &hex, std::array<uint8_t, 3> &out);
+
+/// Perceptual colour difference, CIEDE2000 (the same as the flush volume predictor uses)
+double svg_split_color_distance(const std::array<uint8_t, 3> &a, const std::array<uint8_t, 3> &b);
+
+// A colour is "unmatched" when its nearest filament differs by more than this (CIEDE2000),
+// such colours are offered to be added as new filaments
+constexpr double SVG_SPLIT_UNMATCHED_DELTA_E = 15.;
+
+/// <summary>
+/// Filament with the nearest colour (CIEDE2000); a tie keeps the lowest index
+/// </summary>
+/// <param name="filament_colors">"#rrggbb" per filament</param>
+/// <param name="distance">When not null, receives the difference (max double when nothing matched)</param>
+/// <returns>1 based filament index, 0 when no filament has a readable colour</returns>
+int svg_split_nearest_filament(const std::array<uint8_t, 3> &color, const std::vector<std::string> &filament_colors,
+                               double *distance = nullptr);
 
 /// <summary>
 /// SVG text of one part: one evenodd path in micrometers, sized as the whole drawing

@@ -108,6 +108,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SimpleShapeDialog.hpp
     GUI/ImageTraceDialog.cpp
     GUI/ImageTraceDialog.hpp
+    GUI/SvgSplitDialog.cpp
+    GUI/SvgSplitDialog.hpp
     GUI/ConfigManipulation.cpp
     GUI/ConfigManipulation.hpp
     GUI/ConfigWizard.cpp

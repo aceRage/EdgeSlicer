@@ -186,6 +186,7 @@
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
+#include "SvgSplitDialog.hpp" // Drop SVG file: SVG or SVG (Split)
 #include "Gizmos/GizmoObjectManipulation.hpp"
 
 // BBS
@@ -10451,10 +10452,21 @@ bool emboss_svg(Plater& plater, const wxString &svg_file, const Vec2d& mouse_dro
         return false;
 
     // Refresh hover state to find surface point under mouse
-    wxMouseEvent evt(wxEVT_MOTION);
-    evt.SetPosition(wxPoint(mouse_drop_position.x(), mouse_drop_position.y()));
-    canvas->on_mouse(evt); // call render where is call GLCanvas3D::_picking_pass()
+    auto refresh_hover = [canvas, &mouse_drop_position]() {
+        wxMouseEvent evt(wxEVT_MOTION);
+        evt.SetPosition(wxPoint(mouse_drop_position.x(), mouse_drop_position.y()));
+        canvas->on_mouse(evt); // call render where is call GLCanvas3D::_picking_pass()
+    };
+    refresh_hover();
 
+    // "SVG" (one part) or "SVG (Split)" (one part per shape)?
+    SvgDropAction action = ask_svg_drop_action(nullptr, wxFileName(svg_file).GetFullName());
+    if (action == SvgDropAction::Cancel)
+        return false;
+    // the question took the mouse out of the canvas
+    refresh_hover();
+    if (action == SvgDropAction::Split)
+        return svg->create_volume_split(ModelVolumeType::MODEL_PART, mouse_drop_position, svg_file_str);
     return svg->create_volume(svg_file_str, mouse_drop_position, ModelVolumeType::MODEL_PART);
 }
 

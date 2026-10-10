@@ -1,6 +1,8 @@
 #include "SvgSplit.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <limits>
 #include <cmath>
 #include <cstdio>
 #include <sstream>
@@ -10,6 +12,7 @@
 #include "Emboss.hpp" // get_extents(ExPolygonsWithIds)
 #include "NSVGUtils.hpp"
 #include "UntrustedInput.hpp"
+#include "FlushVolPredictor.hpp" // CIEDE2000
 #include "nanosvg/nanosvg.h"
 
 namespace Slic3r {
@@ -115,7 +118,25 @@ std::string svg_split_path_in_3mf(const std::string &group_id, size_t index)
     return "3D/svgsplit_" + group_id + "_" + std::to_string(index + 1) + ".svg";
 }
 
-SvgSplitResult split_svg_by_shapes(const NSVGimage &image, const NSVGLineParams &params, double min_area, bool write_svg)
+double svg_split_min_area(const BoundingBox &drawing, double floor)
+{
+    if (!drawing.defined)
+        return floor;
+    double w = unscale<double>(drawing.size().x());
+    double h = unscale<double>(drawing.size().y());
+    return std::max(floor, SVG_SPLIT_SPECK_AREA_FRACTION * w * h);
+}
+
+double svg_split_min_width(const BoundingBox &drawing, double floor)
+{
+    if (!drawing.defined)
+        return floor;
+    double w = unscale<double>(drawing.size().x());
+    double h = unscale<double>(drawing.size().y());
+    return std::max(floor, SVG_SPLIT_SLIVER_DIAGONAL_FRACTION * std::sqrt(w * w + h * h));
+}
+
+SvgSplitResult split_svg_by_shapes(const NSVGimage &image, const NSVGLineParams &params, double min_area_floor, bool write_svg)
 {
     SvgSplitResult result;
 
@@ -144,9 +165,13 @@ SvgSplitResult split_svg_by_shapes(const NSVGimage &image, const NSVGLineParams 
     const BoundingBox drawing = get_extents(shapes);
     result.width              = unscale<double>(drawing.size().x());
     result.height             = unscale<double>(drawing.size().y());
-    const double min_area_scaled = min_area / (SCALING_FACTOR * SCALING_FACTOR);
-    // Slivers thinner than this left between nearly matching outlines are not printable
-    const float sliver = float(scale_(0.005));
+    // Specks scale with the drawing: an SVG is usually scaled down to the print, so a speck of a big
+    // drawing is a speck of the print too (see svg_split_min_area / svg_split_min_width)
+    result.min_area              = svg_split_min_area(drawing, min_area_floor);
+    result.min_width             = svg_split_min_width(drawing);
+    const double min_area_scaled = result.min_area / (SCALING_FACTOR * SCALING_FACTOR);
+    // Opening by half of the width removes slivers thinner than the width
+    const float sliver = float(scale_(result.min_width / 2.));
 
     // From the top of the painting down: everything painted later covers the shape
     std::vector<SvgSplitPart> parts;
@@ -158,9 +183,11 @@ SvgSplitResult split_svg_by_shapes(const NSVGimage &image, const NSVGLineParams 
             visible = opening_ex(visible, sliver);
         svgsplit_remove_small(visible, min_area_scaled);
         svgsplit_snap_to_um(visible);
-        if (i > 0) {
+        if (i > 0 && !visible.empty()) {
+            // Only what is kept covers the shapes below: a dropped speck or sliver stays with the
+            // shape under it instead of leaving a hole there
             ExPolygons all = std::move(covered);
-            append(all, s.expoly);
+            append(all, visible);
             covered = union_ex(all);
         }
         if (visible.empty()) {
@@ -200,6 +227,61 @@ SvgSplitResult split_svg_by_shapes(const NSVGimage &image, const NSVGLineParams 
         }
     }
     return result;
+}
+
+std::vector<SvgSplitColor> svg_split_colors(const SvgSplitResult &result)
+{
+    std::vector<SvgSplitColor> colors;
+    for (size_t i = 0; i < result.parts.size(); ++i) {
+        const SvgSplitPart &part = result.parts[i];
+        auto it = std::find_if(colors.begin(), colors.end(), [&part](const SvgSplitColor &c) { return c.color == part.color; });
+        if (it == colors.end()) {
+            colors.push_back({part.color, {}, 0.});
+            it = colors.end() - 1;
+        }
+        it->parts.push_back(i);
+        for (const ExPolygon &e : part.shape)
+            it->area += e.area() * SCALING_FACTOR * SCALING_FACTOR;
+    }
+    return colors;
+}
+
+bool svg_split_parse_hex(const std::string &hex, std::array<uint8_t, 3> &out)
+{
+    // "#rrggbb" or "#rrggbbaa" (alpha ignored)
+    if (hex.size() < 7 || hex[0] != '#')
+        return false;
+    for (size_t i = 1; i < 7; ++i)
+        if (!std::isxdigit(static_cast<unsigned char>(hex[i])))
+            return false;
+    for (int c = 0; c < 3; ++c)
+        out[size_t(c)] = uint8_t(std::stoi(hex.substr(size_t(1 + 2 * c), 2), nullptr, 16));
+    return true;
+}
+
+double svg_split_color_distance(const std::array<uint8_t, 3> &a, const std::array<uint8_t, 3> &b)
+{
+    return FlushPredict::calc_color_distance(FlushPredict::RGBColor(a[0], a[1], a[2]), FlushPredict::RGBColor(b[0], b[1], b[2]));
+}
+
+int svg_split_nearest_filament(const std::array<uint8_t, 3> &color, const std::vector<std::string> &filament_colors, double *distance)
+{
+    int    best   = 0;
+    double best_d = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < filament_colors.size(); ++i) {
+        std::array<uint8_t, 3> f;
+        if (!svg_split_parse_hex(filament_colors[i], f))
+            continue;
+        double d = svg_split_color_distance(color, f);
+        // strictly smaller: a tie keeps the lowest filament
+        if (d < best_d) {
+            best_d = d;
+            best   = int(i) + 1;
+        }
+    }
+    if (distance != nullptr)
+        *distance = best == 0 ? std::numeric_limits<double>::max() : best_d;
+    return best;
 }
 
 } // namespace Slic3r
