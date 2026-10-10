@@ -7,8 +7,11 @@
 #endif
 
 #include <boost/log/trivial.hpp>
+#include <boost/filesystem.hpp>
+#include <boost/nowide/convert.hpp>
 #include "libslic3r/Utils.hpp"
 #include "NetworkAgent.hpp"
+#include "PluginLoadDiagnostics.hpp"
 #include "sentry_wrapper/SentryScrub.hpp"
 
 
@@ -27,7 +30,127 @@ static void* netwoking_module = NULL;
 static void* source_module = NULL;
 #endif
 
-bool NetworkAgent::use_legacy_network = true;
+bool NetworkAgent::use_legacy_network = false;
+
+std::string NetworkAgent::expected_version()
+{
+    return BAMBU_NETWORK_AGENT_VERSION;
+}
+
+bool NetworkAgent::is_compatible_version(const std::string &plugin_version)
+{
+    const std::string expected = expected_version();
+    return plugin_version.length() >= 8 && plugin_version.substr(0, 8) == expected.substr(0, 8);
+}
+
+namespace {
+
+const char *plugdiag_kind_name(PluginLoadFailureKind kind)
+{
+    switch (kind) {
+    case PluginLoadFailureKind::None:              return "none";
+    case PluginLoadFailureKind::Blocked:           return "blocked";
+    case PluginLoadFailureKind::Missing:           return "missing";
+    case PluginLoadFailureKind::MissingDependency: return "missing-dependency";
+    case PluginLoadFailureKind::BadImage:          return "bad-image";
+    case PluginLoadFailureKind::Incompatible:      return "incompatible";
+    case PluginLoadFailureKind::Other:             break;
+    }
+    return "other";
+}
+
+// Records `chosen` as the session's last load failure and logs the verdict. A load of the backup
+// folder is only logged: it is a second attempt at the same plug-in, and the "no backup folder"
+// failure it usually ends in would hide the real reason the first attempt was rejected.
+void plugdiag_record(PluginLoadFailure chosen, bool using_backup)
+{
+    BOOST_LOG_TRIVIAL(warning) << "[plugin] network plug-in load failed: class=" << plugdiag_kind_name(chosen.kind)
+                               << " error=" << plugin_load_error_text(chosen) << " file=" << chosen.library
+                               << (using_backup ? " (backup folder; not recorded)" : "");
+    if (!using_backup)
+        record_plugin_load_failure(chosen);
+}
+
+#if defined(_MSC_VER) || defined(_WIN32)
+typedef LONG (NTAPI *plugdiag_RtlGetLastNtStatus_fn)(void);
+
+// The NTSTATUS behind the last failed LoadLibrary. The Bad Image dialog prints this value (for a
+// Smart App Control block it is 0xC0E90002), while GetLastError() only holds its Win32 mapping.
+// Resolved before the load, because GetProcAddress itself would overwrite the thread's last status.
+plugdiag_RtlGetLastNtStatus_fn plugdiag_nt_status_fn()
+{
+    static plugdiag_RtlGetLastNtStatus_fn fn = []() -> plugdiag_RtlGetLastNtStatus_fn {
+        HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+        return ntdll ? reinterpret_cast<plugdiag_RtlGetLastNtStatus_fn>(::GetProcAddress(ntdll, "RtlGetLastNtStatus")) : nullptr;
+    }();
+    return fn;
+}
+
+std::string plugdiag_format_message(DWORD code)
+{
+    wchar_t buf[512] = {0};
+    DWORD   n        = ::FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, code, 0, buf,
+                                        static_cast<DWORD>(sizeof(buf) / sizeof(buf[0])) - 1, nullptr);
+    while (n > 0 && (buf[n - 1] == L'\r' || buf[n - 1] == L'\n' || buf[n - 1] == L' '))
+        buf[--n] = 0;
+    return n ? boost::nowide::narrow(buf) : std::string("(no system message)");
+}
+
+// LoadLibrary with the diagnostics a "plug-in did not load" report needs. GetLastError() is read
+// immediately; on failure `failure` is filled and the whole story goes to the log at warning level:
+// the path, the numeric code (hex and decimal), the system's text for it, and whether the file is
+// there and how big it is (an antivirus may quarantine or empty it).
+HMODULE plugdiag_load_library(const std::string &utf8_path, PluginLoadFailure &failure)
+{
+    // A std::wstring, not a fixed buffer: the old 128-character buffer cut a long profile path short.
+    const std::wstring wide   = boost::nowide::widen(utf8_path);
+    auto               nt_fn  = plugdiag_nt_status_fn();
+    HMODULE            module = ::LoadLibraryW(wide.c_str());
+    if (module)
+        return module;
+
+    const DWORD err = ::GetLastError();
+    const DWORD nt  = nt_fn ? static_cast<DWORD>(nt_fn()) : 0;
+
+    failure           = PluginLoadFailure{};
+    failure.code      = err;
+    failure.nt_status = nt;
+    failure.library   = utf8_path;
+    plugin_file_facts(utf8_path, failure.file_exists, failure.file_size);
+    failure.detail = plugdiag_format_message(err);
+    failure.kind   = classify_plugin_load_error(err, nt, failure.file_exists, failure.file_size);
+
+    BOOST_LOG_TRIVIAL(warning) << "[plugin] LoadLibrary failed: path=" << utf8_path << " (" << utf8_path.size() << " chars)"
+                               << " GetLastError=" << err << " (0x" << std::hex << std::uppercase << err << std::dec << ")"
+                               << " ntstatus=0x" << std::hex << std::uppercase << nt << std::dec
+                               << " file_exists=" << (failure.file_exists ? "yes" : "no") << " size=" << failure.file_size
+                               << " message=\"" << failure.detail << "\" class=" << plugdiag_kind_name(failure.kind);
+    return nullptr;
+}
+#else
+// dlopen with the same diagnostics. There is no numeric code, so the classification is by file facts
+// alone: no file or an empty one is "missing", everything else "other" with dlerror() in the log.
+void *plugdiag_dlopen(const std::string &path, PluginLoadFailure &failure)
+{
+    void *module = dlopen(path.c_str(), RTLD_LAZY);
+    if (module)
+        return module;
+
+    const char *dl_error = dlerror();
+    failure              = PluginLoadFailure{};
+    failure.library      = path;
+    failure.detail       = dl_error ? dl_error : "(dlerror returned null)";
+    plugin_file_facts(path, failure.file_exists, failure.file_size);
+    failure.kind = classify_plugin_load_error(0, 0, failure.file_exists, failure.file_size);
+
+    BOOST_LOG_TRIVIAL(warning) << "[plugin] dlopen failed: path=" << path << " file_exists=" << (failure.file_exists ? "yes" : "no")
+                               << " size=" << failure.file_size << " dlerror=\"" << failure.detail
+                               << "\" class=" << plugdiag_kind_name(failure.kind);
+    return nullptr;
+}
+#endif
+
+} // namespace
 
 typedef int (*func_start_print_legacy)(void *agent, PrintParams_Legacy params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn);
 typedef int (*func_start_local_print_with_record_legacy)(void *agent, PrintParams_Legacy params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn);
@@ -211,9 +334,11 @@ std::string NetworkAgent::get_libpath_in_current_directory(std::string library_n
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", GetModuleFileNameW return error, can not Load Library for %1%") % library_name;
         return lib_path;
     }
-    int size_needed = ::WideCharToMultiByte(0, 0, file_name, wcslen(file_name), nullptr, 0, nullptr, nullptr);
+    // UTF-8 on both sides: this string is converted back with CP_UTF8, and the ANSI code page (0)
+    // mangled any non-ASCII character in the install path.
+    int size_needed = ::WideCharToMultiByte(CP_UTF8, 0, file_name, wcslen(file_name), nullptr, 0, nullptr, nullptr);
     std::string file_name_string(size_needed, 0);
-    ::WideCharToMultiByte(0, 0, file_name, wcslen(file_name), file_name_string.data(), size_needed, nullptr, nullptr);
+    ::WideCharToMultiByte(CP_UTF8, 0, file_name, wcslen(file_name), file_name_string.data(), size_needed, nullptr, nullptr);
 
     // Do not hard-code the executable name here: it has changed twice, and the old
     // literal was paired with the wrong length (18 chars, compared against 16), so
@@ -242,28 +367,31 @@ int NetworkAgent::initialize_network_module(bool using_backup)
     //first load the library
 #if defined(_MSC_VER) || defined(_WIN32)
     library = plugin_folder.string() + "\\" + std::string(BAMBU_NETWORK_LIBRARY) + ".dll";
-    wchar_t lib_wstr[128];
-    memset(lib_wstr, 0, sizeof(lib_wstr));
-    ::MultiByteToWideChar(CP_UTF8, NULL, library.c_str(), strlen(library.c_str())+1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-    netwoking_module = LoadLibrary(lib_wstr);
-    /*if (!netwoking_module) {
-        library = std::string(BAMBU_NETWORK_LIBRARY) + ".dll";
-        memset(lib_wstr, 0, sizeof(lib_wstr));
-        ::MultiByteToWideChar(CP_UTF8, NULL, library.c_str(), strlen(library.c_str()) + 1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-        netwoking_module = LoadLibrary(lib_wstr);
-    }*/
+    if (!using_backup)
+        clear_plugin_load_failure(); // a fresh start-up attempt; the backup retry must not erase its reason
+    PluginLoadFailure primary_failure;
+    netwoking_module = plugdiag_load_library(library, primary_failure);
     if (!netwoking_module) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", try load library directly from current directory");
 
         std::string library_path = get_libpath_in_current_directory(std::string(BAMBU_NETWORK_LIBRARY));
         if (library_path.empty()) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", can not get path in current directory for %1%") % BAMBU_NETWORK_LIBRARY;
+            plugdiag_record(primary_failure, using_backup);
             return -1;
         }
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", current path %1%")%library_path;
-        memset(lib_wstr, 0, sizeof(lib_wstr));
-        ::MultiByteToWideChar(CP_UTF8, NULL, library_path.c_str(), strlen(library_path.c_str())+1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-        netwoking_module = LoadLibrary(lib_wstr);
+        PluginLoadFailure fallback_failure;
+        netwoking_module = plugdiag_load_library(library_path, fallback_failure);
+        if (netwoking_module) {
+            library = library_path;
+        } else {
+            // Report the more informative of the two: "not there" from one location must not hide
+            // "Windows blocked it" from the other.
+            const bool use_fallback = primary_failure.kind == PluginLoadFailureKind::Missing &&
+                                      fallback_failure.kind != PluginLoadFailureKind::Missing;
+            plugdiag_record(use_fallback ? fallback_failure : primary_failure, using_backup);
+        }
     }
 #else
     #if defined(__WXMAC__)
@@ -272,17 +400,16 @@ int NetworkAgent::initialize_network_module(bool using_backup)
     library = plugin_folder.string() + "/" + std::string("lib") + std::string(BAMBU_NETWORK_LIBRARY) + ".so";
     #endif
     printf("loading network module at %s\n", library.c_str());
-    netwoking_module = dlopen( library.c_str(), RTLD_LAZY);
-    if (!netwoking_module) {
-        /*#if defined(__WXMAC__)
-        library = std::string("lib") + BAMBU_NETWORK_LIBRARY + ".dylib";
-        #else
-        library = std::string("lib") + BAMBU_NETWORK_LIBRARY + ".so";
-        #endif*/
-        //netwoking_module = dlopen( library.c_str(), RTLD_LAZY);
-        char* dll_error = dlerror();
-        printf("error, dlerror is %s\n", dll_error);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", error, dlerror is %1%")%dll_error;
+    if (!using_backup)
+        clear_plugin_load_failure();
+    {
+        PluginLoadFailure posix_failure;
+        netwoking_module = plugdiag_dlopen(library, posix_failure);
+        if (!netwoking_module) {
+            printf("error, dlerror is %s\n", posix_failure.detail.c_str());
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", error, dlerror is %1%") % posix_failure.detail;
+            plugdiag_record(posix_failure, using_backup);
+        }
     }
     printf("after dlopen, network_module is %p\n", netwoking_module);
 #endif
@@ -539,24 +666,26 @@ void* NetworkAgent::get_bambu_source_entry()
     boost::filesystem::path data_dir_path(data_dir_str);
     auto plugin_folder = data_dir_path / "plugins";
 #if defined(_MSC_VER) || defined(_WIN32)
-    wchar_t lib_wstr[128];
-
     //goto load bambu source
     library = plugin_folder.string() + "/" + std::string(BAMBU_SOURCE_LIBRARY) + ".dll";
-    memset(lib_wstr, 0, sizeof(lib_wstr));
-    ::MultiByteToWideChar(CP_UTF8, NULL, library.c_str(), strlen(library.c_str())+1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-    source_module = LoadLibrary(lib_wstr);
+    PluginLoadFailure primary_failure;
+    source_module = plugdiag_load_library(library, primary_failure);
     if (!source_module) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", try load BambuSource directly from current directory");
         std::string library_path = get_libpath_in_current_directory(std::string(BAMBU_SOURCE_LIBRARY));
         if (library_path.empty()) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", can not get path in current directory for %1%") % BAMBU_SOURCE_LIBRARY;
+            plugdiag_record(primary_failure, false);
             return source_module;
         }
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", current path %1%")%library_path;
-        memset(lib_wstr, 0, sizeof(lib_wstr));
-        ::MultiByteToWideChar(CP_UTF8, NULL, library_path.c_str(), strlen(library_path.c_str()) + 1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));
-        source_module = LoadLibrary(lib_wstr);
+        PluginLoadFailure fallback_failure;
+        source_module = plugdiag_load_library(library_path, fallback_failure);
+        if (!source_module) {
+            const bool use_fallback = primary_failure.kind == PluginLoadFailureKind::Missing &&
+                                      fallback_failure.kind != PluginLoadFailureKind::Missing;
+            plugdiag_record(use_fallback ? fallback_failure : primary_failure, false);
+        }
     }
 #else
 #if defined(__WXMAC__)
@@ -564,7 +693,12 @@ void* NetworkAgent::get_bambu_source_entry()
 #else
     library = plugin_folder.string() + "/" + std::string("lib") + std::string(BAMBU_SOURCE_LIBRARY) + ".so";
 #endif
-    source_module = dlopen( library.c_str(), RTLD_LAZY);
+    {
+        PluginLoadFailure posix_failure;
+        source_module = plugdiag_dlopen(library, posix_failure);
+        if (!source_module)
+            plugdiag_record(posix_failure, false);
+    }
     /*if (!source_module) {
 #if defined(__WXMAC__)
         library = std::string("lib") + BAMBU_SOURCE_LIBRARY + ".dylib";
@@ -587,12 +721,14 @@ void* NetworkAgent::get_network_function(const char* name)
 
 #if defined(_MSC_VER) || defined(_WIN32)
     function = GetProcAddress(netwoking_module, name);
+    const unsigned long proc_error = function ? 0 : ::GetLastError();
 #else
     function = dlsym(netwoking_module, name);
+    const unsigned long proc_error = 0;
 #endif
 
     if (!function) {
-        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", can not find function %1%")%name;
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", can not find function %1% (error %2%)")%name %proc_error;
     }
     return function;
 }
@@ -609,13 +745,13 @@ std::string NetworkAgent::get_version()
 #endif
     }
     if (!consistent) {
-        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", inconsistent library,return 00.00.00.00!");
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", inconsistent library (the plug-in's debug/release build does not match this EdgeSlicer), return 00.00.00.00!");
         return "00.00.00.00";
     }
     if (get_version_ptr) {
         return get_version_ptr();
     }
-    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", get_version not supported,return 00.00.00.00!");
+    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", get_version not supported (bambu_network_get_version is not exported by the loaded plug-in), return 00.00.00.00!");
     return "00.00.00.00";
 }
 

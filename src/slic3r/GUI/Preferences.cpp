@@ -2202,10 +2202,8 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("Connect to Bambu Lab printers (cloud login or LAN). The plug-in is downloaded from Bambu on first use; takes effect after restarting."), 50, "installed_networking");
     auto item_bambu_stealth = create_item_checkbox(_L("Stealth mode (no Bambu cloud telemetry)"), page,
         _L("Stops data transmission to Bambu's cloud services. Safe to enable for LAN-only use; disable it to sign in to a Bambu account."), 50, "stealth_mode");
-    // Ultra (plug-in guards): "legacy" only picks WHICH Bambu CDN build to download. With our own
-    // plug-in installed nothing is ever downloaded, so the switch has no effect - hide it.
-    auto item_bambu_legacy = create_item_checkbox(_L("Use legacy network plugin"), page,
-        _L("Use the older plug-in for printers on old Bambu firmware. Takes effect after restarting."), 50, "legacy_networking");
+    // The "Use legacy network plugin" switch is gone: EdgeSlicer ships one network plug-in and
+    // ignores the legacy_networking setting (GUI_App resets it at start-up).
 
     auto title_spoolman = create_item_title(_L("Spool Manager"), page, _L("Spool Manager"));
     auto item_spoolman_enabled = create_item_checkbox(_L("Enable Spoolman integration"), page,
@@ -2269,10 +2267,6 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(title_bambu, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_bambu_legacy, 0, wxTOP, FromDIP(3));
-    // Hidden after the Add so the sizer keeps no space for it. The switch only picks WHICH Bambu
-    // CDN build to download, and nothing is downloaded any more.
-    sizer_page->Hide(item_bambu_legacy, true);
     sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_spoolman_enabled, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_spoolman_url, 0, wxTOP, FromDIP(3));
