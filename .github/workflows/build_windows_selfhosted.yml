@@ -772,7 +772,10 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # The signing identity holds only "Certificate Profile Signer" on the profile (least
+          # privilege), so it sees no subscription; without this az login fails with
+          # "No subscriptions found". Signing needs only the token, not a subscription.
+          allow-no-subscriptions: true
 
       # Signs every PE file of build\EdgeSlicer that has no valid signature yet: our exe/dll, OCCT,
       # freetype, GMP/MPFR, Sentry, go2rtc, ffmpeg, the UltraNet DLLs (FlashNetwork.dll only with
