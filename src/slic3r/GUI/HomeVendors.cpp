@@ -415,6 +415,7 @@ void HomeVendors::send_state()
                               {"synced_at", c.cache.synced_at},
                               {"count", c.cache.items.size()},
                               {"last_error", c.cache.last_error},
+                              {"full_next", c.cache.needs_full},
                               {"quota", {{"used", c.cache.quota.used}, {"limit", c.cache.quota.limit}, {"resets", c.cache.quota.resets}}},
                               {"downloads_limited", c.spec.downloads_limited}});
         const bool endpoint = !c.spec.download_path.empty();
@@ -534,6 +535,7 @@ bool HomeVendors::handle(const json& msg)
 
 void HomeVendors::save_connector(const json& spec_json)
 {
+    bool          settings_changed = false;
     Vendors::Spec spec;
     try {
         spec = Vendors::spec_from_json(spec_json);
@@ -561,15 +563,25 @@ void HomeVendors::save_connector(const json& spec_json)
         // A different address or list invalidates what was fetched.
         const bool reset = existing->spec.base_url != spec.base_url || existing->spec.list_path != spec.list_path ||
                            existing->spec.items_path != spec.items_path;
+        // Items already fetched were read with the old settings; "Fetch Changes" would keep those of
+        // models that did not change, so the next one reads everything again.
+        const bool full = !reset && Vendors::needs_full_fetch(existing->spec, spec);
         existing->spec = spec;
         if (reset) {
             existing->cache = Vendors::Cache();
             write_atomic(fs::path(cache_dir(spec.id)) / "items.json", Vendors::cache_to_json(existing->cache).dump());
+        } else if (full) {
+            ensure_cache(*existing);
+            existing->cache.needs_full = true;
+            write_atomic(fs::path(cache_dir(spec.id)) / "items.json", Vendors::cache_to_json(existing->cache).dump(-1, ' ', false, json::error_handler_t::replace));
+            settings_changed = true;
         }
     }
     save_specs();
     m_send({{"type", "vendor_saved"}, {"id", spec.id}});
     send_state();
+    if (settings_changed)
+        notice(_u8L("Settings changed: the next Fetch Changes reads every model again."));
 }
 
 void HomeVendors::delete_connector(const std::string& id)
@@ -819,7 +831,7 @@ void HomeVendors::confirm_import(const std::string& text, const std::string& ori
 
     if (update_id.empty()) {
         save_connector(r.json); // a new connector: the JSON has no id and no credential
-        notice(_u8L("Connector imported. Set its credentials, then Refresh."));
+        notice(_u8L("Connector imported. Set its credentials, then Fetch Changes."));
     } else
         update_connector(update_id, r.json);
 }
@@ -849,12 +861,17 @@ void HomeVendors::update_connector(const std::string& id, const json& imported)
         c->cache_loaded = true;
         m_thumbs_asked.clear();
         write_atomic(fs::path(cache_dir(id)) / "items.json", Vendors::cache_to_json(c->cache).dump());
+    } else if (plan.needs_full) {
+        ensure_cache(*c);
+        c->cache.needs_full = true;
+        write_atomic(fs::path(cache_dir(id)) / "items.json", Vendors::cache_to_json(c->cache).dump(-1, ' ', false, json::error_handler_t::replace));
     }
     save_specs();
     send_state();
     BOOST_LOG_TRIVIAL(info) << "HomeVendors: connector " << id << " updated by an import; kept " << plan.keep_slots.size()
                             << " secret(s), forgot " << plan.drop_slots.size() << (plan.reset_cache ? ", cleared its list" : "");
-    notice(plan.reset_cache ? _u8L("Connector updated. Refresh to fetch with the updated connector.") :
+    notice(plan.reset_cache ? _u8L("Connector updated. Fetch Changes to fetch with the updated connector.") :
+           plan.needs_full  ? _u8L("Connector updated. Settings changed: the next Fetch Changes reads every model again.") :
                               _u8L("Connector updated. Its saved credentials and fetched list are kept."));
 }
 

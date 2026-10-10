@@ -167,9 +167,14 @@ struct UpdatePlan
     std::string              old_origin, new_origin;
     std::vector<std::string> keep_slots;               // secret_slots() keys that stay stored
     std::vector<std::string> drop_slots;               // keys whose slot is gone or now asks for something else: forget them
-    bool                     reset_cache { false };    // the fetched list no longer fits: drop it
+    bool                     reset_cache { false };    // it reads another list (address, list path, items, query): drop what was fetched
+    bool                     needs_full { false };     // needs_full_fetch(old, imported)
 };
 UpdatePlan plan_update(const Spec& old_spec, const Spec& imported);
+// True when changing `old_spec` into `now` changes how items are read from the same answers (address,
+// list, paging, since, fields, files, download, licence): what was fetched must be read again, in full.
+// Credentials, sign-in, headers, quota and the name do not.
+bool needs_full_fetch(const Spec& old_spec, const Spec& now);
 
 struct SubItem
 {
@@ -207,6 +212,9 @@ struct Cache
     int64_t           synced_at { 0 };
     Quota             quota;
     std::string       last_error;
+    // The connector's settings changed in a way that affects how items are read: the next sync
+    // fetches every model again (an incremental one would keep the old reading of unchanged ones).
+    bool needs_full { false };
 };
 nlohmann::json cache_to_json(const Cache& c);
 Cache          cache_from_json(const nlohmann::json& j);

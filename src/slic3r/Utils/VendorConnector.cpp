@@ -775,7 +775,7 @@ json cache_to_json(const Cache& c)
     return {{"version", 1},        {"items", items},
             {"since", c.since},    {"synced_at", c.synced_at},
             {"quota", {{"used", c.quota.used}, {"limit", c.quota.limit}, {"resets", c.quota.resets}}},
-            {"last_error", c.last_error}};
+            {"last_error", c.last_error}, {"needs_full", c.needs_full}};
 }
 
 Cache cache_from_json(const json& j)
@@ -792,6 +792,7 @@ Cache cache_from_json(const json& j)
     c.since      = get_or<std::string>(j, "since", "");
     c.synced_at  = get_or<int64_t>(j, "synced_at", 0);
     c.last_error = get_or<std::string>(j, "last_error", "");
+    c.needs_full = j.contains("needs_full") && j["needs_full"].is_boolean() && j["needs_full"].get<bool>();
     const json q = j.contains("quota") ? j["quota"] : json::object();
     c.quota.used   = get_or<std::string>(q, "used", "");
     c.quota.limit  = get_or<std::string>(q, "limit", "");
@@ -871,7 +872,7 @@ SyncResult sync(const Spec& spec, const Secrets& secrets, const Cache& previous,
     SyncResult result;
     result.cache            = previous;
     result.cache.last_error = std::string();
-    const bool  incremental = !options.full && !spec.since_param.empty() && !previous.since.empty() && !previous.items.empty();
+    const bool  incremental = !options.full && !previous.needs_full && !spec.since_param.empty() && !previous.since.empty() && !previous.items.empty();
     const std::string since = incremental ? previous.since : std::string();
 
     Pager             pager(spec);
@@ -961,8 +962,11 @@ SyncResult sync(const Spec& spec, const Secrets& secrets, const Cache& previous,
         }
     }
     // The newest change seen only moves on when the whole list came through.
-    if (done)
+    if (done) {
         result.cache.since = newest;
+        if (!incremental)
+            result.cache.needs_full = false; // every model was read again
+    }
     result.cache.synced_at  = now;
     result.cache.last_error = result.error;
     result.ok               = done;
@@ -1379,14 +1383,21 @@ std::vector<size_t> find_matching(const std::vector<Spec>& existing, const Spec&
     return out;
 }
 
-// Everything a fetched list depends on: when any of it changes, what was fetched no longer fits.
-static bool list_definition_differs(const Spec& a, const Spec& b)
+// Where the list comes from: when this changes, what was fetched belongs to another list.
+static bool list_source_differs(const Spec& a, const Spec& b)
 {
-    return a.base_url != b.base_url || a.license != b.license || a.list_path != b.list_path || a.list_query != b.list_query ||
-           a.items_path != b.items_path || a.paging != b.paging || a.page_param != b.page_param || a.page_start != b.page_start ||
+    return a.base_url != b.base_url || a.list_path != b.list_path || a.list_query != b.list_query || a.items_path != b.items_path;
+}
+
+// Everything that decides how items are read from the answers.
+bool needs_full_fetch(const Spec& a, const Spec& b)
+{
+    return list_source_differs(a, b) || a.license != b.license || a.paging != b.paging || a.page_param != b.page_param || a.page_start != b.page_start ||
            a.size_param != b.size_param || a.page_size != b.page_size || a.has_more_path != b.has_more_path ||
            a.total_path != b.total_path || a.cursor_path != b.cursor_path || a.since_param != b.since_param ||
-           a.since_field != b.since_field || a.fields != b.fields || a.subs_path != b.subs_path || a.sub_fields != b.sub_fields;
+           a.since_field != b.since_field || a.fields != b.fields || a.subs_path != b.subs_path || a.sub_fields != b.sub_fields ||
+           a.download_path != b.download_path || a.download_url_path != b.download_url_path ||
+           a.download_direct_field != b.download_direct_field;
 }
 
 UpdatePlan plan_update(const Spec& old_spec, const Spec& imported)
@@ -1400,7 +1411,8 @@ UpdatePlan plan_update(const Spec& old_spec, const Spec& imported)
     const auto now = secret_slots(imported);
     for (const auto& old : secret_slots(old_spec))
         (std::find(now.begin(), now.end(), old) != now.end() ? p.keep_slots : p.drop_slots).push_back(old.first);
-    p.reset_cache = list_definition_differs(old_spec, imported);
+    p.reset_cache = list_source_differs(old_spec, imported);
+    p.needs_full  = needs_full_fetch(old_spec, imported);
     return p;
 }
 

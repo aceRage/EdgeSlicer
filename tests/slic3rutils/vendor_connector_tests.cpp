@@ -1210,34 +1210,107 @@ TEST_CASE("vendors: what an update keeps, forgets and clears", "[Vendors]")
         CHECK(p.keep_slots == std::vector<std::string> { "auth" });
         CHECK(p.drop_slots.empty());
     }
-    SECTION("the fetched list is cleared only when what it depends on changed")
+    SECTION("the fetched list is dropped when it comes from another list, read again in full when it is read differently")
     {
+        const auto with_key = [](const std::function<void(json&)>& change) {
+            return spec_with([&](json& j) { change(j); j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); });
+        };
         for (const std::function<void(json&)>& change : std::vector<std::function<void(json&)>> {
                  [](json& j) { j["list"]["path"] = "/api/v2/library"; },
                  [](json& j) { j["list"]["items"] = "results"; },
                  [](json& j) { j["list"]["query"] = {{"sort", "name"}}; },
+             }) {
+            const UpdatePlan p = plan_update(old, with_key(change));
+            CHECK(p.reset_cache);
+            CHECK(p.needs_full);
+        }
+        for (const std::function<void(json&)>& change : std::vector<std::function<void(json&)>> {
                  [](json& j) { j["list"]["paging"]["type"] = "offset"; },
                  [](json& j) { j["list"]["paging"]["size"] = 50; },
                  [](json& j) { j["list"]["since"] = {{"param", ""}, {"field", ""}}; },
                  [](json& j) { j["fields"]["name"] = "title"; },
+                 [](json& j) { j["fields"]["page_url"] = "https://www.cpl3d.com/dashboard/models/{type}/{slug}"; },
                  [](json& j) { j["files"]["path"] = "versions"; },
                  [](json& j) { j["files"]["fields"]["size"] = "bytes"; },
                  [](json& j) { j["license"] = "Commercial"; },
+                 [](json& j) { j["download"]["path"] = "/api/v2/download/{sub.id}"; },
+                 [](json& j) { j["download"]["direct_field"] = "file_url"; },
              }) {
-            const Spec in = spec_with([&](json& j) { change(j); j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); });
-            CHECK(plan_update(old, in).reset_cache);
+            const UpdatePlan p = plan_update(old, with_key(change));
+            CHECK_FALSE(p.reset_cache);
+            CHECK(p.needs_full);
         }
         for (const std::function<void(json&)>& change : std::vector<std::function<void(json&)>> {
                  [](json& j) { j["name"] = "CPL3D (renamed)"; },
-                 [](json& j) { j["download"]["path"] = "/api/v2/download/{sub.id}"; },
                  [](json& j) { j["download"]["limited"] = false; },
                  [](json& j) { j["quota"]["limit"] = "X-Other-Limit"; },
-                 [](json& j) { j["download"]["direct_field"] = "file_url"; },
              }) {
-            const Spec in = spec_with([&](json& j) { change(j); j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); });
-            CHECK_FALSE(plan_update(old, in).reset_cache);
+            const UpdatePlan p = plan_update(old, with_key(change));
+            CHECK_FALSE(p.reset_cache);
+            CHECK_FALSE(p.needs_full);
         }
     }
+}
+
+TEST_CASE("vendors: which settings changes need a full fetch", "[Vendors]")
+{
+    const Spec base = cpl3d();
+    CHECK_FALSE(needs_full_fetch(base, base));
+    // only credentials and what carries them: no
+    CHECK_FALSE(needs_full_fetch(base, spec_with([](json& j) { j["auth"] = {{"type", "header"}, {"name", "X-Api-Key"}}; })));
+    CHECK_FALSE(needs_full_fetch(base, spec_with([](json& j) { j["auth"] = {{"type", "none"}}; })));
+    CHECK_FALSE(needs_full_fetch(base, spec_with([](json& j) { j["headers"] = json::array({{{"name", "X-App-Key"}, {"secret", true}}}); })));
+    CHECK_FALSE(needs_full_fetch(base, spec_with([](json& j) { j["headers"] = json::array({{{"name", "X-Client"}, {"value", "EdgeSlicer"}}}); })));
+    CHECK_FALSE(needs_full_fetch(base, spec_with([](json& j) { j["name"] = "Mine"; j["vendor"] = "Somebody"; })));
+    CHECK_FALSE(needs_full_fetch(base, spec_with([](json& j) { j["quota"] = {{"used", ""}, {"limit", ""}, {"resets", ""}}; })));
+    CHECK_FALSE(needs_full_fetch(base, spec_with([](json& j) { j["download"]["limited"] = false; })));
+    // how items are read: yes
+    CHECK(needs_full_fetch(base, spec_with([](json& j) { j["base_url"] = "https://api.cpl3d.example"; })));
+    CHECK(needs_full_fetch(base, spec_with([](json& j) { j["fields"]["page_url"] = "https://www.cpl3d.com/m/{type}/{slug}"; })));
+    CHECK(needs_full_fetch(base, spec_with([](json& j) { j["files"]["fields"]["variant"] = "kind"; })));
+    CHECK(needs_full_fetch(base, spec_with([](json& j) { j["download"]["url_field"] = "link"; })));
+    CHECK(needs_full_fetch(base, spec_with([](json& j) { j["list"]["paging"]["has_more"] = ""; j["list"]["paging"]["total"] = "total"; })));
+}
+
+TEST_CASE("vendors: a sync after a settings change reads every model again", "[Vendors]")
+{
+    const Spec        s = spec_from_json(cpl3d_spec_json());
+    FakeVendor        vendor(5);
+    std::atomic<bool> cancel { false };
+    HttpFn            http = [&vendor](const Request& r) { return vendor(r); };
+
+    SyncResult first = sync(s, cpl3d_secrets(), Cache(), http, cancel, 1000);
+    REQUIRE(first.ok);
+    CHECK_FALSE(first.cache.needs_full);
+
+    // Nothing changed on the vendor's side; the settings did. Marked, the next sync is not incremental
+    // (no updated_since) and replaces every item; it clears the mark.
+    Cache marked      = first.cache;
+    marked.needs_full = true;
+    vendor.log.clear();
+    SyncResult again = sync(s, cpl3d_secrets(), marked, http, cancel, 2000);
+    REQUIRE(again.ok);
+    CHECK(again.requests == 3);
+    CHECK(vendor.log[0].url.find("updated_since") == std::string::npos);
+    CHECK(again.cache.items.size() == 5);
+    CHECK_FALSE(again.cache.needs_full);
+
+    // Without the mark the same state is incremental, and a failed or partial sync keeps the mark.
+    vendor.log.clear();
+    SyncResult incremental = sync(s, cpl3d_secrets(), first.cache, http, cancel, 3000);
+    CHECK(vendor.log[0].url.find("updated_since") != std::string::npos);
+    CHECK_FALSE(incremental.cache.needs_full);
+    FakeVendor down(5);
+    down.fail_status = 500;
+    HttpFn broken   = [&down](const Request& r) { return down(r); };
+    SyncResult failed = sync(s, cpl3d_secrets(), marked, broken, cancel, 4000);
+    CHECK_FALSE(failed.ok);
+    CHECK(failed.cache.needs_full);
+
+    // The mark survives the cache file.
+    CHECK(cache_from_json(json::parse(cache_to_json(marked).dump())).needs_full);
+    CHECK_FALSE(cache_from_json(json::parse(cache_to_json(first.cache).dump())).needs_full);
+    CHECK_FALSE(cache_from_json(json::parse(R"({"items":[],"needs_full":"yes"})")).needs_full);
 }
 
 TEST_CASE("vendors: the default name of a downloaded file never has a doubled extension", "[Vendors]")
