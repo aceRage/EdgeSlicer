@@ -60,6 +60,7 @@ add_executable(${_TEST_NAME}_tests
     instance_routing_tests.cpp
     startup_wizard_tests.cpp
     page_server_security_tests.cpp
+    login_result_page_tests.cpp
     sentry_scrub_tests.cpp
     login_diagnostics_tests.cpp
     dual_nozzle_layout_tests.cpp

@@ -4,12 +4,14 @@
 #include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
+#include <cctype>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <condition_variable>
 #include "GUI_App.hpp"
+#include "libslic3r/libslic3r.h"
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include  "sentry_wrapper/SentryWrapper.hpp"
@@ -1045,10 +1047,11 @@ std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const 
 
     // Ultra: third-party (Google/OAuth) ticket flow. The system browser lands on the
     // loopback with ?ticket=<t>&redirect_url=<url>; exchange the ticket for real tokens
-    // (upstream TicketLoginTask::do_request_login_info) and then redirect the browser to
-    // redirect_url with ?result=success / ?result=fail - upstream NEVER answers a
-    // well-formed ticket callback with a 404, even when the exchange fails, because the
-    // browser would then show a bare 404 page instead of bambulab's own failure page.
+    // (upstream TicketLoginTask::do_request_login_info). Upstream then redirects the browser
+    // to redirect_url?result=success|fail, Bambu's studio-callback page, which hands off to
+    // Bambu Studio's URL scheme; EdgeSlicer does not register that scheme, so the browser
+    // ended on an error ("the address is invalid" in Safari). We answer with our own result
+    // page instead (ResponseLoginResult), success or failure, and never with a 404.
     const bool has_ticket = boost::contains(url, "ticket");
     if (access_token.empty() && agent && has_ticket) {
         std::string  ticket  = url_get_param(url, "ticket");
@@ -1105,7 +1108,8 @@ std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const 
             j["data"]["user"]["account"]    = user_account;
             j["data"]["user"]["avatar"]     = user_avatar;
             agent->change_user(j.dump());
-            if (agent->is_user_login()) {
+            const bool signed_in = agent->is_user_login();
+            if (signed_in) {
                 //wxGetApp().request_user_login(1);
                 // Ultra P4: the stock post-login trigger is gone, so kick cloud device
                 // discovery ourselves so My Devices populates after OAuth login. (Kept in
@@ -1113,24 +1117,19 @@ std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const 
                 wxGetApp().kick_user_device_refresh();
             }
             GUI::wxGetApp().CallAfter([] { wxGetApp().ShowUserLogin(false); });
-            std::string location_str = (boost::format("%1%?result=success") % redirect_url).str();
-            return std::make_shared<ResponseRedirect>(location_str);
+            BOOST_LOG_TRIVIAL(info) << "thirdparty_login: " << (signed_in ? "signed in" : "account not accepted")
+                                    << ", answering with our result page";
+            return std::make_shared<ResponseLoginResult>(signed_in, signed_in ? std::string() : "account_not_accepted");
         } else {
-            std::string error_str    = "get_user_profile_error_" + std::to_string(result);
-            std::string location_str = (boost::format("%1%?result=fail&error=%2%") % redirect_url % error_str).str();
-            return std::make_shared<ResponseRedirect>(location_str);
+            BOOST_LOG_TRIVIAL(info) << "thirdparty_login: profile request failed (" << result << "), answering with our failure page";
+            return std::make_shared<ResponseLoginResult>(false, "get_user_profile_error_" + std::to_string(result));
         }
-    } else if (has_ticket && !redirect_url.empty()) {
-        // Ticket exchange failed (bad/expired ticket, network, agent missing). Upstream
-        // answers this with a 302 to redirect_url?result=fail, not a 404.
-        BOOST_LOG_TRIVIAL(info) << "thirdparty_login: ticket exchange failed, redirecting with result=fail";
-        std::string location_str = (boost::format("%1%?result=fail&error=ticket_exchange_failed") % redirect_url).str();
-        return std::make_shared<ResponseRedirect>(location_str);
     } else if (has_ticket) {
-        // A ticket arrived but no redirect_url to send the browser back to; show a plain
-        // failure page rather than a 404 so the user sees why nothing happened.
-        BOOST_LOG_TRIVIAL(info) << "thirdparty_login: ticket present but redirect_url missing";
-        return std::make_shared<ResponseLoginFailed>();
+        // Ticket exchange failed (bad/expired ticket, network, agent missing), with or without
+        // a redirect_url: our failure page, not a 404.
+        BOOST_LOG_TRIVIAL(info) << "thirdparty_login: ticket exchange failed, answering with our failure page"
+                                << (redirect_url.empty() ? " (no redirect_url)" : "");
+        return std::make_shared<ResponseLoginResult>(false, "ticket_exchange_failed");
     } else {
         return std::make_shared<ResponseNotFound>();
     }
@@ -1247,13 +1246,55 @@ void HttpServer::ResponseRedirect::write_response(std::stringstream& ssOut)
     ssOut << sHTML;                                          // 响应体（长度必须匹配）
 }
 
-void HttpServer::ResponseLoginFailed::write_response(std::stringstream& ssOut)
+std::string HttpServer::ResponseLoginResult::page_html(bool success, const std::string& error)
 {
-    const std::string sHTML = "<html><body><h1>Sign-in failed</h1>"
-                              "<p>The sign-in could not be completed. You can close this page and try again "
-                              "in the slicer.</p></body></html>";
+    std::string code;
+    for (char c : error)
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')
+            code += c;
+    if (code.size() > 64)
+        code.resize(64);
+
+    const std::string app = SLIC3R_APP_FULL_NAME;
+    const std::string title   = success ? "Signed in to Bambu Lab" : "Bambu Lab sign-in did not complete";
+    const std::string message = success ? app + " is signed in to your Bambu Lab account. You can close this tab and "
+                                                "return to " + app + "."
+                                        : app + " could not finish signing in to your Bambu Lab account. Close this "
+                                                "tab and sign in again from " + app + ".";
+    std::string html =
+        "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>" + title + " - " + app + "</title><style>"
+        ":root{color-scheme:light dark;--bg:#f4f5f7;--card:#fff;--text:#1f2328;--muted:#59636e;"
+        "--ok:#1a7f37;--fail:#cf222e;--line:#d1d9e0}"
+        "@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--text:#e6edf3;"
+        "--muted:#9198a1;--ok:#3fb950;--fail:#f85149;--line:#30363d}}"
+        "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
+        "background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,BlinkMacSystemFont,"
+        "\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif}"
+        "main{box-sizing:border-box;max-width:440px;margin:16px;padding:32px;background:var(--card);"
+        "border:1px solid var(--line);border-radius:12px;text-align:center}"
+        ".mark{width:56px;height:56px;margin:0 auto 16px;border-radius:50%;display:flex;"
+        "align-items:center;justify-content:center;font-size:30px;color:#fff;background:var(--ok)}"
+        ".mark.fail{background:var(--fail)}h1{font-size:20px;margin:0 0 8px}p{margin:0;color:var(--muted)}"
+        "code{font-size:13px}.detail{margin-top:16px}</style></head><body><main>"
+        "<div class=\"mark" + std::string(success ? "" : " fail") + "\" aria-hidden=\"true\">" +
+        (success ? "&#10003;" : "&#10007;") + "</div>"
+        "<h1>" + title + "</h1><p>" + message + "</p>";
+    if (!success && !code.empty())
+        html += "<p class=\"detail\">Details: <code>" + code + "</code></p>";
+    html += "</main></body></html>\n";
+    return html;
+}
+
+void HttpServer::ResponseLoginResult::write_response(std::stringstream& ssOut)
+{
+    const std::string sHTML = page_html(m_success, m_error);
     write_head(ssOut, 200, "OK");
-    ssOut << "Content-Type: text/html\r\n";
+    ssOut << "Content-Type: text/html; charset=utf-8\r\n";
+    // The callback URL carried the sign-in ticket in its query string.
+    ssOut << "Cache-Control: no-store\r\n";
+    ssOut << "Referrer-Policy: no-referrer\r\n";
     ssOut << "Content-Length: " << sHTML.size() << "\r\n";
     ssOut << "\r\n";
     ssOut << sHTML;
