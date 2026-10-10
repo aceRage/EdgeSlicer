@@ -11,8 +11,10 @@
 // one below, and printed as support material, so they use the support filament, speed and flow,
 // and break off at the pinpoint touch.
 //
-// They are an addition to the normal or tree supports: they run in the support step, only for
-// objects with supports enabled, and they never replace what those generators made.
+// They are an addition to the normal or tree supports, never a replacement: they run at the end of
+// the support step and never replace what those generators made. They do not need Enable supports
+// either: with supports off the step makes no support, interface or raft at all and the stabilizers
+// insert their own support layers (at the object's layer heights) to carry the extrusions.
 //
 // Painted stabilizer points: the user can paint spots on a part (paint-on supports, state
 // EnforcerBlockerType::STABILIZER) where a strut must always touch, whatever the ring settings say.
@@ -337,7 +339,8 @@ std::vector<ExPolygons> sparse_infill_areas(const std::vector<ExPolygons> &slice
 
 // Generates the stabilizers for `object` and adds them to its support layers, inserting support
 // layers at object layer heights where none exist. No-op unless the object's stabilizer_supports
-// option is on. Must run after the regular support generator, inside the support step. Returns what
+// option is on. Must run after the regular support generator (when there is one: not with supports
+// off), inside the support step. Returns what
 // the planner did with the painted points, so the caller can warn about the unreachable ones.
 stabilizers::PlanReport generate_stabilizer_supports(PrintObject &object, const std::function<void()> &throw_if_canceled);
 

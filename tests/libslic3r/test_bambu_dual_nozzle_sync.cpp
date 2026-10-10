@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/BambuDualNozzleSync.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/BambuNozzleMappingRequest.hpp"
 
 #include "nlohmann/json.hpp"
@@ -523,4 +524,156 @@ TEST_CASE("Only printers with a nozzle rack are asked for a nozzle mapping", "[D
     QueryConditions single = h2c;
     single.dual_nozzle_preset = false;
     CHECK_FALSE(query_applies(single));
+}
+
+// ---------------------------------------------------------------------------------------------
+// External spools on a two-extruder printer (2026-10-09, an X2D user's report): one extruder fed
+// from an AMS, the other from its own external spool holder. Made-up report in the shape the
+// printer pushes (print.ams[].info carries the AMS's extruder, print.vir_slot[] the two holders,
+// id "255" = main/right, "254" = deputy/left); no real serials.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// An X2D (model code N6): a one-slot AMS HT on the left extruder (physical 1) with beige PLA,
+// nothing on the right extruder but a red PLA spool on the right external holder (vir_slot 255),
+// and an empty left holder (vir_slot 254 reported without a spool, so no tray).
+PrinterState x2d_ext_state()
+{
+    PrinterState s;
+    s.dev_id                = "X2DTEST0000001";
+    s.printer_type          = "N6";
+    s.has_report            = true;
+    s.physical_extruder_map = H2_MAP;
+    s.ams.push_back({ 128, 1, 1, { tray(128, 0, "CBC6B8FF") } });
+    s.ams.push_back({ 255, 0, 1, { tray(255, 0, "C12E1FFF") } });
+    s.ams.push_back({ 254, 1, 1, {} });
+    s.nozzles = { nozzle(0), nozzle(1) };
+    return s;
+}
+
+std::vector<ProjectFilament> x2d_used()
+{
+    return { { 0, "#CBC6B8", "PLA", "GFA00" }, { 1, "#C12E1F", "PLA", "GFA00" } };
+}
+
+} // namespace
+
+TEST_CASE("An extruder's external spool is a tray of that extruder", "[DualNozzleSync][ExternalSpool]")
+{
+    const PrinterState s = x2d_ext_state();
+
+    // Not an AMS: extruder_ams_count stays what the printer's AMS units make it (the X2D user's log
+    // showed exactly ["1#1|4#0", "1#0|4#0"]).
+    CHECK(extruder_ams_count_strings(s, 2) == std::vector<std::string>{ "1#1|4#0", "1#0|4#0" });
+
+    const std::vector<Tray> left  = trays_for_extruder(s, 0);
+    const std::vector<Tray> right = trays_for_extruder(s, 1);
+    REQUIRE(left.size() == 1);
+    CHECK(left[0].ams_id == 128); // the empty left holder offers nothing
+    REQUIRE(right.size() == 1);
+    CHECK(right[0].ams_id == 255);
+    CHECK(right[0].slot_id == 0);
+
+    CHECK(s.has_loaded_ams_tray(0));
+    CHECK_FALSE(s.has_loaded_ams_tray(1));
+
+    // AMS trays are listed before an extruder's external spool.
+    PrinterState h2d = h2d_state();
+    h2d.ams.insert(h2d.ams.begin(), AmsUnit{ 255, 0, 1, { tray(255, 0, "00FF00FF") } });
+    const std::vector<Tray> h2d_right = trays_for_extruder(h2d, 1);
+    REQUIRE(h2d_right.size() == 3);
+    CHECK(h2d_right[0].ams_id == 0);
+    CHECK(h2d_right[2].ams_id == 255);
+}
+
+TEST_CASE("The pre-fill uses an extruder's external spool when it has no AMS", "[DualNozzleSync][ExternalSpool]")
+{
+    const PrinterState s = x2d_ext_state();
+
+    // Both filaments start on the left (the user's first slice: filament_map 1 1).
+    const Arrangement arr = propose_arrangement(s, x2d_used(), 5, { 1, 1, 1, 1, 1 });
+    CHECK(arr.filament_map == std::vector<int>{ 1, 2, 1, 1, 1 });
+    REQUIRE(arr.trays.count(0));
+    CHECK(arr.trays.at(0) == TrayRef{ 128, 0 });
+    REQUIRE(arr.trays.count(1));
+    CHECK(arr.trays.at(1) == TrayRef{ 255, 0 });
+    CHECK(validate_arrangement(arr, s, x2d_used(), 2).empty());
+    // Spools on both sides, so the one-side hint has something to say.
+    Arrangement one_side = arr;
+    one_side.filament_map[1] = 1;
+    CHECK(all_on_one_side_with_trays_on_both(one_side, s, x2d_used()));
+
+    // An extruder that has an AMS does not get its external spool automatically, however close the
+    // colour (BambuStudio maps an external spool only for an extruder without an AMS) - but it is
+    // still offered for a manual pick.
+    PrinterState h2d = h2d_state();
+    h2d.ams.push_back({ 255, 0, 1, { tray(255, 0, "00FF00FF") } });
+    const std::vector<ProjectFilament> green{ { 0, "#00FF00", "PLA", "GFA00" } };
+    const Arrangement h2d_arr = propose_arrangement(h2d, green, 1, { 2 });
+    REQUIRE(h2d_arr.trays.count(0));
+    CHECK_FALSE(BambuExtruderMap::is_external_spool_ams_id(h2d_arr.trays.at(0).ams_id));
+    Arrangement manual = h2d_arr;
+    manual.filament_map    = { 2 };
+    manual.trays[0]        = TrayRef{ 255, 0 };
+    CHECK(validate_arrangement(manual, h2d, green, 2).empty());
+}
+
+TEST_CASE("A filament may only take its own extruder's external spool", "[DualNozzleSync][ExternalSpool]")
+{
+    PrinterState s = x2d_ext_state();
+    s.ams[2].trays.push_back(tray(254, 0, "000000FF")); // a spool on the left holder too
+
+    Arrangement arr;
+    arr.filament_map = { 1, 2 };
+    arr.trays[0]     = TrayRef{ 128, 0 };
+    arr.trays[1]     = TrayRef{ 254, 0 }; // filament 2 prints on the right, Ext-L feeds the left
+    const auto issues = validate_arrangement(arr, s, x2d_used(), 2);
+    REQUIRE(issues.size() == 1);
+    CHECK(issues[0].kind == Issue::Kind::TrayOnOtherExtruder);
+    CHECK(issues[0].filament == 1);
+
+    arr.trays[1] = TrayRef{ 255, 0 };
+    CHECK(validate_arrangement(arr, s, x2d_used(), 2).empty());
+
+    // The spool taken off the right holder: the confirmed tray is missing.
+    PrinterState unloaded = x2d_ext_state();
+    unloaded.ams[1].trays.clear();
+    const auto missing = validate_arrangement(arr, unloaded, x2d_used(), 2);
+    REQUIRE(missing.size() == 1);
+    CHECK(missing[0].kind == Issue::Kind::TrayMissing);
+}
+
+TEST_CASE("A loaded external spool is part of the printer state an arrangement was confirmed for", "[DualNozzleSync][ExternalSpool]")
+{
+    // An empty holder changes nothing: AMS-only printers keep the fingerprint they had.
+    PrinterState plain = h2d_state();
+    PrinterState empty_holders = h2d_state();
+    empty_holders.ams.push_back({ 254, 1, 1, {} });
+    empty_holders.ams.push_back({ 255, 0, 1, {} });
+    CHECK(state_fingerprint(plain) == state_fingerprint(empty_holders));
+
+    // A spool on a holder, or a different one, does change it.
+    const PrinterState x2d = x2d_ext_state();
+    PrinterState       other_colour = x2d_ext_state();
+    other_colour.ams[1].trays[0].color = "0000FFFF";
+    CHECK(state_fingerprint(x2d) != state_fingerprint(other_colour));
+    PrinterState unloaded = x2d_ext_state();
+    unloaded.ams[1].trays.clear();
+    CHECK(state_fingerprint(x2d) != state_fingerprint(unloaded));
+
+    // A confirmation naming the external spool survives the project file round trip.
+    Confirmation c;
+    c.dev_id       = x2d.dev_id;
+    c.synced       = true;
+    c.state_fp     = state_fingerprint(x2d);
+    c.filaments_fp = filaments_fingerprint(x2d_used());
+    c.filament_map = { 1, 2 };
+    c.trays[0]     = TrayRef{ 128, 0 };
+    c.trays[1]     = TrayRef{ 255, 0 };
+    const Confirmation back = Confirmation::deserialize(c.serialize());
+    REQUIRE(back.trays.count(1));
+    CHECK(back.trays.at(1) == TrayRef{ 255, 0 });
+    CHECK(needs_confirmation(back, x2d, x2d_used(), { 1, 2 }) == ConfirmReason::None);
+    CHECK(needs_confirmation(back, other_colour, x2d_used(), { 1, 2 }) == ConfirmReason::PrinterStateChanged);
 }

@@ -14485,6 +14485,12 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
     int nozzles = 0;
     for (auto& kv : obj->amsList)
         if (kv.second) nozzles = std::max(nozzles, kv.second->nozzle + 1);
+    // A two-extruder printer whose only AMS feeds one extruder while the other is fed from its
+    // external spool (an X2D, 2026-10-09) has two extruders to group for, not one. Without a loaded
+    // external spool this stays what it was.
+    if (obj->is_multi_extruders())
+        for (AmsTray ext : obj->external_spools())
+            if (ext.is_tray_info_ready()) nozzles = std::max(nozzles, 2);
     if (nozzles < 2) return infos;
     infos.resize(nozzles);
     std::vector<std::map<int, int>> cap_per_noz(nozzles); // logical extruder -> map<bank_slot_count, num_banks>
@@ -14515,6 +14521,23 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
             cfg.set_key_value("tray_name",       new ConfigOptionStrings{ tray_name });
             infos[nz].push_back(std::move(cfg));
         }
+    }
+    // Each extruder's external spool, named "Ext" as BambuStudio's build_filament_ams_list names
+    // it: the grouping (FilamentGroupUtils::build_machine_filaments) offers it for an extruder that
+    // has no AMS filament, so a match-mode slice can put a filament on the extruder whose spool
+    // holder carries it. Not an AMS: it adds nothing to the slot budget below.
+    for (AmsTray ext : obj->external_spools()) {
+        const int ext_id = atoi(ext.id.c_str());
+        const int physical = BambuExtruderMap::external_spool_physical_extruder(ext_id);
+        if (physical < 0 || !ext.is_tray_info_ready()) continue;
+        const int nz = BambuExtruderMap::physical_to_logical(physical_extruder_map, physical);
+        if (nz < 0 || nz >= nozzles) continue;
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("filament_type",   new ConfigOptionStrings{ ext.get_filament_type() });
+        cfg.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + ext.color).GetAsString(wxC2S_HTML_SYNTAX)) });
+        cfg.set_key_value("filament_id",     new ConfigOptionStrings{ ext.setting_id });
+        cfg.set_key_value("tray_name",       new ConfigOptionStrings{ BambuExtruderMap::tray_name(ext_id, 0) });
+        infos[nz].push_back(std::move(cfg));
     }
     if (out_ams_count) {
         out_ams_count->assign(nozzles, "");
@@ -17355,47 +17378,30 @@ void Plater::priv::on_filament_color_changed(wxCommandEvent &event)
 
 void Plater::priv::install_network_plugin(wxCommandEvent &event)
 {
-    // Ultra (plug-in guards): the Device tab's "install network plugin" link. Our own plug-in is
-    // already there in that case, and this dialog would download Bambu's package over it.
-    if (wxGetApp().is_ultranet_plugin_installed()) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Device-tab install link ignored)";
-        return;
-    }
-    wxGetApp().ShowDownNetPluginDlg();
-    return;
+    // The Device tab's "install network plugin" link. There is no download any more (EdgeSlicer
+    // never fetches Bambu's plug-in); the link just says the plug-in is missing, and is silent when
+    // our own plug-in is installed.
+    wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true);
 }
 
 void Plater::priv::update_plugin_when_launch(wxCommandEvent &event)
 {
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto cache_folder = data_dir_path / "ota";
-    std::string changelog_file = cache_folder.string() + "/network_plugins.json";
-
-    UpdatePluginDialog dlg(wxGetApp().mainframe);
-    dlg.update_info(changelog_file);
-    auto result = dlg.ShowModal();
-
-    auto app_config = wxGetApp().app_config;
-    if (!app_config) return;
-
-    if (result == wxID_OK) {
-        app_config->set("update_network_plugin", "true");
-    }
-    else if (result == wxID_NO) {
+    // The old "new network plug-in available" prompt. Nothing raises it any more (the Bambu update
+    // check is gone) and a Bambu plug-in is never installed, so this only makes sure a stale
+    // request cannot start a download.
+    if (auto app_config = wxGetApp().app_config)
         app_config->set("update_network_plugin", "false");
-    }
 }
 
 void Plater::priv::show_install_plugin_hint(wxCommandEvent &event)
 {
-    // Ultra (plug-in guards): the notification's only action is the Bambu CDN download, so it is
-    // pointless (and would overwrite our plug-in) once UltraNet is installed.
+    // With our own plug-in installed there is nothing to say. Otherwise the plug-in is missing from
+    // this install; the notification carries the explanation and no download link.
     if (wxGetApp().is_ultranet_plugin_installed()) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install-plugin hint suppressed)";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, install-plugin hint suppressed";
         return;
     }
-    notification_manager->bbl_show_plugin_install_notification(into_u8(_L("Network Plug-in is not detected. Network related features are unavailable.")));
+    notification_manager->bbl_show_plugin_install_notification(into_u8(GUI_App::network_plugin_missing_text()));
 }
 
 void Plater::priv::show_preview_only_hint(wxCommandEvent &event)

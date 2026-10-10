@@ -1827,7 +1827,8 @@ int PresetCollection::get_differed_values_to_update(Preset& preset, std::map<std
             key_values[BBL_JSON_KEY_FILAMENT_ID] = preset.filament_id;
         }
     }
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " uploading user preset name is: " << preset.name << "and create filament_id is: " << preset.filament_id
+    // debug: the cloud preset sync retries on a timer, so this repeats for every unsynced user preset
+    BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << " uploading user preset name is: " << preset.name << "and create filament_id is: " << preset.filament_id
                             << " and base_id is: " << preset.base_id;
     key_values[BBL_JSON_KEY_UPDATE_TIME] = std::to_string(preset.updated_time);
     key_values[BBL_JSON_KEY_TYPE] = Preset::get_iot_type_string(preset.type);

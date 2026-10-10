@@ -11,6 +11,7 @@
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
 
 #include "GUI_App.hpp"
@@ -35,8 +36,6 @@
 #define CALI_DEBUG
 #define MINUTE_30 1800000    //ms
 #define TIME_OUT  5000       //ms
-
-#define ORCA_NETWORK_DEBUG
 
 namespace pt = boost::property_tree;
 
@@ -900,6 +899,41 @@ void MachineObject::get_ams_colors(std::vector<wxColour> &ams_colors) {
     }
 }
 
+std::vector<AmsTray> MachineObject::external_spools() const
+{
+    if (!is_multi_extruders())
+        return {};
+    if (!vir_slots.empty())
+        return vir_slots;
+    if (!ams_support_virtual_tray)
+        return {};
+    AmsTray main_slot = vt_tray;
+    main_slot.id      = std::to_string(BambuExtruderMap::external_spool_ams_id(0));
+    return { main_slot };
+}
+
+bool MachineObject::external_spool_mapping_info(int ext_ams_id, FilamentInfo &info) const
+{
+    if (!BambuExtruderMap::is_external_spool_ams_id(ext_ams_id))
+        return false;
+    for (AmsTray tray : external_spools()) {
+        if (atoi(tray.id.c_str()) != ext_ams_id || !tray.is_tray_info_ready())
+            continue;
+        info             = FilamentInfo();
+        info.id          = ext_ams_id;
+        info.tray_id     = ext_ams_id;
+        info.color       = tray.color;
+        info.type        = tray.get_filament_type();
+        info.filament_id = tray.setting_id;
+        info.ctype       = tray.ctype;
+        info.colors      = tray.cols;
+        info.ams_id      = std::to_string(ext_ams_id);
+        info.slot_id     = "0";
+        return true;
+    }
+    return false;
+}
+
 int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std::vector<FilamentInfo> &result, std::vector<int> exclude_id,
                                         int only_physical_extruder)
 {
@@ -944,6 +978,23 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
                 tray_filaments.emplace(std::make_pair(tray_index, info));
             }
         }
+    }
+
+    /* Two-extruder machine, one extruder's filaments: an extruder no AMS feeds prints from its own
+     * external spool holder (BambuStudio do_ams_mapping: use_left_ext = !has_left_ams, and the
+     * same for the right). Without this a filament sliced for such an extruder never got a tray,
+     * and the X2D with an AMS HT on the left and a spool on the right holder could not be sent
+     * (2026-10-09). An extruder that has an AMS keeps mapping against its AMS only; its external
+     * spool can still be picked by hand. Tray ids 254/255 cannot clash with an AMS tray index. */
+    if (only_physical_extruder >= 0 && is_multi_extruders()) {
+        bool extruder_has_ams = false;
+        for (const auto &ams : amsList)
+            if (ams.second && ams.second->nozzle == only_physical_extruder)
+                extruder_has_ams = true;
+        FilamentInfo ext_info;
+        const int    ext_id = BambuExtruderMap::external_spool_ams_id(only_physical_extruder);
+        if (!extruder_has_ams && external_spool_mapping_info(ext_id, ext_info))
+            tray_filaments.emplace(std::make_pair(ext_id, ext_info));
     }
 
     // tray info list
@@ -1193,7 +1244,12 @@ bool MachineObject::is_valid_mapping_result(std::vector<FilamentInfo>& result, b
         // invalid mapping result
         if (result[i].tray_id < 0)
             valid_ams_mapping_result = false;
-        else {
+        else if (is_multi_extruders() && result[i].tray_id == atoi(result[i].ams_id.c_str()) &&
+                 BambuExtruderMap::is_external_spool_ams_id(result[i].tray_id)) {
+            // A two-extruder printer's external spool holder (tray 254/255, ams_id "254"/"255"):
+            // not an AMS, valid as BambuStudio's is_valid_mapping_result accepts it. tray_id / 4
+            // below would look for "AMS 63" and throw the mapping away.
+        } else {
             int ams_id = result[i].tray_id / 4;
             auto ams_item = amsList.find(std::to_string(ams_id));
             if (ams_item == amsList.end()) {
@@ -1223,6 +1279,9 @@ bool MachineObject::is_mapping_exceed_filament(std::vector<FilamentInfo> & resul
 {
     bool is_exceed = false;
     for (int i = 0; i < result.size(); i++) {
+        if (is_multi_extruders() && result[i].tray_id == atoi(result[i].ams_id.c_str()) &&
+            BambuExtruderMap::is_external_spool_ams_id(result[i].tray_id))
+            continue; // an external spool holder, not an AMS slot (see is_valid_mapping_result)
         int ams_id = result[i].tray_id / 4;
         if (amsList.find(std::to_string(ams_id)) == amsList.end()) {
             exceed_index = result[i].tray_id;
@@ -3156,6 +3215,20 @@ int MachineObject::local_publish_json(std::string json_str, int qos, int flag)
     return result;
 }
 
+// Status pushes arrive every second or so per printer and several helpers below are re-run on each one, so a
+// message that describes a *condition* (not an event) would otherwise be repeated forever. log_first_time()
+// returns true only the first time a given key is seen in this session; callers log the first sighting at info
+// and every repeat at trace. The set is bounded so a pathological stream of distinct keys cannot grow it.
+static bool log_first_time(const std::string &key)
+{
+    static std::mutex s_mutex;
+    static std::set<std::string> s_seen;
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (s_seen.size() > 1024)
+        s_seen.clear();
+    return s_seen.insert(key).second;
+}
+
 std::string MachineObject::setting_id_to_type(std::string setting_id, std::string tray_type)
 {
     std::string type;
@@ -3174,7 +3247,12 @@ std::string MachineObject::setting_id_to_type(std::string setting_id, std::strin
 
     if (tray_type != type || type.empty()) {
         if (type.empty()) { type = tray_type; }
-        BOOST_LOG_TRIVIAL(info) << "The values of tray_info_idx and tray_type do not match tray_info_idx " << setting_id << " tray_type " << tray_type << " system_type" << type;
+        // Runs for every tray on every status push: info the first time this combination is seen, trace after.
+        const bool first = log_first_time("tray_mismatch|" + setting_id + "|" + tray_type + "|" + type);
+        if (first)
+            BOOST_LOG_TRIVIAL(info) << "The values of tray_info_idx and tray_type do not match tray_info_idx " << setting_id << " tray_type " << tray_type << " system_type" << type;
+        else
+            BOOST_LOG_TRIVIAL(trace) << "The values of tray_info_idx and tray_type do not match tray_info_idx " << setting_id << " tray_type " << tray_type << " system_type" << type;
     }
     return type;
 }
@@ -3189,10 +3267,12 @@ static ENUM enum_index_of(char const *key, char const **enum_names, int enum_cou
 
 int MachineObject::parse_json(std::string payload, bool key_field_only)
 {
-#ifdef ORCA_NETWORK_DEBUG
-    BOOST_LOG_TRIVIAL(info) << "parse_json: payload = " << payload;
-    flush_logs();
-#endif
+    // The full status JSON (several KB per push, per printer) is trace-only: at info it made up ~90% of a day's log.
+    // Set Preferences > Log level to "trace" to get it back. The per-message flush is only paid when it is wanted.
+    if (get_logging_level() >= 5) {
+        BOOST_LOG_TRIVIAL(trace) << "parse_json: payload = " << payload;
+        flush_logs();
+    }
 
     parse_msg_count++;
     std::chrono::system_clock::time_point clock_start = std::chrono::system_clock::now();
@@ -3225,6 +3305,20 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
         CNumericLocalesSetter locales_setter;
         if (j_pre.empty()) {
             return 0;
+        }
+        // One line per message that is not the periodic status push (acks, info replies, ...): which command,
+        // which sequence id, how big. The push_status stream itself is not logged at info.
+        if (get_logging_level() >= 3) {
+            for (auto it = j_pre.begin(); it != j_pre.end(); ++it) {
+                if (!it.value().is_object()) continue;
+                auto cmd = it.value().find("command");
+                if (cmd == it.value().end() || !cmd->is_string()) continue;
+                if (cmd->get<std::string>() == "push_status") continue;
+                auto seq = it.value().find("sequence_id");
+                BOOST_LOG_TRIVIAL(info) << "parse_json: dev " << dev_id << " " << it.key() << "/" << cmd->get<std::string>()
+                                        << " seq " << ((seq != it.value().end() && seq->is_string()) ? seq->get<std::string>() : std::string("-"))
+                                        << " (" << payload.size() << " bytes)";
+            }
         }
         if (j_pre.contains("print")) {
             if (m_active_state == NotActive) m_active_state = Active;
@@ -5466,11 +5560,11 @@ void MachineObject::update_model_task()
     if (!model_task) return;
     if (!subtask_) return;
     if (model_task->task_id != subtask_->task_id) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " times: " << request_model_result << " model_task_id !=subtask_id";
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << " times: " << request_model_result << " model_task_id !=subtask_id";
         return;
     }
     if (model_task->instance_id <= 0) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " times: " << request_model_result << " instance_id <= 0";
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << " times: " << request_model_result << " instance_id <= 0";
         return;
     }
 
@@ -5485,7 +5579,7 @@ void MachineObject::update_model_task()
             get_model_mall_result_need_retry = false;
         }
     } else {
-        BOOST_LOG_TRIVIAL(info) << "subtask_id_ no change and do not need retry";
+        BOOST_LOG_TRIVIAL(trace) << "subtask_id_ no change and do not need retry";
         return;
     }
 
@@ -5896,12 +5990,12 @@ void MachineObject::parse_new_info(json print)
         return;
     }
 
-    BOOST_LOG_TRIVIAL(info) << "using new print data for parsing";
+    BOOST_LOG_TRIVIAL(trace) << "using new print data for parsing";
 
     /*cfg*/
     std::string cfg = print["cfg"].get<std::string>();
 
-    BOOST_LOG_TRIVIAL(info) << "new print data cfg = " << cfg;
+    BOOST_LOG_TRIVIAL(trace) << "new print data cfg = " << cfg;
 
     if(!cfg.empty()){
         if (ams_user_setting_hold_count > 0) ams_user_setting_hold_count--;
@@ -5960,7 +6054,7 @@ void MachineObject::parse_new_info(json print)
 
     /*fun*/
     std::string fun = print["fun"].get<std::string>();
-    BOOST_LOG_TRIVIAL(info) << "new print data fun = " << fun;
+    BOOST_LOG_TRIVIAL(trace) << "new print data fun = " << fun;
 
     if (!fun.empty()) {
 
@@ -6004,7 +6098,7 @@ void MachineObject::parse_new_info(json print)
     /*aux*/
     std::string aux = print["aux"].get<std::string>();
 
-    BOOST_LOG_TRIVIAL(info) << "new print data aux = " << aux;
+    BOOST_LOG_TRIVIAL(trace) << "new print data aux = " << aux;
 
     if (!aux.empty()) {
          sdcard_state = MachineObject::SdcardState(get_flag_bits(aux, 12, 2));
@@ -6013,7 +6107,7 @@ void MachineObject::parse_new_info(json print)
     /*stat*/
     std::string stat = print["stat"].get<std::string>();
 
-    BOOST_LOG_TRIVIAL(info) << "new print data stat = " << stat;
+    BOOST_LOG_TRIVIAL(trace) << "new print data stat = " << stat;
 
     if (!stat.empty()) {
         camera_recording = get_flag_bits(stat, 7);
@@ -6319,7 +6413,7 @@ void MachineObject::update_filament_list()
 
 void MachineObject::update_printer_preset_name()
 {
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << "start update preset_name";
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << " " << __LINE__ << "start update preset_name";
     PresetBundle *     preset_bundle = Slic3r::GUI::wxGetApp().preset_bundle;
     if (!preset_bundle) return;
     auto               printer_model = MachineObject::get_preset_printer_model_name(this->printer_type);
@@ -6337,8 +6431,14 @@ void MachineObject::update_printer_preset_name()
             data.printer_preset_name = *printer_set.begin();
             m_nozzle_filament_data[nozzle_diameter_str] = data;
         }
-        else
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << " update printer preset name failed: "<< "printer_type: " << printer_type << "nozzle_diameter_str" << nozzle_diameter_str;
+        else {
+            // Same answer on every status push while no matching preset exists: info once per printer/nozzle, trace after.
+            const bool first = log_first_time("preset_name_failed|" + dev_id + "|" + printer_type + "|" + nozzle_diameter_str);
+            if (first)
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << " update printer preset name failed: "<< "printer_type: " << printer_type << "nozzle_diameter_str" << nozzle_diameter_str;
+            else
+                BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << " " << __LINE__ << " update printer preset name failed: "<< "printer_type: " << printer_type << "nozzle_diameter_str" << nozzle_diameter_str;
+        }
     }
 
     for (auto iter = m_nozzle_filament_data.begin(); iter != m_nozzle_filament_data.end();)

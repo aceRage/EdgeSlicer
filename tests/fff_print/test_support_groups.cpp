@@ -224,7 +224,7 @@ TEST_CASE("support_groups: a part asking for a soluble interface makes the whole
                         });
 
     // §3.6: the strictest group wins, object-wide, because support_top_z_distance also drives
-    // SlicingParameters::soluble_interface and bottom-surface classification.
+    // SlicingParameters::zero_gap_interface_* and bottom-surface classification.
     CHECK_THAT(first_object(print).config().support_top_z_distance.value, WithinAbs(0.0, 1e-9));
     CHECK(PrintObject::support_groups_want_soluble(*model.objects.front()));
 }
