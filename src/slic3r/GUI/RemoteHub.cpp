@@ -5949,7 +5949,7 @@ public:
     // may be gone by then, which is why it is looked up again rather than captured.
     void balloon(const std::string& title, const std::string& text, const std::string& severity)
     {
-        wxTaskBarIcon* self = this;
+        HubTaskBarIcon* self = this; // the concrete type: show_notification() is ours, not wxTaskBarIcon's
         const wxString t = wxString::FromUTF8(title), b = wxString::FromUTF8(text);
         const int      flags = severity == "error" ? wxICON_ERROR : severity == "warning" ? wxICON_WARNING : wxICON_INFORMATION;
         wxTheApp->CallAfter([self, t, b, flags]() {
