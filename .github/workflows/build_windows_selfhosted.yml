@@ -893,8 +893,9 @@ jobs:
         run: |
           set "PATH=%CMAKE_DIR%;%NSIS_DIR%;%PATH%"
           @rem When this run signs, the CPack hooks (configured by -DEDGESLICER_SIGN_WINDOWS=ON) copy the
-          @rem signed files of this tree into CPack's staging copy, verify it, and sign Uninstall.exe and
-          @rem the installer itself through makensis' !uninstfinalize / !finalize. Unused otherwise.
+          @rem signed files of this tree into CPack's staging copy, verify it, sign copies of the NSIS
+          @rem plug-ins for makensis to embed (the NSIS install is not touched), and sign Uninstall.exe
+          @rem and the installer itself through makensis' !uninstfinalize / !finalize. Unused otherwise.
           if "%EDGESLICER_SIGN_WINDOWS%"=="1" set "EDGESLICER_SIGNED_TREE=%GITHUB_WORKSPACE%\build\EdgeSlicer"
           cpack -G NSIS || exit /b 1
 
@@ -907,9 +908,10 @@ jobs:
       # Last check before anything is uploaded: the portable zip as it will be published, and the
       # installer itself plus everything 7-Zip unpacks from it. Uninstall.exe is not unpacked by
       # 7-Zip (NSIS writes it at install time); makensis' !uninstfinalize hook signed and
-      # verified it, and makensis stops if that fails. The stock NSIS plug-in DLLs the installer
-      # extracts to %TEMP% at run time ($PLUGINSDIR) are not ours and are not signed: they are
-      # listed as allowed, see "NSIS plug-ins" in docs/windows-signing.md.
+      # verified it, and makensis stops if that fails. The NSIS plug-in DLLs the installer
+      # extracts to %TEMP% at run time ($PLUGINSDIR) are signed copies (the CPack pre-build hook
+      # signs them and an !addplugindir makes makensis embed them, see "NSIS plug-ins" in
+      # docs/windows-signing.md), so they get no allowance: an unsigned one fails the run.
       - name: Signing - verify the packages before upload
         if: env.EDGESLICER_SIGN_WINDOWS == '1'
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
@@ -917,7 +919,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $build = Join-Path $env:GITHUB_WORKSPACE 'build'
           $verify = Join-Path $env:GITHUB_WORKSPACE 'scripts\windows_verify_signatures.ps1'
-          $allow = @('$PLUGINSDIR\*')
+          $allow = @()
           if ($env:EDGESLICER_SIGN_FLASHNETWORK -ne '1') { $allow += 'FlashNetwork.dll' }
           $targets = @((Join-Path $build "EdgeSlicer_Windows_$($env:ver)_portable.zip"))
           $installer = Get-ChildItem -LiteralPath $build -Filter '*.exe' -File | Where-Object { $_.Name -match 'Installer' } | Select-Object -First 1
