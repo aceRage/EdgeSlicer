@@ -32,8 +32,8 @@ MachineObject *selected_machine();
 // Whether obj is the model the edited preset is for (BambuStudio get_machine_sync_status).
 bool machine_matches_preset(MachineObject *obj);
 
-// Snapshot of obj (nullptr or offline: has_report = false). Only loaded, identified trays;
-// external spool holders are left out.
+// Snapshot of obj (nullptr or offline: has_report = false). Only loaded, identified trays; each
+// extruder's external spool holder is a one-slot unit of its own (ams id 254 / 255).
 DualNozzleSync::PrinterState printer_state(MachineObject *obj);
 
 // Filaments printed on the plate, with the project's colours and filament types.

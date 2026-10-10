@@ -1190,6 +1190,17 @@ std::vector<int> SelectMachineDialog::sliced_filament_map() const
     return fil_map;
 }
 
+int SelectMachineDialog::filament_physical_extruder(int filament_id) const
+{
+    const std::vector<int> fil_map = sliced_filament_map();
+    if (filament_id < 0 || filament_id >= (int) fil_map.size())
+        return -1;
+    const int logical = fil_map[size_t(filament_id)] - 1;
+    if (logical != 0 && logical != 1)
+        return -1;
+    return BambuExtruderMap::logical_to_physical(printer_physical_extruder_map(), logical);
+}
+
 std::vector<int> SelectMachineDialog::printer_physical_extruder_map() const
 {
     if (PresetBundle* preset_bundle = wxGetApp().preset_bundle)
@@ -1531,6 +1542,28 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
         auto it = conf.trays.find(r.id);
         if (it == conf.trays.end() || !it->second.valid())
             continue;
+        if (BambuExtruderMap::is_external_spool_ams_id(it->second.ams_id)) {
+            // The external spool of the extruder this filament prints on, confirmed in the
+            // arrangement dialog: tray 254/255, slot 0, when it still holds a spool.
+            FilamentInfo ext;
+            const int    physical = BambuExtruderMap::external_spool_physical_extruder(it->second.ams_id);
+            if (r.id >= 0 && r.id < (int) fil_map.size() && BambuExtruderMap::physical_to_logical(pem, physical) != fil_map[r.id] - 1)
+                continue;
+            if (!obj_->external_spool_mapping_info(it->second.ams_id, ext))
+                continue;
+            r.tray_id        = ext.tray_id;
+            r.ams_id         = ext.ams_id;
+            r.slot_id        = ext.slot_id;
+            r.color          = ext.color;
+            r.colors         = ext.colors;
+            r.ctype          = ext.ctype;
+            r.type           = ext.type;
+            r.filament_id    = ext.filament_id;
+            r.distance       = 0;
+            r.mapping_result = 0;
+            ++applied;
+            continue;
+        }
         auto ams_it = obj_->amsList.find(std::to_string(it->second.ams_id));
         if (ams_it == obj_->amsList.end() || !ams_it->second)
             continue;
@@ -1555,7 +1588,7 @@ void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
         ++applied;
     }
     if (applied > 0) {
-        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] send dialog starts from the " << applied << " AMS slot(s) confirmed before slicing";
+        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] send dialog starts from the " << applied << " AMS slot(s) / external spool(s) confirmed before slicing";
         sync_ams_mapping_result(m_ams_mapping_result);
     }
 }
@@ -2184,6 +2217,12 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
 
         DeviceManager::check_filaments_in_blacklist(filament_brand, filament_type, in_blacklist, action, info);
         
+        // The prohibitions are about feeding through an AMS (TPU, Bambu PET-CF/PA6-CF); a two-extruder
+        // job's filament on an external spool holder does not go through one (BambuStudio scopes
+        // these blacklist entries to "slot": "ams").
+        if (in_blacklist && action == "prohibition" && BambuSendMapping::is_external_spool(m_ams_mapping_result[i]))
+            in_blacklist = false;
+
         if (in_blacklist && action == "prohibition") {
             has_prohibited_filament = true;
             prohibited_error = wxString::FromUTF8(info);
@@ -2564,6 +2603,10 @@ void SelectMachineDialog::on_send_print()
 
     if (obj_->has_ams()) {
         m_print_job->task_use_ams = m_checkbox_list["use_ams"]->GetValue();
+        // A two-extruder job that prints from an external spool: BambuStudio's rule (AMS and
+        // external -> true, external only -> false). Unchanged for every other job.
+        if (obj_->is_multi_extruders() && m_print_job->task_use_ams)
+            m_print_job->task_use_ams = BambuSendMapping::use_ams(m_ams_mapping_result, true);
     } else {
         m_print_job->task_use_ams = false;
     }
@@ -3803,7 +3846,7 @@ void SelectMachineDialog::reset_and_sync_ams_list()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(extruder);
                     m_mapping_popup.set_tag_texture(materials[extruder]);
-                    m_mapping_popup.update_ams_data(obj_->amsList);
+                    m_mapping_popup.update_ams_data(obj_->amsList, obj_->external_spools(), filament_physical_extruder(extruder));
                     m_mapping_popup.Popup();
                 }
             }
@@ -4229,7 +4272,7 @@ void SelectMachineDialog::set_default_from_sdcard()
                     m_mapping_popup.set_parent_item(item);
                     m_mapping_popup.set_current_filament_id(fo.id);
                     m_mapping_popup.set_tag_texture(fo.type);
-                    m_mapping_popup.update_ams_data(obj_->amsList);
+                    m_mapping_popup.update_ams_data(obj_->amsList, obj_->external_spools(), filament_physical_extruder(fo.id));
                     m_mapping_popup.Popup();
                 }
             }
