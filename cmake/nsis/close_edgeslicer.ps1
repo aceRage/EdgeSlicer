@@ -83,7 +83,7 @@ function Get-Scan {
             Created = [string]$p.CreationDate
         })
     }
-    return , $out.ToArray()
+    return $out.ToArray()    # callers wrap the call in @(): zero results must stay zero
 }
 
 function Test-VisibleWindow([int]$ProcId) {
