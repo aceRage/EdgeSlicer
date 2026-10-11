@@ -2502,8 +2502,9 @@ void GUI_App::init_networking_callbacks()
                     if (obj)
                         obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
                     // The one "connected" line per connect, and the end of holding this
-                    // selection's early status requests (the pushall below replaces them).
-                    if (obj && obj->is_lan_mode_printer()) {
+                    // selection's early requests: the held commands go out now, the held status
+                    // requests are replaced by the pushall + get_version below.
+                    if (obj && FirstRequestGate::event_applies(obj->is_lan_mode_printer(), /* event_is_lan */ true)) {
                         if (state == ConnectStatus::ConnectStatusOk)
                             obj->note_session_up("LAN");
                         else
@@ -2518,8 +2519,6 @@ void GUI_App::init_networking_callbacks()
                             if (state == ConnectStatus::ConnectStatusOk) {
                                 obj->command_request_push_all(true);
                                 obj->command_get_version();
-                                // Then whatever else was asked for while the dial was in flight.
-                                obj->flush_held_commands();
                                 event.SetInt(0);
                                 event.SetString(obj->dev_id);
                                 GUI::wxGetApp().sidebar().load_ams_list(obj->dev_id, obj);

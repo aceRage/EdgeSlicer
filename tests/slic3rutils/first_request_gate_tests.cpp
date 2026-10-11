@@ -238,3 +238,183 @@ TEST_CASE("[FirstRequest] each selection logs its own connect and first status o
     CHECK_FALSE(w.hold(20401));
     CHECK(w.on_status(20600) == 600);
 }
+
+// ---- the selection gate: held commands across the LAN and cloud session events ----
+//
+// Hand test 3 (first selection of a session, a LAN printer, signed in): get_version and
+// extrusion_cali_get were held, the cloud session came up, then the LAN session - and the held
+// extrusion_cali_get was dropped as "did not come up in time" in the very second the session came
+// up, and the "early request(s) held" count said 1 instead of 2. The LAN handler flushed the held
+// commands only after its own pushall, and that pushall's publish took the still-full queue for an
+// expired hold. The host below is wired the way MachineObject, DeviceManager::on_cloud_session and
+// GUI_App's on_local_connect are now.
+namespace {
+
+using Slic3r::FirstRequestGate::HeldCommand;
+using Slic3r::FirstRequestGate::SelectionGate;
+using Slic3r::FirstRequestGate::event_applies;
+
+struct GateHost
+{
+    bool          lan_printer = true;
+    long long     lan_up_at   = -1; // when the fake plug-in's LAN session is up (-1: never)
+    long long     cloud_up_at = -1; // ... and the cloud session
+    SelectionGate gate;
+    std::vector<std::string> sent, not_sent;
+    int                      refused = 0;
+    long long                up_ms = -1;
+    int                      up_held = 0;
+
+    bool session_up(long long now) const
+    {
+        const long long at = lan_printer ? lan_up_at : cloud_up_at;
+        return at >= 0 && now >= at;
+    }
+    void plugin_publish(long long now, const std::string& key)
+    {
+        if (session_up(now)) sent.push_back(key);
+        else ++refused;
+    }
+    void report(const SelectionGate::Dropped& d, long long now)
+    {
+        for (const HeldCommand& c : d.commands) {
+            if (d.send) plugin_publish(now, c.key);
+            else not_sent.push_back(c.key + ": " + d.why);
+        }
+    }
+    // MachineObject::publish_json
+    void publish(long long now, const std::string& key, bool info)
+    {
+        if (gate.dialling(now)) {
+            HeldCommand c;
+            c.key  = key;
+            c.info = info;
+            gate.hold_command(now, c);
+            return;
+        }
+        if (gate.queued() > 0) report(gate.settle(now), now);
+        plugin_publish(now, key);
+    }
+    // command_request_push_all / command_get_version: held, not queued
+    void status_request(long long now, const std::string& key)
+    {
+        if (gate.hold_status(now)) return;
+        publish(now, key, true);
+    }
+    // MachineObject::note_session_up
+    void session_up_event(long long now)
+    {
+        SelectionGate::Up u = gate.session_up(now);
+        if (u.ms >= 0) { up_ms = u.ms; up_held = u.held; }
+        for (const HeldCommand& c : u.send) publish(now, c.key, c.info);
+    }
+    // GUI_App's on_local_connect(Ok)
+    void lan_event(long long now)
+    {
+        if (!event_applies(lan_printer, true)) return;
+        session_up_event(now);
+        status_request(now, "pushing/pushall");
+        status_request(now, "info/get_version");
+    }
+    // DeviceManager::on_cloud_session(0)
+    void cloud_event(long long now)
+    {
+        if (!event_applies(lan_printer, false)) return;
+        session_up_event(now);
+    }
+    // the first 1.1 s after the selection, as in the hand test, plus a user command
+    void early_requests()
+    {
+        gate.select(1, false); // 1, not 0: a selection time of 0 means "nothing selected"
+        status_request(142, "info/get_version");
+        publish(486, "print/extrusion_cali_get", true);
+        publish(700, "system/ledctrl", false);
+        publish(1036, "print/extrusion_cali_get", true);
+    }
+};
+
+} // namespace
+
+TEST_CASE("[FirstRequest] LAN printer: cloud session up first, then the LAN session", "[FirstRequest]")
+{
+    GateHost h;
+    h.lan_up_at   = 1241;
+    h.cloud_up_at = 1100;
+    h.early_requests();
+    h.cloud_event(1100); // says nothing about a LAN printer
+    CHECK(h.sent.empty());
+    CHECK(h.gate.queued() == 2);
+    h.lan_event(1241);
+
+    CHECK(h.refused == 0);
+    CHECK(h.not_sent.empty());
+    REQUIRE(h.sent.size() == 4);
+    CHECK(h.sent[0] == "system/ledctrl");            // held, in the order asked
+    CHECK(h.sent[1] == "print/extrusion_cali_get");  // one copy, the latest
+    CHECK(h.sent[2] == "pushing/pushall");           // the connected callback's own
+    CHECK(h.sent[3] == "info/get_version");
+    CHECK(h.up_ms == 1240); // up at 1241, selected at 1
+    CHECK(h.up_held == 3); // get_version, extrusion_cali_get, ledctrl
+}
+
+TEST_CASE("[FirstRequest] LAN printer: LAN session up first, then the cloud session", "[FirstRequest]")
+{
+    GateHost h;
+    h.lan_up_at   = 1241;
+    h.cloud_up_at = 1300;
+    h.early_requests();
+    h.lan_event(1241);
+    h.cloud_event(1300);
+
+    CHECK(h.refused == 0);
+    CHECK(h.not_sent.empty());
+    REQUIRE(h.sent.size() == 4); // nothing sent twice
+    CHECK(h.sent[0] == "system/ledctrl");
+    CHECK(h.sent[1] == "print/extrusion_cali_get");
+    CHECK(h.up_held == 3);
+}
+
+TEST_CASE("[FirstRequest] cloud printer: held commands go out when the cloud session is up, in either order", "[FirstRequest]")
+{
+    for (int order = 0; order < 2; ++order) {
+        DYNAMIC_SECTION("order " << order) {
+            GateHost h;
+            h.lan_printer = false;
+            h.cloud_up_at = 1200;
+            h.early_requests();
+            if (order == 0) { h.lan_event(1150); h.cloud_event(1200); }
+            else            { h.cloud_event(1200); h.lan_event(1250); }
+            CHECK(h.refused == 0);
+            CHECK(h.not_sent.empty());
+            REQUIRE(h.sent.size() == 2);
+            CHECK(h.sent[0] == "system/ledctrl");
+            CHECK(h.sent[1] == "print/extrusion_cali_get");
+            CHECK(h.up_held == 3);
+        }
+    }
+}
+
+TEST_CASE("[FirstRequest] held commands are reported not sent with the real reason", "[FirstRequest]")
+{
+    SECTION("the dial failed") {
+        GateHost h;
+        h.early_requests();
+        h.report(h.gate.session_down(), 1300);
+        REQUIRE(h.not_sent.size() == 2);
+        CHECK(h.not_sent[0] == "system/ledctrl: the session did not come up");
+    }
+    SECTION("the hold ran out") {
+        GateHost h; // the plug-in never reports
+        h.early_requests();
+        h.publish(HOLD_MAX_MS + 5, "info/get_version", true);
+        REQUIRE(h.not_sent.size() == 2);
+        CHECK(h.not_sent[1] == "print/extrusion_cali_get: the session did not come up within 15 s");
+    }
+    SECTION("a new selection") {
+        GateHost h;
+        h.early_requests();
+        h.report(h.gate.select(1300, false), 1300);
+        REQUIRE(h.not_sent.size() == 2);
+        CHECK(h.not_sent[0] == "system/ledctrl: a new selection replaced the session they were waiting for");
+    }
+}

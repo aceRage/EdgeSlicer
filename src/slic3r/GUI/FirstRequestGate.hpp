@@ -149,5 +149,118 @@ private:
     std::vector<HeldCommand> m_items;
 };
 
+// One printer's selection: the watch plus the held commands, and the rules that tie them together.
+// MachineObject forwards its events here, so the rules (and their orderings) can be unit-tested.
+//
+//  * The session coming up hands back every held command to send, whichever event reports it
+//    first, and only once. (A first version flushed them from the LAN connect handler AFTER the
+//    handler's own pushall, and that pushall's publish took the still-full queue for an expired
+//    hold and dropped it as "did not come up in time".)
+//  * A session that fails, a hold that runs out and a new selection hand back what was held as
+//    not sent, each with its own reason.
+//  * held() counts every request held for the selection: status requests (pushall/get_version,
+//    which the connected callback asks for again) and held commands alike.
+class SelectionGate
+{
+public:
+    struct Dropped
+    {
+        std::vector<HeldCommand> commands;
+        const char*              why { "" };
+        bool                     send { false }; // settle() only: send these, do not report them
+    };
+
+    // A selection (or a re-dial) starts. Returns what the previous selection still held.
+    Dropped select(long long now, bool session_already_up)
+    {
+        Dropped d = drop("a new selection replaced the session they were waiting for");
+        m_watch.on_selected(now, session_already_up);
+        m_held = 0;
+        return d;
+    }
+
+    bool dialling(long long now) const { return m_watch.dialling(now); }
+
+    // A pushall / get_version while dialling: not kept (the connected callback asks for it).
+    bool hold_status(long long now)
+    {
+        if (!m_watch.hold(now)) return false;
+        ++m_held;
+        return true;
+    }
+
+    // Any other command while dialling: kept until the session is up. `replaced`: an earlier held
+    // copy of the same request was dropped for it.
+    bool hold_command(long long now, HeldCommand c, bool* replaced = nullptr)
+    {
+        if (!m_watch.dialling(now)) return false;
+        const bool r = m_queue.hold(std::move(c));
+        if (replaced) *replaced = r;
+        if (!r) ++m_held; // a newer copy of a request already counted is not another request
+        return true;
+    }
+
+    struct Up
+    {
+        long long                ms { -1 }; // ms since selection, the first time only (else -1)
+        int                      held { 0 }; // requests held for it until now
+        std::vector<HeldCommand> send;       // to publish now, in order
+    };
+    // The plug-in reported this selection's session up.
+    Up session_up(long long now)
+    {
+        Up u;
+        u.held = m_held;
+        u.ms   = m_watch.on_session_up(now);
+        u.send = m_queue.take();
+        return u;
+    }
+
+    // The plug-in reported the dial failed or the session lost.
+    Dropped session_down()
+    {
+        m_watch.on_session_down();
+        return drop("the session did not come up");
+    }
+
+    // Before anything is published once the selection is no longer dialling: a hold that ran out
+    // without the plug-in reporting either way. (A session that is up was flushed by session_up.)
+    Dropped settle(long long now)
+    {
+        if (m_queue.empty() || m_watch.dialling(now)) return {};
+        if (m_watch.session_up) {
+            // Not expected - session_up flushed the queue - but never drop what can be sent.
+            Dropped d;
+            d.commands = m_queue.take();
+            d.send     = true;
+            return d;
+        }
+        return drop("the session did not come up within 15 s");
+    }
+
+    long long on_status(long long now) { return m_watch.on_status(now); }
+    const ConnectWatch& watch() const { return m_watch; }
+    int    held() const { return m_held; }
+    size_t queued() const { return m_queue.size(); }
+
+private:
+    Dropped drop(const char* why)
+    {
+        Dropped d;
+        d.commands = m_queue.take();
+        d.why      = why;
+        return d;
+    }
+
+    ConnectWatch m_watch;
+    HeldQueue    m_queue;
+    int          m_held { 0 };
+};
+
+// Which session events reach a selection: the printer's own LAN session for a LAN-mode printer,
+// the account's cloud session for a cloud printer. A cloud session coming up while a LAN printer
+// is selected (the two arrive in either order) says nothing about that printer.
+inline bool event_applies(bool selected_is_lan, bool event_is_lan) { return selected_is_lan == event_is_lan; }
+
 } // namespace FirstRequestGate
 } // namespace Slic3r

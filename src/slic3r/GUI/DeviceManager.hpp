@@ -588,22 +588,22 @@ public:
     // session this selection started is still being dialled is held - the connected callback asks
     // for the same report - and each connect logs one line when the session is up and one when the
     // first status report lands, in milliseconds from the selection.
-    FirstRequestGate::ConnectWatch m_connect_watch;
+    // Any other command published while the session is dialled waits in the gate (publish_json):
+    // it goes out as soon as the session is up (note_session_up, whichever event reports it), or is
+    // reported as not sent when the session fails, the hold runs out or a new selection replaces it.
+    FirstRequestGate::SelectionGate m_gate;
     // A selection or a re-dial started. `session_already_up`: the session it needs is up (a cloud
     // printer while the cloud session is connected).
     void note_selected(bool session_already_up);
-    // The plug-in reported this printer's session up (`kind`: "LAN" / "cloud"), or failed / lost.
+    // The plug-in reported this printer's session up (`kind`: "LAN" / "cloud") - this also sends
+    // whatever was held for it - or failed / lost.
     void note_session_up(const char* kind);
     void note_session_down();
     // True (and logged) when the status request `what` is to be held back for the session.
     bool hold_status_request(const char* what);
     void note_status_received();
-    // Any other command published while the session is dialled waits here (publish_json), and
-    // goes out once the session is up (flush_held_commands, from the connected callbacks) or is
-    // reported as not sent when it fails, times out or a new selection replaces it.
-    FirstRequestGate::HeldQueue m_held_commands;
-    void flush_held_commands();
-    void fail_held_commands(const char* why);
+    void report_not_sent(const FirstRequestGate::SelectionGate::Dropped& d);
+    void send_held(const std::vector<FirstRequestGate::HeldCommand>& held);
     // Ultra: whether a report carrying the AMS / external spools has been parsed in full for this
     // printer, and when DeviceManager::full_report_tick last asked it for one (see there).
     bool m_full_report_seen{false};

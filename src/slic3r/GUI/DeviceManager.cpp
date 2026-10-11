@@ -3170,64 +3170,65 @@ static long long first_request_now_ms()
 
 void MachineObject::note_selected(bool session_already_up)
 {
-    if (!m_held_commands.empty())
-        fail_held_commands("a new selection replaced the session they were waiting for");
-    m_connect_watch.on_selected(first_request_now_ms(), session_already_up);
+    report_not_sent(m_gate.select(first_request_now_ms(), session_already_up));
     if (session_already_up)
         BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " selected, the cloud session is already up";
 }
 
 void MachineObject::note_session_up(const char* kind)
 {
-    const int       held = m_connect_watch.held;
-    const long long ms   = m_connect_watch.on_session_up(first_request_now_ms());
-    if (ms >= 0)
-        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << kind << " session up " << ms
-                                << " ms after selection" << (held > 0 ? " (" + std::to_string(held) + " early request(s) held for it)" : std::string());
+    FirstRequestGate::SelectionGate::Up up = m_gate.session_up(first_request_now_ms());
+    if (up.ms >= 0)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << kind << " session up " << up.ms
+                                << " ms after selection" << (up.held > 0 ? " (" + std::to_string(up.held) + " early request(s) held for it)" : std::string());
+    // Before anything else goes out on the new session (the connected callbacks' own pushall
+    // included): these were asked for first.
+    send_held(up.send);
 }
 
 void MachineObject::note_session_down()
 {
-    m_connect_watch.on_session_down();
-    if (!m_held_commands.empty())
-        fail_held_commands("the session did not come up");
+    report_not_sent(m_gate.session_down());
 }
 
-void MachineObject::flush_held_commands()
+void MachineObject::send_held(const std::vector<FirstRequestGate::HeldCommand>& held)
 {
-    if (m_held_commands.empty())
+    if (held.empty())
         return;
-    std::vector<FirstRequestGate::HeldCommand> held = m_held_commands.take();
     BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " session up, sending " << held.size() << " held command(s)";
     for (const FirstRequestGate::HeldCommand& c : held)
         publish_json(c.payload, c.qos, c.flag);
 }
 
-void MachineObject::fail_held_commands(const char* why)
+void MachineObject::report_not_sent(const FirstRequestGate::SelectionGate::Dropped& d)
 {
-    for (const FirstRequestGate::HeldCommand& c : m_held_commands.take())
-        BOOST_LOG_TRIVIAL(error) << "connect: dev=" << dev_id << " " << c.key << " was not sent: " << why;
+    if (d.send) {
+        send_held(d.commands);
+        return;
+    }
+    for (const FirstRequestGate::HeldCommand& c : d.commands)
+        BOOST_LOG_TRIVIAL(error) << "connect: dev=" << dev_id << " " << c.key << " was not sent: " << d.why;
 }
 
 bool MachineObject::hold_status_request(const char* what)
 {
     const long long now = first_request_now_ms();
-    if (!m_connect_watch.hold(now))
+    if (!m_gate.hold_status(now))
         return false;
     // The first hold of a selection at info, so a log shows why no request went out; the
     // refresh timer's repeats (at most one per REQUEST_PUSH_MIN_TIME) at trace.
-    if (m_connect_watch.held == 1)
+    if (m_gate.held() == 1)
         BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << what << " held until the "
                                 << (is_lan_mode_printer() ? "LAN" : "cloud") << " session is up ("
-                                << (now - m_connect_watch.selected_at) << " ms after selection)";
+                                << (now - m_gate.watch().selected_at) << " ms after selection)";
     else
-        BOOST_LOG_TRIVIAL(trace) << "connect: dev=" << dev_id << " " << what << " held (" << m_connect_watch.held << ")";
+        BOOST_LOG_TRIVIAL(trace) << "connect: dev=" << dev_id << " " << what << " held (" << m_gate.held() << ")";
     return true;
 }
 
 void MachineObject::note_status_received()
 {
-    const long long ms = m_connect_watch.on_status(first_request_now_ms());
+    const long long ms = m_gate.on_status(first_request_now_ms());
     if (ms >= 0)
         BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " first status " << ms << " ms after selection";
 }
@@ -3236,9 +3237,9 @@ int MachineObject::publish_json(std::string json_str, int qos, int flag)
 {
     // This selection's session is still being dialled: the plug-in has nothing to publish on and
     // would refuse the command (-1). Keep it and send it once the session is up
-    // (flush_held_commands). The caller gets 0 - the command is accepted, it just waits.
+    // (note_session_up). The caller gets 0 - the command is accepted, it just waits.
     const long long now = first_request_now_ms();
-    if (m_connect_watch.dialling(now)) {
+    if (m_gate.dialling(now)) {
         FirstRequestGate::HeldCommand c;
         c.payload = json_str;
         c.qos     = qos;
@@ -3256,16 +3257,19 @@ int MachineObject::publish_json(std::string json_str, int qos, int flag)
         }
         if (c.key.empty())
             c.key = "(unnamed command)";
-        const bool replaced = m_held_commands.hold(c);
-        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << c.key << " held until the "
+        const std::string key      = c.key;
+        bool              replaced = false;
+        m_gate.hold_command(now, std::move(c), &replaced);
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << key << " held until the "
                                 << (is_lan_mode_printer() ? "LAN" : "cloud") << " session is up ("
-                                << (now - m_connect_watch.selected_at) << " ms after selection"
+                                << (now - m_gate.watch().selected_at) << " ms after selection"
                                 << (replaced ? ", replacing an earlier copy" : "") << ")";
         return 0;
     }
-    // The hold window ran out without the session reporting either way.
-    if (!m_held_commands.empty())
-        fail_held_commands("the session did not come up in time");
+    // Held commands still waiting although the selection is no longer dialling: the hold ran out
+    // without the plug-in reporting either way (a session that came up was flushed already).
+    if (m_gate.queued() > 0)
+        report_not_sent(m_gate.settle(now));
 
     int rtn = 0;
     if (is_lan_mode_printer()) {
@@ -7487,15 +7491,14 @@ void DeviceManager::on_cloud_session(int code)
     if (changed)
         BOOST_LOG_TRIVIAL(info) << "connect: cloud session " << (up ? "up" : "down") << " (code " << code << ")";
     MachineObject* sel = get_selected_machine();
-    if (!sel || sel->is_lan_mode_printer())
+    if (!sel || !FirstRequestGate::event_applies(sel->is_lan_mode_printer(), /* event_is_lan */ false))
         return;
     if (up) {
-        sel->note_session_up("cloud");
+        sel->note_session_up("cloud"); // also sends what was held for it
         // The session's own on-connect pushall (UltraNet replays one to every subscribed printer)
         // and the set_user_selected_machine that GUI_App's handler makes next both ask for the
         // report; keep_alive waits its REQUEST_PUSH_MIN_TIME before asking a third time.
         sel->last_request_push = std::chrono::system_clock::now();
-        sel->flush_held_commands();
     } else {
         sel->note_session_down();
     }
