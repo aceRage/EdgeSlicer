@@ -98,14 +98,21 @@ using namespace Slic3r::GUI::LiveActivity;
 const long long T0 = 1789000000000LL; // ms
 
 // A Bambu-like hub row with everything a privacy leak could come from: serial id, a name, an
-// address, a file name.
+// address, a file name - plus the fields main's rows have gained since (the friendly model name,
+// the cloud cover picture, HMS codes, AMS trays, U1 toolheads), so a builder that ever starts
+// copying the row through is caught.
 json printing_row(int percent = 42, int left = 3600, const std::string& state = "RUNNING", int age_s = 4)
 {
     return json{ { "id", "01P00A451201234" }, { "name", "Ace's X1C in the garage" }, { "model", "BL-P001" },
                  { "kind", "bambu" }, { "print_status", state }, { "online", true }, { "printing", true },
                  { "percent", percent }, { "left_time_s", left }, { "layer", 120 }, { "total_layers", 300 },
                  { "task", "secret_project_v3.gcode.3mf" }, { "ip", "192.168.1.77" }, { "print_error", nullptr },
-                 { "stale", false }, { "age_s", age_s }, { "instance", 4242 } };
+                 { "stale", false }, { "age_s", age_s }, { "instance", 4242 },
+                 { "model_name", "Bambu Lab X1 Carbon" }, { "connected", true },
+                 { "cover_url", "https://cover.example/secret_cover.png" },
+                 { "hms", json::array({ json{ { "code", "0300_9999" } } }) },
+                 { "ams", json::array({ json{ { "tray_type", "secret_tray" } } }) },
+                 { "toolheads", json::array({ json{ { "filament", "secret_tray" } } }) } };
 }
 
 Row row_of(const json& j) { return row_from_json(j); }
@@ -130,7 +137,8 @@ Track sent(const Track& t, const json& row, long long now_ms, bool can_start = f
 void check_names_nothing(const json& payload)
 {
     const std::string s = payload.dump();
-    for (const char* secret : { "01P00A451201234", "Ace", "garage", "192.168", "secret_project", "BL-P001", "bambu", "4242" })
+    for (const char* secret : { "01P00A451201234", "Ace", "garage", "192.168", "secret_project", "BL-P001", "bambu", "4242",
+                                "X1 Carbon", "secret_cover", "0300_9999", "secret_tray" })
         CHECK(s.find(secret) == std::string::npos);
 }
 
