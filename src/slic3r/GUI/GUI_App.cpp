@@ -2518,6 +2518,8 @@ void GUI_App::init_networking_callbacks()
                             if (state == ConnectStatus::ConnectStatusOk) {
                                 obj->command_request_push_all(true);
                                 obj->command_get_version();
+                                // Then whatever else was asked for while the dial was in flight.
+                                obj->flush_held_commands();
                                 event.SetInt(0);
                                 event.SetString(obj->dev_id);
                                 GUI::wxGetApp().sidebar().load_ams_list(obj->dev_id, obj);

@@ -29,6 +29,9 @@
 // Kept in this small header, apart from DeviceManager (which needs wx and half the GUI), so the
 // rule can be unit-tested; see tests/slic3rutils/first_request_gate_tests.cpp.
 
+#include <string>
+#include <vector>
+
 namespace Slic3r {
 namespace FirstRequestGate {
 
@@ -58,12 +61,18 @@ struct ConnectWatch
         held          = 0;
     }
 
+    // Whether this selection's session is still being dialled at `now` (and not for longer than
+    // HOLD_MAX_MS): nothing can be published to the printer yet.
+    bool dialling(long long now) const
+    {
+        return selected_at != 0 && !session_up && !failed && now - selected_at < HOLD_MAX_MS;
+    }
+
     // Whether a status request made at `now` is to be held back until the session is up. Counts
     // the requests it holds.
     bool hold(long long now)
     {
-        if (selected_at == 0 || session_up || failed) return false;
-        if (now - selected_at >= HOLD_MAX_MS) return false;
+        if (!dialling(now)) return false;
         ++held;
         return true;
     }
@@ -84,13 +93,60 @@ struct ConnectWatch
     void on_session_down() { session_up = false; failed = true; }
 
     // A status report arrived. Returns the milliseconds since the selection for the first report
-    // after it (the caller logs it), -1 otherwise.
+    // over this selection's live session (the caller logs it), -1 otherwise. A report that lands
+    // before the session is up is not that: it was already on its way over the printer's watch
+    // session (UltraNet reports every LAN printer, not only the selected one) when the selection
+    // replaced it.
     long long on_status(long long now)
     {
-        if (selected_at == 0 || status_logged) return -1;
+        if (selected_at == 0 || status_logged || !session_up) return -1;
         status_logged = true;
         return now - selected_at;
     }
+};
+
+// Commands published while a selection's session is still being dialled. They are kept, not
+// refused, and sent in order once the session is up. A request for information (`info`: a status
+// or info query) keeps only its latest copy, since a panel that polls one asks again and again
+// while it waits. If the session does not come up, every held command is reported as not sent.
+struct HeldCommand
+{
+    std::string key;     // "<block>/<command>", e.g. "print/extrusion_cali_get"
+    std::string payload; // the JSON as it would have been published
+    int         qos { 0 };
+    int         flag { 0 };
+    bool        info { false };
+};
+
+class HeldQueue
+{
+public:
+    // Returns true when the command replaced an earlier held copy of the same request.
+    bool hold(HeldCommand c)
+    {
+        bool replaced = false;
+        if (c.info) {
+            for (auto it = m_items.begin(); it != m_items.end(); ++it)
+                if (it->info && it->key == c.key) {
+                    m_items.erase(it);
+                    replaced = true;
+                    break;
+                }
+        }
+        m_items.push_back(std::move(c));
+        return replaced;
+    }
+    std::vector<HeldCommand> take()
+    {
+        std::vector<HeldCommand> out;
+        out.swap(m_items);
+        return out;
+    }
+    bool   empty() const { return m_items.empty(); }
+    size_t size() const { return m_items.size(); }
+
+private:
+    std::vector<HeldCommand> m_items;
 };
 
 } // namespace FirstRequestGate

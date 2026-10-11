@@ -153,7 +153,60 @@ TEST_CASE("[FirstRequest] a reported failure stops holding at once", "[FirstRequ
     CHECK(w.hold(200));
     w.on_session_down();
     CHECK_FALSE(w.hold(300));
-    CHECK(w.on_status(400) == 300);  // a later report still gets its line
+    CHECK_FALSE(w.dialling(300));
+    CHECK(w.on_status(400) == -1);  // not a report over this selection's live session
+}
+
+TEST_CASE("[FirstRequest] a report that lands before the session is up is not the first status", "[FirstRequest]")
+{
+    // The printer was watched before it was selected: its watch session's last reports are still
+    // queued for the GUI thread when the selection dials the printer's own session.
+    ConnectWatch w;
+    w.on_selected(1000, false);
+    CHECK(w.on_status(1054) == -1);
+    CHECK(w.on_session_up(2338) == 1338);
+    CHECK(w.on_status(3100) == 2100);
+}
+
+TEST_CASE("[FirstRequest] commands made while dialling wait, polls keep their latest copy", "[FirstRequest]")
+{
+    using Slic3r::FirstRequestGate::HeldCommand;
+    using Slic3r::FirstRequestGate::HeldQueue;
+    HeldQueue q;
+    auto cmd = [](const char* key, const char* payload, bool info) {
+        HeldCommand c;
+        c.key     = key;
+        c.payload = payload;
+        c.info    = info;
+        return c;
+    };
+    // StatusPanel asks for the PA calibration table on every refresh until an answer lands.
+    CHECK_FALSE(q.hold(cmd("print/extrusion_cali_get", "seq 20005", true)));
+    CHECK_FALSE(q.hold(cmd("system/ledctrl", "light on", false)));
+    CHECK(q.hold(cmd("print/extrusion_cali_get", "seq 20006", true)));
+    CHECK_FALSE(q.hold(cmd("system/ledctrl", "light off", false)));  // user commands are all kept, in order
+    CHECK(q.hold(cmd("print/extrusion_cali_get", "seq 20007", true)));
+    REQUIRE(q.size() == 3);
+
+    const std::vector<HeldCommand> out = q.take();
+    CHECK(q.empty());
+    REQUIRE(out.size() == 3);
+    CHECK(out[0].payload == "light on");
+    CHECK(out[1].payload == "light off");
+    CHECK(out[2].payload == "seq 20007");  // one poll, the latest
+}
+
+TEST_CASE("[FirstRequest] dialling ends when the session is up, fails, or the hold runs out", "[FirstRequest]")
+{
+    ConnectWatch w;
+    CHECK_FALSE(w.dialling(10));  // nothing selected
+    w.on_selected(1000, false);
+    CHECK(w.dialling(1001));
+    CHECK_FALSE(w.dialling(1000 + HOLD_MAX_MS));
+    w.on_session_up(1500);
+    CHECK_FALSE(w.dialling(1501));
+    w.on_selected(5000, true);  // cloud session already up
+    CHECK_FALSE(w.dialling(5001));
 }
 
 TEST_CASE("[FirstRequest] a session already up at selection holds nothing", "[FirstRequest]")
@@ -163,7 +216,7 @@ TEST_CASE("[FirstRequest] a session already up at selection holds nothing", "[Fi
     w.on_selected(5000, true);
     CHECK_FALSE(w.hold(5001));
     CHECK(w.held == 0);
-    CHECK(w.on_status(5300) == 300);
+    CHECK(w.on_status(5300) == 300);  // the session was up at selection: this one counts
     CHECK(w.on_status(6300) == -1);  // only the first report is logged
 }
 

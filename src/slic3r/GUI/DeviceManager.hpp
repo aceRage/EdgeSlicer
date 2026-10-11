@@ -598,6 +598,12 @@ public:
     // True (and logged) when the status request `what` is to be held back for the session.
     bool hold_status_request(const char* what);
     void note_status_received();
+    // Any other command published while the session is dialled waits here (publish_json), and
+    // goes out once the session is up (flush_held_commands, from the connected callbacks) or is
+    // reported as not sent when it fails, times out or a new selection replaces it.
+    FirstRequestGate::HeldQueue m_held_commands;
+    void flush_held_commands();
+    void fail_held_commands(const char* why);
     // Ultra: whether a report carrying the AMS / external spools has been parsed in full for this
     // printer, and when DeviceManager::full_report_tick last asked it for one (see there).
     bool m_full_report_seen{false};

@@ -3170,6 +3170,8 @@ static long long first_request_now_ms()
 
 void MachineObject::note_selected(bool session_already_up)
 {
+    if (!m_held_commands.empty())
+        fail_held_commands("a new selection replaced the session they were waiting for");
     m_connect_watch.on_selected(first_request_now_ms(), session_already_up);
     if (session_already_up)
         BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " selected, the cloud session is already up";
@@ -3187,6 +3189,24 @@ void MachineObject::note_session_up(const char* kind)
 void MachineObject::note_session_down()
 {
     m_connect_watch.on_session_down();
+    if (!m_held_commands.empty())
+        fail_held_commands("the session did not come up");
+}
+
+void MachineObject::flush_held_commands()
+{
+    if (m_held_commands.empty())
+        return;
+    std::vector<FirstRequestGate::HeldCommand> held = m_held_commands.take();
+    BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " session up, sending " << held.size() << " held command(s)";
+    for (const FirstRequestGate::HeldCommand& c : held)
+        publish_json(c.payload, c.qos, c.flag);
+}
+
+void MachineObject::fail_held_commands(const char* why)
+{
+    for (const FirstRequestGate::HeldCommand& c : m_held_commands.take())
+        BOOST_LOG_TRIVIAL(error) << "connect: dev=" << dev_id << " " << c.key << " was not sent: " << why;
 }
 
 bool MachineObject::hold_status_request(const char* what)
@@ -3214,6 +3234,39 @@ void MachineObject::note_status_received()
 
 int MachineObject::publish_json(std::string json_str, int qos, int flag)
 {
+    // This selection's session is still being dialled: the plug-in has nothing to publish on and
+    // would refuse the command (-1). Keep it and send it once the session is up
+    // (flush_held_commands). The caller gets 0 - the command is accepted, it just waits.
+    const long long now = first_request_now_ms();
+    if (m_connect_watch.dialling(now)) {
+        FirstRequestGate::HeldCommand c;
+        c.payload = json_str;
+        c.qos     = qos;
+        c.flag    = flag;
+        const json parsed = json::parse(json_str, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_object()) {
+            for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+                if (!it.value().is_object()) continue;
+                auto cmd = it.value().find("command");
+                if (cmd == it.value().end() || !cmd->is_string()) continue;
+                c.key  = it.key() + "/" + cmd->get<std::string>();
+                c.info = GUI::is_status_or_info_command(cmd->get<std::string>());
+                break;
+            }
+        }
+        if (c.key.empty())
+            c.key = "(unnamed command)";
+        const bool replaced = m_held_commands.hold(c);
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << c.key << " held until the "
+                                << (is_lan_mode_printer() ? "LAN" : "cloud") << " session is up ("
+                                << (now - m_connect_watch.selected_at) << " ms after selection"
+                                << (replaced ? ", replacing an earlier copy" : "") << ")";
+        return 0;
+    }
+    // The hold window ran out without the session reporting either way.
+    if (!m_held_commands.empty())
+        fail_held_commands("the session did not come up in time");
+
     int rtn = 0;
     if (is_lan_mode_printer()) {
         rtn = local_publish_json(json_str, qos, flag);
@@ -7442,6 +7495,7 @@ void DeviceManager::on_cloud_session(int code)
         // and the set_user_selected_machine that GUI_App's handler makes next both ask for the
         // report; keep_alive waits its REQUEST_PUSH_MIN_TIME before asking a third time.
         sel->last_request_push = std::chrono::system_clock::now();
+        sel->flush_held_commands();
     } else {
         sel->note_session_down();
     }
