@@ -6,6 +6,7 @@
 #include <cstring>
 #include "BoundingBox.hpp"
 #include "Brim.hpp"
+#include "CostEstimate.hpp"
 #include "BrimFilament.hpp"
 #include "ClipperUtils.hpp"
 #include "Extruder.hpp"
@@ -621,6 +622,12 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "filament_end_gcode",
         // BBS (H2C rack): only read by change_filament_gcode (M620.11 O1 T<len>).
         "filament_retract_length_nc",
+        // BBS: only read through the change_filament / machine start / end G-code placeholders
+        // (flush_temperatures, flush_volumetric_speeds). filament_cooling_before_tower also drives the
+        // tower's "Wipe tower reheat before wipe", so it invalidates psWipeTower (below), as in Bambu Studio.
+        "filament_flush_temp",
+        "filament_flush_temp_fast",
+        "filament_flush_volumetric_speed",
         // BBS: read only by the idle-nozzle pre-cooling / pre-heating of the G-code post-processor.
         "enable_pre_heating",
         "filament_pre_cooling_temperature",
@@ -651,6 +658,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "filament_diameter",
         "filament_density",
         "filament_cost",
+        // Only the cost statistics read it (machine time cost); not a slicing input.
+        "time_cost",
         "filament_notes",
         "outer_wall_acceleration",
         "inner_wall_acceleration",
@@ -879,6 +888,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "slow_down_layers"
             || opt_key == "idle_temperature" 
             || opt_key == "filament_tower_ironing_area"
+            // BBS: the tower writes "Wipe tower reheat before wipe" from it (Bambu Studio Print.cpp 328).
+            || opt_key == "filament_cooling_before_tower"
             || opt_key == "wipe_tower_cone_angle"
             || opt_key == "wipe_tower_extra_spacing"
             || opt_key == "wipe_tower_max_purge_speed"
@@ -1069,6 +1080,15 @@ std::vector<unsigned int> Print::support_material_extruders() const
                 support_uses_current_extruder = true;
             else {
             	unsigned int i = (unsigned int)object->config().support_interface_filament - 1;
+                extruders.emplace_back((i >= num_extruders) ? 0 : i);
+            }
+        } else if (object->has_stabilizers()) {
+            // Side stabilizers without supports: they print with the support filament, never the
+            // interface filament.
+            if (object->config().support_filament == 0)
+                support_uses_current_extruder = true;
+            else {
+                unsigned int i = (unsigned int)object->config().support_filament - 1;
                 extruders.emplace_back((i >= num_extruders) ? 0 : i);
             }
         }
@@ -2161,10 +2181,6 @@ StringObjectException Print::check_multi_filament_valid(const Print& print)
     return {std::string()};
 }
 
-// Orca: this g92e0 regex is used copied from PrusaSlicer
-// Matches "G92 E0" with various forms of writing the zero and with an optional comment.
-boost::regex regex_g92e0 { "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.*)?$" };
-
 // Precondition: Print::validate() requires the Print::apply() to be called its invocation.
 //BBS: refine seq-print validation logic
 // Dual-nozzle (H2D / H2C / X2D): each nozzle reaches only part of the bed (extruder_printable_area) and only up
@@ -2304,6 +2320,12 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         // #4043
         if (total_copies_count > 1 && m_config.print_sequence != PrintSequence::ByObject)
             return {L("Please select \"By object\" print sequence to print multiple objects in spiral vase mode."), nullptr, "spiral_mode"};
+        // Side stabilizers are support-role layers the vase cannot carry (a layer with support is never
+        // a spiral layer), supports on or off. The spiral settings dialog only clears Enable supports,
+        // so with supports on this combination was reachable from a project or the CLI.
+        for (const PrintObject* object : m_objects)
+            if (object->has_stabilizers())
+                return {L("Spiral vase mode can't be used with side stabilizers. Turn the stabilizers off or spiral vase mode off."), object, "stabilizer_supports"};
         assert(m_objects.size() == 1);
         const auto all_regions = m_objects.front()->all_regions();
         if (all_regions.size() > 1) {
@@ -2636,6 +2658,13 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 if (sup == 0 || supi == 0)
                     // "use whatever filament is current": any filament of the print may print it.
                     append(object_filaments, extruders);
+            } else if (object->has_stabilizers()) {
+                // Side stabilizers without supports print with the support filament only.
+                const int sup = object->config().support_filament.value;
+                if (sup > 0)
+                    object_filaments.emplace_back(unsigned(sup - 1));
+                else
+                    append(object_filaments, extruders);
             }
             if (this->has_wipe_tower())
                 // The prime tower shares this object's layer grid and every filament purges into it.
@@ -2675,9 +2704,11 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             if (!validate_extrusion_width(object->config().get_abs_value("line_width", object_min_nozzle_diameter),
                                           object_min_nozzle_diameter, layer_height, err_msg))
                 return {err_msg, object, "line_width"};
-            if (object->has_support() || object->has_raft()) {
+            if (object->has_support() || object->has_raft() || object->has_stabilizers()) {
                 const int sup  = object->config().support_filament.value;
-                const int supi = object->config().support_interface_filament.value;
+                // Side stabilizers alone print with the support filament only, so the interface
+                // filament does not enter into the width check then.
+                const int supi = object->has_support_material() ? object->config().support_interface_filament.value : sup;
                 // The support line width has to fit the finer of the two support nozzles; filament 0
                 // ("current filament") could be any of the object's, so fall back to its minimum.
                 double support_nozzle_diameter = std::min(nozzle_dmr_of_filament0(unsigned(std::max(sup, 1) - 1)),
@@ -2732,24 +2763,54 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     }
 
     // Orca: G92 E0 is not supported when using absolute extruder addressing
-    // This check is copied from PrusaSlicer, the original author is Vojtech Bubnik
-    if(!is_BBL_printer()) {
-        bool before_layer_gcode_resets_extruder =
-            boost::regex_search(m_config.before_layer_change_gcode.value, regex_g92e0);
-        bool layer_gcode_resets_extruder = boost::regex_search(m_config.layer_change_gcode.value, regex_g92e0);
-        if (m_config.use_relative_e_distances) {
-            // See GH issues #6336 #5073
-            if ((m_config.gcode_flavor == gcfMarlinLegacy || m_config.gcode_flavor == gcfMarlinFirmware) &&
-                !before_layer_gcode_resets_extruder && !layer_gcode_resets_extruder)
-                return {L("Relative extruder addressing requires resetting the extruder position at each layer to "
-                          "prevent loss of floating point accuracy. Add \"G92 E0\" to layer_gcode."),
-                        nullptr, "before_layer_change_gcode"};
-        } else if (before_layer_gcode_resets_extruder)
-            return {L("\"G92 E0\" was found in before_layer_gcode, which is incompatible with absolute extruder "
+    // This check is modified from PrusaSlicer, the original author is Vojtech Bubnik
+    // Orca (#13933): a lower-case "g92 e0" satisfies the case-insensitive pattern below but is not understood by the
+    // firmware / G-code processor, so in relative mode only the exact upper-case form counts as a reset.
+    // https://github.com/OrcaSlicer/OrcaSlicer/issues/13927
+
+    // Matches "G92 E0" in any letter case, with various forms of writing the zero and an optional comment.
+    static const boost::regex regex_g92e0 {
+        "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.*)?$"
+    };
+    // Matches only the exact upper-case "G92 E0".
+    static const boost::regex regex_g92e0_correct {
+        "^[ \\t]*G92[ \\t]*E(0(\\.0*)?|\\.0+)[ \\t]*(;.*)?$"
+    };
+
+    const bool before_has_g92_any = boost::regex_search(m_config.before_layer_change_gcode.value, regex_g92e0);
+    const bool layer_has_g92_any  = boost::regex_search(m_config.layer_change_gcode.value, regex_g92e0);
+
+    if (m_config.use_relative_e_distances) {
+        // Relative mode: "G92 E0" is required to reset the extruder position.
+        const bool before_has_g92_exact = boost::regex_search(m_config.before_layer_change_gcode.value, regex_g92e0_correct);
+        const bool layer_has_g92_exact  = boost::regex_search(m_config.layer_change_gcode.value, regex_g92e0_correct);
+
+        // Wrong case found?
+        if (before_has_g92_any && !before_has_g92_exact)
+            return {L("\"G92 E0\" was found in before_layer_change_gcode, but the G or E are not uppercase. "
+                      "Please change them to the exact uppercase \"G92 E0\"."),
+                    nullptr, "before_layer_change_gcode"};
+        if (layer_has_g92_any && !layer_has_g92_exact)
+            return {L("\"G92 E0\" was found in layer_change_gcode, but the G or E are not uppercase. "
+                      "Please change them to the exact uppercase \"G92 E0\"."),
+                    nullptr, "layer_change_gcode"};
+
+        // Only Marlin flavours need the reset; BBL printers do not.
+        // See GH issues #6336 #5073
+        if ((m_config.gcode_flavor == gcfMarlinLegacy || m_config.gcode_flavor == gcfMarlinFirmware) && !is_BBL_printer() &&
+            !before_has_g92_exact && !layer_has_g92_exact)
+            return {L("Relative extruder addressing requires resetting the extruder position at each layer to "
+                      "prevent loss of floating point accuracy. Add \"G92 E0\" to layer_gcode."),
+                    nullptr, "before_layer_change_gcode"};
+    } else {
+        // Absolute mode: any occurrence of "G92 E0" is incompatible.
+        if (before_has_g92_any)
+            return {L("\"G92 E0\" was found in before_layer_change_gcode, which is incompatible with absolute extruder "
                       "addressing."),
                     nullptr, "before_layer_change_gcode"};
-        else if (layer_gcode_resets_extruder)
-            return {L("\"G92 E0\" was found in layer_gcode, which is incompatible with absolute extruder addressing."),
+        if (layer_has_g92_any)
+            return {L("\"G92 E0\" was found in layer_change_gcode, which is incompatible with absolute extruder "
+                      "addressing."),
                     nullptr, "layer_change_gcode"};
     }
 
@@ -2973,8 +3034,8 @@ BoundingBox Print::total_bounding_box() const
     Flow perimeter_flow = m_objects.front()->get_layer(0)->get_region(0)->flow(frPerimeter);
     double extra = perimeter_flow.width/2;
 
-    // consider support material
-    if (this->has_support_material()) {
+    // consider support material (and side stabilizers, which print as support)
+    if (this->uses_support_filament()) {
         extra = std::max(extra, SUPPORT_MATERIAL_MARGIN);
     }
 
@@ -3056,21 +3117,30 @@ bool Print::has_support_material() const
     return false;
 }
 
+bool Print::uses_support_filament() const
+{
+    for (const PrintObject *object : m_objects)
+        if (object->uses_support_filament())
+            return true;
+    return false;
+}
+
 // Ultra (H2C 3MF schema): ported verbatim from BambuStudio Print::support_material_on_wipe_tower
 // (src/libslic3r/Print.cpp). Reported in slice_info.config so the printer knows the prime tower
 // carries a support-only filament.
 bool Print::support_material_on_wipe_tower() const
 {
-    if (!this->has_wipe_tower() || !this->has_support_material())
+    if (!this->has_wipe_tower() || !this->uses_support_filament())
         return false;
 
     for (const PrintObject *object : m_objects) {
-        if (!object->has_support_material())
+        if (!object->uses_support_filament())
             continue;
 
         const std::vector<unsigned int> obj_filaments = object->object_extruders();
         const int                       support_fil   = object->config().support_filament;
-        const int                       support_interface_fil = object->config().support_interface_filament;
+        // Side stabilizers alone never print the interface filament.
+        const int                       support_interface_fil = object->has_support_material() ? object->config().support_interface_filament.value : 0;
 
         auto support_differs_from_body = [&](int filament_1based) -> bool {
             if (filament_1based <= 0)
@@ -4019,6 +4089,10 @@ static void chameleon_assign_support_interfaces(Print &print)
         // flag, apply_bucket_caps, storage, emission, logging) applies uniformly to
         // every opted-in object.
         if (!object->config().support_filament_matching.value)
+            continue;
+        // Side stabilizers alone leave support layers behind with no supports or interface: there
+        // is nothing for filament matching to assign, and it must not run on them.
+        if (!object->has_support_material())
             continue;
         if (object->layers().empty() || object->support_layers().empty())
             continue;
@@ -6544,6 +6618,16 @@ void Print::set_gcode_file_invalidated()
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ <<  boost::format(": done");
 }
 
+bool Print::set_gcode_filament_prices(bool include)
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    if (m_gcode_filament_prices == include)
+        return false;
+    m_gcode_filament_prices = include;
+    // Only the export writes the prices: slicing results stay valid.
+    return this->invalidate_step(psGCodeExport);
+}
+
 //BBS: add gcode file preload logic
 void Print::export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
@@ -6556,6 +6640,22 @@ void Print::export_gcode_from_previous_file(const std::string& file, GCodeProces
         processor.process_file(file);
 
         *result = std::move(processor.extract_result());
+
+        // A G-code exported with the filament prices left out (or an older one without time_cost)
+        // still gets its cost: this Print holds the project's config the G-code was sliced with,
+        // so take the prices from there instead of showing 0.00 until the next reslice.
+        if (!result->has_filament_costs) {
+            const size_t n = std::max(result->extruders_count, m_config.filament_cost.values.size());
+            result->filament_costs.resize(n, 0.f);
+            for (size_t i = 0; i < n; ++i)
+                result->filament_costs[i] = static_cast<float>(m_config.filament_cost.get_at(i));
+            result->has_filament_costs = !m_config.filament_cost.values.empty();
+        }
+        if (!result->has_time_cost) {
+            result->time_cost    = m_config.time_cost.value;
+            result->has_time_cost = true;
+        }
+        m_print_statistics.total_cost = compute_cost(*result).total;
     } catch (std::exception & /* ex */) {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ <<  boost::format(": found errors when process gcode file %1%") %file.c_str();
         throw Slic3r::RuntimeError(

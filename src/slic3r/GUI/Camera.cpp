@@ -22,6 +22,15 @@ double Camera::FrustrumZMargin = 10.0;
 double Camera::MaxFovDeg = 60.0;
 double Camera::ZoomUnit = 0.1;
 
+// The CLI renders thumbnails through Camera without a GUI_App: there is no wxApp instance, so
+// wxGetApp() is a null reference and reading its app_config faults (the CLI segfaulted on every
+// thumbnail). No GUI_App means no preferences: auto perspective is off and nothing is saved.
+static AppConfig* app_config_if_any()
+{
+    const GUI_App* app = dynamic_cast<const GUI_App*>(wxApp::GetInstance());
+    return app != nullptr ? app->app_config : nullptr;
+}
+
 std::string Camera::get_type_as_string() const
 {
     switch (m_type)
@@ -39,7 +48,8 @@ void Camera::set_type(EType type)
         m_type = type;
         m_prevent_auto_type = true;
         if (m_update_config_on_type_change_enabled) {
-            wxGetApp().app_config->set_bool("use_perspective_camera", m_type == EType::Perspective);
+            if (AppConfig* config = app_config_if_any())
+                config->set_bool("use_perspective_camera", m_type == EType::Perspective);
         }
     }
 }
@@ -55,7 +65,8 @@ void Camera::select_next_type()
 
 void Camera::auto_type(EType preferred_type)
 {
-    if (!wxGetApp().app_config->get_bool("auto_perspective")) return;
+    const AppConfig* config = app_config_if_any();
+    if (config == nullptr || !config->get_bool("auto_perspective")) return;
     if (preferred_type == EType::Perspective) {
         if (!m_prevent_auto_type) {
             set_type(preferred_type);

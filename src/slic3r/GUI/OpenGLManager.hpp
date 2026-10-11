@@ -26,6 +26,7 @@ public:
         bool m_detected{ false };
         int m_max_tex_size{ 0 };
         float m_max_anisotropy{ 0.0f };
+        bool m_core_profile{ false };
 
         std::string m_version;
         std::string m_glsl_version;
@@ -41,6 +42,12 @@ public:
         const std::string& get_renderer() const;
 
         bool is_mesa() const;
+        // True for a core-profile context (no wide lines, no fixed-function state, a VAO must be
+        // bound to draw). init_glcontext() asks for the highest forward-compatible core profile first
+        // (OrcaSlicer #10735), so this is the normal case now: macOS 4.1, Windows/Linux 4.x. It is
+        // false only where core was refused and we fell back to a compatibility or default context.
+        // Also false until init_gl() has detected the context (it never queries GL by itself).
+        bool is_core_profile() const;
 
         int get_max_tex_size() const;
         float get_max_anisotropy() const;
@@ -51,6 +58,10 @@ public:
         // If formatted for github, plaintext with OpenGL extensions enclosed into <details>.
         // Otherwise HTML formatted for the system info dialog.
         std::string to_string(bool for_github) const;
+
+        // Space-separated extension list on either profile (glGetString(GL_EXTENSIONS) is gone
+        // from core profiles; there it is assembled from glGetStringi()).
+        static std::string get_extensions_string();
 
     private:
         void detect() const;
@@ -88,13 +99,74 @@ private:
     static EMultisampleState s_multisample;
     static EFramebufferType s_framebuffers_type;
     static OpenGLManager* s_active;
+    // EDGE: see get_default_vao().
+    static unsigned int s_default_vao;
+    // EDGE: see get_fallback_texture().
+    static unsigned int s_fallback_texture_2d;
+    static unsigned int s_fallback_texture_3d;
 
 public:
     OpenGLManager() = default;
     ~OpenGLManager();
 
     bool init_gl(bool popup_error = true);
+    // Creates the one GL context every canvas shares. Profile order (EDGE, after OrcaSlicer #10735):
+    // the highest forward-compatible core profile 4.6..3.2, then a compatibility profile, then the
+    // platform default. EDGESLICER_OPENGL_PROFILE=core|compatibility|default (environment) or
+    // "opengl_profile" in the app config picks one by hand; the environment wins.
     wxGLContext* init_glcontext(wxGLCanvas& canvas);
+
+    // EDGE (core profile): no draw or vertex-attribute call is valid without a bound vertex array
+    // object. One VAO is created with the context and stays bound; code with its own VAO (GLModel,
+    // ImGui, the painter gizmos) binds this one back when it is done, so the remaining plain VBO
+    // draws (legacy G-code viewer, 3DBed, ...) keep working. 0 in a compatibility context.
+    static unsigned int get_default_vao() { return s_default_vao; }
+    static void bind_default_vao();
+    // glLineWidth() above 1 is GL_INVALID_VALUE in a forward-compatible core context (macOS, and
+    // what we ask for everywhere). Sets it only where it is valid; core-profile lines are 1 px.
+    static void set_line_width(float width);
+    // Drains glGetError() and logs what it found as "OpenGL error(s) <where>: ...", within a small
+    // per-session budget so a broken frame cannot flood the log. first_error: one the caller already
+    // read with glGetError() (0 = none). Returns the number of errors.
+    static int report_gl_errors(const std::string& where, unsigned int first_error = 0);
+    static const char* gl_error_name(unsigned int error);
+
+    // EDGE: EDGESLICER_GL_DEBUG=1 in the environment (read once, at start-up). Release builds then check
+    // glGetError() after every glsafe() call and log the call site (3DScene.hpp), and every GLModel and
+    // ImGui draw checks that each texture its shader samples is complete (check_sampled_textures()).
+    // Off by default: one flag test per GL call. There is no KHR_debug on macOS core, so this is the
+    // way to name the offending call there.
+    static bool gl_debug_enabled();
+    static void set_gl_debug_enabled(bool enabled);
+
+    // EDGE (core profile): a 1x1 (or 1x1x1) opaque white texture for GL_TEXTURE_2D / GL_TEXTURE_3D, made
+    // on first use with the current context. Bound to a unit a shader samples while it has nothing of
+    // its own there (see GLShaderProgram::set_sampler_units), so the draw never samples texture 0: an
+    // incomplete texture, which macOS reports as "unit N GLD_TEXTURE_INDEX_2D is unloadable ... using
+    // zero texture". 0 for any other target or without GL.
+    static unsigned int get_fallback_texture(unsigned int target);
+    // Why the texture bound to `unit` for `target` (GL_TEXTURE_2D/3D) cannot be sampled: texture 0,
+    // no image at the base level, a mipmap min filter without every level up to GL_TEXTURE_MAX_LEVEL,
+    // or a wrongly sized level. Empty when it is complete. Restores the active texture unit.
+    static std::string describe_texture_incompleteness(unsigned int target, unsigned int unit);
+    // Only with gl_debug_enabled(): logs (once per shader, sampler and reason) every texture `shader`
+    // samples that describe_texture_incompleteness() rejects, naming `what` draws it.
+    static void check_sampled_textures(const GLShaderProgram* shader, const char* what);
+    // The same for the program bound now (GL_CURRENT_PROGRAM), whoever made it: the hook libvgcode
+    // calls before each of its draws (libvgcode::Viewer::set_draw_check_hook). Both also flag a texture
+    // unit that two samplers of different types read (a sampler2D and a samplerBuffer, say): an
+    // invalid program at draw time, which macOS reports as an "unloadable" texture on that unit.
+    static void check_current_program_samplers(const char* what);
+
+    // EDGE: EDGESLICER_GL_SKIP=<part>[,<part>...] (read once) leaves parts of the frame out, to bisect a
+    // driver message by elimination: libvgcode, imgui_legend, imgui (every ImGui draw), slider,
+    // marker, shells, plate_logo, plate_icons. Logged at start-up.
+    static bool gl_skip(const char* part);
+
+    // EDGE: the point size range on either profile. GL_ALIASED_POINT_SIZE_RANGE is gone from core
+    // profiles (GL_INVALID_ENUM on macOS: the G-code viewer's first initialisation asked for it at the
+    // first slice); GL_POINT_SIZE_RANGE is valid on both.
+    static void query_point_size_range(float range[2]);
 
     GLShaderProgram* get_shader(const std::string& shader_name) { return m_shaders_manager.get_shader(shader_name); }
     GLShaderProgram* get_current_shader() { return m_shaders_manager.get_current_shader(); }

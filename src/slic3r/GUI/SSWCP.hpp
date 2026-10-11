@@ -652,8 +652,10 @@ public:
     // Handle webview deletion
     static void on_webview_delete(wxWebView* webview);
 
-    // query the info of the machine
-    static bool query_machine_info(std::shared_ptr<PrintHost>& host, std::string& out_model, std::vector<std::string>& out_nozzle_diameters, std::string& device_name, int timeout_second = 5);
+    // query the info of the machine (machine.system_info). `attempts` > 1 asks again when an
+    // attempt times out or is answered with an error - the connect paths pass 2, since the first
+    // request on a fresh session is the one that can be lost (see sw_mqtt_set_engine).
+    static bool query_machine_info(std::shared_ptr<PrintHost>& host, std::string& out_model, std::vector<std::string>& out_nozzle_diameters, std::string& device_name, int timeout_second = 5, int attempts = 1);
 
     // update the active file name
     static void update_active_filename(const std::string& filename);

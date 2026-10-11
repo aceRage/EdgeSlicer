@@ -836,6 +836,12 @@ void MqttClient::add_topic_to_resubscribe(const std::string& topic, int qos) {
     BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] Added topic to resubscribe list: " << topic;
 }
 
+bool MqttClient::IsSubscribed(const std::string& topic) const
+{
+    std::lock_guard<std::mutex> lock(topics_mtx_);
+    return topics_to_resubscribe_.count(topic) > 0;
+}
+
 void MqttClient::remove_topic_from_resubscribe(const std::string& topic) {
     std::lock_guard<std::mutex> lock(topics_mtx_);
     auto it = topics_to_resubscribe_.find(topic);

@@ -511,6 +511,13 @@ public:
     bool                        has_support()           const { return m_config.enable_support || m_config.enforce_support_layers > 0; }
     bool                        has_raft()              const { return m_config.raft_layers > 0; }
     bool                        has_support_material()  const { return this->has_support() || this->has_raft(); }
+    // Side stabilizers (Support/Stabilizers.hpp) are configured for this object. They do NOT need
+    // Enable supports: they print as support-role extrusions of their own, so with supports off the
+    // support step runs in a stabilizers-only mode (no support, interface or raft is made).
+    bool                        has_stabilizers()       const { return m_config.stabilizer_supports.value != smOff; }
+    // Something prints with the support filament: supports, a raft or stabilizers. The support
+    // INTERFACE filament is used only when has_support_material().
+    bool                        uses_support_filament() const { return this->has_support_material() || this->has_stabilizers(); }
     // Checks if the model object is painted using the multi-material painting gizmo.
     bool                        is_mm_painted()         const { return this->model_object()->is_mm_painted(); }
     // Checks if the model object is painted using the fuzzy skin painting gizmo.
@@ -998,6 +1005,7 @@ struct WipeTowerData
         number_of_toolchanges = -1;
         depth = 0.f;
         width = 0.f;
+        height = 0.f;
         local_z_reserve_boxes.clear();
         brim_width = 0.f;
         wipe_tower_mesh_data.reset();
@@ -1224,6 +1232,8 @@ public:
     
     double              max_allowed_layer_height() const;
     bool                has_support_material() const;
+    // Any object prints with the support filament (supports, a raft or side stabilizers).
+    bool                uses_support_filament() const;
     // Make sure the background processing has no access to this model_object during this call!
     void                auto_assign_extruders(ModelObject* model_object) const;
 
@@ -1294,6 +1304,15 @@ public:
     void set_gcode_file_ready();
     void set_gcode_file_invalidated();
     void export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+
+    // Whether the exported G-code carries the costs: the "; filament cost" and "; total filament cost"
+    // lines, and filament_cost and time_cost (the machine rate) in the CONFIG_BLOCK. Everything else in the
+    // file is the same either way. A GUI preference ("gcode_include_filament_prices", default off,
+    // applied by BackgroundSlicingProcess) and a CLI switch (--no-filament-prices); a Print built
+    // any other way keeps today's G-code (on). Not a config key, so it never reaches presets,
+    // projects or the G-code itself. Returns true when the change invalidated an exported G-code.
+    bool set_gcode_filament_prices(bool include);
+    bool gcode_filament_prices() const { return m_gcode_filament_prices; }
     //BBS: add modify_count logic
     int get_modified_count() const {return m_modified_count;}
     //BBS: add status for whether support used
@@ -1403,6 +1422,8 @@ private:
     // value for a Print built any other way (tests, tools): as an uninitialized member of a stack Print it
     // was garbage, and a non-zero byte moved the whole config dump into the G-code header.
     bool m_isBBLPrinter = false;
+    // See set_gcode_filament_prices().
+    bool m_gcode_filament_prices = true;
 
     // Ordered collections of extrusion paths to build skirt loops and brim.
     ExtrusionEntityCollection               m_skirt;

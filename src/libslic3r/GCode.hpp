@@ -51,7 +51,11 @@ public:
     bool enable;
 
     OozePrevention() : enable(false) {}
-    std::string pre_toolchange(GCode &gcodegen);
+    // print_z is the print-wide Z of the layer currently being processed (as passed to
+    // GCode::set_extruder), used to look the extruder up in ToolOrdering::tools_for_layer()
+    // so the "last use" check stays print-wide-index-correct regardless of which object or
+    // support layer we are on.
+    std::string pre_toolchange(GCode &gcodegen, double print_z);
     std::string post_toolchange(GCode &gcodegen);
 
 private:
@@ -795,8 +799,9 @@ private:
     template<typename VectorOption>
     auto process_flow_value(const VectorOption &opt) const -> decltype(opt.get_at(0))
     {
-        return get_value_at(m_config, opt, ConfigFlowDomain::Process,
-                            m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0);
+        // The slot is resolved once per export (m_filament_flow.process_config_idx); the same
+        // slot get_value_at(m_config, opt, ConfigFlowDomain::Process, id) picks.
+        return opt.get_at(m_filament_flow.process_config_idx_for(m_config, m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0));
     }
 
     void print_machine_envelope(GCodeOutputStream &file, Print &print);
@@ -825,6 +830,7 @@ private:
         size_t                                                  num_objects,
         size_t                                                  num_islands);
 
+    friend class OozePrevention;
     friend class Wipe;
     friend class WipeTowerIntegration;
     friend class PressureEqualizer;

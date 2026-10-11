@@ -210,6 +210,28 @@ void AppConfig::set_defaults()
     if (get("enable_multi_machine").empty())
         set_bool("enable_multi_machine", false);
 
+    // ORCA (#14705 / #15001, libvgcode stage 3): darken the layers the preview layer slider is not
+    // scrubbed to; brightness of those dimmed layers in percent, 0 = black, capped at 99 because 100
+    // would render them unchanged, which is what disabling the option already does
+    // ORCA (#15769): the view type the sliced preview opens with ("auto", "last" or a view type name)
+    if (get("preview_default_view_type").empty())
+        set("preview_default_view_type", "auto");
+
+    if (get("preview_dim_previous_layers").empty())
+        set_bool("preview_dim_previous_layers", false);
+    if (get("preview_dim_previous_layers_brightness").empty())
+        set("preview_dim_previous_layers_brightness", "40");
+    else {
+        int brightness = 40;
+        try {
+            brightness = std::stoi(get("preview_dim_previous_layers_brightness"));
+        }
+        catch (...) {
+            brightness = 40;
+        }
+        set("preview_dim_previous_layers_brightness", std::to_string(std::max(0, std::min(brightness, 99))));
+    }
+
     if (get("show_gcode_window").empty())
         set_bool("show_gcode_window", true);
 
@@ -467,6 +489,11 @@ void AppConfig::set_defaults()
 
     if (get("hide_other_plates_on_move").empty()) {
         set_bool("hide_other_plates_on_move", false);
+    }
+
+    // Filament prices stay out of exported / uploaded G-code unless asked for (Print::set_gcode_filament_prices()).
+    if (get("gcode_include_filament_prices").empty()) {
+        set_bool("gcode_include_filament_prices", false);
     }
 
     // Move gizmo, Align row: which point of the moved item goes to the target, per axis

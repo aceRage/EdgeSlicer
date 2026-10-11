@@ -57,6 +57,7 @@
 			"support_user_preset": false
 		},
 		"model_id": "O1C2",
+		"sn_prefix": "31B",
 		"subseries": [ "O1C2-V2" ],
 		"printer_modes": [ "fdm", "laser", "cut" ],
 		"compatible_machine": [],

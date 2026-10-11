@@ -571,6 +571,8 @@ private:
 #endif
     unsigned int m_last_w, m_last_h;
     bool m_in_render;
+    // EDGE (core profile): set once this canvas has rendered a frame with no GL error; see report_frame_gl_errors().
+    bool m_gl_clean_frame_logged{ false };
     wxTimer m_timer;
     wxTimer m_timer_set_color;
     LayersEditing m_layers_editing;
@@ -598,6 +600,8 @@ private:
 
     GLVolumeCollection m_volumes;
     GCodeViewer m_gcode_viewer;
+    // used to show layers times on the layers slider (libvgcode stage 3, OrcaSlicer #10735)
+    std::vector<float> m_gcode_layers_times_cache;
 
     RenderTimer m_render_timer;
 
@@ -861,6 +865,10 @@ public:
     void reset_gcode_toolpaths(); // makes a context current first: glDeleteBuffers inside
     const GCodeViewer::SequentialView& get_gcode_sequential_view() const { return m_gcode_viewer.get_sequential_view(); }
     void update_gcode_sequential_view_current(unsigned int first, unsigned int last) { m_gcode_viewer.update_sequential_view_current(first, last); }
+    const libvgcode::Interval& get_gcode_view_full_range() const { return m_gcode_viewer.get_gcode_view_full_range(); }
+    const libvgcode::Interval& get_gcode_view_enabled_range() const { return m_gcode_viewer.get_gcode_view_enabled_range(); }
+    const libvgcode::Interval& get_gcode_view_visible_range() const { return m_gcode_viewer.get_gcode_view_visible_range(); }
+    const libvgcode::PathVertex& get_gcode_vertex_at(size_t id) const { return m_gcode_viewer.get_gcode_vertex_at(id); }
 
     void toggle_selected_volume_visibility(bool selected_visible);
     // Re-apply GLVolume::is_active onto the Volume picking raycasters (they are registered once per
@@ -975,6 +983,13 @@ public:
     bool is_dragging() const { return m_gizmos.is_dragging() || m_moving; }
 
     void render(bool only_init = false);
+    // EDGE (core profile): reads the GL error flag after a frame or thumbnail pass and logs it with the canvas
+    // and the open gizmo (OpenGLManager::report_gl_errors()).
+    void report_frame_gl_errors(const char* pass);
+    // EDGE (core profile): at a thumbnail's entry, logs as "before a thumbnail" what is already in the GL
+    // error flag, so the framebuffer set-up report that follows only covers the set-up.
+    // Static: the framebuffer thumbnail renderers are static (the CLI calls them without a canvas).
+    static void report_thumbnail_entry_gl_errors(unsigned int w, unsigned int h, bool for_picking);
     bool is_rendering_enabled()
     {
         return m_enable_render;
@@ -1038,9 +1053,6 @@ public:
         PartPlateList& partplate_list, ModelObjectPtrs& model_objects, const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors,
         GLShaderProgram* shader, Camera::EType camera_type, bool use_top_view = false, bool for_picking = false, bool ban_light = false, ThumbnailView view = ThumbnailView::Iso);
 
-    //BBS use gcoder viewer render calibration thumbnails
-    void render_calibration_thumbnail(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params);
-
     //BBS
     void select_curr_plate_all();
     void select_object_from_idx(std::vector<int>& object_idxs);
@@ -1055,14 +1067,12 @@ public:
     void ensure_on_bed(unsigned int object_idx, bool allow_negative_z);
 
     bool is_gcode_legend_enabled() const { return m_gcode_viewer.is_legend_enabled(); }
-    GCodeViewer::EViewType get_gcode_view_type() const { return m_gcode_viewer.get_view_type(); }
-    const std::vector<double>& get_gcode_layers_zs() const;
+    std::vector<double> get_gcode_layers_zs() const { return m_gcode_viewer.get_layers_zs(); }
+    std::vector<float> get_gcode_layers_times() const { return m_gcode_viewer.get_layers_times(); }
+    const std::vector<float>& get_gcode_layers_times_cache() const { return m_gcode_layers_times_cache; }
+    void reset_gcode_layers_times_cache() { m_gcode_layers_times_cache.clear(); }
     std::vector<double> get_volumes_print_zs(bool active_only) const;
-    unsigned int get_gcode_options_visibility_flags() const { return m_gcode_viewer.get_options_visibility_flags(); }
-    void set_gcode_options_visibility_from_flags(unsigned int flags);
-    unsigned int get_toolpath_role_visibility_flags() const { return m_gcode_viewer.get_toolpath_role_visibility_flags(); }
     void set_volumes_z_range(const std::array<double, 2>& range);
-    std::vector<CustomGCode::Item>& get_custom_gcode_per_print_z() { return m_gcode_viewer.get_custom_gcode_per_print_z(); }
     size_t get_gcode_extruders_count() { return m_gcode_viewer.get_extruders_count(); }
 
     std::vector<int> load_object(const ModelObject& model_object, int obj_idx, std::vector<int> instance_idxs);
@@ -1078,10 +1088,11 @@ public:
     void set_shells_on_previewing(bool is_preview) { m_gcode_viewer.set_shells_on_preview(is_preview); }
 
     //BBS: add only gcode mode
-    void load_gcode_preview(const GCodeProcessorResult& gcode_result, const std::vector<std::string>& str_tool_colors, bool only_gcode, bool skip_toolpaths = false);
-    void refresh_gcode_preview_render_paths();
-    void set_gcode_view_preview_type(GCodeViewer::EViewType type) { return m_gcode_viewer.set_view_type(type); }
-    GCodeViewer::EViewType get_gcode_view_preview_type() const { return m_gcode_viewer.get_view_type(); }
+    // EDGE (#642): skip_toolpaths = the memory guard's summary-only load (no toolpaths drawn)
+    void load_gcode_preview(const GCodeProcessorResult& gcode_result, const std::vector<std::string>& str_tool_colors,
+        const std::vector<std::string>& str_color_print_colors, bool only_gcode, bool skip_toolpaths = false);
+    void set_gcode_view_type(libvgcode::EViewType type) { return m_gcode_viewer.set_view_type(type); }
+    libvgcode::EViewType get_gcode_view_type() const { return m_gcode_viewer.get_view_type(); }
     void load_sla_preview();
     //void load_preview(const std::vector<std::string>& str_tool_colors, const std::vector<CustomGCode::Item>& color_print_values);
     void bind_event_handlers();
@@ -1168,6 +1179,10 @@ public:
 
     void set_mouse_as_dragging() { m_mouse.dragging = true; }
     bool is_mouse_dragging() const { return m_mouse.dragging; }
+    // True when the current left up event comes from an ImGui window and was not processed by it
+    // (e.g. a drag that started on a gizmo floating window and was released over the 3D scene).
+    // Such a release is the end of an ImGui interaction, not a click on the scene.
+    bool is_mouse_left_up_ignored() const { return m_mouse.ignore_left_up; }
 
     double get_size_proportional_to_max_bed_size(double factor) const;
 
@@ -1364,6 +1379,9 @@ private:
     void _refresh_if_shown_on_screen();
 
     void _picking_pass();
+    // While the Text or SVG tool edits a volume, its padded on-screen footprint hovers that volume
+    // (gaps between the glyphs included), so a press there drags it instead of the object behind.
+    void _apply_emboss_footprint_hover(bool gizmo_element_hovered);
     void _rectangular_selection_picking_pass();
     void _render_background();
     void _render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes);
@@ -1425,17 +1443,6 @@ private:
 
     void _start_timer();
     void _stop_timer();
-
-    // Create 3D thick extrusion lines for a skirt and brim.
-    // Adds a new Slic3r::GUI::3DScene::Volume to volumes, updates collision with the build_volume.
-    void _load_print_toolpaths(const BuildVolume &build_volume);
-    // Create 3D thick extrusion lines for object forming extrusions.
-    // Adds a new Slic3r::GUI::3DScene::Volume to $self->volumes,
-    // one for perimeters, one for infill and one for supports, updates collision with the build_volume.
-    void _load_print_object_toolpaths(const PrintObject& print_object, const BuildVolume &build_volume,
-        const std::vector<std::string>& str_tool_colors, const std::vector<CustomGCode::Item>& color_print_values);
-    // Create 3D thick extrusion lines for wipe tower extrusions, updates collision with the build_volume.
-    void _load_wipe_tower_toolpaths(const BuildVolume &build_volume, const std::vector<std::string>& str_tool_colors);
 
     // Load SLA objects and support structures for objects, for which the slaposSliceSupports step has been finished.
 	void _load_sla_shells();

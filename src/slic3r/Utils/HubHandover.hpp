@@ -172,6 +172,107 @@ inline Outcome after_quit(bool old_pid_gone)
     return old_pid_gone ? Outcome::SpawnOwn : Outcome::LeaveRunning;
 }
 
+// ---- one hub at a time, and waiting for the one that is starting ----
+//
+// A test-copy log (2026-10-08) showed how two hubs ended up on one data dir: a slicer asked a
+// foreign hub to hand over, spawned its own (A), gave up on A after 12 s while A was still starting,
+// and a second caller in the same process - parked on the same mutex - then found no hub and spawned
+// B. A came up a little later, then B, and both kept running on one hub.json, one hub.log and one
+// set of state files; B held 13640, so the next hub moved to 13642. Three rules close that:
+//  - a hub holds <hub dir>/hub.lock (an OS lock, released with the process however it ends) from
+//    its first moment, and one that cannot take it exits: at most one hub per data dir, whoever
+//    started it;
+//  - a slicer waits for a hub that is starting - its own earlier spawn, or whoever holds the lock -
+//    instead of starting another;
+//  - a spawn of ours that still has not answered at the deadline is terminated, never left behind.
+
+constexpr int QUIT_WAIT_MS      = 10000;  // the old hub's time to exit after /hub/quit
+constexpr int PORT_FREE_WAIT_MS = 5000;   // ... and then its listener port's time to come free
+constexpr int START_DEADLINE_MS = 120000; // a hub that has not answered this long after it was spawned is given up on
+                                          // (a fresh install's first start can take well over a minute while
+                                          // its binaries are scanned: 105 s in the 2026-10-08 log)
+constexpr int LOCK_RETRY_MS     = 2000;   // a starting hub's retries for hub.lock: a slicer's probe holds it for
+                                          // microseconds, a running hub for good
+
+// After the old hub was asked to quit. `waited_ms` counts from the request, `since_gone_ms` from the
+// moment its pid was seen gone. `port_free` is about the port it listened on (0: none known).
+struct QuitFacts
+{
+    bool old_gone { false };
+    bool port_free { true };
+    int  waited_ms { 0 };
+    int  since_gone_ms { 0 };
+};
+
+enum class QuitStep {
+    Wait,             // look again
+    SpawnOwn,         // gone, and its port is free
+    SpawnOwnPortHeld, // gone, but something still holds the port: start ours anyway (it moves to the next port)
+    LeaveRunning      // it did not go: use it as it is (after_quit()'s rule)
+};
+
+inline QuitStep after_quit_step(const QuitFacts& f)
+{
+    if (!f.old_gone) return f.waited_ms >= QUIT_WAIT_MS ? QuitStep::LeaveRunning : QuitStep::Wait;
+    if (f.port_free) return QuitStep::SpawnOwn;
+    return f.since_gone_ms >= PORT_FREE_WAIT_MS ? QuitStep::SpawnOwnPortHeld : QuitStep::Wait;
+}
+
+// No hub answers: start one, or wait for one that is already on its way.
+struct Starting
+{
+    long own_pending_pid { 0 };     // the hub this process spawned that has not answered yet; 0 none
+    bool own_pending_alive { false };
+    bool lock_held { false };       // some process holds hub.lock: a hub is starting or running
+};
+
+enum class StartPlan {
+    Spawn,     // nobody is starting one
+    WaitOwn,   // our earlier spawn is still starting: never a second one next to it
+    WaitOther  // another process's hub holds the lock
+};
+
+inline StartPlan start_plan(const Starting& s)
+{
+    if (s.own_pending_pid > 0 && s.own_pending_alive) return StartPlan::WaitOwn;
+    if (s.lock_held) return StartPlan::WaitOther;
+    return StartPlan::Spawn;
+}
+
+// One look while waiting for a hub to answer.
+struct WaitFacts
+{
+    bool hub_answers { false };    // /hub/info answered
+    bool own { false };            // the process waited on is one this process spawned
+    bool process_alive { false };  // it is still running (for another's hub: the lock is still held)
+    bool lock_held { false };      // some process holds hub.lock
+    int  elapsed_ms { 0 };         // own: since it was spawned (across calls); other: since this call began waiting
+};
+
+enum class WaitStep {
+    Up,            // it answers
+    Wait,          // still starting: look again
+    WaitOther,     // ours is gone but a hub holds the lock (ours lost the race to it): wait for that one
+    Exited,        // gone and nobody holds the lock: it failed; the next call may spawn again
+    Terminate,     // ours is past the deadline: stop it, or it comes up later as a second hub
+    GiveUp         // another process's is past the deadline: not ours to stop; report no hub for now
+};
+
+inline WaitStep wait_step(const WaitFacts& f)
+{
+    if (f.hub_answers) return WaitStep::Up;
+    if (!f.process_alive) return f.lock_held ? (f.own ? WaitStep::WaitOther : WaitStep::Wait) : WaitStep::Exited;
+    if (f.elapsed_ms >= START_DEADLINE_MS) return f.own ? WaitStep::Terminate : WaitStep::GiveUp;
+    return WaitStep::Wait;
+}
+
+// A quitting hub removes hub.json only when the record is its own (or unreadable). Before hub.lock,
+// the second of two hubs deleted the first one's record when it quit, and slicers then found no hub.
+inline bool remove_record_on_quit(long record_pid, long own_pid)
+{
+    return record_pid <= 0 || record_pid == own_pid;
+}
+
 // ---- the hub checking its own install ----
 
 constexpr int SELF_CHECK_INTERVAL_S = 30; // how often the hub looks

@@ -185,6 +185,22 @@ TEST_CASE("macOS-style names: utun / awdl / bridge are skipped", "[HubAddresses]
     REQUIRE(candidate_ips(adapters) == std::vector<std::string>{ "192.168.1.5" });
 }
 
+TEST_CASE("macOS: Tailscale's anonymous utun interface is the tailnet adapter, other utuns stay rejected", "[HubAddresses]")
+{
+    const std::vector<Adapter> adapters = {
+        posix("lo0", { "127.0.0.1" }),
+        posix("utun3", { "100.78.10.92" }),   // Tailscale: tailnet range
+        posix("utun4", { "10.9.0.2" }),       // some other VPN
+        posix("utun5", { "100.10.0.2" }),     // outside 100.64.0.0/10: not a tailnet address
+        posix("en0", { "192.168.1.5" }),
+    };
+    REQUIRE(candidate_ips(adapters) == std::vector<std::string>{ "192.168.1.5", "100.78.10.92" });
+    // And it is the tailnet kind, so Serve drops it like any other raw tailnet address.
+    REQUIRE(classify(adapters[1], "100.78.10.92") == Kind::Tailscale);
+    REQUIRE(classify(adapters[2], "10.9.0.2") == Kind::Rejected);
+    REQUIRE(classify(adapters[3], "100.10.0.2") == Kind::Rejected);
+}
+
 // ---- Tailscale Serve: never a raw tailnet address over https ----
 
 TEST_CASE("with Tailscale Serve publishing the hub the raw tailnet address is dropped", "[HubAddresses]")
