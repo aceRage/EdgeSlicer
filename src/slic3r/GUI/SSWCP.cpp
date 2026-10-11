@@ -6752,19 +6752,26 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                             });
                             // The first request below (machine.system_info) is answered on <sn>/response.
                             // The Device page subscribes that topic with its own sw_mqtt_subscribe, on
-                            // another worker, and nothing makes set_engine wait for its SUBACK, so the
+                            // another worker, and sends set_engine without waiting for that SUBACK, so the
                             // answer to the first request after picking a printer could arrive before
-                            // the subscription existed and be dropped (a 5 s timeout, then "model not
-                            // detected"). Subscribe here first: idempotent, and Subscribe waits for the
-                            // broker's acknowledgement. The query also asks a second time if the first
-                            // goes unanswered or is refused (a fresh session's first request carries no
-                            // synced time yet). LAN only: a WAN (cloud relay) session names its topics
-                            // differently, and a broker may drop a client that subscribes outside them.
+                            // the subscription existed and be dropped (a 5 s timeout; seen on a U1 over
+                            // the Snapmaker cloud broker, where the page re-subscribed after a timeout
+                            // and set_engine overtook it). Wait for the page's subscription; if it has
+                            // not landed in 3 s, subscribe the same topics here (the page's own names,
+                            // <sn>/response and <sn>/notification, in both link modes; Subscribe waits
+                            // for the broker's acknowledgement). The query also asks a second time if
+                            // the first goes unanswered or is refused (a fresh session's first request
+                            // carries no synced time yet).
                             const auto connect_t0 = std::chrono::steady_clock::now();
-                            if (link_mode == "lan") {
+                            if (!host->wait_response_subscribed(3000)) {
                                 std::string sub_msg = "success";
-                                if (!host->subscribe_device_topics(sub_msg))
-                                    BOOST_LOG_TRIVIAL(warning) << "[SSWCP_MqttAgent_Instance] connect: device topics not subscribed before the first request: " << sub_msg;
+                                const bool  subscribed = host->subscribe_device_topics(sub_msg);
+                                BOOST_LOG_TRIVIAL(warning) << "[SSWCP_MqttAgent_Instance] connect: the page had not subscribed the response topic after 3 s ("
+                                                           << link_mode << "); subscribed it here: " << (subscribed ? "ok" : sub_msg);
+                            } else {
+                                BOOST_LOG_TRIVIAL(info) << "[SSWCP_MqttAgent_Instance] connect: response topic subscribed "
+                                                        << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_t0).count()
+                                                        << " ms after set_engine";
                             }
                             bool res = true;
 

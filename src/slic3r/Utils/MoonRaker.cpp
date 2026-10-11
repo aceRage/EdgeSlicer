@@ -1081,6 +1081,25 @@ bool Moonraker_Mqtt::subscribe_device_topics(std::string& msg)
     return notification_subscribed && response_subscribed;
 }
 
+bool Moonraker_Mqtt::wait_response_subscribed(int timeout_ms)
+{
+    m_sn_mtx.lock();
+    const std::string sn = m_sn;
+    m_sn_mtx.unlock();
+    if (sn.empty())
+        return false;
+    const std::string topic = sn + m_response_topic;
+    const auto        until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        std::shared_ptr<MqttClient> client = get_mqtt_client_tls();
+        if (client && client->IsSubscribed(topic))
+            return true;
+        if (std::chrono::steady_clock::now() >= until)
+            return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 // Ask for TLS info
 bool Moonraker_Mqtt::ask_for_tls_info(const nlohmann::json& cn_params)
 {
