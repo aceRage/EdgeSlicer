@@ -208,17 +208,22 @@ TEST_CASE("A small-bed config marks an object near the large-bed edge outside", 
     model.update_print_volume_state(BuildVolume(small_area, small.opt_float("printable_height")));
     REQUIRE(model.objects.front()->instances.front()->print_volume_state != ModelInstancePVS_Inside);
 
-    // Processor records the Print's own bed. toolpath_outside is only reset (never set true)
-    // in GCodeProcessor.cpp, so P7 uses print_volume_state / PartPlate::check_outside.
+    // The Print keeps the small bed. export_gcode's apply_config(PrintConfig) copies
+    // printable_height but not printable_area (only the DynamicPrintConfig overload does).
+    // toolpath_outside is only reset (never set true) in GCodeProcessor.cpp, so P7 uses
+    // print_volume_state / PartPlate::check_outside.
     Print inside;
     Model inside_model;
     init_print({TestMesh::cube_20x20x20}, inside, inside_model, small);
     inside.is_BBL_printer() = false;
-    GCodeProcessorResult result;
-    Test::gcode(inside, result);
-    REQUIRE_FALSE(result.printable_area.empty());
-    const BoundingBoxf bed(result.printable_area);
+    REQUIRE_FALSE(inside.config().printable_area.values.empty());
+    const BoundingBoxf bed(inside.config().printable_area.values);
     CHECK(bed.max.x() <= 180. + 1e-3);
     CHECK(bed.max.y() <= 180. + 1e-3);
+
+    GCodeProcessorResult result;
+    Test::gcode(inside, result);
+    CHECK(result.printable_height > 179.f);
+    CHECK(result.printable_height < 181.f);
     CHECK_FALSE(result.toolpath_outside);
 }
