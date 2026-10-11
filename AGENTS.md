@@ -28,3 +28,34 @@ Follow `SECURITY.md` for vulnerability reporting. Keep API tokens and printer cr
 - Resampled draw-cut stroke points sit a few microns inside the faceted skin (resample chord sagitta plus float32 vertex quantization). Geometric hit tests fired from stroke samples need a hit floor well above that noise (0.05 mm in `DrawCut.cpp`'s `ray_first_hit`), or a ray leaving the body clamps back onto the skin.
 - On draw-cut changes, run `libslic3r_tests.exe "[DrawCut]"` from `build/tests/libslic3r/Release`; the suite is the fast gate (~92 cases), a full Snapmaker_Orca rebuild is only needed for the deliverable.
 - From Git Bash, MSBuild switches must be dash-style (`-- -m -v:m`); slash-style `/m /v:m` gets path-mangled into `M:/`.
+
+## Cursor Cloud
+Linux Cloud Agent VMs report about 16GB in `free`, but a virtio balloon often leaves about 5GB available, and `swapon` fails with `Invalid argument`. `./build_linux.sh` stops unless available memory is at least 10GB; pass `-r`.
+
+The dependency CMake run reads `nproc` and bakes `-jN` into every third-party build. While the balloon is inflated, put a `nproc` that prints `2` first on `PATH` for that configure, and export `CMAKE_BUILD_PARALLEL_LEVEL=1` so one dependency builds at a time. The slicer itself builds at `CMAKE_BUILD_PARALLEL_LEVEL=2`.
+
+```bash
+sudo DEBIAN_FRONTEND=noninteractive ./build_linux.sh -u
+./build_linux.sh -dr
+export CCACHE_DIR=/opt/ccache
+export CC=/usr/lib/ccache/gcc CXX=/usr/lib/ccache/g++
+export CMAKE_BUILD_PARALLEL_LEVEL=2
+./build_linux.sh -sr
+cmake --build build --config Release --target libslic3r_tests
+./build/tests/libslic3r/Release/libslic3r_tests "[DrawCut]"
+```
+
+`-t` enables tests at configure time. `./build_linux.sh -s` still only builds `Snapmaker_Orca` and the profile validator, so compile `libslic3r_tests` with the `cmake --build` line above. `build/package/EdgeSlicer` is the runnable wrapper; resources and `libexec` sit next to it. A headless slice of the 20mm box:
+
+```bash
+python3 scripts/orca_cli.py --exe build/package/EdgeSlicer \
+  --printer "Snapmaker U1 (0.4 nozzle)" \
+  --process "0.20mm Standard @Snapmaker U1 (0.4 nozzle)" \
+  --filament "Snapmaker PLA Matte @U1" \
+  --outdir /tmp/slice-out --export-3mf box.3mf \
+  tests/data/test_stl/ASCII/20mmbox-LF.stl
+```
+
+Give `--export-3mf` a filename inside `--outdir` (`box.3mf`, which the CLI joins with the output directory). `wx-config` hardcodes `deps/build/destdir/usr/local`, so that prefix has to stay at that path.
+
+The Cloud Agent environment installs the Ubuntu 24.04 packages from `scripts/linux.d/debian` (WebKitGTK 4.1) plus `ccache`, `clang-format`, and `shellcheck`. A finished dependency prefix is kept at `/opt/edgeslicer-deps` and copied back to `deps/build/destdir` when `.cloud-deps-ok` is missing. ccache lives in `/opt/ccache`, enabled for login shells by `/etc/profile.d/edgeslicer-ccache.sh`. The desktop session provides `DISPLAY=:1`.
