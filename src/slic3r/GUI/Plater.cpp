@@ -16575,6 +16575,8 @@ static void notify_high_flow_standard_fallback(const Print *print, NotificationM
                                      format(_L("No High Flow values for %s: printed on a High Flow nozzle with its Standard values."), list));
 }
 
+static void apply_model_static_tables_for_current_plate(PartPlateList &plates);
+
 void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": enter, m_ignore_event %1%, status %2%")%m_ignore_event %evt.status();
