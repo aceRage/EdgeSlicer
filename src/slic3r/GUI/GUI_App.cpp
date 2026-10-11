@@ -8257,6 +8257,44 @@ void GUI_App::apply_keeped_preset_modifications()
     load_current_presets(false);
 }
 
+int GUI_App::cache_current_preset_changes_for_transfer(const char* why)
+{
+    if (!has_current_preset_changes())
+        return 0;
+    int                     count              = 0;
+    const PrinterTechnology printer_technology = preset_bundle->printers.get_edited_preset().printer_technology();
+    for (Tab* tab : tabs_list) {
+        if (!tab->supports_printer_technology(printer_technology) || !tab->current_preset_is_dirty())
+            continue;
+        // As the dialog's Transfer does (check_and_keep_current_preset_changes): option names
+        // without the "#<index>" of a vector element, and the printer's extruder count on its own.
+        std::vector<std::string> options;
+        for (const std::string& o : tab->m_presets->current_dirty_options()) {
+            const size_t      i     = o.find('#');
+            const std::string plain = i != std::string::npos ? o.substr(0, i) : o;
+            if (std::find(options.begin(), options.end(), plain) == options.end())
+                options.push_back(plain);
+        }
+        if (tab->type() == Preset::TYPE_PRINTER) {
+            auto it = std::find(options.begin(), options.end(), "extruders_count");
+            if (it != options.end()) {
+                options.erase(it);
+                static_cast<TabPrinter*>(tab)->cache_extruder_cnt();
+            }
+        }
+        if (options.empty())
+            continue;
+        tab->cache_config_diff(options);
+        count += int(options.size());
+        std::string names;
+        for (const std::string& o : options)
+            names += (names.empty() ? "" : ", ") + o;
+        BOOST_LOG_TRIVIAL(info) << why << ": keeping the modified " << Preset::get_type_string(tab->type()) << " values of \""
+                                << tab->m_presets->get_edited_preset().name << "\" without asking: " << names;
+    }
+    return count;
+}
+
 // This is called when creating new project or load another project
 // OR close ConfigWizard
 // to ask the user what should we do with unsaved changes for presets.

@@ -74,7 +74,11 @@ public:
     int SaveProfile();
     int GetFilamentInfo(std::string VendorDirectory, const json& pFilaList, std::string filepath, std::string& sVendor, std::string& sType);
 
-    bool apply_config(AppConfig* app_config, PresetBundle* preset_bundle, const PresetUpdater* updater, bool& apply_keeped_changes);
+    // `silent_transfer`: a reload the program makes on its own (a Snapmaker printer connect) keeps
+    // the user's modified preset values without the "Configuration package changed" dialog, as
+    // that dialog's Transfer would, and re-applies them after the reload itself.
+    bool apply_config(AppConfig* app_config, PresetBundle* preset_bundle, const PresetUpdater* updater, bool& apply_keeped_changes,
+                      bool silent_transfer = false);
     bool run();
 
     void        StrReplace(std::string& strBase, std::string strSrc, std::string strDes);

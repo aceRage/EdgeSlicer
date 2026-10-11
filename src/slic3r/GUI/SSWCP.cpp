@@ -6886,6 +6886,9 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
 
                                             m_dialog->m_device_id = ip;
                                             
+                                            // Whether this connect adds anything to the installed printer
+                                            // models (the model itself, or its nozzle).
+                                            bool profile_changed = false;
                                             {
                                                 std::lock_guard<std::mutex> lock(m_ProfileJson_mutex);
                                                 int  nModel = m_ProfileJson["model"].size();
@@ -6900,6 +6903,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                         if (!se_nozz_selected.empty() && nozzle_selected.find(se_nozz_selected) == std::string::npos) {
                                                             nozzle_selected += ";" + se_nozz_selected;
                                                             m_ProfileJson["model"][m]["nozzle_selected"] = nozzle_selected;
+                                                            profile_changed = true;
                                                         }
 
                                                         break;
@@ -6912,15 +6916,39 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     new_item["model"]           = info.model_name;
                                                     new_item["nozzle_selected"] = NozzleSync::first_nozzle(nozzle_diameters);
                                                     m_ProfileJson["model"].push_back(new_item);
+                                                    profile_changed = true;
                                                 }
                                             }
 
                                             wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
 
-                                            m_dialog->SaveProfile();
-                                            bool flag = false;
-                                            m_dialog->apply_config(wxGetApp().app_config, wxGetApp().preset_bundle, wxGetApp().preset_updater,
-                                                                flag);
+                                            // The model is installed already (some variant of it is enabled) and
+                                            // this connect added nothing: there is nothing to apply. apply_config
+                                            // compares the whole vendor and filament selection, not just this
+                                            // printer, and that comparison came out "changed" on every connect, so
+                                            // every connect reloaded all presets - and the first one of a session
+                                            // asked about unsaved changes ("Configuration package changed").
+                                            bool installed = false;
+                                            {
+                                                const auto vendors = wxGetApp().app_config->vendors();
+                                                for (const auto& v : vendors) {
+                                                    auto m = v.second.find(info.model_name);
+                                                    if (m != v.second.end() && !m->second.empty()) {
+                                                        installed = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (installed && !profile_changed) {
+                                                BOOST_LOG_TRIVIAL(info) << "[connect] " << info.model_name
+                                                                        << " is installed and this connect adds no nozzle: no preset reload";
+                                            } else {
+                                                m_dialog->SaveProfile();
+                                                bool flag = false;
+                                                // Not asked for by the user: keep their modified values silently.
+                                                m_dialog->apply_config(wxGetApp().app_config, wxGetApp().preset_bundle, wxGetApp().preset_updater,
+                                                                       flag, true);
+                                            }
                                             wxGetApp().update_mode();
                                         }
                                     });
