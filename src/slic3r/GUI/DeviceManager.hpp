@@ -18,6 +18,7 @@
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
+#include "FirstRequestGate.hpp"
 #include "AmsDrying.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
@@ -583,6 +584,26 @@ public:
     bool m_lan_session_up{false};
     void set_lan_session_up(bool up) { m_lan_session_up = up; }
     bool lan_session_up() const { return m_lan_session_up; }
+    // The first request after a selection (FirstRequestGate.hpp): a status request made while the
+    // session this selection started is still being dialled is held - the connected callback asks
+    // for the same report - and each connect logs one line when the session is up and one when the
+    // first status report lands, in milliseconds from the selection.
+    // Any other command published while the session is dialled waits in the gate (publish_json):
+    // it goes out as soon as the session is up (note_session_up, whichever event reports it), or is
+    // reported as not sent when the session fails, the hold runs out or a new selection replaces it.
+    FirstRequestGate::SelectionGate m_gate;
+    // A selection or a re-dial started. `session_already_up`: the session it needs is up (a cloud
+    // printer while the cloud session is connected).
+    void note_selected(bool session_already_up);
+    // The plug-in reported this printer's session up (`kind`: "LAN" / "cloud") - this also sends
+    // whatever was held for it - or failed / lost.
+    void note_session_up(const char* kind);
+    void note_session_down();
+    // True (and logged) when the status request `what` is to be held back for the session.
+    bool hold_status_request(const char* what);
+    void note_status_received();
+    void report_not_sent(const FirstRequestGate::SelectionGate::Dropped& d);
+    void send_held(const std::vector<FirstRequestGate::HeldCommand>& held);
     // Ultra: whether a report carrying the AMS / external spools has been parsed in full for this
     // printer, and when DeviceManager::full_report_tick last asked it for one (see there).
     bool m_full_report_seen{false};
@@ -1368,6 +1389,10 @@ private:
     // One reconnect attempt against one LAN machine: the same three steps the Device tab's
     // set_selected_machine runs (disconnect, reset, connect, mark LAN-connected).
     void lan_reconnect_now(MachineObject* obj, const char* why);
+    // Whether the plug-in's cloud MQTT session is up, as its on_server_connected callback last
+    // reported (UltraNet opens it lazily, on the first subscribe or cloud selection). A cloud
+    // printer selected while it is still connecting holds its early status requests.
+    bool m_cloud_session_up{false};
 
     // The hidden hub-managed instance's round robin over its LAN printers (see the .cpp): which
     // printer currently holds the agent's single LAN session, and since when.
@@ -1405,6 +1430,10 @@ public:
     void reload_printer_settings();
 
     bool set_selected_machine(std::string dev_id,  bool need_disconnect = false);
+    // GUI_App's on_server_connected handler: the cloud session came up (code 0) or failed / was
+    // lost (anything else). A selected cloud printer waiting for it gets its "connected" line.
+    void on_cloud_session(int code);
+    bool cloud_session_up() const { return m_cloud_session_up; }
     MachineObject* get_selected_machine();
     void add_user_subscribe();
     void del_user_subscribe();

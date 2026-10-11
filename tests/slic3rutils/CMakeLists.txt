@@ -37,6 +37,7 @@ add_executable(${_TEST_NAME}_tests
     push_privacy_tests.cpp
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
+    first_request_gate_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp

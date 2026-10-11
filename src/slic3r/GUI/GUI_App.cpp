@@ -2418,15 +2418,20 @@ void GUI_App::init_networking_callbacks()
                 });
                 return;
             }
-            GUI::wxGetApp().CallAfter([this] {
+            GUI::wxGetApp().CallAfter([this, return_code] {
                 if (m_is_closing)
                     return;
                 BOOST_LOG_TRIVIAL(trace) << "static: server connected";
-                m_agent->set_user_selected_machine(m_agent->get_user_selected_machine());
+                // Before set_user_selected_machine below asks for the selected printer's report:
+                // a selection made while the session was still connecting held its own request.
+                if (m_device_manager)
+                    m_device_manager->on_cloud_session(return_code);
                     if (this->is_enable_multi_machine()) {
                         auto evt = new wxCommandEvent(EVT_UPDATE_MACHINE_LIST);
                         wxQueueEvent(this, evt);
                     }
+                    // Once (it used to be made twice, before and after the event above, and each
+                    // call asks the printer for a full report).
                     m_agent->set_user_selected_machine(m_agent->get_user_selected_machine());
                     //subscribe device
                     if (m_agent->is_user_login()) {
@@ -2496,6 +2501,15 @@ void GUI_App::init_networking_callbacks()
                     // asked for a report, a session reported down is re-dialled.
                     if (obj)
                         obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    // The one "connected" line per connect, and the end of holding this
+                    // selection's early requests: the held commands go out now, the held status
+                    // requests are replaced by the pushall + get_version below.
+                    if (obj && FirstRequestGate::event_applies(obj->is_lan_mode_printer(), /* event_is_lan */ true)) {
+                        if (state == ConnectStatus::ConnectStatusOk)
+                            obj->note_session_up("LAN");
+                        else
+                            obj->note_session_down();
+                    }
                     if (MachineObject* local = m_device_manager->get_local_machine(dev_id); local && local != obj)
                         local->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
 
@@ -6023,6 +6037,8 @@ void GUI_App::request_user_logout()
         // Update data first before showing dialogs
         m_agent->user_logout(true);
         m_agent->set_user_selected_machine("");
+        if (m_device_manager)
+            m_device_manager->on_cloud_session(-1); // the plug-in drops its cloud session on logout
         /* delete old user settings */
         bool     transfer_preset_changes = false;
         wxString header = _L("Some presets are modified.") + "\n" +
@@ -8253,6 +8269,44 @@ void GUI_App::apply_keeped_preset_modifications()
             tab->apply_config_from_cache();
     }
     load_current_presets(false);
+}
+
+int GUI_App::cache_current_preset_changes_for_transfer(const char* why)
+{
+    if (!has_current_preset_changes())
+        return 0;
+    int                     count              = 0;
+    const PrinterTechnology printer_technology = preset_bundle->printers.get_edited_preset().printer_technology();
+    for (Tab* tab : tabs_list) {
+        if (!tab->supports_printer_technology(printer_technology) || !tab->current_preset_is_dirty())
+            continue;
+        // As the dialog's Transfer does (check_and_keep_current_preset_changes): option names
+        // without the "#<index>" of a vector element, and the printer's extruder count on its own.
+        std::vector<std::string> options;
+        for (const std::string& o : tab->m_presets->current_dirty_options()) {
+            const size_t      i     = o.find('#');
+            const std::string plain = i != std::string::npos ? o.substr(0, i) : o;
+            if (std::find(options.begin(), options.end(), plain) == options.end())
+                options.push_back(plain);
+        }
+        if (tab->type() == Preset::TYPE_PRINTER) {
+            auto it = std::find(options.begin(), options.end(), "extruders_count");
+            if (it != options.end()) {
+                options.erase(it);
+                static_cast<TabPrinter*>(tab)->cache_extruder_cnt();
+            }
+        }
+        if (options.empty())
+            continue;
+        tab->cache_config_diff(options);
+        count += int(options.size());
+        std::string names;
+        for (const std::string& o : options)
+            names += (names.empty() ? "" : ", ") + o;
+        BOOST_LOG_TRIVIAL(info) << why << ": keeping the modified " << Preset::get_type_string(tab->type()) << " values of \""
+                                << tab->m_presets->get_edited_preset().name << "\" without asking: " << names;
+    }
+    return count;
 }
 
 // This is called when creating new project or load another project

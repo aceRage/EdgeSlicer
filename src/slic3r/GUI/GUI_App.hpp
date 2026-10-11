@@ -836,6 +836,11 @@ private:
     bool            check_and_save_current_preset_changes(const wxString& caption, const wxString& header, bool remember_choice = true, bool use_dont_save_insted_of_discard = false);
     void            apply_keeped_preset_modifications();
     bool            check_and_keep_current_preset_changes(const wxString& caption, const wxString& header, int action_buttons, bool* postponed_apply_of_keeped_changes = nullptr);
+    // The "Transfer" answer of the dialog above, without the dialog, for a preset reload the
+    // program makes on its own (a Snapmaker printer connect installing its nozzle): every modified
+    // option of the current presets is cached for apply_keeped_preset_modifications() and logged
+    // with `why`. Returns how many options were cached (0: nothing was modified).
+    int             cache_current_preset_changes_for_transfer(const char* why);
     bool            can_load_project();
     bool            check_print_host_queue();
     bool            checked_tab(Tab* tab);
