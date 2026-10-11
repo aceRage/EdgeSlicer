@@ -269,3 +269,14 @@ TEST_CASE("web session: only Snapmaker's own session cookies are named for delet
     CHECK(session_cookie_uri(false) == "https://id.snapmaker.com/");
     CHECK(session_cookie_uri(true) == "https://id.snapmaker.cn/");
 }
+
+TEST_CASE("log redaction: no query string or fragment reaches the log", "[SMSilentLogin]")
+{
+    CHECK(redact_url_queries("https://accounts.google.com/v3/signin/accountchooser?continue=x&token=SECRET") ==
+          "https://accounts.google.com/v3/signin/accountchooser");
+    CHECK(redact_url_queries("https://id.snapmaker.com/cb#access_token=SECRET") == "https://id.snapmaker.com/cb");
+    CHECK(redact_url_queries("https://a/b") == "https://a/b");
+    CHECK(redact_url_queries("") == "");
+    CHECK(redact_url_queries("cancelled \"https://a/b?token=SECRET\" (https://c/d?x=1) end") ==
+          "cancelled \"https://a/b\" (https://c/d) end");
+}

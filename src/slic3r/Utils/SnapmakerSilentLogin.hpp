@@ -75,6 +75,11 @@ bool has_token_param(const std::string& url);
 // so carried "&_act=login_success", which the account service rejects (Snapmaker upstream #741).
 std::string token_from_url(const std::string& url);
 
+// Text for the log with every query string and fragment dropped (sign-in redirects carry tokens
+// there): "https://a/b?x=1#y rest" becomes "https://a/b rest". Works on a bare address and on an
+// error message that quotes one.
+std::string redact_url_queries(const std::string& text);
+
 // The answer of GET /api/common/accounts/current, read. Snapmaker answers HTTP 200 even for a
 // token it does not accept - {"code":110002,"msg":"Missing authorization"} - so the status alone
 // says nothing: only an answer with an account id is a verified session.

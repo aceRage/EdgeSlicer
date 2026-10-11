@@ -5821,12 +5821,27 @@ void GUI_App::sm_sign_out_locally()
 void GUI_App::sm_clear_web_session(const char* why)
 {
     const bool china = app_config != nullptr && app_config->get_country_code().find("CN") != std::string::npos;
-    // Elsewhere than Windows the cookies go by script, from a view showing id.snapmaker.com.
+#ifdef __APPLE__
+    // The slicer's web views share WKWebsiteDataStore's default store: delete the cookies through
+    // its cookie store, no open web view needed. Asynchronous, so the outcome is logged from the
+    // completion (main thread). Cookie names and counts only, never values.
+    const std::string why_copy = why;
+    mac_delete_site_cookies(SMSilentLogin::session_cookie_names(), SMSilentLogin::session_cookie_uri(china),
+                            [why_copy](size_t deleted) {
+                                BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: web session cookies "
+                                                           << (deleted > 0 ? "cleared (" + std::to_string(deleted) + " deleted)" :
+                                                                             std::string("already clear (none found)"))
+                                                           << " (" << why_copy << ")";
+                            });
+#else
+    // Windows deletes through any live view's cookie manager (one shared profile). Linux has no
+    // such call here and goes by script, from a view showing id.snapmaker.com.
     wxWebView* page = sm_login_dlg != nullptr ? sm_login_dlg->browser() :
                       sm_silent_login_dlg != nullptr ? sm_silent_login_dlg->browser() : nullptr;
     const bool done = WebView::DeleteSiteCookies(SMSilentLogin::session_cookie_names(), SMSilentLogin::session_cookie_uri(china), page);
     BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: web session cookies " << (done ? "cleared" : "not cleared (no web view)")
                                << " (" << why << ")";
+#endif
 }
 
 void GUI_App::sm_finish_sign_in(const std::string& token, const std::string& user_info_url, bool shown)
