@@ -45,6 +45,14 @@ END_EVENT_TABLE()
 
 int SMUserLogin::web_sequence_id = 20000;
 
+namespace {
+// Event text for the log, without any query string or fragment.
+std::string url_for_log(const wxString &text)
+{
+    return SMSilentLogin::redact_url_queries(std::string(text.ToUTF8().data()));
+}
+} // namespace
+
 SMUserLogin::SMUserLogin(bool isLogout, bool silent) : wxDialog((wxWindow *) (wxGetApp().mainframe), wxID_ANY, "EdgeSlicer"), m_silent(silent)
 {
     m_silent_timer.SetOwner(this, SILENT_LOGIN_TIMER_ID);
@@ -488,7 +496,17 @@ void SMUserLogin::OnError(wxWebViewEvent &event)
     case wxWEBVIEW_NAV_ERR_USER_CANCELLED: e = "wxWEBVIEW_NAV_ERR_USER_CANCELLED"; break;
     case wxWEBVIEW_NAV_ERR_OTHER: e = "wxWEBVIEW_NAV_ERR_OTHER"; break;
     }
-    BOOST_LOG_TRIVIAL(fatal) << __FUNCTION__<< boost::format(":SMUserLogin error loading page %1% %2% %3% %4%") % event.GetURL() % event.GetTarget() %e % event.GetString();
+    // A navigation cancelled by the sign-in success redirect (Google's account chooser, for one) or
+    // reported after the sign-in has already succeeded is not a failure. The address is logged
+    // without its query string, so no token reaches the log.
+    const bool cancelled = event.GetInt() == wxWEBVIEW_NAV_ERR_USER_CANCELLED;
+    const bool succeeded = m_token_taken || m_silent_done;
+    const std::string logged = (boost::format(":SMUserLogin error loading page %1% %2% %3% %4%") % url_for_log(event.GetURL()) %
+                                url_for_log(event.GetTarget()) % e % url_for_log(event.GetString())).str();
+    if (cancelled || succeeded)
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << logged << (cancelled ? " (navigation cancelled)" : " (after sign-in)");
+    else
+        BOOST_LOG_TRIVIAL(fatal) << __FUNCTION__ << logged;
 
     // Silent mode: a navigation that fails outright (no connection, certificate, ...) ends the
     // attempt now rather than at the timeout. A cancelled navigation is only a redirect
