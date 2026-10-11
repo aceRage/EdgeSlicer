@@ -130,7 +130,16 @@ public:
 #endif
     static std::string get_version();
     static void* get_network_function(const char* name);
+    // Always false: EdgeSlicer ships one network plug-in (its own, the current ABI). The old
+    // "legacy_networking" setting no longer reaches this flag (GUI_App resets it at start-up), and
+    // neither the expected plug-in version nor the version check read it.
     static bool use_legacy_network;
+    // The plug-in version this EdgeSlicer needs (BAMBU_NETWORK_AGENT_VERSION), whatever
+    // use_legacy_network says.
+    static std::string expected_version();
+    // The plug-in's reported version against expected_version(): the first 8 characters
+    // ("MM.mm.pp") must match. "00.00.00.00" (inconsistent build / no get_version export) never does.
+    static bool is_compatible_version(const std::string &plugin_version);
     NetworkAgent(std::string log_dir);
     ~NetworkAgent();
 
@@ -228,6 +237,10 @@ public:
     int get_model_mall_detail_url(std::string* url, std::string id);
     int get_my_profile(std::string token, unsigned int* http_code, std::string* http_body);
     int get_my_token(std::string ticket, unsigned int* http_code, std::string* http_body);
+    // What get_my_token / get_my_profile log of a failed call's response body: the credential
+    // the call carried is cut out by value, then the text is scrubbed (tokens, e-mail, account
+    // and user values) and cut to max_len. Public for the unit test.
+    static std::string login_failure_body_for_log(const std::string& body, const std::string& credential, size_t max_len = 300);
     int track_enable(bool enable);
     int track_remove_files();
     int track_event(std::string evt_key, std::string content);

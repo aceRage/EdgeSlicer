@@ -118,6 +118,13 @@ public:
         // executing the gcode finish_layer_tcr.
         bool is_finish_first = false;
 
+        // BBS: this toolchange may cool the nozzle before the tower (change_filament_gcode's
+        // M620.15 C{new_filament_temp - filament_cooling_before_tower}): it is not on the tower's
+        // first layer and not a tower interface (Bambu Studio's "contact") toolchange, and the tower
+        // wrote "Wipe tower reheat before wipe" back to the print temperature when the new filament
+        // cools at all. GCode publishes 0 cooling for every other toolchange.
+        bool reheats_after_cooling = false;
+
 		// Sum the total length of the extrusion.
 		float total_extrusion_length_in_plane() {
 			float e_length = 0.f;
@@ -332,6 +339,10 @@ public:
         float               run_in_distance       = 0.f;
         float               extra_prime_length    = 0.f;
         int                 physical_extruder     = -1; // T of its M104/M109 on a multi-nozzle machine, -1 for none
+        // BBS: filament_cooling_before_tower (with the filament-switcher extra) and the T of the
+        // tower's "Wipe tower reheat before wipe" M104 (Bambu Studio always names the physical extruder).
+        float               cooling_before_tower  = 0.f;
+        int                 reheat_extruder       = 0;
     };
 
 private:

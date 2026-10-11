@@ -6,10 +6,12 @@ add_executable(${_TEST_NAME}_tests
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
     plugin_guard_tests.cpp
+    plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp
     login_useragent_tests.cpp
     hub_home_tests.cpp
     hub_handover_tests.cpp
+    web_load_retry_tests.cpp
     home_tab_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp
@@ -19,6 +21,7 @@ add_executable(${_TEST_NAME}_tests
     http_body_redirect_tests.cpp
     snapmaker_silent_login_tests.cpp
     bambu_sync_policy_tests.cpp
+    preset_sync_policy_tests.cpp
     ff_diagnostics_tests.cpp
     elegoo_canvas_tests.cpp
     splash_animation_tests.cpp
@@ -35,10 +38,13 @@ add_executable(${_TEST_NAME}_tests
     live_activity_push_tests.cpp
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
+    first_request_gate_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp
     hub_addresses_tests.cpp
+    tailscale_cli_tests.cpp
+    hub_platform_tests.cpp
     update_feed_tests.cpp
     paint_cli_tests.cpp
     hms_lookup_tests.cpp
@@ -57,15 +63,23 @@ add_executable(${_TEST_NAME}_tests
     instance_routing_tests.cpp
     startup_wizard_tests.cpp
     page_server_security_tests.cpp
+    login_result_page_tests.cpp
     sentry_scrub_tests.cpp
+    login_diagnostics_tests.cpp
+    login_ticket_gate_tests.cpp
+    stream_page_icon_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
     device_controls_tests.cpp
+    bambu_fans_tests.cpp
     printer_timelapse_tests.cpp
     chamber_lights_tests.cpp
     filament_commands_tests.cpp
     ams_dual_layout_tests.cpp
     gizmo_selection_object_tests.cpp
+    emboss_picking_tests.cpp
+    svg_import_routing_tests.cpp
+    emboss_free_transform_tests.cpp
     dark_mode_background_tests.cpp
     # After the other wx-window tests: it starts a plain wxApp when none is up, and the tests
     # that run before it (hms_lookup_tests) call wxGetApp() whenever an app exists.
@@ -75,7 +89,13 @@ add_executable(${_TEST_NAME}_tests
     bambu_setup_notice_tests.cpp
     saved_printers_tests.cpp
     ff_printer_sources_tests.cpp
+    ff_device_pid_tests.cpp
     emboss_font_search_tests.cpp
+    printers_monitor_tests.cpp
+    # Hidden GLFW window + forward-compatible 3.3 core context; skips itself where none can be made.
+    gl_core_profile_tests.cpp
+    libvgcode_input_tests.cpp
+    layer_height_check_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp

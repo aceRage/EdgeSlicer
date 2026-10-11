@@ -260,6 +260,23 @@ const char* PresetBundle::SM_DEFAULT_PRINTER_VARIANT = "0.4";
 const char* PresetBundle::SM_DEFAULT_FILAMENT        = "Snapmaker PLA SnapSpeed";
 const char *PresetBundle::ORCA_FILAMENT_LIBRARY = "OrcaFilamentLibrary";
 
+std::string PresetBundle::variant_to_activate(const std::set<std::string> &previous, const std::set<std::string> &enabled)
+{
+    for (const std::string &variant : enabled)
+        if (previous.find(variant) == previous.end())
+            return default_printer_variant(enabled);
+    return std::string();
+}
+
+std::string PresetBundle::default_printer_variant(const std::set<std::string> &variants)
+{
+    if (variants.empty())
+        return std::string();
+    if (variants.find(SM_DEFAULT_PRINTER_VARIANT) != variants.end())
+        return SM_DEFAULT_PRINTER_VARIANT;
+    return *variants.begin();
+}
+
 PresetBundle::PresetBundle()
     : prints(Preset::TYPE_PRINT, Preset::print_options(), static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()))
     , filaments(Preset::TYPE_FILAMENT, Preset::filament_options(), static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()), "Default Filament")
@@ -286,6 +303,15 @@ PresetBundle::PresetBundle()
     this->filaments.default_preset().inherits();
     // Set all the nullable values to nils.
     this->filaments.default_preset().config.null_nullables();
+    // BBS: except Bambu's flush settings and pre-tower cooling. They are nullable only because some
+    // profiles write "nil" (Anycubic); there is no printer value a nil could fall back to. A filament
+    // preset that does not set them holds what Bambu Studio's base filament profile
+    // (BBL/filament/fdm_filament_common.json, which every Bambu filament inherits) says: all 0, so flush
+    // temperature and speed are derived and there is no cooling before the tower. The option default of
+    // filament_cooling_before_tower stays Bambu's 10; the BBL presets that cool say so explicitly.
+    for (const char *key : { "filament_flush_temp", "filament_flush_temp_fast", "filament_flush_volumetric_speed" })
+        this->filaments.default_preset().config.set_key_value(key, print_config_def.get(key)->default_value->clone());
+    this->filaments.default_preset().config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable{ 0. });
 
     this->sla_materials.default_preset().config.optptr("sla_material_settings_id", true);
     this->sla_materials.default_preset().compatible_printers_condition();
@@ -462,6 +488,10 @@ PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, Forward
     const bool startup_profile = startup_profile_enabled();
     const auto total_start     = std::chrono::steady_clock::now();
     auto       phase_start     = total_start;
+
+    // One report for the whole load (system vendors and user presets) of keys that are dropped on
+    // purpose, see PrintConfigDef::unsupported_foreign_key().
+    Preset::ForeignKeyReportScope foreign_key_scope;
 
     // First load the vendor specific system presets.
     PresetsConfigSubstitutions substitutions;
@@ -701,6 +731,43 @@ std::vector<Preset*> PresetBundle::get_current_project_embedded_presets()
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" finished, returned project_presets count %1%")%project_presets.size();
     return project_presets;
+}
+
+// Ultra: "Keep my printer" (keep_printer_on_open) switches a project that was saved for another
+// printer over to the user's printer, and the switch deselects every process / filament preset
+// the new printer cannot use. For a project preset that means it is gone from the combos -
+// project presets follow their parent profile's printer list - and the values the user saved
+// into the project are replaced by the new printer's defaults. This lists what would be lost.
+std::vector<std::string> PresetBundle::project_presets_lost_on_printer(const std::string &printer_name) const
+{
+    std::vector<std::string> lost;
+    const Preset *target = this->printers.find_preset(printer_name, false);
+    if (target == nullptr)
+        return lost;
+    // Presets load_external_preset() made up while reading a project, for a slot whose values
+    // matched no preset: "<name>(<file>.3mf)". They stand for "whatever the file had", which is
+    // exactly what Keep my printer is meant to replace, not for something the user saved.
+    auto made_up = [](const std::string &name) { return boost::algorithm::iends_with(name, ".3mf)"); };
+    auto add = [&lost](const std::string &name) {
+        if (std::find(lost.begin(), lost.end(), name) == lost.end())
+            lost.push_back(name);
+    };
+
+    const Preset &printer = this->printers.get_selected_preset();
+    if (printer.is_project_embedded && printer.name != target->name && !made_up(printer.name))
+        add(printer.name);
+
+    const PresetWithVendorProfile target_with_vendor = this->printers.get_preset_with_vendor_profile(*target);
+    auto check = [&](const PresetCollection &presets, const Preset *preset) {
+        if (preset == nullptr || !preset->is_project_embedded || made_up(preset->name))
+            return;
+        if (!is_compatible_with_printer(presets.get_preset_with_vendor_profile(*preset), target_with_vendor))
+            add(preset->name);
+    };
+    check(this->prints, &this->prints.get_selected_preset());
+    for (const std::string &name : this->filament_presets)
+        check(this->filaments, this->filaments.find_preset(name, false));
+    return lost;
 }
 
 //BBS: reset project embedded presets
@@ -1162,6 +1229,7 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             BOOST_LOG_TRIVIAL(error) << "Error in a preset file: The preset \"" << preset.file
                                      << "\" contains the following incorrect keys: " << incorrect_keys << ", which were removed";
         }
+        Preset::log_ignored_foreign_keys();
         if (!config_substitutions.empty())
             substitutions.push_back({name, collection->type(), PresetConfigSubstitutions::Source::UserFile, file, std::move(config_substitutions)});
 
@@ -1680,6 +1748,7 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
         startup_profile_log("PresetBundle::load_system_presets_from_json end vendor_count=" + std::to_string(vendor_names.size()) +
                             " total_ms=" + std::to_string(total_ms));
     }
+    filaments.log_printer_alias_duplicates();
     return std::make_pair(std::move(substitutions), errors_cummulative);
 }
 
@@ -1875,6 +1944,15 @@ void PresetBundle::load_installed_printers(AppConfig &config)
         preset.set_visible_from_appconfig(config);
 }
 
+std::string PresetBundle::get_filament_name_by_alias_for_slot(const std::string &alias, size_t filament_slot) const
+{
+    // filament_preset_fits_slot narrows nothing unless the machine really carries different nozzle sizes,
+    // so on every other machine this is the plain alias lookup.
+    return filaments.get_preset_name_by_alias(alias, [this, filament_slot](const Preset &preset) {
+        return filament_preset_fits_slot(preset, printers, unsigned(filament_slot + 1));
+    });
+}
+
 const std::string& PresetBundle::get_preset_name_by_alias( const Preset::Type& preset_type, const std::string& alias) const
 {
     // there are not aliases for Printers profiles
@@ -1913,7 +1991,8 @@ const int PresetBundle::get_required_hrc_by_filament_type(const std::string& fil
 
 //BBS: add project embedded preset logic
 void PresetBundle::save_changes_for_preset(const std::string& new_name, Preset::Type type,
-                                           const std::vector<std::string>& unselected_options, bool save_to_project)
+                                           const std::vector<std::string>& unselected_options, bool save_to_project,
+                                           ProjectPresetPrinters project_printers)
 {
     PresetCollection& presets = type == Preset::TYPE_PRINT          ? prints :
                                 type == Preset::TYPE_SLA_PRINT      ? sla_prints :
@@ -1929,7 +2008,7 @@ void PresetBundle::save_changes_for_preset(const std::string& new_name, Preset::
     // Save the preset into Slic3r::data_dir / presets / section_name / preset_name.ini
     //BBS: add project embedded preset logic
     //presets.save_current_preset(new_name);
-    presets.save_current_preset(new_name, false, save_to_project);
+    presets.save_current_preset(new_name, false, save_to_project, nullptr, nullptr, project_printers);
     // Mark the print & filament enabled if they are compatible with the currently selected preset.
     // If saving the preset changes compatibility with other presets, keep the now incompatible dependent presets selected, however with a "red flag" icon showing that they are no more compatible.
     update_compatible(PresetSelectCompatibleType::Never);
@@ -2791,6 +2870,12 @@ Preset *PresetBundle::get_similar_printer_preset(std::string printer_model, std:
         if (preset.second->config.opt_string("printer_variant") == printer_variant)
             return preset.second;
     }
+    // Nothing matches: the map is ordered by name, so its first entry is the smallest nozzle ("0.2" for
+    // the U1). Fall back to the model's default variant (0.4) before that.
+    for (auto& preset : printer_presets) {
+        if (preset.second->config.opt_string("printer_variant") == SM_DEFAULT_PRINTER_VARIANT)
+            return preset.second;
+    }
     return printer_presets.begin()->second;
 }
 
@@ -3516,6 +3601,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     // (enable_tower_interface_features, prime_tower_skip_points): see SystemPresetTowerKeysScope.
     SystemPresetTowerKeysScope tower_keys_scope;
 
+    // Keys the profiles carry but presets deliberately do not hold are counted, not logged per file;
+    // the totals are written once when the outermost bulk load (load_presets) or this call ends.
+    Preset::ForeignKeyReportScope foreign_key_scope;
+
     // Enable substitutions for user config bundle, throw an exception when loading a system profile.
     ConfigSubstitutionContext  substitution_context { compatibility_rule };
     PresetsConfigSubstitutions substitutions;
@@ -3759,6 +3848,15 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                 }
                 else if (boost::iequals(it.key(), BBL_JSON_KEY_HOTEND_MODEL)) {
                     model.hotend_model = it.value();
+                }
+                else if (boost::iequals(it.key(), BBL_JSON_KEY_BOTTOM_TEXTURE_END_NAME)) {
+                    model.bottom_texture_end_name = it.value();
+                }
+                else if (boost::iequals(it.key(), BBL_JSON_KEY_BOTTOM_TEXTURE_RECT)) {
+                    model.bottom_texture_rect = it.value();
+                }
+                else if (boost::iequals(it.key(), BBL_JSON_KEY_MIDDLE_TEXTURE_RECT)) {
+                    model.middle_texture_rect = it.value();
                 }
                 else if (boost::iequals(it.key(), BBL_JSON_KEY_DEFAULT_MATERIALS)) {
                     //get machine list

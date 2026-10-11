@@ -6,10 +6,11 @@
   "setting_id": "937533070",
   "inherits": "Snapmaker ABS @U1 base",
   "compatible_printers": [
-    "Snapmaker U1 (0.6 nozzle)"
+    "Snapmaker U1 (0.6 nozzle)",
+    "Snapmaker U1 (0.4+0.6 nozzle)"
   ],
   "enable_pressure_advance": [
-    "1"
+    "0"
   ],
   "chamber_temperature": [
     "60"

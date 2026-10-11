@@ -5,13 +5,16 @@
 //
 //  * Account > Login must not open a sign-in page when no agent is loaded - the Google flow ends
 //    with the ticket being handed to the plug-in, and with none loaded the user just watches it
-//    fail. Offer the plug-in download instead.
-//  * Nothing may replace UltraNet. install_plugin() unzips Bambu's CDN package over
-//    data_dir/plugins, so every download and update entry point is gated on "is the installed
-//    plug-in ours?" - a question the DLL name alone cannot answer, hence the marker file.
+//    fail. Say the plug-in is missing instead.
+//  * EdgeSlicer NEVER downloads or installs Bambu's network plug-in (owner decision, 2026-10),
+//    whatever is or is not in data_dir/plugins: bambu_cdn_download_allowed() is false for every
+//    input, the only package GUI_App::download_plugin() lets through is the camera component, and
+//    a package staged in ota/ is refused.
+//  * Whether a plug-in is OURS is still a question the DLL name alone cannot answer, hence the
+//    marker file: it decides when the sidecar replaces what is there and which message to show.
 //
 // The trap the marker exists for: a leftover marker with no library beside it, and a Bambu-original
-// library with no marker. Neither is UltraNet, and both must keep the CDN path fully working.
+// library with no marker. Neither is UltraNet.
 //
 // Nothing here touches wx, a config file, the network, or a printer; only the UltraNet-tag case
 // near the end writes two scratch files under the temp folder.
@@ -27,7 +30,10 @@
 
 using Slic3r::GUI::CameraToolsCopy;
 using Slic3r::GUI::LoginGuardAction;
+using Slic3r::GUI::PluginMissingNotice;
 using Slic3r::GUI::bambu_cdn_download_allowed;
+using Slic3r::GUI::bambu_cdn_package_allowed;
+using Slic3r::GUI::network_plugin_missing_notice;
 using Slic3r::GUI::camera_tools_copy_decision;
 using Slic3r::GUI::is_ultranet_plugin;
 using Slic3r::GUI::may_overwrite_bambusource;
@@ -51,14 +57,48 @@ TEST_CASE("UltraNet is a library AND a marker, never one alone", "[PluginGuard]"
     CHECK_FALSE(is_ultranet_plugin(false, false));
 }
 
-TEST_CASE("The Bambu CDN path is disabled exactly when UltraNet is installed", "[PluginGuard]")
+TEST_CASE("The Bambu CDN download is never allowed, whatever is installed", "[PluginGuard]")
 {
-    CHECK_FALSE(bambu_cdn_download_allowed(true, true));
-    // The regression this guards: an empty folder or a Bambu-original plug-in must keep the
-    // download and update path working in full.
-    CHECK(bambu_cdn_download_allowed(false, false));
-    CHECK(bambu_cdn_download_allowed(true, false));
-    CHECK(bambu_cdn_download_allowed(false, true));
+    // Every combination of the two facts the old rule looked at.
+    for (bool plugin_present : { false, true })
+        for (bool ultranet_marker : { false, true })
+            CHECK_FALSE(bambu_cdn_download_allowed(plugin_present, ultranet_marker));
+    // In particular the cases that used to keep the download path alive: an empty folder, a
+    // Bambu-original plug-in with no marker, a leftover marker with no library.
+    CHECK_FALSE(bambu_cdn_download_allowed(false, false));
+    CHECK_FALSE(bambu_cdn_download_allowed(true, false));
+    CHECK_FALSE(bambu_cdn_download_allowed(false, true));
+}
+
+TEST_CASE("Only the camera component package may be fetched from the Bambu CDN", "[PluginGuard]")
+{
+    CHECK(bambu_cdn_package_allowed("camera_component.zip"));
+    // The network plug-in package, the virtual-camera tools, and anything else.
+    CHECK_FALSE(bambu_cdn_package_allowed("network_plugin.zip"));
+    CHECK_FALSE(bambu_cdn_package_allowed("camera_tools.zip"));
+    CHECK_FALSE(bambu_cdn_package_allowed(""));
+    CHECK_FALSE(bambu_cdn_package_allowed("plugins"));
+    // Exact match: no case folding, no prefix or suffix, no path.
+    CHECK_FALSE(bambu_cdn_package_allowed("Camera_Component.zip"));
+    CHECK_FALSE(bambu_cdn_package_allowed("camera_component.zip.exe"));
+    CHECK_FALSE(bambu_cdn_package_allowed("x/camera_component.zip"));
+    CHECK_FALSE(bambu_cdn_package_allowed("network_plugin.zip camera_component.zip"));
+}
+
+TEST_CASE("The plug-in-missing message: silent with UltraNet, once per session when automatic", "[PluginGuard]")
+{
+    // UltraNet installed: nothing is missing, however the question arises.
+    for (bool user_requested : { false, true })
+        for (bool already_shown : { false, true })
+            CHECK(network_plugin_missing_notice(/*ultranet_installed*/ true, user_requested, already_shown) == PluginMissingNotice::Suppress);
+
+    // The user clicked something that needs the plug-in: always told, even a second time.
+    CHECK(network_plugin_missing_notice(false, /*user_requested*/ true, /*already_shown*/ false) == PluginMissingNotice::Show);
+    CHECK(network_plugin_missing_notice(false, true, true) == PluginMissingNotice::Show);
+
+    // An automatic trigger (start-up check, banner, wizard): once per session.
+    CHECK(network_plugin_missing_notice(false, /*user_requested*/ false, /*already_shown*/ false) == PluginMissingNotice::Show);
+    CHECK(network_plugin_missing_notice(false, false, true) == PluginMissingNotice::Suppress);
 }
 
 TEST_CASE("A loaded agent is left alone", "[PluginGuard]")
@@ -71,19 +111,19 @@ TEST_CASE("A loaded agent is left alone", "[PluginGuard]")
     CHECK(plugin_guard_decision(false, false, false, true) == LoginGuardAction::ShowLogin);
 }
 
-TEST_CASE("A fresh install with no plug-in is offered the download, not a dead sign-in page", "[PluginGuard]")
+TEST_CASE("A fresh install with no plug-in is told it is missing, not given a dead sign-in page", "[PluginGuard]")
 {
     // The reported bug: no plugins folder at all, so the loopback callback has nothing to hand the
     // ticket to.
     CHECK(plugin_guard_decision(/*plugin_present*/ false, /*ultranet_marker*/ false,
                                 /*installed_networking*/ false, /*agent_loaded*/ false)
-          == LoginGuardAction::OfferPluginDownload);
+          == LoginGuardAction::PluginMissing);
     // Same answer with the preference on: the preference is not what makes sign-in work.
-    CHECK(plugin_guard_decision(false, false, true, false) == LoginGuardAction::OfferPluginDownload);
-    // A Bambu-original plug-in that failed to load: the download is still the right offer.
-    CHECK(plugin_guard_decision(true, false, true, false) == LoginGuardAction::OfferPluginDownload);
+    CHECK(plugin_guard_decision(false, false, true, false) == LoginGuardAction::PluginMissing);
+    // A Bambu-original plug-in that failed to load: still missing, and still no download to offer.
+    CHECK(plugin_guard_decision(true, false, true, false) == LoginGuardAction::PluginMissing);
     // A leftover marker is not a plug-in.
-    CHECK(plugin_guard_decision(false, true, true, false) == LoginGuardAction::OfferPluginDownload);
+    CHECK(plugin_guard_decision(false, true, true, false) == LoginGuardAction::PluginMissing);
 }
 
 TEST_CASE("UltraNet installed but not loaded asks for a restart, never a download", "[PluginGuard]")
@@ -281,21 +321,15 @@ TEST_CASE("Storage browser route: stock rule, plus the LAN address for a LAN-onl
     CHECK_FALSE(storage_browser_use_lan_url(false, true, true, true, false, true));
 }
 
-// copy_network_if_available(): a Bambu package staged in ota/ by the plug-in update check must never
-// be copied over UltraNet (same library file name) unless the user keeps a foreign plug-in.
-TEST_CASE("A staged Bambu plug-in is never installed over UltraNet", "[PluginGuard]")
+// copy_network_if_available(): a Bambu package staged in ota/ by an older build's plug-in update
+// check is never copied over data_dir/plugins - not over UltraNet, not into an empty folder, not
+// for a developer who keeps a foreign plug-in (that switch keeps a hand-copied DLL, it does not
+// make the CDN package acceptable).
+TEST_CASE("A staged Bambu plug-in is never installed", "[PluginGuard]")
 {
-    // No flag: nothing staged, whatever is installed.
-    CHECK(ota_plugin_install_decision(false, true, false) == OtaPluginInstall::NothingStaged);
-    CHECK(ota_plugin_install_decision(false, false, false) == OtaPluginInstall::NothingStaged);
-    CHECK(ota_plugin_install_decision(false, true, true) == OtaPluginInstall::NothingStaged);
-    // UltraNet installed: refused (flag cleared, staged files removed).
-    CHECK(ota_plugin_install_decision(true, true, false) == OtaPluginInstall::Refuse);
-    // ...unless the user keeps a foreign plug-in on purpose.
-    CHECK(ota_plugin_install_decision(true, true, true) == OtaPluginInstall::Install);
-    // No UltraNet (a self-built tree, or Bambu's plug-in): the stock copy.
-    CHECK(ota_plugin_install_decision(true, false, false) == OtaPluginInstall::Install);
-    CHECK(ota_plugin_install_decision(true, false, true) == OtaPluginInstall::Install);
+    CHECK(ota_plugin_install_decision(false) == OtaPluginInstall::NothingStaged);
+    // The flag is set: refused (flag cleared, staged files removed).
+    CHECK(ota_plugin_install_decision(true) == OtaPluginInstall::Refuse);
 }
 
 TEST_CASE("A refused ota install removes only exact file names inside ota/", "[PluginGuard]")

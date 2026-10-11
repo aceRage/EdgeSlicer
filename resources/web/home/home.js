@@ -136,6 +136,7 @@
     for (const e of entries) {
       if (e === '-') { menu.appendChild(el('hr')); continue; }
       const b = el('button', e.danger ? 'danger' : '', e.label);
+      if (e.title) b.title = e.title;
       b.type = 'button';
       b.setAttribute('role', 'menuitem');
       b.addEventListener('click', (ev) => { ev.stopPropagation(); closeMenu(); e.run(); });
@@ -831,10 +832,11 @@
     more.setAttribute('aria-label', 'More');
     more.appendChild(svg(ICON_MORE));
     const menu = [
-      { label: t('full_sync', 'Fetch everything again'), run: () => post('vendor_sync', { id: c.id, full: true }) },
+      { label: t('full_sync', 'Full Refresh'), title: t('full_sync_tip', 'Re-read every model (after changing settings)'), run: () => post('vendor_sync', { id: c.id, full: true }) },
       { label: t('test', 'Test connection'), run: () => post('vendor_test', { id: c.id }) },
       { label: t('edit', 'Edit'), run: () => openEditor(c) },
       { label: t('export', 'Export'), run: () => post('vendor_export_spec', { id: c.id }) },
+      { label: t('copy_json', 'Copy JSON'), run: () => post('vendor_copy_spec', { id: c.id }) },
     ];
     if ((c.slots || []).some((s) => s.set)) menu.push({ label: t('forget', 'Forget credentials'), run: () => post('vendor_forget', { id: c.id }) });
     menu.push('-');
@@ -844,7 +846,7 @@
     box.appendChild(top);
 
     const lines = [];
-    if (c.syncing) lines.push(t('syncing', 'Refreshing...'));
+    if (c.syncing) lines.push(t('syncing', 'Fetching...'));
     else if (c.synced_at) lines.push(c.count + ' ' + t('models', 'models') + ' · ' + t('synced', 'Fetched') + ' ' + fmtDate(c.synced_at));
     else lines.push(t('never_synced', 'Not fetched yet'));
     for (const l of lines) box.appendChild(el('div', 'line', l));
@@ -854,10 +856,12 @@
     if (c.downloads_limited) box.appendChild(el('div', 'line', t('limited_downloads', 'Downloads count against a limit')));
     const missing = (c.slots || []).filter((s) => !s.set);
     if (missing.length) box.appendChild(el('div', 'line warn', t('credentials', 'Credentials') + ': ' + missing.map((s) => s.label).join(', ') + ' ' + t('not_set', 'not set')));
+    if (c.full_next) box.appendChild(el('div', 'line warn', t('settings_changed', 'Settings changed: the next Fetch Changes reads every model again.')));
     if (c.last_error) { const e = el('div', 'line err', c.last_error); box.appendChild(e); }
 
     const row = el('div', 'row');
-    const sync = el('button', 'btn primary', c.syncing ? t('syncing', 'Refreshing...') : t('sync', 'Refresh list'));
+    const sync = el('button', 'btn primary', c.syncing ? t('syncing', 'Fetching...') : t('sync', 'Fetch Changes'));
+    sync.title = t('sync_tip', 'New and changed models since the last fetch');
     sync.type = 'button';
     sync.disabled = !!c.syncing;
     sync.addEventListener('click', () => post('vendor_sync', { id: c.id }));
@@ -991,7 +995,7 @@
     else while (state.venRendered < state.venShown.length) renderMoreVendors();
     empty.hidden = state.venShown.length > 0;
     emptyText.textContent = !ven.connectors.length ? t('vendors_empty', 'Connect a vendor\'s API to browse the models you have access to.')
-      : !ven.items.length ? t('vendor_no_items', 'Nothing fetched yet. Set the credentials, then Refresh list.')
+      : !ven.items.length ? t('vendor_no_items', 'Nothing fetched yet. Set the credentials, then Fetch Changes.')
         : t('no_match', 'Nothing matches your search.');
   }
 
@@ -1427,6 +1431,9 @@
         case 'vendor_thumbs':
           applyVendorThumbs(msg.images || {});
           break;
+        case 'show_section':
+          if (msg.section) showSection(String(msg.section), true);
+          break;
         case 'vendor_notice':
           toast(String(msg.text || ''), !!msg.error);
           break;
@@ -1453,7 +1460,7 @@
   });
   $('sort').addEventListener('change', () => { state.sort[state.section] = $('sort').value; render(); });
   $('refresh').addEventListener('click', () => {
-    // Vendors' lists are metered: Refresh only redraws them; each connector has its own Refresh list.
+    // Vendors' lists are metered: Refresh only redraws them; each connector has its own Fetch Changes.
     if (state.section === 'vendors') { post('vendor_state'); return; }
     $('refresh').classList.add('spin'); post('home_refresh'); setTimeout(stopSpin, 3000);
   });
@@ -1462,7 +1469,16 @@
   $('history-settings').addEventListener('click', () => post('history_settings'));
   $('lib-manage').addEventListener('click', openFolders);
   $('ven-add').addEventListener('click', () => openEditor(null));
-  $('ven-import').addEventListener('click', () => post('vendor_import'));
+  $('ven-import').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const btn = $('ven-import');
+    if (menuFor === btn) { closeMenu(); return; }
+    openMenu(btn, [
+      { label: t('import_file', 'From file...'), run: () => post('vendor_import', { source: 'file' }) },
+      { label: t('import_link', 'From link...'), run: () => post('vendor_import', { source: 'link' }) },
+      { label: t('import_paste', 'Paste JSON...'), run: () => post('vendor_import', { source: 'paste' }) },
+    ]);
+  });
   $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key) }));
   $('ven-detail-close').addEventListener('click', closeDetail);
   $('ven-detail').addEventListener('click', (e) => { if (e.target === $('ven-detail')) closeDetail(); });

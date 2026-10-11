@@ -54,10 +54,13 @@
 #include "Preferences.hpp"
 #include "Widgets/ProgressDialog.hpp"
 #include "BindDialog.hpp"
+#include "AccountStatus.hpp"
+#include "RemoteHub.hpp"
 #include "../Utils/MacDarkMode.hpp"
 
 #include <fstream>
 #include <string_view>
+#include <thread>
 #include <iomanip>
 #include <sstream>
 #include <cstdlib>
@@ -66,6 +69,7 @@
 #include <ctime>
 
 #include "GUI_App.hpp"
+#include "CostsDialog.hpp"
 #include "DualNozzleState.hpp"
 #include "FlowTypeHelper.hpp"
 #include "SliceModePopup.hpp"
@@ -1272,13 +1276,12 @@ LazyPanelHolder* MainFrame::make_calibration_holder()
     });
 }
 
-LazyPanelHolder* MainFrame::make_multi_machine_holder()
+LazyPanelHolder* MainFrame::make_printers_holder()
 {
-    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=MultiMachinePage", [this](wxWindow* parent) -> wxWindow* {
-        m_multi_machine = new MultiMachinePage(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-        m_multi_machine->SetBackgroundColour(*wxWHITE);
-        apply_theme_to_lazy_panel(m_multi_machine);
-        return m_multi_machine;
+    // Lazy like the others: the page is a web view, built when the tab is first opened.
+    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=PrintersPanel", [this](wxWindow* parent) -> wxWindow* {
+        m_printers = new PrintersPanel(parent);
+        return m_printers;
     });
 }
 
@@ -1321,8 +1324,26 @@ CalibrationPanel* MainFrame::calibration()
 
 MultiMachinePage* MainFrame::multi_machine()
 {
-    if (m_multi_machine == nullptr && m_multi_machine_holder != nullptr)
-        m_multi_machine_holder->realize();
+    // The old Multi-device tab's pages (Device / Task Sending / Task Sent) live on for the cloud
+    // "Send to Multi-device" dialog, in a window of their own: the Printers tab took their slot.
+    if (m_multi_machine == nullptr) {
+        m_multi_machine_dlg = new wxDialog(this, wxID_ANY, _L("Multi-device tasks"), wxDefaultPosition, wxDefaultSize,
+                                           wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX);
+        m_multi_machine = new MultiMachinePage(m_multi_machine_dlg, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_multi_machine->SetBackgroundColour(*wxWHITE);
+        auto* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(m_multi_machine, 1, wxEXPAND);
+        m_multi_machine_dlg->SetSizer(sizer);
+        m_multi_machine_dlg->SetSize(m_multi_machine_dlg->FromDIP(wxSize(1000, 700)));
+        m_multi_machine_dlg->CentreOnParent();
+        // Closing hides the window (its pages keep their state) and stops their refresh timer.
+        m_multi_machine_dlg->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent&) {
+            if (m_multi_machine)
+                m_multi_machine->Show(false);
+            m_multi_machine_dlg->Hide();
+        });
+        apply_theme_to_lazy_panel(m_multi_machine_dlg);
+    }
     return m_multi_machine;
 }
 
@@ -1511,11 +1532,12 @@ void MainFrame::init_tabpanel() {
 
     m_printer_view->Hide();
 
-    if (wxGetApp().is_enable_multi_machine()) {
-        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=MultiMachinePage(deferred)");
-        m_multi_machine_holder = make_multi_machine_holder();
-        // TODO: change the bitmap
-        m_tabpanel->AddPage(m_multi_machine_holder, _L("Multi-device"), std::string("tab_multi_active"), std::string("tab_multi_active"), false);
+    {
+        // Printers: every printer at a glance. Always present (whatever the printer preset and the
+        // "Multi-device Management" preference), in the slot the Multi-device tab had (tpPrinters).
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=PrintersPanel(deferred)");
+        m_printers_holder = make_printers_holder();
+        m_tabpanel->AddPage(m_printers_holder, _L("Printers"), std::string("tab_multi_active"), std::string("tab_multi_active"), false);
     }
 
     {
@@ -1577,19 +1599,11 @@ void MainFrame::show_device(bool bBBLPrinter) {
         m_monitor_holder->Show(false);
         m_tabpanel->InsertPage(tpMonitor, m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
 
-        if (wxGetApp().is_enable_multi_machine()) {
-            if (!m_multi_machine_holder)
-                m_multi_machine_holder = make_multi_machine_holder();
-            // TODO: change the bitmap
-            m_multi_machine_holder->Show(false);
-            m_tabpanel->InsertPage(tpMultiDevice, m_multi_machine_holder, _L("Multi-device"), std::string("tab_multi_active"),
-                                   std::string("tab_multi_active"), false);
-        }
         if (!m_calibration_holder)
             m_calibration_holder = make_calibration_holder();
         m_calibration_holder->Show(false);
-        // Calibration is always the last page, so don't use InsertPage here. Otherwise, if multi_machine page is not enabled,
-        // the calibration tab won't be properly added as well, due to the TabPosition::tpCalibration no longer matches the real tab position.
+        // Calibration is always the last page, so don't use InsertPage here: AddPage needs no index to agree
+        // with TabPosition::tpCalibration.
         m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"),
                                std::string("tab_calibration_active"), false);
 
@@ -1603,10 +1617,6 @@ void MainFrame::show_device(bool bBBLPrinter) {
 
         if (m_calibration_holder && (idx = m_tabpanel->FindPage(m_calibration_holder)) != wxNOT_FOUND) {
             m_calibration_holder->Show(false);
-            m_tabpanel->RemovePage(idx);
-        }
-        if (m_multi_machine_holder && (idx = m_tabpanel->FindPage(m_multi_machine_holder)) != wxNOT_FOUND) {
-            m_multi_machine_holder->Show(false);
             m_tabpanel->RemovePage(idx);
         }
         if (m_monitor_holder && (idx = m_tabpanel->FindPage(m_monitor_holder)) != wxNOT_FOUND) {
@@ -1635,10 +1645,6 @@ void MainFrame::show_flashforge_device()
     int idx;
     if (m_calibration_holder && (idx = m_tabpanel->FindPage(m_calibration_holder)) != wxNOT_FOUND) {
         m_calibration_holder->Show(false);
-        m_tabpanel->RemovePage(idx);
-    }
-    if (m_multi_machine_holder && (idx = m_tabpanel->FindPage(m_multi_machine_holder)) != wxNOT_FOUND) {
-        m_multi_machine_holder->Show(false);
         m_tabpanel->RemovePage(idx);
     }
     if (m_monitor_holder && (idx = m_tabpanel->FindPage(m_monitor_holder)) != wxNOT_FOUND) {
@@ -2673,6 +2679,9 @@ void MainFrame::on_sys_color_changed()
     // Before RecreateAll: the hub view switches theme in place (it is excluded from the reload).
     if (m_home)
         m_home->sys_color_changed();
+    // So does the Printers page.
+    if (m_printers)
+        m_printers->sys_color_changed();
     WebView::RecreateAll();
 
     this->Refresh();
@@ -2894,6 +2903,65 @@ void MainFrame::refresh_account_menu(wxMenu* menu)
                 [](wxCommandEvent&) { wxGetApp().sm_request_login(true); });
         }
     }
+}
+
+// What refresh_account_menu() would show right now, as one string: the selected printer's vendor and
+// each provider's sign-in state and name. Lets the macOS menu bar skip rebuilding an unchanged menu.
+static std::string account_menu_signature()
+{
+    auto&       app = wxGetApp();
+    std::string sig = AccountStatus::current_printer_vendor_id();
+    sig += "|bbl:";
+    if (app.is_user_login())
+        sig += app.get_bambu_user_name();
+    else
+        sig += "-";
+    sig += "|sm:";
+    auto* ui = app.sm_get_userinfo();
+    if (ui && ui->is_user_login())
+        sig += ui->get_user_name();
+    else
+        sig += "-";
+    return sig;
+}
+
+void MainFrame::update_account_menubar()
+{
+    if (m_account_menubar_menu == nullptr)
+        return;
+    const std::string sig = account_menu_signature();
+    if (sig == m_account_menubar_sig)
+        return;
+    m_account_menubar_sig = sig;
+    refresh_account_menu(m_account_menubar_menu);
+}
+
+void MainFrame::open_mobile_hub()
+{
+    // The hub is a separate process. Asking it where it lives - and starting it when it is not
+    // running - takes seconds, so it happens on a worker thread and the browser is opened back
+    // on the GUI thread. The seeds are the ones GUI_App::start_remote_access() uses, so a hub
+    // started from here comes up exactly as the slicer itself would have started it,
+    // phone access included (or not) as the user left it.
+    const std::string token = wxGetApp().app_config->get("stream_phone_token");
+    const bool        phone = wxGetApp().app_config->get("stream_phone_access") == "1";
+    std::thread([token, phone]() {
+        RemoteHub::Info info = RemoteHub::query();
+        if (!info.alive || info.admin_port == 0)
+            info = RemoteHub::ensure_running(token, phone);
+        wxGetApp().CallAfter([info]() {
+            if (info.alive && info.admin_port > 0) {
+                // The hub page is served by the loopback-only control plane, never by the
+                // listener a tunnel can front. No secret in the URL: /hub/ itself is the one
+                // route that does not need it, and the page sends it as a header afterwards.
+                wxLaunchDefaultBrowser(wxString::Format("http://127.0.0.1:%d/hub/", info.admin_port));
+            } else {
+                MessageDialog(nullptr, _L("The Mobile Hub did not start. Please try again in a moment."),
+                              _L("Mobile Hub"), wxOK | wxICON_INFORMATION)
+                    .ShowModal();
+            }
+        });
+    }).detach();
 }
 
 void MainFrame::init_menubar_as_editor()
@@ -3399,6 +3467,10 @@ void MainFrame::init_menubar_as_editor()
         parent_menu, wxID_ANY, _L("Themes") + dots, _L("Colours, fonts, corners and the title bar"),
         [this](wxCommandEvent &) { wxGetApp().open_themes(); },
         "", nullptr, []() { return true; }, this, 2);
+    append_menu_item(
+        parent_menu, wxID_ANY, _L("Costs") + dots, _L("Your own filament prices and machine rates, over the presets' values"),
+        [this](wxCommandEvent &) { show_costs_dialog(this); },
+        "", nullptr, []() { return true; }, this, 3);
     //parent_menu->Insert(1, preference_item);
 #endif
     // Help menu
@@ -3425,6 +3497,11 @@ void MainFrame::init_menubar_as_editor()
     append_menu_item(
         m_topbar->GetTopMenu(), wxID_ANY, _L("Themes") + dots, _L("Colours, fonts, corners and the title bar"),
         [this](wxCommandEvent &) { wxGetApp().open_themes(); },
+        "", nullptr, []() { return true; }, this);
+    // Your own costs: filament prices and machine rates over every preset (also in the Filament and Printer tabs).
+    append_menu_item(
+        m_topbar->GetTopMenu(), wxID_ANY, _L("Costs") + dots, _L("Your own filament prices and machine rates, over the presets' values"),
+        [this](wxCommandEvent &) { show_costs_dialog(this); },
         "", nullptr, []() { return true; }, this);
 
     m_topbar->AddDropDownSubMenu(helpMenu, _L("Help"));
@@ -3542,6 +3619,13 @@ void MainFrame::init_menubar_as_editor()
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
 #else
+    // The title bar's Mobile Hub button has no menu bar equivalent on macOS; it goes at the end of View.
+    if (viewMenu) {
+        viewMenu->AppendSeparator();
+        append_menu_item(viewMenu, wxID_ANY, _L("Mobile Hub") + dots, _L("Open the Mobile Hub page in your browser (phone access, cameras, open windows)"),
+            [this](wxCommandEvent&) { open_mobile_hub(); }, "", nullptr,
+            []() { return true; }, this);
+    }
     m_menubar->Append(fileMenu, wxString::Format("&%s", _L("File")));
     if (editMenu)
         m_menubar->Append(editMenu, wxString::Format("&%s", _L("Edit")));
@@ -3656,8 +3740,13 @@ void MainFrame::init_menubar_as_editor()
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
     m_menubar->Append(calib_menu,wxString::Format("&%s", _L("Calibration")));
-    // Ultra: the Account entry lives in the custom top bar (BBLTopbar), not this native
-    // menubar (which the fork hides) - see BBLTopbar's ID_ACCOUNT tool + refresh_account_menu.
+    // Ultra: on Windows / Linux the Account entry is a button in the custom top bar (BBLTopbar's
+    // ID_ACCOUNT tool). macOS keeps its native title bar and menu bar, so the same contextual menu
+    // (refresh_account_menu) is an Account menu here, kept current by update_account_menubar().
+    m_account_menubar_menu = new wxMenu();
+    refresh_account_menu(m_account_menubar_menu);
+    m_account_menubar_sig = account_menu_signature();
+    m_menubar->Append(m_account_menubar_menu, wxString::Format("&%s", _L("Account")));
     if (helpMenu)
         m_menubar->Append(helpMenu, wxString::Format("&%s", _L("Help")));
     SetMenuBar(m_menubar);
@@ -4127,11 +4216,46 @@ ProgressDialog* MainFrame::createLogProgress()
 
 void MainFrame::jump_to_multipage()
 {
-    m_tabpanel->SetSelection(tpMultiDevice);
     MultiMachinePage* mm = multi_machine();
-    if (!mm)
+    if (!mm || !m_multi_machine_dlg)
         return;
+    m_multi_machine_dlg->Show();
+    m_multi_machine_dlg->Raise();
+    mm->Show(true); // starts its refresh timer
     mm->jump_to_send_page();
+}
+
+bool MainFrame::open_printer_device_page(const std::string& id, const PrintersMonitor::Target& target, std::string& why)
+{
+    using PrintersMonitor::OpenWay;
+    // What the Device tab holds right now follows the selected printer preset (show_device): the
+    // Bambu MonitorPanel, the PrinterWebView, or the Flashforge tab. The preset is never switched
+    // from here - that would change the plate's printer behind the person's back.
+    const bool bambu_shown = m_monitor_holder && m_tabpanel->FindPage(m_monitor_holder) != wxNOT_FOUND;
+    const bool view_shown  = m_printer_view && m_tabpanel->FindPage(m_printer_view) != wxNOT_FOUND;
+    switch (PrintersMonitor::open_way(target, bambu_shown, view_shown)) {
+    case OpenWay::BambuMonitor:
+        // What the old Multi-device tab's View button did: the Device tab, on that printer.
+        jump_to_monitor(id);
+        return true;
+    case OpenWay::PrinterWebView: {
+        wxString url = wxString::FromUTF8(target.url);
+        m_printer_view->load_url(url);
+        const int idx = m_tabpanel->FindPage(m_printer_view);
+        if (idx != wxNOT_FOUND)
+            select_tab(size_t(idx));
+        return true;
+    }
+    case OpenWay::Browser:
+        if (wxLaunchDefaultBrowser(wxString::FromUTF8(target.url)))
+            return true;
+        why = "The system browser did not open " + target.url;
+        return false;
+    case OpenWay::NotHere:
+    default:
+        why = PrintersMonitor::not_here_reason(target);
+        return false;
+    }
 }
 
 
@@ -4793,6 +4917,10 @@ void MainFrame::update_side_preset_ui()
 
 void MainFrame::on_select_default_preset(SimpleEvent& evt)
 {
+    // The "synchronize from Bambu Cloud" question: user presets are never synced (PresetSyncPolicy.hpp).
+    if (!PresetSync::cloud_sync_enabled())
+        return;
+
     MessageDialog dialog(this,
                     _L("Do you want to synchronize your personal data from Bambu Cloud?\n"
                         "It contains the following information:\n"

@@ -87,6 +87,10 @@ if (SLIC3R_GUI)
 #    list(REMOVE_ITEM wxWidgets_LIBRARIES oleacc)
     message(STATUS "wx libs: ${wxWidgets_LIBRARIES}")
 
+    # libvgcode (PrusaSlicer 2.8 G-code viewer, AGPL-3.0; via OrcaSlicer #10735). Spike: built
+    # and linked, fed by GUI/LibVGCode/EdgeVGCodeInput; the legacy GCodeViewer still renders.
+    add_subdirectory(libvgcode)
+
     add_subdirectory(slic3r)
 endif()
 
@@ -99,7 +103,7 @@ endif()
 if(ORCA_TOOLS)
     # Snapmaker_Orca_profile_validator
     if(APPLE)
-        add_executable(Snapmaker_Orca_profile_validator MACOSX_BUNDLE dev-utils/Snapmaker_Orca_profile_validator.cpp)
+        add_executable(Snapmaker_Orca_profile_validator MACOSX_BUNDLE dev-utils/Snapmaker_Orca_profile_validator.cpp dev-utils/nanosvg_impl.cpp)
         set_target_properties(Snapmaker_Orca_profile_validator PROPERTIES
             MACOSX_BUNDLE TRUE
             MACOSX_BUNDLE_BUNDLE_NAME "Snapmaker_Orca Profile Validator"
@@ -110,7 +114,7 @@ if(ORCA_TOOLS)
             MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.acerage.EdgeSlicer.profile-validator"
         )
     else()
-        add_executable(Snapmaker_Orca_profile_validator dev-utils/Snapmaker_Orca_profile_validator.cpp)
+        add_executable(Snapmaker_Orca_profile_validator dev-utils/Snapmaker_Orca_profile_validator.cpp dev-utils/nanosvg_impl.cpp)
     endif()
     target_link_libraries(Snapmaker_Orca_profile_validator libslic3r boost_headeronly libcurl OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(Snapmaker_Orca_profile_validator PRIVATE -DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x602 -DBOOST_SYSTEM_USE_UTF8)

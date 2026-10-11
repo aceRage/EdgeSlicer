@@ -6,10 +6,11 @@
   "setting_id": "41452139080",
   "inherits": "Snapmaker PVA @U1 base",
   "compatible_printers": [
-    "Snapmaker U1 (0.4 nozzle)"
+    "Snapmaker U1 (0.4 nozzle)",
+    "Snapmaker U1 (0.4+0.6 nozzle)"
   ],
   "enable_pressure_advance": [
-    "1"
+    "0"
   ],
   "nozzle_temperature_range_high": [
     "240"

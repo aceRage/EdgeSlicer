@@ -106,6 +106,17 @@ HomePanel::~HomePanel()
     *m_library_cancel = true;
 }
 
+void HomePanel::open_connector_link(const std::string& url)
+{
+    show_home();
+    wxGetApp().app_config->set(SECTION_KEY, "vendors");
+    if (m_page_ready)
+        send({{"type", "show_section"}, {"section", "vendors"}});
+    if (!m_vendors)
+        m_vendors = std::make_unique<HomeVendors>(this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); });
+    m_vendors->import_from_link(url);
+}
+
 void HomePanel::ensure_browser()
 {
     if (m_browser != nullptr)
@@ -526,15 +537,22 @@ void HomePanel::send_init()
     s["connector"]         = _u8L("Connector");
     s["add_connector"]     = _u8L("Add connector");
     s["import"]            = _u8L("Import");
+    s["import_file"]       = _u8L("From file...");
+    s["import_link"]       = _u8L("From link...");
+    s["import_paste"]      = _u8L("Paste JSON...");
+    s["copy_json"]         = _u8L("Copy JSON");
     s["export"]            = _u8L("Export");
     s["export_csv"]        = _u8L("Export CSV");
     s["edit"]              = _u8L("Edit");
     s["save"]              = _u8L("Save");
     s["cancel"]            = _u8L("Cancel");
     s["test"]              = _u8L("Test connection");
-    s["sync"]              = _u8L("Refresh list");
-    s["full_sync"]         = _u8L("Fetch everything again");
-    s["syncing"]           = _u8L("Refreshing...");
+    s["sync"]              = _u8L("Fetch Changes");
+    s["sync_tip"]          = _u8L("New and changed models since the last fetch");
+    s["full_sync"]         = _u8L("Full Refresh");
+    s["full_sync_tip"]     = _u8L("Re-read every model (after changing settings)");
+    s["settings_changed"]  = _u8L("Settings changed: the next Fetch Changes reads every model again.");
+    s["syncing"]           = _u8L("Fetching...");
     s["never_synced"]      = _u8L("Not fetched yet");
     s["synced"]            = _u8L("Fetched");
     s["models"]            = _u8L("models");
@@ -556,7 +574,7 @@ void HomePanel::send_init()
     s["print_time"]        = _u8L("Time");
     s["size"]              = _u8L("Size");
     s["vendors_empty"]     = _u8L("Connect a vendor's API to browse the models you have access to. EdgeSlicer includes no vendors: add a connector for yours, or import one someone shared.");
-    s["vendor_no_items"]   = _u8L("Nothing fetched yet. Set the credentials, then Refresh list.");
+    s["vendor_no_items"]   = _u8L("Nothing fetched yet. Set the credentials, then Fetch Changes.");
     s["edit_json"]         = _u8L("Edit as JSON");
     s["edit_form"]         = _u8L("Edit as form");
     s["delete_connector"]  = _u8L("Remove connector");

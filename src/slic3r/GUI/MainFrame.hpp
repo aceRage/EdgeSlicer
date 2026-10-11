@@ -33,6 +33,7 @@
 #include "BBLTopbar.hpp"
 #include "PrinterWebView.hpp"
 #include "StreamPanel.hpp"
+#include "PrintersPanel.hpp"
 #include "calib_dlg.hpp"
 #include "MultiMachinePage.hpp"
 #include "LazyPanelHolder.hpp"
@@ -107,6 +108,8 @@ class MainFrame : public DPIFrame
     wxString    m_last_config = wxEmptyString;
 
     wxMenuBar*  m_menubar{ nullptr };
+    wxMenu*     m_account_menubar_menu{ nullptr }; // macOS only: the menu bar's Account menu (owned by m_menubar)
+    std::string m_account_menubar_sig;             // what that menu currently shows
     //wxMenu* publishMenu{ nullptr };
     wxMenu *    m_calib_menu{nullptr};
     bool        enable_multi_machine{ false };
@@ -222,6 +225,14 @@ public:
     // Ultra: populate the given menu contextually for the current printer's brand
     // (login/logout). Called by the topbar's Account button just before it pops the menu.
     void        refresh_account_menu(wxMenu* menu);
+    // macOS: there is no custom title bar to carry the Account button, so the same contextual menu is
+    // an entry in the native menu bar. AccountStatus::refresh() calls this when the sign-in state or
+    // the selected printer changes; it rebuilds that menu only when what it shows would differ. A
+    // no-op where there is no such menu (Windows / Linux).
+    void        update_account_menubar();
+    // The title bar's Mobile Hub button (Windows / Linux) and the macOS View menu entry: opens the
+    // hub page in the browser, starting the hub first when it is not running.
+    void        open_mobile_hub();
 
     // BBS: auto-save the project to its own file on a timer, in addition to auto-backup
     void update_autosave_timer();
@@ -239,7 +250,8 @@ public:
         tpPreview       = 2,
         tpMonitor       = 3,
         tpStream        = 4,
-        tpMultiDevice   = 5,
+        tpPrinters      = 5, // the Printers tab (PrintersPanel); always present
+        tpMultiDevice   = tpPrinters, // its old name: the Multi-device tab had this slot
         tpProject       = 6,
         tpCalibration   = 7,
         tpAuxiliary     = 8,
@@ -345,7 +357,12 @@ public:
     void        show_flashforge_device();
     void        jump_to_monitor_exit(const std::string& dev_id = "");
     ProgressDialog* createLogProgress();
+    // The old Multi-device pages (cloud "Send to Multi-device" queue and history), in a window of
+    // their own since the Printers tab took their slot; landing on "Task Sending".
     void        jump_to_multipage();
+    // Printers tab: open that printer's Device page (Bambu: the Device tab; Snapmaker / Moonraker:
+    // its web UI in the Device tab's web view, or the system browser). false + why when it cannot.
+    bool        open_printer_device_page(const std::string& id, const PrintersMonitor::Target& target, std::string& why);
     //BBS: hint when jump to 3Deditor under preview only mode
     bool        preview_only_hint();
     // Select tab in m_tabpanel
@@ -434,8 +451,11 @@ public:
     StreamPanel*          m_stream{ nullptr };
 
     //AuxiliaryPanel*       m_auxiliary{ nullptr };
+    // The old Multi-device pages, built on first use inside m_multi_machine_dlg (jump_to_multipage).
     MultiMachinePage*     m_multi_machine{ nullptr };
-    LazyPanelHolder*      m_multi_machine_holder{ nullptr };
+    wxDialog*             m_multi_machine_dlg{ nullptr };
+    PrintersPanel*        m_printers{ nullptr };
+    LazyPanelHolder*      m_printers_holder{ nullptr };
     ProjectPanel*         m_project{ nullptr };
     LazyPanelHolder*      m_project_holder{ nullptr };
 
@@ -444,8 +464,8 @@ public:
 
     // On-demand accessors for the deferred tabs. Each builds its panel if it has not been
     // built yet, and returns nullptr only when the tab is not part of this layout at all
-    // (multi_machine() with multi-device management disabled, or any of them before
-    // init_tabpanel has run).
+    // (any of them before init_tabpanel has run). multi_machine() builds the old Multi-device
+    // pages in their window without showing it.
     MonitorPanel*     monitor();
     CalibrationPanel* calibration();
     MultiMachinePage* multi_machine();
@@ -453,7 +473,7 @@ public:
     // Fresh placeholders for the deferred tabs (show_device() re-creates pages).
     LazyPanelHolder*  make_monitor_holder();
     LazyPanelHolder*  make_calibration_holder();
-    LazyPanelHolder*  make_multi_machine_holder();
+    LazyPanelHolder*  make_printers_holder();
     LazyPanelHolder*  make_project_holder();
     // Dark-mode/DPI treatment for a panel built after the startup theme pass.
     void              apply_theme_to_lazy_panel(wxWindow* panel);

@@ -22,6 +22,12 @@
 #define HAS_GLSAFE
 #endif // NDEBUG
 
+// EDGE: EDGESLICER_GL_DEBUG=1 in the environment (Slic3r::GUI::OpenGLManager::gl_debug_enabled()).
+// Release builds then read glGetError() after every glsafe()/glcheck() and log the call site of each
+// error (no assert); off, a release glsafe() costs one flag test. Debug builds always check and assert.
+extern bool edge_gl_debug_calls;
+extern void glReportRecentCallImpl(const char *file_name, unsigned int line, const char *function_name);
+
 #ifdef HAS_GLSAFE
     extern void glAssertRecentCallImpl(const char *file_name, unsigned int line, const char *function_name);
     inline void glAssertRecentCall() { glAssertRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); }
@@ -29,8 +35,8 @@
     #define glcheck() do { glAssertRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #else // HAS_GLSAFE
     inline void glAssertRecentCall() { }
-    #define glsafe(cmd) cmd
-    #define glcheck()
+    #define glsafe(cmd) do { cmd; if (::edge_gl_debug_calls) ::glReportRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
+    #define glcheck() do { if (::edge_gl_debug_calls) ::glReportRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #endif // HAS_GLSAFE
 extern std::vector<Slic3r::ColorRGBA> get_extruders_colors();
 extern float                          FullyTransparentMaterialThreshold;

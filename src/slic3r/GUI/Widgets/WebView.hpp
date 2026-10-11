@@ -26,6 +26,13 @@ public:
 
     static bool RunScript(wxWebView * webView, wxString const & msg);
 
+    // Deletes the cookies called `names` that the browser would send to `uri` - only those, never
+    // the rest of the shared profile (Bambu, Stream tab, ... sign-ins live there too).
+    // Windows: through the WebView2 cookie manager of the profile every CreateWebView view shares,
+    // using any live view. Elsewhere: by script in `page`, which must show a page of that site
+    // (the cookies must not be HttpOnly). false when nothing could do it.
+    static bool DeleteSiteCookies(const std::vector<std::string> &names, const std::string &uri, wxWebView *page = nullptr);
+
     // After a theme change: refresh every view's User-Agent (it carries the theme token) and
     // reload it - except views that opted out with SetReloadOnThemeChange(view, false), which
     // switch theme live instead (a reload would restart the hub view's camera streams).

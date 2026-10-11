@@ -104,8 +104,8 @@ ModelObject *apply_stabilizer_bake(Model &model, ModelObject &source, const Stab
 std::string stabilizer_bake_object_name(const ModelObject &source);
 
 // The objects whose live side stabilizers - EdgeSlicer-only settings, which a Bambu Studio export
-// leaves out - are on: stabilizer_supports and enable_support, each from the object's own config or
-// else `print_config`. Their names, in model order.
+// leaves out - are on: stabilizer_supports, from the object's own config or else `print_config`
+// (whether Enable supports is on does not matter). Their names, in model order.
 std::vector<std::string> objects_with_live_stabilizers(const Model &model, const DynamicPrintConfig &print_config);
 
 } // namespace Slic3r

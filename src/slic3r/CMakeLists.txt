@@ -106,6 +106,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/CodeEmbossDialog.hpp
     GUI/SimpleShapeDialog.cpp
     GUI/SimpleShapeDialog.hpp
+    GUI/ImageTraceDialog.cpp
+    GUI/ImageTraceDialog.hpp
+    GUI/SvgSplitDialog.cpp
+    GUI/SvgSplitDialog.hpp
     GUI/ConfigManipulation.cpp
     GUI/ConfigManipulation.hpp
     GUI/ConfigWizard.cpp
@@ -125,8 +129,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/DownloaderFileGet.cpp
     GUI/DownloaderFileGet.hpp
     GUI/Downloader.hpp
-    GUI/DownloadProgressDialog.cpp
-    GUI/DownloadProgressDialog.hpp
     GUI/DragCanvas.cpp
     GUI/DragCanvas.hpp
     GUI/EditGCodeDialog.cpp
@@ -188,6 +190,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/EmbossFaceList.hpp
     GUI/Gizmos/EmbossInsert.cpp
     GUI/Gizmos/EmbossInsert.hpp
+    GUI/Gizmos/EmbossTransformHandles.cpp
+    GUI/Gizmos/EmbossTransformHandles.hpp
     #GUI/Gizmos/GLGizmoFaceDetector.cpp
     #GUI/Gizmos/GLGizmoFaceDetector.hpp
     GUI/Gizmos/GLGizmoFdmSupports.cpp
@@ -234,6 +238,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmosManager.hpp
     GUI/Gizmos/GLGizmoSVG.cpp
     GUI/Gizmos/GLGizmoSVG.hpp
+    GUI/Gizmos/GLGizmoTextureDisplacement.cpp
+    GUI/Gizmos/GLGizmoTextureDisplacement.hpp
+    GUI/Gizmos/GLGizmoUtils.cpp
+    GUI/Gizmos/GLGizmoUtils.hpp
     #GUI/Gizmos/GLGizmoText.cpp
     #GUI/Gizmos/GLGizmoText.hpp
     GUI/GLCanvas3D.cpp
@@ -365,12 +373,20 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/SLAImportDialog.hpp
     GUI/Jobs/SLAImportJob.cpp
     GUI/Jobs/SLAImportJob.hpp
+    GUI/Jobs/TextureDisplacementBakeJob.cpp
+    GUI/Jobs/TextureDisplacementBakeJob.hpp
+    GUI/Jobs/TextureDisplacementPrepareJob.cpp
+    GUI/Jobs/TextureDisplacementPrepareJob.hpp
+    GUI/Jobs/TextureDisplacementDebugJob.cpp
+    GUI/Jobs/TextureDisplacementDebugJob.hpp
+    GUI/Jobs/TextureDisplacementPreviewJob.cpp
+    GUI/Jobs/TextureDisplacementPreviewJob.hpp
     GUI/Jobs/ThreadSafeQueue.hpp
-    GUI/Jobs/UpgradeNetworkJob.cpp
-    GUI/Jobs/UpgradeNetworkJob.hpp
     GUI/Jobs/Worker.hpp
     GUI/KBShortcutsDialog.cpp
     GUI/KBShortcutsDialog.hpp
+    GUI/LibVGCode/LibVGCodeWrapper.cpp
+    GUI/LibVGCode/LibVGCodeWrapper.hpp
     GUI/MainFrame.cpp
     GUI/MainFrame.hpp
     GUI/PrintSelectKeys.hpp
@@ -489,6 +505,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrinterWebView.hpp
     GUI/StreamPanel.cpp
     GUI/StreamPanel.hpp
+    GUI/PrintersPanel.cpp
+    GUI/PrintersPanel.hpp
     GUI/HomePanel.cpp
     GUI/ModelBrowserPanel.cpp
     GUI/Theme.cpp
@@ -508,6 +526,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/FirstRequestGate.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
@@ -537,12 +556,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/DeviceModelCode.cpp
     GUI/NozzleTempRows.hpp
     GUI/DeviceControls.hpp
+    GUI/BambuFans.hpp
     GUI/ChamberLights.hpp
     GUI/FilamentCommands.hpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
     GUI/HubEventDedupe.hpp
+    GUI/LoginTicketGate.hpp
     GUI/HubPushOwner.hpp
     GUI/RemoteNotify.cpp
     GUI/RemoteNotify.hpp
@@ -561,6 +582,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrintHostDialogs.hpp
     GUI/PrintHostDevicesDialog.cpp
     GUI/PrintHostDevicesDialog.hpp
+    GUI/CostsDialog.cpp
+    GUI/CostsDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp
@@ -696,6 +719,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/SavePresetDialog.hpp
     GUI/ScaleToVolumeDialog.cpp
     GUI/ScaleToVolumeDialog.hpp
+    GUI/EmbossPicking.cpp
+    GUI/EmbossPicking.hpp
+    GUI/EmbossFreeTransform.cpp
+    GUI/EmbossFreeTransform.hpp
     GUI/SceneRaycaster.cpp
     GUI/SceneRaycaster.hpp
     GUI/Search.cpp
@@ -737,6 +764,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/TextLines.cpp
     GUI/TextLines.hpp
     GUI/ThumbnailView.hpp
+    GUI/TextureLibrary.cpp
+    GUI/TextureLibrary.hpp
+    GUI/TextureProjectorFrame.cpp
+    GUI/TextureProjectorFrame.hpp
     GUI/TickCode.cpp
     GUI/TickCode.hpp
     GUI/UnsavedChangesDialog.cpp
@@ -749,8 +780,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/UserManager.hpp
     GUI/UserNotification.cpp
     GUI/UserNotification.hpp
-    GUI/WebDownPluginDlg.cpp
-    GUI/WebDownPluginDlg.hpp
+    GUI/UVEditorCanvas.cpp
+    GUI/UVEditorCanvas.hpp
     GUI/WebGuideDialog.cpp
     GUI/WebGuideDialog.hpp
     GUI/WebUserLoginDialog.cpp
@@ -926,7 +957,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/LoginUserAgent.hpp
     Utils/HubHomeLogic.cpp
     Utils/HubHomeLogic.hpp
+    Utils/PrintersMonitor.cpp
+    Utils/PrintersMonitor.hpp
     Utils/HubHandover.hpp
+    Utils/WebLoadRetry.hpp
     Utils/HomeTabLogic.cpp
     Utils/HomeTabLogic.hpp
     Utils/ThemePack.cpp
@@ -947,6 +981,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/SnapmakerSilentLogin.hpp
     Utils/BambuSyncPolicy.cpp
     Utils/BambuSyncPolicy.hpp
+    Utils/PresetSyncPolicy.hpp
     Utils/AccountProviders.cpp
     Utils/AccountProviders.hpp
     Utils/json_diff.cpp
@@ -957,6 +992,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/MKS.hpp
     Utils/NetworkAgent.cpp
     Utils/NetworkAgent.hpp
+    Utils/PluginLoadDiagnostics.cpp
+    Utils/PluginLoadDiagnostics.hpp
     Utils/Obico.cpp
     Utils/Obico.hpp
     Utils/OctoPrint.cpp
@@ -1081,6 +1118,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Gizmos/GLGizmoMeshBoolean.cpp             # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/CodeEmbossDialog.cpp                      # CFG_SECTION also in other dialogs
     GUI/SimpleShapeDialog.cpp                     # filament_label() also in CodeEmbossDialog.cpp
+    GUI/ImageTraceDialog.cpp                      # file-local preview helpers with common names
     GUI/Gizmos/GLGizmoSVG.cpp                     # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/GLCanvas3D.cpp                            # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/ImGuiWrapper.cpp                          # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
@@ -1202,7 +1240,7 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SLIC3R_GUI_SOURCES})
 encoding_check(libslic3r_gui)
 
 find_package(libnoise REQUIRED)
-target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo glad OpenGL::GL hidapi ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
+target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode glad OpenGL::GL hidapi ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)

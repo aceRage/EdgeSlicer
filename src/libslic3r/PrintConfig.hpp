@@ -570,6 +570,47 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
+// name one slot per (extruder, variant) pair, extruder-major, and the retraction settings below carry one
+// value per slot (upstream Orca's Custom MyToolChanger: 5 extruders x 3 variants = 15 values).
+bool is_printer_extruder_variant_option(const std::string &key);
+
+// The slots of each extruder in that layout (extruder e's at [e]), or empty when the config has none:
+// printer_extruder_id / printer_extruder_variant missing or of different sizes, ids not grouped as
+// 1, 1, .., 2, 2, .., n, or a single variant per extruder (where per-variant and per-extruder vectors are
+// the same thing).
+std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config);
+
+// The slot of extruder `extruder_idx`'s current variant (extruder_type + nozzle_volume_type), its first
+// slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
+// in size or do not list the extruder.
+int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
+
+// extruder_type per extruder (ExtruderType values) as the 3MF slice_info reports it, `extruder_count` long.
+// PrintConfigDef::handle_legacy drops a profile's extruder_type on load, so the option usually holds its
+// one-element Direct Drive default; when it is shorter than the extruder count, each extruder's type is read
+// off its extruder_variant_list entry ("Bowden Standard,..." -> Bowden), which is what Bambu Studio's
+// extruder_type says for the same profile (X2D: Direct Drive, Bowden). Entries with nothing to go on repeat
+// the last known value.
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count);
+
+// The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
+// (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
+// one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine
+// (support_different_extruders), the first value per extruder index as the slicer has always read them
+// there. Leaves any other config alone.
+class DynamicPrintConfig;
+void resolve_printer_extruder_variants(DynamicPrintConfig &config);
+
+// The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
+std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
+
+// The index of extruder `extruder_idx`'s value of `key` that the slicer uses: its slot from `sources`
+// (printer_extruder_variant_sources) when `key` is a per-variant vector of the layout's length, else
+// `extruder_idx`. The printer tab binds its extruder pages to it.
+size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
+                                            size_t extruder_idx);
+
 template<typename VectorOption>
 inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
     -> decltype(opt.get_at(0))
@@ -586,6 +627,14 @@ inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int fila
         return 1.0;
     return get_value_at(config, *opt, ConfigFlowDomain::Filament, filament_id);
 }
+
+// BBS: how far a filament's nozzle cools below its print temperature before the BBL wipe tower
+// (filament_cooling_before_tower at the filament's flow-variant slot; nil reads as 0, no cooling).
+// with_switcher_extra adds Bambu Studio's 10 degrees for a filament switcher that feeds extruders of
+// different types (GCode.cpp g_filament_switcher_extra_cooling_before_tower), which Bambu applies to
+// the toolchange through the tower. GCode's M620.15 C and the tower's "Wipe tower reheat before wipe"
+// both read this, so a toolchange that cools always heats back.
+double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
 
 // Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
 // count is filament_diameter, not the packed length.
@@ -622,9 +671,14 @@ inline bool filament_flow_variants_active(const ConfigBase &config)
 // option lookups and get_config_idx on every path. The *_for accessors return the
 // same value the uncached expression gives, falling back to it for an id outside
 // the resolved range, so the G-code is identical either way.
+// process_config_idx is the slot get_config_idx(config, Process, id) picks, which
+// GCode::process_flow_value used to recompute (two string-keyed option lookups and a
+// variant-name search) for every option it read, a few dozen times per extrusion path
+// (the config-lookup caching of Orca #16028, adapted to the flow-variant lookup).
 struct ResolvedFilamentFlow
 {
     bool                       variants_active{false};
+    std::vector<size_t>        process_config_idx;
     std::vector<double>        flow_ratio;
     std::vector<double>        max_volumetric_speed;
     std::vector<unsigned char> enable_pressure_advance;
@@ -637,6 +691,11 @@ struct ResolvedFilamentFlow
     static double uncached_max_volumetric_speed(const ConfigBase &config, unsigned int filament_id);
     static bool   uncached_enable_pressure_advance(const ConfigBase &config, unsigned int filament_id);
 
+    size_t process_config_idx_for(const ConfigBase &config, unsigned int filament_id) const
+    {
+        return filament_id < process_config_idx.size() ? process_config_idx[filament_id] :
+                                                         get_config_idx(config, ConfigFlowDomain::Process, filament_id);
+    }
     double flow_ratio_for(const ConfigBase &config, unsigned int filament_id) const
     {
         return filament_id < flow_ratio.size() ? flow_ratio[filament_id] : uncached_flow_ratio(config, filament_id);
@@ -861,6 +920,20 @@ public:
     static void handle_legacy(t_config_option_key &opt_key, std::string &value);
     static void handle_legacy_composite(DynamicPrintConfig &config);
 
+    // Keys a bundled or user preset file may carry although this build deliberately does not load
+    // them into presets (yet). They are dropped on load exactly like any other key that is not part
+    // of the preset type, but they are expected, so Preset::remove_invalid_keys() reports them once
+    // per session at info level instead of one error per file. A genuinely unknown key is not listed
+    // here and keeps logging as an error. This is a "known to be absent" list, not a support list:
+    // adding a key here never changes a loaded value or the G-code.
+    enum class ForeignKeyOrigin {
+        BambuStudio,   // Bambu Studio option this fork has not implemented in presets (see docs/bambu-flush-keys.md)
+        ProjectScoped, // option that lives in the project config; older saves also wrote it into preset files
+    };
+    // True (and the origin) when opt_key is such a key.
+    static bool unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin = nullptr);
+    static const char *foreign_key_origin_label(ForeignKeyOrigin origin);
+
     // Array options growing with the number of extruders
     const std::vector<std::string>& extruder_option_keys() const { return m_extruder_option_keys; }
     // Options defining the extruder retract properties. These keys are sorted lexicographically.
@@ -977,7 +1050,7 @@ public:
     // Ultra (dual-nozzle): returns true when the printer's extruders carry more than one distinct
     // extruder variant (H2D/H2C/X2D), i.e. it is a multi-nozzle grouping machine. extruder_count is
     // filled with the nozzle count. Single-nozzle machines and same-variant toolchangers (U1) → false.
-    bool support_different_extruders(int& extruder_count);
+    bool support_different_extruders(int& extruder_count) const;
 };
 
 void handle_legacy_sla(DynamicPrintConfig &config);
@@ -1382,7 +1455,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,              tree_support_branch_diameter_angle))
     ((ConfigOptionFloat,              tree_support_angle_slow))
     ((ConfigOptionInt,                tree_support_wall_count))
-    ((ConfigOptionBool,               tree_support_adaptive_layer_height))
     ((ConfigOptionBool,               tree_support_auto_brim))
     ((ConfigOptionFloat,              tree_support_brim_width))
     // Side stabilizers (Support/Stabilizers.hpp)
@@ -1724,9 +1796,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
-    ((ConfigOptionInts,                filament_flush_temp))  // Ultra: BBS 2.x flush temp (0 = use nozzle_temperature_range_high)
-    ((ConfigOptionFloats,              filament_flush_volumetric_speed))  // Ultra: BBS 2.x flush speed (0 = use filament_max_volumetric_speed)
-    ((ConfigOptionFloats,              filament_cooling_before_tower))  // Ultra: BBS 2.x change_filament (per-filament, °C)
+    // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
+    // stored per flow variant (read them with get_value_at, ConfigFlowDomain::Filament).
+    ((ConfigOptionIntsNullable,        filament_flush_temp))  // 0 = use nozzle_temperature_range_high
+    ((ConfigOptionIntsNullable,        filament_flush_temp_fast))  // prime_volume_mode Fast; 0 = range high
+    ((ConfigOptionFloatsNullable,      filament_flush_volumetric_speed))  // 0 = use filament_max_volumetric_speed
+    ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
     ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature

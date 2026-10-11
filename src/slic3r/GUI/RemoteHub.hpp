@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "slic3r/Utils/HubHomeLogic.hpp"
+#include "slic3r/Utils/TailscaleCli.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -65,7 +66,8 @@ struct Record
 };
 Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
-Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it
+Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it, or for one
+                                                                 // already starting (up to HubHandover::START_DEADLINE_MS)
 Info set_phone(bool on, const std::string& token = ""); // off and on keeps the same link; a valid
                                                         // token seeds a hub that has none yet
 Info new_link();                                        // replace the phone link (explicit only):
@@ -112,9 +114,10 @@ int serve_status_target_port(const std::string& serve_status_json_text);
 // --json` said into exactly one of these, so the page never has to re-derive "installed but not
 // signed in" out of three separate booleans.
 enum class RemoteAccessState {
-    NotInstalled,  // no tailscale CLI on this PC -> offer the download
+    NotInstalled,  // no tailscale CLI on this computer -> offer the download
     NotSignedIn,   // installed, BackendState=NeedsLogin -> `tailscale login`
     NotRunning,    // installed and signed in, backend is Stopped/NoState/... -> start it
+    NoAnswer,      // installed, but the CLI ran too long and was stopped (not the same as missing)
     HttpsOff,      // running, but the tailnet issues no certificates -> admin console > DNS
     Serving,       // running, certificates on, Serve is pointed at this hub: the URL works
     Ready,         // running, certificates on, remote access simply switched off
@@ -138,6 +141,10 @@ const char* remote_access_state_name(RemoteAccessState s); // "not_installed", "
 // the root to our loopback port", `on` is the hub's own remote_on switch, `error` is whatever the
 // CLI printed (only used for RemoteAccessState::Error).
 RemoteAccessInfo classify_remote_access(bool installed, const std::string& backend, bool https,
+                                        bool serving, bool on, const std::string& error);
+// The same for a named platform (the wording says "Mac"/"menu bar" there and the install link goes
+// to that platform's download page); the one above uses the platform this build runs on.
+RemoteAccessInfo classify_remote_access(TailscaleCli::Platform platform, bool installed, const std::string& backend, bool https,
                                         bool serving, bool on, const std::string& error);
 
 // ---- hub identity (design_hosted_relay.md section 2) ----

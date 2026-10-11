@@ -673,7 +673,7 @@ std::vector<std::map<NozzleVolumeType, int>> get_extruder_nozzle_stats(const std
 // True when the printer's extruders carry more than one distinct extruder variant (dual-nozzle grouping
 // machine: H2D/H2C/X2D). Same-variant toolchangers (U1) and machines with more than two extruders return
 // false.
-bool DynamicPrintConfig::support_different_extruders(int& extruder_count)
+bool DynamicPrintConfig::support_different_extruders(int& extruder_count) const
 {
     extruder_count = 0;
     std::set<std::string> variant_set;
@@ -1405,12 +1405,15 @@ void PrintConfigDef::init_fff_params()
     def = this->add("bridge_density", coPercent);
     def->label = L("External bridge density");
     def->category = L("Strength");
-    def->tooltip = L("Controls the density (spacing) of external bridge lines. 100% means solid bridge. Default is 100%.\n\n"
+    def->tooltip = L("Controls the density (spacing) of external bridge lines. Default is 100%.\n\n"
                      "Lower density external bridges can help improve reliability as there is more space for air to circulate "
-                     "around the extruded bridge, improving its cooling speed.");
+                     "around the extruded bridge, improving its cooling speed. Minimum is 10%.\n\n"
+                     "Higher densities can produce smoother bridge surfaces, as overlapping lines provide "
+                     "additional support during printing. Maximum is 120%. \n"
+                     "Note: Bridge density that is too high can cause warping or overextrusion.");
     def->sidetext = "%";
     def->min = 10;
-    def->max = 100;
+    def->max = 120;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(100));
 
@@ -2511,34 +2514,54 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 2. });
 
-    // Ultra: BambuStudio 2.x flush tuning, consumed by GCode.cpp to publish
-    // flush_temperatures / flush_volumetric_speeds for newer change_filament templates.
+    // BBS: per-filament flush settings (Bambu Studio PrintConfig.cpp 2547-2575). GCode.cpp turns them
+    // into the flush_temperatures / flush_volumetric_speeds placeholders of the BBL change_filament
+    // and machine_start templates (M620.10 ... T<temp> / F<speed>, M620.11 ... F<speed>). Nullable
+    // like Bambu's (Anycubic profiles say ["nil"]) and stored per flow variant
+    // (filament_flow_variant_options), as Bambu stores them per extruder variant.
     def = this->add("filament_flush_temp", coInts);
     def->label = L("Flush temperature");
-    def->tooltip = L("Temperature when flushing filament. 0 indicates the upper bound of the recommended nozzle temperature range.");
-    def->sidetext = "°C";
+    def->tooltip = L("temperature when flushing filament. 0 indicates the upper bound of the recommended nozzle temperature range");
+    def->mode = comAdvanced;
+    def->nullable = true;
     def->min = 0;
     def->max = max_temp;
+    def->sidetext = "°C";
+    def->set_default_value(new ConfigOptionIntsNullable { 0 });
+
+    // BBS: the flush temperature used instead of filament_flush_temp when the project's
+    // prime_volume_mode is Fast.
+    def = this->add("filament_flush_temp_fast", coInts);
+    def->label = L("Flush temperature");
+    def->tooltip = L("Flush temperature used in fast purge mode.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts { 0 });
+    def->nullable = true;
+    def->min = 0;
+    def->max = max_temp;
+    def->sidetext = "°C";
+    def->set_default_value(new ConfigOptionIntsNullable { 0 });
 
     def = this->add("filament_flush_volumetric_speed", coFloats);
     def->label = L("Flush volumetric speed");
-    def->tooltip = L("Volumetric speed when flushing filament. 0 indicates the max volumetric speed.");
-    def->sidetext = u8"mm³/s";
+    def->tooltip = L("Volumetric speed when flushing filament. 0 indicates the max volumetric speed");
+    def->mode = comAdvanced;
+    def->nullable = true;
     def->min = 0;
     def->max = 200;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
+    def->sidetext = u8"mm³/s";
+    def->set_default_value(new ConfigOptionFloatsNullable { 0. });
 
-    // Ultra: BBS 2.x change_filament templates reference filament_cooling_before_tower[extruder].
+    // BBS: the drop below the print temperature the hotend cools to before it enters the prime tower
+    // (Bambu Studio PrintConfig.cpp 3034). The BBL change_filament templates read it as
+    // M620.15 C{new_filament_temp - filament_cooling_before_tower[next_filament_id]} and in the
+    // SYNC heat-up compensation; GCode.cpp publishes it per toolchange, 0 on the first layer.
     def = this->add("filament_cooling_before_tower", coFloats);
-    def->label = L("Cooling before tower");
-    def->tooltip = L("Temperature drop applied before entering the prime tower when changing filament.");
+    def->label = L("Wipe tower cooling");
+    def->tooltip = L("Temperature drop before entering filament tower");
     def->sidetext = "°C";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
+    def->mode = comDevelop;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable { 10. });
 
     // Ultra (H2C rack): BambuStudio PrintConfig.cpp:3041. The nozzle-change pre-cool target,
     // read by the wipe tower's nozzle-change block (M104 T<e> S<t> N0 ;Wipe tower nozzle change
@@ -2681,7 +2704,8 @@ void PrintConfigDef::init_fff_params()
         "\nBe sure to allow enough space between objects, as this compensation is done after the checks.");
     def->sidetext = "%";
     def->ratio_over = "";
-    def->min = 10;
+    def->min = 50;
+    def->max = 150;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercents{ 100 });
     
@@ -2692,7 +2716,8 @@ void PrintConfigDef::init_fff_params()
         " The part will be scaled in Z to compensate.");
     def->sidetext = "%";
     def->ratio_over = "";
-    def->min = 10;
+    def->min = 50;
+    def->max = 150;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercents{ 100 });
 
@@ -3317,7 +3342,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("initial_layer_speed", coFloats);
     def->label = L("Initial layer");
-    def->tooltip = L("Speed of initial layer except the solid infill part.");
+    def->tooltip = L("Speed of initial layer except the solid infill part. It also applies to support, support interface and the raft base on the first layer.");
     def->sidetext = "mm/s";	// milimeters per second, don't need translation
     def->min = 1;
     def->mode = comAdvanced;
@@ -5799,8 +5824,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("raft_contact_distance", coFloat);
     def->label = L("Raft contact Z distance");
     def->category = L("Support");
-    def->tooltip = L("Z gap between object and raft. Ignored for soluble interface.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between raft and object. "
+                    "If Support Top Z Distance is 0, this value is ignored and "
+                    "the object is printed in direct contact with the raft (no gap).");
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.1));
@@ -6797,8 +6824,8 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Top Z distance");
     def->min = 0;
     def->category = L("Support");
-    def->tooltip = L("The Z gap between the top support interface and object.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between the support's top and object.");
 //    def->min = 0;
 #if 0
     //def->enum_values.push_back("0");
@@ -6814,8 +6841,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("support_bottom_z_distance", coFloat);
     def->label = L("Bottom Z distance");
     def->category = L("Support");
-    def->tooltip = L("The Z gap between the bottom support interface and object.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between the object and the support bottom. "
+                    "If Support Top Z Distance is 0 and the bottom has interface layers, this value "
+                    "is ignored and the support is printed in direct contact with the object (no gap).");
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.2));
@@ -7176,12 +7205,6 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(30));
 
-    def = this->add("tree_support_adaptive_layer_height", coBool);
-    def->label = L("Adaptive layer height");
-    def->category = L("Quality");
-    def->tooltip = L("Enabling this option means the height of tree support layer except the first will be automatically calculated.");
-    def->set_default_value(new ConfigOptionBool(1));
-    
     def = this->add("tree_support_auto_brim", coBool);
     def->label = L("Auto brim width");
     def->category = L("Quality");
@@ -7256,7 +7279,8 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Support");
     def->tooltip = L("Add thin struts that touch tall, slender parts on their sides with a small pinpoint tip "
                      "and stand on the build plate next to it. They keep the part from wobbling while it prints "
-                     "and snap off at the tip afterwards. Printed as support, so supports must be enabled.\n\n"
+                     "and snap off at the tip afterwards. Printed with the support filament, speed and line width; "
+                     "Enable supports does not need to be on.\n\n"
                      "Off: no stabilizers.\n"
                      "Auto: rings of touch points up the part's height, plus any stabilizer points painted with "
                      "the support painting tool.\n"
@@ -9253,6 +9277,12 @@ const std::vector<std::string>& filament_flow_variant_options()
         "filament_multitool_ramming_volume",
         "filament_multitool_ramming_flow",
         "filament_minimal_purge_on_wipe_tower",
+        // BBS: Bambu Studio stores these per extruder variant (filament_options_with_variant,
+        // PrintConfig.cpp 7663); its Standard / High Flow slots are ours (BambuFlowSupport).
+        "filament_flush_volumetric_speed",
+        "filament_flush_temp",
+        "filament_flush_temp_fast",
+        "filament_cooling_before_tower",
     };
     return options;
 }
@@ -9334,6 +9364,147 @@ bool is_machine_flow_variant_option(const std::string &key)
     return std::find(options.begin(), options.end(), key) != options.end();
 }
 
+bool is_printer_extruder_variant_option(const std::string &key)
+{
+    // The extruder_option_keys() that upstream Orca stores per variant (printer_options_with_variant_1).
+    static const std::set<std::string> options {
+        "retraction_length", "z_hop", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce",
+        "z_hop_types", "retraction_speed", "deretraction_speed", "retraction_minimum_travel", "retract_when_changing_layer",
+        "wipe", "wipe_distance", "retract_before_wipe", "retract_length_toolchange", "retract_restart_extra",
+        "retract_restart_extra_toolchange", "long_retractions_when_cut", "retraction_distances_when_cut",
+    };
+    return options.count(key) > 0;
+}
+
+std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config)
+{
+    const auto *ids      = config.option<ConfigOptionInts>("printer_extruder_id");
+    const auto *variants = config.option<ConfigOptionStrings>("printer_extruder_variant");
+    if (ids == nullptr || variants == nullptr || ids->values.empty() || ids->values.size() != variants->values.size())
+        return {};
+    std::vector<std::vector<size_t>> slots;
+    for (size_t i = 0; i < ids->values.size(); ++i) {
+        const int id = ids->values[i];
+        if (id == int(slots.size()) + 1)
+            slots.emplace_back();
+        else if (slots.empty() || id != int(slots.size()))
+            return {};
+        slots.back().push_back(i);
+    }
+    if (slots.size() == ids->values.size())
+        return {};
+    return slots;
+}
+
+int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
+{
+    const auto *ids      = config.option<ConfigOptionInts>("printer_extruder_id");
+    const auto *variants = config.option<ConfigOptionStrings>("printer_extruder_variant");
+    if (ids == nullptr || variants == nullptr || ids->values.size() != variants->values.size())
+        return -1;
+    const auto *types   = config.option<ConfigOptionEnumsGeneric>("extruder_type");
+    const auto *volumes = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+    const int   type    = types != nullptr && extruder_idx < types->values.size() ? types->values[extruder_idx] : int(etDirectDrive);
+    NozzleVolumeType volume = volumes != nullptr && extruder_idx < volumes->values.size() ? NozzleVolumeType(volumes->values[extruder_idx]) :
+                                                                                            nvtStandard;
+    if (volume == nvtHybrid)
+        volume = nvtStandard; // Bambu: hybrid is not a preset variant
+    const std::string wanted = std::string(type == int(etBowden) ? "Bowden" : "Direct Drive") + " " + get_nozzle_volume_type_string(volume);
+    int first = -1;
+    for (size_t i = 0; i < ids->values.size(); ++i) {
+        if (ids->values[i] != int(extruder_idx + 1))
+            continue;
+        if (first < 0)
+            first = int(i);
+        if (variants->values[i] == wanted)
+            return int(i);
+    }
+    return first;
+}
+
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count)
+{
+    std::vector<int> types;
+    if (const auto *opt = config.option<ConfigOptionEnumsGeneric>("extruder_type"))
+        types = opt->values;
+    if (extruder_count == 0 || types.size() >= extruder_count) {
+        if (types.size() > extruder_count)
+            types.resize(extruder_count);
+        return types;
+    }
+    const auto *variants = config.option<ConfigOptionStrings>("extruder_variant_list");
+    std::vector<int> out(extruder_count, types.empty() ? int(etDirectDrive) : types.back());
+    for (size_t e = 0; e < extruder_count; ++e) {
+        if (variants != nullptr && e < variants->values.size()) {
+            const std::string &v = variants->values[e];
+            if (boost::starts_with(v, "Bowden")) {
+                out[e] = int(etBowden);
+                continue;
+            }
+            if (boost::starts_with(v, "Direct Drive")) {
+                out[e] = int(etDirectDrive);
+                continue;
+            }
+        }
+        if (e < types.size())
+            out[e] = types[e];
+        else if (e > 0)
+            out[e] = out[e - 1];
+    }
+    return out;
+}
+
+std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config)
+{
+    const auto *semm = config.option<ConfigOptionBool>("single_extruder_multi_material");
+    if (semm == nullptr || semm->value)
+        return {};
+    const std::vector<std::vector<size_t>> slots = printer_extruder_variant_slots(config);
+    const auto *nozzle_diameter = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
+    if (slots.empty() || nozzle_diameter == nullptr || nozzle_diameter->size() != slots.size())
+        return {};
+
+    // Which slot each extruder reads. Bambu's grouping machines (H2D, H2C, X2D) index these vectors by
+    // filament, not by extruder, so they keep the values Preset::normalize used to cut them down to.
+    int        extruder_count = 0;
+    const bool grouping       = config.support_different_extruders(extruder_count);
+    std::vector<size_t> sources(slots.size());
+    for (size_t e = 0; e < slots.size(); ++e)
+        sources[e] = grouping ? e : size_t(std::max(0, printer_extruder_variant_slot(config, e)));
+    return sources;
+}
+
+size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
+                                            size_t extruder_idx)
+{
+    if (extruder_idx >= sources.size() || !is_printer_extruder_variant_option(key))
+        return extruder_idx;
+    const auto *ids = config.option<ConfigOptionInts>("printer_extruder_id");
+    const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(config.option(key));
+    if (ids == nullptr || opt == nullptr || opt->size() != ids->values.size())
+        return extruder_idx;
+    return sources[extruder_idx];
+}
+
+void resolve_printer_extruder_variants(DynamicPrintConfig &config)
+{
+    const std::vector<size_t> sources = printer_extruder_variant_sources(config);
+    if (sources.empty())
+        return;
+    const size_t slot_count = config.option<ConfigOptionInts>("printer_extruder_id")->values.size();
+    for (const std::string &key : print_config_def.extruder_option_keys()) {
+        if (!is_printer_extruder_variant_option(key))
+            continue;
+        auto *opt = dynamic_cast<ConfigOptionVectorBase *>(config.option(key));
+        if (opt == nullptr || opt->size() != slot_count)
+            continue;
+        std::unique_ptr<ConfigOption> all(opt->clone());
+        opt->resize(sources.size());
+        for (size_t e = 0; e < sources.size(); ++e)
+            opt->set_at(all.get(), e, sources[e]);
+    }
+}
+
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id)
 {
     // An id of -1 (unsigned wrap) used to run the Filament segment loop ~4e9 times.
@@ -9391,6 +9562,27 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
     return 0;
 }
 
+double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra)
+{
+    double      cooling = 0.;
+    const auto *opt     = dynamic_cast<const ConfigOptionFloatsNullable *>(config.option("filament_cooling_before_tower"));
+    if (opt != nullptr && !opt->values.empty()) {
+        size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, filament_id);
+        if (idx >= opt->values.size())
+            idx = 0; // ConfigOptionVector::get_at's fallback
+        if (!opt->is_nil(idx) && !std::isnan(opt->values[idx]))
+            cooling = opt->values[idx];
+    }
+    if (with_switcher_extra) {
+        const auto *switcher = dynamic_cast<const ConfigOptionBool *>(config.option("has_filament_switcher"));
+        const auto *types    = dynamic_cast<const ConfigOptionEnumsGeneric *>(config.option("extruder_type"));
+        if (switcher != nullptr && switcher->value && types != nullptr && types->values.size() > 1 &&
+            std::adjacent_find(types->values.begin(), types->values.end(), [](int lhs, int rhs) { return lhs != rhs; }) != types->values.end())
+            cooling += 10.;
+    }
+    return cooling;
+}
+
 double ResolvedFilamentFlow::uncached_flow_ratio(const ConfigBase &config, unsigned int filament_id)
 {
     const auto *opt = config.option<ConfigOptionFloats>("filament_flow_ratio");
@@ -9420,6 +9612,12 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
 {
     ResolvedFilamentFlow out;
     out.variants_active = filament_flow_variants_active(config);
+    {
+        const size_t count = flow_variant_filament_count(config);
+        out.process_config_idx.reserve(count);
+        for (size_t i = 0; i < count; ++i)
+            out.process_config_idx.push_back(get_config_idx(config, ConfigFlowDomain::Process, static_cast<unsigned int>(i)));
+    }
     const auto *ratio   = config.option<ConfigOptionFloats>("filament_flow_ratio");
     const auto *mvs     = config.option<ConfigOptionFloats>("filament_max_volumetric_speed");
     const auto *pa      = config.option<ConfigOptionBools>("enable_pressure_advance");
@@ -9637,6 +9835,36 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         opt_key = "";
         return;
     }
+}
+
+// Keys that preset files carry but presets deliberately do not hold. Kept next to the obsolete-key
+// ignore set in handle_legacy() above, but unlike that set these keys stay defined in
+// print_config_def (the G-code placeholders read their defaults), so they are not erased while a
+// config is parsed; Preset::remove_invalid_keys() recognises them and drops them quietly.
+bool PrintConfigDef::unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin)
+{
+    static const std::map<std::string, ForeignKeyOrigin> foreign = {
+        // (Bambu Studio's filament_flush_temp, filament_flush_temp_fast, filament_flush_volumetric_speed
+        // and filament_cooling_before_tower used to be listed here; filament presets hold them now.)
+        // Project-wide mixed-filament rows (PresetBundle::project_config). The edited process preset
+        // picks a copy up when mixed filaments change, and saving the preset writes it to disk.
+        { "mixed_filament_definitions",      ForeignKeyOrigin::ProjectScoped },
+    };
+    const auto it = foreign.find(opt_key);
+    if (it == foreign.end())
+        return false;
+    if (origin != nullptr)
+        *origin = it->second;
+    return true;
+}
+
+const char *PrintConfigDef::foreign_key_origin_label(ForeignKeyOrigin origin)
+{
+    switch (origin) {
+    case ForeignKeyOrigin::BambuStudio:   return "unsupported Bambu Studio keys";
+    case ForeignKeyOrigin::ProjectScoped: return "project-level keys saved into presets";
+    }
+    return "unsupported keys";
 }
 
 // Called after a config is loaded as a whole.
@@ -10050,6 +10278,24 @@ void  handle_legacy_sla(DynamicPrintConfig &config)
 void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
 {
     const auto &defaults = FullPrintConfig::defaults();
+    // A printer in the per-extruder-variant layout stores its retraction settings per (extruder, variant)
+    // slot. Cutting those vectors to the extruder count kept extruder 1's variants and the first variants
+    // of extruder 2 and lost the rest, so they are resized per extruder, all of its slots together.
+    const std::vector<std::vector<size_t>> slots      = printer_extruder_variant_slots(*this);
+    const size_t                           slot_count = slots.empty() ? 0 : this->option<ConfigOptionInts>("printer_extruder_id")->values.size();
+    // Extruder e keeps its own slots; an added extruder takes extruder 1's, as resize() gives it
+    // extruder 1's value.
+    std::vector<size_t> kept;
+    for (size_t e = 0; e < num_extruders && !slots.empty(); ++e)
+        for (size_t slot : slots[e < slots.size() ? e : 0])
+            kept.push_back(slot);
+    auto keep_slots = [&kept](ConfigOptionVectorBase &opt) {
+        std::unique_ptr<ConfigOption> all(opt.clone());
+        opt.resize(kept.size());
+        for (size_t i = 0; i < kept.size(); ++i)
+            opt.set_at(all.get(), i, kept[i]);
+    };
+
     for (const std::string &key : print_config_def.extruder_option_keys()) {
         if (key == "default_filament_profile")
             // Don't resize this field, as it is presented to the user at the "Dependencies" page of the Printer profile and we don't want to present
@@ -10058,8 +10304,26 @@ void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
         auto *opt = this->option(key, false);
         assert(opt != nullptr);
         assert(opt->is_vector());
-        if (opt != nullptr && opt->is_vector())
-            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_extruders, defaults.option(key));
+        if (opt == nullptr || !opt->is_vector())
+            continue;
+        auto *vec = static_cast<ConfigOptionVectorBase*>(opt);
+        if (slot_count > 0 && is_printer_extruder_variant_option(key) && vec->size() == slot_count) {
+            if (slots.size() != num_extruders)
+                keep_slots(*vec);
+            continue;
+        }
+        vec->resize(num_extruders, defaults.option(key));
+    }
+
+    if (slot_count > 0 && slots.size() != num_extruders) {
+        // The layout follows the new extruder count.
+        keep_slots(*this->option<ConfigOptionStrings>("printer_extruder_variant"));
+        auto  *ids = this->option<ConfigOptionInts>("printer_extruder_id");
+        ids->values.clear();
+        for (size_t e = 0; e < num_extruders; ++e)
+            ids->values.insert(ids->values.end(), slots[e < slots.size() ? e : 0].size(), int(e + 1));
+        if (auto *list = this->option<ConfigOptionStrings>("extruder_variant_list"); list != nullptr && list->values.size() == slots.size())
+            list->resize(num_extruders);
     }
 }
 
@@ -10233,10 +10497,15 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         cfg.gcode_flavor.value != gcfRepetier)
         error_message.emplace("use_firmware_retraction","--use-firmware-retraction is only supported by Klipper, Marlin, Smoothie, RepRapFirmware, Repetier and Machinekit firmware");
 
+    // Orca #13812 lets the printer tab keep Wipe on with firmware retraction once the whole retraction happens
+    // before the wipe (retract_before_wipe 100%): the G10 runs first and the wipe is a dry move. Only a partial
+    // retraction before the wipe is incompatible; rejecting every wipe here reported a project saved in the
+    // state the tab allows as invalid when it was opened again, and the CLI refused to slice it.
     if (cfg.use_firmware_retraction.value)
-        for (unsigned char wipe : cfg.wipe.values)
-             if (wipe)
-                error_message.emplace("use_firmware_retraction", "--use-firmware-retraction is not compatible with --wipe");
+        for (size_t i = 0; i < cfg.wipe.values.size(); ++i)
+            if (cfg.wipe.values[i] && cfg.retract_before_wipe.get_at(i) < 100. - EPSILON)
+                error_message.emplace("use_firmware_retraction",
+                                      "--use-firmware-retraction is not compatible with --wipe unless --retract-before-wipe is 100%");
                 
     // --gcode-flavor
     if (! print_config_def.get("gcode_flavor")->has_enum_value(cfg.gcode_flavor.serialize())) {
@@ -11000,6 +11269,15 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "option";
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("no_filament_prices", coBool);
+    def->label = L("Leave costs out of the G-code");
+    def->tooltip = L("Do not write the filament prices and the machine rate into the G-code (\"; filament cost\", "
+                     "\"; total filament cost\", and filament_cost and time_cost in the config block) or into the "
+                     "settings of an exported 3MF with G-code, like the GUI preference \"Include costs in exported "
+                     "G-code\" switched off. Without it the CLI writes them, as it always has.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("no_thumbnails", coBool);
     def->label = L("Skip thumbnails");
     def->tooltip = L("Do not render plate thumbnails when exporting 3mf (no OpenGL context needed).");
@@ -11713,8 +11991,32 @@ bool has_skirt(const DynamicPrintConfig& cfg)
         || (opt_draft_shield && opt_draft_shield->getInt() != dsDisabled);
 }
 float get_real_skirt_dist(const DynamicPrintConfig& cfg) {
-    return has_skirt(cfg) ? cfg.opt_float("skirt_distance") : 0;
+    if (!has_skirt(cfg)) return 0.f;
+
+    float dist = cfg.opt_float("skirt_distance");
+
+    int loops = cfg.opt_int("skirt_loops");
+    auto opt_draft_shield = cfg.option("draft_shield");
+    if (opt_draft_shield && opt_draft_shield->getInt() != dsDisabled && loops == 0) {
+        loops = 1;
+    }
+
+    float width = cfg.opt_float("initial_layer_line_width");
+    if (width <= 0.f) {
+        width = cfg.opt_float("line_width");
+    }
+    if (width <= 0.f) {
+        auto* nd = cfg.opt<ConfigOptionFloats>("nozzle_diameter");
+        if (nd && !nd->values.empty()) {
+            width = *std::max_element(nd->values.begin(), nd->values.end());
+        } else {
+            width = 0.4f;
+        }
+    }
+
+    return dist + loops * width;
 }
+
 static bool is_XL_printer(const std::string& printer_notes)
 {
     return boost::algorithm::contains(printer_notes, "PRINTER_VENDOR_PRUSA3D")

@@ -2,6 +2,7 @@
 #include "GLShader.hpp"
 
 #include "3DScene.hpp"
+#include "OpenGLManager.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/format.hpp"
 #include "libslic3r/Color.hpp"
@@ -200,6 +201,90 @@ void GLShaderProgram::start_using() const
 {
     assert(m_id > 0);
     glsafe(::glUseProgram(m_id));
+    if (!m_parked_units.empty())
+        bind_parked_fallback_textures();
+}
+
+void GLShaderProgram::bind_parked_fallback_textures() const
+{
+    GLint previous_unit = GL_TEXTURE0;
+    glsafe(::glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_unit));
+    for (const auto& [unit, target] : m_parked_units) {
+        const unsigned int fallback = GUI::OpenGLManager::get_fallback_texture(target);
+        if (fallback == 0)
+            continue;
+        glsafe(::glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit)));
+        glsafe(::glBindTexture(static_cast<GLenum>(target), static_cast<GLuint>(fallback)));
+    }
+    glsafe(::glActiveTexture(static_cast<GLenum>(previous_unit)));
+}
+
+unsigned int GLShaderProgram::sampler_target(unsigned int sampler_type)
+{
+    switch (sampler_type) {
+    case GL_SAMPLER_2D:
+    case GL_INT_SAMPLER_2D:
+    case GL_UNSIGNED_INT_SAMPLER_2D:
+        return GL_TEXTURE_2D;
+    case GL_SAMPLER_3D:
+    case GL_INT_SAMPLER_3D:
+    case GL_UNSIGNED_INT_SAMPLER_3D:
+        return GL_TEXTURE_3D;
+    case GL_SAMPLER_BUFFER:
+    case GL_INT_SAMPLER_BUFFER:
+    case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+        return GL_TEXTURE_BUFFER;
+    default:
+        return 0;
+    }
+}
+
+const std::vector<GLShaderProgram::SamplerUniform>& GLShaderProgram::get_samplers() const
+{
+    if (m_samplers_listed || m_id == 0)
+        return m_samplers;
+    m_samplers_listed = true;
+    m_samplers = list_samplers(m_id);
+    return m_samplers;
+}
+
+std::vector<GLShaderProgram::SamplerUniform> GLShaderProgram::list_samplers(unsigned int program)
+{
+    std::vector<SamplerUniform> samplers;
+    if (program == 0)
+        return samplers;
+
+    auto is_sampler = [](GLenum type) {
+        switch (type) {
+        case GL_SAMPLER_1D: case GL_SAMPLER_2D: case GL_SAMPLER_3D: case GL_SAMPLER_CUBE:
+        case GL_SAMPLER_1D_SHADOW: case GL_SAMPLER_2D_SHADOW: case GL_SAMPLER_2D_RECT: case GL_SAMPLER_BUFFER:
+        case GL_INT_SAMPLER_2D: case GL_INT_SAMPLER_3D: case GL_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_2D: case GL_UNSIGNED_INT_SAMPLER_3D: case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+            return true;
+        default:
+            return false;
+        }
+    };
+    GLint count = 0;
+    GLint max_length = 0;
+    glsafe(::glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &count));
+    glsafe(::glGetProgramiv(program, GL_ACTIVE_UNIFORM_MAX_LENGTH, &max_length));
+    std::vector<char> buffer(std::max<GLint>(max_length, 1) + 1, 0);
+    for (GLint i = 0; i < count; ++i) {
+        GLsizei length = 0;
+        GLint   size   = 0;
+        GLenum  type   = 0;
+        glsafe(::glGetActiveUniform(program, static_cast<GLuint>(i), static_cast<GLsizei>(buffer.size()), &length, &size, &type, buffer.data()));
+        if (!is_sampler(type))
+            continue;
+        SamplerUniform sampler;
+        sampler.name     = std::string(buffer.data(), static_cast<size_t>(length));
+        sampler.type     = type;
+        sampler.location = ::glGetUniformLocation(program, sampler.name.c_str());
+        if (sampler.location >= 0)
+            samplers.push_back(std::move(sampler));
+    }
+    return samplers;
 }
 
 void GLShaderProgram::stop_using() const
@@ -218,6 +303,15 @@ void GLShaderProgram::set_sampler_units(std::initializer_list<std::pair<const ch
     for (const auto& [name, unit] : units)
         set_uniform(name, unit);
     glsafe(::glUseProgram(static_cast<GLuint>(previous_program)));
+
+    // Remember where they went, by sampler type, for start_using()'s fallback textures.
+    for (const auto& [name, unit] : units)
+        for (const SamplerUniform& sampler : get_samplers())
+            if (sampler.name == name) {
+                const unsigned int target = sampler_target(sampler.type);
+                if (target != 0 && std::find(m_parked_units.begin(), m_parked_units.end(), std::make_pair(unit, target)) == m_parked_units.end())
+                    m_parked_units.emplace_back(unit, target);
+            }
 }
 
 std::string GLShaderProgram::sampler_unit_conflicts() const

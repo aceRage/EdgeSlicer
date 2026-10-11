@@ -9,7 +9,9 @@
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "FlowVariantEdit.hpp"
+#include "Plater.hpp"
 
+#include <algorithm>
 #include <wx/msgdlg.h>
 
 namespace Slic3r {
@@ -210,6 +212,81 @@ void ConfigManipulation::check_chamber_minimal_temperature(DynamicPrintConfig* c
     }
 }
 
+// Orca (#14369): the layer height limits of the edited printer preset; a multi-nozzle printer is bounded by its
+// smallest minimum and its largest maximum.
+void ConfigManipulation::layer_height_limits(double& min_layer_height, double& max_layer_height) const
+{
+    const DynamicPrintConfig& printer_config = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const std::vector<double>& min_limits = printer_config.option<ConfigOptionFloats>("min_layer_height")->values;
+    const std::vector<double>& max_limits = printer_config.option<ConfigOptionFloats>("max_layer_height")->values;
+    min_layer_height = *std::min_element(min_limits.begin(), min_limits.end());
+    max_layer_height = *std::max_element(max_limits.begin(), max_limits.end());
+}
+
+ConfigManipulation::LayerHeightCheck ConfigManipulation::classify_layer_height(double value, double min_limit, double max_limit)
+{
+    if (min_limit > EPSILON && value < EPSILON)
+        return LayerHeightCheck::Zero;
+    if (max_limit > EPSILON && value > max_limit + EPSILON)
+        return LayerHeightCheck::TooHigh;
+    if (min_limit > EPSILON && value < min_limit - EPSILON)
+        return LayerHeightCheck::TooLow;
+    return LayerHeightCheck::InRange;
+}
+
+// Returns true when the value was changed here. opt_key is "layer_height" or, for the first layer,
+// "initial_layer_print_height": both are held to the same printer limits and answer "Ignore" the same way.
+bool ConfigManipulation::check_layer_height(DynamicPrintConfig* config, const std::string& opt_key)
+{
+    double min_layer_height = 0., max_layer_height = 0.;
+    layer_height_limits(min_layer_height, max_layer_height);
+    const bool   is_initial   = opt_key == "initial_layer_print_height";
+    const double layer_height = config->opt_float(opt_key);
+
+    switch (classify_layer_height(layer_height, min_layer_height, max_layer_height)) {
+    case LayerHeightCheck::Zero: {
+        const wxString msg_text = wxString::Format(is_initial ? _L("Initial layer height is too small. It will be set to the minimum (%g mm).") :
+                                                                _L("Layer height is too small. It will be set to the minimum (%g mm)."),
+                                                   min_layer_height);
+        MessageDialog dialog(wxGetApp().plater(), msg_text, "", wxICON_WARNING | wxOK);
+        dialog.SetButtonLabel(wxID_OK, _L("OK"));
+        is_msg_dlg_already_exist = true;
+        dialog.ShowModal();
+        is_msg_dlg_already_exist = false;
+        DynamicPrintConfig new_conf = *config;
+        new_conf.set_key_value(opt_key, new ConfigOptionFloat(min_layer_height));
+        apply(config, &new_conf);
+        return true;
+    }
+    case LayerHeightCheck::TooHigh: return layer_height_out_of_range_dialog(config, max_layer_height, opt_key);
+    case LayerHeightCheck::TooLow:  return layer_height_out_of_range_dialog(config, min_layer_height, opt_key);
+    default: return false;
+    }
+}
+
+// "Ignore" keeps the value as the user typed it; update_print_fff_config() no longer clamps it behind the dialog.
+bool ConfigManipulation::layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key)
+{
+    wxString msg_text = opt_key == "initial_layer_print_height" ?
+        _(L("Initial layer height is outside the limits set in Printer Settings -> Extruder -> Layer height limits, "
+            "this may cause printing quality issues.")) :
+        _(L("Layer height is outside the limits set in Printer Settings -> Extruder -> Layer height limits, "
+            "this may cause printing quality issues."));
+    msg_text += "\n\n" + wxString::Format(_L("Adjust it to the limit (%g mm) automatically?"), clamp_to);
+    MessageDialog dialog(wxGetApp().plater(), msg_text, "", wxICON_WARNING | wxYES | wxNO);
+    dialog.SetButtonLabel(wxID_YES, _L("Adjust"));
+    dialog.SetButtonLabel(wxID_NO, _L("Ignore"));
+    is_msg_dlg_already_exist = true;
+    const bool adjust = dialog.ShowModal() == wxID_YES;
+    if (adjust) {
+        DynamicPrintConfig new_conf = *config;
+        new_conf.set_key_value(opt_key, new ConfigOptionFloat(clamp_to));
+        apply(config, &new_conf);
+    }
+    is_msg_dlg_already_exist = false;
+    return adjust;
+}
+
 void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, const bool is_global_config, const bool is_plate_config)
 {
     // #ys_FIXME_to_delete
@@ -224,7 +301,6 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
 
     // layer_height shouldn't be equal to zero
     auto layer_height = config->opt_float("layer_height");
-    auto gpreset = GUI::wxGetApp().preset_bundle->printers.get_edited_preset();
     if (layer_height < EPSILON)
     {
         const wxString msg_text = _(L("Too small layer height.\nReset to 0.2."));
@@ -237,19 +313,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         is_msg_dlg_already_exist = false;
     }
 
-    //BBS: limite the max layer_herght
-    auto max_lh = gpreset.config.opt_float("max_layer_height",0);
-    if (max_lh > 0.2 && layer_height > max_lh+ EPSILON)
-    {
-        const wxString msg_text = wxString::Format(L"Too large layer height.\nReset to %0.3f.", max_lh);
-        MessageDialog dialog(nullptr, msg_text, "", wxICON_WARNING | wxOK);
-        DynamicPrintConfig new_conf = *config;
-        is_msg_dlg_already_exist = true;
-        dialog.ShowModal();
-        new_conf.set_key_value("layer_height", new ConfigOptionFloat(max_lh));
-        apply(config, &new_conf);
-        is_msg_dlg_already_exist = false;
-    }
+    // Orca (#14369): the "layer height above the printer limit" prompt moved to check_layer_height(), which runs when the
+    // layer height is edited. Clamping it here as well undid the "Ignore" answer on the next config update.
 
     //BBS: ironing_spacing shouldn't be too small or equal to zero
     if (config->opt_float("ironing_spacing") < IRONING_SPACING_MIN)
@@ -601,7 +666,7 @@ void ConfigManipulation::apply_null_fff_config(DynamicPrintConfig *config, std::
 {
     for (auto &k : keys) {
         if (/*k == "adaptive_layer_height" || */ k == "independent_support_layer_height" || k == "enable_support" ||
-            k == "detect_thin_wall" || k == "tree_support_adaptive_layer_height")
+            k == "detect_thin_wall")
             config->set_key_value(k, new ConfigOptionBool(true));
         else if (k == "wall_loops")
             config->set_key_value(k, new ConfigOptionInt(0));
@@ -662,8 +727,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_infill = config->option<ConfigOptionPercent>("sparse_infill_density")->value > 0;
     // sparse_infill_filament uses the same logic as in Print::extruders()
-    for (auto el : { "sparse_infill_pattern", "infill_combination",
-        "minimum_sparse_infill_area", "infill_anchor_max","infill_shift_step","sparse_infill_rotate_template","symmetric_infill_y_axis"})
+    for (auto el : { "sparse_infill_pattern", "infill_combination", "fill_multiline","infill_direction",
+        "minimum_sparse_infill_area", "infill_anchor", "infill_anchor_max","infill_shift_step","sparse_infill_rotate_template","symmetric_infill_y_axis"})
         toggle_line(el, have_infill);
 
     bool have_combined_infill = config->opt_bool("infill_combination") && have_infill;
@@ -673,22 +738,25 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     InfillPattern pattern = config->opt_enum<InfillPattern>("sparse_infill_pattern");
     bool          have_multiline_infill_pattern = pattern == ipGyroid || pattern == ipGrid || pattern == ipRectilinear || pattern == ipTpmsD || pattern == ipTpmsFK || pattern == ipCrossHatch || pattern == ipHoneycomb || pattern == ipLateralLattice || pattern == ipLateralHoneycomb ||
                                                   pattern == ipCubic || pattern == ipStars || pattern == ipAlignedRectilinear || pattern == ipLightning || pattern == ip3DHoneycomb || pattern == ipAdaptiveCubic || pattern == ipSupportCubic;
-    toggle_line("fill_multiline", have_multiline_infill_pattern);
 
-    // If the infill pattern does not support multiline infill, set fill_multiline to 1.
-    if (!have_multiline_infill_pattern) {
-        DynamicPrintConfig new_conf = *config;
-        new_conf.set_key_value("fill_multiline", new ConfigOptionInt(1));
-        apply(config, &new_conf);
+    // If there is infill, enable/disable fill_multiline according to whether the pattern supports multiline infill.
+    if (have_infill) {
+        toggle_field("fill_multiline", have_multiline_infill_pattern);
+        // If the infill pattern does not support multiline fill_multiline is changed to 1.
+        // Necessary when the pattern contains params.multiline (for example, triangles because they belong to the rectilinear class)
+        if (!have_multiline_infill_pattern) {
+            DynamicPrintConfig new_conf = *config;
+            new_conf.set_key_value("fill_multiline", new ConfigOptionInt(1));
+            apply(config, &new_conf);
+        }
+        // Hide infill anchor max if sparse_infill_pattern is not line or if sparse_infill_pattern is line but infill_anchor_max is 0.
+        bool infill_anchor = config->opt_enum<InfillPattern>("sparse_infill_pattern") != ipLine;
+        toggle_field("infill_anchor_max", infill_anchor);
+
+        // Only allow configuration of open anchors if the anchoring is enabled.
+        bool has_infill_anchors = infill_anchor && config->option<ConfigOptionFloatOrPercent>("infill_anchor_max")->value > 0;
+        toggle_field("infill_anchor", has_infill_anchors);
     }
-
-    // Hide infill anchor max if sparse_infill_pattern is not line or if sparse_infill_pattern is line but infill_anchor_max is 0.
-    bool infill_anchor = config->opt_enum<InfillPattern>("sparse_infill_pattern") != ipLine;
-    toggle_field("infill_anchor_max",infill_anchor);
-
-    // Only allow configuration of open anchors if the anchoring is enabled.
-    bool has_infill_anchors = have_infill && config->option<ConfigOptionFloatOrPercent>("infill_anchor_max")->value > 0 && infill_anchor;
-    toggle_field("infill_anchor", has_infill_anchors);
 
     //cross zag
     bool is_cross_zag = config->option<ConfigOptionEnum<InfillPattern>>("sparse_infill_pattern")->value == InfillPattern::ipCrossZag;
@@ -723,7 +791,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("top_surface_density", has_top_shell);
     toggle_field("bottom_surface_density", has_bottom_shell);
 
-    for (auto el : { "infill_direction", "sparse_infill_line_width", "fill_multiline","gap_fill_target","filter_out_gap_fill","infill_wall_overlap",
+    for (auto el : { "infill_direction", "sparse_infill_line_width", "gap_fill_target","filter_out_gap_fill","infill_wall_overlap",
         "sparse_infill_speed", "bridge_speed", "internal_bridge_speed", "bridge_angle", "internal_bridge_angle",
         "solid_infill_direction", "solid_infill_rotate_template", "internal_solid_infill_pattern", "solid_infill_filament",
         })
@@ -782,6 +850,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_raft = config->opt_int("raft_layers") > 0;
     bool have_support_material = config->opt_bool("enable_support") || have_raft;
+    // Side stabilizers do not depend on Enable supports: they are on whenever their own mode is not Off.
+    const StabilizerMode stab_mode = config->opt_enum<StabilizerMode>("stabilizer_supports");
+    const bool           stab_on   = stab_mode != smOff;
 
     SupportType support_type = config->opt_enum<SupportType>("support_type");
     bool have_support_interface = config->opt_int("support_interface_top_layers") > 0 || config->opt_int("support_interface_bottom_layers") > 0;
@@ -792,14 +863,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         "support_interface_pattern", "support_interface_top_layers", "support_interface_bottom_layers",
         "bridge_no_support", "max_bridge_length", "support_top_z_distance", "support_bottom_z_distance",
         "support_type", "support_on_build_plate_only", "support_critical_regions_only", "support_interface_not_for_body",
-        "support_object_xy_distance", "support_object_first_layer_gap"/*, "independent_support_layer_height"*/})
+        "support_object_xy_distance", "support_object_first_layer_gap", "independent_support_layer_height",
+        // EdgeSlicer: greyed out with the other support options (a raft counts as support here too).
+        "top_z_overrides_xy_distance"})
         toggle_field(el, have_support_material);
     toggle_line("hollow_shell_thickness", config->opt_bool("hollow_interior"));
-    // Side stabilizers print as support, so they need supports on.
-    toggle_field("stabilizer_supports", have_support_material);
+    // Side stabilizers print with the support filament, speed and line width, but they are their own
+    // feature: the mode is always editable, supports on or off. What they borrow from the support
+    // settings stays editable while stabilizers are on.
+    toggle_field("stabilizer_supports", true);
+    toggle_field("support_object_xy_distance", have_support_material || stab_on);
     {
-        const StabilizerMode stab_mode = config->opt_enum<StabilizerMode>("stabilizer_supports");
-        const bool           stab_on   = have_support_material && stab_mode != smOff;
         for (auto el : {"stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_diameter", "stabilizer_tip_gap",
                         "stabilizer_pillar_diameter", "stabilizer_max_island_width"})
             toggle_line(el, stab_on);
@@ -837,7 +911,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"tree_support_branch_angle", "tree_support_branch_distance", "tree_support_branch_diameter" })
         toggle_line(el, support_is_normal_tree);
     // settings specific to normal trees
-    for (auto el : {"tree_support_auto_brim", "tree_support_brim_width", "tree_support_adaptive_layer_height"})
+    for (auto el : {"tree_support_auto_brim", "tree_support_brim_width"})
         toggle_line(el, support_is_normal_tree);
     // settings specific to organic trees
     for (auto el : {"tree_support_branch_angle_organic", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_angle_slow", "tree_support_tip_diameter", "tree_support_top_rate", "tree_support_branch_diameter_angle"})
@@ -870,20 +944,23 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_skirt_height = have_skirt &&
     (config->opt_int("skirt_height") > 1 || config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
-    toggle_line("support_speed", have_support_material || have_skirt_height);
+    toggle_line("support_speed", have_support_material || have_skirt_height || stab_on);
     toggle_line("support_interface_speed", have_support_material && have_support_interface);
 
     // BBS
     //toggle_field("support_material_synchronize_layers", have_support_soluble);
 
     toggle_field("inner_wall_line_width", have_perimeters || have_skirt || have_brim);
-    toggle_field("support_filament", have_support_material || have_skirt);
+    toggle_field("support_filament", have_support_material || have_skirt || stab_on);
 
     toggle_line("raft_contact_distance", have_raft && !have_support_soluble);
 
-    // Orca: Raft, grid, snug and organic supports use these two parameters to control the size & density of the "brim"/flange
-    for (auto el : { "raft_first_layer_expansion", "raft_first_layer_density"})
-        toggle_field(el, have_support_material && !(support_is_normal_tree && !have_raft));
+    // Orca: First-layer density is available for supports broadly.
+    toggle_field("raft_first_layer_density", have_support_material);
+    // Orca: For regular tree (Slim/Strong) without raft, hide first-layer expansion.
+    // Keep it enabled for non-tree supports, organic tree, hybrid tree, and any raft case.
+    toggle_field("raft_first_layer_expansion",
+                 have_support_material && ((!support_is_normal_tree || support_style == smsTreeHybrid) || have_raft));
 
     bool has_ironing = (config->opt_enum<IroningType>("ironing_type") != IroningType::NoIroning);
     for (auto el : { "ironing_pattern", "ironing_flow", "ironing_spacing", "ironing_angle", "ironing_inset"})
@@ -1101,8 +1178,12 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : { "lateral_lattice_angle_1", "lateral_lattice_angle_2"})
         toggle_line(el, lattice_options);
 
-    //Orca: disable infill_direction/solid_infill_direction if sparse_infill_rotate_template/solid_infill_rotate_template is not empty value
-    toggle_field("infill_direction", config->opt_string("sparse_infill_rotate_template") == "");
+    // Adaptative Cubic and support cubic infill patterns do not support infill rotation.
+    bool FillAdaptive = (pattern == InfillPattern::ipAdaptiveCubic || pattern == InfillPattern::ipSupportCubic);
+
+    //Orca: disable infill_direction/solid_infill_direction if sparse_infill_rotate_template/solid_infill_rotate_template is not empty value and adaptive cubic/support cubic infill pattern is not selected
+    toggle_field("sparse_infill_rotate_template", !FillAdaptive);
+    toggle_field("infill_direction", config->opt_string("sparse_infill_rotate_template") == "" && !FillAdaptive);
     toggle_field("solid_infill_direction", config->opt_string("solid_infill_rotate_template") == "");
 
 

@@ -127,6 +127,22 @@ void GLTexture::Compressor::compress()
 
 GLTexture::Quad_UVs GLTexture::FullTextureUVs = { { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f } };
 
+// EDGE (core profile): one complete level. For textures whose mipmap levels are not (yet) there.
+static void set_single_level_filtering()
+{
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0));
+}
+
+// EDGE: with EDGESLICER_GL_DEBUG, name each file texture's GL id, so an "OpenGL texture check" line
+// (which only knows the id) can be traced back to its image.
+static void log_texture_created(const GLTexture& texture, bool mipmaps, bool compressed)
+{
+    if (OpenGLManager::gl_debug_enabled())
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL debug: texture " << texture.get_id() << " = " << texture.get_source() << " (" << texture.get_width()
+                                   << "x" << texture.get_height() << (mipmaps ? ", mipmaps" : "") << (compressed ? ", S3TC, compressed in the background" : "") << ")";
+}
+
 GLTexture::GLTexture()
     : m_compressor(*this)
 {
@@ -163,7 +179,8 @@ bool GLTexture::load_from_svg_file(const std::string& filename, bool use_mipmaps
         return false;
 }
 
-bool GLTexture::load_from_raw_data(std::vector<unsigned char> data, unsigned int w, unsigned int h, bool apply_anisotropy)
+bool GLTexture::load_from_raw_data(std::vector<unsigned char> data, unsigned int w, unsigned int h, bool apply_anisotropy,
+                                   bool use_mipmaps)
 {
     m_width = w;
     m_height = h;
@@ -187,18 +204,51 @@ bool GLTexture::load_from_raw_data(std::vector<unsigned char> data, unsigned int
 
     glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)m_width, (GLsizei)m_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, (const void*)data.data()));
 
-    bool use_mipmaps = true;
     if (use_mipmaps) {
-        // we manually generate mipmaps because glGenerateMipmap() function is not reliable on all graphics cards
-        int lod_w = m_width;
-        int lod_h = m_height;
+        // We generate the mipmap chain ourselves rather than calling glGenerateMipmap(), which this
+        // codebase has historically considered unreliable on some graphics cards.
+        //
+        // Each level is a 2x2 box filter of the level above it. Note this used to re-upload the
+        // *level-0* buffer at every level instead, which does not downscale anything - it just
+        // reinterprets the image's first lod_w * lod_h texels as the whole smaller level, i.e. every
+        // level below 0 held a crop of the top-left corner. It went unnoticed for as long as every
+        // caller drew these textures at roughly their native size (where only level 0 is ever
+        // sampled); it shows up the moment one is drawn small enough to select a lower level, as a
+        // texture that visibly turns into something else as it shrinks.
+        std::vector<unsigned char> scratch;
+        const std::vector<unsigned char> *src = &data;
+        int src_w = m_width;
+        int src_h = m_height;
         GLint level = 0;
-        while (lod_w > 1 || lod_h > 1) {
+        while (src_w > 1 || src_h > 1) {
             ++level;
-            lod_w = std::max(lod_w / 2, 1);
-            lod_h = std::max(lod_h / 2, 1);
-            n_pixels = lod_w * lod_h;
-            glsafe(::glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, (GLsizei)lod_w, (GLsizei)lod_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, (const void*)data.data()));
+            const int lod_w = std::max(src_w / 2, 1);
+            const int lod_h = std::max(src_h / 2, 1);
+
+            std::vector<unsigned char> lod(size_t(lod_w) * size_t(lod_h) * 4);
+            for (int y = 0; y < lod_h; ++y) {
+                // min() rather than a plain 2*y+1: an odd source extent leaves the last output texel
+                // with only one source row/column to average, not two.
+                const int y0 = std::min(2 * y, src_h - 1);
+                const int y1 = std::min(2 * y + 1, src_h - 1);
+                for (int x = 0; x < lod_w; ++x) {
+                    const int x0 = std::min(2 * x, src_w - 1);
+                    const int x1 = std::min(2 * x + 1, src_w - 1);
+                    for (int c = 0; c < 4; ++c) {
+                        const unsigned int sum = (*src)[(size_t(y0) * size_t(src_w) + size_t(x0)) * 4 + size_t(c)] +
+                                                 (*src)[(size_t(y0) * size_t(src_w) + size_t(x1)) * 4 + size_t(c)] +
+                                                 (*src)[(size_t(y1) * size_t(src_w) + size_t(x0)) * 4 + size_t(c)] +
+                                                 (*src)[(size_t(y1) * size_t(src_w) + size_t(x1)) * 4 + size_t(c)];
+                        lod[(size_t(y) * size_t(lod_w) + size_t(x)) * 4 + size_t(c)] = (unsigned char)(sum / 4);
+                    }
+                }
+            }
+            glsafe(::glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, (GLsizei)lod_w, (GLsizei)lod_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, (const void*)lod.data()));
+
+            scratch = std::move(lod);
+            src     = &scratch;
+            src_w   = lod_w;
+            src_h   = lod_h;
         }
 
         glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, level));
@@ -671,6 +721,10 @@ void GLTexture::render_texture(unsigned int tex_id, float left, float right, flo
 
 void GLTexture::render_sub_texture(unsigned int tex_id, float left, float right, float bottom, float top, const GLTexture::Quad_UVs& uvs)
 {
+    // EDGE (core profile): texture 0 has no image; drawing it samples an incomplete texture (black on
+    // most drivers, "unit 0 ... is unloadable" on macOS). Nothing to draw.
+    if (tex_id == 0)
+        return;
     GLModel& model = InitModelForRenderImage();
 
     // position and scale from normalized unit quad
@@ -700,9 +754,8 @@ void GLTexture::render_sub_texture(unsigned int tex_id, float left, float right,
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
-    glsafe(::glEnable(GL_TEXTURE_2D));
-    glsafe(::glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE));
-
+    // EDGE (core profile): no glEnable(GL_TEXTURE_2D) / glTexEnvi() here - fixed-function texturing
+    // is GL_INVALID_ENUM in a core profile and does nothing for a shader in a compatibility one.
     glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint)tex_id));
 
     GLShaderProgram* shader = wxGetApp().get_shader("flat_texture");
@@ -717,7 +770,6 @@ void GLTexture::render_sub_texture(unsigned int tex_id, float left, float right,
 
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
 
-    glsafe(::glDisable(GL_TEXTURE_2D));
     glsafe(::glDisable(GL_BLEND));
 }
 
@@ -888,7 +940,9 @@ bool GLTexture::load_from_png(const std::string& filename, bool use_mipmaps, ECo
 
             if (compression_enabled) {
                 if (compression_type == SingleThreaded)
-                    glsafe(::glTexImage2D(GL_TEXTURE_2D, level, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, (GLsizei)m_width, (GLsizei)m_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, (const void*)data.data()));
+                    // EDGE: the level's own size. This used m_width x m_height, which reads past `data`
+                    // and leaves every level but 0 the wrong size: an incomplete texture.
+                    glsafe(::glTexImage2D(GL_TEXTURE_2D, level, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, (GLsizei)lod_w, (GLsizei)lod_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, (const void*)data.data()));
                 else {
                     // initializes the texture on GPU
                     glsafe(::glTexImage2D(GL_TEXTURE_2D, level, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, (GLsizei)lod_w, (GLsizei)lod_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0));
@@ -900,21 +954,26 @@ bool GLTexture::load_from_png(const std::string& filename, bool use_mipmaps, ECo
                 glsafe(::glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, (GLsizei)lod_w, (GLsizei)lod_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, (const void*)data.data()));
         }
 
-        if (!compression_enabled) {
+        if (!compression_enabled || compression_type == SingleThreaded) {
             glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, level));
             glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
         }
+        else
+            // EDGE (core profile): the levels have storage but no image until the compressor sends
+            // them, and Compressor::send_compressed_data_to_gpu() raises GL_TEXTURE_MAX_LEVEL and the
+            // min filter one level at a time. Until then keep the texture complete on level 0 alone:
+            // the defaults (a mipmap min filter, GL_TEXTURE_MAX_LEVEL 1000) made it incomplete.
+            set_single_level_filtering();
     }
-    else {
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0));
-    }
+    else
+        set_single_level_filtering();
 
     glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
 
     m_source = filename;
+    log_texture_created(*this, use_mipmaps, compression_enabled);
 
     if (compression_type == MultiThreaded)
         // start asynchronous compression
@@ -1025,17 +1084,22 @@ bool GLTexture::load_from_svg(const std::string& filename, bool use_mipmaps, boo
             glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, level));
             glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
         }
+        else
+            // EDGE (core profile): see load_from_png(). Worse here: the chain stops above 1x1 (the loop
+            // ends below 4 px), so with the default GL_TEXTURE_MAX_LEVEL 1000 and mipmap min filter this
+            // texture was incomplete until the compressor's first level reached the GPU, and the bed
+            // and plate logo textures are drawn on the frame that creates them.
+            set_single_level_filtering();
     }
-    else {
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0));
-    }
+    else
+        set_single_level_filtering();
 
     glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
 
     m_source = filename;
+    log_texture_created(*this, use_mipmaps, compression_enabled);
 
     if (compression_enabled)
         // start asynchronous compression
