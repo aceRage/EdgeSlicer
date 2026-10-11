@@ -156,6 +156,27 @@ AccountAnswer read_account_answer(unsigned http_status, const std::string& body)
     return a;
 }
 
+std::string redact_url_queries(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    bool skipping = false;
+    for (const char c : s) {
+        if (skipping) {
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '"' || c == '\'' || c == ')' || c == '>')
+                skipping = false;
+            else
+                continue;
+        }
+        if (c == '?' || c == '#') {
+            skipping = true;
+            continue;
+        }
+        out += c;
+    }
+    return out;
+}
+
 std::vector<std::string> session_cookie_names() { return {"login_access_token", "login_refresh_token"}; }
 
 std::string session_cookie_uri(bool china_region)
