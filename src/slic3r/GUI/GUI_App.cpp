@@ -2418,15 +2418,20 @@ void GUI_App::init_networking_callbacks()
                 });
                 return;
             }
-            GUI::wxGetApp().CallAfter([this] {
+            GUI::wxGetApp().CallAfter([this, return_code] {
                 if (m_is_closing)
                     return;
                 BOOST_LOG_TRIVIAL(trace) << "static: server connected";
-                m_agent->set_user_selected_machine(m_agent->get_user_selected_machine());
+                // Before set_user_selected_machine below asks for the selected printer's report:
+                // a selection made while the session was still connecting held its own request.
+                if (m_device_manager)
+                    m_device_manager->on_cloud_session(return_code);
                     if (this->is_enable_multi_machine()) {
                         auto evt = new wxCommandEvent(EVT_UPDATE_MACHINE_LIST);
                         wxQueueEvent(this, evt);
                     }
+                    // Once (it used to be made twice, before and after the event above, and each
+                    // call asks the printer for a full report).
                     m_agent->set_user_selected_machine(m_agent->get_user_selected_machine());
                     //subscribe device
                     if (m_agent->is_user_login()) {
@@ -2496,6 +2501,14 @@ void GUI_App::init_networking_callbacks()
                     // asked for a report, a session reported down is re-dialled.
                     if (obj)
                         obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    // The one "connected" line per connect, and the end of holding this
+                    // selection's early status requests (the pushall below replaces them).
+                    if (obj && obj->is_lan_mode_printer()) {
+                        if (state == ConnectStatus::ConnectStatusOk)
+                            obj->note_session_up("LAN");
+                        else
+                            obj->note_session_down();
+                    }
                     if (MachineObject* local = m_device_manager->get_local_machine(dev_id); local && local != obj)
                         local->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
 
@@ -6008,6 +6021,8 @@ void GUI_App::request_user_logout()
         // Update data first before showing dialogs
         m_agent->user_logout(true);
         m_agent->set_user_selected_machine("");
+        if (m_device_manager)
+            m_device_manager->on_cloud_session(-1); // the plug-in drops its cloud session on logout
         /* delete old user settings */
         bool     transfer_preset_changes = false;
         wxString header = _L("Some presets are modified.") + "\n" +

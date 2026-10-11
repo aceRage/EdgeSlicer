@@ -1792,6 +1792,8 @@ int MachineObject::command_get_version(bool with_retry)
     j["info"]["command"] = "get_version";
     if (with_retry)
         get_version_retry = GET_VERSION_RETRYS;
+    if (hold_status_request("get_version"))
+        return 0;
     return this->publish_json(j.dump(), 1);
 }
 
@@ -1823,6 +1825,11 @@ int MachineObject::command_request_push_all(bool request_now)
         BOOST_LOG_TRIVIAL(trace) << "static: command_request_push_all, dev_id=" << dev_id;
         last_request_push = std::chrono::system_clock::now();
     }
+
+    // Asked for while this selection's session is still being dialled: the plug-in has nothing to
+    // publish on yet and would refuse it (-1). The connected callback asks for the report itself.
+    if (hold_status_request("pushall"))
+        return 0;
 
     json j;
     j["pushing"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
@@ -3153,6 +3160,58 @@ bool MachineObject::is_camera_busy_off()
     return false;
 }
 
+// ------------------------------------------------- the first request after a selection ----
+// See FirstRequestGate.hpp. Times are steady-clock milliseconds.
+static long long first_request_now_ms()
+{
+    return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void MachineObject::note_selected(bool session_already_up)
+{
+    m_connect_watch.on_selected(first_request_now_ms(), session_already_up);
+    if (session_already_up)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " selected, the cloud session is already up";
+}
+
+void MachineObject::note_session_up(const char* kind)
+{
+    const int       held = m_connect_watch.held;
+    const long long ms   = m_connect_watch.on_session_up(first_request_now_ms());
+    if (ms >= 0)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << kind << " session up " << ms
+                                << " ms after selection" << (held > 0 ? " (" + std::to_string(held) + " early request(s) held for it)" : std::string());
+}
+
+void MachineObject::note_session_down()
+{
+    m_connect_watch.on_session_down();
+}
+
+bool MachineObject::hold_status_request(const char* what)
+{
+    const long long now = first_request_now_ms();
+    if (!m_connect_watch.hold(now))
+        return false;
+    // The first hold of a selection at info, so a log shows why no request went out; the
+    // refresh timer's repeats (at most one per REQUEST_PUSH_MIN_TIME) at trace.
+    if (m_connect_watch.held == 1)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << what << " held until the "
+                                << (is_lan_mode_printer() ? "LAN" : "cloud") << " session is up ("
+                                << (now - m_connect_watch.selected_at) << " ms after selection)";
+    else
+        BOOST_LOG_TRIVIAL(trace) << "connect: dev=" << dev_id << " " << what << " held (" << m_connect_watch.held << ")";
+    return true;
+}
+
+void MachineObject::note_status_received()
+{
+    const long long ms = m_connect_watch.on_status(first_request_now_ms());
+    if (ms >= 0)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " first status " << ms << " ms after selection";
+}
+
 int MachineObject::publish_json(std::string json_str, int qos, int flag)
 {
     int rtn = 0;
@@ -3328,6 +3387,7 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         if (j_pre["print"]["msg"].get<int>() == 0) {           //all message
                             BOOST_LOG_TRIVIAL(trace) << "static: get push_all msg, dev_id=" << dev_id;
                             m_push_count++;
+                            note_status_received();
                             if (!printer_type.empty())
                                 print_json.load_compatible_settings(printer_type, "");
                             print_json.diff2all_base_reset(j_pre);
@@ -3781,6 +3841,7 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
 
                 if (jj["command"].get<std::string>() == "push_status") {
                     m_push_count++;
+                    note_status_received();
                     last_push_time = last_update_time;
 #pragma region printing
                     // U0 firmware
@@ -6794,6 +6855,7 @@ void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
         m_agent->disconnect_printer();
         obj->set_lan_session_up(false); // up again when the new dial's on_local_connect(Ok) lands
         obj->reset();
+        obj->note_selected(false);
 #if !BBL_RELEASE_TO_PUBLIC
         obj->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
 #else
@@ -7309,6 +7371,7 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
                 if (m_agent) {
                     if (!need_disconnect) {m_agent->disconnect_printer();}
                     it->second->reset();
+                    it->second->note_selected(false);
 #if !BBL_RELEASE_TO_PUBLIC
                     it->second->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
 #else
@@ -7325,12 +7388,16 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
                     }
                     else {
                         BOOST_LOG_TRIVIAL(info) << "static: set_selected_machine: same dev_id = " << dev_id;
+                        // Before set_user_selected_machine: that call is what opens the plug-in's
+                        // cloud session when none is up yet.
+                        it->second->note_selected(m_cloud_session_up);
                         m_agent->set_user_selected_machine(dev_id);
                         it->second->reset();
                     }
                 } else {
                     BOOST_LOG_TRIVIAL(info) << "static: set_selected_machine: same dev_id = empty";
                     it->second->reset();
+                    it->second->note_selected(false);
 #if !BBL_RELEASE_TO_PUBLIC
                     it->second->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
 #else
@@ -7357,6 +7424,27 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
         m_lan_watch_pinned_at = m_lan_watch_since;
     }
     return true;
+}
+
+void DeviceManager::on_cloud_session(int code)
+{
+    const bool up      = code == 0;
+    const bool changed = up != m_cloud_session_up;
+    m_cloud_session_up = up;
+    if (changed)
+        BOOST_LOG_TRIVIAL(info) << "connect: cloud session " << (up ? "up" : "down") << " (code " << code << ")";
+    MachineObject* sel = get_selected_machine();
+    if (!sel || sel->is_lan_mode_printer())
+        return;
+    if (up) {
+        sel->note_session_up("cloud");
+        // The session's own on-connect pushall (UltraNet replays one to every subscribed printer)
+        // and the set_user_selected_machine that GUI_App's handler makes next both ask for the
+        // report; keep_alive waits its REQUEST_PUSH_MIN_TIME before asking a third time.
+        sel->last_request_push = std::chrono::system_clock::now();
+    } else {
+        sel->note_session_down();
+    }
 }
 
 MachineObject* DeviceManager::get_selected_machine()
