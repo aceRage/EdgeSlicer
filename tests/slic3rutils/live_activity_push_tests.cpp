@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 using namespace Slic3r::GUI;
 using namespace Slic3r::GUI::AppPush;
@@ -290,27 +291,200 @@ TEST_CASE("the ETA moving a minute goes at priority 5", "[LiveActivityPush]")
     CHECK(std::string(d.why) == "eta");
 }
 
-TEST_CASE("a state change goes at priority 10, never two within 10 s", "[LiveActivityPush]")
+TEST_CASE("priority 10 only for what the person must see now; resume and preparing at 5", "[LiveActivityPush]")
 {
+    // The table.
+    CHECK(is_urgent(Phase::Paused));
+    CHECK(is_urgent(Phase::Attention));
+    CHECK(is_urgent(Phase::Finished));
+    CHECK(is_urgent(Phase::Failed));
+    CHECK(is_urgent(Phase::Cancelled));
+    CHECK_FALSE(is_urgent(Phase::Printing));
+    CHECK_FALSE(is_urgent(Phase::Preparing));
+    CHECK_FALSE(is_urgent(Phase::Idle));
+
     Track     t      = sent(registered(), printing_row(), T0);
     const Row paused = row_of(printing_row(42, 3600, "PAUSE"));
     Decision  d      = decide(t, &paused, false, T0 + 2000);
     CHECK(d.action == Action::Update);
     CHECK(d.priority == 10);
+    CHECK(std::string(d.why) == "state");
     t = apply(t, d, &paused, T0 + 2000);
+
+    // A resume is not coalesced behind the pause and goes at 5: it is no news the person must act on.
     const Row running = row_of(printing_row(42, 3500, "RUNNING"));
-    CHECK(decide(t, &running, false, T0 + 8000).action == Action::None); // coalesced...
-    d = decide(t, &running, false, T0 + 12000);                         // ...and sent on the next poll
+    d = decide(t, &running, false, T0 + 8000);
+    CHECK(d.action == Action::Update);
+    CHECK(d.priority == 5);
+    CHECK(std::string(d.why) == "resume");
+    CHECK(d.content.state == Phase::Printing);
+
+    // Two urgent states within 10 s: the later one waits for the next poll.
+    json att = printing_row(42, 3600, "PAUSE");
+    att["print_error"] = json{ { "code", 7 } };
+    const Row attention = row_of(att);
+    CHECK(decide(t, &attention, false, T0 + 8000).action == Action::None); // coalesced...
+    d = decide(t, &attention, false, T0 + 12000);                         // ...and sent on the next poll
     CHECK(d.action == Action::Update);
     CHECK(d.priority == 10);
-    // An error code that changes is a state change too.
-    t = apply(t, d, &running, T0 + 12000);
+    CHECK(d.content.state == Phase::Attention);
+
+    // An error code on a running print is attention: 10. Cleared again, back to printing: 5.
+    t = apply(t, decide(t, &running, false, T0 + 8000), &running, T0 + 8000);
     json err = printing_row(42, 3500, "RUNNING");
     err["print_error"] = json{ { "code", 1 } };
     const Row er = row_of(err);
     d = decide(t, &er, false, T0 + 30000);
     CHECK(d.priority == 10);
     CHECK(d.content.state == Phase::Attention);
+    t = apply(t, d, &er, T0 + 30000);
+    // A different error code while still in attention is news again.
+    json err2 = printing_row(42, 3500, "RUNNING");
+    err2["print_error"] = json{ { "code", 2 } };
+    const Row er2 = row_of(err2);
+    d = decide(t, &er2, false, T0 + 45000);
+    CHECK(d.priority == 10);
+    d = decide(t, &running, false, T0 + 45000);
+    CHECK(d.action == Action::Update);
+    CHECK(d.priority == 5);
+    CHECK(std::string(d.why) == "resume");
+
+    // Preparing (a filament change, a re-level) and the ETA appearing or going are routine.
+    Track     p   = sent(registered(), printing_row(), T0);
+    const Row prep = row_of(printing_row(42, 3600, "PREPARE"));
+    d = decide(p, &prep, false, T0 + 10000);
+    CHECK(d.priority == 5);
+    CHECK(std::string(d.why) == "preparing");
+    const Row no_eta = row_of(printing_row(42, -1, "RUNNING"));
+    d = decide(p, &no_eta, false, T0 + 10000);
+    CHECK(d.action == Action::Update);
+    CHECK(d.priority == 5);
+    CHECK(std::string(d.why) == "routine state");
+}
+
+TEST_CASE("a priority-10 update is repeated once at 5 on the next poll", "[LiveActivityPush]")
+{
+    Track     t      = sent(registered(), printing_row(), T0);
+    const long long A = T0 + 60000;
+    const Row paused = row_of(printing_row(42, 3600, "PAUSE"));
+    Decision  d      = decide(t, &paused, false, A);
+    REQUIRE(d.priority == 10);
+    t = apply(t, d, &paused, A);
+    CHECK(t.repeat_due);
+
+    // The next poll: the same content-state again at 5.
+    d = decide(t, &paused, false, A + 10000);
+    CHECK(d.action == Action::Update);
+    CHECK(d.priority == 5);
+    CHECK(d.repeat_only);
+    CHECK(std::string(d.why) == "repeat");
+    CHECK(d.content.same_reading(t.last));
+    CHECK(d.content.as_of_s == t.last.as_of_s);
+    CHECK(content_state(d.content) == content_state(t.last));
+    const Track repeated = apply(t, d, &paused, A + 10000);
+    CHECK_FALSE(repeated.repeat_due);
+    CHECK(repeated.last_sent_ms == A); // the throttle and the heartbeat still count from the pause
+    // Once only.
+    CHECK(decide(repeated, &paused, false, A + 20000).action == Action::None);
+
+    // An APNs end is not repeated (its token is dead), nor is Android's high-priority FCM.
+    const Row done = row_of(printing_row(100, 0, "FINISH"));
+    CHECK_FALSE(apply(repeated, decide(repeated, &done, false, A + 30000), &done, A + 30000).repeat_due);
+    Track android;
+    android.virtual_activity = true;
+    android = sent(android, printing_row(), T0);
+    CHECK_FALSE(apply(android, decide(android, &paused, false, A), &paused, A).repeat_due);
+}
+
+TEST_CASE("the repeat never holds progress back, and rides a progress update that is due", "[LiveActivityPush]")
+{
+    // Attention on a running print (the percent keeps going): p10 at A, repeat at A + 10 s.
+    Track     t   = sent(registered(), printing_row(40, 4000), T0);
+    const long long A = T0 + 60000;
+    json      e   = printing_row(41, 3900);
+    e["print_error"] = json{ { "code", 5 } };
+    const Row att = row_of(e);
+    Decision  d   = decide(t, &att, false, A);
+    REQUIRE(d.priority == 10);
+    t = apply(t, d, &att, A);
+    d = decide(t, &att, false, A + 10000);
+    REQUIRE(d.repeat_only);
+    const Track after_repeat = apply(t, d, &att, A + 10000);
+    // A percent step 30 s after the p10 goes out on time: the repeat did not restart the throttle.
+    json e2 = printing_row(42, 3870);
+    e2["print_error"] = json{ { "code", 5 } };
+    const Row step = row_of(e2);
+    CHECK(decide(after_repeat, &step, false, A + 20000).action == Action::None); // 20 s: still throttled by the p10
+    d = decide(after_repeat, &step, false, A + 30000);
+    CHECK(d.action == Action::Update);
+    CHECK(std::string(d.why) == "percent");
+
+    // The repeat did not go out (a failed send leaves the track as it was), and a progress step is
+    // due by the next poll: one push, the current reading, standing in for the repeat.
+    d = decide(t, &step, false, A + 30000);
+    CHECK(d.action == Action::Update);
+    CHECK(d.priority == 5);
+    CHECK_FALSE(d.repeat_only);
+    CHECK(std::string(d.why) == "percent + repeat");
+    CHECK(d.content.state == Phase::Attention);
+    CHECK(d.content.percent == 42);
+    const Track merged = apply(t, d, &step, A + 30000);
+    CHECK_FALSE(merged.repeat_due);
+    CHECK(merged.last_sent_ms == A + 30000);
+    CHECK(decide(merged, &step, false, A + 40000).action == Action::None);
+}
+
+TEST_CASE("the owner's timeline: pause, and resume 41 s later, on a locked phone", "[LiveActivityPush]")
+{
+    // 2026-10-11, sandbox APNs through the hosted forwarder: start 17:22:13, pause 17:23:56, resume
+    // 17:24:06, pause 17:40:07, resume 17:40:48. The second resume was the fourth priority-10
+    // update in ~17 min; APNs said 200 and iOS showed Paused until the phone was unlocked.
+    // Seconds from the start; the hub polls every 10 s.
+    const long long pause1 = 103, resume1 = 113, pause2 = 1074, resume2 = 1115, end_s = 1300;
+    struct Sent { long long at_s; int priority; std::string why; Phase state; bool repeat; };
+    std::vector<Sent> log;
+    Track t = registered(T0);
+    for (long long s = 0; s <= end_s; s += 10) {
+        const bool is_paused = (s >= pause1 && s < resume1) || (s >= pause2 && s < resume2);
+        // A slow print: 5 % at the start, 15 % about 20 minutes later.
+        const int  pct = 5 + (int) (s / 120);
+        const Row  r   = row_of(printing_row(pct, 6000 - (int) s, is_paused ? "PAUSE" : "RUNNING", 3));
+        const Decision d = decide(t, &r, false, T0 + s * 1000);
+        if (d.action == Action::None) continue;
+        log.push_back({ s, d.priority, d.why, d.content.state, d.repeat_only });
+        t = apply(t, d, &r, T0 + s * 1000);
+    }
+    auto at = [&](long long s) { return std::find_if(log.begin(), log.end(), [&](const Sent& x) { return x.at_s == s; }); };
+
+    // Only the two pauses are priority 10 (it was four: the resumes too).
+    int p10 = 0;
+    for (const Sent& x : log) if (x.priority >= 10) ++p10;
+    CHECK(p10 == 2);
+
+    // Pause 1 is seen at 110 s; resume 1 at 120 s supersedes its repeat and goes at 5.
+    REQUIRE(at(110) != log.end());
+    CHECK(at(110)->priority == 10);
+    CHECK(at(110)->state == Phase::Paused);
+    REQUIRE(at(120) != log.end());
+    CHECK(at(120)->priority == 5);
+    CHECK(at(120)->why == "resume");
+    CHECK(at(120)->state == Phase::Printing);
+
+    // Pause 2 at 1080 s (p10), its repeat at 1090 s (p5, still Paused), resume 2 at 1120 s - the
+    // first poll after 1115 s - at 5, the priority the locked phone kept taking.
+    REQUIRE(at(1080) != log.end());
+    CHECK(at(1080)->priority == 10);
+    REQUIRE(at(1090) != log.end());
+    CHECK(at(1090)->priority == 5);
+    CHECK(at(1090)->repeat);
+    CHECK(at(1090)->state == Phase::Paused);
+    REQUIRE(at(1120) != log.end());
+    CHECK(at(1120)->priority == 5);
+    CHECK(at(1120)->why == "resume");
+    CHECK(at(1120)->state == Phase::Printing);
+    CHECK(at(1120)->at_s - resume2 <= 10);
+    // No repeat after a priority-5 update.
+    CHECK(at(1130) == log.end());
 }
 
 TEST_CASE("nothing new still means a heartbeat every 3 minutes", "[LiveActivityPush]")
@@ -424,31 +598,55 @@ TEST_CASE("Android: a progress update stream with no tokens", "[LiveActivityPush
     CHECK(p.dump().size() < 1200);
 }
 
-TEST_CASE("a four-hour print polled every 10 s costs about a push per percent", "[LiveActivityPush]")
+namespace {
+
+struct PrintCost { int pushes = 0; int p10 = 0; int repeats = 0; long long min_gap_ms = 1LL << 60; };
+
+// A four-hour print polled every 10 s, optionally paused for `pause_s` at its half-way point.
+PrintCost four_hour_print(long long pause_s)
 {
+    PrintCost c;
     Track t = registered(T0);
-    int   pushes = 0, p10 = 0;
-    long long last_ms = -1, min_gap = 1LL << 60;
-    const long long total_ms = 4LL * 3600 * 1000;
-    for (long long el = 0; el <= total_ms; el += 10000) {
-        const int  done = (int) (el * 100 / total_ms);
-        const json row  = printing_row(done, (int) ((total_ms - el) / 1000), done >= 100 ? "FINISH" : "RUNNING", 3);
+    long long last_ms = -1;
+    const long long total_ms = 4LL * 3600 * 1000, pause_at = total_ms / 2;
+    for (long long el = 0; el <= total_ms + pause_s * 1000; el += 10000) {
+        const bool      paused = pause_s > 0 && el >= pause_at && el < pause_at + pause_s * 1000;
+        const long long run    = el < pause_at ? el : paused ? pause_at : el - pause_s * 1000;
+        const int  done = (int) (run * 100 / total_ms);
+        const json row  = printing_row(done, (int) ((total_ms - run) / 1000), done >= 100 ? "FINISH" : paused ? "PAUSE" : "RUNNING", 3);
         const Row  r    = row_of(row);
         const Decision d = decide(t, &r, false, T0 + el);
         if (d.action == Action::None) continue;
-        ++pushes;
-        if (d.priority >= 10) ++p10;
-        if (last_ms >= 0) min_gap = std::min(min_gap, T0 + el - last_ms);
+        ++c.pushes;
+        if (d.priority >= 10) ++c.p10;
+        if (d.repeat_only) ++c.repeats;
+        if (last_ms >= 0) c.min_gap_ms = std::min(c.min_gap_ms, T0 + el - last_ms);
         last_ms = T0 + el;
         t = apply(t, d, &r, T0 + el);
         if (d.action == Action::End) break;
     }
+    return c;
+}
+
+} // namespace
+
+TEST_CASE("a four-hour print polled every 10 s costs about a push per percent", "[LiveActivityPush]")
+{
     // 100 percent steps (one every 2.4 min, so the 3 min heartbeat never fires), the first update
-    // and the end; only the end is priority 10.
-    CHECK(pushes >= 95);
-    CHECK(pushes <= 110);
-    CHECK(p10 == 1);
-    CHECK(min_gap >= 30000);
+    // and the end; only the end is priority 10, and an end is not repeated.
+    const PrintCost plain = four_hour_print(0);
+    CHECK(plain.pushes == 101);
+    CHECK(plain.p10 == 1);
+    CHECK(plain.repeats == 0);
+    CHECK(plain.min_gap_ms >= 30000);
+
+    // Paused for 10 minutes half-way: the pause (10) carries the 50 % step that falls on the same
+    // poll, then + its repeat (5), three heartbeats while paused and the resume (5) = 106 pushes,
+    // two of them priority 10 in the whole print.
+    const PrintCost paused = four_hour_print(600);
+    CHECK(paused.pushes == plain.pushes + 5);
+    CHECK(paused.p10 == 2);
+    CHECK(paused.repeats == 1);
 }
 
 TEST_CASE("the providers build liveactivity pushes ActivityKit's way", "[LiveActivityPush]")

@@ -20,11 +20,16 @@
 // tests/slic3rutils/live_activity_push_tests.cpp asserts it.
 //
 // The rules (per phone and printer, evaluated after every hub poll of the printers, ~10 s):
-//   priority 10  a state change (printing / paused / attention / finished / failed / cancelled),
-//                an error code that changed, and the end; never two within 10 s for one activity
-//                (the later state simply goes out on the next poll)
-//   priority 5   a +1 % step, or the ETA moving 60 s or more, at most every 30 s; a stale flag
-//                change; and a heartbeat every 3 min when nothing changed
+//   priority 10  only what the person must see now: the print paused, needing attention (or a new
+//                error code), and the end (finished / failed / cancelled / gone); never two within
+//                10 s for one activity (the later state simply goes out on the next poll)
+//   repeat       after every priority-10 update, the same content-state again at priority 5 on the
+//                next poll (~10 s): APNs answers 200 even when iOS drops a priority-10 push over its
+//                budget, so the repeat is the safety net. It is folded into a progress update that
+//                is due anyway, and does not restart the 30 s progress throttle or the heartbeat
+//   priority 5   the other state changes - resumed, back to printing after an attention, preparing,
+//                the ETA appearing or going; a +1 % step, or the ETA moving 60 s or more, at most
+//                every 30 s; a stale flag change; and a heartbeat every 3 min when nothing changed
 //   stale-date   now + 5 min on every push: if the PC sleeps or the hub stops, the activity says
 //                "out of date" within 5 minutes instead of 15 past the ETA
 //   restart      at 7 h 20 m the activity is ended and, with a push-to-start token (iOS 17.2+),
@@ -32,8 +37,13 @@
 //   start        a print the phone has no activity for (it was locked, the app closed) is started
 //                by push-to-start once it has been seen printing for 30 s, unless the person
 //                dismissed that print's activity
+//   (start, restart and every end stay at priority 10: a push-to-start shows an alert, and an end
+//   or a restart is once per print)
 // Apple counts priority-10 Live Activity pushes against an hourly budget and not priority 5, so
-// routine progress is 5. NSSupportsLiveActivitiesFrequentUpdates is not needed at these rates.
+// routine progress is 5. The owner's iPhone test (2026-10-11) saw a resume - the fourth priority-10
+// update in ~17 min, the second within 41 s - accepted by APNs and never shown while locked, while
+// the priority-5 pushes kept arriving: hence resume at 5 and the repeat.
+// NSSupportsLiveActivitiesFrequentUpdates was considered again and is still not added.
 
 #include <nlohmann/json_fwd.hpp>
 
@@ -52,6 +62,8 @@ enum class Phase { Preparing, Printing, Paused, Attention, Finished, Failed, Can
 const char* phase_name(Phase p); // the app's PrintPhase raw values: "printing", "paused", ...
 bool        is_active(Phase p);
 bool        is_terminal(Phase p);
+// A phase the person must see at once (priority 10): paused, attention and the outcomes.
+bool        is_urgent(Phase p);
 // The printer's own status word, as the app reads it (ProgressSession.swift PrintPhase.base).
 Phase base_phase(const std::string& state, bool printing);
 // base_phase, with an error on a running or paused print raised to Attention.
@@ -129,6 +141,7 @@ struct Track
     std::string last_error_code;
     long long   last_sent_ms { 0 };
     long long   last_p10_ms { 0 };
+    bool        repeat_due { false }; // a priority-10 update went out: repeat `last` at 5 on the next poll
     long long   active_since_ms { 0 };  // first poll that saw this print active (push-to-start grace)
     std::string start_sent_job;       // a push-to-start went out for this job...
     long long   start_sent_ms { 0 };  // ...at this time
@@ -143,6 +156,7 @@ struct Decision
     int         priority { 5 };
     Content     content;
     long long   dismissal_s { 0 };    // End: when the ended activity leaves the Lock Screen (unix s)
+    bool        repeat_only { false }; // Update: only the repeat of the last priority-10 update
     const char* why { "" };
 };
 

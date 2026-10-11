@@ -126,6 +126,7 @@ const char* phase_name(Phase p)
 
 bool is_active(Phase p) { return p == Phase::Preparing || p == Phase::Printing || p == Phase::Paused || p == Phase::Attention; }
 bool is_terminal(Phase p) { return p == Phase::Finished || p == Phase::Failed || p == Phase::Cancelled; }
+bool is_urgent(Phase p) { return p == Phase::Paused || p == Phase::Attention || is_terminal(p); }
 
 Phase base_phase(const std::string& state, bool printing)
 {
@@ -225,6 +226,13 @@ const char* action_name(Action a)
     return "none";
 }
 
+// The log's reason for a progress update that also stands in for the repeat.
+static const char* with_repeat(const char* routine)
+{
+    const std::string r = routine;
+    return r == "stale" ? "stale + repeat" : r == "heartbeat" ? "heartbeat + repeat" : r == "percent" ? "percent + repeat" : "eta + repeat";
+}
+
 Decision decide(const Track& t, const Row* row, bool can_start, long long now_ms, const Rules& rules)
 {
     Decision d;
@@ -297,31 +305,57 @@ Decision decide(const Track& t, const Row* row, bool can_start, long long now_ms
         return d;
     }
 
-    const Content& last     = t.last;
-    const long long since   = now_ms - t.last_sent_ms;
-    const bool state_change = last.state != c.state || t.last_error_code != row->error_code ||
-                              (last.eta_s == 0) != (c.eta_s == 0);
-    if (state_change) {
-        // Coalesced, not dropped: the next poll sends the then-current state.
-        if (now_ms - t.last_p10_ms < rules.p10_gap_ms) return d;
-        d.action = Action::Update; d.priority = 10; d.why = "state";
+    const Content& last      = t.last;
+    const long long since    = now_ms - t.last_sent_ms;
+    const bool phase_change  = last.state != c.state;
+    const bool error_change  = t.last_error_code != row->error_code;
+    const bool eta_change    = (last.eta_s == 0) != (c.eta_s == 0);
+    if (phase_change || error_change || eta_change) {
+        // Priority 10 only for what the person must see now: the print paused or needs them (a
+        // new error code). Apple budgets priority 10, and a resume that came over budget was
+        // accepted by APNs and never shown on a locked phone (owner's test, 2026-10-11).
+        const bool urgent = (phase_change && is_urgent(c.state)) || (error_change && !row->error_code.empty());
+        if (urgent) {
+            // Coalesced, not dropped: the next poll sends the then-current state.
+            if (now_ms - t.last_p10_ms < rules.p10_gap_ms) return d;
+            d.action = Action::Update; d.priority = 10; d.why = "state";
+            return d;
+        }
+        // Resumed, back to printing after an attention, preparing, the ETA appearing or going.
+        d.action   = Action::Update;
+        d.priority = 5;
+        d.why      = phase_change && (last.state == Phase::Paused || last.state == Phase::Attention) ? "resume" :
+                     phase_change && c.state == Phase::Preparing                                     ? "preparing" :
+                                                                                                       "routine state";
         return d;
     }
-    if (last.stale != c.stale) {
-        d.action = Action::Update; d.priority = 5; d.why = "stale";
+
+    // A routine (priority 5) reason to send the current reading, if there is one.
+    const char* routine = nullptr;
+    if (last.stale != c.stale)
+        routine = "stale";
+    else if (last.same_reading(c))
+        routine = since >= rules.heartbeat_ms ? "heartbeat" : nullptr;
+    else if (since >= rules.p5_gap_ms) {
+        if (c.percent > last.percent) routine = "percent";
+        else if (c.eta_s && last.eta_s && std::llabs(c.eta_s - last.eta_s) >= rules.eta_move_s) routine = "eta";
+        else if (since >= rules.heartbeat_ms) routine = "heartbeat";
+    }
+    if (routine) {
+        // A due progress update carries the state the priority-10 push said: it is the repeat too.
+        d.action   = Action::Update;
+        d.priority = 5;
+        d.why      = t.repeat_due ? with_repeat(routine) : routine;
         return d;
     }
-    if (last.same_reading(c)) {
-        if (since >= rules.heartbeat_ms) { d.action = Action::Update; d.priority = 5; d.why = "heartbeat"; }
-        return d;
+    if (t.repeat_due) {
+        // The safety net under the last priority-10 update: the same content-state at 5.
+        d.action      = Action::Update;
+        d.priority    = 5;
+        d.content     = last;
+        d.repeat_only = true;
+        d.why         = "repeat";
     }
-    if (since < rules.p5_gap_ms) return d;
-    if (c.percent > last.percent) { d.action = Action::Update; d.priority = 5; d.why = "percent"; return d; }
-    if (c.eta_s && last.eta_s && std::llabs(c.eta_s - last.eta_s) >= rules.eta_move_s) {
-        d.action = Action::Update; d.priority = 5; d.why = "eta";
-        return d;
-    }
-    if (since >= rules.heartbeat_ms) { d.action = Action::Update; d.priority = 5; d.why = "heartbeat"; }
     return d;
 }
 
@@ -332,16 +366,26 @@ Track apply(const Track& t, const Decision& d, const Row* row, long long now_ms)
     switch (d.action) {
     case Action::None: break;
     case Action::Update:
+        if (d.repeat_only) {
+            // Nothing new was said: the progress throttle and the heartbeat keep counting from the
+            // update it repeats, so the repeat never holds real progress back.
+            n.repeat_due = false;
+            break;
+        }
         n.has_sent        = true;
         n.last            = d.content;
         n.last_sent_ms    = now_ms;
         if (d.priority >= 10) n.last_p10_ms = now_ms;
+        // A priority-10 update is repeated once at 5. Not on Android: the repeat answers APNs
+        // accepting a push that iOS then drops over its budget; FCM has no such case.
+        n.repeat_due      = d.priority >= 10 && !t.virtual_activity;
         n.last_error_code = row ? row->error_code : t.last_error_code;
         if (!job.empty()) n.job_key = job;
         break;
     case Action::End:
         // The activity is over. Its token is dead; an Android "activity" starts afresh.
         n.activity_token  = std::string();
+        n.repeat_due      = false;
         n.has_sent        = false;
         n.last            = Content();
         n.last_error_code = std::string();
@@ -354,6 +398,7 @@ Track apply(const Track& t, const Decision& d, const Row* row, long long now_ms)
     case Action::EndAndStart:
         // The new activity's token arrives from the app; until then there is nothing to update.
         n.activity_token  = std::string();
+        n.repeat_due      = false;
         n.has_sent        = false;
         n.last            = d.content;
         n.last_error_code = row ? row->error_code : std::string();
