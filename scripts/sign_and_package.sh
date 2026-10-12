@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build/$ARCH"
 APP_NAME="Snapmaker_Orca"
-APP_NAME_EX="Snapmaker Orca"
+APP_NAME_EX="EdgeSlicer"
 DMG_NAME="Snapmaker_Orca_${ARCH}.dmg"
 
 # 证书配置 — read from the environment (public repo; do not hard-code a signing identity).
@@ -341,7 +341,7 @@ xattr -cr "$DMG_CONTENT_DIR/$APP_NAME_EX.app"
 ln -sfn /Applications "$DMG_CONTENT_DIR/Applications"
 
 # 卷名不使用下划线，避免 macOS 安全机制阻止
-DMG_VOLNAME="Snapmaker_Orca"
+DMG_VOLNAME="EdgeSlicer"
 FINAL_DMG_PATH="$BUILD_DIR/$DMG_NAME"
 rm -f "$FINAL_DMG_PATH"
 

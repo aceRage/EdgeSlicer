@@ -8807,9 +8807,9 @@ void GUI_App::open_mall_page_dialog()
     }
 
     if (link_url.find("?") != std::string::npos) {
-        link_url += "&from=Snapmaker_Orca";
+        link_url += "&from=EdgeSlicer";
     } else {
-        link_url += "?from=Snapmaker_Orca";
+        link_url += "?from=EdgeSlicer";
     }
 
     wxLaunchDefaultBrowser(link_url);
