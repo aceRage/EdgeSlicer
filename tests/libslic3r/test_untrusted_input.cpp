@@ -3055,13 +3055,14 @@ TEST_CASE("an AMF metadata tag without a type fails to load instead of crashing"
 
     DynamicPrintConfig        cfg;
     ConfigSubstitutionContext ctx{ForwardCompatibilitySubstitutionRule::Enable};
+    bool                      use_inches = false; // load_amf writes through this pointer
     Model                     bad_model;
     bool                      loaded = true;
-    REQUIRE_NOTHROW(loaded = load_amf(bad.string().c_str(), &cfg, &ctx, &bad_model, nullptr));
+    REQUIRE_NOTHROW(loaded = load_amf(bad.string().c_str(), &cfg, &ctx, &bad_model, &use_inches));
     CHECK_FALSE(loaded);
 
     Model good_model;
-    CHECK(load_amf(good.string().c_str(), &cfg, &ctx, &good_model, nullptr));
+    CHECK(load_amf(good.string().c_str(), &cfg, &ctx, &good_model, &use_inches));
     CHECK(good_model.objects.size() == 1);
 
     boost::system::error_code ec;
