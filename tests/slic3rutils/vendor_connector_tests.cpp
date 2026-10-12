@@ -1354,3 +1354,79 @@ TEST_CASE("vendors: the default name of a downloaded file never has a doubled ex
     CHECK(model_extension("noext").empty());
     CHECK(model_extension("a.gcode").empty());
 }
+
+namespace {
+// Typographic quotes in UTF-8, built from escapes so the file's encoding cannot change them.
+const std::string LDQ = "\xE2\x80\x9C", RDQ = "\xE2\x80\x9D"; // U+201C, U+201D
+const std::string RSQ = "\xE2\x80\x99";                          // U+2019
+
+// `s` with every plain double quote swapped for a curly one, opening then closing in turn.
+std::string smart_quoted(const std::string& s)
+{
+    std::string out;
+    bool        open = true;
+    for (char c : s) {
+        if (c == '"') {
+            out += open ? LDQ : RDQ;
+            open = !open;
+        } else
+            out += c;
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("vendors: smart quotes are corrected only when the JSON does not parse as it is", "[Vendors]")
+{
+    SECTION("valid JSON is left unchanged")
+    {
+        json j;
+        bool fixed = true;
+        REQUIRE(parse_json_lenient(CPL3D_TEMPLATE, j, &fixed));
+        CHECK_FALSE(fixed);
+        CHECK(j == json::parse(CPL3D_TEMPLATE));
+    }
+    SECTION("a smart-quoted connector parses after the fallback")
+    {
+        const std::string bad = smart_quoted(CPL3D_TEMPLATE);
+        REQUIRE(bad != std::string(CPL3D_TEMPLATE));
+        CHECK_THROWS(json::parse(bad));
+        json j;
+        bool fixed = false;
+        REQUIRE(parse_json_lenient(bad, j, &fixed));
+        CHECK(fixed);
+        CHECK(j == json::parse(CPL3D_TEMPLATE));
+
+        const ImportResult r = import_check(bad);
+        CHECK(r.ok);
+        CHECK(r.spec.name == "CPL3D");
+    }
+    SECTION("curly quotes inside the string values of valid JSON are kept exactly")
+    {
+        const std::string text = "{\"name\": \"Ace" + RSQ + "s " + LDQ + "shop" + RDQ + "\", \"n\": 1}";
+        json j;
+        bool fixed = true;
+        REQUIRE(parse_json_lenient(text, j, &fixed));
+        CHECK_FALSE(fixed);
+        CHECK(j["name"].get<std::string>() == "Ace" + RSQ + "s " + LDQ + "shop" + RDQ);
+    }
+    SECTION("garbage still fails with the same message")
+    {
+        json j;
+        bool fixed = true;
+        CHECK_FALSE(parse_json_lenient("not json at all", j, &fixed));
+        CHECK_FALSE(fixed);
+        CHECK_FALSE(parse_json_lenient(LDQ + "a" + RDQ + ": ", j));
+        const ImportResult r = import_check(LDQ + "name" + RDQ + ": " + LDQ + "x");
+        CHECK_FALSE(r.ok);
+        CHECK(r.error == "That is not valid JSON.");
+        CHECK(import_check("not json at all").error == "That is not valid JSON.");
+    }
+    SECTION("the normaliser maps every listed quote and nothing else")
+    {
+        CHECK(normalize_smart_quotes(LDQ + "\xE2\x80\x9E\xE2\x80\xB3" + RDQ) == "\"\"\"\"");
+        CHECK(normalize_smart_quotes("\xE2\x80\x98" + RSQ + "\xE2\x80\xB2") == std::string(3, char(39)));
+        CHECK(normalize_smart_quotes("a\xE2\x80\x93" "b\xC3\xA9") == "a\xE2\x80\x93" "b\xC3\xA9"); // en dash, e-acute
+        CHECK(normalize_smart_quotes("\xE2\x80") == "\xE2\x80");                                 // truncated sequence
+    }
+}

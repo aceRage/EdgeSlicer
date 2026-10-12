@@ -177,8 +177,9 @@ static std::string key_of(const std::string& connector, const std::string& item)
 
 // ------------------------------------------------------------------------------ setup ----
 
-HomeVendors::HomeVendors(wxWindow* parent, SendFn send, std::function<void()> library_changed)
-    : m_parent(parent), m_send(std::move(send)), m_library_changed(std::move(library_changed))
+HomeVendors::HomeVendors(wxWindow* parent, SendFn send, std::function<void()> library_changed,
+                         std::function<void(const std::string&)> open_file)
+    : m_parent(parent), m_send(std::move(send)), m_library_changed(std::move(library_changed)), m_open_file(std::move(open_file))
 {
     for (Vendors::Spec& s : load_specs()) {
         Connector c;
@@ -525,7 +526,7 @@ bool HomeVendors::handle(const json& msg)
             }
     } else if (command == "vendor_download") {
         if (item_of(key))
-            download(key, msg.value("sub", std::string()));
+            download(key, msg.value("sub", std::string()), msg.value("open", false)); // "open": Download & Open
     } else
         BOOST_LOG_TRIVIAL(warning) << "HomeVendors: unknown command \"" << command << "\"";
     return true;
@@ -639,6 +640,10 @@ public:
         m_text = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(560), FromDIP(300)),
                                 wxTE_MULTILINE | wxTE_DONTWRAP);
         m_text->SetMaxLength(Vendors::IMPORT_MAX_BYTES); // a multi-line box stops at 32 KB otherwise
+#ifdef __WXOSX__
+        // macOS would turn the JSON's straight quotes (and dashes) into typographic ones as they are pasted.
+        m_text->OSXDisableAllSmartSubstitutions();
+#endif
         m_text->SetValue(initial);
         sizer->Add(m_text, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
         sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, FromDIP(10));
@@ -1073,7 +1078,7 @@ void HomeVendors::send_thumbnails(const std::vector<std::string>& keys)
     }).detach();
 }
 
-void HomeVendors::download(const std::string& key, const std::string& sub_id)
+void HomeVendors::download(const std::string& key, const std::string& sub_id, bool open_after)
 {
     Connector*           c = nullptr;
     const Vendors::Item* i = item_of(key, &c);
@@ -1118,11 +1123,13 @@ void HomeVendors::download(const std::string& key, const std::string& sub_id)
     if (dlg.ShowModal() != wxID_OK)
         return;
     const fs::path target = into_path(dlg.GetPath());
+    // Where Download & Open opens the file from once it is saved (nothing opens if it is not).
+    const std::string open_path = open_after ? into_u8(dlg.GetPath()) : std::string();
     notice(_u8L("Downloading") + " " + label + "...");
 
     std::weak_ptr<bool> alive = m_alive;
     auto                cancel = m_cancel;
-    std::thread([this, alive, cancel, spec = c->spec, secrets = secrets_of(c->spec), url, direct, target, label]() {
+    std::thread([this, alive, cancel, spec = c->spec, secrets = secrets_of(c->spec), url, direct, target, label, open_path]() {
         const Vendors::HttpFn list_http = [](const Vendors::Request& q) { return http_call(q, LIST_LIMIT); };
         const Vendors::HttpFn file_http = [](const Vendors::Request& q) { return http_call(q, FILE_LIMIT); };
         std::string error;
@@ -1162,13 +1169,19 @@ void HomeVendors::download(const std::string& key, const std::string& sub_id)
                                           : _u8L("The download was empty.");
             }
         }
-        wxGetApp().CallAfter([this, alive, saved, error, target, label]() {
+        wxGetApp().CallAfter([this, alive, saved, error, target, label, open_path]() {
             if (alive.expired())
                 return;
             if (saved) {
                 notice(_u8L("Saved") + " " + label + " " + _u8L("to") + " " + target.parent_path().string());
                 if (m_library_changed)
                     m_library_changed();
+                if (!open_path.empty() && m_open_file) {
+                    if (HomeTab::download_open_kind(open_path) == HomeTab::DownloadOpen::None)
+                        notice(label + ": " + _u8L("EdgeSlicer cannot open this kind of file, so it was only saved."), true);
+                    else
+                        m_open_file(open_path);
+                }
             } else
                 notice(label + ": " + error, true);
         });

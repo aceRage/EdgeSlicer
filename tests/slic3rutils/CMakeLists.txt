@@ -6,12 +6,14 @@ add_executable(${_TEST_NAME}_tests
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
     plugin_guard_tests.cpp
+    camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp
     login_useragent_tests.cpp
     hub_home_tests.cpp
     hub_handover_tests.cpp
     web_load_retry_tests.cpp
+    device_page_load_tests.cpp
     home_tab_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp
@@ -39,6 +41,7 @@ add_executable(${_TEST_NAME}_tests
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
     first_request_gate_tests.cpp
+    ssdp_connect_type_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp

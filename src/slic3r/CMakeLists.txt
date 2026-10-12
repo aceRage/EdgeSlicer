@@ -528,6 +528,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
     GUI/FirstRequestGate.hpp
+    GUI/SsdpConnectType.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
@@ -965,6 +966,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintersMonitor.hpp
     Utils/HubHandover.hpp
     Utils/WebLoadRetry.hpp
+    Utils/DevicePageLoad.hpp
     Utils/HomeTabLogic.cpp
     Utils/HomeTabLogic.hpp
     Utils/ThemePack.cpp
@@ -981,6 +983,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/MainThreadGate.hpp
     Utils/ServerLifetime.cpp
     Utils/ServerLifetime.hpp
+    Utils/LoopbackAcceptLoop.cpp
+    Utils/LoopbackAcceptLoop.hpp
     Utils/SnapmakerSilentLogin.cpp
     Utils/SnapmakerSilentLogin.hpp
     Utils/BambuSyncPolicy.cpp

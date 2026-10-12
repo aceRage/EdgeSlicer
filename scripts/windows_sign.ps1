@@ -10,7 +10,8 @@
     - collects PE files from -Path (folders recursively by extension, single files of any name:
       NSIS hands the uninstaller over as a .tmp file);
     - leaves alone every file that already has a valid signature (Microsoft's VC runtime and
-      WebView2Loader, or anything signed by an earlier run) - we never dual-sign or re-sign;
+      WebView2Loader, Bambu's camera files in cameratools\, or anything signed by an earlier run) -
+      we never dual-sign or re-sign;
     - signs everything else, third-party payloads included (OCCT, freetype, GMP/MPFR, Sentry,
       go2rtc, ffmpeg, UltraNet), except FlashNetwork.dll unless -IncludeFlashNetwork or
       EDGESLICER_SIGN_FLASHNETWORK=1 (owner's licence decision pending);

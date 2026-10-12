@@ -31,7 +31,9 @@ class HomeVendors
 {
 public:
     using SendFn = std::function<void(const nlohmann::json&)>;
-    HomeVendors(wxWindow* parent, SendFn send, std::function<void()> library_changed);
+    // `open_file` opens a file the user chose to Download & Open once it is saved (path as UTF-8).
+    HomeVendors(wxWindow* parent, SendFn send, std::function<void()> library_changed,
+                std::function<void(const std::string&)> open_file = {});
     ~HomeVendors();
 
     // True when `msg` was a Vendors command (handled or refused).
@@ -78,7 +80,7 @@ private:
     void copy_spec(const std::string& id);
     void export_csv(const nlohmann::json& keys);
     void send_thumbnails(const std::vector<std::string>& keys);
-    void download(const std::string& key, const std::string& sub_id);
+    void download(const std::string& key, const std::string& sub_id, bool open_after);
     void notice(const std::string& text, bool error = false);
 
     // A key the page acts on -> (connector id, item id); rebuilt on every send_state().
@@ -88,6 +90,7 @@ private:
     wxWindow*                          m_parent;
     SendFn                             m_send;
     std::function<void()>              m_library_changed;
+    std::function<void(const std::string&)> m_open_file;
     std::vector<Connector>             m_connectors;
     // Secrets kept for this session when the system has no credential store.
     std::map<std::string, std::string> m_session_secrets;

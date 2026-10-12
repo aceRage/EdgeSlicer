@@ -255,6 +255,11 @@ public:
 private:
     bool            m_initialized { false };
     bool            m_post_initialized { false };
+    // Startup is over: post_init() has run and the wx event queue it filled (project reset, config
+    // wizard step, ...) has drained, which the first idle event after post_init() tells. The GUI
+    // thread answers web pages promptly only from then on (DevicePageLoad.hpp).
+    bool            m_startup_settle_pending { false };
+    bool            m_startup_settled { false };
     // Set when a snapmaker-orca:// URL is handed to us after launch (macOS delivers these
     // through MacOpenURL rather than argv, so post_init cannot see them in input_files).
     // post_init must not start a blank project in that case, or it discards the model the
@@ -911,6 +916,7 @@ private:
     void            remove_mall_system_dialog();
     void            run_script(wxString js);
     bool            is_adding_script_handler() { return m_adding_script_handler; }
+    bool            startup_settled() const { return m_startup_settled; }
     void            set_adding_script_handler(bool status) { m_adding_script_handler = status; }
 
     char            from_hex(char ch);
@@ -1005,22 +1011,31 @@ private:
     int             download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
 
     // Ultra (live view): Bambu's camera component (BambuSource), the DirectShow source filter the
-    // Device-tab live view plays through. It is NOT part of UltraNet - we ship only a placeholder
-    // of that name so the agent's LoadLibrary probe succeeds - so this is the one Bambu CDN path
-    // that stays open (Windows, after the user says yes). It fetches the component package
-    // (camera_component.zip) and extracts ONLY BambuSource (and live555 when present) into plugins/ and cameratools/;
+    // Device-tab live view plays through. It is NOT part of UltraNet. Release builds ship it in
+    // <exe dir>/cameratools (CAMERA_BIN_DIR) and start-up seeds <data_dir>/cameratools from there
+    // (sync_bambu_camera_module); this CDN fetch is only the fallback for a build that carries no
+    // camera files (Windows, after the user says yes). It fetches the component package
+    // (camera_component.zip) and extracts ONLY BambuSource (and its live555 etc.) into
+    // <data_dir>/cameratools - never plugins/, which holds UltraNet's storage module.
     // bambu_networking and the UltraNet marker are never touched. Returns 0 on success.
     int             install_bambu_camera_component(InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
     // Ask the user whether to fetch the component, then do it with a progress dialog and register
     // the filter. Returns true when it is installed, so the caller may retry playback.
     bool            offer_bambu_camera_component(wxWindow *parent);
-    // True when <data_dir>/plugins holds a real BambuSource rather than our placeholder.
+    // True when <data_dir>/cameratools holds a real camera module.
     bool            has_bambu_camera_component() const;
-    // Register the installed BambuSource DirectShow filter: writes the HKCR\bambu source-filter
-    // CLSID and runs regsvr32 on it (two UAC prompts). Windows only; a no-op elsewhere. Refuses
-    // outright when the DLL does not export DllRegisterServer, which is what made the stock path
-    // fail with "the entry-point DllRegisterServer was not found".
+    // Register <data_dir>/cameratools/BambuSource.dll as the bambu: DirectShow source filter for
+    // this user (HKCU\Software\Classes: the CLSID's InprocServer32 and bambu\Source Filter, exactly
+    // what the filter's own DllRegisterServer and Bambu's .reg write, but per user, so no UAC).
+    // Windows only; a no-op elsewhere. Refuses outright when the DLL does not export
+    // DllRegisterServer, i.e. is not the filter.
     bool            register_bambu_source_filter();
+    // Start-up (Windows and macOS): keep the camera module out of plugins/ and in cameratools/.
+    // Moves a Bambu camera module found in <data_dir>/plugins into <data_dir>/cameratools (with its
+    // live555), puts UltraNet's storage module back in plugins/ (from the app's sidecar, else from a
+    // hand-kept <name>.ultranet copy), then seeds cameratools from the app's bundled camera folder.
+    // Logs every step under "[camera module]". Linux: does nothing.
+    void            sync_bambu_camera_module();
 
     std::string     get_http_url(std::string country_code, std::string path = {});
     std::string     get_model_http_url(std::string country_code);
