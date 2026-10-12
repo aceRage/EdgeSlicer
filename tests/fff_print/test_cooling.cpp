@@ -421,6 +421,69 @@ TEST_CASE("The overhang fan of one filament does not leak into the next after a 
     CHECK(cooled_outer > 0);
 }
 
+// EDGE: a role fan region open at a tool change on the same layer. Two cubes, one per filament, each a single
+// outer wall cooled all round by its overhang fan (threshold 0%), so every layer has a tool change from one
+// cooled outer wall straight into the other. The first filament's region stayed open across the tool change:
+// the second filament's wall got no START of its own, and CoolingBuffer kept the old request open, so it
+// printed at the layer speed (or at whatever the tool change G-code left the fan at).
+TEST_CASE("An overhang fan region open at a tool change starts again for the new filament", "[Cooling]")
+{
+    const std::vector<std::pair<std::string, std::string>> tool_changes{
+        {"comment", ";tool change\n"},                    // the T command follows, after _FORCE_RESUME_FAN_SPEED
+        {"T then fan off", "T[next_extruder]\nM106 S0\n"}, // BBL-like: T inside, the fan set after it
+    };
+    for (const auto &[name, change_gcode] : tool_changes) {
+        DYNAMIC_SECTION("tool change G-code: " << name) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_num_extruders(2);
+            config.set_num_filaments(2);
+            config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+            config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+            config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+            config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+            config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+            config.set_key_value("change_filament_gcode", new ConfigOptionString(change_gcode));
+            config.set_deserialize_strict({
+                {"layer_height", "0.2"},
+                {"initial_layer_print_height", "0.2"},
+                {"wall_loops", 1},
+                {"top_shell_layers", 0},
+                {"bottom_shell_layers", 0},
+                {"sparse_infill_density", "0%"},
+                {"skirt_loops", 0},
+                {"brim_type", "no_brim"},
+                {"enable_overhang_bridge_fan", "1,1"},
+                {"overhang_fan_threshold", "0%,0%"},
+                {"overhang_fan_speed", "100,100"},
+                {"fan_min_speed", "40,40"},
+                {"fan_max_speed", "40,40"},
+                {"close_fan_the_first_x_layers", "1,1"},
+                {"full_fan_speed_layer", "0,0"},
+                {"slow_down_for_layer_cooling", "0,0"},
+                {"machine_start_gcode", ""},
+                {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]"},
+            });
+            Print print;
+            Model model;
+            init_print({TestMesh::cube_20x20x20, TestMesh::cube_20x20x20}, print, model, config);
+            REQUIRE(model.objects.size() == 2);
+            model.objects[1]->volumes.front()->config.set("extruder", 2);
+            print.apply(model, config);
+            const auto moves = fan_at_extrusions(Test::gcode(print));
+
+            size_t walls[2] = {0, 0};
+            for (const FanAtExtrusion &m : moves)
+                if (m.layer >= 2 && m.role == "Outer wall" && m.tool >= 0 && m.tool < 2) {
+                    ++walls[m.tool];
+                    INFO("layer " << m.layer << " T" << m.tool);
+                    CHECK(m.fan == 255);
+                }
+            CHECK(walls[0] > 0);
+            CHECK(walls[1] > 0);
+        }
+    }
+}
+
 // Upstream's test for Orca #15158 (tests/fff_print/test_cooling.cpp), on Catch2 v2 and our config API.
 TEST_CASE("Overhang fan transitions do not depend on overhang speed", "[Cooling][Regression][Orca15158]")
 {

@@ -931,6 +931,11 @@ std::string CoolingBuffer::apply_layer_cooldown(
             if (std::errc::invalid_argument != ret.ec) {
                 if (new_extruder != m_current_extruder) {
                     m_current_extruder = new_extruder;
+                    // EDGE: the new filament starts at its layer speed (written just below); a role fan region of
+                    // the old one ends here, and GCode::_extrude writes a fresh START when the new one continues it.
+                    for (int type : {int(CoolingLine::TYPE_OVERHANG_FAN_START), int(CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START),
+                                     int(CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START), int(CoolingLine::TYPE_IRONING_FAN_START)})
+                        fan_speed_change_requests[type] = false;
                     change_extruder_set_fan(true);
                 }
             }

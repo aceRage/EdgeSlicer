@@ -615,6 +615,8 @@ private:
     // ORCA: Add support for role based fan speed control
     std::array<bool, ExtrusionRole::erCount> m_is_role_based_fan_on;
     std::array<int, ExtrusionRole::erCount>  m_role_based_fan_marker_layer;
+    // EDGE: the extruder (filament) each open role fan region was started with; a tool change starts it afresh.
+    std::array<int, ExtrusionRole::erCount>  m_role_based_fan_marker_extruder;
     // Markers for the Pressure Equalizer to recognize the extrusion type.
     // The Pressure Equalizer removes the markers from the final G-code.
     bool                                m_enable_extrusion_role_markers;
