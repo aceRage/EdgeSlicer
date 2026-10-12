@@ -12295,7 +12295,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                                                      is_user_cancel = cancel;
                                                              },
                                                              nullptr, &from_bambu_studio);
-                    const bool is_bambu_studio_project = from_bambu_studio;
+                    // Orca #16153 gates on file_version > 2.3.2 too: OrcaSlicer only started tagging its own 3MFs after 2.3.2,
+                    // so an older BambuStudio-stamped file may be an Orca project and keeps the dialog. The stamp test
+                    // (not From_BBS) is the Edge adaptation, because Edge stamps its own projects From_BBS too.
+                    const bool is_bambu_studio_project = from_bambu_studio && file_version > Semver(2, 3, 2);
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__
                                             << boost::format(", plate_data.size %1%, project_preset.size %2%, is_bbs_3mf %3%, file_version %4% \n") % plate_data.size() %
                                                    project_presets.size() % (en_3mf_file_type == En3mfType::From_BBS) % file_version.to_string();
