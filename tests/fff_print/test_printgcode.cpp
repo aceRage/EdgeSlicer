@@ -49,8 +49,8 @@ SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
                 REQUIRE(gcode.size() > 0);
             }
             THEN("Exported text contains slic3r version") {
-                // The exported header is branded "EdgeSlicer <Snapmaker_VERSION>"
-                // (utils.cpp header_slic3r_generated()), not the SLIC3R_VERSION macro.
+                // The exported header is "OrcaSlicer <Snapmaker_VERSION> (EdgeSlicer)"
+                // (utils.cpp header_gcode_producer()), not the SLIC3R_VERSION macro.
                 REQUIRE(gcode.find(Snapmaker_VERSION) != std::string::npos);
             }
             //THEN("Exported text contains git commit id") {
