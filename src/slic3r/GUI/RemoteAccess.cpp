@@ -34,6 +34,7 @@
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
+#include "slic3r/Utils/LoopbackAcceptLoop.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
 #include <boost/asio.hpp>
@@ -519,12 +520,29 @@ void RemoteAccess::start()
         // Lives for the process and is never destroyed: the connection threads are detached, and a
         // socket destroyed after its io_context crashes in the socket service (see ServerLifetime.hpp).
         static asio::io_context& ioc = *new asio::io_context();
-        auto* acceptor = new tcp::acceptor(ioc, tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        std::unique_ptr<tcp::acceptor> acceptor(new tcp::acceptor(ioc, tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
         acceptor->listen();
-        m_acceptor = acceptor;
-        m_port     = acceptor->local_endpoint().port();
-        m_on       = true;
-        std::thread([this]() { accept_loop(); }).detach();
+        const int port = acceptor->local_endpoint().port();
+        // From here on only the accept thread touches the acceptor; stop() reaches it through the
+        // loop's wake-up connection, never directly (EDGESLICER-9, LoopbackAcceptLoop.hpp).
+        auto           loop  = std::make_shared<LoopbackAcceptLoop>((unsigned short) port);
+        tcp::acceptor* owned = acceptor.get();
+        std::thread([this, loop, owned]() {
+            std::unique_ptr<tcp::acceptor> acceptor(owned);
+            const bool stopped = loop->run(*acceptor, [this](tcp::socket* sock) {
+                try {
+                    std::thread([this, sock]() { serve(sock); }).detach();
+                } catch (const std::exception&) {
+                    delete sock; // no thread to answer it: the peer sees the connection close
+                }
+            });
+            if (!stopped)
+                BOOST_LOG_TRIVIAL(error) << "RemoteAccess: the instance API listener failed; the hub no longer reaches this instance";
+        }).detach();
+        acceptor.release();
+        m_accept_loop = std::move(loop);
+        m_port        = port;
+        m_on          = true;
         write_instance_file();
         if (s_heartbeat == nullptr) s_heartbeat = new GuiHeartbeat(); // GUI thread: start() runs there
         s_heartbeat->Start(1000);
@@ -538,20 +556,28 @@ void RemoteAccess::start()
 
 void RemoteAccess::stop()
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_on)
-        return;
-    m_on = false;
-    RemoteEvents::stop();
-    RemoteTimelapse::shutdown();
-    if (s_heartbeat) s_heartbeat->Stop();
-    boost::system::error_code ig;
-    fs::remove(fs::path(RemoteHub::instances_dir()) / (std::to_string(wxGetProcessId()) + ".json"), ig);
-    if (auto* acceptor = static_cast<tcp::acceptor*>(m_acceptor)) {
-        acceptor->close(ig); // unblocks accept_loop, which deletes the acceptor
-        m_acceptor = nullptr;
+    std::shared_ptr<LoopbackAcceptLoop> loop;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_on)
+            return;
+        m_on = false;
+        RemoteEvents::stop();
+        RemoteTimelapse::shutdown();
+        if (s_heartbeat) s_heartbeat->Stop();
+        boost::system::error_code ig;
+        fs::remove(fs::path(RemoteHub::instances_dir()) / (std::to_string(wxGetProcessId()) + ".json"), ig);
+        loop.swap(m_accept_loop);
+        m_port = 0;
     }
-    m_port = 0;
+    // EDGESLICER-9: this used to close the acceptor here while the accept thread, woken by that
+    // very close, deleted it - two threads tearing down one acceptor, a double close and a write
+    // into freed memory, which macOS reported a moment later as a double free when the main window
+    // was hidden. Now the accept thread closes and deletes its own acceptor; this only asks it to,
+    // with a loopback connection that ends its accept(). Outside m_mutex: the wait is bounded, but
+    // no request thread should queue behind it.
+    if (loop && !loop->stop())
+        BOOST_LOG_TRIVIAL(warning) << "RemoteAccess: could not wake the instance API listener; it ends with the process";
 }
 
 int RemoteAccess::port()
@@ -2678,22 +2704,6 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     r.status = 404;
     r.body   = json_error("no such route; see /api");
     return r;
-}
-
-void RemoteAccess::accept_loop()
-{
-    auto* acceptor = static_cast<tcp::acceptor*>(m_acceptor);
-    for (;;) {
-        boost::system::error_code ec;
-        auto* sock = new tcp::socket(acceptor->get_executor());
-        acceptor->accept(*sock, ec);
-        if (ec) {
-            delete sock;
-            break; // closed by stop()
-        }
-        std::thread([this, sock]() { serve(sock); }).detach();
-    }
-    delete acceptor;
 }
 
 // Loopback peers only (the hub); small bodies (form parameters); /api/... routes.

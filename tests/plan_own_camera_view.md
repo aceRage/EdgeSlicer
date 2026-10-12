@@ -96,7 +96,8 @@ Stream-tab edit, from any window). If the phone is watching a printer at that mo
 viewer of that camera opens a second RTSPS session to the printer. That is existing behaviour;
 the prototype's own registration does not do it (it reuses a registered stream), and fixing
 `register_streams()` (skip a name whose source is unchanged since this go2rtc started) is
-follow-up #1 below.
+follow-up #1 below. **Fixed by #450** (`plan_stream_sync`: only what changed is touched), which
+this branch now merges and uses for the Device tab's streams too.
 
 ## 2. Desktop display options
 
@@ -148,7 +149,14 @@ WebKitGTK's MSE turns out to be unreliable in the AppImage.
 - The hub computes the stream **exactly as `stream_center.html` does** for RTSPS
   (`Testing::own_camera_stream`, unit-tested against values produced by the page's own JS), so a
   printer that is also on the Stream tab/phone wall with the same address and code is the **same
-  go2rtc stream**. It `GET`s the stream first and only `PUT`s when it does not exist (finding 4).
+  go2rtc stream**. Since the merge with #450 the hub never PUTs it itself: it adds the camera to
+  `m_own_streams`, which `desired_streams()` merges into what the Stream-tab sync wants
+  (`Testing::merge_desired_streams`), and lets the sync worker (`plan_stream_sync`) do it - an
+  existing stream is "unchanged" (nothing sent, viewers untouched), a missing one is PUT once.
+  Because the Device tab's cameras are part of `desired`, a Stream-tab save that drops the same
+  `s<hash>` camera does not delete or replace the stream the Device tab is playing (only that
+  camera's Stream-tab `_med`/`_low` variants go). Live-view streams stay registered for the hub's
+  run; an idle go2rtc stream has no printer connection.
   P1/A1: `src = http://127.0.0.1:<BambuCamRelay port>/bambu?ip=&code=`, name
   `b<hash(ip|code)>`, played as `mjpeg`.
 - Back on the UI thread: load `http://127.0.0.1:<hub port>/stream.html?src=<name>&mode=<mse|mjpeg>&lt=<secret>`
@@ -186,7 +194,7 @@ WebKitGTK's MSE turns out to be unreliable in the AppImage.
   stream; switching printers stops one consumer and starts another.
 - **Sharing:** with the same name, N viewers (desktop windows, phone tiles, Stream tab tiles) =
   1 printer connection (finding 2). Conditions: the Stream-tab entry uses the same address and code
-  as the Device tab; and nobody re-saves the Stream tab mid-session (finding 4, follow-up #1).
+  as the Device tab. (Re-saving the Stream tab mid-session no longer splits it: #450.)
 - **Printer limits** (unverified, to measure): RTSPS servers on X1/H2 are reported to accept only a
   few sessions; the P1/A1 port-6000 server is reported to allow very few (possibly one) and to run
   at ~1 fps. Bambu Studio / Orca / Bambu Handy on another device are consumers we do not control.
@@ -271,11 +279,13 @@ the test plan checks they still work in the same clean-data-dir run.
 - With the setting off nothing new is created and `Play()`/`Stop()` behave as before
   (`try_play_own()` returns false, `m_own_busy` stays false). `wxMediaCtrl2.mm` is untouched (#443
   changes it); a merge-tree of this branch with `origin/feat/bambu-camera-module` is clean.
-- Not in this branch: the `register_streams()` re-PUT fix (follow-up 1) - another branch owns it.
+- The `register_streams()` re-PUT fix (follow-up 1) is #450, merged into main and into this branch;
+  the Device tab's registration goes through it (see section 3). Tests:
+  `[own-camera][go2rtc-sync]` in `tests/slic3rutils/remote_hub_tests.cpp`.
 
 ## Follow-ups (not in the spike)
 
-1. `register_streams()`: remember name → source per go2rtc run and skip unchanged ones (finding 4).
+1. ~~`register_streams()`: remember name → source per go2rtc run and skip unchanged ones (finding 4).~~ Done in #450.
 2. Phone P1/A1 tiles through go2rtc `b<hash>` + `mjpeg` so they share with the desktop.
 3. Bridge player errors (go2rtc's WS `error`) to the status line and to the IP/access-code dialog.
 4. Hide "Go Live" (virtual camera) while the own view is on.

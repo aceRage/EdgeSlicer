@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -278,6 +279,63 @@ struct LinkRevocation
     int web_subscriptions { 0 };
 };
 LinkRevocation revoke_push_for_old_link();
+
+// ---- go2rtc stream registration (HubServer::register_streams) ----
+// go2rtc 1.9.14 builds a NEW stream object on every PUT of a name, even an unchanged one; viewers
+// already watching stay on the old object and its upstream connection, and the next viewer opens a
+// second connection to the camera (measured: tests/phone/go2rtc_share_probe.py). DELETE only
+// unlists a stream - its producer runs on until its last viewer leaves - and PATCH of a name that
+// exists does not touch the running connection. So the hub registers a stream only when go2rtc
+// does not have it or its source really changed, and never re-PUTs one that is unchanged.
+
+// One stream as go2rtc's GET /api/streams lists it: the first producer's URL and whether that
+// producer is connected right now. An idle producer reports exactly the source it was given; a
+// connected one reports its connection's URL, which for some sources (ffmpeg:, rtspx:) is not the
+// registered string, so `url` is only compared while `active` is false.
+struct Go2rtcLiveStream
+{
+    std::string url;
+    bool        active { false };
+};
+// Parse GET /api/streams (a JSON object, name -> {producers, consumers}). False on anything that
+// is not such an object, with `out` untouched.
+bool parse_go2rtc_streams(const std::string& body, std::map<std::string, Go2rtcLiveStream>& out);
+
+// What register_streams() does to bring go2rtc to `desired` (name -> source, every Stream-tab
+// camera and its quality variants). `registered` is what this hub itself put into this go2rtc
+// (name -> source); `live` is go2rtc's own list, or nullptr when it could not be read.
+//
+//   add     - go2rtc does not have the name: PUT it.
+//   replace - the name exists with a different source (ours with a changed source, or one we did
+//             not register that is idle with another source): DELETE, PUT, then end the hub's
+//             viewer tunnels on it so the old producer closes and the players reconnect to the new
+//             one. A quality variant (`ffmpeg:<name>#...`) of a replaced stream is replaced too,
+//             because its ffmpeg is a viewer of the old stream object.
+//   remove  - registered by us and no longer wanted (a camera taken off the Stream tab, or one
+//             whose source - and so its s<hash> name - changed): DELETE and end its viewers.
+//   adopt   - already in go2rtc and not ours: idle with this very source, or connected (viewers
+//             are on it - never disturbed). Recorded as ours, nothing sent to go2rtc.
+// Unchanged streams of ours appear in none of the lists: nothing is sent and no viewer notices.
+struct StreamSyncPlan
+{
+    std::vector<std::pair<std::string, std::string>> add;     // name, source
+    std::vector<std::pair<std::string, std::string>> replace; // name, new source
+    std::vector<std::string>                         remove;  // name
+    std::vector<std::pair<std::string, std::string>> adopt;   // name, source
+};
+StreamSyncPlan plan_stream_sync(const std::map<std::string, std::string>& desired,
+                                const std::map<std::string, std::string>& registered,
+                                const std::map<std::string, Go2rtcLiveStream>* live);
+
+// The `desired` map plan_stream_sync() is given: every Stream-tab camera (and its variants) plus
+// every camera the Device tab's live view ("New Bambu LiveView", POST /hub/camera) has asked for
+// in this go2rtc run. Taking the live-view cameras into `desired` is what makes a Stream-tab save
+// unable to delete or replace a stream the Device tab is playing: a camera taken off the Stream
+// tab that the Device tab also plays under the same s<hash> name is still wanted, so it is
+// "unchanged", not "remove". On a name both lists have, the Stream tab's source wins (the names are
+// hashes of the sources, so the two only differ on a hash collision).
+std::map<std::string, std::string> merge_desired_streams(const std::map<std::string, std::string>& stream_tab,
+                                                         const std::map<std::string, std::string>& live_view);
 
 } // namespace Testing
 

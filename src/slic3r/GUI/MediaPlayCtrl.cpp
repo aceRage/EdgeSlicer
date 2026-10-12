@@ -501,7 +501,7 @@ void MediaPlayCtrl::ToggleStream()
                 // real component rather than failing mutely.
                 namespace fs = boost::filesystem;
                 const fs::path plugin_source = fs::path(data_dir()) / "plugins" / bambu_source_library_name();
-                if (is_ultranet_bambusource_stub(plugin_source))
+                if (is_ultranet_bambusource_stub(plugin_source) && !wxGetApp().has_bambu_camera_component())
                     wxGetApp().offer_bambu_camera_component(this);
                 return;
             }
