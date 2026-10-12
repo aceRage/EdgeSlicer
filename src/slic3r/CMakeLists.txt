@@ -716,6 +716,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RecenterDialog.hpp
     GUI/ReleaseNote.cpp
     GUI/ReleaseNote.hpp
+    GUI/BindDetectGuard.hpp
     GUI/RemovableDriveManager.cpp
     GUI/RemovableDriveManager.hpp
     GUI/SavePresetDialog.cpp

@@ -7278,6 +7278,14 @@ void DeviceManager::on_machine_alive(std::string json_str)
 
 MachineObject* DeviceManager::insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code)
 {
+    // A printer without a serial number cannot be addressed (MQTT topics, AppConfig keys, the
+    // device lists are all keyed on it). Connect via IP used to insert one when the network
+    // plug-in's bind_detect answered with an empty result.
+    if (machine.dev_id.empty()) {
+        BOOST_LOG_TRIVIAL(error) << "insert_local_device: refused a printer with an empty serial number (ip "
+                                 << machine.dev_ip << ")";
+        return nullptr;
+    }
     MachineObject* obj;
     auto           it = localMachineList.find(machine.dev_id);
     if (it != localMachineList.end()) {
