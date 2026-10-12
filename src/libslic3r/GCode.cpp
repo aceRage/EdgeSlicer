@@ -2820,6 +2820,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_max_layer_z  = 0.f;
     m_last_width   = 0.f;
     m_is_role_based_fan_on.fill(false);
+    m_role_based_fan_marker_layer.fill(-1);
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
     m_last_mm3_per_mm = 0.;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
@@ -10444,11 +10445,14 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         assert(m_enable_cooling_markers);
 
         if (fan_on) {
-            if (!m_is_role_based_fan_on[role]) {
+            // Orca: CoolingBuffer consumes role fan markers per layer, so continuing
+            // role-based fan regions need a fresh START marker on each new layer.
+            if (!m_is_role_based_fan_on[role] || m_role_based_fan_marker_layer[role] != m_layer_index) {
                 gcode += ";";
                 gcode += marker_prefix;
                 gcode += "_FAN_START\n";
                 m_is_role_based_fan_on[role] = true;
+                m_role_based_fan_marker_layer[role] = m_layer_index;
             }
         } else {
             if (m_is_role_based_fan_on[role]) {
@@ -10456,6 +10460,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 gcode += marker_prefix;
                 gcode += "_FAN_END\n";
                 m_is_role_based_fan_on[role] = false;
+                m_role_based_fan_marker_layer[role] = -1;
             }
         }
     };
