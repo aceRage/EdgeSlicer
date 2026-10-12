@@ -62,6 +62,9 @@ private:
     unsigned int                m_current_extruder;
     //BBS: current fan speed
     int                         m_current_fan_speed;
+    // EDGE: tool change G-code (followed by ";_FORCE_RESUME_FAN_SPEED") may have set the fan since
+    // m_current_fan_speed was written, so the next fan command is written even if it repeats it.
+    bool                        m_fan_speed_unknown { false };
     // See last_layer_slowed_down().
     bool                        m_last_layer_slowed_down { false };
 };
