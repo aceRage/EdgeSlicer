@@ -238,6 +238,25 @@ public:
         return u;
     }
 
+    // A dial on a session that is already up: re-selecting the printer whose LAN session is up
+    // (DeviceManager::set_selected_machine keeps that session). The plug-in's connect_printer is
+    // idempotent for the same address and access code and reports nothing back, so a hold armed
+    // by dial_started here would wait for a connected callback that never comes: every command
+    // for HOLD_MAX_MS would be held and then reported as not sent. Starts the selection with its
+    // session up instead (nothing is held), and hands back anything an earlier dial still held, to
+    // send now. If the plug-in does dial again (the access code changed), its callback still lands:
+    // Ok logs the session up, a failure reports it down.
+    Up dial_on_live_session(long long now)
+    {
+        Up u;
+        u.held = m_held;
+        u.send = m_queue.take();
+        m_watch.on_selected(now, true);
+        m_held    = 0;
+        m_retried = false;
+        return u;
+    }
+
     // The plug-in reported the dial failed or the session lost.
     Dropped session_down()
     {

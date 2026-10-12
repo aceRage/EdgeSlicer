@@ -3073,7 +3073,7 @@ void MachineObject::set_print_state(std::string status)
     print_status = status;
 }
 
-int MachineObject::connect(bool is_anonymous, bool use_openssl)
+int MachineObject::connect(bool is_anonymous, bool use_openssl, bool session_up)
 {
     if (dev_ip.empty()) return -1;
     std::string username;
@@ -3084,8 +3084,12 @@ int MachineObject::connect(bool is_anonymous, bool use_openssl)
     }
     if (m_agent) {
         // Every LAN dial comes through here, whatever started it; hold this printer's requests
-        // until the session it starts is up.
-        note_dial_started();
+        // until the session it starts is up. A re-selection that keeps a live session starts none:
+        // nothing would report it up, so nothing is held for it.
+        if (session_up)
+            note_dial_on_live_session();
+        else
+            note_dial_started();
         try {
             return m_agent->connect_printer(dev_id, dev_ip, username, password, use_openssl);
         } catch (...) {
@@ -3203,6 +3207,15 @@ void MachineObject::note_dial_started()
         return; // a selection armed it already (or this is its re-dial)
     report_not_sent(m_gate.dial_started(now));
     BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " LAN dial started outside a Device-tab selection: holding its requests until the session is up";
+}
+
+void MachineObject::note_dial_on_live_session()
+{
+    m_redial_due = false;
+    FirstRequestGate::SelectionGate::Up up = m_gate.dial_on_live_session(first_request_now_ms());
+    if (!up.send.empty())
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " re-selected over its live LAN session: sending what an earlier dial held";
+    send_held(up.send);
 }
 
 bool MachineObject::note_dial_failed()
@@ -7545,12 +7558,15 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
                 return true;
             } else if (keep_lan_session) {
                 // No connecting state is set: no connected callback follows an idempotent connect.
+                // For the same reason connect() is told the session is up, so it does not arm the
+                // first-request gate (a hold nothing would end: 15 s of held, then dropped, commands).
                 BOOST_LOG_TRIVIAL(info) << "set_selected_machine: " << dev_id << " re-selected, LAN session already up";
                 it->second->reset_update_time();
 #if !BBL_RELEASE_TO_PUBLIC
-                it->second->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
+                it->second->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false,
+                                    /* session_up */ true);
 #else
-                it->second->connect(false, it->second->local_use_ssl_for_mqtt);
+                it->second->connect(false, it->second->local_use_ssl_for_mqtt, /* session_up */ true);
 #endif
             } else {
                 // lan mode printer reconnect printer

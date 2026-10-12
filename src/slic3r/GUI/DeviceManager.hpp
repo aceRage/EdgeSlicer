@@ -607,6 +607,9 @@ public:
     // connect() is dialling the printer: arms the gate when no selection did (FirstRequestGate.hpp
     // SelectionGate::dial_started).
     void note_dial_started();
+    // connect(..., session_up = true): the printer's LAN session is already up (a re-selection
+    // that keeps it). Does not arm the gate (SelectionGate::dial_on_live_session).
+    void note_dial_on_live_session();
     bool m_redial_due { false };
     std::chrono::steady_clock::time_point m_redial_at {};
     // True (and logged) when the status request `what` is to be held back for the session.
@@ -1045,7 +1048,9 @@ public:
     std::vector<HMSItem>    hms_list;
 
     /* machine mqtt apis */
-    int connect(bool is_anonymous = false, bool use_openssl = true);
+    // `session_up`: the LAN session to this printer is already up and this call only confirms it
+    // (the plug-in's connect_printer is idempotent); the first-request gate is not armed.
+    int connect(bool is_anonymous = false, bool use_openssl = true, bool session_up = false);
     int disconnect();
 
     json_diff print_json;
