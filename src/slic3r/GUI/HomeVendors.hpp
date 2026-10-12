@@ -31,7 +31,9 @@ class HomeVendors
 {
 public:
     using SendFn = std::function<void(const nlohmann::json&)>;
-    HomeVendors(wxWindow* parent, SendFn send, std::function<void()> library_changed);
+    // `open_file` opens a file the user chose to Download & Open once it is saved (path as UTF-8).
+    HomeVendors(wxWindow* parent, SendFn send, std::function<void()> library_changed,
+                std::function<void(const std::string&)> open_file = {});
     ~HomeVendors();
 
     // True when `msg` was a Vendors command (handled or refused).
@@ -39,6 +41,9 @@ public:
     void send_state();
     // The Vendor tags of all connectors, for the Library's folder editor.
     std::vector<std::string> vendor_tags() const;
+    // Import a connector from a link (asks for the address first, `preset` pre-fills it; the user
+    // confirms the connector before it is saved). Also the target of edgeslicer://connector?url=...
+    void import_from_link(const std::string& preset);
 
 private:
     struct Connector
@@ -68,11 +73,14 @@ private:
     void save_connector(const nlohmann::json& spec_json);
     void delete_connector(const std::string& id);
     void ask_secret(const std::string& id, const std::string& key);
-    void import_spec();
+    void import_spec(bool pasted);
+    void confirm_import(const std::string& text, const std::string& origin_host);
+    void update_connector(const std::string& id, const nlohmann::json& imported);
     void export_spec(const std::string& id);
+    void copy_spec(const std::string& id);
     void export_csv(const nlohmann::json& keys);
     void send_thumbnails(const std::vector<std::string>& keys);
-    void download(const std::string& key, const std::string& sub_id);
+    void download(const std::string& key, const std::string& sub_id, bool open_after);
     void notice(const std::string& text, bool error = false);
 
     // A key the page acts on -> (connector id, item id); rebuilt on every send_state().
@@ -82,6 +90,7 @@ private:
     wxWindow*                          m_parent;
     SendFn                             m_send;
     std::function<void()>              m_library_changed;
+    std::function<void(const std::string&)> m_open_file;
     std::vector<Connector>             m_connectors;
     // Secrets kept for this session when the system has no credential store.
     std::map<std::string, std::string> m_session_secrets;
@@ -92,6 +101,7 @@ private:
     std::shared_ptr<std::atomic<bool>> m_cancel { std::make_shared<std::atomic<bool>>(false) };
     std::set<std::string>              m_thumbs_asked;
     bool                               m_thumbs_busy { false };
+    bool                               m_import_busy { false }; // a link is being fetched
     std::vector<std::string>           m_thumbs_queue;
 };
 

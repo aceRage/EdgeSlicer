@@ -459,6 +459,8 @@ set(lisbslic3r_sources
     NozzleSync.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
+    SvgSplit.cpp
+    SvgSplit.hpp
     ObjColorMatch.cpp
     ObjColorMatch.hpp
     ObjColorUtils.hpp
@@ -501,6 +503,10 @@ set(lisbslic3r_sources
     PrincipalComponents2D.hpp
     PrinterModelSpecs.cpp
     PrinterModelSpecs.hpp
+    FilamentPresetExport.cpp
+    FilamentPresetExport.hpp
+    ProcessPresetExport.cpp
+    ProcessPresetExport.hpp
     PrintApply.cpp
     PrintBase.cpp
     MemoryGuardPolicy.hpp

@@ -4,6 +4,7 @@
 #include "wx/osx/core/cfstring.h"
 
 #import <algorithm>
+#include <memory>
 
 #import <Cocoa/Cocoa.h>
 #import <Foundation/Foundation.h>
@@ -117,6 +118,58 @@ void mac_make_accessory_app()
 void mac_activate_app()
 {
     [NSApp activateIgnoringOtherApps:YES];
+}
+
+void mac_delete_site_cookies(const std::vector<std::string> &names, const std::string &uri,
+                             std::function<void(size_t deleted)> done)
+{
+    // wxWebView (webview_webkit.mm) makes every WKWebView from a default WKWebViewConfiguration,
+    // so all of the slicer's web views use [WKWebsiteDataStore defaultDataStore]; its cookie
+    // store is where id.snapmaker.com's session lives. No web view has to be open.
+    NSMutableSet *wanted = [NSMutableSet set];
+    for (const std::string &n : names)
+        [wanted addObject:[NSString stringWithUTF8String:n.c_str()]];
+    NSString *host = [[NSURL URLWithString:[NSString stringWithUTF8String:uri.c_str()]] host];
+    if (host == nil || [wanted count] == 0) {
+        if (done)
+            done(0);
+        return;
+    }
+    host = [host lowercaseString];
+
+    // MRC: the blocks copy `done`; the singletons are autoreleased/unowned here.
+    WKHTTPCookieStore *store = [[WKWebsiteDataStore defaultDataStore] httpCookieStore];
+    [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        // Cookies the browser would send to `host` under that name: the host-only copy and the
+        // parent-domain copy (.snapmaker.com), as the Windows DeleteCookies(name, uri) matches.
+        NSMutableArray<NSHTTPCookie *> *doomed = [NSMutableArray array];
+        for (NSHTTPCookie *c in cookies) {
+            if (![wanted containsObject:c.name])
+                continue;
+            NSString *d = [c.domain lowercaseString];
+            if ([d hasPrefix:@"."])
+                d = [d substringFromIndex:1];
+            if ([d length] == 0)
+                continue;
+            if ([host isEqualToString:d] || [host hasSuffix:[@"." stringByAppendingString:d]])
+                [doomed addObject:c];
+        }
+        if ([doomed count] == 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(0); });
+            return;
+        }
+        // The completions all come back on the main thread; count them down there.
+        std::shared_ptr<size_t> pending = std::make_shared<size_t>([doomed count]);
+        const size_t total = [doomed count];
+        for (NSHTTPCookie *c in doomed) {
+            [store deleteCookie:c completionHandler:^{
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (--(*pending) == 0 && done)
+                        done(total);
+                });
+            }];
+        }
+    }];
 }
 
 }

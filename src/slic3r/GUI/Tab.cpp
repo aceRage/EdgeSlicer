@@ -2212,6 +2212,12 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         }
     }
 
+    // The first layer is held to the same printer limits as the layer height (same Adjust / Ignore dialog).
+    if (opt_key == "initial_layer_print_height") {
+        if (m_config_manipulation.check_layer_height(m_config, "initial_layer_print_height"))
+            wxGetApp().plater()->update();
+    }
+
     if(opt_key=="layer_height"){
         double layer_height_floor = 0., layer_height_ceil = 0.;
         m_config_manipulation.layer_height_limits(layer_height_floor, layer_height_ceil);
@@ -4704,6 +4710,9 @@ void TabFilament::build()
         optgroup->append_single_option_line("temperature_vitrification");
         // filament_is_high_temperature is controlled by preset data, not user-facing
         optgroup->append_single_option_line("idle_temperature");
+        // BBS: Bambu Studio shows its wipe-tower cooling (a Develop-mode option) in this group, next to
+        // its tower settings.
+        optgroup->append_single_option_line("filament_cooling_before_tower");
         optgroup->append_single_option_line("filament_tower_ironing_area");
         Line line = { L("Recommended nozzle temperature"), L("Recommended nozzle temperature range of this filament. 0 means no set") };
         line.append_option(optgroup->get_option("nozzle_temperature_range_low"));
@@ -4988,8 +4997,13 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_multitool_ramming");
         optgroup->append_single_option_line("filament_multitool_ramming_volume");
         optgroup->append_single_option_line("filament_multitool_ramming_flow");
-        // BBS: extruder-change long retraction (dual-nozzle machines such as H2D). Upstream shows these
-        // on its own "Multi Filament" page; this group is the fork's nearest equivalent.
+        // BBS: flush settings and extruder-change long retraction (BBL machines such as H2D). Upstream
+        // shows these on its own "Multi Filament" page, in this order; this group is the fork's nearest
+        // equivalent. Only one flush temperature line shows: the Fast one when the project's
+        // prime_volume_mode is Fast (toggle_options), as Bambu Studio's purge-mode switch does.
+        optgroup->append_single_option_line("filament_flush_temp");
+        optgroup->append_single_option_line("filament_flush_temp_fast");
+        optgroup->append_single_option_line("filament_flush_volumetric_speed");
         optgroup->append_single_option_line("long_retractions_when_ec", "", 0);
         optgroup->append_single_option_line("retraction_distances_when_ec", "", 0);
 
@@ -5237,6 +5251,13 @@ void TabFilament::toggle_options()
         bool multitool_ramming = m_config->opt_bool("filament_multitool_ramming", int(flow_variant_view_index()));
         toggle_option("filament_multitool_ramming_volume", multitool_ramming);
         toggle_option("filament_multitool_ramming_flow", multitool_ramming);
+
+        // BBS: the G-code reads filament_flush_temp_fast instead of filament_flush_temp in Fast
+        // prime-volume mode (a project setting, e.g. from a Bambu Studio project).
+        const ConfigOption *prime_volume_mode = m_preset_bundle->project_config.option("prime_volume_mode");
+        const bool          fast_purge        = prime_volume_mode != nullptr && prime_volume_mode->getInt() == int(PrimeVolumeMode::pvmFast);
+        toggle_line("filament_flush_temp", !fast_purge);
+        toggle_line("filament_flush_temp_fast", fast_purge);
     }
 }
 

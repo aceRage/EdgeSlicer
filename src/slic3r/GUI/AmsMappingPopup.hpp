@@ -159,13 +159,20 @@ public:
     wxBoxSizer *m_sizer_ams{nullptr}; 
     wxBoxSizer *m_sizer_ams_left{nullptr}; 
     wxBoxSizer *m_sizer_ams_right{nullptr}; 
+    wxStaticText *m_left_ams_title{nullptr};
+    wxStaticText *m_right_ams_title{nullptr};
     wxBoxSizer *m_sizer_list{nullptr}; 
     wxWindow   *m_parent_item{nullptr}; 
 
     wxString     format_text(wxString &m_msg);
     void         update_materials_list(std::vector<std::string> list);
     void         set_tag_texture(std::string texture);
-    void         update_ams_data(std::map<std::string, Ams *> amsList);
+    /* ext_spools: a two-extruder printer's external spool holders (MachineObject::external_spools),
+     * each offered on its own extruder's side. only_physical_extruder >= 0 shows only the AMS units
+     * and the holder of that physical extruder - the one the filament was sliced for - as
+     * BambuStudio's picker does; -1 shows everything (one-extruder printers, unknown side). */
+    void         update_ams_data(std::map<std::string, Ams *> amsList, const std::vector<AmsTray> &ext_spools = {},
+                                 int only_physical_extruder = -1);
     void         update_ams_data_multi_machines();
     void         add_ams_mapping(std::vector<TrayData> tray_data, wxWindow* container, wxBoxSizer* sizer);
     void         set_current_filament_id(int id){m_current_filament_id = id;};

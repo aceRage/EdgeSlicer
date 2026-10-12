@@ -2,6 +2,10 @@
 #define slic3r_MacDarkMode_hpp_
 
 #include <wx/event.h>
+#include <cstddef>
+#include <functional>
+#include <string>
+#include <vector>
 
 namespace Slic3r {
 namespace GUI {
@@ -22,6 +26,12 @@ void openFolderForFile(wxString const & file);
 void mac_make_accessory_app();
 // Bring this process to the front (an accessory app's dialogs open behind the active app).
 void mac_activate_app();
+// Delete the named cookies that would be sent to `uri` (Snapmaker's id.snapmaker.com web session)
+// from the WebKit data store every web view of the slicer shares. Only those cookies, never the
+// rest of the store. Asynchronous: `done` runs once on the main thread with how many were deleted
+// (0 when none matched). Never gets cookie values.
+void mac_delete_site_cookies(const std::vector<std::string> &names, const std::string &uri,
+                             std::function<void(size_t deleted)> done);
 #endif
 
 

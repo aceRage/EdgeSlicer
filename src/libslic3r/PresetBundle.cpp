@@ -303,6 +303,15 @@ PresetBundle::PresetBundle()
     this->filaments.default_preset().inherits();
     // Set all the nullable values to nils.
     this->filaments.default_preset().config.null_nullables();
+    // BBS: except Bambu's flush settings and pre-tower cooling. They are nullable only because some
+    // profiles write "nil" (Anycubic); there is no printer value a nil could fall back to. A filament
+    // preset that does not set them holds what Bambu Studio's base filament profile
+    // (BBL/filament/fdm_filament_common.json, which every Bambu filament inherits) says: all 0, so flush
+    // temperature and speed are derived and there is no cooling before the tower. The option default of
+    // filament_cooling_before_tower stays Bambu's 10; the BBL presets that cool say so explicitly.
+    for (const char *key : { "filament_flush_temp", "filament_flush_temp_fast", "filament_flush_volumetric_speed" })
+        this->filaments.default_preset().config.set_key_value(key, print_config_def.get(key)->default_value->clone());
+    this->filaments.default_preset().config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable{ 0. });
 
     this->sla_materials.default_preset().config.optptr("sla_material_settings_id", true);
     this->sla_materials.default_preset().compatible_printers_condition();
@@ -3839,6 +3848,15 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                 }
                 else if (boost::iequals(it.key(), BBL_JSON_KEY_HOTEND_MODEL)) {
                     model.hotend_model = it.value();
+                }
+                else if (boost::iequals(it.key(), BBL_JSON_KEY_BOTTOM_TEXTURE_END_NAME)) {
+                    model.bottom_texture_end_name = it.value();
+                }
+                else if (boost::iequals(it.key(), BBL_JSON_KEY_BOTTOM_TEXTURE_RECT)) {
+                    model.bottom_texture_rect = it.value();
+                }
+                else if (boost::iequals(it.key(), BBL_JSON_KEY_MIDDLE_TEXTURE_RECT)) {
+                    model.middle_texture_rect = it.value();
                 }
                 else if (boost::iequals(it.key(), BBL_JSON_KEY_DEFAULT_MATERIALS)) {
                     //get machine list
