@@ -276,7 +276,6 @@ Http::priv::priv(const std::string &url)
 #ifdef __WINDOWS__
 	::curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_MAX_TLSv1_2);
 #endif
-	::curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
 	// The certificate checks are set in http_perform(), from `url` and tls_policy (see
 	// apply_tls_options below). Until 2026-09-22 they were switched off here for every request.
 
