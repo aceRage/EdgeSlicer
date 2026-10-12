@@ -1134,6 +1134,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
         float minimum_travel_feedrate(PrintEstimatedStatistics::ETimeMode mode, float feedrate) const;
         float get_axis_max_feedrate(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
         float get_axis_max_acceleration(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
+        float get_axis_max_jerk_with_jd(PrintEstimatedStatistics::ETimeMode mode, Axis axis, float acceleration) const;
         float get_axis_max_jerk_with_jd(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
         // Orca: junction deviation for a block at the given acceleration, 0 for a classic jerk machine.
         float get_junction_deviation(PrintEstimatedStatistics::ETimeMode mode, float acceleration) const;
