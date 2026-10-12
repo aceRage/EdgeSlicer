@@ -965,6 +965,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintersMonitor.hpp
     Utils/HubHandover.hpp
     Utils/WebLoadRetry.hpp
+    Utils/DevicePageLoad.hpp
     Utils/HomeTabLogic.cpp
     Utils/HomeTabLogic.hpp
     Utils/ThemePack.cpp
