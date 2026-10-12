@@ -2503,3 +2503,67 @@ TEST_CASE("A per-object draft shield follows the object layers, not interlaced s
     // Every object layer is 0.2 mm, so is every skirt layer.
     CHECK(max_skirt_height < 0.2 + 1e-3);
 }
+
+// Orca #16297: overhang fan control used to force point-by-point extrusion (no G2/G3) on every
+// multi-point wall. With Edge's #15945 split, a uniformly overhanging piece stays on the
+// constant-speed branch, keeps its arcs, and still gets a path-wide overhang-fan marker.
+TEST_CASE("Arc fitting remains active with overhang fan control", "[PrintGCode][Cooling][Regression][Orca16297]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_arc_fitting",             "1" },
+        { "enable_overhang_bridge_fan",     "1" },
+        { "enable_overhang_speed",          "1" },
+        { "initial_layer_print_height",     "0.2" },
+        { "layer_height",                   "0.2" },
+        { "slow_down_for_layer_cooling",    "0" },
+        { "close_fan_the_first_x_layers",   "0" },
+        { "fan_max_speed",                  "20" },
+        { "fan_min_speed",                  "20" },
+        { "overhang_fan_speed",             "100" },
+        { "overhang_fan_threshold",         "25%" },
+        { "layer_change_gcode",             ";TEST_LAYER=[layer_num]" },
+        { "machine_start_gcode",            "" },
+        { "gcode_comments",                 "1" },
+    });
+
+    const auto has_arc_after_first_layer = [](const std::string &gcode) {
+        std::istringstream input(gcode);
+        std::string        line;
+        size_t             layers_seen = 0;
+        while (std::getline(input, line)) {
+            if (line.rfind(";TEST_LAYER=", 0) == 0)
+                ++layers_seen;
+            else if (layers_seen > 1 && (line.rfind("G2 ", 0) == 0 || line.rfind("G3 ", 0) == 0))
+                return true;
+        }
+        return false;
+    };
+    const auto has_arc_with_overhang_fan = [](const std::string &gcode) {
+        std::istringstream input(gcode);
+        std::string        line;
+        bool               overhang_fan_active = false;
+        bool               outer_wall          = false;
+        while (std::getline(input, line)) {
+            if (line.rfind("M106 S255", 0) == 0)
+                overhang_fan_active = true;
+            else if (line.rfind("M106 S0", 0) == 0 || line.rfind("M107", 0) == 0)
+                overhang_fan_active = false;
+            else if (line.rfind(";TYPE:", 0) == 0)
+                outer_wall = line == ";TYPE:Outer wall";
+            else if (overhang_fan_active && outer_wall && (line.rfind("G2 ", 0) == 0 || line.rfind("G3 ", 0) == 0))
+                return true;
+        }
+        return false;
+    };
+
+    const std::string with_overhang_speed = Slic3r::Test::slice({ make_cylinder(25.0, 10.0, 2.0 * PI / 72.0) }, config);
+    CHECK(has_arc_after_first_layer(with_overhang_speed));
+
+    config.set_deserialize_strict({ { "enable_overhang_speed", "0" } });
+    const std::string without_overhang_speed = Slic3r::Test::slice({ make_cylinder(25.0, 10.0, 2.0 * PI / 72.0) }, config);
+    CHECK(has_arc_after_first_layer(without_overhang_speed));
+
+    const std::string uniform_overhang_gcode = Slic3r::Test::slice({ make_sphere(50.0, 2.0 * PI / 72.0) }, config);
+    CHECK(has_arc_with_overhang_fan(uniform_overhang_gcode));
+}
