@@ -306,3 +306,46 @@ TEST_CASE("Carried-forward tool-change delay reaches the total without polluting
         REQUIRE_THAT(rd.at(role), WithinAbs(zero_time, 1e-2));
     }
 }
+
+// ---- #15066: firmware retraction ----
+
+TEST_CASE("Firmware retraction does not change the modal feedrate", "[GCodeTiming][FirmwareRetraction]")
+{
+    // G10 / G11 are emulated as G1 moves with the retraction speed. That feedrate is not the one the next
+    // G1 without an F inherits: before the fix every extrusion after a G10 / G11 was previewed (and timed) at the
+    // retraction speed.
+    FullPrintConfig config = make_config(0.0, 0.0, 0.0);
+    config.retraction_length.values   = {2.0, 2.0};
+    config.retraction_speed.values    = {30.0, 30.0};
+    config.deretraction_speed.values  = {30.0, 30.0};
+    config.retract_restart_extra.values = {0.0, 0.0};
+
+    const char* gcode =
+        "M83\n"
+        "G1 X10 Y0 Z0.2 F6000\n"
+        "G1 X20 Y0 E1 F6000\n"
+        "G10\n"
+        "G1 X30 Y0 E1\n"      // no F: the modal 100 mm/s
+        "G11\n"
+        "G1 X40 Y0 E1\n";     // no F: the modal 100 mm/s
+
+    GCodeProcessor proc;
+    run_processor(proc, config, gcode);
+
+    size_t extrusions = 0, retractions = 0;
+    for (const auto& mv : proc.get_result().moves) {
+        if (mv.actual_speed_point)
+            continue; // the planner's acceleration / deceleration points are copies of a move, not moves
+        if (mv.type == EMoveType::Extrude) {
+            ++extrusions;
+            INFO("extrusion " << extrusions);
+            REQUIRE_THAT(mv.feedrate, WithinAbs(100.0, 1e-3));
+        } else if (mv.type == EMoveType::Retract || mv.type == EMoveType::Unretract) {
+            ++retractions;
+            // the retraction moves themselves keep the retraction speed
+            REQUIRE_THAT(mv.feedrate, WithinAbs(30.0, 1e-3));
+        }
+    }
+    REQUIRE(extrusions == 3);
+    REQUIRE(retractions == 2);
+}
