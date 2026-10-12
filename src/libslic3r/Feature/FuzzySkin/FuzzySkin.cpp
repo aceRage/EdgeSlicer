@@ -926,7 +926,7 @@ Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perim
     return fuzzified;
 }
 
-void apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, const bool is_contour)
+void apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, const bool is_contour, const bool closed)
 {
     const auto  slice_z = perimeter_generator.slice_z;
     const auto  layer_height = perimeter_generator.layer_height;
@@ -959,6 +959,15 @@ void apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerato
             if (merged_regions.size() == 1 && merged_regions.front().expolygons.empty()) {
                 fuzzy_extrusion_line(extrusion->junctions, slice_z, layer_height, *merged_regions.front().config, support);
                 return;
+            }
+
+            // Open path means this is a thin wall that collapsed into a single thick line, in this case the path will go exactly
+            // between the middle two sides of the object. And since the paint segmentation never goes beyond the middle line because
+            // it uses voronoi diagram, we need to expand the segmentation a little bit to make sure it covers the path.
+            if (!closed) {
+                for (auto& r : merged_regions) {
+                    r.expolygons = offset_ex(r.expolygons, perimeter_generator.ext_perimeter_flow.scaled_width() / 10);
+                }
             }
 
             // Make each region's ExPolygons exclusive so overlapping regions don't double-fuzz

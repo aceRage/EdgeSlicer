@@ -353,6 +353,33 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
     
     // Append thin walls to the nearest-neighbor search (only for first iteration)
     if (! thin_walls.empty()) {
+        // Orca: apply fuzzy skin to thin walls as well
+        // Edge: only when some region fuzzes contours, so a print without fuzzy skin keeps its thin walls untouched
+        // (the round trip below would otherwise re-derive their widths).
+        if (perimeter_generator.has_fuzzy_skin) {
+            for (auto& thin_wall : thin_walls) {
+                if (thin_wall.points.size() < 2 || thin_wall.width.size() != 2 * (thin_wall.points.size() - 1))
+                    continue;
+                // First, we convert the ThickPolyline into Arachne::ExtrusionLine so we could reuse our existing fuzzy code.
+                // ThickPolyline::width holds a start and an end width per segment; a junction takes the width the segment
+                // ending at it ends with (the first junction the first segment's start width).
+                Arachne::ExtrusionLine el(0, true);
+                el.junctions.reserve(thin_wall.points.size());
+                for (size_t i = 0; i < thin_wall.points.size(); ++i) {
+                    const coordf_t w = i == 0 ? thin_wall.width.front() : thin_wall.width[2 * i - 1];
+                    el.junctions.emplace_back(thin_wall.points[i], coord_t(w), 0);
+                }
+
+                // Then we fuzzy it
+                apply_fuzzy_skin(&el, perimeter_generator, true, thin_wall.is_closed());
+
+                // Then convert the result back to ThickPolyline
+                const std::pair<bool, bool> endpoints = thin_wall.endpoints;
+                thin_wall           = Arachne::to_thick_polyline(el);
+                thin_wall.endpoints = endpoints;
+            }
+        }
+
         variable_width(thin_walls, erExternalPerimeter, perimeter_generator.ext_perimeter_flow, coll.entities);
         thin_walls.clear();
     }
