@@ -10,6 +10,14 @@
 # with a valid Developer ID certificate" / "The signature does not include a secure timestamp".
 # Signing every Mach-O file we can find, deepest path first, and sealing the bundle last covers
 # all of them, whatever the build adds later (a network plugin, a bundled ffmpeg, ...).
+#
+# That includes Bambu's camera files in Contents/Resources/cameratools (libBambuSource.dylib,
+# liblive555.dylib; CAMERA_BIN_DIR), which arrive signed by Bambu's team (T3UBR9Y3B2): --force
+# replaces that signature with ours. Notarization is the reason - every Mach-O in the submission
+# must carry a Developer ID signature with a secure timestamp, and re-signing guarantees both
+# instead of depending on how Bambu signed a given build. Loading them needs nothing extra: the
+# app's com.apple.security.cs.disable-library-validation entitlement already admits libraries of
+# another team (or ours).
 set -euo pipefail
 
 APP=${1:?usage: macos_sign_app.sh <App.app> <identity> <entitlements.plist>}
