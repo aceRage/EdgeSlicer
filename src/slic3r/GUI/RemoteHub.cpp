@@ -113,6 +113,8 @@ static const int         HUB_PORT           = 13640;
 static const char* const PLAYER_PAGE = "/stream.html";
 static const char* const PLAYER_JS[] = { "/video-stream.js", "/video-rtc.js" };
 static const char* const GO2RTC_WS   = "/api/ws";
+// ServerLifetime tag of a viewer tunnel on /api/ws: this prefix + the go2rtc stream name it plays.
+static const char GO2RTC_VIEWER_TAG[] = "go2rtc:";
 static const size_t      MAX_API_BODY       = 64 * 1024;
 static const uint64_t    MAX_UPLOAD         = 2ull * 1024 * 1024 * 1024;
 static const int         IDLE_EXIT_SECONDS  = 60;
@@ -1602,6 +1604,70 @@ std::string Testing::camera_for_printer(const std::string& printer_id, const std
     return {};
 }
 
+// ---- go2rtc stream registration (see RemoteHub.hpp) ------------------------------------------
+bool Testing::parse_go2rtc_streams(const std::string& body, std::map<std::string, Go2rtcLiveStream>& out)
+{
+    json j;
+    try { j = json::parse(body); } catch (...) { return false; }
+    if (!j.is_object()) return false;
+    std::map<std::string, Go2rtcLiveStream> res;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        Go2rtcLiveStream s;
+        const json& v = it.value();
+        if (v.is_object() && v.contains("producers") && v["producers"].is_array() && !v["producers"].empty()) {
+            const json& p = v["producers"][0];
+            if (p.is_object()) {
+                if (p.contains("url") && p["url"].is_string()) s.url = p["url"].get<std::string>();
+                // An idle producer is just {"url": ...}; a connected one carries its connection's
+                // id, format, addresses and byte counters as well.
+                s.active = p.contains("id") || p.contains("remote_addr") || p.contains("format_name");
+            }
+        }
+        res[it.key()] = s;
+    }
+    out.swap(res);
+    return true;
+}
+
+Testing::StreamSyncPlan Testing::plan_stream_sync(const std::map<std::string, std::string>& desired,
+                                                  const std::map<std::string, std::string>& registered,
+                                                  const std::map<std::string, Go2rtcLiveStream>* live)
+{
+    StreamSyncPlan        plan;
+    std::set<std::string> replaced;
+    std::vector<std::pair<std::string, std::string>> unchanged; // looked at again for the variant rule
+    for (const auto& d : desired) {
+        const std::string& name = d.first;
+        const std::string& src  = d.second;
+        if (name.empty() || src.empty()) continue;
+        const auto r = registered.find(name);
+        if (live != nullptr && live->find(name) == live->end()) {
+            plan.add.emplace_back(name, src); // go2rtc does not have it (never sent, or a PUT that failed)
+        } else if (r != registered.end()) {
+            if (r->second == src) unchanged.emplace_back(name, src);
+            else { plan.replace.emplace_back(name, src); replaced.insert(name); }
+        } else if (live == nullptr) {
+            plan.add.emplace_back(name, src); // nothing known either way
+        } else {
+            const Go2rtcLiveStream& l = live->at(name);
+            if (l.active || l.url == src) plan.adopt.emplace_back(name, src);
+            else { plan.replace.emplace_back(name, src); replaced.insert(name); }
+        }
+    }
+    // A quality variant is go2rtc's ffmpeg reading the base stream through go2rtc itself, i.e. a
+    // viewer of the base stream object. Left alone it would keep the replaced object - and its
+    // connection to the camera - running.
+    for (const auto& u : unchanged) {
+        const std::string& src = u.second;
+        if (src.compare(0, 7, "ffmpeg:") != 0) continue;
+        const std::string base = src.substr(7, src.find('#') == std::string::npos ? std::string::npos : src.find('#') - 7);
+        if (replaced.count(base)) plan.replace.push_back(u);
+    }
+    for (const auto& r : registered)
+        if (desired.find(r.first) == desired.end()) plan.remove.push_back(r.first);
+    return plan;
+}
+
 static bool row_has_filament(const json& row)
 {
     if (row.contains("ams") && row["ams"].is_array())
@@ -2736,7 +2802,10 @@ private:
     void  handle_phone(tcp::socket& client, Request& r, const std::string& rest);
     void  start_go2rtc();
     void  reap_go2rtc(); // macOS/Linux: collect an ended go2rtc (no-op on Windows)
-    void  register_streams();
+    void  register_streams();   // schedule a sync of go2rtc's streams with the Stream-tab list (one worker)
+    void  sync_streams_once();  // the worker's pass: Testing::plan_stream_sync() applied to go2rtc
+    std::map<std::string, std::string> desired_streams(); // name -> source for every Stream-tab camera + variants
+    bool  sleep_unless_stopping(int ms);
     std::string go2rtc_base_locked() const; // http://user:pass@127.0.0.1:port ("" while go2rtc is down); m_mutex held
     std::pair<int, std::string> onvif_discover(); // GET /api/onvif on go2rtc: {status, body}
     std::string state_for_phone();
@@ -2789,6 +2858,11 @@ private:
     std::string                    m_last_login;                 // most recent remote visitor
     long long                      m_last_login_at { 0 };
     int                            m_go2rtc_port { 0 };
+    // What register_streams() has put into this go2rtc (name -> source). Only its single worker
+    // touches it; go2rtc lives exactly as long as this server, so it never goes stale.
+    std::map<std::string, std::string> m_registered_streams;
+    std::atomic<bool>              m_streams_dirty { false };  // a Stream-tab save not synced yet
+    std::atomic<bool>              m_streams_worker { false }; // the sync worker is running
     int                            m_webrtc_port { 0 };          // go2rtc's WebRTC media port (0 = WebRTC off)
     FirewallState                  m_fw;                         // last firewall_query() (go2rtc/WebRTC)
     std::atomic<bool>              m_fw_busy { false };
@@ -4235,72 +4309,186 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
     return m_lan_fw;
 }
 
+// Bring go2rtc's streams in line with the Stream-tab list. Called on start-up and on every
+// /hub/state post (every Stream-tab save, from any window), so it has to be a no-op for cameras
+// that did not change: go2rtc 1.9.14 turns a PUT of an existing name into a fresh stream object,
+// and the next viewer then opens a SECOND connection to the camera while the phone's is still
+// running - two RTSP sessions on a Bambu printer that allows very few (tests/plan_own_camera_view.md
+// finding 4). The work itself is Testing::plan_stream_sync(); this only schedules it.
+//
+// One worker at a time, on the hub's own lifetime: saves that arrive while it runs set the dirty
+// flag and are folded into one more pass, so two quick saves can never race each other into a
+// double PUT of the same name.
 void HubServer::register_streams()
 {
-    std::string state, base, secret;
+    m_streams_dirty = true;
+    if (m_streams_worker.exchange(true)) return; // the running worker picks it up
+    const bool started = m_life.spawn([this]() {
+        for (;;) {
+            while (m_streams_dirty.exchange(false) && !m_life.stopping()) sync_streams_once();
+            m_streams_worker = false;
+            // A save that landed between the last pass and the flag going down: take it, unless
+            // another worker already has.
+            if (!m_streams_dirty.load() || m_streams_worker.exchange(true)) return;
+        }
+    });
+    if (!started) m_streams_worker = false;
+}
+
+// The name -> source map register_streams() wants go2rtc to have, from the saved Stream-tab state.
+// Names are the ones the phone app, the Stream tab and the own live view (#448) already use:
+// rname (stream_center.html's 's' + hashStr(src)) for go2rtc cameras, u1_<id> for a U1 through
+// /relay/h264, and <name>_<q> for the quality variants.
+std::map<std::string, std::string> HubServer::desired_streams()
+{
+    std::string state, secret;
     int         port = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         state  = m_state;
-        base   = go2rtc_base_locked();
         secret = m_secret;
         port   = m_admin_port; // /relay/h264 lives on the control plane, never on the tunnelled listener
     }
-    if (base.empty() || state.empty()) return;
+    std::map<std::string, std::string> want;
+    if (state.empty()) return want;
     try {
         json j = json::parse(state);
         for (const auto& h : j.value("hosts", json::array())) {
             std::string name = h.value("rname", ""), src = h.value("rsrc", "");
             if (!u1_h264_url(h).empty() && port > 0) {
-                // The U1 raw stream, fetched by go2rtc from this hub (SPS-first), never from the printer directly.
+                // The U1 raw stream, fetched by go2rtc from this hub (SPS-first), never from the
+                // printer directly. Port and secret are fixed for this hub run - and so for this
+                // go2rtc, which lives exactly as long - so the source is stable across saves.
                 name = u1_stream_name(h.value("id", ""));
                 src  = "http://127.0.0.1:" + std::to_string(port) + "/relay/h264?id=" + encode_component(h.value("id", "")) + "&lt=" + secret;
             }
             if (name.empty() || src.empty()) continue;
-            // Http::put() is a file-upload PUT (its read callback dereferences the missing
-            // file and crashes); put2() is a plain PUT with no body, which is what go2rtc wants.
-            const std::string url = base + "/api/streams?name=" + name + "&src=" + percent_encode(src);
-            std::thread([url]() {
-                for (int attempt = 0; attempt < 3; ++attempt) {
-                    bool ok = false;
-                    Http::put2(url).timeout_connect(2).timeout_max(5).on_complete([&ok](std::string, unsigned) { ok = true; }).perform_sync();
-                    if (ok) return;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // go2rtc may still be starting
-                }
-            }).detach();
+            want[name] = src;
             // Quality variants beside the source stream, when an ffmpeg exists to make them (see
-            // quality_variants()). Each is a re-encode of the stream just registered, not a second
-            // connection to the printer, so the camera still sees one consumer. Registered lazily
-            // by go2rtc - the ffmpeg process only starts when a viewer actually opens the variant,
-            // so an unused _med/_low costs nothing.
-            for (const std::string& q : quality_variants()) {
-                const std::string vurl = base + "/api/streams?name=" + name + "_" + q +
-                                         "&src=" + percent_encode(variant_src(name, q));
-                std::thread([vurl]() {
-                    // A freshly started go2rtc answers its API before it will accept an *exec*
-                    // source: for the first ~5 s a PUT of an `ffmpeg:` (or `echo:`) stream comes
-                    // back `400 streams: source not supported`, while `rtsp:` is taken at once.
-                    // The source stream above therefore registers immediately and the variants
-                    // did not, which is exactly the window the hub registers in - so on a normal
-                    // start the variants were silently absent and every _med/_low tile went black.
-                    //
-                    // Twelve attempts at 1.5 s covers ~18 s, comfortably past that window (the
-                    // old three attempts covered 4.5 s and always fell inside it). A 400 lands in
-                    // on_error, not on_complete, so `ok` stays false and the loop does retry -
-                    // it simply ran out of attempts. Logged on final failure rather than failing
-                    // silently, because a missing variant is otherwise invisible until a viewer
-                    // opens the tile.
-                    for (int attempt = 0; attempt < 12; ++attempt) {
-                        bool ok = false;
-                        Http::put2(vurl).timeout_connect(2).timeout_max(5).on_complete([&ok](std::string, unsigned) { ok = true; }).perform_sync();
-                        if (ok) return;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-                    }
-                    BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc kept refusing a quality variant; it will fall back to the source stream";
-                }).detach();
-            }
+            // quality_variants()). Each is a re-encode of the stream registered above, not a second
+            // connection to the printer, so the camera still sees one consumer. Started lazily by
+            // go2rtc - the ffmpeg process only runs while a viewer has the variant open.
+            for (const std::string& q : quality_variants()) want[name + "_" + q] = variant_src(name, q);
         }
     } catch (...) {}
+    // P1/A1 (rkind "p1") cameras are not go2rtc streams here: the phone plays them through
+    // /r/<token>/bambu (BambuCamRelay) directly, so there is nothing to register for them.
+    return want;
+}
+
+void HubServer::sync_streams_once()
+{
+    std::string base;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        base = go2rtc_base_locked();
+    }
+    if (base.empty()) return;
+    const std::map<std::string, std::string> want = desired_streams();
+
+    // go2rtc's own list. It answers its API within a second or two of starting; until then keep
+    // asking (this is the start-up registration), and give up quietly if it never does - the next
+    // save tries again, and nothing was sent that could double a connection.
+    std::map<std::string, Testing::Go2rtcLiveStream> live;
+    bool have_live = false;
+    for (int attempt = 0; attempt < 12 && !have_live; ++attempt) {
+        if (attempt > 0 && !sleep_unless_stopping(1500)) return;
+        std::string body;
+        bool        ok = false;
+        Http::get(base + "/api/streams")
+            .timeout_connect(2).timeout_max(5)
+            .on_complete([&](std::string b, unsigned) { body = std::move(b); ok = true; })
+            .on_error([](std::string, std::string, unsigned) {})
+            .perform_sync();
+        have_live = ok && Testing::parse_go2rtc_streams(body, live);
+    }
+    if (!have_live) {
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc did not list its streams; camera registration waits for the next Stream-tab save";
+        return;
+    }
+
+    const Testing::StreamSyncPlan plan = Testing::plan_stream_sync(want, m_registered_streams, &live);
+    if (plan.add.empty() && plan.replace.empty() && plan.remove.empty() && plan.adopt.empty()) return; // the common case: a save that changed no camera
+
+    for (const auto& a : plan.adopt) m_registered_streams[a.first] = a.second;
+
+    // Names whose viewers are moved off an old stream object once the new one is in place.
+    std::set<std::string> kick;
+    auto del = [&base](const std::string& name) {
+        unsigned status = 0;
+        Http::del(base + "/api/streams?src=" + encode_component(name))
+            .timeout_connect(2).timeout_max(5)
+            .on_complete([&status](std::string, unsigned s) { status = s ? s : 200; })
+            .on_error([&status](std::string, std::string, unsigned s) { status = s; })
+            .perform_sync();
+        return status == 200 || status == 404; // 404: go2rtc no longer has it, which is the goal
+    };
+    for (const std::string& name : plan.remove) {
+        if (del(name)) m_registered_streams.erase(name);
+        kick.insert(name);
+    }
+
+    // PUTs (new and replaced), retried together in rounds. A freshly started go2rtc answers its
+    // API before it will accept an *exec* source: for the first ~5 s a PUT of an `ffmpeg:` stream
+    // comes back `400 streams: source not supported`, while `rtsp:`/`http:` is taken at once.
+    // Twelve rounds at 1.5 s cover ~18 s, past that window. A 400 lands in on_error, not
+    // on_complete, so it is retried; a PUT that never succeeds is not recorded as registered, so
+    // the next save tries it again.
+    std::vector<std::pair<std::string, std::string>> pending = plan.add;
+    for (const auto& r : plan.replace) {
+        // DELETE first: a PUT over an existing name leaves the old object (and its upstream
+        // connection) running for whoever is on it - exactly the doubled connection this avoids.
+        del(r.first);
+        m_registered_streams.erase(r.first);
+        kick.insert(r.first);
+        pending.push_back(r);
+    }
+    for (int round = 0; round < 12 && !pending.empty(); ++round) {
+        if (round > 0 && !sleep_unless_stopping(1500)) return;
+        if (m_streams_dirty.load()) break; // a newer save: start over from it rather than finish this one
+        std::vector<std::pair<std::string, std::string>> failed;
+        for (const auto& p : pending) {
+            // Http::put() is a file-upload PUT (its read callback dereferences the missing file
+            // and crashes); put2() is a plain PUT with no body, which is what go2rtc wants.
+            bool ok = false;
+            Http::put2(base + "/api/streams?name=" + p.first + "&src=" + percent_encode(p.second))
+                .timeout_connect(2).timeout_max(5)
+                .on_complete([&ok](std::string, unsigned) { ok = true; })
+                .on_error([](std::string, std::string, unsigned) {})
+                .perform_sync();
+            if (ok) m_registered_streams[p.first] = p.second;
+            else failed.push_back(p);
+        }
+        pending.swap(failed);
+    }
+    if (!pending.empty() && !m_streams_dirty.load())
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc refused " << pending.size() << " camera stream(s) (" << pending.front().first
+                                   << (pending.size() > 1 ? ", ..." : "") << "); a quality variant falls back to the source stream";
+
+    // End the hub's viewer tunnels (/api/ws) on the replaced and removed streams. That is what
+    // makes go2rtc close the old producer - and the old connection to the camera - instead of
+    // keeping it for as long as a phone stays on the page. The players reconnect by themselves
+    // and land on the new stream. Never logs a source: they carry access codes.
+    int ended = 0;
+    if (!kick.empty())
+        ended = m_life.shut_tagged([&kick](const std::string& tag) {
+            return tag.compare(0, sizeof(GO2RTC_VIEWER_TAG) - 1, GO2RTC_VIEWER_TAG) == 0 && kick.count(tag.substr(sizeof(GO2RTC_VIEWER_TAG) - 1)) > 0;
+        });
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: camera streams: " << plan.add.size() << " added, " << plan.replace.size() << " replaced, "
+                            << plan.remove.size() << " removed, " << plan.adopt.size() << " already in go2rtc; "
+                            << (want.size() - plan.add.size() - plan.replace.size() - plan.adopt.size()) << " unchanged left alone"
+                            << (ended ? ", " + std::to_string(ended) + " viewer tunnel(s) on replaced/removed streams ended" : std::string());
+}
+
+// Sleep in short slices so a hub that is shutting down does not wait out a retry delay. False
+// when the hub is stopping.
+bool HubServer::sleep_unless_stopping(int ms)
+{
+    for (int waited = 0; waited < ms; waited += 100) {
+        if (m_life.stopping()) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return !m_life.stopping();
 }
 
 std::string HubServer::go2rtc_base_locked() const
@@ -5589,6 +5777,9 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
         if (r.path == GO2RTC_WS) {
             if (!player_ok) { respond(client, 404, "text/plain", "not found"); return; }
             if (go2rtc_port == 0) { respond(client, 503, "text/plain", "stream relay is not running"); return; }
+            // Labelled with its stream, so register_streams() can move this viewer off a stream
+            // whose source it replaced or removed (and so let go2rtc close the old connection).
+            tracked.tag(GO2RTC_VIEWER_TAG + query_param(r.query, "src"));
             tunnel(client, go2rtc_port, force_close(go2rtc_head(r.head, auth)), r.pending);
             return;
         }

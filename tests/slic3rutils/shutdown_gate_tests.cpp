@@ -378,6 +378,52 @@ TEST_CASE("ServerLifetime: a socket tracked after stop() is shut straight away",
     CHECK(ms_since(t0) < 2000);
 }
 
+// The hub's go2rtc stream sync (register_streams) ends the viewer tunnels of a stream whose source
+// it replaced, so go2rtc closes the old connection to the camera. Only those: every other
+// connection - another camera's viewers, the control plane - keeps running.
+TEST_CASE("ServerLifetime: shut_tagged ends only the connections with a matching tag", "[ShutdownGate]")
+{
+    ServerLifetime life;
+    tcp::acceptor  acceptor(life.io(), tcp::endpoint(boost::asio::ip::address_v4::loopback(), 0));
+    boost::asio::io_context client_io;
+    const char* const tags[] = { "go2rtc:s1", "go2rtc:s2", "" };
+    std::vector<std::unique_ptr<tcp::socket>> clients;
+    std::atomic<int> ended[3] = { { 0 }, { 0 }, { 0 } };
+    std::atomic<int> tagged { 0 };
+    for (int i = 0; i < 3; ++i) {
+        clients.push_back(std::make_unique<tcp::socket>(client_io));
+        clients.back()->connect(acceptor.local_endpoint());
+        auto server_side = std::make_shared<tcp::socket>(life.io());
+        acceptor.accept(*server_side);
+        recv_timeout(*server_side, 10000); // safety net only
+        REQUIRE(life.spawn([&life, &ended, &tagged, server_side, tag = std::string(tags[i]), i]() {
+            ServerLifetime::Tracked tracked(life, *server_side);
+            if (!tag.empty()) tracked.tag(tag);
+            ++tagged;
+            char                      buf[16];
+            boost::system::error_code e;
+            server_side->read_some(boost::asio::buffer(buf), e); // the peer never sends
+            ++ended[i];
+        }));
+    }
+    REQUIRE(wait_until([&]() { return tagged == 3; }));
+
+    const auto t0 = Clock::now();
+    CHECK(life.shut_tagged([](const std::string& t) { return t == "go2rtc:s1"; }) == 1);
+    REQUIRE(wait_until([&]() { return ended[0] == 1; }));
+    CHECK(ms_since(t0) < 2000);
+    std::this_thread::sleep_for(200ms);
+    CHECK(ended[1] == 0);
+    CHECK(ended[2] == 0);
+    CHECK_FALSE(life.stopping()); // not a shutdown: new connections are still served
+    CHECK(life.spawn([]() {}));
+
+    CHECK(life.shut_tagged([](const std::string& t) { return t == "go2rtc:nobody"; }) == 0);
+    CHECK(life.stop(3000ms));
+    CHECK(ended[1] == 1);
+    CHECK(ended[2] == 1);
+}
+
 // -------------------------------------------------------------------- LoopbackAcceptLoop ----
 //
 // EDGESLICER-9 (macOS, 2.4.5.4): RemoteAccess::stop() closed the instance API's acceptor on the
