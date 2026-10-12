@@ -204,6 +204,7 @@ set(SLIC3R_GUI_SOURCES
     #GUI/Gizmos/GLGizmoHollow.hpp
     GUI/Gizmos/GLGizmoMeasure.cpp
     GUI/Gizmos/GLGizmoMeasure.hpp
+    GUI/Gizmos/GizmoVolumeRefs.hpp
     GUI/Gizmos/GLGizmoMeshBoolean.cpp
     GUI/Gizmos/GLGizmoMeshBoolean.hpp
     GUI/Gizmos/GLGizmoMmuSegmentation.cpp
@@ -526,6 +527,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/FirstRequestGate.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
@@ -577,6 +579,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HostedProvider.cpp
     GUI/PushIds.cpp
     GUI/PushIds.hpp
+    GUI/LiveActivityPush.cpp
+    GUI/LiveActivityPush.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
     GUI/PrintHostDevicesDialog.cpp
@@ -1005,6 +1009,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintHostDevices.hpp
     Utils/PrintHostDeviceStatus.cpp
     Utils/PrintHostDeviceStatus.hpp
+    Utils/MoonrakerProgress.cpp
+    Utils/MoonrakerProgress.hpp
     Utils/PrusaLinkStatus.cpp
     Utils/PrusaLinkStatus.hpp
     Utils/Process.cpp

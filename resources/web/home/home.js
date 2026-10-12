@@ -926,8 +926,14 @@
       menu.push({ label: t('copy_link', 'Copy link'), run: () => post('vendor_copy', { key: i.key }) });
     }
     const subs = (i.subs || []).filter((s) => s.can_download);
-    if (i.can_download) menu.push({ label: t('download', 'Download'), download: true, run: () => post('vendor_download', { key: i.key }) });
-    else if (subs.length === 1) menu.push({ label: t('download', 'Download'), download: true, run: () => post('vendor_download', { key: i.key, sub: subs[0].id }) });
+    // Download & Open asks where to save, like Download, then opens the saved file in the slicer.
+    if (i.can_download) {
+      menu.push({ label: t('download', 'Download'), download: true, run: () => post('vendor_download', { key: i.key }) });
+      menu.push({ label: t('download_open', 'Download & Open'), download: true, run: () => post('vendor_download', { key: i.key, open: true }) });
+    } else if (subs.length === 1) {
+      menu.push({ label: t('download', 'Download'), download: true, run: () => post('vendor_download', { key: i.key, sub: subs[0].id }) });
+      menu.push({ label: t('download_open', 'Download & Open'), download: true, run: () => post('vendor_download', { key: i.key, sub: subs[0].id, open: true }) });
+    }
     return menu;
   }
 
@@ -1055,6 +1061,10 @@
           b.type = 'button';
           b.addEventListener('click', () => post('vendor_download', { key: i.key, sub: s.id }));
           act.appendChild(b);
+          const bo = el('button', 'btn', t('download_open', 'Download & Open'));
+          bo.type = 'button';
+          bo.addEventListener('click', () => post('vendor_download', { key: i.key, sub: s.id, open: true }));
+          act.appendChild(bo);
         }
         tr.appendChild(act);
         body.appendChild(tr);

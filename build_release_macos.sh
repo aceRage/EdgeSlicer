@@ -48,6 +48,7 @@ while getopts ":dpa:snt:xbc:1h" opt; do
         echo "   -c: Set CMake build configuration, default is Release"
         echo "   -1: Use single job for building"
         echo "   env ULTRANET_BIN_DIR: bundle the network plug-in (libbambu_networking.dylib) from this folder"
+        echo "   env CAMERA_BIN_DIR: bundle Bambu's camera files (libBambuSource.dylib + liblive555.dylib) from this folder"
         echo "   env GO2RTC_BIN_DIR / FFMPEG_BIN_DIR: bundle go2rtc / ffmpeg for the remote hub's camera video (optional GO2RTC_SHA256 / FFMPEG_SHA256 to verify)"
         exit 0
         ;;
@@ -253,6 +254,46 @@ function build_slicer() {
             codesign --force --sign - "${UN_DIR}"/*.dylib 2>/dev/null || true
         elif [ -n "${ULTRANET_BIN_DIR:-}" ]; then
             echo "Warning: ULTRANET_BIN_DIR=${ULTRANET_BIN_DIR} holds no libbambu_networking.dylib - no network plug-in bundled"
+        fi
+
+        # EdgeSlicer: Bambu's own camera files for Bambu live view (owner decision 2026-10-11), until
+        # EdgeSlicer's go2rtc live view is proven on macOS. libBambuSource.dylib holds the BambuPlayer
+        # class wxMediaCtrl2.mm plays through; liblive555.dylib is the RTSP library it loads at run
+        # time for X1/H2D/H2C cameras and must sit next to it. Both are Bambu's, unmodified, and NOT
+        # in this public repo: set CAMERA_BIN_DIR to a folder holding them (universal dylibs for a
+        # universal app). They go to Contents/Resources/cameratools - not Contents/Resources/ultranet,
+        # whose libBambuSource.dylib is UltraNet's storage module of the same name - and the app
+        # copies them into <data dir>/cameratools at start-up (PluginGuard: "The camera module").
+        # Nothing else from Bambu's package is taken (no network plug-in, no Agora cloud libraries).
+        # Local builds keep Bambu's signature; a Developer ID build re-signs them with ours
+        # (scripts/macos_sign_app.sh signs every nested Mach-O), which notarization needs.
+        if [ -n "${CAMERA_BIN_DIR:-}" ] && [ -f "${CAMERA_BIN_DIR}/libBambuSource.dylib" ]; then
+            CAM_DIR='./EdgeSlicer.app/Contents/Resources/cameratools'
+            echo "Bundling Bambu's camera files from ${CAMERA_BIN_DIR}..."
+            # The player class is what live view needs; refuse UltraNet's storage module by mistake.
+            # (Matched in the shell, not with `| grep -q`: under pipefail an early grep exit can
+            # SIGPIPE nm and read as a failure.)
+            cam_syms=$(nm -gU "${CAMERA_BIN_DIR}/libBambuSource.dylib" 2>/dev/null || true)
+            case "${cam_syms}" in
+                *'_OBJC_CLASS_$_BambuPlayer'*) ;;
+                *)
+                    echo "Error: ${CAMERA_BIN_DIR}/libBambuSource.dylib does not export BambuPlayer - not Bambu's camera module"
+                    exit 1
+                    ;;
+            esac
+            rm -rf "${CAM_DIR}"
+            mkdir -p "${CAM_DIR}"
+            cp -f "${CAMERA_BIN_DIR}/libBambuSource.dylib" "${CAM_DIR}/"
+            if [ -f "${CAMERA_BIN_DIR}/liblive555.dylib" ]; then
+                cp -f "${CAMERA_BIN_DIR}/liblive555.dylib" "${CAM_DIR}/"
+            else
+                echo "Warning: ${CAMERA_BIN_DIR} has no liblive555.dylib - RTSP cameras (X1/H2D/H2C) will not play"
+            fi
+            for f in "${CAM_DIR}"/*.dylib; do
+                echo "  $(basename "$f"): $(lipo -archs "$f" 2>/dev/null || echo '?')"
+            done
+        elif [ -n "${CAMERA_BIN_DIR:-}" ]; then
+            echo "Warning: CAMERA_BIN_DIR=${CAMERA_BIN_DIR} holds no libBambuSource.dylib - no camera files bundled"
         fi
 
         # EdgeSlicer: the remote hub's camera tools. Set GO2RTC_BIN_DIR (a folder holding an
