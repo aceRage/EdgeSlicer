@@ -224,11 +224,18 @@ void CrealityPrint::start_print(const std::string &filename) const
         
         ws.write(net::buffer(to_string(j2)));
 
+        // K1-family firmware closes the WebSocket right after accepting the
+        // start command, so a blocking read here surfaces a benign
+        // "End of file [asio.misc:2]" even though the print already started
+        // (the command is delivered by write()). Read best-effort, ignore errors.
         beast::flat_buffer buffer;
+        beast::error_code  read_ec;
+        ws.read(buffer, read_ec);
 
-        ws.read(buffer);
-
-        ws.close(websocket::close_code::normal);
+        // Same reason: the printer may have already closed the connection. A close
+        // error here is not a failure - the start command was sent above.
+        beast::error_code close_ec;
+        ws.close(websocket::close_code::normal, close_ec);
     } catch(std::exception const& e) {
         std::cerr << "Error: " << e.what() << std::endl;
     }
