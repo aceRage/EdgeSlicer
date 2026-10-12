@@ -41,6 +41,7 @@
 #  include <unistd.h>
 #  ifdef __APPLE__
 #    include <libproc.h>
+#    include <mach/mach.h>
 #  endif
 #endif
 
@@ -662,6 +663,15 @@ inline long spawn_child_posix(const std::vector<std::string>& args, const std::s
     }
     if (pid == 0) {
         ::setpgid(0, 0);
+#ifdef __APPLE__
+        // The crash reporter (crashpad) is this process's exception port, and a forked child keeps
+        // it across exec: go2rtc then held a send right to the hub's crashpad_handler, which waits
+        // for its last sender to go - so the handler outlived the hub for as long as go2rtc did, and
+        // a go2rtc crash would have been reported as the hub's. One mask per call: a mask this
+        // kernel does not know fails on its own instead of taking the others with it.
+        for (int m : { EXC_MASK_CRASH, EXC_MASK_RESOURCE, EXC_MASK_GUARD })
+            task_set_exception_ports(mach_task_self(), (exception_mask_t) m, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+#endif
         signal(SIGPIPE, SIG_DFL);
         sigset_t none;
         sigemptyset(&none); // no ::, macOS defines sigemptyset as a macro
@@ -717,6 +727,36 @@ inline void terminate_child_posix(long pid, int grace_ms = 2000)
     ::kill((pid_t) pid, SIGKILL);
     int status = 0;
     while (::waitpid((pid_t) pid, &status, 0) < 0 && errno == EINTR) {}
+}
+
+// True when no process is left in process group `pgid` (or it never existed).
+inline bool process_group_empty_posix(long pgid)
+{
+    return pgid > 1 && ::kill(-(pid_t) pgid, 0) != 0 && errno == ESRCH;
+}
+
+// terminate_child_posix() for a child that leads its own process group (spawn_child_posix), with
+// everything it started: go2rtc runs ffmpeg for the quality variants, and that ffmpeg is in
+// go2rtc's group, not ours. SIGTERM to the whole group, up to `grace_ms` for all of it to go, then
+// SIGKILL to whatever is left; the child itself is always reaped. Once the leader is reaped the
+// group id stays reserved for as long as any member lives, so the SIGKILL cannot reach a stranger.
+inline void terminate_child_group_posix(long pid, int grace_ms = 2000)
+{
+    if (pid <= 1) return;
+    ::kill(-(pid_t) pid, SIGTERM);
+    ::kill((pid_t) pid, SIGTERM); // in case it ever left its group
+    bool leader_gone = false;
+    for (int waited = 0; waited < grace_ms; waited += 20) {
+        if (!leader_gone) leader_gone = reap_child_posix(pid);
+        if (leader_gone && process_group_empty_posix(pid)) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ::kill(-(pid_t) pid, SIGKILL);
+    if (!leader_gone) {
+        ::kill((pid_t) pid, SIGKILL);
+        int status = 0;
+        while (::waitpid((pid_t) pid, &status, 0) < 0 && errno == EINTR) {}
+    }
 }
 
 #endif // !_WIN32

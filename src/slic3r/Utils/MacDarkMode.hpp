@@ -26,6 +26,9 @@ void openFolderForFile(wxString const & file);
 void mac_make_accessory_app();
 // Bring this process to the front (an accessory app's dialogs open behind the active app).
 void mac_activate_app();
+// Call `fn` on the main thread when NSWorkspaceWillPowerOffNotification arrives (logout, restart
+// or shut down was chosen). The phone hub quits on it; registered once for the life of the process.
+void mac_on_power_off(void (*fn)());
 // Delete the named cookies that would be sent to `uri` (Snapmaker's id.snapmaker.com web session)
 // from the WebKit data store every web view of the slicer shares. Only those cookies, never the
 // rest of the store. Asynchronous: `done` runs once on the main thread with how many were deleted
