@@ -418,3 +418,77 @@ TEST_CASE("[FirstRequest] held commands are reported not sent with the real reas
         CHECK(h.not_sent[0] == "system/ledctrl: a new selection replaced the session they were waiting for");
     }
 }
+
+// ---- dials that no selection announced, and a refused first dial ----
+//
+// Hand test on the build with #436 (log 2026-10-11-19-41-39): the printer restored from the last
+// session was dialled when the Device tab opened; 117 ms later the plug-in reported the dial
+// failed (the printer's broker refused it while the watch session the dial had just replaced was
+// still closing). That ended the hold, so get_version and four extrusion_cali_get polls went to a
+// plug-in with no session (code -1) until the printer was dialled again 2.7 s later.
+
+TEST_CASE("[FirstRequest] a dial started without a selection holds too", "[FirstRequest]")
+{
+    // MachineObject::connect arms the gate when nothing did (dial_started).
+    GateHost h;
+    h.lan_up_at = 1400;
+    h.report(h.gate.dial_started(1), 1);
+    h.status_request(100, "info/get_version");
+    h.publish(300, "print/extrusion_cali_get", true);
+    CHECK(h.refused == 0);
+    // A second dial_started while dialling (the selection's own connect) changes nothing.
+    CHECK(h.gate.dial_started(350).commands.empty());
+    CHECK(h.gate.queued() == 1);
+    h.lan_event(1400);
+    CHECK(h.refused == 0);
+    CHECK(h.not_sent.empty());
+    REQUIRE(h.sent.size() == 3);
+    CHECK(h.sent[0] == "print/extrusion_cali_get");
+}
+
+TEST_CASE("[FirstRequest] a refused first dial is dialled once more, still holding", "[FirstRequest]")
+{
+    GateHost h;
+    h.lan_up_at = 3000;
+    h.gate.select(1, false);
+    REQUIRE(h.gate.dial_failed(117));          // first refusal: dial again, keep holding
+    h.status_request(125, "info/get_version");
+    h.publish(304, "print/extrusion_cali_get", true);
+    h.publish(587, "print/extrusion_cali_get", true);
+    h.publish(1090, "print/extrusion_cali_get", true);
+    h.publish(1200, "system/ledctrl", false);
+    CHECK(h.gate.dial_started(1617).commands.empty()); // the re-dial keeps what is held
+    h.publish(2100, "print/extrusion_cali_get", true);
+    CHECK(h.refused == 0);
+    h.lan_event(3000);
+    CHECK(h.refused == 0);
+    CHECK(h.not_sent.empty());
+    REQUIRE(h.sent.size() == 4);
+    CHECK(h.sent[0] == "system/ledctrl");
+    CHECK(h.sent[1] == "print/extrusion_cali_get");
+    CHECK(h.sent[2] == "pushing/pushall");
+    CHECK(h.sent[3] == "info/get_version");
+}
+
+TEST_CASE("[FirstRequest] a second refusal reports the held commands not sent", "[FirstRequest]")
+{
+    GateHost h;
+    h.early_requests();
+    REQUIRE(h.gate.dial_failed(200));
+    CHECK_FALSE(h.gate.dial_failed(2000)); // the one re-dial was refused too
+    h.report(h.gate.session_down(), 2000);
+    REQUIRE(h.not_sent.size() == 2);
+    CHECK(h.not_sent[0] == "system/ledctrl: the session did not come up");
+    // A new selection gets its own re-dial.
+    h.gate.select(5000, false);
+    CHECK(h.gate.dial_failed(5100));
+}
+
+TEST_CASE("[FirstRequest] an established session that drops is not re-dialled by the gate", "[FirstRequest]")
+{
+    GateHost h;
+    h.lan_up_at = 500;
+    h.gate.select(1, false);
+    h.lan_event(500);
+    CHECK_FALSE(h.gate.dial_failed(60000)); // not dialling: the reconnect ladder owns this
+}
