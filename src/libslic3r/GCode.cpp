@@ -1261,11 +1261,18 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     if (should_travel_to_tower || gcodegen.m_need_change_layer_lift_z) {
         // FIXME: It would be better if the wipe tower set the force_travel flag for all toolchanges,
         // then we could simplify the condition and make it more readable.
-        auto type = ZHopType(gcodegen.m_config.z_hop_types.get_at(gcodegen.m_writer.extruder()->id()));
-        if (type == ZHopType::zhtAuto) {
-            type = ZHopType::zhtSpiral;
+
+        // Orca #15038: pass the configured lift type. Slope and spiral both need a known head
+        // position: with an unknown one the writer emits neither, and the head would travel to
+        // the tower before it lifts. Use a normal lift then.
+        LiftType lift_type = LiftType::NormalLift;
+        if (gcodegen.writer().extruder() != nullptr && gcodegen.writer().is_current_position_clear()) {
+            auto type = ZHopType(gcodegen.m_config.z_hop_types.get_at(gcodegen.m_writer.extruder()->id()));
+            if (type == ZHopType::zhtAuto) {
+                type = ZHopType::zhtSpiral;
+            }
+            lift_type = gcodegen.to_lift_type(type);
         }
-        auto lift_type = gcodegen.to_lift_type(type);
 
         if (gcodegen.m_config.z_hop_when_prime.get_at(gcodegen.m_writer.extruder()->id())) {
             gcode += gcodegen.retract(false, false, lift_type);
@@ -1649,8 +1656,10 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
             auto type = ZHopType(gcodegen.m_config.z_hop_types.get_at(gcodegen.m_writer.extruder()->id()));
             if (type == ZHopType::zhtAuto)
                 type = ZHopType::zhtSpiral;
+            // Orca #15038 (as in append_tcr2): slope and spiral need a known head position.
+            const LiftType lift_type = gcodegen.writer().is_current_position_clear() ? gcodegen.to_lift_type(type) : LiftType::NormalLift;
             if (gcodegen.m_config.z_hop_when_prime.get_at(gcodegen.m_writer.extruder()->id()))
-                gcode += gcodegen.retract(false, false, gcodegen.to_lift_type(type));
+                gcode += gcodegen.retract(false, false, lift_type);
         }
 
         gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
