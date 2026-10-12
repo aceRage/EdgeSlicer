@@ -464,6 +464,11 @@ std::string interruption_level(const DevicePrefs& d, const std::string& kind)
     return d.level_hint && listed(d, kind) ? std::string("time-sensitive") : std::string();
 }
 
+bool wakes_app(const std::string& kind)
+{
+    return RemoteEvents::is_kind(kind);
+}
+
 } // namespace policy
 
 static json prefs_json(const policy::DevicePrefs& p)
@@ -680,8 +685,27 @@ static PushRequest request_for(const Device& d, const json& event, const std::st
     req.thread_id   = thread_for(pid);
     req.priority    = policy::priority(d.prefs, ev_str(event, "severity", "info"), kind);
     req.ttl_seconds = policy::ttl(kind);
-    if (d.platform == "apns") req.interruption_level = policy::interruption_level(d.prefs, kind);
+    if (d.platform == "apns") {
+        req.interruption_level = policy::interruption_level(d.prefs, kind);
+        req.content_available  = policy::wakes_app(kind);
+    }
     return req;
+}
+
+// One line per push, so the owner can line the hub's sends up against the phone's Console log
+// (category LiveActivity) when measuring the lag: which device (its short random id, never the
+// token), the kind, priority, whether it asked for the background wake, the outcome, and how old
+// the event was when it left (`age`: now minus the event's own time, i.e. watcher-to-send delay).
+static void log_sent(const Device& d, const json& event, const PushRequest& req, const PushResult& r, bool hosted, bool queued)
+{
+    long long age_ms = 0;
+    if (event.is_object() && event.contains("time") && event["time"].is_number_integer())
+        age_ms = std::max(0LL, now_ms() - event["time"].get<long long>());
+    BOOST_LOG_TRIVIAL(info) << "AppPush: sent " << ev_str(event, "kind") << " to " << d.platform << " device " << d.id
+                            << " via " << (hosted ? "hosted" : "own keys") << ": priority " << req.priority
+                            << ", wake " << (req.content_available ? 1 : 0) << ", "
+                            << (queued ? std::string("queued") : (r.ok ? std::string("ok") : "failed")) << " (HTTP "
+                            << r.status << "), event age " << age_ms / 1000 << " s";
 }
 
 // Encrypt for one device. The whole reason this module can exist without new crypto: an app's
@@ -834,13 +858,18 @@ void deliver(const json& event)
         if (hosted) {
             // No in-process 1 s / 3 s retries here: the hosted provider has its own bounded queue
             // (5 s, 30 s, 2 min, 5 min... up to 30 min or the TTL) that outlives a short outage.
-            bool             queued = false;
-            const PushResult r      = g_hosted->deliver(d.id, request_for(d, event, blob), queued);
+            bool              queued = false;
+            const PushRequest req    = request_for(d, event, blob);
+            const PushResult  r      = g_hosted->deliver(d.id, req, queued);
+            log_sent(d, event, req, r, true, queued);
             if (queued) note_waiting(d, r);
             else record(d, r);
             continue;
         }
-        record(d, send_with_retries(p, request_for(d, event, blob), d.platform == "apns" ? apns_cfg : fcm_cfg));
+        const PushRequest req = request_for(d, event, blob);
+        const PushResult  r   = send_with_retries(p, req, d.platform == "apns" ? apns_cfg : fcm_cfg);
+        log_sent(d, event, req, r, false, false);
+        record(d, r);
     }
 }
 
@@ -893,7 +922,8 @@ std::pair<int, std::string> register_device(const std::string& body)
     const policy::DevicePrefs prefs = policy::read_prefs(in);
     // What this hub understands, so the app can tell the person when the PC needs an update
     // before its own notification levels take full effect.
-    const json features = json::array({ "priority_kinds", "all_events", "level_hint", "push_test" });
+    // "wake": APNs alerts for print events carry content-available (policy::wakes_app).
+    const json features = json::array({ "priority_kinds", "all_events", "level_hint", "push_test", "wake" });
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -1272,6 +1302,7 @@ std::pair<int, std::string> test_device(const std::string& body)
     return { 200, json({ { "ok", r.ok }, { "status", r.status }, { "host", r.host }, { "error", scrub(r.error, d) },
                          { "kind", kind }, { "severity", e["severity"] }, { "priority", req.priority },
                          { "ttl", req.ttl_seconds }, { "interruption_level", req.interruption_level },
+                         { "content_available", req.content_available },
                          { "mode", hosted ? "hosted" : "own" } }).dump() };
 }
 
