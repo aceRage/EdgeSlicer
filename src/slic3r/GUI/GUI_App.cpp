@@ -2532,7 +2532,9 @@ void GUI_App::init_networking_callbacks()
                         if (state == ConnectStatus::ConnectStatusOk)
                             obj->note_session_up("LAN");
                         else
-                            obj->note_session_down();
+                            // A refused first dial is dialled once more with its requests still
+                            // held; anything else reports the session down.
+                            obj->note_dial_failed();
                     }
                     if (MachineObject* local = m_device_manager->get_local_machine(dev_id); local && local != obj)
                         local->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);

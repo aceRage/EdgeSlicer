@@ -52,6 +52,7 @@ add_executable(${_TEST_NAME}_tests
     hms_actions_tests.cpp
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
+    gizmo_volume_refs_tests.cpp
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
     bambu_config_compat_tests.cpp
@@ -93,6 +94,7 @@ add_executable(${_TEST_NAME}_tests
     ff_device_pid_tests.cpp
     emboss_font_search_tests.cpp
     printers_monitor_tests.cpp
+    moonraker_progress_tests.cpp
     # Hidden GLFW window + forward-compatible 3.3 core context; skips itself where none can be made.
     gl_core_profile_tests.cpp
     libvgcode_input_tests.cpp
