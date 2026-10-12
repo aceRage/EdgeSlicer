@@ -1250,7 +1250,7 @@ TEST_CASE("The BambuStudio generator flag is set only for a BambuStudio Applicat
     bool is_bambu = true;
     CHECK_FALSE(load_flag(is_bambu));
 
-    auto stamp = [](const std::string &value) {
+    auto stamp = [&path](const std::string &value) {
         return rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
             if (!boost::algorithm::ends_with(name, "3dmodel.model"))
                 return false;
