@@ -484,7 +484,7 @@ Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perim
     // Split the loops into lines with different config, and fuzzy them separately
     fuzzified = polygon;
     for (const auto& r : fuzzified_regions) {
-        const auto splitted = Algorithm::split_line(fuzzified, r.second, true);
+        auto splitted = Algorithm::split_line(fuzzified, r.second, true);
         if (splitted.empty()) {
             // No intersection, skip
             continue;
@@ -495,6 +495,14 @@ Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perim
             // The entire polygon is fuzzified
             fuzzy_polyline(fuzzified.points, true, slice_z, r.first, support);
         } else {
+            // Start from a non-clipped junction so wrapped clipped segments do
+            // not need an artificial reconnection across the seam.
+            const auto first_non_clipped = std::find_if(splitted.begin(), splitted.end(), [](const Algorithm::SplitLineJunction& j) {
+                return !j.clipped;
+            });
+            if (first_non_clipped != splitted.begin()) {
+                std::rotate(splitted.begin(), first_non_clipped, splitted.end());
+            }
             Points segment;
             segment.reserve(splitted.size());
             fuzzified.points.clear();
