@@ -18,7 +18,6 @@
         "Direct Drive Standard"
     ],
     "standby_temperature_delta": "-100",
-    "version": "2.1.1.0",
     "wipe_tower_extra_rib_length": "0",
     "wipe_tower_wall_type": "rib",
     "elefant_foot_compensation": "0.1",
@@ -37,7 +36,6 @@
     "instantiation": "true",
     "internal_solid_infill_pattern": "rectilinear",
     "internal_solid_infill_speed": "230",
-    "is_custom_defined": "0",
     "layer_height": "0.24",
     "max_travel_detour_distance": "300",
     "name": "0.24mm Standard @FF C5",
@@ -59,5 +57,6 @@
     "support_top_z_distance": "0.2",
     "support_type": "tree(auto)",
     "wipe_tower_cone_angle": "12",
-    "wipe_tower_extra_spacing": "120%"
+    "wipe_tower_extra_spacing": "120%",
+    "type": "process"
 }
