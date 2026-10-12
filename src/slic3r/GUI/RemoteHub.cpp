@@ -40,7 +40,9 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <deque>
 #include <functional>
@@ -1602,6 +1604,58 @@ std::string Testing::camera_for_printer(const std::string& printer_id, const std
     return {};
 }
 
+// ---- the Device tab's own live view (spike) ------------------------------------------------
+// See RemoteHub.hpp. These mirror stream_center.html exactly, because sharing one go2rtc stream
+// with the phone depends on both sides arriving at the same name for the same camera.
+std::string Testing::js_encode_uri_component(const std::string& s)
+{
+    static const char* hx = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        // encodeURIComponent leaves A-Z a-z 0-9 - _ . ! ~ * ' ( ) as they are.
+        if (std::isalnum(c) || (c != 0 && std::strchr("-_.!~*'()", (char) c) != nullptr)) out += (char) c;
+        else { out += '%'; out += hx[c >> 4]; out += hx[c & 15]; }
+    }
+    return out;
+}
+
+std::string Testing::js_hash_str(const std::string& s)
+{
+    // FNV-1a 32 as hashStr() computes it (charCodeAt == the byte for ASCII), printed like
+    // Number.prototype.toString(16): lower case, no leading zeros.
+    uint32_t h = 0x811c9dc5u;
+    for (unsigned char c : s) { h ^= c; h *= 0x01000193u; }
+    std::ostringstream os;
+    os << std::hex << h;
+    return os.str();
+}
+
+Testing::OwnCameraStream Testing::own_camera_stream(const std::string& kind, const std::string& ip, const std::string& code, int relay_port)
+{
+    OwnCameraStream out;
+    // The same address and code rules BambuCamRelay applies, so nothing reaches go2rtc's config (it
+    // writes registered streams back into go2rtc.yaml) or a URL that the relay would refuse anyway.
+    if (ip.empty() || ip.size() > 253 ||
+        ip.find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.:-_") != std::string::npos)
+        return out;
+    if (code.empty() || code.size() > 32) return out;
+    for (unsigned char c : code)
+        if (c < 0x21 || c > 0x7e) return out;
+    if (kind == "rtsps" || kind == "rtsp") {
+        out.src  = kind == "rtsps" ? "rtspx://bblp:" + js_encode_uri_component(code) + "@" + ip + ":322/streaming/live/1"
+                                   : "rtsp://bblp:" + js_encode_uri_component(code) + "@" + ip + "/streaming/live/1";
+        out.name = "s" + js_hash_str(out.src);
+        out.mode = "mse";
+    } else if (kind == "local") {
+        if (relay_port <= 0 || relay_port > 65535) return out;
+        out.src  = "http://127.0.0.1:" + std::to_string(relay_port) + "/bambu?ip=" + js_encode_uri_component(ip) + "&code=" + js_encode_uri_component(code);
+        // Named by the camera, not by the relay's port: the port changes with every hub run.
+        out.name = "b" + js_hash_str("bambu6000|" + ip + "|" + code);
+        out.mode = "mjpeg";
+    }
+    return out;
+}
+
 static bool row_has_filament(const json& row)
 {
     if (row.contains("ams") && row["ams"].is_array())
@@ -2739,6 +2793,7 @@ private:
     void  register_streams();
     std::string go2rtc_base_locked() const; // http://user:pass@127.0.0.1:port ("" while go2rtc is down); m_mutex held
     std::pair<int, std::string> onvif_discover(); // GET /api/onvif on go2rtc: {status, body}
+    std::pair<int, std::string> register_own_camera(const std::string& kind, const std::string& ip, const std::string& code); // spike: POST /hub/camera
     std::string state_for_phone();
     bool  lookup_host(const std::string& id, std::string& ip, std::string& code);
     std::string relay_h264_url(const std::string& id); // the U1 raw stream behind /relay/h264?id=, or ""
@@ -4329,6 +4384,56 @@ std::pair<int, std::string> HubServer::onvif_discover()
     return { status == 0 ? 502 : status, body };
 }
 
+// Spike (opt-in "liveview_go2rtc"): the Device tab's camera panel asks for a go2rtc stream for one
+// Bambu camera. The Stream tab's list (m_state, streams.json) is not touched, so the phone's wall
+// and the hub page stay exactly as they were.
+//
+// A stream that already exists is left alone. That matters: a second PUT of the same name makes
+// go2rtc build a fresh stream object, and the next viewer then opens a SECOND connection to the
+// printer while the first one is still running (measured with go2rtc 1.9.14 against a loopback
+// MJPEG source - tests/plan_own_camera_view.md). Reusing the existing stream keeps one printer
+// connection however many viewers there are, which is what printers with a client limit need.
+std::pair<int, std::string> HubServer::register_own_camera(const std::string& kind, const std::string& ip, const std::string& code)
+{
+    std::string base;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        base = go2rtc_base_locked();
+    }
+    if (base.empty()) return { 503, json_error("the stream relay (go2rtc) is not running; see hub.log") };
+    const int relay = kind == "local" ? BambuCamRelay::get().port() : 0;
+    if (kind == "local" && relay == 0) return { 503, json_error("the Bambu camera relay is not running") };
+    const Testing::OwnCameraStream s = Testing::own_camera_stream(kind, ip, code, relay);
+    if (s.name.empty()) return { 400, json_error("unsupported camera type, address or access code") };
+
+    bool exists = false;
+    Http::get(base + "/api/streams?src=" + s.name)
+        .timeout_connect(2).timeout_max(5)
+        .on_complete([&exists](std::string, unsigned status) { exists = status == 200; })
+        .on_error([](std::string, std::string, unsigned) {})
+        .perform_sync();
+    bool ok = exists;
+    if (!exists) {
+        const std::string url = base + "/api/streams?name=" + s.name + "&src=" + percent_encode(s.src);
+        for (int attempt = 0; attempt < 6 && !ok; ++attempt) {
+            if (attempt > 0) std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // go2rtc may still be starting
+            Http::put2(url).timeout_connect(2).timeout_max(5)
+                .on_complete([&ok](std::string, unsigned) { ok = true; })
+                .on_error([](std::string, std::string, unsigned) {})
+                .perform_sync();
+        }
+    }
+    // Never log the source: it carries the access code.
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: own live view stream " << s.name << " (" << kind << ", " << s.mode << ") "
+                            << (exists ? "already registered, reused" : ok ? "registered" : "could not be registered");
+    if (!ok) return { 502, json_error("go2rtc refused the camera stream") };
+    json j;
+    j["name"]   = s.name;
+    j["mode"]   = s.mode;
+    j["reused"] = exists;
+    return { 200, j.dump() };
+}
+
 // The phone only sees ids, aliases, the source kind, go2rtc stream names and direct
 // printer-page URLs. Addresses, access codes and camera credentials stay here.
 std::string HubServer::state_for_phone()
@@ -4853,6 +4958,21 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
     } else if (r.path == "/hub/onvif" && r.method == "GET") {
         const auto res = onvif_discover();
         respond(client, res.first, res.first == 200 ? "application/json" : "text/plain; charset=utf-8", res.second);
+    } else if (r.path == "/hub/camera" && r.method == "POST") {
+        // Spike: the Device tab's own live view (see register_own_camera). JSON body
+        // {kind, ip, code}; the access code never travels in a URL.
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("request too large")); return; }
+        std::string kind, ip, code;
+        try {
+            const json j = json::parse(body);
+            kind = j.value("kind", std::string());
+            ip   = j.value("ip", std::string());
+            code = j.value("code", std::string());
+        } catch (...) { respond_json(client, 400, json_error("bad JSON")); return; }
+        const auto res = register_own_camera(kind, ip, code);
+        respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/qrcode.js" && r.method == "GET") {
         std::string js;
         if (serve_web_asset(client, "qrcode.js", js)) respond(client, 200, "application/javascript", js);
@@ -6394,6 +6514,27 @@ bool post_state(const std::string& state_json)
         .on_complete([&ok](std::string, unsigned status) { ok = status == 200; })
         .perform_sync();
     return ok;
+}
+
+std::pair<int, std::string> register_own_camera(const std::string& kind, const std::string& ip, const std::string& code)
+{
+    const HubFile hf = hub_file();
+    if (hf.admin_port == 0) return { 503, json_error("the hub is not running") };
+    json req;
+    req["kind"] = kind;
+    req["ip"]   = ip;
+    req["code"] = code;
+    int         status = 0;
+    std::string body;
+    Http::post("http://127.0.0.1:" + std::to_string(hf.admin_port) + "/hub/camera")
+        .timeout_connect(1).timeout_max(20) // a cold go2rtc can take several seconds to accept a stream
+        .header("Content-Type", "application/json")
+        .header("X-Hub-Secret", hf.secret)
+        .set_post_body(req.dump())
+        .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+        .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? json_error(err) : b; })
+        .perform_sync();
+    return { status == 0 ? 502 : status, body };
 }
 
 bool post_event(const std::string& event_json)

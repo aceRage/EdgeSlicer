@@ -638,3 +638,57 @@ TEST_CASE("merge_printer_row never overrides a row that reports filament of its 
     const MergedPrinterRow m = merge_printer_row(LIVE_ROW, 100, false, other, 200);
     REQUIRE(nlohmann::json::parse(m.row)["ams"][0]["trays"][0]["type"] == "ABS");
 }
+
+// ---- the Device tab's own live view (spike, "liveview_go2rtc") ------------------------------
+// The names below were produced by stream_center.html's own hashStr()/encodeURIComponent() in
+// node, so a camera on the Stream tab / phone wall and the Device tab's live view of the same
+// printer are one go2rtc stream (one connection to the printer), not two.
+
+TEST_CASE("js_hash_str matches stream_center.html's hashStr", "[RemoteHub][own-camera]")
+{
+    REQUIRE(js_hash_str("") == "811c9dc5");
+    REQUIRE(js_hash_str("a") == "e40c292c");
+    // Number.toString(16) has no leading zeros, and neither may we.
+    REQUIRE(js_hash_str("x2") == "f630cef");
+}
+
+TEST_CASE("js_encode_uri_component matches encodeURIComponent", "[RemoteHub][own-camera]")
+{
+    REQUIRE(js_encode_uri_component("-_.!~*'()az09 %&/=?") == "-_.!~*'()az09%20%25%26%2F%3D%3F");
+}
+
+TEST_CASE("own_camera_stream names an RTSPS camera the way the Stream tab does", "[RemoteHub][own-camera]")
+{
+    const OwnCameraStream a = own_camera_stream("rtsps", "192.168.1.50", "12345678", 0);
+    REQUIRE(a.src == "rtspx://bblp:12345678@192.168.1.50:322/streaming/live/1");
+    REQUIRE(a.name == "se6b733ea");
+    REQUIRE(a.mode == "mse");
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "ab(c)d!*", 0).name == "sc1ebfb8f");
+    const OwnCameraStream b = own_camera_stream("rtsps", "printer.local", "a&c/d=", 0);
+    REQUIRE(b.src == "rtspx://bblp:a%26c%2Fd%3D@printer.local:322/streaming/live/1");
+    REQUIRE(b.name == "s268fa2e4");
+}
+
+TEST_CASE("own_camera_stream sends a P1/A1 camera through the hub's MJPEG relay", "[RemoteHub][own-camera]")
+{
+    const OwnCameraStream a = own_camera_stream("local", "10.0.0.9", "abc", 52540);
+    REQUIRE(a.src == "http://127.0.0.1:52540/bambu?ip=10.0.0.9&code=abc");
+    REQUIRE(a.mode == "mjpeg");
+    REQUIRE(a.name == "b4e7ecdb0");
+    // Named by the camera, not by the relay port, which changes with every hub run.
+    REQUIRE(own_camera_stream("local", "10.0.0.9", "abc", 60000).name == a.name);
+    // No relay, no stream.
+    REQUIRE(own_camera_stream("local", "10.0.0.9", "abc", 0).name.empty());
+}
+
+TEST_CASE("own_camera_stream refuses what BambuCamRelay would refuse", "[RemoteHub][own-camera]")
+{
+    REQUIRE(own_camera_stream("rtsps", "", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7/x", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7@evil", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", std::string(33, 'a'), 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "abc def", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "abc\ndef", 0).name.empty());
+    REQUIRE(own_camera_stream("tutk", "10.0.0.7", "12345678", 0).name.empty());
+}

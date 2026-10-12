@@ -74,6 +74,10 @@ Info new_link();                                        // replace the phone lin
                                                         // saved links, QR codes and home-screen
                                                         // icons made from the old one stop working
 bool post_state(const std::string& json); // full Stream-tab state; remembered for a hub started later
+// Spike (opt-in "liveview_go2rtc"): make sure the hub's go2rtc has a stream for this Bambu camera
+// (see Testing::own_camera_stream) without touching the Stream tab's camera list. Returns the HTTP
+// status and the hub's JSON answer ({"name","mode"} on 200, {"error"} otherwise).
+std::pair<int, std::string> register_own_camera(const std::string& kind, const std::string& ip, const std::string& code);
 // The camera list the Stream tab last saved: from the running hub, else what this process last
 // posted, else <datadir>/hub/streams.json. Empty when there is none. Every window's Stream tab
 // opens with this rather than its own localStorage, which is per port and so per window.
@@ -217,6 +221,31 @@ struct CameraCandidate
 // also missing it.
 std::string camera_for_printer(const std::string& printer_id, const std::string& printer_ip,
                                const std::vector<CameraCandidate>& cams);
+
+// ---- the Device tab's own live view (spike, opt-in "liveview_go2rtc") ----
+// The go2rtc stream a Bambu printer's camera plays through, for the desktop camera panel.
+//
+// The name is the one stream_center.html gives the same camera ('s' + hashStr(src), FNV-1a 32 in
+// unpadded lower-case hex, over src built with encodeURIComponent), so a printer that is also on
+// the Stream tab / phone camera wall is ONE go2rtc stream with one connection to the printer, not
+// a second one. That only holds when the Stream tab entry used the same address and access code.
+//
+//   kind "rtsps" (X1/X1C/X1E/H2D/H2C/H2S/P2S, LAN Liveview on): rtspx:// to port 322, played as MSE.
+//   kind "rtsp"  (plain RTSP, port 554 - rare): rtsp://, played as MSE.
+//   kind "local" (P1/A1, the JPEG-over-TLS stream on port 6000): go2rtc pulls the hub's own
+//                BambuCamRelay MJPEG (http://127.0.0.1:<relay_port>/bambu?...), played as mjpeg -
+//                go2rtc then fans one relay connection out to every viewer. relay_port 0 = none.
+// Anything invalid (an address with characters BambuCamRelay refuses, an empty or over-long
+// code, an unknown kind) gives an empty `name`.
+struct OwnCameraStream
+{
+    std::string name;
+    std::string src;
+    std::string mode; // the player's ?mode=: "mse" or "mjpeg"
+};
+OwnCameraStream own_camera_stream(const std::string& kind, const std::string& ip, const std::string& code, int relay_port);
+std::string     js_encode_uri_component(const std::string& s); // JavaScript's encodeURIComponent, byte-wise
+std::string     js_hash_str(const std::string& s);             // stream_center.html's hashStr (ASCII input)
 
 // ---- one printer reported by several windows (poll_printers) ----
 // Every slicer window lists every Bambu printer it knows, but a Bambu LAN printer reports only to

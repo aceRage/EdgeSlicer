@@ -7,6 +7,12 @@
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
 #include "PluginGuard.hpp"
+#include "RemoteHub.hpp"
+
+#include <nlohmann/json.hpp>
+#include <wx/webview.h>
+#include <wx/weakref.h>
+#include <thread>
 
 #include <boost/lexical_cast.hpp>
 #include <boost/log/trivial.hpp>
@@ -281,6 +287,13 @@ void MediaPlayCtrl::Play()
         return;
     }
 
+    // Spike (opt-in "liveview_go2rtc"): EdgeSlicer's own live view. With the preference on, the
+    // Bambu player (BambuSource / live555) is never asked for anything, not even as a fallback.
+    if (m_own_view) {
+        play_own();
+        return;
+    }
+
     NetworkAgent *agent = wxGetApp().getAgent();
     std::string  agent_version = agent ? agent->get_version() : "";
     if (m_lan_proto > MachineObject::LVL_Disable && (m_lan_mode || !m_remote_proto) && !m_disable_lan && !m_lan_ip.empty()) {
@@ -373,6 +386,10 @@ void start_ping_test();
 
 void MediaPlayCtrl::Stop(wxString const &msg, wxString const &msg2)
 {
+    if (m_own_busy) { // spike: the own live view never touches the Bambu player, stopping included
+        stop_own(msg);
+        return;
+    }
     int last_state = m_last_state;
 
     if (m_last_state != MEDIASTATE_IDLE) {
@@ -573,6 +590,111 @@ void MediaPlayCtrl::ultra_pause(bool pause)
     // Ultra: quiesce the DirectShow video graph around the modal print-send flow.
     if (pause) Stop();
     else       Play();
+}
+
+// ---- Spike: EdgeSlicer's own live view (opt-in "liveview_go2rtc") ------------------------------
+// The camera plays through the hub's go2rtc - the same relay the phone uses - in a web view that
+// loads the hub's player page (resources/web/orca/player.html), exactly as the Stream tab embeds a
+// go2rtc camera. RTSPS printers (X1/H2/P2S) play as MSE over the hub's WebSocket tunnel: loopback
+// TCP only, no WebRTC port and no firewall prompt for the desktop. P1/A1 (port 6000) go through
+// the hub's BambuCamRelay into go2rtc and play as MJPEG frames on the same WebSocket.
+// Plan, findings and the owner's clean-data-dir test: tests/plan_own_camera_view.md.
+
+void MediaPlayCtrl::SetOwnView(wxWebView *view, std::function<void(bool own)> show_own)
+{
+    m_own_view = view;
+    m_show_own = std::move(show_own);
+}
+
+void MediaPlayCtrl::play_own()
+{
+    std::string kind;
+    if (m_lan_proto == MachineObject::LVL_Rtsps)      kind = "rtsps";
+    else if (m_lan_proto == MachineObject::LVL_Rtsp)  kind = "rtsp";
+    else if (m_lan_proto == MachineObject::LVL_Local) kind = "local";
+    if (kind.empty()) {
+        Stop(m_lan_proto == MachineObject::LVL_Disable
+                 ? _L("LAN Only Liveview is off. Please turn on the liveview on printer screen.")
+                 : _L("This printer reports no LAN camera stream. Please update the printer firmware and try again."));
+        return;
+    }
+    if (m_lan_ip.empty() || m_lan_passwd.empty()) {
+        Stop(_L("Live view needs the printer's LAN address and access code. Connect to the printer on the LAN first."));
+        return;
+    }
+    m_failed_code = 0;
+    m_own_busy    = true;
+    m_last_state  = MEDIASTATE_INITIALIZING;
+    m_button_play->SetIcon("media_stop");
+    m_label_stat->SetLabel({});
+    SetStatus(_L("Starting live view..."), false);
+    BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: [own camera] " << kind
+                            << " live view through the hub's go2rtc; the Bambu player (BambuSource/live555) is not used";
+
+    const int         seq     = ++m_own_seq;
+    const std::string machine = m_machine, ip = m_lan_ip, code = m_lan_passwd;
+    wxWeakRef<MediaPlayCtrl> weak(this);
+    std::thread([weak, seq, machine, kind, ip, code]() {
+        // The hub is the one owner of go2rtc on this PC (phone, Stream tab and now this panel): start
+        // it if no window has yet. Phone access is left as it is.
+        RemoteHub::Info info = RemoteHub::ensure_running("", false);
+        std::pair<int, std::string> res { 503, std::string() };
+        if (info.alive && info.go2rtc_port > 0)
+            res = RemoteHub::register_own_camera(kind, ip, code);
+        wxGetApp().CallAfter([weak, seq, machine, info, res]() {
+            if (weak)
+                weak->own_ready(seq, machine, info.port, info.go2rtc_port, info.secret, res.first, res.second);
+        });
+    }).detach();
+}
+
+void MediaPlayCtrl::own_ready(int seq, const std::string &machine, int port, int go2rtc_port, const std::string &secret,
+                              int status, const std::string &body)
+{
+    // Stopped, restarted or switched to another printer while the hub was asked: not ours any more.
+    if (seq != m_own_seq || machine != m_machine || !m_own_busy || m_last_state != MEDIASTATE_INITIALIZING)
+        return;
+    if (port <= 0 || go2rtc_port <= 0) {
+        BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: [own camera] the hub or its go2rtc is not running";
+        stop_own(_L("The camera relay (go2rtc) is not running. See hub.log in the log folder."));
+        return;
+    }
+    std::string name, mode, error;
+    try {
+        const nlohmann::json j = nlohmann::json::parse(body);
+        name  = j.value("name", std::string());
+        mode  = j.value("mode", std::string());
+        error = j.value("error", std::string());
+    } catch (...) {}
+    if (status != 200 || name.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: [own camera] the hub refused the stream: " << status << " " << error;
+        stop_own(wxString::Format(_L("Live view could not start (%s)."), error.empty() ? wxString::Format("%d", status) : from_u8(error)));
+        return;
+    }
+    // The player page at the hub's root; `lt` is the hub secret, accepted from loopback only.
+    const wxString url = wxString::Format("http://127.0.0.1:%d/stream.html?src=%s&mode=%s&lt=%s", port, from_u8(name),
+                                          from_u8(mode.empty() ? std::string("mse") : mode), from_u8(secret));
+    BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: [own camera] playing go2rtc stream " << name << " as " << mode;
+    if (m_show_own) m_show_own(true);
+    m_own_view->LoadURL(url);
+    m_last_state = wxMEDIASTATE_PLAYING;
+    SetStatus(_L("Playing (EdgeSlicer live view)"), false);
+}
+
+void MediaPlayCtrl::stop_own(wxString const &msg)
+{
+    ++m_own_seq; // a hub answer still on its way is dropped
+    if (m_own_view) {
+        // Leaving the page closes its WebSocket: go2rtc drops this consumer, and closes the printer
+        // connection when it was the last one (the phone's, if it is watching, stays).
+        m_own_view->LoadURL("about:blank");
+    }
+    if (m_show_own) m_show_own(false);
+    m_own_busy   = false;
+    m_last_state = MEDIASTATE_IDLE;
+    m_button_play->SetIcon("media_play");
+    BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: [own camera] stopped";
+    SetStatus(msg.IsEmpty() ? _L("Video Stopped.") : msg, false);
 }
 
 void MediaPlayCtrl::onStateChanged(wxMediaEvent &event)

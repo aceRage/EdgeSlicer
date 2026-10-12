@@ -335,6 +335,9 @@ protected:
     ScalableButton *m_button_abort;
     Button *        m_button_clean;
     wxWebView *     m_custom_camera_view{nullptr};
+    // Spike: the go2rtc live view (opt-in "liveview_go2rtc", read when this panel is built). Null
+    // when the preference is off, so the Bambu player path is exactly as before.
+    wxWebView *     m_own_camera_view{nullptr};
 
     wxStaticText *  m_text_tasklist_caption;
 

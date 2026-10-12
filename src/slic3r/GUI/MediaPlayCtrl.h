@@ -16,10 +16,12 @@
 #include <boost/thread/condition_variable.hpp>
 
 #include <deque>
+#include <functional>
 #include <set>
 
 class Button;
 class Label;
+class wxWebView;
 
 namespace Slic3r {
 
@@ -49,6 +51,11 @@ public:
     // AV-crashes wmp.dll on a stale hwnd. pause=true -> Stop(), false -> Play().
     void ultra_pause(bool pause);
 
+    // Spike (opt-in "liveview_go2rtc"): play Bambu cameras through the hub's go2rtc in `view`
+    // instead of through Bambu's player. `show_own(true)` puts the web view in the player's slot,
+    // `show_own(false)` gives the slot back. Never called while the preference is off.
+    void SetOwnView(wxWebView *view, std::function<void(bool own)> show_own);
+
 protected:
     void onStateChanged(wxMediaEvent & event);
 
@@ -70,6 +77,17 @@ private:
     static bool start_stream_service(bool *need_install = nullptr);
 
     static bool get_stream_url(std::string *url = nullptr);
+
+    // Spike: the own live view (see SetOwnView).
+    void play_own();
+    void own_ready(int seq, const std::string &machine, int port, int go2rtc_port, const std::string &secret,
+                   int status, const std::string &body);
+    void stop_own(wxString const &msg);
+
+    wxWebView *               m_own_view = nullptr;
+    std::function<void(bool)> m_show_own;
+    bool                      m_own_busy = false; // starting or playing through go2rtc
+    int                       m_own_seq  = 0;     // drops a late answer after Stop or a printer switch
 
 private:
     static const wxMediaState MEDIASTATE_IDLE = (wxMediaState) 3;
