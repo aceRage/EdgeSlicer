@@ -339,6 +339,11 @@ TEST_CASE("the probe against a fake U1: normal, slow, down, back up", "[.][Snapm
     CHECK(s.nozzles.size() == 4); // all four toolheads (PR #142)
     CHECK(s.age_ms == 0);
     CHECK(toolheads(d).size() == 4);
+    // Percent and time left as the Device page works them out (MoonrakerProgress): the G-code
+    // body share of virtual_sdcard.file_position and the file's estimated_time, not the old
+    // display_status 30 % with a linear 1400 s.
+    CHECK((int) (s.progress * 100 + 0.5) == 25);
+    CHECK(s.left_time_s == 2700);
 
     INFO("slow: every reply takes 6 s, each request gives up after 3 s");
     fake_ctl(f, "mode?m=slow&delay=6");
