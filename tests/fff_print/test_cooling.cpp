@@ -51,6 +51,18 @@ int part_fan_value(const std::string &line)
     return s == std::string::npos ? -1 : std::atoi(body.c_str() + s + 2);
 }
 
+// `gcode` without its part-cooling fan command lines.
+std::string without_fan_lines(const std::string &gcode)
+{
+    std::string        out;
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line))
+        if (part_fan_value(line) < 0)
+            out += line + "\n";
+    return out;
+}
+
 // One extruding move, with the fan value in force while it prints.
 struct FanAtExtrusion
 {
@@ -583,4 +595,90 @@ TEST_CASE("FanMover writes a fan command near the end of a move after the move",
     REQUIRE(next_move != std::string::npos);
     CHECK(first_move < fan);
     CHECK(fan < next_move);
+}
+
+// Our #170 (Orca #15904) brackets change_filament_gcode with "; custom gcode start" / "; custom gcode end" so
+// that FanMover leaves it alone. FanMover only treated fan commands inside the span specially: a fan
+// increase right after the tool change still reached back into it and split one of its moves, putting a
+// waypoint computed from FanMover's own idea of the position into a hand-routed tool change.
+TEST_CASE("FanMover never splits a move of tool change G-code", "[FanMover][GCode]")
+{
+    // Speed-up 2 s, after a 6 s tool change travel: the fan command belongs 4 s into the travel.
+    const std::vector<std::string> out = fan_mover_layers(2.f, false, 0.f, {
+        "G1 X0 Y0 F600\n"
+        "M106 S51\n"
+        "G1 X5 E1\n"
+        "; custom gcode start\n"
+        "G1 X65 F600\n"    // 6 s
+        "; custom gcode end\n"
+        "T1\n"
+        "M106 S255\n"
+        "G1 X70 E1\n",
+    });
+    REQUIRE(out.size() == 1);
+    const std::string &g = out[0];
+    INFO(g);
+    const size_t start  = g.find("; custom gcode start\n");
+    const size_t travel = g.find("\nG1 X65 F600\n");
+    const size_t end    = g.find("; custom gcode end\n");
+    REQUIRE(start != std::string::npos);
+    REQUIRE(travel != std::string::npos);
+    REQUIRE(end != std::string::npos);
+    // The tool change keeps its moves as they came: no waypoint. (A fan command between them moves nothing.)
+    CHECK(without_fan_lines(g.substr(start, end - start)) == "; custom gcode start\nG1 X65 F600\n");
+    // The fan still comes early: before the travel rather than inside it.
+    const size_t fan = g.find("M106 S255");
+    REQUIRE(fan != std::string::npos);
+    CHECK(fan < travel);
+}
+
+// The same with GCode generating the tool change: FanMover and the fan commands CoolingBuffer writes
+// around the bracketed change_filament_gcode leave its moves intact.
+TEST_CASE("Tool change G-code stays intact with the fan speed-up and the overhang fan", "[FanMover][GCode][Cooling]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+    // A long hand-routed travel in the tool change, in relative coordinates FanMover cannot follow.
+    config.set_key_value("change_filament_gcode", new ConfigOptionString("G91\nG1 X40 F600\nG1 Y40 F600\nG90\n"));
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"wall_filament", 1},
+        {"sparse_infill_filament", 2},
+        {"solid_infill_filament", 2},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"fan_speedup_time", "2"},
+        {"fan_kickstart", "0"},
+        {"fan_speedup_overhangs", "0"},
+        {"enable_overhang_bridge_fan", "1,1"},
+        {"overhang_fan_threshold", "0%,0%"},
+        {"overhang_fan_speed", "100,100"},
+        // Different layer fans, so the tool change itself raises or lowers the fan.
+        {"fan_min_speed", "20,60"},
+        {"fan_max_speed", "20,60"},
+        {"close_fan_the_first_x_layers", "1,1"},
+        {"full_fan_speed_layer", "0,0"},
+        {"slow_down_for_layer_cooling", "0,0"},
+        {"machine_start_gcode", ""},
+    });
+    const std::string gcode = slice({TestMesh::cube_20x20x20}, config);
+
+    size_t changes = 0;
+    for (size_t start = gcode.find("; custom gcode start\n"); start != std::string::npos;
+         start = gcode.find("; custom gcode start\n", start + 1)) {
+        const size_t end = gcode.find("; custom gcode end", start);
+        REQUIRE(end != std::string::npos);
+        const std::string body = without_fan_lines(gcode.substr(start, end - start));
+        INFO(body);
+        CHECK(body == "; custom gcode start\nG91\nG1 X40 F600\nG1 Y40 F600\nG90\n");
+        ++changes;
+    }
+    CHECK(changes > 10);
 }

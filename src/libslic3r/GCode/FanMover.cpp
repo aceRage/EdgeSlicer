@@ -121,7 +121,7 @@ void FanMover::_put_in_middle_G1(std::list<BufferData>::iterator item_to_split, 
         // doesn't really need to be split, print it before
         //will also print before if line_to_split.time == 0
         m_buffer.insert(item_to_split, line_to_write);
-    } else if (item_to_split->raw.size() > 2
+    } else if (!item_to_split->is_custom && item_to_split->raw.size() > 2
         && item_to_split->raw[0] == 'G' && item_to_split->raw[1] == '1' && item_to_split->raw[2] == ' ') {
         float percent = nb_sec_since_itemtosplit_start / item_to_split->time;
         BufferData before = *item_to_split;
@@ -177,7 +177,7 @@ void FanMover::_print_in_middle_G1(BufferData& line_to_split, float nb_sec, cons
         // Doesn't need to be split: the insertion point is at the end.
         m_process_output += line_to_split.raw + "\n";
         m_process_output += line_to_write + (line_to_write.back() == '\n' ? "" : "\n");
-    }else if(line_to_split.raw.size() > 2
+    }else if(!line_to_split.is_custom && line_to_split.raw.size() > 2
         && line_to_split.raw[0] == 'G' && line_to_split.raw[1] == '1' && line_to_split.raw[2] == ' ') {
         float percent = nb_sec / line_to_split.time;
         std::string before = line_to_split.raw;
@@ -436,6 +436,8 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
 
     if (time >= 0) {
         BufferData& new_data = put_in_buffer(BufferData(line.raw(), time, fan_speed));
+        // EDGE (#170): tool change G-code is bracketed as custom G-code so that it is never split.
+        new_data.is_custom = m_is_custom_gcode;
         if (line.has(Axis::X)) {
             new_data.x = reader.x();
             new_data.dx = line.dist_X(reader);
