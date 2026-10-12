@@ -492,6 +492,11 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
     if (time >= 0) {
         while (!m_buffer.empty() && (need_flush || m_buffer_time_size - m_buffer.front().time > nb_seconds_delay - EPSILON) ){
             BufferData& frontdata = m_buffer.front();
+            // A fan command repeating m_front_buffer_fan_speed is dropped here. EDGE note: that includes the
+            // deliberate repeat CoolingBuffer writes after ";_FORCE_RESUME_FAN_SPEED" (tool change G-code may have
+            // set the fan). It survives only because FanMover also reads the tool change G-code's own M106/M107;
+            // a template that sets the fan with a command FanMover cannot read (M106 P0, SET_FAN_SPEED, a
+            // firmware macro) gets the repeat dropped. FanMover is off in every shipped BBL / Snapmaker profile.
             if (frontdata.fan_speed < 0 || frontdata.fan_speed != m_front_buffer_fan_speed || frontdata.is_kickstart) {
                 if (frontdata.is_kickstart && frontdata.fan_speed < m_front_buffer_fan_speed) {
                     //you have to slow down! not kickstart! rewrite the fan speed.

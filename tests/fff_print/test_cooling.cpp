@@ -777,6 +777,33 @@ TEST_CASE("FanMover never splits a move of tool change G-code", "[FanMover][GCod
     CHECK(fan < travel);
 }
 
+// The kickstart path: a fan increase is kicked at 100% and its own speed is put back once the kick time
+// has run out, which may fall inside the next move. That move must not be split when it is tool change
+// G-code either.
+TEST_CASE("FanMover's kickstart never splits a move of tool change G-code", "[FanMover][GCode]")
+{
+    // No speed-up, kickstart 3 s: a raise from 0 to 49% kicks for 1.47 s, which ends 1.47 s into the
+    // 6 s tool change travel that follows.
+    const std::vector<std::string> out = fan_mover_layers(0.f, false, 3.f, {
+        "G1 X0 Y0 F600\n"
+        "M106 S127\n"
+        "; custom gcode start\n"
+        "G1 X60 F600\n"    // 6 s
+        "; custom gcode end\n"
+        "G1 X70 E1\n",
+    });
+    REQUIRE(out.size() == 1);
+    const std::string &g = out[0];
+    INFO(g);
+    const size_t start = g.find("; custom gcode start\n");
+    const size_t end   = g.find("; custom gcode end\n");
+    REQUIRE(start != std::string::npos);
+    REQUIRE(end != std::string::npos);
+    // The kick happened, and the travel stayed whole.
+    CHECK(g.find("M106 S255") != std::string::npos);
+    CHECK(without_fan_lines(g.substr(start, end - start)) == "; custom gcode start\nG1 X60 F600\n");
+}
+
 // The same with GCode generating the tool change: FanMover and the fan commands CoolingBuffer writes
 // around the bracketed change_filament_gcode leave its moves intact.
 TEST_CASE("Tool change G-code stays intact with the fan speed-up and the overhang fan", "[FanMover][GCode][Cooling]")
