@@ -2,6 +2,7 @@
 #define slic3r_GUI_PluginGuard_hpp_
 
 #include <string>
+#include <vector>
 
 #include <boost/filesystem/path.hpp>
 
@@ -203,8 +204,9 @@ extern const char *const kUltraNetModuleTag; // "UltraNet-module"
 bool carries_ultranet_module_tag(const boost::filesystem::path &lib);
 
 // The copier's "is what is already in plugins/ a real camera component?" question, per platform:
-// a PE exporting DllRegisterServer on Windows (exports_dll_register_server, unchanged), and on
-// macOS/Linux any existing library that does not carry the UltraNet tag - i.e. Bambu's.
+// a PE exporting DllRegisterServer on Windows (exports_dll_register_server, unchanged); on macOS a
+// Mach-O that exports Bambu's player class (classify_camera_module() == BambuCamera); on Linux any
+// existing library that does not carry the UltraNet tag - i.e. Bambu's.
 bool is_real_camera_component(const boost::filesystem::path &lib);
 // Whether start-up should copy the sidecar's BambuSource over <data_dir>/plugins/BambuSource.dll.
 // BambuSource is checked on its own rather than only when the network plug-in is replaced: since
@@ -216,6 +218,157 @@ bool bambusource_needs_refresh(bool bundled_present,
                                bool identical,
                                bool installed_is_real_filter,
                                bool keep_foreign);
+
+// ---------------------------------------------------------------------------------------------
+// The camera module, kept apart from the storage module (owner decision 2026-10-11).
+//
+// Two different libraries share Bambu's file name (BambuSource.dll / libBambuSource.dylib):
+//
+//  * UltraNet's STORAGE module, in <data_dir>/plugins. It carries the storage browser's LAN
+//    tunnel (Bambu_Open & co.) and nothing else. PrinterFileSystem loads it through
+//    NetworkAgent::get_bambu_source_entry().
+//  * Bambu's own CAMERA module, which plays live video: the DirectShow filter on Windows
+//    (registered under CLSID {233E64FB-...}, loaded by Windows Media Player), the BambuPlayer
+//    Objective-C class on macOS. It needs live555 next to it for RTSP/RTSPS cameras
+//    (X1/H2D/H2C). It lives in <data_dir>/cameratools, seeded from the app's own cameratools
+//    folder: EdgeSlicer ships Bambu's camera files until its own go2rtc live view is proven on
+//    every platform. Bambu's network plug-in is still never shipped or downloaded.
+//
+// With both in plugins/ under the one name, whichever is there breaks the other feature: the 2.4.5.4
+// Mac build had UltraNet's there (live view: "Failed to start liveview"), and a hand-copied Bambu
+// module there broke the storage browser. Linux keeps the old single-module behaviour.
+
+// What a library file is, read off its bytes (never loaded). Works on any platform for any of the
+// three formats, so the rules can be tested anywhere:
+//   PE      - BambuCamera when it exports DllRegisterServer (the COM filter).
+//   Mach-O  - BambuCamera when it exports _OBJC_CLASS_$_BambuPlayer and does not carry the UltraNet
+//             tag. Thin or universal (fat) images; the symbol table and the dyld export trie are
+//             both consulted, so a stripped local symbol table does not hide the export.
+//   any     - UltraNetStorage when it carries kUltraNetModuleTag or exports EdgeSlicer_TunnelLanOnly.
+enum class CameraModuleKind {
+    Missing,         // no such file
+    BambuCamera,     // Bambu's camera module (live view)
+    UltraNetStorage, // EdgeSlicer's storage module (or its older placeholder)
+    Other,           // something else: unreadable, malformed, or a library we cannot place
+};
+CameraModuleKind classify_camera_module(const boost::filesystem::path &lib);
+
+// The exported-symbol probes behind classify_camera_module(), on an in-memory image. Exposed so the
+// tests can feed synthetic images. Never throw; a malformed image answers false.
+bool pe_image_exports(const std::string &image, const char *symbol);
+bool macho_image_exports(const std::string &image, const char *symbol); // thin or fat; "_name" form
+
+// The Mach-O symbol of Bambu's player class, the one wxMediaCtrl2.mm instantiates.
+extern const char *const kBambuPlayerClassSymbol; // "_OBJC_CLASS_$_BambuPlayer"
+
+// The camera module's runtime dependency for RTSP/RTSPS cameras, per platform: live555.dll,
+// liblive555.dylib, liblive555.so.
+const char *live555_library_name();
+
+// Where the app bundle carries Bambu's camera files (packaging: CAMERA_BIN_DIR), given the folder of
+// the running executable: <exe dir>/cameratools on Windows, Contents/Resources/cameratools in the
+// macOS bundle (Contents/MacOS may hold only code; macos_sign_app.sh signs the dylibs where they
+// are). Mirrors ultranet_sidecar_dir().
+boost::filesystem::path bundled_camera_dir(const boost::filesystem::path &exe_dir, bool macos_app_bundle);
+boost::filesystem::path bundled_camera_dir(const boost::filesystem::path &exe_dir);
+
+// The data-dir folder the camera module is used from: <data_dir>/cameratools.
+boost::filesystem::path camera_module_dir(const boost::filesystem::path &data_dir);
+
+// Start-up: <data_dir>/plugins holds Bambu's camera module where UltraNet's storage module belongs
+// (a hand copy, an older camera-component download, or the owner's 2.4.5.4 Mac workaround). What to
+// do with it, given what cameratools already has:
+enum class PluginsCameraRepair {
+    Nothing,            // plugins/ holds no camera module
+    MoveToCameraTools,  // cameratools has no camera module: this one becomes it
+    RemoveDuplicate,    // cameratools already has a byte-identical copy: drop the plugins/ one
+    MoveAsideDuplicate, // cameratools has a different camera module: keep that one, park this one
+                        // beside it as <name>.from-plugins so nothing the user put there is lost
+};
+PluginsCameraRepair plugins_camera_repair_decision(bool plugins_has_camera_module,
+                                                   bool cameratools_has_camera_module,
+                                                   bool identical);
+
+// After a repair (or whenever plugins/ has no storage module): where UltraNet's storage module comes
+// back from. The app's sidecar copy first; failing that the copy the owner set aside by hand as
+// <name>.ultranet - but only when that file really is UltraNet's storage module.
+enum class StorageModuleRestore {
+    Nothing,     // plugins/ already holds the storage module
+    FromSidecar, // copy the app's bundled UltraNet module in
+    FromBackup,  // rename plugins/<name>.ultranet back to plugins/<name>
+    Unavailable, // nothing to restore from; the storage browser is unavailable until a reinstall
+};
+StorageModuleRestore storage_module_restore_decision(bool plugins_has_storage_module,
+                                                     bool sidecar_has_storage_module,
+                                                     bool backup_is_storage_module);
+
+// Seeding <data_dir>/cameratools from the app's bundled camera folder.
+enum class CameraModuleSync {
+    Nothing,  // nothing bundled (or the bundled file is not a camera module), or already identical
+    Install,  // cameratools has no camera module: copy the bundled one in
+    Refresh,  // cameratools has what an earlier EdgeSlicer put there (or junk): replace it
+    KeepUser, // cameratools has a real camera module the user put there: never overwritten
+};
+//   bundled_is_camera_module - the app's cameratools holds a real camera module
+//   installed_present        - <data_dir>/cameratools/<name> exists
+//   installed_is_camera_module - ... and is a real camera module
+//   identical                - byte-identical to the bundled one
+//   installed_from_bundle    - it is the copy an earlier EdgeSlicer installed (the record matches)
+CameraModuleSync camera_module_sync_decision(bool bundled_is_camera_module,
+                                             bool installed_present,
+                                             bool installed_is_camera_module,
+                                             bool identical,
+                                             bool installed_from_bundle);
+
+// The record kept in <data_dir>/cameratools of what EdgeSlicer installed there from its bundle, so
+// an upgrade can refresh its own copy without ever touching one the user supplied. One line per
+// file: "<name> <size> <fnv1a-64 hex>".
+extern const char *const kCameraBundleRecordName; // "edgeslicer_bundled.txt"
+std::string camera_file_fingerprint(const boost::filesystem::path &file); // "<size> <hash>", "" if unreadable
+// The fingerprint recorded for `name` in `record_text`, or "" when it has none.
+std::string camera_record_lookup(const std::string &record_text, const std::string &name);
+// `record_text` with the line for `name` replaced (or added).
+std::string camera_record_update(const std::string &record_text, const std::string &name, const std::string &fingerprint);
+
+// Windows live view: whether the registered DirectShow filter can be used as it is, or EdgeSlicer
+// should register its own cameratools copy (per user, HKCU, no UAC). A working registration that
+// points at another install (OrcaSlicer, Bambu Studio) is left alone so the apps do not fight over
+// it; a missing one, a dangling path or one that points at a non-filter (UltraNet's storage module
+// after a repair) is replaced when we have a real filter to offer.
+enum class FilterRegistration {
+    UseRegistered,     // the registered filter is fine
+    RegisterOurs,      // register <data_dir>/cameratools/BambuSource.dll for this user
+    OfferComponent,    // nothing usable registered and no filter of ours: offer the component
+};
+FilterRegistration filter_registration_decision(bool clsid_matches,
+                                                bool registered_path_is_real_filter,
+                                                bool ours_is_real_filter);
+
+// The start-up file work behind GUI_App::sync_bambu_camera_module(), on plain paths so it can be
+// run against dummy files in a temp folder. Three steps, each decided by the functions above:
+//  1. plugins/<source> is Bambu's camera module -> it moves to camera_dir (or is dropped / parked
+//     as <source>.from-plugins); plugins/<live> always moves with it (UltraNet ships no live555).
+//  2. plugins/<source> is now missing -> UltraNet's storage module comes back from sidecar_dir, else
+//     from plugins/<source>.ultranet when that really is UltraNet's module.
+//  3. camera_dir is seeded from bundled_dir (source + live555), with the record that lets a later
+//     upgrade refresh EdgeSlicer's own copy and never a user's.
+// Steps 1-2 are skipped with keep_foreign (the developer escape hatch). A file another process has
+// loaded is moved aside to <name>.replaced rather than overwritten (removed on the next run).
+// Returns what was done, for the log. Never throws.
+struct CameraSyncPaths {
+    boost::filesystem::path plugins_dir; // <data_dir>/plugins
+    boost::filesystem::path camera_dir;  // <data_dir>/cameratools
+    boost::filesystem::path sidecar_dir; // the app's UltraNet sidecar (ultranet_sidecar_dir)
+    boost::filesystem::path bundled_dir; // the app's camera files (bundled_camera_dir)
+    std::string             source_name; // bambu_source_library_name()
+    std::string             live_name;   // live555_library_name()
+    bool                    keep_foreign = false;
+};
+struct CameraSyncLog {
+    enum Level { Info, Warning, Error } level;
+    std::string text;
+};
+std::vector<CameraSyncLog> sync_camera_module_files(const CameraSyncPaths &paths);
 
 // ---------------------------------------------------------------------------------------------
 // The Device tab's storage browser (MediaFilePanel::fetchUrl): whether to hand the tunnel library

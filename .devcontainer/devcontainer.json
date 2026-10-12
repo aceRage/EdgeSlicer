@@ -1,5 +1,5 @@
 {
-	"name": "Snapmaker_Orca",
+	"name": "EdgeSlicer",
 	"build": {
 		"dockerfile": "Dockerfile",
 			"args": {

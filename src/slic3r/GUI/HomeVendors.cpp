@@ -640,6 +640,10 @@ public:
         m_text = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(560), FromDIP(300)),
                                 wxTE_MULTILINE | wxTE_DONTWRAP);
         m_text->SetMaxLength(Vendors::IMPORT_MAX_BYTES); // a multi-line box stops at 32 KB otherwise
+#ifdef __WXOSX__
+        // macOS would turn the JSON's straight quotes (and dashes) into typographic ones as they are pasted.
+        m_text->OSXDisableAllSmartSubstitutions();
+#endif
         m_text->SetValue(initial);
         sizer->Add(m_text, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
         sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxALL | wxALIGN_RIGHT, FromDIP(10));

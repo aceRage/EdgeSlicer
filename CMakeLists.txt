@@ -1087,6 +1087,30 @@ if (WIN32)
         message(STATUS "EdgeSlicer: shipping the network plugin from ${ULTRANET_BIN_DIR}")
     endif()
 
+    # EdgeSlicer: Bambu's own camera files for Bambu live view (owner decision 2026-10-11), shipped
+    # until EdgeSlicer's go2rtc live view is proven on every platform. BambuSource.dll is Bambu's
+    # DirectShow source filter and live555.dll the RTSP library it loads for X1/H2D/H2C cameras; they
+    # are redistributed unmodified and keep Bambu's own Authenticode signature (windows_sign.ps1 skips
+    # validly signed files; windows_verify_signatures.ps1 -AllowBambuCameraFiles accepts that signer
+    # for these two paths only). They are NOT in this public repo: point CAMERA_BIN_DIR at a folder
+    # holding them (the VM stages C:\Dev\ship\cameratools). They install to <exe dir>\cameratools and
+    # the app copies them into <data dir>\cameratools at start-up (PluginGuard: "The camera module"),
+    # never into plugins\, where UltraNet's storage module of the same name lives. Only these two
+    # named files are taken - never Bambu's network plug-in or the cloud (agora) libraries.
+    if (CAMERA_BIN_DIR AND EXISTS "${CAMERA_BIN_DIR}/BambuSource.dll")
+        install(FILES "${CAMERA_BIN_DIR}/BambuSource.dll" DESTINATION "./cameratools")
+        if (EXISTS "${CAMERA_BIN_DIR}/live555.dll")
+            install(FILES "${CAMERA_BIN_DIR}/live555.dll" DESTINATION "./cameratools")
+        else()
+            message(WARNING "EdgeSlicer: ${CAMERA_BIN_DIR} has BambuSource.dll but no live555.dll - RTSP cameras (X1/H2D/H2C) will not play")
+        endif()
+        message(STATUS "EdgeSlicer: shipping Bambu's camera files from ${CAMERA_BIN_DIR}")
+    elseif (CAMERA_BIN_DIR)
+        message(WARNING "EdgeSlicer: CAMERA_BIN_DIR=${CAMERA_BIN_DIR} holds no BambuSource.dll - no camera files shipped")
+    else()
+        message(STATUS "EdgeSlicer: no CAMERA_BIN_DIR - Bambu live view relies on a filter registered by another install or the camera-component download")
+    endif()
+
     # EdgeSlicer: FlashForge's FlashNetwork library. The FlashForge device tab drives Creator 5 and
     # friends entirely through this closed, pre-built DLL - without it the tab cannot initialise and
     # no LAN send is possible. FlashForge publishes it nowhere: it exists only inside their Flash

@@ -192,6 +192,71 @@ jobs:
             bash scripts/build_ultranet_posix.sh "$SRC" "$OUT"
           echo "ULTRANET_BIN_DIR=$OUT" >> "$GITHUB_ENV"
 
+#   Bambu camera files: Bambu's own live-view module, shipped until EdgeSlicer's go2rtc live view is
+#   proven on every platform (owner decision 2026-10-11; Bambu's network plug-in is still never
+#   shipped). macOS: libBambuSource.dylib + liblive555.dylib; Windows: BambuSource.dll + live555.dll.
+#   They are not in this public repo. They come from the private repo aceRage/edgeslicer-camera
+#   through a read-only deploy key (secret CAMERA_DEPLOY_KEY), are checked against that repo's
+#   SHA256SUMS, and only those files travel on (CAMERA_BIN_DIR, read by build_release_macos.sh and
+#   build_release_vs2022.bat). The checkout leaves the workspace before anything else runs and is
+#   deleted after staging; nothing uploads it. Without the secret the package carries no camera
+#   files, exactly as before. Layout and rationale: docs/superpowers/specs/2026-10-11-bambu-camera-module.md.
+      - name: Camera files - check for the deploy key
+        id: camera
+        shell: bash
+        env:
+          CAMERA_DEPLOY_KEY: ${{ secrets.CAMERA_DEPLOY_KEY }}
+        run: |
+          case "${{ inputs.os }}" in macos-*|windows-*) platform_ok=1 ;; *) platform_ok=0 ;; esac
+          if [ -n "$CAMERA_DEPLOY_KEY" ] && [ "$platform_ok" = 1 ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "CAMERA_DEPLOY_KEY is set: Bambu's camera files will be bundled for live view."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No camera files for this build (CAMERA_DEPLOY_KEY unset, or Linux) - Bambu live view needs them installed separately."
+          fi
+
+      - name: Camera files - fetch (deploy key)
+        if: steps.camera.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: aceRage/edgeslicer-camera
+          ref: main
+          ssh-key: ${{ secrets.CAMERA_DEPLOY_KEY }}
+          persist-credentials: false
+          path: .camera-src
+
+      - name: Camera files - verify and stage
+        if: steps.camera.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/camera-src"
+          OUT="$RUNNER_TEMP/camera-bin"
+          rm -rf "$SRC" "$OUT"
+          # Out of the workspace before anything else can see it.
+          mv "$GITHUB_WORKSPACE/.camera-src" "$SRC"
+          trap 'rm -rf "$SRC"' EXIT
+          case "${{ inputs.os }}" in
+            windows-*) sub=windows; files="BambuSource.dll live555.dll" ;;
+            macos-*)   sub=macos;   files="libBambuSource.dylib liblive555.dylib" ;;
+            *) echo "no camera files for ${{ inputs.os }}"; exit 0 ;;
+          esac
+          # Pinned: the private repo's SHA256SUMS lists every file it holds.
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$SRC" && sha256sum -c SHA256SUMS)
+          else
+            (cd "$SRC" && shasum -a 256 -c SHA256SUMS)
+          fi
+          mkdir -p "$OUT"
+          for f in $files; do
+            [ -f "$SRC/$sub/$f" ] || { echo "::error::aceRage/edgeslicer-camera has no $sub/$f"; exit 1; }
+            cp -f "$SRC/$sub/$f" "$OUT/"
+          done
+          if [ "$sub" = windows ]; then OUT=$(cygpath -m "$OUT"); fi
+          echo "CAMERA_BIN_DIR=$OUT" >> "$GITHUB_ENV"
+          echo "staged $files"
+
 #   Mac
       - name: Install tools mac
         if: inputs.os == 'macos-14'
