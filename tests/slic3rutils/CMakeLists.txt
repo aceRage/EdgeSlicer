@@ -12,6 +12,7 @@ add_executable(${_TEST_NAME}_tests
     hub_home_tests.cpp
     hub_handover_tests.cpp
     web_load_retry_tests.cpp
+    device_page_load_tests.cpp
     home_tab_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp

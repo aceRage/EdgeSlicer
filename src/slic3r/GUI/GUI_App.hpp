@@ -255,6 +255,11 @@ public:
 private:
     bool            m_initialized { false };
     bool            m_post_initialized { false };
+    // Startup is over: post_init() has run and the wx event queue it filled (project reset, config
+    // wizard step, ...) has drained, which the first idle event after post_init() tells. The GUI
+    // thread answers web pages promptly only from then on (DevicePageLoad.hpp).
+    bool            m_startup_settle_pending { false };
+    bool            m_startup_settled { false };
     // Set when a snapmaker-orca:// URL is handed to us after launch (macOS delivers these
     // through MacOpenURL rather than argv, so post_init cannot see them in input_files).
     // post_init must not start a blank project in that case, or it discards the model the
@@ -911,6 +916,7 @@ private:
     void            remove_mall_system_dialog();
     void            run_script(wxString js);
     bool            is_adding_script_handler() { return m_adding_script_handler; }
+    bool            startup_settled() const { return m_startup_settled; }
     void            set_adding_script_handler(bool status) { m_adding_script_handler = status; }
 
     char            from_hex(char ch);
