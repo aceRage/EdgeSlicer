@@ -9795,31 +9795,12 @@ static bool overhang_fan_on_at(int overhang_fan_threshold, float overlap, Extrus
     return overlap_threshold >= 0.f && overlap <= overlap_threshold;
 }
 
-// Whether the overhang fan is on over a whole path printed at one speed (the constant-speed branch of _extrude).
-static bool overhang_fan_on_for_path(int overhang_fan_threshold, ExtrusionRole role)
+// Whether the overhang fan is on over a whole path for its role alone, whatever its overlap.
+static bool overhang_fan_on_for_role(int overhang_fan_threshold, ExtrusionRole role)
 {
     // BBS: Overhang_threshold_none means Overhang_threshold_1_4 and forcing cooling for all external perimeter
     return (overhang_fan_threshold == Overhang_threshold_none && is_external_perimeter(role)) ||
            role == erBridgeInfill || role == erOverhangPerimeter;
-}
-
-// EDGE (adapting Orca #15158): whether printing `points` point by point switches the overhang fan anywhere the
-// constant-speed branch would not. Mirrors the per-segment rule of _extrude's variable-speed branch.
-static bool overhang_fan_changes_along(const std::vector<ProcessedPoint> &points, int overhang_fan_threshold, ExtrusionRole role)
-{
-    if (points.size() < 2)
-        return false;
-    const bool path_fan = overhang_fan_on_for_path(overhang_fan_threshold, role);
-    bool       pre      = overhang_fan_on_at(overhang_fan_threshold, points.front().overlap, role);
-    if (role == erInternalBridgeInfill)
-        pre = true;
-    for (size_t i = 1; i < points.size(); ++i) {
-        const bool cur = overhang_fan_on_at(overhang_fan_threshold, points[i].overlap, role);
-        if ((pre && cur) != path_fan)
-            return true;
-        pre = cur;
-    }
-    return false;
 }
 
 std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_description, double speed)
@@ -10211,6 +10192,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     }
 
     bool                        variable_speed = false;
+    // Orca #16297: the overhang fan is on along the whole path (a uniform fan state the constant-speed branch's
+    // path-wide marker can carry).
+    bool                        path_overhang_fan_active = false;
     std::vector<ProcessedPoint> new_points{};
 
     // Ultra (over-support walls): a wall over support is a perimeter for every other purpose, but
@@ -10282,23 +10266,24 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
                                                                                   ref_speed, speed, slowdown_curled, fan_overlap_threshold);
         }
+        // Orca #14788: with the slowdown off the points only carry the overhang fan transitions, printed at the
+        // path's own speed.
+        if (!overhang_speed_on)
+            for (ProcessedPoint &point : new_points)
+                point.speed = speed;
         variable_speed = std::any_of(new_points.begin(), new_points.end(), [speed](const ProcessedPoint& p) {
             return fabs(double(p.speed) - speed) > 1;
         }); // Ignore small speed variations (under 1mm/sec)
-        // Orca #14788 / #15158: with the overhang fan on, the points carry the fan transitions, so the path
-        // is printed point by point even where the speed does not change (with the slowdown off, every
-        // point is printed at the path's own speed).
-        // EDGE: upstream prints every such path point by point (`new_points.size() > 1`), which also drops
-        // its arcs. Only a path along which the fan actually switches needs it; any other path gets the same
-        // fan markers from the constant-speed branch, so it stays there and keeps its arcs.
-        if (overhang_fan_on) {
-            if (!overhang_speed_on) {
-                for (ProcessedPoint &point : new_points)
-                    point.speed = speed;
-                variable_speed = false;
-            }
-            if (!variable_speed)
-                variable_speed = overhang_fan_changes_along(new_points, EXTRUDER_CONFIG(overhang_fan_threshold), path.role());
+        // Orca #15158 / #16297: a uniform overhang fan state is set by the path-wide marker of the constant-speed
+        // branch (which keeps the path's arcs); only a fan transition within the path needs point-by-point
+        // moves, so CoolingBuffer can put the fan command between them.
+        if (overhang_fan_on && fan_overlap_threshold >= 0.f && !new_points.empty()) {
+            path_overhang_fan_active = new_points.front().overlap <= fan_overlap_threshold;
+            variable_speed = variable_speed ||
+                std::adjacent_find(new_points.begin(), new_points.end(),
+                                   [fan_overlap_threshold](const ProcessedPoint &previous, const ProcessedPoint &current) {
+                                       return (previous.overlap <= fan_overlap_threshold) != (current.overlap <= fan_overlap_threshold);
+                                   }) != new_points.end();
         }
     }
 
@@ -10587,9 +10572,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 if (enable_overhang_bridge_fan) {
                     // BBS: Overhang_threshold_none means Overhang_threshold_1_4 and forcing cooling for all external
                     // perimeter. ORCA: bridges and overhang perimeters always (separate internal bridge fan below).
-                    // EDGE: shared with overhang_fan_changes_along(), which keeps a path here only when this matches.
+                    // Orca #16297: or a path overhanging past the fan threshold all along.
                     append_role_based_fan_marker(erOverhangPerimeter, "_OVERHANG"sv,
-                                                 overhang_fan_on_for_path(overhang_fan_threshold, path.role()));
+                                                 path_overhang_fan_active ||
+                                                     overhang_fan_on_for_role(overhang_fan_threshold, path.role()));
 
                     // ORCA: Add support for separate internal bridge fan speed control
                     append_role_based_fan_marker(erInternalBridgeInfill, "_INTERNAL_BRIDGE"sv, path.role() == erInternalBridgeInfill);

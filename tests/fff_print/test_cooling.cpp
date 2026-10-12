@@ -515,10 +515,10 @@ std::vector<std::string> layers_without_fan(const std::string &gcode)
 
 } // namespace
 
-// EDGE deviation from Orca #15158: upstream prints every wall and bridge point by point whenever the
-// overhang fan is on, which drops the wall's arcs (arc fitting) even where the fan never switches. We do
-// that only for a path along which the fan switches, so a layer without an overhang prints the same G-code
-// with the overhang fan on as with it off.
+// Orca #15158 printed every wall and bridge point by point whenever the overhang fan is on, which drops the
+// wall's arcs (arc fitting) even where the fan never switches; Orca #16297 does that only for a path along
+// which the fan switches, so a layer without an overhang prints the same G-code with the overhang fan on as
+// with it off.
 TEST_CASE("Walls without an overhang fan transition keep their arcs", "[Cooling][Orca15158]")
 {
     DynamicPrintConfig config = sphere_overhang_fan_config(true);
@@ -539,6 +539,69 @@ TEST_CASE("Walls without an overhang fan transition keep their arcs", "[Cooling]
             ++arcs;
     }
     CHECK(arcs > 0);
+}
+
+// Upstream's test for Orca #16297 (tests/fff_print/test_cooling.cpp), on Catch2 v2 and our config API. The
+// sphere's lower half overhangs all round, so its walls are cooled along their whole length: the path-wide
+// marker carries that, and they keep their arcs.
+TEST_CASE("Arc fitting remains active with overhang fan control", "[Cooling][Regression][Orca16297]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_arc_fitting", "1"},
+        {"enable_overhang_bridge_fan", "1"},
+        {"enable_overhang_speed", "1"},
+        {"initial_layer_print_height", "0.2"},
+        {"layer_height", "0.2"},
+        {"slow_down_for_layer_cooling", "0"},
+        {"fan_max_speed", "20"},
+        {"fan_min_speed", "20"},
+        {"overhang_fan_speed", "100"},
+        {"overhang_fan_threshold", "25%"},
+        {"layer_change_gcode", ";TEST_LAYER=[layer_num]"},
+    });
+
+    const auto has_arc_after_first_layer = [](const std::string &gcode) {
+        std::istringstream input(gcode);
+        std::string        line;
+        size_t             layers_seen = 0;
+        while (std::getline(input, line)) {
+            if (line.rfind(";TEST_LAYER=", 0) == 0)
+                ++layers_seen;
+            else if (layers_seen > 1 && (line.rfind("G2 ", 0) == 0 || line.rfind("G3 ", 0) == 0))
+                return true;
+        }
+        return false;
+    };
+    const auto has_arc_with_overhang_fan = [](const std::string &gcode) {
+        std::istringstream input(gcode);
+        std::string        line;
+        bool               overhang_fan_active = false;
+        bool               outer_wall          = false;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            if (line.rfind("M106 S255", 0) == 0)
+                overhang_fan_active = true;
+            else if (line.rfind("M106 S0", 0) == 0 || line.rfind("M107", 0) == 0)
+                overhang_fan_active = false;
+            else if (line.rfind(";TYPE:", 0) == 0)
+                outer_wall = line == ";TYPE:Outer wall";
+            else if (overhang_fan_active && outer_wall && (line.rfind("G2 ", 0) == 0 || line.rfind("G3 ", 0) == 0))
+                return true;
+        }
+        return false;
+    };
+
+    const std::string with_overhang_speed = slice({make_cylinder(25.0, 10.0, 2.0 * PI / 72.0)}, config);
+    CHECK(has_arc_after_first_layer(with_overhang_speed));
+
+    config.set_deserialize_strict({{"enable_overhang_speed", "0"}});
+    const std::string without_overhang_speed = slice({make_cylinder(25.0, 10.0, 2.0 * PI / 72.0)}, config);
+    CHECK(has_arc_after_first_layer(without_overhang_speed));
+
+    const std::string uniform_overhang_gcode = slice({make_sphere(50.0, 2.0 * PI / 72.0)}, config);
+    CHECK(has_arc_with_overhang_fan(uniform_overhang_gcode));
 }
 
 // EDGE, with Orca #15158's skipping of repeated fan commands: tool change G-code may set the fan itself.
