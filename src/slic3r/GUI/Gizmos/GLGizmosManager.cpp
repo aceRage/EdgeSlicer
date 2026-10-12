@@ -635,6 +635,11 @@ void GLGizmosManager::render_current_gizmo() const
     if (!m_enabled || m_current == Undefined)
         return;
 
+    // Only a gizmo that is really open draws (and ray-casts for its hover state, which the Measure /
+    // Assembly gizmo does from on_render()).
+    if (m_gizmos[m_current]->get_state() != GLGizmoBase::On)
+        return;
+
     m_gizmos[m_current]->render();
 }
 
@@ -807,8 +812,8 @@ bool GLGizmosManager::on_mouse(const wxMouseEvent &mouse_event)
     // tool bar wants to use event?
     if (gizmos_toolbar_on_mouse(mouse_event)) return true;
 
-    // current gizmo wants to use event?
-    if (m_current != Undefined &&
+    // current gizmo wants to use event? (only a gizmo that is really open gets mouse events)
+    if (m_current != Undefined && m_gizmos[m_current]->get_state() == GLGizmoBase::On &&
         // check if gizmo override method could be slower than simple call virtual function
         // &m_gizmos[m_current]->on_mouse != &GLGizmoBase::on_mouse &&
         m_gizmos[m_current]->on_mouse(mouse_event))
@@ -1494,6 +1499,13 @@ bool GLGizmosManager::activate_gizmo(EType type)
                 snapshot(wxGetApp().plater(),
                          old_gizmo.get_gizmo_leaving_text(),
                          UndoRedo::SnapshotType::LeavingGizmoWithAction);
+
+        // The old gizmo is Off now. Do not leave it as the current one while the new one is being
+        // tried: when the new gizmo is not activable or refuses to turn on, the early returns below
+        // used to keep m_current on a gizmo that was already Off with its raycasters unregistered,
+        // and render_current_gizmo() / on_mouse() kept driving it with its toolbar icon and panel
+        // gone (EDGESLICER-8).
+        m_current = Undefined;
     }
 
     if (type == Undefined) { 

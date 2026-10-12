@@ -279,8 +279,9 @@ TEST_CASE("macOS/Linux tell our camera placeholder from Bambu's by the UltraNet 
     CHECK(carries_ultranet_module_tag(edge));
     CHECK_FALSE(carries_ultranet_module_tag(theirs));
     CHECK_FALSE(carries_ultranet_module_tag(dir / "missing.bin"));
-#if !defined(_WIN32)
-    // Off Windows this is the copier's "keep it" question: only Bambu's module is kept.
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // On Linux this is the copier's "keep it" question: only Bambu's module is kept. (macOS asks
+    // the Mach-O itself for Bambu's player class instead, see camera_module_tests.cpp.)
     CHECK(Slic3r::GUI::is_real_camera_component(theirs));
     CHECK_FALSE(Slic3r::GUI::is_real_camera_component(ours));
     CHECK_FALSE(Slic3r::GUI::is_real_camera_component(dir / "missing.bin"));
