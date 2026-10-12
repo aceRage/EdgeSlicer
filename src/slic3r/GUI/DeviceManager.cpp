@@ -7149,6 +7149,10 @@ void DeviceManager::on_machine_alive(std::string json_str)
         // from the LAN lists and erased it from the saved printers.
         AppConfig* const app_config = Slic3r::GUI::wxGetApp().app_config;
         const bool saved_lan = app_config && app_config->get_local_machines().count(dev_id) > 0;
+        // A printer that announced "lan" lately rides out a short run of "cloud bind=free" ones
+        // (an H2C in LAN-only mode sends one now and then): fed once per announcement.
+        const long long now_ms = ssdp_now_ms();
+        m_ssdp_lan_memory[dev_id].observe(connect_type, now_ms);
 
         /* update userMachineList info */
         auto it = userMachineList.find(dev_id);
@@ -7158,7 +7162,7 @@ void DeviceManager::on_machine_alive(std::string json_str)
             it->second->bind_ssdp_version       = ssdp_version;
             // The cloud list's access code comes from the account, not the user: only a saved
             // LAN printer is kept LAN here.
-            apply_ssdp_connect_type(it->second, connect_type, bind_state, saved_lan, false);
+            apply_ssdp_connect_type(it->second, "user", connect_type, bind_state, saved_lan, false, now_ms);
         }
 
         /* update localMachineList */
@@ -7186,7 +7190,7 @@ void DeviceManager::on_machine_alive(std::string json_str)
 
 
             obj->wifi_signal        = printer_signal;
-            apply_ssdp_connect_type(obj, connect_type, bind_state, saved_lan, obj->has_access_right());
+            apply_ssdp_connect_type(obj, "local", connect_type, bind_state, saved_lan, obj->has_access_right(), now_ms);
             obj->bind_sec_link      = sec_link;
             obj->bind_ssdp_version = ssdp_version;
             {
@@ -7228,7 +7232,7 @@ void DeviceManager::on_machine_alive(std::string json_str)
             }
             // After the codes: a saved LAN printer that was not loaded at start-up (no code then)
             // still counts as one.
-            apply_ssdp_connect_type(obj, connect_type, bind_state, saved_lan, obj->has_access_right());
+            apply_ssdp_connect_type(obj, "local", connect_type, bind_state, saved_lan, obj->has_access_right(), now_ms);
             localMachineList.insert(std::make_pair(dev_id, obj));
 
             /* if (!obj->dev_ip.empty()) {
@@ -7246,18 +7250,67 @@ void DeviceManager::on_machine_alive(std::string json_str)
     }
 }
 
-void DeviceManager::apply_ssdp_connect_type(MachineObject* obj, const std::string& announced, const std::string& announced_bind,
-                                            bool saved_lan, bool has_access_code)
+long long DeviceManager::ssdp_now_ms()
+{
+    return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void DeviceManager::apply_ssdp_connect_type(MachineObject* obj, const char* list, const std::string& announced,
+                                            const std::string& announced_bind, bool saved_lan, bool has_access_code, long long now_ms)
 {
     if (!obj) return;
-    const SsdpConnectType::Result r = SsdpConnectType::after_announcement(obj->dev_connection_type, announced, announced_bind,
-                                                                          saved_lan, has_access_code);
-    if (r.kept_lan && m_ssdp_kept_lan_logged.insert(obj->dev_id + "|" + announced).second)
-        BOOST_LOG_TRIVIAL(warning) << "SsdpDiscovery: " << obj->dev_id << " announced connect_type='" << announced << "' bind_state='"
-                                   << announced_bind << "'; kept as a LAN printer ("
-                                   << (saved_lan ? "saved LAN printer" : "access code entered") << ")";
+    const std::string                 before = obj->dev_connection_type;
+    const SsdpConnectType::LanMemory& mem    = m_ssdp_lan_memory[obj->dev_id];
+    const SsdpConnectType::Result     r      = SsdpConnectType::after_announcement(before, announced, announced_bind, saved_lan,
+                                                                                   has_access_code, mem, now_ms);
     obj->dev_connection_type = r.connect_type;
     obj->bind_state          = r.bind_state;
+
+    // Warning level: the release build logs nothing below it, and this is what the "Log in
+    // printer" question is decided on. Written whenever the outcome for this printer and list
+    // changes, not on every announcement. Never an access code.
+    std::string line = std::string("SsdpDiscovery: ") + obj->dev_id + " [" + list + "] announced connect_type='" + announced +
+                       "' bind_state='" + announced_bind + "' -> dev_connection_type='" + r.connect_type + "' bind_state='" +
+                       r.bind_state + "' (" + SsdpConnectType::why_text(r.why) + ")";
+    std::string& last = m_ssdp_outcome_logged[obj->dev_id + "|" + list];
+    if (line != last) {
+        last = line;
+        if (r.why == SsdpConnectType::Why::RecentLan)
+            line += " last lan " + std::to_string((now_ms - mem.last_lan_ms) / 1000) + " s ago, non-lan for " +
+                    std::to_string((now_ms - mem.cloud_since_ms) / 1000) + " s";
+        if (before != r.connect_type)
+            line += " (was '" + before + "')";
+        BOOST_LOG_TRIVIAL(warning) << line;
+    }
+}
+
+bool DeviceManager::lan_announced_recently(const std::string& dev_id) const
+{
+    auto it = m_ssdp_lan_memory.find(dev_id);
+    return it != m_ssdp_lan_memory.end() && it->second.lan_recently(ssdp_now_ms());
+}
+
+SsdpConnectType::PickerOffer DeviceManager::picker_offer_for(MachineObject* obj, const char* panel_list)
+{
+    if (!obj) return SsdpConnectType::PickerOffer::Bind;
+    const bool is_lan = obj->is_lan_mode_printer();
+    const bool recent = lan_announced_recently(obj->dev_id);
+    const SsdpConnectType::PickerOffer offer = SsdpConnectType::picker_offer(is_lan, recent);
+    const char* object_list = get_local_machine(obj->dev_id) == obj ? "local" : get_user_machine(obj->dev_id) == obj ? "user" : "other";
+    BOOST_LOG_TRIVIAL(warning) << "printer picker: " << obj->dev_id << " clicked in '" << panel_list << "' (" << object_list
+                               << " list object): dev_connection_type='" << obj->dev_connection_type << "' bind_state='"
+                               << obj->bind_state << "' lan_announced_recently=" << (recent ? "yes" : "no")
+                               << " access_code=" << (obj->has_access_right() ? "entered" : "none") << " -> "
+                               << (offer == SsdpConnectType::PickerOffer::AccessCode ? "access-code dialog" : "Log in printer (bind)");
+    if (offer == SsdpConnectType::PickerOffer::AccessCode && !is_lan) {
+        // Switched by a run of "cloud" announcements, but it was LAN a moment ago: the access code
+        // is what the user is about to enter, and ConnectPrinterDialog / update_local_machine only
+        // treat a "lan" printer as a LAN printer.
+        obj->dev_connection_type = "lan";
+        if (obj->bind_state.empty()) obj->bind_state = "free";
+        BOOST_LOG_TRIVIAL(warning) << "printer picker: " << obj->dev_id << " made LAN again for the access-code dialog";
+    }
+    return offer;
 }
 
 MachineObject* DeviceManager::insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code)

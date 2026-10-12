@@ -98,7 +98,7 @@ private:
     ScalableBitmap m_printer_status_lock;
     ScalableBitmap m_printer_in_lan;
 
-    MachineObject *m_info;
+    MachineObject *m_info{nullptr};
 
 protected:
     wxStaticBitmap *m_bitmap_info;
@@ -119,6 +119,8 @@ public:
     void show_printer_bind(bool show, PrinterBindState state);
     void show_edit_printer_name(bool show);
     void update_machine_info(MachineObject *info, bool is_my_devices = false);
+    // The printer this (reused) panel shows right now; read at event time, never captured.
+    MachineObject *machine_info() const { return m_info; }
 protected:
     void OnPaint(wxPaintEvent &event);
     void render(wxDC &dc);
@@ -206,6 +208,20 @@ private:
 private:
     void OnLeftUp(wxMouseEvent &event);
     void on_timer(wxTimerEvent &event);
+
+    // A machine panel is created once and reused for whichever printer sits in its row at the
+    // next refresh (every MACHINE_LIST_REFRESH_INTERVAL). Its handlers are bound once, here, at
+    // creation, and act on the panel's printer at event time. They used to be bound again on every
+    // refresh, so after a few refreshes one click ran the handler once per refresh: "Log in
+    // printer" opened two, then three times.
+    void wire_panel(MachineObjectPanel *op);
+    void on_panel_connect_lan(MachineObject *mobj);
+    void on_panel_bind(MachineObject *mobj);
+    void on_panel_unbind(MachineObject *mobj);
+    void on_panel_edit_name(MachineObject *mobj);
+    // One panel dialog at a time: a second click (or a click delivered twice) while one is open
+    // does not stack another on top.
+    bool m_panel_dialog_open{false};
 
 	void      update_other_devices();
     void      update_user_devices();

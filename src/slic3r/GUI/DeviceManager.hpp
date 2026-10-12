@@ -1451,11 +1451,21 @@ public:
 
     /* create machine or update machine properties */
     void on_machine_alive(std::string json_str);
-    // The connection type a printer keeps after an announcement (SsdpConnectType.hpp), logged
-    // once per printer and announced value when a LAN printer is kept LAN.
-    void apply_ssdp_connect_type(MachineObject* obj, const std::string& announced, const std::string& announced_bind,
-                                 bool saved_lan, bool has_access_code);
-    std::set<std::string> m_ssdp_kept_lan_logged; // "<dev_id>|<announced>"
+    // The connection type a printer keeps after an announcement (SsdpConnectType.hpp). `list` is
+    // "local" or "user", for the log line written whenever the outcome for that printer and list
+    // changes.
+    void apply_ssdp_connect_type(MachineObject* obj, const char* list, const std::string& announced,
+                                 const std::string& announced_bind, bool saved_lan, bool has_access_code, long long now_ms);
+    std::map<std::string, std::string>                     m_ssdp_outcome_logged; // "<dev_id>|<list>" -> last line
+    std::map<std::string, SsdpConnectType::LanMemory>      m_ssdp_lan_memory;     // dev_id -> what it announced lately
+    static long long                                       ssdp_now_ms();
+    // The printer announced "lan" within SsdpConnectType::LAN_MEMORY_MS.
+    bool lan_announced_recently(const std::string& dev_id) const;
+    // The printer picker's "Other Device" click (SelectMachinePop): which dialog to offer for `obj`.
+    // A printer that announced "lan" recently is offered the access-code dialog, never the cloud
+    // bind; if a run of non-"lan" announcements had already switched it, it is made "lan" again
+    // here so the access code can be entered. Logs the decision (never the access code).
+    SsdpConnectType::PickerOffer picker_offer_for(MachineObject* obj, const char* panel_list);
     MachineObject* insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code);
     /* disconnect all machine connections */
     void disconnect_all();
