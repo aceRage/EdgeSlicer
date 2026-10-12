@@ -287,12 +287,11 @@ void MediaPlayCtrl::Play()
         return;
     }
 
-    // Spike (opt-in "liveview_go2rtc"): EdgeSlicer's own live view. With the preference on, the
-    // Bambu player (BambuSource / live555) is never asked for anything, not even as a fallback.
-    if (m_own_view) {
-        play_own();
+    // "New Bambu LiveView" (liveview_go2rtc, on by default): a LAN camera plays through the hub's
+    // go2rtc and the Bambu player (BambuSource / live555) is never asked for anything. Setting off,
+    // or a printer the own view cannot play: the Bambu-player path below, exactly as before.
+    if (try_play_own())
         return;
-    }
 
     NetworkAgent *agent = wxGetApp().getAgent();
     std::string  agent_version = agent ? agent->get_version() : "";
@@ -386,7 +385,7 @@ void start_ping_test();
 
 void MediaPlayCtrl::Stop(wxString const &msg, wxString const &msg2)
 {
-    if (m_own_busy) { // spike: the own live view never touches the Bambu player, stopping included
+    if (m_own_busy) { // the own live view never touches the Bambu player, stopping included
         stop_own(msg);
         return;
     }
@@ -592,7 +591,7 @@ void MediaPlayCtrl::ultra_pause(bool pause)
     else       Play();
 }
 
-// ---- Spike: EdgeSlicer's own live view (opt-in "liveview_go2rtc") ------------------------------
+// ---- "New Bambu LiveView": EdgeSlicer's own live view (liveview_go2rtc, on by default) ---------
 // The camera plays through the hub's go2rtc - the same relay the phone uses - in a web view that
 // loads the hub's player page (resources/web/orca/player.html), exactly as the Stream tab embeds a
 // go2rtc camera. RTSPS printers (X1/H2/P2S) play as MSE over the hub's WebSocket tunnel: loopback
@@ -600,27 +599,34 @@ void MediaPlayCtrl::ultra_pause(bool pause)
 // the hub's BambuCamRelay into go2rtc and play as MJPEG frames on the same WebSocket.
 // Plan, findings and the owner's clean-data-dir test: tests/plan_own_camera_view.md.
 
-void MediaPlayCtrl::SetOwnView(wxWebView *view, std::function<void(bool own)> show_own)
+void MediaPlayCtrl::SetOwnView(std::function<wxWebView *()> make_view, std::function<void(bool own)> show_own)
 {
-    m_own_view = view;
-    m_show_own = std::move(show_own);
+    m_make_own_view = std::move(make_view);
+    m_show_own      = std::move(show_own);
 }
 
-void MediaPlayCtrl::play_own()
+bool MediaPlayCtrl::try_play_own()
 {
+    if (!m_make_own_view || !wxGetApp().app_config->get_bool("liveview_go2rtc"))
+        return false; // setting off: the Bambu-player path, untouched
     std::string kind;
     if (m_lan_proto == MachineObject::LVL_Rtsps)      kind = "rtsps";
     else if (m_lan_proto == MachineObject::LVL_Rtsp)  kind = "rtsp";
     else if (m_lan_proto == MachineObject::LVL_Local) kind = "local";
-    if (kind.empty()) {
-        Stop(m_lan_proto == MachineObject::LVL_Disable
-                 ? _L("LAN Only Liveview is off. Please turn on the liveview on printer screen.")
-                 : _L("This printer reports no LAN camera stream. Please update the printer firmware and try again."));
-        return;
+    // Only a printer this path can actually play: a LAN stream, its address and its access code.
+    // Anything else (LAN liveview switched off, cloud-only remote liveview, no access code yet) goes
+    // on to the Bambu-player path, which has its own messages and its own fallbacks for those.
+    if (kind.empty() || m_lan_ip.empty() || m_lan_passwd.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: [own camera] not usable for this printer (lan proto " << m_lan_proto
+                                << (m_lan_ip.empty() ? ", no LAN address" : "") << (m_lan_passwd.empty() ? ", no access code" : "")
+                                << "); using the Bambu player path";
+        return false;
     }
-    if (m_lan_ip.empty() || m_lan_passwd.empty()) {
-        Stop(_L("Live view needs the printer's LAN address and access code. Connect to the printer on the LAN first."));
-        return;
+    if (m_own_view == nullptr)
+        m_own_view = m_make_own_view();
+    if (m_own_view == nullptr) {
+        BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: [own camera] no web view could be created; using the Bambu player path";
+        return false;
     }
     m_failed_code = 0;
     m_own_busy    = true;
@@ -646,6 +652,7 @@ void MediaPlayCtrl::play_own()
                 weak->own_ready(seq, machine, info.port, info.go2rtc_port, info.secret, res.first, res.second);
         });
     }).detach();
+    return true;
 }
 
 void MediaPlayCtrl::own_ready(int seq, const std::string &machine, int port, int go2rtc_port, const std::string &secret,
@@ -656,7 +663,7 @@ void MediaPlayCtrl::own_ready(int seq, const std::string &machine, int port, int
         return;
     if (port <= 0 || go2rtc_port <= 0) {
         BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: [own camera] the hub or its go2rtc is not running";
-        stop_own(_L("The camera relay (go2rtc) is not running. See hub.log in the log folder."));
+        stop_own(_L("The camera relay (go2rtc) is not running. See hub.log in the log folder, or turn off \"New Bambu LiveView\" in Preferences."));
         return;
     }
     std::string name, mode, error;

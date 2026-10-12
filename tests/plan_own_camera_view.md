@@ -1,6 +1,10 @@
 # Our own desktop live view for Bambu printers (replacing BambuSource + live555)
 
-Status: investigation + opt-in prototype, branch `feat/own-camera-view-spike` (draft PR).
+Status: investigation + prototype, branch `feat/own-camera-view-spike` (draft PR #448). Revision 2
+(2026-10-12, owner): the setting is **"New Bambu LiveView", ON by default** (fresh installs and
+upgrades; an explicit OFF is kept), applies at the next Play without a restart, and OFF falls back
+to the existing Bambu-player path, with Bambu's camera files from PR #443 or, without them, the old
+"download camera component" prompt.
 Date: 2026-10-11. Context: PR #443 ships Bambu's camera files as a stopgap; the owner wants our
 own path proven first, on Windows and macOS, with a **clean data dir**
 (memory note `bambu-camera-files-decision`).
@@ -22,9 +26,10 @@ own path proven first, on Windows and macOS, with a **clean data dir**
   prompt, one shared go2rtc stream with the phone. It is already proven on Windows by the Stream
   tab. Options (b) native ffmpeg decode and (c) others cost far more and would need an ffmpeg on
   macOS, which we deliberately do not ship.
-- The **prototype** (preference "EdgeSlicer live view for Bambu cameras (experimental)", key
-  `liveview_go2rtc`, off by default) does exactly that, and never touches the Bambu player while it
-  is on. Draft PR and owner test plan below.
+- The **prototype** (Preferences → Bambu Network → **"New Bambu LiveView"**, key `liveview_go2rtc`,
+  **on by default**) does exactly that, and never touches the Bambu player for a printer it plays.
+  OFF, or a printer it cannot play (no LAN stream/address/access code, e.g. cloud-only), takes the
+  existing Bambu-player path unchanged. Draft PR and owner test plan below.
 
 ## 1. How the phone relay gets each Bambu camera today
 
@@ -127,12 +132,15 @@ WebKitGTK's MSE turns out to be unreliable in the AppImage.
 - `StatusBasePanel` (Device tab) builds `m_media_ctrl` (Bambu player), `m_custom_camera_view`
   (Orca's "custom camera source" web view) and `m_media_play_ctrl` (the play/stop bar,
   `MediaPlayCtrl`). The prototype adds `m_own_camera_view`, a third widget in the same sizer slot,
-  **created only when the preference is on at start-up**.
-- `MediaPlayCtrl::Play()` - after the usual checks (connected, not busy, has a camera) - branches
-  to `play_own()` when an own view was given. Everything after that branch (the `bambu:///…` URL,
+  **created on the first Play that uses it** (so never for someone with the setting off).
+- `MediaPlayCtrl::Play()` - after the usual checks (connected, not busy, has a camera) - calls
+  `try_play_own()`. It reads `liveview_go2rtc` **at every Play** (no restart needed) and returns
+  false - letting the existing code run unchanged - when the setting is off, the printer has no
+  LAN stream (`LVL_Rtsps`/`LVL_Rtsp`/`LVL_Local`), no LAN address or no access code, or no web view
+  can be created. When it plays, everything after that branch (the `bambu:///…` URL,
   `wxMediaCtrl2::Load`, the TUTK/Agora cloud URL) is never reached, so neither the DirectShow
   filter nor `BambuPlayer` is asked for anything.
-- `play_own()`: picks the kind from the printer's own report (`ipcam.liveview.local` /
+- `try_play_own()`: picks the kind from the printer's own report (`ipcam.liveview.local` /
   `rtsp_url` → `LVL_Rtsps` / `LVL_Rtsp` / `LVL_Local`), needs the LAN IP + access code, then on a
   worker thread: `RemoteHub::ensure_running("", false)` (phone access untouched) →
   `RemoteHub::register_own_camera(kind, ip, code)` → hub `POST /hub/camera` (control plane, hub
@@ -160,8 +168,11 @@ WebKitGTK's MSE turns out to be unreliable in the AppImage.
 
 - **"LAN Connection Failed (Failed to start liveview)"** (`Stop()` → `show_modal_ip_address_enter_dialog`)
   and **"download camera component"** (`wxMediaCtrl2::Load` → `offer_bambu_camera_component`) are
-  both on the Bambu-player path and are **not reached** with the preference on. For a product
-  version, wire the IP dialog to the own path's "unreachable" error instead.
+  both on the Bambu-player path: **not reached** for a printer the own view plays, and exactly as
+  before when the setting is OFF (or the printer falls back). With OFF: if Bambu's camera files are
+  installed (PR #443: `cameratools` on Windows and macOS) they play; without them, Windows offers
+  the camera component as before. For a product version, wire the IP dialog to the own path's
+  "unreachable" error too.
 - **"Go Live" virtual camera** (`ToggleStream`, `cameratools/bambu_source.exe` + ffmpeg) is still
   Bambu-only; hide it while the own view is on (follow-up), or drop it.
 - **Storage browser and timelapse** (`MediaFilePanel` → `PrinterFileSystem` → `plugins/BambuSource`,
@@ -240,21 +251,27 @@ the test plan checks they still work in the same clean-data-dir run.
    zero a few seconds after every viewer stops.
 5. Stop on tab switch / minimise / printer switch really stops (connection count returns to 0).
 6. Storage browser and timelapse still work (UltraNet), in the same run.
-7. With the preference **off** (same clean dir, restart), the old behaviour is back (no own view;
-   Play takes the Bambu path) - the preference is the only switch.
+7. With the setting **OFF** (no restart needed), the old behaviour is back (Play takes the Bambu
+   path: Bambu's files from #443 if present, else the "download camera component" prompt) - the
+   setting is the only switch. A fresh data dir and an upgraded one both start with it ON.
 
 ## Prototype (this branch)
 
-- Preference: Preferences → Bambu Network → "EdgeSlicer live view for Bambu cameras
-  (experimental)" (`liveview_go2rtc`, off by default; takes effect after a restart).
-- Files: `MediaPlayCtrl.{h,cpp}` (`SetOwnView`, `play_own`, `own_ready`, `stop_own`; branches in
-  `Play()`/`Stop()`), `StatusPanel.{hpp,cpp}` (the web view, created only with the preference on),
+- Setting: Preferences → Bambu Network → **"New Bambu LiveView"** (`liveview_go2rtc`). ON by
+  default: `AppConfig::set_defaults()` sets it when the key is missing, which covers fresh installs
+  and configs from older builds; a stored `false` is kept. Read at every Play, so it applies without
+  a restart. Tests: `[AppConfig]` "New Bambu LiveView ..." in `tests/libslic3r/test_appconfig_trailing_newline.cpp`.
+- Files: `MediaPlayCtrl.{h,cpp}` (`SetOwnView`, `try_play_own`, `own_ready`, `stop_own`; branches
+  in `Play()`/`Stop()`), `StatusPanel.{hpp,cpp}` (the web view, created on first use),
+  `AppConfig.cpp` (the default),
   `RemoteHub.{hpp,cpp}` (`Testing::own_camera_stream`, `js_hash_str`, `js_encode_uri_component`,
   `HubServer::register_own_camera`, `POST /hub/camera`, client `register_own_camera`),
   `Preferences.cpp`, unit tests `[own-camera]` in `tests/slic3rutils/remote_hub_tests.cpp`, and the
   offline probe `tests/phone/go2rtc_share_probe.py`.
-- With the preference off nothing new is created and `Play()`/`Stop()` behave as before
-  (`m_own_view` is null, `m_own_busy` false).
+- With the setting off nothing new is created and `Play()`/`Stop()` behave as before
+  (`try_play_own()` returns false, `m_own_busy` stays false). `wxMediaCtrl2.mm` is untouched (#443
+  changes it); a merge-tree of this branch with `origin/feat/bambu-camera-module` is clean.
+- Not in this branch: the `register_streams()` re-PUT fix (follow-up 1) - another branch owns it.
 
 ## Follow-ups (not in the spike)
 
@@ -274,21 +291,22 @@ for this. Use a new empty folder each time you want "clean".
 
 ### Windows
 
-Test copy: `C:\Dev\EdgeSlicerTest\camspike` (built from this branch; has `ultranet\` copied from
-`C:\Dev\ultranet_ship_stage`, no `cameratools`, no ffmpeg).
+Test copy: `C:\Dev\EdgeSlicerTest\camspike2` (revision 2 of this branch; has `ultranet\` copied
+from `C:\Dev\ultranet_ship_stage`, no `cameratools`, no ffmpeg). The older `camspike` copy is
+revision 1 (setting off by default) - don't use it.
 
 1. Keep your normal EdgeSlicer running (so its hub keeps 13640, the port Tailscale Serve and the
    phone use); the test copy's data dir gets its own hub on the next free port. If Windows Firewall
    asks about the test copy's `go2rtc.exe` (its WebRTC port), Cancel is fine: the desktop view uses
    loopback only.
 2. `mkdir C:\Dev\EdgeSlicerTest\camspike_data` (must be empty), then
-   `C:\Dev\EdgeSlicerTest\camspike\EdgeSlicer.exe --datadir C:\Dev\EdgeSlicerTest\camspike_data`.
+   `C:\Dev\EdgeSlicerTest\camspike2\EdgeSlicer.exe --datadir C:\Dev\EdgeSlicerTest\camspike_data`.
    Finish the setup wizard (Bambu Lab printers on).
 3. Check nothing Bambu is there: `dir C:\Dev\EdgeSlicerTest\camspike_data\cameratools` → not found;
    `dir C:\Dev\EdgeSlicerTest\camspike_data\plugins` → only UltraNet (`bambu_networking.dll`,
    `BambuSource.dll` ~2.2 MB, `ultranet.txt`).
-4. Preferences → Bambu Network → tick **EdgeSlicer live view for Bambu cameras (experimental)**,
-   restart with the same `--datadir`.
+4. Preferences → Bambu Network: **"New Bambu LiveView" is already ticked** (fresh data dir = ON).
+   Nothing to change.
 5. Device tab: add/connect the H2D in LAN mode (IP + access code). Press Play. Expect "Starting
    live view..." then video and "Playing (EdgeSlicer live view)"; the player overlay says MSE.
    Note the delay (stopwatch on your phone in front of the camera vs the screen) and CPU in Task
@@ -319,11 +337,16 @@ Test copy: `C:\Dev\EdgeSlicerTest\camspike` (built from this branch; has `ultran
    Pass: one row, owned by go2rtc.exe. (P1/A1: `-RemotePort 6000`, owned by the hub EdgeSlicer.)
    Stop both viewers (Stream tab to another tab, Device tab Stop): within ~10 s, no rows.
 10. Storage: Device tab → storage/timelapse list still opens and downloads a file (UltraNet).
-11. Preference off, restart: Play takes the Bambu path again - proving the preference is the only
-    switch. On your PC that path may even *play*, through OrcaSlicer's registered DirectShow filter
+11. Untick "New Bambu LiveView" (no restart), Stop, Play: Play takes the Bambu path again -
+    proving the setting is the only switch. Tick it again and Play: back to the own view. On your PC that path may even *play*, through OrcaSlicer's registered DirectShow filter
     (risk 5); the step-7 module check then shows `live555.dll` and OrcaSlicer's `BambuSource.dll`,
     which is exactly the contrast with step 7 that we want to see.
 12. Optional, strongest: repeat 2-8 on devwin11 (no OrcaSlicer/Bambu Studio, so no HKCU filter).
+13. Upgrade check: start camspike2 once on a **copy** of a data dir from an older build (copy an old
+    test data dir, never `%APPDATA%\EdgeSlicer` itself): the setting comes up ticked. Untick it,
+    restart: it stays unticked.
+14. With #443 (optional, once both are built together): with the setting OFF and Bambu's files in
+    `cameratools`, Play uses them; with the setting ON the module check still shows no `live555`.
 
 ### macOS (local build, no Mac CI)
 
@@ -349,7 +372,7 @@ build/arm64/Snapmaker_Orca/EdgeSlicer.app/Contents/MacOS/EdgeSlicer --datadir ~/
 3. Log check: `grep -h '\[own camera\]\|own live view stream' ~/edge-camspike-data/log/*` finds lines;
    `grep -h 'MediaPlayCtrl: bambu:\|MediaPlayCtrl: start load\|\[camera component\]\|LAN Connection Failed' ~/edge-camspike-data/log/*` finds nothing.
 4. Sharing as Windows step 9, counting with `lsof -nP -iTCP:322 -sTCP:ESTABLISHED`.
-5. Storage/timelapse and preference-off as Windows steps 10-11.
+5. Storage/timelapse, setting-off and upgrade as Windows steps 10, 11 and 13 (the setting is ON by default).
 6. Note whether the picture starts by itself (WKWebView autoplay) and the overlay says MSE.
 
 Report back per model: plays (Y/N), delay, overlay mode, module check, log check, connection count.
