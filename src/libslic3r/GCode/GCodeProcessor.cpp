@@ -238,6 +238,8 @@ void GCodeProcessor::TimeMachine::reset()
     g1_times_cache = std::vector<G1LinesCacheItem>();
     actual_speed_moves = std::vector<ActualSpeedMove>();
     prepare_time = 0.0f;
+    m_additional_time_buffer.clear();
+    landed_bookings.clear();
 }
 
 // Planner kernels in Marlin's form and order (reverse pass, then forward pass), from PrusaSlicer 2.8
@@ -325,13 +327,67 @@ static void recalculate_trapezoids(std::vector<GCodeProcessor::TimeBlock>& block
     }
 }
 
-void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, PrintEstimatedStatistics::ETimeMode mode,
-                                                 bool collect_actual_speed_points, size_t keep_last_n_blocks, float additional_time)
+GCodeProcessor::TimeMachine::AdditionalBuffer GCodeProcessor::TimeMachine::merge_adjacent_additional_time_blocks(const AdditionalBuffer& buffer)
 {
-    if (!enabled || blocks.size() < 2)
+    AdditionalBuffer merged;
+    if (buffer.empty())
+        return merged;
+
+    AdditionalTime current_block = buffer.front();
+    for (size_t idx = 1; idx < buffer.size(); ++idx) {
+        const AdditionalTime& next_block = buffer[idx];
+        if (current_block.type == next_block.type) {
+            current_block.time += next_block.time;
+            current_block.bookings.insert(current_block.bookings.end(), next_block.bookings.begin(), next_block.bookings.end());
+        } else {
+            merged.push_back(std::move(current_block));
+            current_block = next_block;
+        }
+    }
+    merged.push_back(std::move(current_block));
+    return merged;
+}
+
+void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, PrintEstimatedStatistics::ETimeMode mode,
+                                                 bool collect_actual_speed_points, size_t keep_last_n_blocks, float additional_time,
+                                                 EMoveType target_move_type, bool is_final, size_t booking)
+{
+    if (!enabled)
         return;
+    // Orca: on the finalization pass, drain extra time that is still buffered (e.g. a
+    // trailing filament change) even with fewer than two blocks queued -- no later pass
+    // exists to attribute it on. Every other pass keeps the original >= 2 requirement,
+    // and an empty buffer keeps today's early-return unchanged (no behavior change).
+    const bool drain_final = is_final && !m_additional_time_buffer.empty();
+    if (blocks.size() < 2 && !drain_final) {
+        // Not enough blocks to attribute the extra time to yet; buffer it so it is
+        // applied on a later pass instead of being dropped.
+        if (additional_time > 0.0f) {
+            AdditionalTime item;
+            item.type = target_move_type;
+            item.time = additional_time;
+            if (booking != static_cast<size_t>(-1))
+                item.bookings.push_back(booking);
+            m_additional_time_buffer.push_back(std::move(item));
+        }
+        return;
+    }
 
     assert(keep_last_n_blocks <= blocks.size());
+
+    // Merge any previously buffered extra time with this call's extra time. Each
+    // entry is applied, in order, to the first block matching its target move type
+    // (EMoveType::Noop matches any block).
+    AdditionalBuffer additional_buffer = m_additional_time_buffer;
+    if (additional_time > 0.0f) {
+        AdditionalTime item;
+        item.type = target_move_type;
+        item.time = additional_time;
+        if (booking != static_cast<size_t>(-1))
+            item.bookings.push_back(booking);
+        additional_buffer.push_back(std::move(item));
+    }
+    additional_buffer = merge_adjacent_additional_time_blocks(additional_buffer);
 
     // reverse_pass
     for (int i = static_cast<int>(blocks.size()) - 1; i > 0; --i) {
@@ -347,11 +403,21 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
 
     const size_t mode_id = static_cast<size_t>(mode);
     const size_t n_blocks_process = blocks.size() - keep_last_n_blocks;
+    size_t additional_buffer_idx = 0;
     for (size_t i = 0; i < n_blocks_process; ++i) {
         const TimeBlock& block = blocks[i];
         float block_time = block.time();
-        if (i == 0)
-            block_time += additional_time;
+        if (additional_buffer_idx < additional_buffer.size()) {
+            const AdditionalTime& additional = additional_buffer[additional_buffer_idx];
+            if (additional.type == EMoveType::Noop || additional.type == block.move_type) {
+                block_time += additional.time;
+                // EDGE: a tool change block carries the id of the move before it, the time shows from the next one on.
+                const unsigned int landed_g1_id = block.g1_line_id + (block.move_type == EMoveType::Tool_change ? 1 : 0);
+                for (size_t b : additional.bookings)
+                    landed_bookings.emplace_back(b, landed_g1_id);
+                ++additional_buffer_idx;
+            }
+        }
 
         time += double(block_time);
         // EDGE: += rather than upstream's =, so a move can never lose time it was given.
@@ -417,6 +483,28 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
             [](const StopTime& t, unsigned int value) { return t.g1_line_id < value; });
         if (it_stop_time != stop_times.end() && it_stop_time->g1_line_id == block.g1_line_id)
             it_stop_time->elapsed_time = float(time);
+    }
+
+    // Carry forward any extra time that found no matching block this pass, so it
+    // is retried against the blocks of a later pass.
+    m_additional_time_buffer.clear();
+    if (additional_buffer_idx < additional_buffer.size()) {
+        if (is_final) {
+            // Orca EOF hardening: no later pass remains to attribute this remainder,
+            // so add it to the machine total (and the custom-gcode cache) instead of
+            // dropping it. Deliberately NOT attributed to any move vertex, so a stray
+            // filament-change delay can never leak into an extrusion role's time.
+            // (BambuStudio drops the remainder here.)
+            float leftover = 0.0f;
+            for (size_t i = additional_buffer_idx; i < additional_buffer.size(); ++i)
+                leftover += additional_buffer[i].time;
+            time += double(leftover);
+            gcode_time.cache += leftover;
+        } else {
+            m_additional_time_buffer.insert(m_additional_time_buffer.end(),
+                                            additional_buffer.begin() + additional_buffer_idx,
+                                            additional_buffer.end());
+        }
     }
 
     if (keep_last_n_blocks) {
@@ -1409,7 +1497,9 @@ void GCodeProcessor::finalize(bool post_process)
     }
 
     // process the time blocks
-    calculate_time(m_result);
+    // Orca: final pass -- also drains any filament-change delay still buffered because
+    // calculate_time early-returns with fewer than two queued blocks (see TimeMachine::calculate_time).
+    calculate_time(m_result, 0, 0.0f, EMoveType::Noop, /*is_final=*/true);
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
         TimeMachine& machine = m_time_processor.machines[i];
         TimeMachine::CustomGCodeTime& gcode_time = machine.gcode_time;
@@ -1505,7 +1595,9 @@ void GCodeProcessor::fill_time_tables(const std::vector<GCodeProcessorResult::Mo
         if (!move.prepare_stage || move.type != EMoveType::Travel)
             moves_time[static_cast<size_t>(move.type)] += t;
         //BBS: don't calculate travel time into extrusion path, except travel inside start and end gcode.
-        const ExtrusionRole role = (move.type != EMoveType::Travel || move.extrusion_role == erCustom) ? move.extrusion_role : erNone;
+        // Orca #14573: a tool change's delay is not an extrusion role's time either (unless it is in the start / end G-code).
+        const ExtrusionRole role = ((move.type != EMoveType::Travel && move.type != EMoveType::Tool_change) || move.extrusion_role == erCustom) ?
+            move.extrusion_role : erNone;
         roles_time[static_cast<size_t>(role)] += t;
         if (move.layer_id >= layers_time.size())
             layers_time.resize(move.layer_id + 1, 0.0f);
@@ -3980,6 +4072,7 @@ void GCodeProcessor::process_T(const std::string_view command)
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
         } else {
             unsigned char id = static_cast<unsigned char>(new_extruder);
+            bool tool_change_stored = false;
             if (m_extruder_id != id) {
                 if (id >= m_result.extruders_count)
                     BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
@@ -4000,13 +4093,41 @@ void GCodeProcessor::process_T(const std::string_view command)
                     m_time_processor.extruder_unloaded = false;
                     extra_time += get_filament_load_time(static_cast<size_t>(m_extruder_id));
                     extra_time += m_time_processor.machine_tool_change_time;
+
+                    // Orca #14573: store the tool-change move first, then attribute the filament-change delay to
+                    // it rather than to whichever motion block happens to be pending. This keeps the delay out of
+                    // the per-role feature-time distribution while still including it in the total and the
+                    // per-layer times.
+                    store_move_vertex(EMoveType::Tool_change);
+                    tool_change_stored = true;
+
+                    // Construct a zero-distance time block for the tool-change move on each enabled machine so
+                    // the synchronize below can land the delay on it. The synchronize flushes with
+                    // keep_last_n_blocks == 0; if fewer than two blocks are queued it buffers the delay instead,
+                    // and this block stays queued to receive it on a later pass.
+                    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
+                        TimeMachine& machine = m_time_processor.machines[i];
+                        if (!machine.enabled)
+                            continue;
+                        TimeBlock block;
+                        block.move_id             = static_cast<unsigned int>(m_result.moves.size()) - 1;
+                        block.move_type           = EMoveType::Tool_change;
+                        block.layer_id            = std::max<unsigned int>(1, m_layer_id);
+                        block.g1_line_id          = m_g1_line_id;
+                        block.flags.prepare_stage = m_processing_start_custom_gcode;
+                        block.distance            = 0.0f;
+                        block.calculate_trapezoid();
+                        machine.blocks.push_back(block);
+                    }
+
                     m_booking_tool_change = true;
-                    simulate_st_synchronize(extra_time);
+                    simulate_st_synchronize(extra_time, EMoveType::Tool_change);
                     m_booking_tool_change = false;
                 }
 
                 // store tool change move
-                store_move_vertex(EMoveType::Tool_change);
+                if (!tool_change_stored)
+                    store_move_vertex(EMoveType::Tool_change);
             }
         }
     }
@@ -5258,29 +5379,36 @@ void GCodeProcessor::process_filaments(CustomGCode::Type code)
     }
 }
 
-void GCodeProcessor::simulate_st_synchronize(float additional_time)
+void GCodeProcessor::simulate_st_synchronize(float additional_time, EMoveType target_move_type)
 {
+    size_t booking = static_cast<size_t>(-1);
     if (additional_time > 0.f) {
-        // TimeMachine::calculate_time() adds additional_time to blocks.front(), or drops it when fewer
-        // than two blocks are queued. See m_booked_times.
-        const TimeMachine &normal = m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
-        m_booked_times.push_back({ m_line_id, (normal.enabled && normal.blocks.size() >= 2) ? normal.blocks.front().g1_line_id : (unsigned int) -1,
-                                   additional_time, m_booking_tool_change });
+        // TimeMachine::calculate_time() adds additional_time to the first block matching target_move_type, now or
+        // on a later pass, and reports where it landed. See m_booked_times.
+        booking = m_booked_times.size();
+        m_booked_times.push_back({ m_line_id, (unsigned int) -1, additional_time, m_booking_tool_change });
     }
-    calculate_time(m_result, 0, additional_time);
+    calculate_time(m_result, 0, additional_time, target_move_type, false, booking);
 }
 
-void GCodeProcessor::calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks, float additional_time)
+void GCodeProcessor::calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks, float additional_time,
+                                    EMoveType target_move_type, bool is_final, size_t booking)
 {
     // calculate times
     std::vector<TimeMachine::ActualSpeedMove> actual_speed_moves;
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
         TimeMachine& machine = m_time_processor.machines[i];
         const PrintEstimatedStatistics::ETimeMode mode = static_cast<PrintEstimatedStatistics::ETimeMode>(i);
-        machine.calculate_time(result, mode, m_actual_speed_moves_enabled, keep_last_n_blocks, additional_time);
-        if (mode == PrintEstimatedStatistics::ETimeMode::Normal)
+        machine.calculate_time(result, mode, m_actual_speed_moves_enabled, keep_last_n_blocks, additional_time, target_move_type, is_final, booking);
+        if (mode == PrintEstimatedStatistics::ETimeMode::Normal) {
             actual_speed_moves = std::move(machine.actual_speed_moves);
+            // The pre-cooling bookings follow the Normal machine's times.
+            for (const auto& landed : machine.landed_bookings)
+                if (landed.first < m_booked_times.size())
+                    m_booked_times[landed.first].first_g1_id = landed.second;
+        }
         machine.actual_speed_moves.clear();
+        machine.landed_bookings.clear();
     }
 
     if (actual_speed_moves.empty())

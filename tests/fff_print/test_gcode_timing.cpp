@@ -1,0 +1,308 @@
+// Time estimator tests for the batch 2F ports (OrcaSlicer #14573 filament change time, #15066 firmware retract
+// feedrate, #15304 / #15308 junction deviation planning). Ported from upstream's tests/fff_print/test_gcode_timing.cpp
+// (Catch2 v3 there) to this tree's Catch2 v2.
+
+#include <catch2/catch.hpp>
+
+#include "libslic3r/libslic3r.h"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/PrintConfig.hpp"
+
+#include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
+
+#include <cmath>
+#include <iomanip>
+#include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+constexpr size_t NORMAL = static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal);
+
+// Writes `gcode` to a temporary file and runs the processor over it with `config` applied. The G-code has no
+// producer marker, so process_file() keeps the applied config.
+void run_processor(GCodeProcessor& proc, const FullPrintConfig& config, const char* gcode)
+{
+    // reserved_tag() selects between two tag tables based on this shared static, and other tests in the binary
+    // mutate it -- pin it so our "; FEATURE:" role tags are parsed deterministically regardless of test order.
+    GCodeProcessor::s_IsBBLPrinter = true;
+    const boost::filesystem::path path = boost::filesystem::temp_directory_path() /
+        boost::filesystem::unique_path("edge_gcode_timing_%%%%%%%%.gcode");
+    {
+        boost::nowide::ofstream os(path.string(), std::ios::binary);
+        os << gcode;
+    }
+    proc.apply_config(config);
+    proc.process_file(path.string());
+    boost::filesystem::remove(path);
+}
+
+// Estimated time per extrusion role, grouped the way the preview builds the feature-type legend: the sum of
+// MoveVertex.time over EMoveType::Extrude moves keyed by extrusion_role.
+std::map<ExtrusionRole, double> role_times(const GCodeProcessorResult& r)
+{
+    std::map<ExtrusionRole, double> m;
+    for (const auto& mv : r.moves)
+        if (mv.type == EMoveType::Extrude)
+            m[mv.extrusion_role] += mv.time[NORMAL];
+    return m;
+}
+
+// Sum of estimated time attributed to tool-change moves.
+double sum_tool_change_time(const GCodeProcessorResult& r)
+{
+    double t = 0.0;
+    for (const auto& mv : r.moves)
+        if (mv.type == EMoveType::Tool_change)
+            t += mv.time[NORMAL];
+    return t;
+}
+
+// ---- #14573: filament change time ----
+
+FullPrintConfig make_config(double load_time, double unload_time, double tool_change_time)
+{
+    FullPrintConfig config; // default-initialized with the built-in defaults
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    // Two filaments, both assigned to the same (single) extruder, so a T1 after T0 is a same-extruder
+    // filament swap that costs unload + load time.
+    config.filament_diameter.values = {1.75, 1.75};
+    config.filament_map.values = {1, 1};
+    config.machine_load_filament_time.value = load_time;
+    config.machine_unload_filament_time.value = unload_time;
+    config.machine_tool_change_time.value = tool_change_time;
+    return config;
+}
+
+constexpr double LOAD = 10.0;
+constexpr double UNLOAD = 5.0;
+
+} // namespace
+
+// This tree's process_T() starts on extruder 0 and charges nothing for T0 at the start, so the tests switch to
+// T1 first (empty extruder: load time only) and back to T0 (unload + load).
+
+TEST_CASE("Filament-change time is attributed to tool-change moves, not extrusion roles", "[GCodeTiming]")
+{
+    // Relative extrusion (M83) so every "E5" is a real 5mm extrusion move rather than a zero-delta travel. Two
+    // real travels precede T1 so its delay is flushed cleanly. The extrusions after T1 span several roles; the
+    // first pending block at T0 is an "Outer wall" move, so the old code folded the T0 delay into that role.
+    // The per-role check below verifies EVERY role stays clean, not just one.
+    const char* gcode =
+        "M83\n"
+        "; FEATURE: Outer wall\n"
+        "G1 X10 Y10 Z0.2 F600\n"
+        "G1 X0 Y0 F6000\n"
+        "T1\n"
+        "; FEATURE: Outer wall\n"
+        "G1 X50 Y0 E5 F1800\n"
+        "G1 X50 Y50 E5\n"
+        "; FEATURE: Sparse infill\n"
+        "G1 X0 Y50 E5\n"
+        "G1 X0 Y0 E5\n"
+        "T0\n"
+        "; FEATURE: Inner wall\n"
+        "G1 X50 Y0 E5\n"
+        "G1 X50 Y50 E5\n";
+
+    GCodeProcessor proc_zero;
+    run_processor(proc_zero, make_config(0.0, 0.0, 0.0), gcode);
+    const GCodeProcessorResult& r_zero = proc_zero.get_result();
+
+    GCodeProcessor proc_delay;
+    run_processor(proc_delay, make_config(LOAD, UNLOAD, 0.0), gcode);
+    const GCodeProcessorResult& r_delay = proc_delay.get_result();
+
+    // T1 loads (10), T0 unloads (5) and loads (10).
+    const double delay = LOAD + UNLOAD + LOAD;
+
+    // The delay must not inflate the time of ANY extrusion role. Compare the full per-role breakdown between the
+    // zero-delay and delayed runs -- every role must match to within tolerance.
+    const auto roles_zero  = role_times(r_zero);
+    const auto roles_delay = role_times(r_delay);
+    // Guard: the gcode must genuinely exercise multiple distinct roles, otherwise this check would silently
+    // cover only one.
+    REQUIRE(roles_zero.size() >= 3);
+    REQUIRE(roles_zero.size() == roles_delay.size());
+    for (const auto& [role, zero_time] : roles_zero) {
+        INFO("extrusion role index = " << static_cast<int>(role));
+        REQUIRE(roles_delay.count(role) == 1);
+        REQUIRE_THAT(roles_delay.at(role), WithinAbs(zero_time, 1e-2));
+    }
+
+    // The delay must instead land on the tool-change moves, so per-move consumers (layer-time view, layer slider)
+    // stay consistent.
+    REQUIRE_THAT(sum_tool_change_time(r_delay), WithinAbs(delay, 1e-2));
+    REQUIRE_THAT(sum_tool_change_time(r_zero), WithinAbs(0.0, 1e-9));
+
+    // The role tables are rebuilt from the moves: no extrusion role gets the delay, and the sum of the roles still
+    // adds up to the total.
+    const auto& modes_zero  = r_zero.print_statistics.modes[NORMAL];
+    const auto& modes_delay = r_delay.print_statistics.modes[NORMAL];
+    for (const auto& [role, time] : modes_zero.roles_times) {
+        auto it = std::find_if(modes_delay.roles_times.begin(), modes_delay.roles_times.end(),
+                               [role = role](const auto& item) { return item.first == role; });
+        REQUIRE(it != modes_delay.roles_times.end());
+        if (role != erNone)
+            REQUIRE_THAT(it->second, WithinAbs(time, 1e-2));
+    }
+
+    // Both tool changes occur on layer 1, so the delay must also be reflected in the first-layer time.
+    REQUIRE(!modes_delay.layers_times.empty());
+    REQUIRE_THAT(modes_delay.layers_times.front() - modes_zero.layers_times.front(), WithinAbs(delay, 1e-2));
+}
+
+TEST_CASE("Filament-change time is not dropped when few motion blocks precede the change", "[GCodeTiming]")
+{
+    // Only a single motion block precedes T1, so the old "fewer than two pending blocks" early-out discarded that
+    // filament-change delay entirely, making the total print time inconsistent with the filament changes.
+    const char* gcode =
+        "; FEATURE: Outer wall\n"
+        "G1 X10 Y10 Z0.2 F600\n"
+        "T1\n"
+        "G1 X50 Y0 E5 F1800\n"
+        "G1 X50 Y50 E5\n"
+        "T0\n"
+        "G1 X0 Y50 E5\n"
+        "G1 X0 Y0 E5\n";
+
+    GCodeProcessor proc_zero;
+    run_processor(proc_zero, make_config(0.0, 0.0, 0.0), gcode);
+
+    GCodeProcessor proc_delay;
+    run_processor(proc_delay, make_config(LOAD, UNLOAD, 0.0), gcode);
+
+    // Every second of filament-change delay must be present in the total estimated print time.
+    const double delay = LOAD + UNLOAD + LOAD;
+    const double total_delta = proc_delay.get_time(PrintEstimatedStatistics::ETimeMode::Normal)
+                             - proc_zero.get_time(PrintEstimatedStatistics::ETimeMode::Normal);
+    REQUIRE_THAT(total_delta, WithinAbs(delay, 1e-2));
+}
+
+TEST_CASE("Back-to-back tool changes buffer then merge into one tool-change block", "[GCodeTiming]")
+{
+    // T1 is the very first line: the block queue is empty when its delay is synchronized, so with only the single
+    // (artificial) tool-change block queued the delay can't be attributed yet and is buffered. T0 follows
+    // immediately with no motion between; its synchronize now sees two tool-change blocks queued, so its own delay
+    // joins the buffered T1 entry at application time, the two same-type entries merge into one, and the sum lands
+    // entirely on the first tool-change block. The trailing travels leave both runs with >= 2 blocks so their
+    // end-of-file flush is identical and cancels in every delta.
+    const char* gcode =
+        "T1\n"                     // first charged change (load only); empty queue -> buffers (Tool_change,10)
+        "T0\n"                     // same-extruder swap (unload+load); merges with the buffered entry to (Tool_change,25)
+        "G1 X10 Y0 Z0.2 F6000\n"   // travels: keep >= 2 blocks queued at EOF (flushed identically by both runs)
+        "G1 X10 Y10\n"
+        "G1 X0 Y10\n";
+
+    GCodeProcessor proc_zero;
+    run_processor(proc_zero, make_config(0.0, 0.0, 0.0), gcode);
+    const GCodeProcessorResult& r_zero = proc_zero.get_result();
+
+    GCodeProcessor proc_delay;
+    run_processor(proc_delay, make_config(LOAD, UNLOAD, 0.0), gcode);
+    const GCodeProcessorResult& r_delay = proc_delay.get_result();
+
+    // T1 load 10 + T0 unload 5 + T0 load 10 = 25.
+    const double delay = LOAD + UNLOAD + LOAD;
+
+    // The whole buffered-then-merged delay must reach the total print time.
+    const double total_delta = proc_delay.get_time(PrintEstimatedStatistics::ETimeMode::Normal)
+                             - proc_zero.get_time(PrintEstimatedStatistics::ETimeMode::Normal);
+    REQUIRE_THAT(total_delta, WithinAbs(delay, 1e-2));
+
+    // ...and must land on the tool-change moves, not on any extrusion role.
+    REQUIRE_THAT(sum_tool_change_time(r_delay), WithinAbs(25.0, 1e-2));
+    REQUIRE_THAT(sum_tool_change_time(r_zero), WithinAbs(0.0, 1e-9));
+
+    // Characterization (documents the current merge-collapse behavior, not a correctness requirement): the two
+    // buffered same-type entries combine onto the FIRST artificial tool-change block; the second receives nothing.
+    std::vector<double> tc;
+    for (const auto& mv : r_delay.moves)
+        if (mv.type == EMoveType::Tool_change)
+            tc.push_back(mv.time[NORMAL]);
+    REQUIRE(tc.size() >= 2);
+    REQUIRE_THAT(tc[0], WithinAbs(25.0, 1e-2));
+    REQUIRE_THAT(tc[1], WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Trailing tool change at end of file is drained, not dropped", "[GCodeTiming]")
+{
+    // A tool change is the last line of the file, with only its single artificial block queued. Its delay is
+    // buffered (fewer than two blocks) and there is no later motion to flush it, so only the finalization pass can
+    // attribute it. Without the end-of-file drain the delay would be stranded in the buffer.
+    const char* gcode =
+        "G1 X10 Y0 Z0.2 F6000\n"   // three travels -> three blocks queued (no E, so no filament is selected)
+        "G1 X10 Y10\n"
+        "G1 X0 Y10\n"
+        "G4 S0\n"                  // dwell with S present -> full flush; queue and buffer now empty
+        "T1\n";                    // trailing change, nothing after: buffers (Tool_change,10), one block queued
+
+    GCodeProcessor proc_zero;
+    run_processor(proc_zero, make_config(0.0, 0.0, 0.0), gcode);
+    const GCodeProcessorResult& r_zero = proc_zero.get_result();
+
+    GCodeProcessor proc_delay;
+    run_processor(proc_delay, make_config(LOAD, UNLOAD, 0.0), gcode);
+    const GCodeProcessorResult& r_delay = proc_delay.get_result();
+
+    // T1 is the first charged change on an empty extruder, so it costs the load time only. The zero run buffers
+    // nothing and drops its artificial block, so the motion cancels and the delta is exactly the drained delay.
+    const double total_delta = proc_delay.get_time(PrintEstimatedStatistics::ETimeMode::Normal)
+                             - proc_zero.get_time(PrintEstimatedStatistics::ETimeMode::Normal);
+    REQUIRE_THAT(total_delta, WithinAbs(LOAD, 1e-2));
+
+    // The size-1 drain runs the body, so the delay lands on the artificial tool-change move.
+    REQUIRE_THAT(sum_tool_change_time(r_delay), WithinAbs(LOAD, 1e-2));
+    REQUIRE_THAT(sum_tool_change_time(r_zero), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Carried-forward tool-change delay reaches the total without polluting roles", "[GCodeTiming]")
+{
+    // A wildcard dwell delay is buffered ahead of the tool-change delay, so when the blocks are next flushed the
+    // dwell's (Noop) entry consumes the artificial tool-change block and the tool-change entry finds no matching
+    // block and carries forward. It stays unmatched through the remaining extrusion moves and is only resolved at
+    // finalization, where the end-of-file fold adds it to the machine total -- never to a move vertex, so it
+    // cannot leak into an extrusion role's time.
+    const char* gcode =
+        "M83\n"
+        "G4 S3\n"                        // empty queue -> buffers (Noop,3) [wildcard delay]
+        "T1\n"                           // one block queued -> buffers (Tool_change,10) behind the dwell
+        "; FEATURE: Inner wall\n"
+        "G1 X20 Y0 Z0.2 E5 F1800\n"      // extrusion m1: queue is [artificial_TC, m1]
+        "G4 S0\n"                        // flush: (Noop,3) consumes artificial_TC; (Tool_change,10) carries forward
+        "G1 X20 Y20 E5\n"                // extrusion m2
+        "G1 X0 Y20 E5\n";                // extrusion m3: at EOF queue is [m2, m3], buffer is [(Tool_change,10)]
+
+    GCodeProcessor proc_zero;
+    run_processor(proc_zero, make_config(0.0, 0.0, 0.0), gcode);
+    const GCodeProcessorResult& r_zero = proc_zero.get_result();
+
+    GCodeProcessor proc_delay;
+    run_processor(proc_delay, make_config(LOAD, UNLOAD, 0.0), gcode);
+    const GCodeProcessorResult& r_delay = proc_delay.get_result();
+
+    // The stranded tool-change delay must be drained into the total, not dropped. The 3s dwell is identical in
+    // both runs and cancels along with all motion, leaving exactly the delay.
+    const double total_delta = proc_delay.get_time(PrintEstimatedStatistics::ETimeMode::Normal)
+                             - proc_zero.get_time(PrintEstimatedStatistics::ETimeMode::Normal);
+    REQUIRE_THAT(total_delta, WithinAbs(LOAD, 1e-2));
+
+    // Pollution safety: the drained delay must NOT appear in any extrusion role. Every role's time must match
+    // between the zero and delayed runs -- this is what the total-only fold buys.
+    const auto rz = role_times(r_zero);
+    const auto rd = role_times(r_delay);
+    REQUIRE(rz.size() >= 1);
+    REQUIRE(rz.size() == rd.size());
+    for (const auto& [role, zero_time] : rz) {
+        INFO("extrusion role index = " << static_cast<int>(role));
+        REQUIRE(rd.count(role) == 1);
+        REQUIRE_THAT(rd.at(role), WithinAbs(zero_time, 1e-2));
+    }
+}

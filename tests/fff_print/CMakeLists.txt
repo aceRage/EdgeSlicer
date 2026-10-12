@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
 	test_cost_overrides_slice.cpp
 	test_cost_pricing_slice.cpp
 	test_gcodeprocessor.cpp
+	test_gcode_timing.cpp
 	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
 	test_image_row_preview.cpp
