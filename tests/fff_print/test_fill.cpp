@@ -14,10 +14,12 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Fill/Fill.hpp"
+#include "libslic3r/Fill/FillAdaptive.hpp"
 #include "libslic3r/Fill/FillGyroid.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SVG.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -533,7 +535,7 @@ TEST_CASE("Sparse plane-path anchors match the printed infill", "[Fill][Internal
     const AABBTreeLines::LinesDistancer<Line> printed_tree(to_lines(printed));
 
     // Orca: Exclude perimeter connections: anchoring and extrusion can trim those differently.
-    const Polylines anchors = intersection_pl(layer.generate_sparse_infill_polylines_for_anchoring(nullptr, nullptr, nullptr),
+    const Polylines anchors = intersection_pl(layer.generate_sparse_infill_polylines_for_anchoring(nullptr, nullptr),
                                               shrink(to_polygons(layer.lslices), scale_(3.)));
     REQUIRE_FALSE(anchors.empty());
     double max_distance = 0.;
@@ -1138,4 +1140,105 @@ TEST_CASE("Solid infill direction offsets every layer when no template is set", 
         CAPTURE(i, at_0[i], at_30[i]);
         CHECK(delta == 30);
     }
+}
+
+TEST_CASE("Adaptive infill of a modifier leaves the density of the other regions", "[Fill][Regression]")
+{
+    // Orca #16295: a denser adaptive/support-cubic modifier used to average into the object's
+    // single octree spacing. Per-region octrees keep the unmodified body's infill.
+    const std::string pattern = GENERATE("adaptivecubic", "supportcubic");
+    CAPTURE(pattern);
+
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", pattern},
+                                   {"sparse_infill_density", "15%"},
+                                   {"top_shell_layers", 0},
+                                   {"bottom_shell_layers", 0},
+                                   {"top_shell_thickness", 0},
+                                   {"bottom_shell_thickness", 0},
+                                   {"layer_height", 0.2},
+                                   {"initial_layer_print_height", 0.2}});
+
+    auto two_cubes = []() {
+        TriangleMesh bodies = make_cube(30, 30, 6);
+        TriangleMesh second = make_cube(30, 30, 6);
+        second.translate(40, 0, 0);
+        bodies.merge(second);
+        return bodies;
+    };
+
+    Print print, print_sparse;
+    Model model, model_sparse;
+    Slic3r::Test::init_print({two_cubes()}, print, model, config, false);
+    {
+        TriangleMesh modifier = make_cube(20, 40, 10);
+        modifier.translate(55, -5, -2);
+        ModelVolume *vol = model.objects.front()->add_volume(std::move(modifier), ModelVolumeType::PARAMETER_MODIFIER, false);
+        DynamicPrintConfig dense;
+        dense.set_deserialize_strict({{"sparse_infill_density", "60%"}});
+        vol->config.apply(dense);
+        print.apply(model, config);
+    }
+    Slic3r::Test::init_print({two_cubes()}, print_sparse, model_sparse, config, false);
+    print.process();
+    print_sparse.process();
+
+    const std::vector<double> with_mod = FillAdaptive::adaptive_fill_line_spacing(*print.objects().front());
+    const std::vector<double> sparse   = FillAdaptive::adaptive_fill_line_spacing(*print_sparse.objects().front());
+    std::vector<double>       with_mod_nz;
+    std::vector<double>       sparse_nz;
+    for (double s : with_mod)
+        if (s > 0.)
+            with_mod_nz.push_back(s);
+    for (double s : sparse)
+        if (s > 0.)
+            sparse_nz.push_back(s);
+    REQUIRE(with_mod_nz.size() >= 2);
+    REQUIRE_FALSE(sparse_nz.empty());
+    const double base = sparse_nz.front();
+    for (double s : sparse_nz)
+        CHECK(s == Approx(base));
+    bool found_base  = false;
+    bool found_other = false;
+    for (double s : with_mod_nz) {
+        if (s == Approx(base))
+            found_base = true;
+        else
+            found_other = true;
+    }
+    CHECK(found_base);
+    CHECK(found_other);
+
+    auto left_body_clip = [](const PrintObject &object) {
+        const ExPolygons &slices = object.layers().front()->lslices;
+        REQUIRE_FALSE(slices.empty());
+        const ExPolygon *left = &slices.front();
+        for (const ExPolygon &ex : slices)
+            if (ex.contour.bounding_box().min.x() < left->contour.bounding_box().min.x())
+                left = &ex;
+        const BoundingBox bb    = left->contour.bounding_box();
+        const coord_t     inset = scale_(3.);
+        return Polygon({Point(bb.min.x() + inset, bb.min.y() + inset), Point(bb.max.x() - inset, bb.min.y() + inset),
+                        Point(bb.max.x() - inset, bb.max.y() - inset), Point(bb.min.x() + inset, bb.max.y() - inset)});
+    };
+    auto infill_length_in = [](const Print &print, const Polygon &clip) {
+        double length = 0.;
+        for (const Layer *layer : print.objects().front()->layers())
+            for (const LayerRegion *region : layer->regions()) {
+                const ExtrusionEntityCollection flat = region->fills.flatten();
+                for (const ExtrusionEntity *entity : flat.entities)
+                    if (entity->role() == erInternalInfill) {
+                        Polylines pls;
+                        entity->collect_polylines(pls);
+                        for (const Polyline &pl : intersection_pl(pls, clip))
+                            length += unscale<double>(pl.length());
+                    }
+            }
+        return length;
+    };
+
+    const double len_mod    = infill_length_in(print, left_body_clip(*print.objects().front()));
+    const double len_sparse = infill_length_in(print_sparse, left_body_clip(*print_sparse.objects().front()));
+    REQUIRE(len_sparse > 0.);
+    CHECK(len_mod == Approx(len_sparse).epsilon(0.02));
 }
