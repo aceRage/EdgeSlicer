@@ -528,6 +528,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
     GUI/FirstRequestGate.hpp
+    GUI/SsdpConnectType.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
