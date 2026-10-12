@@ -325,7 +325,9 @@ inline bool is_orca_open(const std::string& url)
     // edgeslicer:// is what we register now; every older spelling this fork has shipped
     // stays accepted so links already handed out (and any left in a browser's handler
     // list) keep working.
-    return boost::starts_with(url, "edgeslicer://open") || boost::starts_with(url, "ultraone://open")
+    // edgeslicer://connector?url=<https link> opens Home > Vendors > Import from link.
+    return boost::starts_with(url, "edgeslicer://open") || boost::starts_with(url, "edgeslicer://connector")
+        || boost::starts_with(url, "ultraone://open")
         || boost::starts_with(url, "Snapmaker_Orca://open") || boost::starts_with(url, "snapmaker-orca://open")
         // Ultra: also accept Printables' native OrcaSlicer button scheme.
         || boost::starts_with(url, "orcaslicer://open");

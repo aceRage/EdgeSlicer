@@ -2965,14 +2965,9 @@ void NotificationManager::close_print_by_object_caution_notification(const std::
 
 void NotificationManager::bbl_show_plugin_install_notification(const std::string &text)
 {
-    std::string hyper_text;
-    auto callback = [](wxEvtHandler *) {
-        wxCommandEvent *evt = new wxCommandEvent(EVT_INSTALL_PLUGIN_NETWORKING);
-        wxQueueEvent(wxGetApp().plater(), evt);
-        return false;
-    };
-    hyper_text =  _u8L(" Click here to install it.");
-    NotificationData data{NotificationType::BBLPluginInstallHint, NotificationLevel::WarningNotificationLevel, 0, text, hyper_text, callback};
+    // No "Click here to install it" link: EdgeSlicer never downloads Bambu's plug-in, so the text
+    // alone says it is missing and that a reinstall restores it.
+    NotificationData data{NotificationType::BBLPluginInstallHint, NotificationLevel::WarningNotificationLevel, 0, text};
 
     for (std::unique_ptr<PopNotification> &notification : m_pop_notifications) {
         if (notification->get_type() == NotificationType::BBLPluginInstallHint) {

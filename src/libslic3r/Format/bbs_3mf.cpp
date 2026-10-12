@@ -9564,6 +9564,9 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                         else if (values.size() < extruder_count)
                             values.resize(extruder_count, values.back());
                     };
+                    // The X2D's second extruder is a Bowden one: read the types off the variant list
+                    // rather than padding the dropped extruder_type default ("0 0" instead of Bambu's "0 1").
+                    extruder_types = slice_info_extruder_types(config, extruder_count);
                     fit_to_extruders(extruder_types);
                     fit_to_extruders(nozzle_volume_types);
                 }

@@ -287,6 +287,21 @@ async function main() {
         check('Esc with nothing open closes the dialog (close_page)', await evalJs(`window.__sent.some(function(m){ return m.command === 'close_page'; })`));
         check('no uncaught exception during all that', errors.length === 0, errors.join(' | '));
 
+        // ============================================================ 7b. column resizing (shared engine); default layout untouched
+        await load('24');
+        const colsVar = () => evalJs(`document.querySelector('.pt-grid').style.getPropertyValue('--pt-cols')`);
+        const widths = () => evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-head .pt-th'), function(t){ return Math.round(t.getBoundingClientRect().width); })`);
+        const dflt = await colsVar();
+        check('Printer Selection keeps its default column layout until a column is dragged', dflt === '88px 40px minmax(96px, 1fr) minmax(150px, 2.2fr) 84px 84px 84px 104px', dflt);
+        const wa = await widths();
+        const hp = await evalJs(`(function(){ var r = document.querySelector('.pt-th[data-key="name"] .pt-resize').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+        const mouse = (type, x, y) => S('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
+        await mouse('mousePressed', hp.x, hp.y); await mouse('mouseMoved', hp.x + 40, hp.y); await mouse('mouseReleased', hp.x + 40, hp.y);
+        const wb = await widths();
+        check('dragging the Model edge widens Model by the drag and the total stays', Math.abs(wb[3] - (wa[3] + 40)) <= 2 && Math.abs(wb.reduce((s, x) => s + x, 0) - wa.reduce((s, x) => s + x, 0)) <= 2, wa[3] + ' -> ' + wb[3]);
+        await evalJs(`document.querySelector('.pt-th[data-key="name"] .pt-resize').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+        check('double-click resets it', await colsVar() === dflt);
+
         // ============================================================ 8. themes
         const bgLight = await evalJs(`getComputedStyle(document.querySelector('.pt-grid')).backgroundColor`);
         await load('24', { dark: true });

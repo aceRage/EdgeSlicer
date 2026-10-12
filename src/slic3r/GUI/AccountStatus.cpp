@@ -4,6 +4,7 @@
 #include "DeviceManager.hpp"
 #include "GUI_App.hpp"
 #include "I18N.hpp"
+#include "MainFrame.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -133,12 +134,23 @@ Accounts::Status current_status()
 
 void refresh()
 {
-    if (g_topbar == nullptr || wxTheApp == nullptr)
+    if (wxTheApp == nullptr)
+        return;
+    // macOS has no custom title bar: its Account entry is a menu in the native menu bar.
+    MainFrame* menubar_owner = nullptr;
+#ifdef __APPLE__
+    menubar_owner = wxGetApp().mainframe;
+#endif
+    if (g_topbar == nullptr && menubar_owner == nullptr)
         return;
     register_providers();
     remember_sign_ins();
-    const Accounts::Status st = current_status();
-    g_topbar->SetAccountWarning(st.warn, st.warn && st.provider != nullptr ? tooltip_for(*st.provider) : wxString());
+    if (g_topbar != nullptr) {
+        const Accounts::Status st = current_status();
+        g_topbar->SetAccountWarning(st.warn, st.warn && st.provider != nullptr ? tooltip_for(*st.provider) : wxString());
+    }
+    if (menubar_owner != nullptr)
+        menubar_owner->update_account_menubar();
 }
 
 void refresh_async()

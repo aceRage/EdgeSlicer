@@ -1,0 +1,24 @@
+{
+  "result": {
+    "eventtime": 86400.0,
+    "status": {
+      "print_stats": {
+        "filename": "plate_1.gcode",
+        "total_duration": 5390.2,
+        "print_duration": 5301.8,
+        "filament_used": 21543.2,
+        "state": "complete",
+        "message": "",
+        "info": { "total_layer": 322, "current_layer": 322 }
+      },
+      "display_status": { "progress": 1.0, "message": null },
+      "virtual_sdcard": {
+        "file_path": "/home/pi/printer_data/gcodes/plate_1.gcode",
+        "progress": 1.0,
+        "is_active": false,
+        "file_position": 6380500,
+        "file_size": 6380500
+      }
+    }
+  }
+}

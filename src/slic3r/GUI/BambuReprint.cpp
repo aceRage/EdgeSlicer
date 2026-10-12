@@ -266,6 +266,33 @@ std::vector<Tray> trays_of(MachineObject* obj, const std::vector<int>& physical_
             out.push_back(tr);
         }
     }
+    // A two-extruder printer's external spool holders (tray 254 = left, 255 = right), each for
+    // its own extruder's filaments - what the automatic mapping picks for an extruder without an
+    // AMS, so the phone can send that proposal back and choose it by hand.
+    if (dual) {
+        for (AmsTray ext : obj->external_spools()) {
+            const int ext_id = atoi(ext.id.c_str());
+            if (!BambuExtruderMap::is_external_spool_ams_id(ext_id)) continue;
+            Tray tr;
+            tr.ams_id            = ext_id;
+            tr.slot_id           = 0;
+            tr.tray_id           = ext_id;
+            tr.physical_extruder = BambuExtruderMap::external_spool_physical_extruder(ext_id);
+            tr.extruder          = BambuExtruderMap::physical_to_logical(physical_extruder_map, tr.physical_extruder);
+            tr.name              = BambuExtruderMap::tray_display_name(ext_id, 0);
+            tr.ready             = ext.is_tray_info_ready();
+            tr.exists            = tr.ready;
+            if (tr.ready) {
+                tr.type         = ext.get_filament_type();
+                tr.display_type = ext.get_display_filament_type();
+                tr.color        = ext.color;
+                tr.colors       = ext.cols;
+                tr.ctype        = ext.ctype;
+                tr.filament_id  = ext.setting_id;
+            }
+            out.push_back(tr);
+        }
+    }
     std::sort(out.begin(), out.end(), [](const Tray& a, const Tray& b) { return a.tray_id < b.tray_id; });
     return out;
 }

@@ -190,6 +190,7 @@ body.pt-page #AcceptArea {
 }
 
 .pt-th {
+	position: relative;
 	display: flex;
 	align-items: center;
 	height: 100%;
@@ -469,4 +470,96 @@ body.pt-page #AcceptArea {
 	font-size: 12px;
 	margin-top: 6px;
 	line-height: 16px;
+}
+
+/* ---- shared by the Export Preset Bundle page (guide/export_process) ---- */
+
+/* The select-all-shown checkbox in the checkbox column's header; the row checkboxes sit under it. */
+.pt-th .pt-hcheck {
+	margin: 0 6px 0 0;
+	width: 16px;
+	height: 16px;
+	flex: 0 0 auto;
+	cursor: pointer;
+}
+
+/* Some of the rows shown are ticked: a dash in the accent colour. */
+.pt-th .pt-hcheck:indeterminate {
+	border-color: var(--pt-accent);
+	background-color: var(--pt-accent);
+}
+
+.pt-th .pt-hcheck:indeterminate::before {
+	transform: scale(1);
+	clip-path: polygon(15% 40%, 85% 40%, 85% 60%, 15% 60%);
+}
+
+.pt-th .pt-hcheck:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.pt-grid.hc .pt-td.check {
+	justify-content: flex-start;
+	padding-left: 8px;
+}
+
+/* A plain drop-down in the toolbar (the export page's printer list). */
+.pt-toolbar .pt-select {
+	box-sizing: border-box;
+	height: 30px;
+	max-width: 280px;
+	padding: 0 6px;
+	border: 1px solid var(--pt-border);
+	border-radius: 5px;
+	outline: none;
+	color: var(--pt-fg);
+	background-color: var(--pt-input-bg);
+	font-size: 13px;
+	cursor: pointer;
+}
+
+.pt-toolbar .pt-select:focus {
+	border-color: var(--pt-accent);
+}
+
+.pt-toolbar .pt-select option {
+	color: var(--pt-fg);
+	background-color: var(--pt-pop-bg);
+}
+
+/* Drag the right edge of a column header to resize it (data_table.js). */
+.pt-resize {
+	position: absolute;
+	top: 0;
+	right: -4px;
+	width: 9px;
+	height: 100%;
+	cursor: col-resize;
+	z-index: 3;
+}
+
+.pt-resize:hover,
+body.pt-resizing .pt-resize:active {
+	background: linear-gradient(to right, transparent 3px, var(--pt-accent) 3px, var(--pt-accent) 5px, transparent 5px);
+}
+
+body.pt-resizing,
+body.pt-resizing * {
+	cursor: col-resize !important;
+	user-select: none !important;
+}
+
+/* The toolbar's drop-down groups. */
+.pt-printer {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 0;
+	font-size: 13px;
+	color: var(--pt-muted);
+}
+
+.pt-printer-lbl {
+	color: var(--pt-muted);
 }
