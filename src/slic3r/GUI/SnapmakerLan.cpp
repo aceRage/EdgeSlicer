@@ -6,6 +6,7 @@
 #include "libslic3r/AppConfig.hpp"
 #include "slic3r/Utils/Bonjour.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "slic3r/Utils/MoonrakerProgress.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
@@ -679,6 +680,67 @@ std::vector<std::pair<double, double>> nozzle_temps_of(const json& status_obj)
     return out;
 }
 
+// ---- the job's file, for percent and time left ----
+//
+// The Device page's percent and time left need the printed file's metadata (gcode_start_byte,
+// gcode_end_byte, estimated_time; MoonrakerProgress.hpp). It only changes with the job, so it is
+// asked once per file per printer, not on every probe: again when the printer starts a file of a
+// different name or size, and at most every META_RETRY_MS while the printer cannot answer it.
+struct MetaSlot
+{
+    std::string                   filename;
+    long long                     file_size { -1 };
+    MoonrakerProgress::FileMeta   meta;
+    bool                          have { false };
+    long long                     tried_ms { -1 };
+};
+static std::mutex                      s_meta_mutex;
+static std::map<std::string, MetaSlot> s_meta;
+static const long long                 META_RETRY_MS = 30000;
+
+static MoonrakerProgress::FileMeta file_meta_for(const Device& d, const MoonrakerProgress::Sample& s)
+{
+    const std::string name = s.metadata_filename();
+    if (name.empty()) return {};
+    const bool        on_job = s.state == "printing" || s.state == "paused";
+    const std::string slot   = slot_of(d);
+    const long long   now    = now_ms();
+    {
+        std::lock_guard<std::mutex> lock(s_meta_mutex);
+        MetaSlot&                   m = s_meta[slot];
+        // A file of the same name uploaded again (a reprint of a re-slice) is a different file.
+        const bool same = m.filename == name && (s.file_size < 0 || m.file_size < 0 || m.file_size == s.file_size);
+        if (!same) {
+            m           = MetaSlot();
+            m.filename  = name;
+        }
+        if (s.file_size >= 0) m.file_size = s.file_size;
+        if (m.have) return m.meta;
+        // Only a running job is worth a request; a finished one keeps whatever was found.
+        if (!on_job || (m.tried_ms >= 0 && now - m.tried_ms < META_RETRY_MS)) return {};
+        m.tried_ms = now;
+    }
+    json        j;
+    std::string error;
+    const bool  ok = get_json(base_url(d) + "/server/files/metadata?filename=" + Http::url_encode(name), j, error, 3, 2) &&
+                    j.contains("result");
+    MoonrakerProgress::FileMeta meta = ok ? MoonrakerProgress::parse_metadata(j) : MoonrakerProgress::FileMeta();
+    std::lock_guard<std::mutex> lock(s_meta_mutex);
+    MetaSlot&                   m = s_meta[slot];
+    if (m.filename != name) return meta; // the job changed while we asked
+    if (meta.valid) {
+        m.meta = meta;
+        m.have = true;
+        BOOST_LOG_TRIVIAL(info) << "[SnapmakerLan] " << d.ip << ": " << name << " estimated_time " << meta.estimated_time
+                                << " s, body bytes " << meta.gcode_start_byte << ".." << meta.gcode_end_byte;
+    } else {
+        BOOST_LOG_TRIVIAL(info) << "[SnapmakerLan] " << d.ip << ": no metadata for " << name << " (" << error
+                                << "); percent from display_status, time left only past "
+                                << (int) (MoonrakerProgress::MIN_LINEAR_FRACTION * 100) << " %";
+    }
+    return meta;
+}
+
 // What one round of requests to a printer found. `queried` says whether the status query answered
 // too (a printer can answer /server/info and then time out on the bigger query while it is busy).
 struct Probe
@@ -723,7 +785,7 @@ static Probe probe(const Device& d, bool ask_access)
     json        q;
     std::string qerror;
     if (get_json(base_url(d) +
-                     "/printer/objects/query?print_stats&display_status&heater_bed&extruder&extruder1&extruder2&extruder3&"
+                     "/printer/objects/query?print_stats&display_status&virtual_sdcard&heater_bed&extruder&extruder1&extruder2&extruder3&"
                      "print_task_config&" + DeviceControls::moonraker_controls_query(),
                  q, qerror, 3, 2) &&
         q.contains("result") && q["result"].contains("status")) {
@@ -742,8 +804,13 @@ static Probe probe(const Device& d, bool ask_access)
                 s.total_layers = (int) num_of(ps["info"], "total_layer");
             }
         }
-        if (st.contains("display_status"))
-            s.progress = num_of(st["display_status"], "progress");
+        {
+            // Percent and time left the way the printer's own Device page works them out.
+            const MoonrakerProgress::Sample   sample = MoonrakerProgress::parse_sample(st);
+            const MoonrakerProgress::Estimate e      = MoonrakerProgress::estimate(sample, file_meta_for(d, sample));
+            s.progress    = e.fraction;
+            s.left_time_s = e.left_s;
+        }
         if (st.contains("heater_bed")) {
             s.bed_temp   = num_of(st["heater_bed"], "temperature");
             s.bed_target = num_of(st["heater_bed"], "target");
@@ -957,11 +1024,8 @@ static json toolheads_json(const std::vector<Toolhead>& heads)
     return out;
 }
 
-// The printer reports elapsed time and progress; the desktop's "time left" is the rest.
-static int left_time_s(const Status& s)
-{
-    return (s.progress > 0.01 && s.print_duration > 0) ? (int) (s.print_duration / s.progress - s.print_duration) : 0;
-}
+// Worked out at probe time (MoonrakerProgress::estimate), on the Device page's basis.
+static int left_time_s(const Status& s) { return s.left_time_s; }
 
 static json status_json(const Device& d, const Status& s)
 {

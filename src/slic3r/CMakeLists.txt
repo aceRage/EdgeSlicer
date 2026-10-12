@@ -1008,6 +1008,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintHostDevices.hpp
     Utils/PrintHostDeviceStatus.cpp
     Utils/PrintHostDeviceStatus.hpp
+    Utils/MoonrakerProgress.cpp
+    Utils/MoonrakerProgress.hpp
     Utils/PrusaLinkStatus.cpp
     Utils/PrusaLinkStatus.hpp
     Utils/Process.cpp
