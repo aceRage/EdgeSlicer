@@ -349,3 +349,187 @@ TEST_CASE("Firmware retraction does not change the modal feedrate", "[GCodeTimin
     REQUIRE(extrusions == 3);
     REQUIRE(retractions == 2);
 }
+
+// ---- #15304 / #15308 (and #12417 / #12440): junction deviation planning ----
+//
+// Junction planning decides the speeds the "actual speed" / "actual flow" preview shows. Per-axis jerk limits a
+// corner by the largest single-axis component of the velocity change, allowing sqrt(2) more speed on a diagonal
+// than on an axis -- a four-lobed ripple around every circle. Klipper and Marlin 2 with M205 J plan with junction
+// deviation instead, which sees only the corner angle.
+namespace {
+
+// One acceleration everywhere and axis limits far above it, so only the junction model under test can slow a
+// corner down.
+FullPrintConfig make_junction_config(GCodeFlavor flavor, double corner_velocity, double junction_deviation)
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = flavor;
+    config.filament_diameter.values = {1.75};
+    config.filament_map.values = {1};
+
+    const std::vector<double> accel   = {1000.0, 1000.0};
+    const std::vector<double> axis    = {20000.0, 20000.0};
+    const std::vector<double> speed   = {500.0, 500.0};
+    config.machine_max_acceleration_extruding.values = accel;
+    config.machine_max_acceleration_travel.values    = accel;
+    config.machine_max_acceleration_retracting.values = accel;
+    config.machine_max_acceleration_x.values = axis;
+    config.machine_max_acceleration_y.values = axis;
+    config.machine_max_acceleration_z.values = axis;
+    config.machine_max_acceleration_e.values = axis;
+    config.machine_max_speed_x.values = speed;
+    config.machine_max_speed_y.values = speed;
+    config.machine_max_speed_z.values = speed;
+    config.machine_max_speed_e.values = speed;
+    // Klipper reads this as the square corner velocity, Marlin as classic jerk.
+    config.machine_max_jerk_x.values = {corner_velocity, corner_velocity};
+    config.machine_max_jerk_y.values = {corner_velocity, corner_velocity};
+    config.machine_max_jerk_z.values = {corner_velocity, corner_velocity};
+    // Kept out of the way so it never binds in the classic-jerk comparisons.
+    config.machine_max_jerk_e.values = {100.0, 100.0};
+    config.machine_max_junction_deviation.values = {junction_deviation, junction_deviation};
+    config.machine_min_extruding_rate.values = {0.0, 0.0};
+    config.machine_min_travel_rate.values    = {0.0, 0.0};
+    return config;
+}
+
+constexpr double junction_x = 60.0;
+constexpr double junction_y = 60.0;
+
+// Two 40mm moves meeting at (junction_x, junction_y) with the given turn, rotated by `orientation`. 40mm is long
+// enough to reach the commanded 150mm/s and brake back to any corner speed these tests produce. `e_per_mm` of zero
+// makes them travels, which keeps the junction vector purely geometric as the formulas below assume.
+std::string corner_gcode(double turn_deg, double orientation_deg, double e_per_mm = 0.0)
+{
+    const double len   = 40.0;
+    const double a_in  = orientation_deg * M_PI / 180.0;
+    const double a_out = (orientation_deg + turn_deg) * M_PI / 180.0;
+    std::ostringstream extrude;
+    if (e_per_mm > 0.0)
+        extrude << std::fixed << std::setprecision(4) << " E" << len * e_per_mm;
+
+    std::ostringstream os;
+    os << std::fixed << std::setprecision(4)
+       << "M83\n"
+       << "G1 Z0.2 F1200\n"
+       << "G1 X" << junction_x - len * std::cos(a_in)  << " Y" << junction_y - len * std::sin(a_in)  << " F6000\n"
+       << "G1 X" << junction_x                         << " Y" << junction_y   << extrude.str()      << " F9000\n"
+       << "G1 X" << junction_x + len * std::cos(a_out) << " Y" << junction_y + len * std::sin(a_out)
+       << extrude.str() << " F9000\n";
+    return os.str();
+}
+
+// Speed allowed through the corner: the vertex ending the incoming move carries that block's exit speed, and the
+// vertices the actual-speed pass inserts are all strictly interior.
+double corner_speed(const GCodeProcessorResult& r)
+{
+    for (const auto& mv : r.moves)
+        if ((mv.type == EMoveType::Travel || mv.type == EMoveType::Extrude) &&
+            std::abs(mv.position.x() - junction_x) < 1e-3 &&
+            std::abs(mv.position.y() - junction_y) < 1e-3)
+            return mv.actual_feedrate;
+    return -1.0;
+}
+
+double planned_corner_speed(GCodeFlavor flavor, double corner_velocity, double junction_deviation,
+                            double turn_deg, double orientation_deg = 0.0, double e_per_mm = 0.0,
+                            const std::string& prefix = std::string())
+{
+    GCodeProcessor proc;
+    run_processor(proc, make_junction_config(flavor, corner_velocity, junction_deviation),
+                  (prefix + corner_gcode(turn_deg, orientation_deg, e_per_mm)).c_str());
+    return corner_speed(proc.get_result());
+}
+
+} // namespace
+
+TEST_CASE("Klipper corners are planned with junction deviation derived from the square corner velocity",
+          "[GCodeTiming][JunctionDeviation]")
+{
+    // jd = scv^2 * (sqrt(2) - 1) / max_accel, then v^2 = jd * accel * sin(t/2) / (1 - sin(t/2)).
+    // The acceleration cancels: the corner speed depends only on the scv and the angle.
+    const double scv = 5.0;
+
+    SECTION("a right angle is taken at exactly the square corner velocity") {
+        // sin(t/2) = sqrt(0.5) at 90 degrees, so v == scv -- the definition of the square corner velocity, and
+        // what makes the mapping above the right one.
+        REQUIRE_THAT(planned_corner_speed(gcfKlipper, scv, 0.0, 90.0), Catch::Matchers::WithinRel(scv, 0.02));
+    }
+
+    SECTION("a shallow corner is taken far faster than the per-axis jerk model allows") {
+        // 6 degrees: sin(t/2) = cos(3 deg), so v = 5 * sqrt((sqrt(2) - 1) * 728.68) = 86.9mm/s. Per-axis jerk
+        // ignores the angle and caps the velocity *change* (2v*sin(3 deg)), giving 47.8mm/s.
+        const double jd_speed   = planned_corner_speed(gcfKlipper, scv, 0.0, 6.0);
+        const double jerk_speed = planned_corner_speed(gcfMarlinLegacy, scv, 0.0, 6.0);
+        REQUIRE_THAT(jd_speed, Catch::Matchers::WithinRel(86.87, 0.02));
+        REQUIRE_THAT(jerk_speed, Catch::Matchers::WithinRel(47.75, 0.02));
+    }
+}
+
+TEST_CASE("Junction deviation limits a corner by its angle alone, not by its orientation",
+          "[GCodeTiming][JunctionDeviation]")
+{
+    // The four-lobed ripple on circular walls is per-axis jerk being anisotropic: a velocity change lying on an
+    // axis gets sqrt(2) less headroom than the same change on the diagonal.
+    const double scv  = 5.0;
+    const double turn = 6.0;
+
+    SECTION("Klipper plans both orientations identically") {
+        const double on_axis  = planned_corner_speed(gcfKlipper, scv, 0.0, turn, 0.0);
+        const double diagonal = planned_corner_speed(gcfKlipper, scv, 0.0, turn, 45.0);
+        REQUIRE(on_axis > 0.0);
+        REQUIRE_THAT(diagonal, Catch::Matchers::WithinRel(on_axis, 0.02));
+    }
+
+    SECTION("the classic jerk model keeps its orientation dependence") {
+        const double on_axis  = planned_corner_speed(gcfMarlinLegacy, scv, 0.0, turn, 0.0);
+        const double diagonal = planned_corner_speed(gcfMarlinLegacy, scv, 0.0, turn, 45.0);
+        REQUIRE(on_axis > 0.0);
+        REQUIRE(diagonal / on_axis > 1.2);
+    }
+}
+
+TEST_CASE("Junction deviation is only used where the firmware actually plans with it",
+          "[GCodeTiming][JunctionDeviation]")
+{
+    const double jerk = 5.0;
+
+    SECTION("Marlin 2 with M205 J disabled keeps the classic jerk planning") {
+        // machine_max_junction_deviation == 0 is how a Marlin 2 printer says it runs classic jerk.
+        const double classic = planned_corner_speed(gcfMarlinLegacy, jerk, 0.0, 90.0);
+        REQUIRE(classic > 0.0);
+        REQUIRE_THAT(planned_corner_speed(gcfMarlinFirmware, jerk, 0.0, 90.0),
+                     Catch::Matchers::WithinRel(classic, 1e-4));
+    }
+
+    SECTION("Marlin 2 with M205 J enabled switches to junction deviation") {
+        // sqrt(1000 * 0.05 * 2.4142136) = 11.0mm/s, independent of the jerk values it no longer reads.
+        REQUIRE_THAT(planned_corner_speed(gcfMarlinFirmware, jerk, 0.05, 90.0),
+                     Catch::Matchers::WithinRel(10.99, 0.02));
+    }
+
+    SECTION("machines without junction deviation are untouched by the jerk values it would ignore") {
+        // A flavor that never enters the junction deviation path must ignore the setting entirely.
+        const double without = planned_corner_speed(gcfMarlinLegacy, jerk, 0.0, 90.0);
+        REQUIRE_THAT(planned_corner_speed(gcfMarlinLegacy, jerk, 0.05, 90.0),
+                     Catch::Matchers::WithinRel(without, 1e-4));
+    }
+}
+
+TEST_CASE("M205 J in the G-code sets the junction deviation the estimator plans with",
+          "[GCodeTiming][JunctionDeviation]")
+{
+    // #12440: the estimator follows the firmware's M205 J, not only the machine value of the printer profile.
+    const double jerk = 5.0;
+    const double classic = planned_corner_speed(gcfMarlinFirmware, jerk, 0.0, 90.0);
+    REQUIRE(classic > 0.0);
+
+    // The printer profile says classic jerk (machine junction deviation 0); the G-code switches Marlin 2 to junction
+    // deviation 0.05: sqrt(1000 * 0.05 * 2.4142136) = 11.0mm/s.
+    REQUIRE_THAT(planned_corner_speed(gcfMarlinFirmware, jerk, 0.0, 90.0, 0.0, 0.0, "M205 J0.05\n"),
+                 Catch::Matchers::WithinRel(10.99, 0.02));
+
+    // M205 J0 puts it back on classic jerk.
+    REQUIRE_THAT(planned_corner_speed(gcfMarlinFirmware, jerk, 0.05, 90.0, 0.0, 0.0, "M205 J0\n"),
+                 Catch::Matchers::WithinRel(classic, 1e-4));
+}
