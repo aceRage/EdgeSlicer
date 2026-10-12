@@ -107,6 +107,9 @@ public:
     // Unsubscribe from a specific topic
     bool Unsubscribe(const std::string& topic, std::string& msg);
 
+    // Whether a Subscribe() of `topic` on this client has been acknowledged by the broker.
+    bool IsSubscribed(const std::string& topic) const;
+
     // Publish a message to a specific topic with given QoS
     bool Publish(const std::string& topic, const std::string& payload, int qos, std::string& msg);
 

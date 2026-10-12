@@ -874,7 +874,8 @@ static std::string get_first_added_preset(const std::map<std::string, std::strin
     return *diff.begin();
 }
 
-bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_bundle, const PresetUpdater* updater, bool& apply_keeped_changes)
+bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_bundle, const PresetUpdater* updater, bool& apply_keeped_changes,
+                                   bool silent_transfer)
 {
     const auto enabled_vendors     = m_appconfig_new.vendors();
     const auto old_enabled_vendors = app_config->vendors();
@@ -916,7 +917,11 @@ bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_b
     wxString caption             = _L("Configuration package changed");
     int      act_btns            = ActionButtons::KEEP | ActionButtons::SAVE;
 
-    if (check_unsaved_preset_changes && !wxGetApp().check_and_keep_current_preset_changes(caption, header, act_btns, &apply_keeped_changes))
+    int silently_kept = 0;
+    if (check_unsaved_preset_changes && silent_transfer) {
+        // Nobody asked for this reload, so nobody is asked about it: keep the modified values.
+        silently_kept = wxGetApp().cache_current_preset_changes_for_transfer("Configuration package changed by a printer connect");
+    } else if (check_unsaved_preset_changes && !wxGetApp().check_and_keep_current_preset_changes(caption, header, act_btns, &apply_keeped_changes))
         return false;
 
     if (install_bundles.size() > 0) {
@@ -1012,6 +1017,14 @@ bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_b
 
     // Update the selections from the compatibilty.
     preset_bundle->export_selections(*app_config);
+
+    // The values kept above go back onto the reloaded presets (what run() does after the dialog's
+    // Transfer, through apply_keeped_changes).
+    if (silently_kept > 0) {
+        wxGetApp().apply_keeped_preset_modifications();
+        BOOST_LOG_TRIVIAL(info) << "Configuration package changed by a printer connect: " << silently_kept
+                                << " modified value(s) transferred to the reloaded presets";
+    }
 
     return true;
 }

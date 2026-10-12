@@ -425,7 +425,7 @@ static std::pair<int, std::string> connect_impl(const std::string& dev_id)
     std::string              model, device_name;
     std::vector<std::string> nozzles;
     std::shared_ptr<PrintHost> as_host = *host;
-    const bool answered = SSWCP::query_machine_info(as_host, model, nozzles, device_name, 10);
+    const bool answered = SSWCP::query_machine_info(as_host, model, nozzles, device_name, 10, 2);
     if (!answered || model.empty()) {
         std::string ig;
         engine->Disconnect(ig);

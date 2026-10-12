@@ -634,6 +634,45 @@ bool WebView::RunScript(wxWebView *webView, wxString const &javascript)
     }
 }
 
+bool WebView::DeleteSiteCookies(const std::vector<std::string> &names, const std::string &uri, wxWebView *page)
+{
+#ifdef __WIN32__
+    (void) page;
+    // One profile for every view made by CreateWebView: any live view's cookie manager will do.
+    // The oldest views (main window pages) come first and outlive a sign-in dialog being torn down.
+    for (wxWebView *view : g_webviews) {
+        ICoreWebView2 *webView2 = view ? (ICoreWebView2 *) view->GetNativeBackend() : nullptr;
+        if (webView2 == nullptr)
+            continue;
+        ICoreWebView2_2 *webView2_2 = nullptr;
+        if (FAILED(webView2->QueryInterface(&webView2_2)) || webView2_2 == nullptr)
+            continue;
+        ICoreWebView2CookieManager *cookies = nullptr;
+        const HRESULT hr = webView2_2->get_CookieManager(&cookies);
+        webView2_2->Release();
+        if (FAILED(hr) || cookies == nullptr)
+            continue;
+        const std::wstring wuri = wxString::FromUTF8(uri).ToStdWstring();
+        for (const std::string &name : names)
+            cookies->DeleteCookies(wxString::FromUTF8(name).ToStdWstring().c_str(), wuri.c_str());
+        cookies->Release();
+        return true;
+    }
+    return false;
+#else
+    (void) uri;
+    if (page == nullptr || page->GetNativeBackend() == nullptr)
+        return false;
+    // Host-only and parent-domain copies (a cookie set for .example.com from id.example.com).
+    std::string js = "(function(){var h=location.hostname.split('.');var d=h.slice(-2).join('.');var n=[";
+    for (size_t i = 0; i < names.size(); ++i)
+        js += (i ? ",'" : "'") + names[i] + "'";
+    js += "];n.forEach(function(k){document.cookie=k+'=; Max-Age=0; path=/';"
+          "document.cookie=k+'=; Max-Age=0; path=/; domain=.'+d;});})();";
+    return RunScript(page, wxString::FromUTF8(js));
+#endif
+}
+
 void WebView::RecreateAll()
 {
     auto dark = Slic3r::GUI::wxGetApp().dark_mode();

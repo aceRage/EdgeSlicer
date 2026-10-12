@@ -4,12 +4,13 @@
 It answers what SnapmakerLan asks a U1:
   GET /server/info            {"result": {"klippy_state": "ready", ...}}
   GET /access/info            {"result": {"login_required": false, "trusted": true}}
-  GET /printer/objects/query  print_stats, display_status, heater_bed, extruder..extruder3 and
+  GET /printer/objects/query  print_stats, display_status, virtual_sdcard, heater_bed, extruder..extruder3 and
                               print_task_config, shaped like firmware 1.5.2's answer
   GET /machine/system_info    model, serial number and device name (what identify() reads)
   GET /printer/info           hostname
   POST /server/files/upload   multipart (root=gcodes, file=...): kept in memory, name -> bytes
-  GET /server/files/metadata  ?filename= -> {size, modified} of an uploaded file, 404 otherwise
+  GET /server/files/metadata  ?filename= -> {size, modified} of an uploaded file, the slicer's numbers
+                              for fake_job.gcode (FAKE_JOB_META), 404 otherwise
   GET /server/files/list      ?root=gcodes -> every uploaded file
   POST /printer/print/start   ?filename= -> starts that file (404 when it was never uploaded)
   POST /printer/gcode/script  ?script= -> accepted (the mapped start's macros)
@@ -41,6 +42,11 @@ LOCK = threading.Lock()
 STATE = {"mode": "normal", "delay": 0.0, "state": "printing", "requests": {},
          "files": {}, "started": [], "uploads": 0, "current": ""}
 ARGS = None
+# server.files.metadata for the job a fresh fake prints (fake_job.gcode): body 100000..900000 of a
+# 1 MB file and a 3600 s slicer estimate, so at file_position 300000 the hub should say 25 % and
+# 2700 s left (the old linear guess from display_status 0.30 and print_duration 600 was 1400 s).
+FAKE_JOB_META = {"filename": "fake_job.gcode", "size": 1000000, "modified": 1760000000.0, "slicer": "EdgeSlicer",
+                 "gcode_start_byte": 100000, "gcode_end_byte": 900000, "estimated_time": 3600, "layer_count": 80}
 
 
 def reply(handler, code, obj):
@@ -66,7 +72,16 @@ def query_status(state):
             "total_duration": 640.0,
             "info": {"current_layer": 12, "total_layer": 80},
         },
-        "display_status": {"progress": 0.25 if state in ("printing", "paused") else 0.0},
+        # The share of the whole file (thumbnails included), as Klipper reports it; the hub's
+        # percent is the share of the G-code body instead (FAKE_JOB_META), like the Device page's.
+        "display_status": {"progress": 0.30 if state in ("printing", "paused") else 0.0},
+        "virtual_sdcard": {
+            "file_path": ("/home/pi/printer_data/gcodes/" + (STATE["current"] or "fake_job.gcode")) if state in ("printing", "paused") else None,
+            "progress": 0.30 if state in ("printing", "paused") else 0.0,
+            "is_active": state == "printing",
+            "file_position": 300000 if state in ("printing", "paused") else 0,
+            "file_size": FAKE_JOB_META["size"] if state in ("printing", "paused") else 0,
+        },
         "heater_bed": {"temperature": 60.2, "target": 60.0},
         "print_task_config": {
             "filament_type": ["PLA", "PETG", "PLA", "TPU"],
@@ -109,6 +124,8 @@ class Printer(BaseHTTPRequestHandler):
         if u.path == "/server/files/metadata":
             with LOCK:
                 size = STATE["files"].get(q.get("filename", ""))
+            if size is None and q.get("filename", "") == "fake_job.gcode":
+                return reply(self, 200, {"result": FAKE_JOB_META})
             if size is None:
                 return reply(self, 404, {"error": {"code": 404, "message": "Metadata not available for " + q.get("filename", "")}})
             return reply(self, 200, {"result": {"filename": q["filename"], "size": size, "modified": time.time()}})

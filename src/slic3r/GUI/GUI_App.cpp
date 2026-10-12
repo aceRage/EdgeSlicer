@@ -2418,15 +2418,20 @@ void GUI_App::init_networking_callbacks()
                 });
                 return;
             }
-            GUI::wxGetApp().CallAfter([this] {
+            GUI::wxGetApp().CallAfter([this, return_code] {
                 if (m_is_closing)
                     return;
                 BOOST_LOG_TRIVIAL(trace) << "static: server connected";
-                m_agent->set_user_selected_machine(m_agent->get_user_selected_machine());
+                // Before set_user_selected_machine below asks for the selected printer's report:
+                // a selection made while the session was still connecting held its own request.
+                if (m_device_manager)
+                    m_device_manager->on_cloud_session(return_code);
                     if (this->is_enable_multi_machine()) {
                         auto evt = new wxCommandEvent(EVT_UPDATE_MACHINE_LIST);
                         wxQueueEvent(this, evt);
                     }
+                    // Once (it used to be made twice, before and after the event above, and each
+                    // call asks the printer for a full report).
                     m_agent->set_user_selected_machine(m_agent->get_user_selected_machine());
                     //subscribe device
                     if (m_agent->is_user_login()) {
@@ -2496,6 +2501,17 @@ void GUI_App::init_networking_callbacks()
                     // asked for a report, a session reported down is re-dialled.
                     if (obj)
                         obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    // The one "connected" line per connect, and the end of holding this
+                    // selection's early requests: the held commands go out now, the held status
+                    // requests are replaced by the pushall + get_version below.
+                    if (obj && FirstRequestGate::event_applies(obj->is_lan_mode_printer(), /* event_is_lan */ true)) {
+                        if (state == ConnectStatus::ConnectStatusOk)
+                            obj->note_session_up("LAN");
+                        else
+                            // A refused first dial is dialled once more with its requests still
+                            // held; anything else reports the session down.
+                            obj->note_dial_failed();
+                    }
                     if (MachineObject* local = m_device_manager->get_local_machine(dev_id); local && local != obj)
                         local->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
 
@@ -5738,35 +5754,131 @@ void GUI_App::sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentR
         return;
     }
 
-    // The session was valid. Look the account up off the UI thread, then fill SMUserInfo on it
-    // (the same end state as a manual sign-in: Account menu, pages told through the login events).
+    // The page handed over a token. That alone proves nothing (the account service answers HTTP 200
+    // to a token it refuses): look the account up off the UI thread, and sign in only with a
+    // verified answer (the same end state as a manual sign-in: Account menu, pages told through
+    // the login events).
     const std::string token = r.token;
-    Http http = Http::get(r.user_info_url);
+    sm_lookup_account(token, r.user_info_url, [this, gen, token](const SMSilentLogin::AccountAnswer& a) {
+        if (gen != m_sm_silent_gen || !m_sm_silent_active)
+            return;
+        if (a.ok) {
+            SMUserLogin::apply_account_info(a, token);
+            sm_get_login_info();
+            sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::SignedIn));
+            return;
+        }
+        // Refused: the saved session is no good. Stay (or become) signed out everywhere, and do not
+        // ask again at the next start; the sign-in dialog works as on a fresh install. A transport
+        // or server problem says nothing about the session: try again next start.
+        const SMSilentLogin::Outcome o = a.rejected ? SMSilentLogin::Outcome::Rejected : SMSilentLogin::Outcome::Failed;
+        if (SMSilentLogin::session_marker_after(o) == SMSilentLogin::SessionMarker::Clear)
+            app_config->set_bool(SMSilentLogin::k_session_key, false);
+        sm_sign_out_locally();
+        sm_finish_silent_login(SMSilentLogin::log_line(o, "account lookup: " + a.why));
+        if (a.rejected)
+            sm_clear_web_session("startup session refused");
+    });
+}
+
+void GUI_App::sm_lookup_account(const std::string& token, const std::string& user_info_url,
+                                std::function<void(const SMSilentLogin::AccountAnswer&)> done)
+{
+    if (token.empty()) {
+        SMSilentLogin::AccountAnswer a;
+        a.why      = "the sign-in page handed over an empty token";
+        a.rejected = true;
+        done(a);
+        return;
+    }
+    auto shared_done = std::make_shared<std::function<void(const SMSilentLogin::AccountAnswer&)>>(std::move(done));
+    Http http = Http::get(user_info_url);
     http.header("Authorization", token);
     http.timeout_max(15);
-    http.on_complete([this, gen, token](std::string body, unsigned status) {
-            CallAfter([this, gen, token, body, status] {
-                if (gen != m_sm_silent_gen || !m_sm_silent_active)
-                    return;
-                if (status == 200 && SMUserLogin::apply_account_info(body, token)) {
-                    sm_get_login_info();
-                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::SignedIn));
-                } else {
-                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
-                                                                   "account lookup HTTP " + std::to_string(status)));
-                }
-            });
+    http.on_complete([this, shared_done](std::string body, unsigned status) {
+            SMSilentLogin::AccountAnswer a = SMSilentLogin::read_account_answer(status, body);
+            CallAfter([shared_done, a] { (*shared_done)(a); });
         })
-        .on_error([this, gen](std::string /*body*/, std::string error, unsigned status) {
-            CallAfter([this, gen, error, status] {
-                if (gen != m_sm_silent_gen || !m_sm_silent_active)
-                    return;
-                sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
-                                                               "account lookup HTTP " + std::to_string(status) +
-                                                                   (error.empty() ? std::string() : ", " + error)));
-            });
+        .on_error([this, shared_done](std::string body, std::string error, unsigned status) {
+            SMSilentLogin::AccountAnswer a = SMSilentLogin::read_account_answer(status, body);
+            if (status == 0)
+                a.why = "no answer" + (error.empty() ? std::string() : ": " + error);
+            else if (!error.empty() && !a.rejected)
+                a.why += ", " + error;
+            sentryReportLog(SENTRY_LOG_TRACE, BP_LOGIN_HTTP_CODE + std::string(":") + std::to_string(status), BP_LOGIN);
+            CallAfter([shared_done, a] { (*shared_done)(a); });
         })
         .perform();
+}
+
+void GUI_App::sm_sign_out_locally()
+{
+    const bool had_something = m_login_userinfo.is_user_login() || !m_login_userinfo.get_user_token().empty() ||
+                               !m_login_userinfo.get_user_id().empty();
+    m_login_userinfo.clear();
+    if (had_something)
+        m_login_userinfo.set_user_login(false); // notify: Account menu and pages say signed out
+}
+
+void GUI_App::sm_clear_web_session(const char* why)
+{
+    const bool china = app_config != nullptr && app_config->get_country_code().find("CN") != std::string::npos;
+#ifdef __APPLE__
+    // The slicer's web views share WKWebsiteDataStore's default store: delete the cookies through
+    // its cookie store, no open web view needed. Asynchronous, so the outcome is logged from the
+    // completion (main thread). Cookie names and counts only, never values.
+    const std::string why_copy = why;
+    mac_delete_site_cookies(SMSilentLogin::session_cookie_names(), SMSilentLogin::session_cookie_uri(china),
+                            [why_copy](size_t deleted) {
+                                BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: web session cookies "
+                                                           << (deleted > 0 ? "cleared (" + std::to_string(deleted) + " deleted)" :
+                                                                             std::string("already clear (none found)"))
+                                                           << " (" << why_copy << ")";
+                            });
+#else
+    // Windows deletes through any live view's cookie manager (one shared profile). Linux has no
+    // such call here and goes by script, from a view showing id.snapmaker.com.
+    wxWebView* page = sm_login_dlg != nullptr ? sm_login_dlg->browser() :
+                      sm_silent_login_dlg != nullptr ? sm_silent_login_dlg->browser() : nullptr;
+    const bool done = WebView::DeleteSiteCookies(SMSilentLogin::session_cookie_names(), SMSilentLogin::session_cookie_uri(china), page);
+    BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: web session cookies " << (done ? "cleared" : "not cleared (no web view)")
+                               << " (" << why << ")";
+#endif
+}
+
+void GUI_App::sm_finish_sign_in(const std::string& token, const std::string& user_info_url, bool shown)
+{
+    const unsigned gen = m_sm_signin_gen;
+    sm_lookup_account(token, user_info_url, [this, gen, token, shown](const SMSilentLogin::AccountAnswer& a) {
+        if (gen != m_sm_signin_gen) {
+            BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: dropped (signed out while the account was looked up)";
+            return;
+        }
+        if (a.ok) {
+            SMUserLogin::apply_account_info(a, token);
+            sm_get_login_info();
+            BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: signed in";
+            flush_logs();
+            return;
+        }
+        // Not verified: signed out everywhere (no half state where the Account menu says signed in
+        // and the Device page does not), and no startup attempt with a session that is no good.
+        if (a.rejected && app_config)
+            app_config->set_bool(SMSilentLogin::k_session_key, false);
+        sm_sign_out_locally();
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: not signed in (account lookup: " << a.why << ")";
+        // A refused session would come straight back at the next try (the window flashes and
+        // closes): drop it, so the next sign-in shows the form.
+        if (a.rejected)
+            sm_clear_web_session("session refused");
+        flush_logs();
+        if (shown && mainframe != nullptr && !m_is_closing) {
+            const wxString msg = a.rejected ?
+                _L("Snapmaker sign-in didn't complete, so you are still signed out of your Snapmaker account. Snapmaker's sign-in service may be having problems; please try again later.") :
+                _L("Snapmaker sign-in didn't complete: Snapmaker's sign-in service could not be reached. Please check the connection and try again later.");
+            MessageDialog(mainframe, msg, _L("Snapmaker sign-in"), wxOK | wxICON_WARNING).ShowModal();
+        }
+    });
 }
 
 void GUI_App::sm_finish_silent_login(const std::string& log_line)
@@ -5802,12 +5914,15 @@ void GUI_App::sm_request_user_logout()
         sm_cancel_silent_login("signed out");
     // Signed out on purpose: no silent sign-in at the next start (SnapmakerSilentLogin.hpp).
     app_config->set_bool(SMSilentLogin::k_session_key, false);
-    if (m_login_userinfo.is_user_login()) {
-        m_login_userinfo.set_user_login(false);
-    }
+    ++m_sm_signin_gen; // a sign-in lookup still in flight is dropped when it answers
+    // The token is dropped with the rest of the account (it used to stay in memory after a sign-out).
+    const std::string token = m_login_userinfo.get_user_token();
+    sm_sign_out_locally();
+    // Signing out also ends the web session; before, the next sign-in got it straight back.
+    sm_clear_web_session("signed out");
     // Nothing to revoke without a token: a page asking to sign out somebody who never signed in
     // must not reach Snapmaker either.
-    if (m_login_userinfo.get_user_token().empty())
+    if (token.empty())
         return;
     try {
         wxString region = wxString::FromUTF8(app_config->get_country_code());
@@ -5819,7 +5934,7 @@ void GUI_App::sm_request_user_logout()
         }
 
         Http http = Http::post(url);
-        http.form_add("token", m_login_userinfo.get_user_token()).perform();
+        http.form_add("token", token).perform();
     } catch (std::exception&) {
         ;
     }
@@ -5924,6 +6039,8 @@ void GUI_App::request_user_logout()
         // Update data first before showing dialogs
         m_agent->user_logout(true);
         m_agent->set_user_selected_machine("");
+        if (m_device_manager)
+            m_device_manager->on_cloud_session(-1); // the plug-in drops its cloud session on logout
         /* delete old user settings */
         bool     transfer_preset_changes = false;
         wxString header = _L("Some presets are modified.") + "\n" +
@@ -8154,6 +8271,44 @@ void GUI_App::apply_keeped_preset_modifications()
             tab->apply_config_from_cache();
     }
     load_current_presets(false);
+}
+
+int GUI_App::cache_current_preset_changes_for_transfer(const char* why)
+{
+    if (!has_current_preset_changes())
+        return 0;
+    int                     count              = 0;
+    const PrinterTechnology printer_technology = preset_bundle->printers.get_edited_preset().printer_technology();
+    for (Tab* tab : tabs_list) {
+        if (!tab->supports_printer_technology(printer_technology) || !tab->current_preset_is_dirty())
+            continue;
+        // As the dialog's Transfer does (check_and_keep_current_preset_changes): option names
+        // without the "#<index>" of a vector element, and the printer's extruder count on its own.
+        std::vector<std::string> options;
+        for (const std::string& o : tab->m_presets->current_dirty_options()) {
+            const size_t      i     = o.find('#');
+            const std::string plain = i != std::string::npos ? o.substr(0, i) : o;
+            if (std::find(options.begin(), options.end(), plain) == options.end())
+                options.push_back(plain);
+        }
+        if (tab->type() == Preset::TYPE_PRINTER) {
+            auto it = std::find(options.begin(), options.end(), "extruders_count");
+            if (it != options.end()) {
+                options.erase(it);
+                static_cast<TabPrinter*>(tab)->cache_extruder_cnt();
+            }
+        }
+        if (options.empty())
+            continue;
+        tab->cache_config_diff(options);
+        count += int(options.size());
+        std::string names;
+        for (const std::string& o : options)
+            names += (names.empty() ? "" : ", ") + o;
+        BOOST_LOG_TRIVIAL(info) << why << ": keeping the modified " << Preset::get_type_string(tab->type()) << " values of \""
+                                << tab->m_presets->get_edited_preset().name << "\" without asking: " << names;
+    }
+    return count;
 }
 
 // This is called when creating new project or load another project

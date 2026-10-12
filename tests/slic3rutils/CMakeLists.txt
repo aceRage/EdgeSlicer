@@ -35,8 +35,10 @@ add_executable(${_TEST_NAME}_tests
     hosted_push_tests.cpp
     app_push_levels_tests.cpp
     push_privacy_tests.cpp
+    live_activity_push_tests.cpp
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
+    first_request_gate_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp
@@ -49,6 +51,7 @@ add_executable(${_TEST_NAME}_tests
     hms_actions_tests.cpp
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
+    gizmo_volume_refs_tests.cpp
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
     bambu_config_compat_tests.cpp
@@ -90,6 +93,7 @@ add_executable(${_TEST_NAME}_tests
     ff_device_pid_tests.cpp
     emboss_font_search_tests.cpp
     printers_monitor_tests.cpp
+    moonraker_progress_tests.cpp
     # Hidden GLFW window + forward-compatible 3.3 core context; skips itself where none can be made.
     gl_core_profile_tests.cpp
     libvgcode_input_tests.cpp

@@ -367,6 +367,19 @@ private:
     void            sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentResult& r);
     void            sm_finish_silent_login(const std::string& log_line);
     void            sm_teardown_silent_login_dlg();
+    // Sign-in by hand (the shown dialog, or one a page asked for): bumped by a sign-out, so a
+    // lookup that answers after it is dropped.
+    unsigned        m_sm_signin_gen{ 0 };
+    // GET /api/common/accounts/current with the token, off the UI thread; `done` runs on the UI
+    // thread with the verified (or refused) answer. The token is never logged.
+    void            sm_lookup_account(const std::string& token, const std::string& user_info_url,
+                                      std::function<void(const SMSilentLogin::AccountAnswer&)> done);
+    // Signed out in this app: the token and account details are dropped, and the Account menu and
+    // the pages are told (only when there was something to drop).
+    void            sm_sign_out_locally();
+    // Deletes id.snapmaker.com's session cookies from the shared browser profile (only those), so
+    // the next sign-in shows the form instead of handing back the same session. `why` is logged.
+    void            sm_clear_web_session(const char* why);
 
     // Bambu Lab startup sync (BambuSyncPolicy.hpp, PresetUpdater::sync_bambu): started at most once
     // per session, as soon as a Bambu printer or a Bambu login exists. Until then this timer looks
@@ -714,6 +727,9 @@ private:
     // Stops an attempt in flight (the user opened the sign-in dialog, signed out, or the app closes).
     void            sm_cancel_silent_login(const std::string& reason);
     bool            sm_silent_login_active() const { return m_sm_silent_active; }
+    // The sign-in page handed over a token (SMUserLogin, not silent): verify it with the account
+    // service and only then sign in. `shown`: the person saw the dialog, so a failure is told.
+    void            sm_finish_sign_in(const std::string& token, const std::string& user_info_url, bool shown);
   
     void            request_user_logout();
     int             request_user_unbind(std::string dev_id);
@@ -820,6 +836,11 @@ private:
     bool            check_and_save_current_preset_changes(const wxString& caption, const wxString& header, bool remember_choice = true, bool use_dont_save_insted_of_discard = false);
     void            apply_keeped_preset_modifications();
     bool            check_and_keep_current_preset_changes(const wxString& caption, const wxString& header, int action_buttons, bool* postponed_apply_of_keeped_changes = nullptr);
+    // The "Transfer" answer of the dialog above, without the dialog, for a preset reload the
+    // program makes on its own (a Snapmaker printer connect installing its nozzle): every modified
+    // option of the current presets is cached for apply_keeped_preset_modifications() and logged
+    // with `why`. Returns how many options were cached (0: nothing was modified).
+    int             cache_current_preset_changes_for_transfer(const char* why);
     bool            can_load_project();
     bool            check_print_host_queue();
     bool            checked_tab(Tab* tab);
