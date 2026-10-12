@@ -1174,6 +1174,11 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Preset type is unknown, not loading: " << name;
             return false;
         }
+        // The name becomes <preset dir>/<name>.json: a name such as "..\..\x" must not climb out of it (Orca #15608).
+        if (!untrusted::is_relative_name_within_root(name, fs::path(collection->m_dir_path))) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Preset name escapes the preset directory, not loading: " << name;
+            return false;
+        }
         if (overwrite == 0) overwrite = 1;
         if (auto p = collection->find_preset(name, false)) {
             if (p->is_default || p->is_system) {

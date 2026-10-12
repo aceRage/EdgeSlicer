@@ -994,6 +994,27 @@ bool is_path_within_root(const boost::filesystem::path &root, const boost::files
     }
 }
 
+bool is_relative_name_within_root(const std::string &rel_name, const boost::filesystem::path &root)
+{
+    auto is_separator = [](char c) { return c == '/' || c == '\\'; };
+    // Empty, absolute ("/x", "\x", UNC) or drive-qualified ("C:x") names never stay inside root.
+    if (rel_name.empty() || is_separator(rel_name.front()) || (rel_name.size() > 1 && rel_name[1] == ':'))
+        return false;
+    if (rel_name.find('\0') != std::string::npos)
+        return false;
+    // Both separators count as separators on every platform, so a name refused on one OS is
+    // refused on all of them.
+    for (size_t start = 0; start <= rel_name.size();) {
+        size_t end = start;
+        while (end < rel_name.size() && !is_separator(rel_name[end]))
+            ++end;
+        if (rel_name.compare(start, end - start, "..") == 0)
+            return false;
+        start = end + 1;
+    }
+    return is_path_within_root(root, root / rel_name);
+}
+
 bool is_safe_attachment_path(const boost::filesystem::path &root, const boost::filesystem::path &candidate)
 {
     try {
