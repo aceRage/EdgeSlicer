@@ -4477,7 +4477,7 @@ void HubServer::sync_streams_once()
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: camera streams: " << plan.add.size() << " added, " << plan.replace.size() << " replaced, "
                             << plan.remove.size() << " removed, " << plan.adopt.size() << " already in go2rtc; "
                             << (want.size() - plan.add.size() - plan.replace.size() - plan.adopt.size()) << " unchanged left alone"
-                            << (ended ? ", " + std::to_string(ended) + " viewer connection(s) moved to the new stream" : std::string());
+                            << (ended ? ", " + std::to_string(ended) + " viewer tunnel(s) on replaced/removed streams ended" : std::string());
 }
 
 // Sleep in short slices so a hub that is shutting down does not wait out a retry delay. False
