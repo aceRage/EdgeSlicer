@@ -2,6 +2,7 @@
 
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -12,6 +13,7 @@
 #include "slic3r/Utils/MainThreadGate.hpp"
 
 namespace Slic3r {
+class LoopbackAcceptLoop;
 namespace GUI {
 
 // This slicer instance's JSON API, on a loopback-only port picked by the OS.
@@ -30,7 +32,7 @@ public:
 
     // Idempotent; call from the main thread once the Plater exists.
     void start();
-    void stop(); // removes the instance file; the listener dies with the process
+    void stop(); // removes the instance file and ends the listener (its own thread closes it)
     int  port();
 
     // ---- handing work to the GUI thread (MainThreadGate.hpp) ----
@@ -119,7 +121,6 @@ public:
 
 private:
     RemoteAccess() = default;
-    void accept_loop();
     void serve(void* socket); // boost::asio tcp::socket*, owned by the call
     void write_instance_file();
 
@@ -187,7 +188,8 @@ private:
     std::mutex       m_mutex;
     bool             m_on { false };
     int              m_port { 0 };
-    void*            m_acceptor { nullptr };
+    // Shared with the accept thread, which alone touches (and finally deletes) the acceptor.
+    std::shared_ptr<LoopbackAcceptLoop> m_accept_loop;
     std::vector<Job> m_jobs;
     int              m_next_job { 1 };
     bool             m_send_running { false }; // one transfer at a time, like the desktop's dialogs

@@ -15,10 +15,12 @@
 #include <catch2/catch.hpp>
 
 #include "slic3r/Utils/MainThreadGate.hpp"
+#include "slic3r/Utils/LoopbackAcceptLoop.hpp"
 #include "slic3r/Utils/ServerLifetime.hpp"
 
 #include <boost/asio.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -374,4 +376,158 @@ TEST_CASE("ServerLifetime: a socket tracked after stop() is shut straight away",
         CHECK(ec);
     }
     CHECK(ms_since(t0) < 2000);
+}
+
+// -------------------------------------------------------------------- LoopbackAcceptLoop ----
+//
+// EDGESLICER-9 (macOS, 2.4.5.4): RemoteAccess::stop() closed the instance API's acceptor on the
+// GUI thread while the accept thread, woken by that close, deleted it - two threads tearing down
+// one acceptor. The heap damage showed up as a double free in -[NSWindow orderOut:] when
+// MainFrame::shutdown() hid the frame. LoopbackAcceptLoop: stop() never touches the acceptor.
+
+namespace {
+
+// RemoteAccess's shape: an acceptor that the accept thread owns and deletes once run() returns.
+struct AcceptThread
+{
+    std::shared_ptr<LoopbackAcceptLoop> loop;
+    std::atomic<int>                    connections { 0 };
+    std::atomic<bool>                   done { false };
+    std::atomic<bool>                   stopped { false };
+    std::atomic<bool>                   acceptor_open_after_run { true };
+
+    AcceptThread(std::unique_ptr<tcp::acceptor> acceptor, std::shared_ptr<LoopbackAcceptLoop> l,
+                 int max_failures = 50, std::chrono::milliseconds retry = 100ms)
+        : loop(std::move(l))
+    {
+        tcp::acceptor* owned = acceptor.release();
+        std::thread([this, owned, max_failures, retry]() {
+            std::unique_ptr<tcp::acceptor> a(owned);
+            stopped = loop->run(*a, [this](tcp::socket* s) { delete s; ++connections; }, max_failures, retry);
+            acceptor_open_after_run = a->is_open();
+            a.reset(); // deleted here, on the thread that ran it - and nowhere else
+            done = true;
+        }).detach();
+    }
+    // A test that fails must not leave the thread pointing at a dead harness: wait it out first.
+    ~AcceptThread() { wait_until([this]() { return done.load(); }, 10000ms); }
+};
+
+std::unique_ptr<tcp::acceptor> loopback_acceptor(boost::asio::io_context& io)
+{
+    auto a = std::make_unique<tcp::acceptor>(io, tcp::endpoint(boost::asio::ip::address_v4::loopback(), 0));
+    a->listen();
+    return a;
+}
+
+} // namespace
+
+TEST_CASE("LoopbackAcceptLoop: stop() ends a blocked accept; the accept thread alone closes the acceptor", "[ShutdownGate]")
+{
+    boost::asio::io_context io;
+    auto                    acceptor = loopback_acceptor(io);
+    auto                    loop     = std::make_shared<LoopbackAcceptLoop>(acceptor->local_endpoint().port());
+    const unsigned short    port     = acceptor->local_endpoint().port();
+    AcceptThread            t(std::move(acceptor), loop);
+
+    // An ordinary connection is handed on.
+    boost::asio::io_context client_io;
+    tcp::socket             client(client_io);
+    client.connect(tcp::endpoint(boost::asio::ip::address_v4::loopback(), port));
+    REQUIRE(wait_until([&]() { return t.connections == 1; }));
+    CHECK_FALSE(t.done);
+    CHECK_FALSE(loop->stop_requested());
+
+    // The quit: stop() wakes the accept with its own connection, which is not handed on.
+    const auto t0 = Clock::now();
+    CHECK(loop->stop(2000ms));
+    REQUIRE(wait_until([&]() { return t.done.load(); }, 3000ms));
+    CHECK(ms_since(t0) < 3000);
+    CHECK(t.stopped);
+    CHECK(loop->finished());
+    CHECK_FALSE(t.acceptor_open_after_run);
+    CHECK(t.connections == 1);
+
+    // Again, as GUI_App::OnExit() does after MainFrame::shutdown(): nothing left to wake.
+    const auto t1 = Clock::now();
+    CHECK(loop->stop(2000ms));
+    CHECK(ms_since(t1) < 500);
+
+    // The listener is gone: a late peer is refused rather than left hanging.
+    tcp::socket               late(client_io);
+    boost::system::error_code ec;
+    late.connect(tcp::endpoint(boost::asio::ip::address_v4::loopback(), port), ec);
+    CHECK(ec);
+}
+
+TEST_CASE("LoopbackAcceptLoop: a stop() that comes before the thread reaches accept() still ends it", "[ShutdownGate]")
+{
+    boost::asio::io_context io;
+    auto                    acceptor = loopback_acceptor(io);
+    auto                    loop     = std::make_shared<LoopbackAcceptLoop>(acceptor->local_endpoint().port());
+    // The wake-up connection waits in the listen backlog; run() sees the flag and never accepts.
+    CHECK(loop->stop(2000ms));
+    AcceptThread t(std::move(acceptor), loop);
+    REQUIRE(wait_until([&]() { return t.done.load(); }, 3000ms));
+    CHECK(t.stopped);
+    CHECK(t.connections == 0);
+}
+
+TEST_CASE("LoopbackAcceptLoop: a listener that keeps failing ends on its own, and stop() then returns at once", "[ShutdownGate]")
+{
+    boost::asio::io_context io;
+    auto                    acceptor = loopback_acceptor(io);
+    auto                    loop     = std::make_shared<LoopbackAcceptLoop>(acceptor->local_endpoint().port());
+    boost::system::error_code ig;
+    acceptor->close(ig); // every accept() fails from the first
+    AcceptThread t(std::move(acceptor), loop, 3, 1ms);
+    REQUIRE(wait_until([&]() { return t.done.load(); }, 3000ms));
+    CHECK_FALSE(t.stopped);
+    CHECK(loop->finished());
+
+    const auto t0 = Clock::now();
+    CHECK(loop->stop(2000ms));
+    CHECK(ms_since(t0) < 500);
+}
+
+TEST_CASE("LoopbackAcceptLoop: stop() is bounded when nothing listens", "[ShutdownGate]")
+{
+    unsigned short port = 0;
+    {
+        boost::asio::io_context io;
+        auto                    a = loopback_acceptor(io);
+        port                      = a->local_endpoint().port();
+    } // closed: connections to it are refused (or, behind a firewall, never answered)
+    LoopbackAcceptLoop loop(port);
+    const auto         t0 = Clock::now();
+    CHECK_FALSE(loop.stop(300ms));
+    CHECK(ms_since(t0) < 2000);
+    CHECK(loop.stop_requested());
+}
+
+TEST_CASE("LoopbackAcceptLoop: many start / connect / stop cycles all end, each stop quickly", "[ShutdownGate]")
+{
+    boost::asio::io_context io; // like RemoteAccess's: shared by every listener, never run
+    boost::asio::io_context client_io;
+    long long               slowest_stop = 0;
+    for (int i = 0; i < 100; ++i) {
+        auto                 acceptor = loopback_acceptor(io);
+        const unsigned short port     = acceptor->local_endpoint().port();
+        auto                 loop     = std::make_shared<LoopbackAcceptLoop>(port);
+        AcceptThread         t(std::move(acceptor), loop);
+        if (i % 2 == 0) {
+            tcp::socket c(client_io);
+            c.connect(tcp::endpoint(boost::asio::ip::address_v4::loopback(), port));
+            REQUIRE(wait_until([&]() { return t.connections == 1; }));
+        }
+        // Odd rounds stop the loop right after its thread was started, often before it ever
+        // blocked in accept(): it then closes the listener on its own, and stop() must not sit
+        // out the refused wake-up connection (two seconds of retries on Windows).
+        const auto t0 = Clock::now();
+        REQUIRE(loop->stop(2000ms));
+        slowest_stop = std::max(slowest_stop, ms_since(t0));
+        REQUIRE(wait_until([&]() { return t.done.load(); }, 3000ms));
+        REQUIRE(t.stopped);
+    }
+    CHECK(slowest_stop < 1000);
 }
