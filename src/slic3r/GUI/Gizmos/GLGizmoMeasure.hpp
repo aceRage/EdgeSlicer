@@ -198,7 +198,7 @@ protected:
     std::map<GripperType, std::shared_ptr<PickRaycaster>> m_gripper_id_raycast_map;
     std::vector<GLVolume*>                                m_hit_different_volumes;
     std::vector<GLVolume*>                                m_hit_order_volumes;
-    GLVolume*                                             m_last_hit_volume;
+    GLVolume*                                             m_last_hit_volume{nullptr};
     //std::vector<std::shared_ptr<GLModel>>                 m_plane_models_cache;
     unsigned int                                          m_last_active_item_imgui{0};
     Vec3d                                                 m_buffered_distance;
@@ -277,6 +277,13 @@ protected:
 
     void show_tooltip_information(float caption_max, float x, float y);
     void reset_all_pick();
+    // EDGESLICER-8: every cached GLVolume* (pick map, measure map, hit lists, Ultra caches) must still
+    // be a live volume of m_parent that owns the same mesh raycaster. volume_refs_are_stale() checks
+    // that without dereferencing a cached pointer; drop_volume_refs() forgets all of them (and any
+    // pending partial update); repair_stale_volume_refs() does both and re-registers the selection.
+    bool volume_refs_are_stale() const;
+    void drop_volume_refs();
+    bool repair_stale_volume_refs();
     void reset_gripper_pick(GripperType id,bool is_all = false);
     void register_single_mesh_pick();
     //void update_single_mesh_pick(GLVolume* v);

@@ -28,6 +28,13 @@ std::string section_or_default(const std::string& section);
 enum class ArchiveOpen { None, Gcode, Project };
 ArchiveOpen archive_open_kind(const std::string& file_name);
 
+// How a file the user just downloaded (Home > Vendors > Download & Open) is opened, by its name
+// alone (case-insensitive): a 3MF - sliced ".gcode.3mf" included - is a project, plain G-code goes
+// to the preview, STL / STEP / OBJ / AMF are added to the current plate, anything else (a .zip...)
+// is saved and left alone.
+enum class DownloadOpen { None, Project, AddToPlate, Gcode };
+DownloadOpen download_open_kind(const std::string& file_name);
+
 // "#RGB", "#RRGGBB" or "#RRGGBBAA" as given (upper-cased), "" for anything else: the only colour
 // form the page is ever handed for a filament swatch.
 std::string clean_colour(const std::string& colour);

@@ -15,7 +15,8 @@
       so an untimestamped signature dies three days after the build);
     - the signer is Microsoft (O=Microsoft Corporation: the VC runtime, WebView2Loader) or, when
       -ExpectedSubject / WINDOWS_SIGNER_SUBJECT is set, matches it. When neither is set, any
-      valid signer is accepted and the table says so.
+      valid signer is accepted and the table says so; or, for the paths -ThirdPartySigner /
+      -AllowBambuCameraFiles name, the third party listed for them (reported as OK-3P).
 
   Exit codes: 0 every file passed (or was explicitly allowed), 1 at least one file failed,
   2 bad arguments (a path that does not exist, nothing to check).
@@ -33,6 +34,20 @@
 .PARAMETER AllowUnsigned
   File-name or relative-path wildcards that may be unsigned (reported as ALLOWED, never fail the
   run), e.g. 'FlashNetwork.dll' while the owner's licence decision is pending.
+
+.PARAMETER ThirdPartySigner
+  Files that ship with a third party's own signature, which is kept (windows_sign.ps1 never
+  re-signs a validly signed file). Each entry is '<path wildcard>=<CN>|<CN>...': a file whose name
+  or relative path matches the wildcard passes with a signer whose CN is one of those listed - and
+  still only when the signature is Valid, embedded and timestamped. Reported as OK-3P. This is not
+  an "unsigned allowed" list: an unsigned file, or one signed by anybody else, still fails.
+
+.PARAMETER AllowBambuCameraFiles
+  Shorthand for the one third-party allowance EdgeSlicer ships with (owner decision 2026-10-11):
+  Bambu's live-view camera files, cameratools\BambuSource.dll and cameratools\live555.dll, signed by
+  Bambu Lab's companies (CN "Shenzhen Tuozhu Technology Co., Ltd." or "Shanghai Lunkuo Technology
+  Co., Ltd" - the two signers seen on Bambu's camera DLLs). Anywhere else, or by anyone else, those
+  names get no allowance.
 
 .PARAMETER ExtractInstaller
   Also unpack each NSIS installer given in -Path with 7-Zip ($env:SEVENZIP, else
@@ -65,6 +80,8 @@ param(
   [Parameter(Mandatory = $true)][string[]]$Path,
   [string]$ExpectedSubject = $env:WINDOWS_SIGNER_SUBJECT,
   [string[]]$AllowUnsigned = @(),
+  [string[]]$ThirdPartySigner = @(),
+  [switch]$AllowBambuCameraFiles,
   [switch]$ExtractInstaller,
   [switch]$AllFiles,
   [switch]$ShowAuthenticodeHash,
@@ -79,6 +96,24 @@ $ErrorActionPreference = 'Stop'
 # Several values may also arrive as one ';'-separated string: `powershell -File` cannot pass arrays.
 $Path = @($Path | ForEach-Object { $_ -split ';' } | Where-Object { $_ -and $_.Trim() })
 $AllowUnsigned = @($AllowUnsigned | ForEach-Object { $_ -split ';' } | Where-Object { $_ -and $_.Trim() })
+$ThirdPartySigner = @($ThirdPartySigner | ForEach-Object { $_ -split ';' } | Where-Object { $_ -and $_.Trim() })
+
+# Bambu's camera files keep Bambu's signature (see -AllowBambuCameraFiles). The two companies Bambu
+# Lab signs its Windows binaries as; the CN is matched exactly.
+$BambuCameraSigners = @('Shenzhen Tuozhu Technology Co., Ltd.', 'Shanghai Lunkuo Technology Co., Ltd')
+if ($AllowBambuCameraFiles) {
+  foreach ($f in @('*cameratools\BambuSource.dll', '*cameratools\live555.dll')) {
+    $ThirdPartySigner += ('{0}={1}' -f $f, ($BambuCameraSigners -join '|'))
+  }
+}
+$ThirdPartyRules = @()
+foreach ($entry in $ThirdPartySigner) {
+  $eq = $entry.IndexOf('=')
+  if ($eq -lt 1) { Write-Host "ERROR: -ThirdPartySigner '$entry' is not '<path wildcard>=<CN>|<CN>'"; exit 2 }
+  $subjects = @($entry.Substring($eq + 1) -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  if ($subjects.Count -eq 0) { Write-Host "ERROR: -ThirdPartySigner '$entry' names no signer"; exit 2 }
+  $ThirdPartyRules += , @{ Pattern = $entry.Substring(0, $eq).Trim(); Subjects = $subjects }
+}
 
 # Extensions Windows maps as images. Anything else is only caught with -AllFiles.
 $PeExtensions = @('.exe', '.dll', '.sys', '.ocx', '.cpl', '.scr', '.pyd', '.node', '.efi', '.drv', '.ax', '.tmp')
@@ -199,6 +234,18 @@ function Test-IsMicrosoft($Cert) {
   return ($Cert.Subject -match '(^|,\s*)O=Microsoft Corporation(,|$)')
 }
 
+# True when this file may carry this third party's signature (-ThirdPartySigner).
+function Test-ThirdPartyAllowed([string]$Rel, [string]$Name, $Cert) {
+  if (-not $Cert) { return $false }
+  $cn = $Cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+  foreach ($rule in $ThirdPartyRules) {
+    if ($Name -like $rule.Pattern -or $Rel -like $rule.Pattern) {
+      if ($rule.Subjects -contains $cn) { return $true }
+    }
+  }
+  return $false
+}
+
 function Test-Allowed([string]$Rel, [string]$Name) {
   foreach ($pat in $AllowUnsigned) {
     if ([string]::IsNullOrWhiteSpace($pat)) { continue }
@@ -281,11 +328,13 @@ try {
     $isTest = ($cert -and $TestCertificateThumbprint -and $cert.Thumbprint -eq $TestCertificateThumbprint.Trim().ToUpperInvariant() -and
                @('Valid', 'UnknownError', 'NotTrusted') -contains [string]$sig.Status)
     if ([string]$sig.Status -ne 'Valid' -and -not $isTest) { $problems += [string]$sig.Status }
+    $isThirdParty = $false
     if ($cert) {
       if (-not (Test-HasEmbeddedSignature $t.File)) { $problems += 'no embedded signature (catalog only)' }
       if (-not $ts) { $problems += 'no timestamp' }
       $isMs = Test-IsMicrosoft $cert
-      if (-not $isMs -and -not $isTest -and -not [string]::IsNullOrWhiteSpace($ExpectedSubject) -and -not (Test-SubjectMatch $cert $ExpectedSubject)) {
+      $isThirdParty = Test-ThirdPartyAllowed $t.Rel ([System.IO.Path]::GetFileName($t.File)) $cert
+      if (-not $isMs -and -not $isTest -and -not $isThirdParty -and -not [string]::IsNullOrWhiteSpace($ExpectedSubject) -and -not (Test-SubjectMatch $cert $ExpectedSubject)) {
         $problems += "unexpected signer"
       }
     }
@@ -294,6 +343,7 @@ try {
       $result = if (-not $cert -and (Test-Allowed $t.Rel ([System.IO.Path]::GetFileName($t.File)))) { 'ALLOWED' } else { 'FAIL' }
     }
     if ($result -eq 'OK' -and $isTest) { $result = 'OK-TEST' }
+    if ($result -eq 'OK' -and $cert -and $isThirdParty -and -not (Test-SubjectMatch $cert $ExpectedSubject)) { $result = 'OK-3P' }
     if ($result -eq 'FAIL') { $exitCode = 1 }
     $row = [ordered]@{
       Result    = $result

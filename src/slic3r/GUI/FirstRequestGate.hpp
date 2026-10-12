@@ -175,8 +175,30 @@ public:
     {
         Dropped d = drop("a new selection replaced the session they were waiting for");
         m_watch.on_selected(now, session_already_up);
-        m_held = 0;
+        m_held    = 0;
+        m_retried = false;
         return d;
+    }
+
+    // A LAN dial starts (MachineObject::connect - every dial goes through it, whatever started it:
+    // a Device-tab selection, the printer restored from the last session when the Device tab
+    // opens, the send dialog, a re-dial). Arms the gate unless this selection is already dialling,
+    // so a dial that no selection announced holds its early requests too.
+    Dropped dial_started(long long now)
+    {
+        if (m_watch.dialling(now)) return {};
+        return select(now, false);
+    }
+
+    // The plug-in reported this selection's dial failed. The first time within the hold, returns
+    // true: keep holding, the caller dials once more (a printer's broker can refuse a connection
+    // made the moment its previous one - the watch session the selection just closed - is still
+    // being torn down). Otherwise false: the caller reports the session down.
+    bool dial_failed(long long now)
+    {
+        if (!m_watch.dialling(now) || m_retried) return false;
+        m_retried = true;
+        return true;
     }
 
     bool dialling(long long now) const { return m_watch.dialling(now); }
@@ -255,6 +277,7 @@ private:
     ConnectWatch m_watch;
     HeldQueue    m_queue;
     int          m_held { 0 };
+    bool         m_retried { false }; // this selection's one re-dial after a refused dial is used
 };
 
 // Which session events reach a selection: the printer's own LAN session for a LAN-mode printer,

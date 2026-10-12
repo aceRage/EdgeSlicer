@@ -6,6 +6,7 @@ add_executable(${_TEST_NAME}_tests
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
     plugin_guard_tests.cpp
+    camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp
     login_useragent_tests.cpp
@@ -52,6 +53,7 @@ add_executable(${_TEST_NAME}_tests
     hms_actions_tests.cpp
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
+    gizmo_volume_refs_tests.cpp
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
     bambu_config_compat_tests.cpp

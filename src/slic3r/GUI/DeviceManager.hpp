@@ -600,6 +600,15 @@ public:
     // whatever was held for it - or failed / lost.
     void note_session_up(const char* kind);
     void note_session_down();
+    // The plug-in reported this printer's LAN dial failed. True: it is the selection's first
+    // refusal, held requests stay held and lan_reconnect_tick dials again at m_redial_at. False:
+    // the session is reported down (note_session_down).
+    bool note_dial_failed();
+    // connect() is dialling the printer: arms the gate when no selection did (FirstRequestGate.hpp
+    // SelectionGate::dial_started).
+    void note_dial_started();
+    bool m_redial_due { false };
+    std::chrono::steady_clock::time_point m_redial_at {};
     // True (and logged) when the status request `what` is to be held back for the session.
     bool hold_status_request(const char* what);
     void note_status_received();

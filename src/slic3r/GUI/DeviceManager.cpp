@@ -3083,6 +3083,9 @@ int MachineObject::connect(bool is_anonymous, bool use_openssl)
         password = get_access_code();
     }
     if (m_agent) {
+        // Every LAN dial comes through here, whatever started it; hold this printer's requests
+        // until the session it starts is up.
+        note_dial_started();
         try {
             return m_agent->connect_printer(dev_id, dev_ip, username, password, use_openssl);
         } catch (...) {
@@ -3188,7 +3191,32 @@ void MachineObject::note_session_up(const char* kind)
 
 void MachineObject::note_session_down()
 {
+    m_redial_due = false;
     report_not_sent(m_gate.session_down());
+}
+
+void MachineObject::note_dial_started()
+{
+    m_redial_due = false;
+    const long long now = first_request_now_ms();
+    if (m_gate.dialling(now))
+        return; // a selection armed it already (or this is its re-dial)
+    report_not_sent(m_gate.dial_started(now));
+    BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " LAN dial started outside a Device-tab selection: holding its requests until the session is up";
+}
+
+bool MachineObject::note_dial_failed()
+{
+    const long long now = first_request_now_ms();
+    if (!m_gate.dial_failed(now)) {
+        note_session_down();
+        return false;
+    }
+    m_redial_due = true;
+    m_redial_at  = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    BOOST_LOG_TRIVIAL(warning) << "connect: dev=" << dev_id << " the LAN dial was refused " << (now - m_gate.watch().selected_at)
+                               << " ms after selection; dialling again in 1.5 s, " << m_gate.held() << " request(s) still held";
+    return true;
 }
 
 void MachineObject::send_held(const std::vector<FirstRequestGate::HeldCommand>& held)
@@ -6912,7 +6940,9 @@ void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
         m_agent->disconnect_printer();
         obj->set_lan_session_up(false); // up again when the new dial's on_local_connect(Ok) lands
         obj->reset();
-        obj->note_selected(false);
+        // connect() arms the first-request gate for this dial (note_dial_started) - and leaves it
+        // as it is when this is the one re-dial after a refused first dial, so what that selection
+        // held keeps waiting for this session.
 #if !BBL_RELEASE_TO_PUBLIC
         obj->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
 #else
@@ -6971,6 +7001,13 @@ void DeviceManager::lan_reconnect_tick()
 
     for (MachineObject* obj : want) {
         if (!obj->has_access_right() || obj->dev_ip.empty()) continue;
+        // The selection's first dial was refused (MachineObject::note_dial_failed): its one
+        // re-dial, while what it held keeps waiting.
+        if (obj->m_redial_due && std::chrono::steady_clock::now() >= obj->m_redial_at) {
+            obj->m_redial_due = false;
+            lan_reconnect_now(obj, "first dial refused, dialling once more");
+            continue;
+        }
         LanReconnect& r = m_lan_reconnect[obj->dev_id];
         const LanReconnect before = r;
         const long long silence = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(

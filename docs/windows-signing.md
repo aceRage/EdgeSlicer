@@ -29,8 +29,18 @@ one run of `build_windows_selfhosted.yml`:
 | `EdgeSlicer_Windows_Installer_V<ver>.exe` | makensis `!finalize` |
 
 Not re-signed: any file that already has a valid signature, which today means Microsoft's VC runtime
-(`msvcp140*.dll`, `vcruntime140*.dll`, `concrt140.dll`) and `WebView2Loader.dll`. We never dual-sign
-or replace an existing signature.
+(`msvcp140*.dll`, `vcruntime140*.dll`, `concrt140.dll`), `WebView2Loader.dll`, and Bambu's camera
+files `cameratools\BambuSource.dll` + `cameratools\live555.dll` (shipped from `CAMERA_BIN_DIR` since
+the owner's 2026-10-11 decision). We never dual-sign or replace an existing signature.
+
+Bambu's camera files are the one third-party signer every verifier accepts, and only for those two
+paths: `windows_verify_signatures.ps1 -AllowBambuCameraFiles` passes them when the signature is
+Valid, embedded and timestamped and the signer CN is one of Bambu Lab's two companies
+("Shenzhen Tuozhu Technology Co., Ltd." or "Shanghai Lunkuo Technology Co., Ltd"), reported as
+`OK-3P`. It is not an unsigned allowance: an unsigned copy, a copy signed by anyone else, or a
+Bambu-signed DLL anywhere outside `cameratools\` still fails. The workflow's two verify steps, the
+CPack staging check and the release publisher all pass the switch. Why they ship at all, and the
+macOS side, is in `docs/superpowers/specs/2026-10-11-bambu-camera-module.md`.
 
 Not signed unless the owner opts in: `FlashNetwork.dll`. Its redistribution terms
 (`docs/superpowers/specs/2026-09-11-flashforge-lan-ship.md`) have not been checked for byte changes.
@@ -89,8 +99,9 @@ installer fails the run.
   validly signed with an embedded signature, timestamped, and signed by Microsoft or by
   `-ExpectedSubject` (default: the `WINDOWS_SIGNER_SUBJECT` environment variable). Prints a table,
   exits 1 on any miss. `-ExtractInstaller` also checks what 7-Zip unpacks from an installer;
-  `-AllowUnsigned` lists exceptions; `-HashOnly` prints signature-independent Authenticode
-  hashes (see "Pinned hashes" below).
+  `-AllowUnsigned` lists exceptions; `-ThirdPartySigner '<wildcard>=<CN>|<CN>'` and its preset
+  `-AllowBambuCameraFiles` accept a named third party's valid signature on named paths;
+  `-HashOnly` prints signature-independent Authenticode hashes (see "Pinned hashes" below).
 - `cmake/signing/WindowsSigning.cmake`: the CMake option `EDGESLICER_SIGN_WINDOWS` (default OFF).
   ON adds the two makensis hooks and the plug-in `!addplugindir` through `CPACK_NSIS_DEFINES`, and
   the CPack pre-build script. OFF adds nothing.

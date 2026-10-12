@@ -87,6 +87,10 @@ private:
     void forget_recent(const std::string& path);
     void open_archived(const std::string& id);
     void open_archived_project(const std::string& id);
+    // A file Home > Vendors just saved (Download & Open): the same routes as the Library and the
+    // Print History, picked by the file's name (HomeTab::download_open_kind).
+    void open_downloaded(const std::string& path);
+    void ensure_vendors();
     void reveal_archived(const std::string& id);
     void delete_archived(const std::string& id);
 
