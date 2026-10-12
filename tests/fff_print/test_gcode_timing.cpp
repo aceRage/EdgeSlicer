@@ -533,3 +533,30 @@ TEST_CASE("M205 J in the G-code sets the junction deviation the estimator plans 
     REQUIRE_THAT(planned_corner_speed(gcfMarlinFirmware, jerk, 0.05, 90.0, 0.0, 0.0, "M205 J0\n"),
                  Catch::Matchers::WithinRel(classic, 1e-4));
 }
+TEST_CASE("How fast a corner is taken does not depend on how much is extruded through it",
+          "[GCodeTiming][JunctionDeviation]")
+{
+    // The junction cosine is taken over XYZE, so the direction vectors have to be unit length or the E term makes
+    // the two paths look more parallel than they are and the corner comes out too fast, the more so the higher the
+    // flow. Marlin normalizes over XYZE on any extruding move (planner.cpp, esteps > 0) and Klipper leaves E out of
+    // the cosine altogether (toolhead.py::Move.calc_junction); on both, this corner is planned by its geometry alone.
+    const double scv  = 5.0;
+    const double turn = 6.0;
+    const double geometric = planned_corner_speed(gcfKlipper, scv, 0.0, turn);
+    REQUIRE(geometric > 0.0);
+
+    // 0.029mm/mm is an ordinary 0.42 x 0.2 line on 1.75mm filament; 0.1 is a fat large-nozzle one. Unnormalized
+    // these came out at 94.4 and 150.0mm/s against a geometric 86.9.
+    for (double e_per_mm : {0.029, 0.1}) {
+        INFO("e_per_mm = " << e_per_mm);
+        REQUIRE_THAT(planned_corner_speed(gcfKlipper, scv, 0.0, turn, 0.0, e_per_mm),
+                     Catch::Matchers::WithinRel(geometric, 0.02));
+    }
+
+    SECTION("and the same holds on Marlin 2") {
+        const double marlin = planned_corner_speed(gcfMarlinFirmware, scv, 0.05, turn);
+        REQUIRE(marlin > 0.0);
+        REQUIRE_THAT(planned_corner_speed(gcfMarlinFirmware, scv, 0.05, turn, 0.0, 0.029),
+                     Catch::Matchers::WithinRel(marlin, 0.02));
+    }
+}
