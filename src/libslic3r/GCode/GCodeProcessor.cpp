@@ -1303,6 +1303,7 @@ void GCodeProcessor::reset()
 {
     m_booked_times.clear();
     m_booking_tool_change = false;
+    m_skip_end_gcode_delays = false;
     m_units = EUnits::Millimeters;
     m_global_positioning_type = EPositioningType::Absolute;
     m_e_local_positioning_type = EPositioningType::Absolute;
@@ -2151,6 +2152,15 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         return;
     }
     
+    // Orca (403292cb63): end G-code marker. With #14573 a wait with no motion queued behind it is buffered and
+    // counted instead of dropped, so the end G-code's M400 S / P waits (air purification, timelapse, sound) would
+    // inflate the print time. They are post-print by definition: skip them from here on.
+    // GCode.cpp writes the marker for the printers that have a pre-cooling plan (H2D and the like).
+    if (comment == PreCooling::MachineEndGCodeStartMarker) {
+        m_skip_end_gcode_delays = true;
+        return;
+    }
+
     // Orca: Integrate filament consumption for purging performed to an external device and controlled via macros
     // (eg. Happy Hare) in the filament consumption stats.
     if (boost::starts_with(comment, GCodeProcessor::External_Purge_Tag)) {
@@ -3998,6 +4008,9 @@ void GCodeProcessor::process_M400(const GCodeReader::GCodeLine& line)
     float value_p = 0.0;
     if (line.has_value('S', value_s) || line.has_value('P', value_p)) {
         value_s += value_p * 0.001;
+        // End G-code waits are post-print (see m_skip_end_gcode_delays).
+        if (m_skip_end_gcode_delays)
+            return;
         simulate_st_synchronize(value_s);
     }
 }

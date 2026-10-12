@@ -560,3 +560,40 @@ TEST_CASE("How fast a corner is taken does not depend on how much is extruded th
                      Catch::Matchers::WithinRel(marlin, 0.02));
     }
 }
+
+// ---- upstream 403292cb63: end G-code waits ----
+
+TEST_CASE("Timed waits of the machine end G-code are not part of the estimate", "[GCodeTiming][EndGCode]")
+{
+    // Air filtration / timelapse / sound waits (M400 S, M400 P) after the machine end G-code marker are post-print.
+    // Since #14573 a wait with no motion behind it is buffered and counted, so they have to be skipped on purpose.
+    auto gcode = [](bool marker) {
+        std::string s =
+            "M83\n"
+            "; FEATURE: Outer wall\n"
+            "G1 X10 Y0 Z0.2 F6000\n"
+            "G1 X50 Y0 E5 F1800\n"
+            "G1 X50 Y50 E5\n"
+            "G1 X0 Y50 E5\n";
+        if (marker)
+            s += "; MACHINE_END_GCODE_START\n";
+        s +=
+            "G1 Z10 F900\n"
+            "G1 Z12\n"
+            "M400 S180\n"          // wait while the nozzle is idle
+            "G1 Z20\n"
+            "G1 Z22\n"
+            "M400 P5000\n";
+        return s;
+    };
+
+    GCodeProcessor with_marker, without_marker;
+    run_processor(with_marker, make_config(0.0, 0.0, 0.0), gcode(true).c_str());
+    run_processor(without_marker, make_config(0.0, 0.0, 0.0), gcode(false).c_str());
+
+    const double t_with    = with_marker.get_time(PrintEstimatedStatistics::ETimeMode::Normal);
+    const double t_without = without_marker.get_time(PrintEstimatedStatistics::ETimeMode::Normal);
+    REQUIRE(t_with > 0.0);
+    // Without the marker both waits count (180 + 5 s).
+    REQUIRE_THAT(t_without - t_with, WithinAbs(185.0, 1e-1));
+}

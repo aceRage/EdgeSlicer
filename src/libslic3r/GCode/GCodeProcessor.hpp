@@ -837,6 +837,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         };
         std::vector<BookedTime> m_booked_times;
         bool                    m_booking_tool_change{ false };
+        // Orca (403292cb63): the machine end G-code's timed M400 waits (air filtration, timelapse picture,
+        // sound) are post-print operations, not part of the print time. Set when the
+        // MACHINE_END_GCODE_START marker is parsed; process_M400() then skips the S / P delays.
+        bool                    m_skip_end_gcode_delays{ false };
 
         //BBS: x, y offset for gcode generated
         double          m_x_offset{ 0 };
