@@ -30,7 +30,8 @@ namespace AccountStatus {
 // Puts the Bambu Lab and Snapmaker providers in Accounts::registry(). Safe to call again.
 void register_providers();
 
-// The title bar this reports to (BBLTopbar's constructor / destructor). None on macOS.
+// The title bar this reports to (BBLTopbar's constructor / destructor). None on macOS, where
+// refresh() updates the menu bar's Account menu instead (MainFrame::update_account_menubar).
 void attach_topbar(BBLTopbar* topbar);
 void detach_topbar(BBLTopbar* topbar);
 

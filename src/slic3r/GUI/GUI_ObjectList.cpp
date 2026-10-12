@@ -1,6 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/PresetBundle.hpp"
 #include "GUI_ObjectList.hpp"
+#include "SvgSplitDialog.hpp" // Load... of an .svg part
 #include "GUI_Factories.hpp"
 #include "SupportGroupsDialog.hpp"
 //#include "GUI_ObjectLayers.hpp"
@@ -2141,6 +2142,21 @@ void ObjectList::load_subobject(ModelVolumeType type, bool from_galery/* = false
 
     if (input_files.IsEmpty())
         return;
+
+    // .svg: by the SVG gizmo onto this object, as Add part > SVG (a part asks SVG / SVG (Split))
+    {
+        std::vector<std::string> files;
+        for (const wxString &file : input_files)
+            files.push_back(into_u8(file));
+        std::vector<std::string> others = import_svg_files_by_gizmo(files, type);
+        if (others.size() != files.size()) {
+            input_files.Clear();
+            for (const std::string &file : others)
+                input_files.Add(from_u8(file));
+            if (input_files.IsEmpty())
+                return;
+        }
+    }
 
     take_snapshot((type == ModelVolumeType::MODEL_PART) ? "Load Part" : "Load Modifier");
 

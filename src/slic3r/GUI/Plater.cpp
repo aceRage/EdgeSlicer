@@ -186,6 +186,7 @@
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
+#include "SvgSplitDialog.hpp" // Drop SVG file: SVG or SVG (Split)
 #include "Gizmos/GizmoObjectManipulation.hpp"
 
 // BBS
@@ -10451,11 +10452,38 @@ bool emboss_svg(Plater& plater, const wxString &svg_file, const Vec2d& mouse_dro
         return false;
 
     // Refresh hover state to find surface point under mouse
-    wxMouseEvent evt(wxEVT_MOTION);
-    evt.SetPosition(wxPoint(mouse_drop_position.x(), mouse_drop_position.y()));
-    canvas->on_mouse(evt); // call render where is call GLCanvas3D::_picking_pass()
+    auto refresh_hover = [canvas, &mouse_drop_position]() {
+        wxMouseEvent evt(wxEVT_MOTION);
+        evt.SetPosition(wxPoint(mouse_drop_position.x(), mouse_drop_position.y()));
+        canvas->on_mouse(evt); // call render where is call GLCanvas3D::_picking_pass()
+    };
+    refresh_hover();
 
+    // "SVG" (one part) or "SVG (Split)" (one part per shape)?
+    SvgDropAction action = ask_svg_drop_action(nullptr, wxFileName(svg_file).GetFullName());
+    if (action == SvgDropAction::Cancel)
+        return false;
+    // the question took the mouse out of the canvas
+    refresh_hover();
+    if (action == SvgDropAction::Split)
+        return svg->create_volume_split(ModelVolumeType::MODEL_PART, mouse_drop_position, svg_file_str);
     return svg->create_volume(svg_file_str, mouse_drop_position, ModelVolumeType::MODEL_PART);
+}
+
+// Every file import of the GUI: .svg files are created by the SVG gizmo after the SVG / SVG (Split)
+// question, as new objects (import_svg_files_by_gizmo). Model::read_from_file keeps its own SVG
+// loader for the command line. Returns the other files, which are loaded by load_files().
+std::vector<fs::path> import_svg_files(Plater &plater, const std::vector<fs::path> &paths)
+{
+    std::vector<std::string> files;
+    for (const fs::path &path : paths)
+        files.push_back(into_u8(from_path(path)));
+    if (partition_svg_files(files).svg.empty())
+        return paths;
+    std::vector<fs::path> others;
+    for (const std::string &file : import_svg_files_by_gizmo(files, ModelVolumeType::INVALID))
+        others.push_back(into_path(from_u8(file)));
+    return others;
 }
 
 bool is_traceable_image(const wxString &file)
@@ -14485,6 +14513,12 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
     int nozzles = 0;
     for (auto& kv : obj->amsList)
         if (kv.second) nozzles = std::max(nozzles, kv.second->nozzle + 1);
+    // A two-extruder printer whose only AMS feeds one extruder while the other is fed from its
+    // external spool (an X2D, 2026-10-09) has two extruders to group for, not one. Without a loaded
+    // external spool this stays what it was.
+    if (obj->is_multi_extruders())
+        for (AmsTray ext : obj->external_spools())
+            if (ext.is_tray_info_ready()) nozzles = std::max(nozzles, 2);
     if (nozzles < 2) return infos;
     infos.resize(nozzles);
     std::vector<std::map<int, int>> cap_per_noz(nozzles); // logical extruder -> map<bank_slot_count, num_banks>
@@ -14515,6 +14549,23 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
             cfg.set_key_value("tray_name",       new ConfigOptionStrings{ tray_name });
             infos[nz].push_back(std::move(cfg));
         }
+    }
+    // Each extruder's external spool, named "Ext" as BambuStudio's build_filament_ams_list names
+    // it: the grouping (FilamentGroupUtils::build_machine_filaments) offers it for an extruder that
+    // has no AMS filament, so a match-mode slice can put a filament on the extruder whose spool
+    // holder carries it. Not an AMS: it adds nothing to the slot budget below.
+    for (AmsTray ext : obj->external_spools()) {
+        const int ext_id = atoi(ext.id.c_str());
+        const int physical = BambuExtruderMap::external_spool_physical_extruder(ext_id);
+        if (physical < 0 || !ext.is_tray_info_ready()) continue;
+        const int nz = BambuExtruderMap::physical_to_logical(physical_extruder_map, physical);
+        if (nz < 0 || nz >= nozzles) continue;
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("filament_type",   new ConfigOptionStrings{ ext.get_filament_type() });
+        cfg.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + ext.color).GetAsString(wxC2S_HTML_SYNTAX)) });
+        cfg.set_key_value("filament_id",     new ConfigOptionStrings{ ext.setting_id });
+        cfg.set_key_value("tray_name",       new ConfigOptionStrings{ BambuExtruderMap::tray_name(ext_id, 0) });
+        infos[nz].push_back(std::move(cfg));
     }
     if (out_ams_count) {
         out_ams_count->assign(nozzles, "");
@@ -17355,47 +17406,30 @@ void Plater::priv::on_filament_color_changed(wxCommandEvent &event)
 
 void Plater::priv::install_network_plugin(wxCommandEvent &event)
 {
-    // Ultra (plug-in guards): the Device tab's "install network plugin" link. Our own plug-in is
-    // already there in that case, and this dialog would download Bambu's package over it.
-    if (wxGetApp().is_ultranet_plugin_installed()) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Device-tab install link ignored)";
-        return;
-    }
-    wxGetApp().ShowDownNetPluginDlg();
-    return;
+    // The Device tab's "install network plugin" link. There is no download any more (EdgeSlicer
+    // never fetches Bambu's plug-in); the link just says the plug-in is missing, and is silent when
+    // our own plug-in is installed.
+    wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true);
 }
 
 void Plater::priv::update_plugin_when_launch(wxCommandEvent &event)
 {
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto cache_folder = data_dir_path / "ota";
-    std::string changelog_file = cache_folder.string() + "/network_plugins.json";
-
-    UpdatePluginDialog dlg(wxGetApp().mainframe);
-    dlg.update_info(changelog_file);
-    auto result = dlg.ShowModal();
-
-    auto app_config = wxGetApp().app_config;
-    if (!app_config) return;
-
-    if (result == wxID_OK) {
-        app_config->set("update_network_plugin", "true");
-    }
-    else if (result == wxID_NO) {
+    // The old "new network plug-in available" prompt. Nothing raises it any more (the Bambu update
+    // check is gone) and a Bambu plug-in is never installed, so this only makes sure a stale
+    // request cannot start a download.
+    if (auto app_config = wxGetApp().app_config)
         app_config->set("update_network_plugin", "false");
-    }
 }
 
 void Plater::priv::show_install_plugin_hint(wxCommandEvent &event)
 {
-    // Ultra (plug-in guards): the notification's only action is the Bambu CDN download, so it is
-    // pointless (and would overwrite our plug-in) once UltraNet is installed.
+    // With our own plug-in installed there is nothing to say. Otherwise the plug-in is missing from
+    // this install; the notification carries the explanation and no download link.
     if (wxGetApp().is_ultranet_plugin_installed()) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install-plugin hint suppressed)";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, install-plugin hint suppressed";
         return;
     }
-    notification_manager->bbl_show_plugin_install_notification(into_u8(_L("Network Plug-in is not detected. Network related features are unavailable.")));
+    notification_manager->bbl_show_plugin_install_notification(into_u8(GUI_App::network_plugin_missing_text()));
 }
 
 void Plater::priv::show_preview_only_hint(wxCommandEvent &event)
@@ -19480,6 +19514,12 @@ bool Plater::add_model(bool imperial_units, std::string fname)
         paths.emplace_back(fname);
     }
 
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive (before the snapshot, the gizmo
+    // jobs take their own)
+    paths = import_svg_files(*this, paths);
+    if (paths.empty())
+        return false;
+
     std::string snapshot_label;
     assert(! paths.empty());
     if (paths.size() == 1) {
@@ -20648,7 +20688,17 @@ void Plater::force_update_all_plate_thumbnails()
 }
 
 // BBS: backup
-std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi) {
+std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_in, LoadStrategy strategy, bool ask_multi) {
+    // Every model import of the GUI ends here (menu File > Import, toolbar, Home, recent files,
+    // downloads, files handed to the running app, ...): .svg files go to the SVG gizmo after the
+    // SVG / SVG (Split) question, the same as Add Primitive. The callers which route them already
+    // (Ctrl+I, drop, File > Import) pass no .svg here any more.
+    std::vector<fs::path> input_files = input_files_in;
+    if ((strategy & LoadStrategy::LoadModel) && !m_only_gcode && !m_exported_file) {
+        input_files = import_svg_files(*this, input_files);
+        if (input_files.empty())
+            return {};
+    }
     //BBS: wish to reset state when load a new file
     p->m_slice_all_only_has_gcode = false;
     //BBS: wish to reset all plates stats item selected state when load a new file
@@ -21110,6 +21160,14 @@ bool Plater::load_files(const wxArrayString& filenames, bool from_url)
     //        return true;
     //}
 
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive (a single dropped .svg is handled
+    // by the drop target already)
+    if (!this->m_only_gcode && !this->m_exported_file) {
+        normal_paths = import_svg_files(*this, normal_paths);
+        if (normal_paths.empty())
+            return true;
+    }
+
     //// other files
     std::string snapshot_label;
     assert(!normal_paths.empty());
@@ -21318,6 +21376,10 @@ void Plater::add_file()
 
     std::vector<fs::path> paths;
     for (const auto &file : input_files) paths.emplace_back(into_path(file));
+
+    // .svg: SVG / SVG (Split) by the SVG gizmo, as Add Primitive
+    paths = import_svg_files(*this, paths);
+    if (paths.empty()) return;
 
     std::string snapshot_label;
     assert(!paths.empty());

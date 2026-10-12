@@ -198,15 +198,27 @@ bool object_prints_support(const ModelObject &object, const DynamicPrintConfig &
     return config_bool_or(global, "enable_support", false) || config_int_or(global, "raft_layers", 0) > 0;
 }
 
-void append_support_filament_ids(const ModelObject &object, const DynamicPrintConfig &global, std::vector<int> &ids)
+// Side stabilizers print as support with the support filament, with or without Enable supports.
+bool object_prints_stabilizers(const ModelObject &object, const DynamicPrintConfig &global)
+{
+    const ConfigOption *opt = object.config.option("stabilizer_supports");
+    if (opt == nullptr)
+        opt = global.option("stabilizer_supports");
+    return opt != nullptr && opt->getInt() != int(smOff);
+}
+
+void append_support_filament_ids(const ModelObject &object, const DynamicPrintConfig &global, std::vector<int> &ids,
+                                 bool with_interface = true)
 {
     const int glb_support_intf = config_int_or(global, "support_interface_filament", 0);
     const int glb_support      = config_int_or(global, "support_filament", 0);
-    int       obj_support_intf = object.config.has("support_interface_filament") ?
+    int       obj_support_intf = with_interface && object.config.has("support_interface_filament") ?
                                object.config.option("support_interface_filament")->getInt() : 0;
     int       obj_support      = object.config.has("support_filament") ?
                           object.config.option("support_filament")->getInt() : 0;
-    if (obj_support_intf != 0)
+    if (!with_interface) {
+        // Stabilizers alone never print the interface filament.
+    } else if (obj_support_intf != 0)
         ids.push_back(obj_support_intf);
     else if (glb_support_intf != 0)
         ids.push_back(glb_support_intf);
@@ -320,6 +332,8 @@ void append_config_filament_ids(const DynamicPrintConfig &cfg, std::vector<int> 
     append_feature_filament_overrides(cfg, ids);
     if (config_bool_or(cfg, "enable_support", false) || config_int_or(cfg, "raft_layers", 0) > 0)
         append_positive_int_keys(cfg, {"support_filament", "support_interface_filament"}, ids);
+    else if (const ConfigOption *stab = cfg.option("stabilizer_supports"); stab != nullptr && stab->getInt() != int(smOff))
+        append_positive_int_keys(cfg, {"support_filament"}, ids);
 }
 
 void append_object_plate_filament_ids(const ModelObject        &object,
@@ -350,6 +364,8 @@ void append_object_plate_filament_ids(const ModelObject        &object,
         }
         if (object_prints_support(object, global_config))
             append_support_filament_ids(object, global_config, ids);
+        else if (object_prints_stabilizers(object, global_config))
+            append_support_filament_ids(object, global_config, ids, false);
         return;
     }
 
@@ -395,6 +411,8 @@ void append_object_plate_filament_ids(const ModelObject        &object,
 
     if (object_prints_support(object, global_config))
         append_support_filament_ids(object, global_config, ids);
+    else if (object_prints_stabilizers(object, global_config))
+        append_support_filament_ids(object, global_config, ids, false);
 }
 
 void append_object_plate_filament_ids(const ModelObject &object, const DynamicPrintConfig &global_config, std::vector<int> &ids)

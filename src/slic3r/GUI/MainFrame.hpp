@@ -108,6 +108,8 @@ class MainFrame : public DPIFrame
     wxString    m_last_config = wxEmptyString;
 
     wxMenuBar*  m_menubar{ nullptr };
+    wxMenu*     m_account_menubar_menu{ nullptr }; // macOS only: the menu bar's Account menu (owned by m_menubar)
+    std::string m_account_menubar_sig;             // what that menu currently shows
     //wxMenu* publishMenu{ nullptr };
     wxMenu *    m_calib_menu{nullptr};
     bool        enable_multi_machine{ false };
@@ -223,6 +225,14 @@ public:
     // Ultra: populate the given menu contextually for the current printer's brand
     // (login/logout). Called by the topbar's Account button just before it pops the menu.
     void        refresh_account_menu(wxMenu* menu);
+    // macOS: there is no custom title bar to carry the Account button, so the same contextual menu is
+    // an entry in the native menu bar. AccountStatus::refresh() calls this when the sign-in state or
+    // the selected printer changes; it rebuilds that menu only when what it shows would differ. A
+    // no-op where there is no such menu (Windows / Linux).
+    void        update_account_menubar();
+    // The title bar's Mobile Hub button (Windows / Linux) and the macOS View menu entry: opens the
+    // hub page in the browser, starting the hub first when it is not running.
+    void        open_mobile_hub();
 
     // BBS: auto-save the project to its own file on a timer, in addition to auto-backup
     void update_autosave_timer();

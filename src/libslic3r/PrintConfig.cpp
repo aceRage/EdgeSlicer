@@ -2514,34 +2514,54 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 2. });
 
-    // Ultra: BambuStudio 2.x flush tuning, consumed by GCode.cpp to publish
-    // flush_temperatures / flush_volumetric_speeds for newer change_filament templates.
+    // BBS: per-filament flush settings (Bambu Studio PrintConfig.cpp 2547-2575). GCode.cpp turns them
+    // into the flush_temperatures / flush_volumetric_speeds placeholders of the BBL change_filament
+    // and machine_start templates (M620.10 ... T<temp> / F<speed>, M620.11 ... F<speed>). Nullable
+    // like Bambu's (Anycubic profiles say ["nil"]) and stored per flow variant
+    // (filament_flow_variant_options), as Bambu stores them per extruder variant.
     def = this->add("filament_flush_temp", coInts);
     def->label = L("Flush temperature");
-    def->tooltip = L("Temperature when flushing filament. 0 indicates the upper bound of the recommended nozzle temperature range.");
-    def->sidetext = "°C";
+    def->tooltip = L("temperature when flushing filament. 0 indicates the upper bound of the recommended nozzle temperature range");
+    def->mode = comAdvanced;
+    def->nullable = true;
     def->min = 0;
     def->max = max_temp;
+    def->sidetext = "°C";
+    def->set_default_value(new ConfigOptionIntsNullable { 0 });
+
+    // BBS: the flush temperature used instead of filament_flush_temp when the project's
+    // prime_volume_mode is Fast.
+    def = this->add("filament_flush_temp_fast", coInts);
+    def->label = L("Flush temperature");
+    def->tooltip = L("Flush temperature used in fast purge mode.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts { 0 });
+    def->nullable = true;
+    def->min = 0;
+    def->max = max_temp;
+    def->sidetext = "°C";
+    def->set_default_value(new ConfigOptionIntsNullable { 0 });
 
     def = this->add("filament_flush_volumetric_speed", coFloats);
     def->label = L("Flush volumetric speed");
-    def->tooltip = L("Volumetric speed when flushing filament. 0 indicates the max volumetric speed.");
-    def->sidetext = u8"mm³/s";
+    def->tooltip = L("Volumetric speed when flushing filament. 0 indicates the max volumetric speed");
+    def->mode = comAdvanced;
+    def->nullable = true;
     def->min = 0;
     def->max = 200;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
+    def->sidetext = u8"mm³/s";
+    def->set_default_value(new ConfigOptionFloatsNullable { 0. });
 
-    // Ultra: BBS 2.x change_filament templates reference filament_cooling_before_tower[extruder].
+    // BBS: the drop below the print temperature the hotend cools to before it enters the prime tower
+    // (Bambu Studio PrintConfig.cpp 3034). The BBL change_filament templates read it as
+    // M620.15 C{new_filament_temp - filament_cooling_before_tower[next_filament_id]} and in the
+    // SYNC heat-up compensation; GCode.cpp publishes it per toolchange, 0 on the first layer.
     def = this->add("filament_cooling_before_tower", coFloats);
-    def->label = L("Cooling before tower");
-    def->tooltip = L("Temperature drop applied before entering the prime tower when changing filament.");
+    def->label = L("Wipe tower cooling");
+    def->tooltip = L("Temperature drop before entering filament tower");
     def->sidetext = "°C";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
+    def->mode = comDevelop;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable { 10. });
 
     // Ultra (H2C rack): BambuStudio PrintConfig.cpp:3041. The nozzle-change pre-cool target,
     // read by the wipe tower's nozzle-change block (M104 T<e> S<t> N0 ;Wipe tower nozzle change
@@ -3322,7 +3342,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("initial_layer_speed", coFloats);
     def->label = L("Initial layer");
-    def->tooltip = L("Speed of initial layer except the solid infill part.");
+    def->tooltip = L("Speed of initial layer except the solid infill part. It also applies to support, support interface and the raft base on the first layer.");
     def->sidetext = "mm/s";	// milimeters per second, don't need translation
     def->min = 1;
     def->mode = comAdvanced;
@@ -5804,8 +5824,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("raft_contact_distance", coFloat);
     def->label = L("Raft contact Z distance");
     def->category = L("Support");
-    def->tooltip = L("Z gap between object and raft. Ignored for soluble interface.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between raft and object. "
+                    "If Support Top Z Distance is 0, this value is ignored and "
+                    "the object is printed in direct contact with the raft (no gap).");
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.1));
@@ -6802,8 +6824,8 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Top Z distance");
     def->min = 0;
     def->category = L("Support");
-    def->tooltip = L("The Z gap between the top support interface and object.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between the support's top and object.");
 //    def->min = 0;
 #if 0
     //def->enum_values.push_back("0");
@@ -6819,8 +6841,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("support_bottom_z_distance", coFloat);
     def->label = L("Bottom Z distance");
     def->category = L("Support");
-    def->tooltip = L("The Z gap between the bottom support interface and object.");
     def->sidetext = "mm";	// milimeters, don't need translation
+    def->tooltip = L("Z gap between the object and the support bottom. "
+                    "If Support Top Z Distance is 0 and the bottom has interface layers, this value "
+                    "is ignored and the support is printed in direct contact with the object (no gap).");
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.2));
@@ -7255,7 +7279,8 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Support");
     def->tooltip = L("Add thin struts that touch tall, slender parts on their sides with a small pinpoint tip "
                      "and stand on the build plate next to it. They keep the part from wobbling while it prints "
-                     "and snap off at the tip afterwards. Printed as support, so supports must be enabled.\n\n"
+                     "and snap off at the tip afterwards. Printed with the support filament, speed and line width; "
+                     "Enable supports does not need to be on.\n\n"
                      "Off: no stabilizers.\n"
                      "Auto: rings of touch points up the part's height, plus any stabilizer points painted with "
                      "the support painting tool.\n"
@@ -9252,6 +9277,12 @@ const std::vector<std::string>& filament_flow_variant_options()
         "filament_multitool_ramming_volume",
         "filament_multitool_ramming_flow",
         "filament_minimal_purge_on_wipe_tower",
+        // BBS: Bambu Studio stores these per extruder variant (filament_options_with_variant,
+        // PrintConfig.cpp 7663); its Standard / High Flow slots are ours (BambuFlowSupport).
+        "filament_flush_volumetric_speed",
+        "filament_flush_temp",
+        "filament_flush_temp_fast",
+        "filament_cooling_before_tower",
     };
     return options;
 }
@@ -9391,6 +9422,38 @@ int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
     return first;
 }
 
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count)
+{
+    std::vector<int> types;
+    if (const auto *opt = config.option<ConfigOptionEnumsGeneric>("extruder_type"))
+        types = opt->values;
+    if (extruder_count == 0 || types.size() >= extruder_count) {
+        if (types.size() > extruder_count)
+            types.resize(extruder_count);
+        return types;
+    }
+    const auto *variants = config.option<ConfigOptionStrings>("extruder_variant_list");
+    std::vector<int> out(extruder_count, types.empty() ? int(etDirectDrive) : types.back());
+    for (size_t e = 0; e < extruder_count; ++e) {
+        if (variants != nullptr && e < variants->values.size()) {
+            const std::string &v = variants->values[e];
+            if (boost::starts_with(v, "Bowden")) {
+                out[e] = int(etBowden);
+                continue;
+            }
+            if (boost::starts_with(v, "Direct Drive")) {
+                out[e] = int(etDirectDrive);
+                continue;
+            }
+        }
+        if (e < types.size())
+            out[e] = types[e];
+        else if (e > 0)
+            out[e] = out[e - 1];
+    }
+    return out;
+}
+
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config)
 {
     const auto *semm = config.option<ConfigOptionBool>("single_extruder_multi_material");
@@ -9497,6 +9560,27 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
     }
 
     return 0;
+}
+
+double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra)
+{
+    double      cooling = 0.;
+    const auto *opt     = dynamic_cast<const ConfigOptionFloatsNullable *>(config.option("filament_cooling_before_tower"));
+    if (opt != nullptr && !opt->values.empty()) {
+        size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, filament_id);
+        if (idx >= opt->values.size())
+            idx = 0; // ConfigOptionVector::get_at's fallback
+        if (!opt->is_nil(idx) && !std::isnan(opt->values[idx]))
+            cooling = opt->values[idx];
+    }
+    if (with_switcher_extra) {
+        const auto *switcher = dynamic_cast<const ConfigOptionBool *>(config.option("has_filament_switcher"));
+        const auto *types    = dynamic_cast<const ConfigOptionEnumsGeneric *>(config.option("extruder_type"));
+        if (switcher != nullptr && switcher->value && types != nullptr && types->values.size() > 1 &&
+            std::adjacent_find(types->values.begin(), types->values.end(), [](int lhs, int rhs) { return lhs != rhs; }) != types->values.end())
+            cooling += 10.;
+    }
+    return cooling;
 }
 
 double ResolvedFilamentFlow::uncached_flow_ratio(const ConfigBase &config, unsigned int filament_id)
@@ -9760,12 +9844,8 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
 bool PrintConfigDef::unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin)
 {
     static const std::map<std::string, ForeignKeyOrigin> foreign = {
-        // Bambu Studio per-filament flush / wipe-tower cooling settings. The bundled BBL, Orca filament
-        // library and Snapmaker profiles carry them; the fork reads the defaults (0 = use the filament's
-        // max volumetric speed / the top of its temperature range, no cooling before the tower).
-        { "filament_flush_temp",             ForeignKeyOrigin::BambuStudio },
-        { "filament_flush_volumetric_speed", ForeignKeyOrigin::BambuStudio },
-        { "filament_cooling_before_tower",   ForeignKeyOrigin::BambuStudio },
+        // (Bambu Studio's filament_flush_temp, filament_flush_temp_fast, filament_flush_volumetric_speed
+        // and filament_cooling_before_tower used to be listed here; filament presets hold them now.)
         // Project-wide mixed-filament rows (PresetBundle::project_config). The edited process preset
         // picks a copy up when mixed filaments change, and saving the preset writes it to disk.
         { "mixed_filament_definitions",      ForeignKeyOrigin::ProjectScoped },

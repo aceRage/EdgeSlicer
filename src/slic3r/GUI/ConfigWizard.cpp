@@ -2670,8 +2670,9 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
             BOOST_LOG_TRIVIAL(info) << "[ConfigWizard] a Bambu Lab printer was installed and installed_networking was unset; enabling it";
             app_config->set_bool("installed_networking", true);
 
-            // Nothing on disk to load: offer the download once, after the wizard has closed - the
-            // dialog is modal and cannot run while this one still is.
+            // Nothing on disk to load: say the plug-in is missing, once, after the wizard has closed
+            // - the dialog is modal and cannot run while this one still is. (No download is offered:
+            // EdgeSlicer never fetches Bambu's plug-in.)
             bool have_plugin = false;
             try {
                 namespace fs = boost::filesystem;
@@ -2681,8 +2682,8 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
                               fs::exists(pf / "libbambu_networking.dylib");
             } catch (...) {}
             if (! have_plugin) {
-                BOOST_LOG_TRIVIAL(info) << "[ConfigWizard] no network plug-in in data_dir/plugins; scheduling the download dialog";
-                wxGetApp().CallAfter([] { wxGetApp().ShowDownNetPluginDlg(); });
+                BOOST_LOG_TRIVIAL(info) << "[ConfigWizard] no network plug-in in data_dir/plugins; scheduling the plug-in-missing message";
+                wxGetApp().CallAfter([] { wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ false); });
             }
         }
     }
