@@ -117,7 +117,7 @@ else ()
     file(TO_NATIVE_PATH "${_stage}" _stage_native)
     execute_process(
         COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
-                -File "${CPACK_EDGESLICER_VERIFY_SCRIPT}" -Path "${_stage_native}" ${_allow}
+                -File "${CPACK_EDGESLICER_VERIFY_SCRIPT}" -Path "${_stage_native}" ${_allow} -AllowBambuCameraFiles
         RESULT_VARIABLE _rc)
     if (NOT _rc EQUAL 0)
         message(FATAL_ERROR "EdgeSlicer signing: the staging tree has unsigned or invalid PE files (verify exit ${_rc}) - not packaging")

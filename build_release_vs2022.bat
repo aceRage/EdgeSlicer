@@ -78,6 +78,8 @@ cd %build_dir%
 @REM They go before WIN10SDK_PATH, whose trailing backslash can swallow what follows it.
 set "PAYLOAD_FLAGS="
 if defined ULTRANET_BIN_DIR set "PAYLOAD_FLAGS=%PAYLOAD_FLAGS% -DULTRANET_BIN_DIR="%ULTRANET_BIN_DIR%""
+@REM Bambu's camera files (BambuSource.dll + live555.dll) for live view; not in this repo.
+if defined CAMERA_BIN_DIR set "PAYLOAD_FLAGS=%PAYLOAD_FLAGS% -DCAMERA_BIN_DIR="%CAMERA_BIN_DIR%""
 if defined FLASHNETWORK_BIN_DIR set "PAYLOAD_FLAGS=%PAYLOAD_FLAGS% -DFLASHNETWORK_BIN_DIR="%FLASHNETWORK_BIN_DIR%""
 if defined FFMPEG_BIN_DIR set "PAYLOAD_FLAGS=%PAYLOAD_FLAGS% -DFFMPEG_BIN_DIR="%FFMPEG_BIN_DIR%""
 

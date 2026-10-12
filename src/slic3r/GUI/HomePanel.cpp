@@ -112,9 +112,16 @@ void HomePanel::open_connector_link(const std::string& url)
     wxGetApp().app_config->set(SECTION_KEY, "vendors");
     if (m_page_ready)
         send({{"type", "show_section"}, {"section", "vendors"}});
-    if (!m_vendors)
-        m_vendors = std::make_unique<HomeVendors>(this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); });
+    ensure_vendors();
     m_vendors->import_from_link(url);
+}
+
+void HomePanel::ensure_vendors()
+{
+    if (!m_vendors)
+        m_vendors = std::make_unique<HomeVendors>(
+            this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); },
+            [this](const std::string& path) { open_downloaded(path); });
 }
 
 void HomePanel::ensure_browser()
@@ -355,8 +362,7 @@ void HomePanel::handle(const json& msg)
         if (m_library_loaded)
             send_library(); // the page was reloaded (a theme change): it starts empty
         library_refresh(false);
-        if (!m_vendors)
-            m_vendors = std::make_unique<HomeVendors>(this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); });
+        ensure_vendors();
         m_vendors->send_state();
     } else if (command == "home_section") {
         const std::string section = msg.value("section", std::string());
@@ -568,6 +574,7 @@ void HomePanel::send_init()
     s["open_page"]         = _u8L("Open vendor page");
     s["copy_link"]         = _u8L("Copy link");
     s["download"]          = _u8L("Download");
+    s["download_open"]     = _u8L("Download & Open");
     s["files_label"]       = _u8L("Files");
     s["plates_label"]      = _u8L("Plates");
     s["variant"]           = _u8L("Variant");
@@ -743,6 +750,43 @@ void HomePanel::open_archived(const std::string& id)
             plater->load_project(from_u8(r.path));
         break;
     case HomeTab::ArchiveOpen::None: break;
+    }
+}
+
+void HomePanel::open_downloaded(const std::string& path)
+{
+    const HomeTab::DownloadOpen kind = HomeTab::download_open_kind(path);
+    Plater*                     plater = wxGetApp().plater();
+    if (kind == HomeTab::DownloadOpen::None || plater == nullptr)
+        return;
+    boost::system::error_code ec;
+    if (!fs::is_regular_file(fs::path(path), ec)) {
+        show_error(this, _L("The file is no longer there."));
+        return;
+    }
+    if (plater->is_background_process_slicing()) {
+        show_info(this, _L("new or open project file is not allowed during the slicing process!"), _L("Open Project"));
+        return;
+    }
+    switch (kind) {
+    case HomeTab::DownloadOpen::Project:
+        // Asks about unsaved changes first, like Open Project and the Library.
+        wxGetApp().request_open_project(path);
+        break;
+    case HomeTab::DownloadOpen::AddToPlate: {
+        // The same as dropping the file on the plater.
+        wxArrayString files;
+        files.Add(from_u8(path));
+        if (plater->load_files(files))
+            if (MainFrame* mf = wxGetApp().mainframe)
+                mf->select_tab(size_t(MainFrame::tp3DEditor));
+        break;
+    }
+    case HomeTab::DownloadOpen::Gcode:
+        // Asks about the current project first, then shows the file in the preview.
+        plater->load_gcode(from_u8(path));
+        break;
+    case HomeTab::DownloadOpen::None: break;
     }
 }
 

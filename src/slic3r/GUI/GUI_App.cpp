@@ -2092,7 +2092,36 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
 bool GUI_App::has_bambu_camera_component() const
 {
     namespace fs = boost::filesystem;
-    return exports_dll_register_server(fs::path(data_dir()) / "plugins" / bambu_source_library_name());
+    return is_real_camera_component(camera_module_dir(fs::path(data_dir())) / bambu_source_library_name());
+}
+
+void GUI_App::sync_bambu_camera_module()
+{
+#if defined(_WIN32) || defined(__APPLE__)
+    try {
+        namespace fs = boost::filesystem;
+        const fs::path   exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
+        CameraSyncPaths  paths;
+        paths.plugins_dir  = fs::path(data_dir()) / "plugins";
+        paths.camera_dir   = camera_module_dir(fs::path(data_dir()));
+        paths.sidecar_dir  = ultranet_sidecar_dir(exe_dir);
+        paths.bundled_dir  = bundled_camera_dir(exe_dir);
+        paths.source_name  = bambu_source_library_name();
+        paths.live_name    = live555_library_name();
+        paths.keep_foreign = app_config && app_config->get_bool("ultranet_keep_foreign_plugin");
+        for (const CameraSyncLog &line : sync_camera_module_files(paths)) {
+            switch (line.level) {
+            case CameraSyncLog::Error:   BOOST_LOG_TRIVIAL(error)   << "[camera module] " << line.text; break;
+            case CameraSyncLog::Warning: BOOST_LOG_TRIVIAL(warning) << "[camera module] " << line.text; break;
+            default:                     BOOST_LOG_TRIVIAL(info)    << "[camera module] " << line.text; break;
+            }
+        }
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(error) << "[camera module] start-up sync failed: " << e.what();
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(error) << "[camera module] start-up sync failed";
+    }
+#endif
 }
 
 int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
@@ -2120,11 +2149,11 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
 
     // Matched on the bare filename so a package that nests them in a folder still works. The
     // network library is never taken: bambu_networking.dll and the ultranet.txt marker stay ours.
+    // Only into cameratools: plugins/ holds UltraNet's storage module under the same name, and a
+    // camera module there breaks the storage browser (see sync_bambu_camera_module).
     const std::string want_source = bambu_source_library_name();
-    const fs::path plugins_dir     = fs::path(data_dir()) / "plugins";
-    const fs::path cameratools_dir = fs::path(data_dir()) / "cameratools";
+    const fs::path cameratools_dir = camera_module_dir(fs::path(data_dir()));
     boost::system::error_code ec;
-    fs::create_directories(plugins_dir, ec);
     fs::create_directories(cameratools_dir, ec);
 
     bool got_source = false;
@@ -2179,11 +2208,9 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
             fs::remove(staged, ec);
             continue;
         }
-        for (const fs::path &dir : {plugins_dir, cameratools_dir}) {
-            fs::copy_file(staged, dir / leaf, fs::copy_option::overwrite_if_exists, ec);
-            if (ec)
-                BOOST_LOG_TRIVIAL(error) << "[camera component] copy to " << dir.string() << " failed: " << ec.message();
-        }
+        fs::copy_file(staged, cameratools_dir / leaf, fs::copy_option::overwrite_if_exists, ec);
+        if (ec)
+            BOOST_LOG_TRIVIAL(error) << "[camera component] copy to " << cameratools_dir.string() << " failed: " << ec.message();
         fs::remove(staged, ec);
         if (is_source)
             got_source = true;
@@ -2206,38 +2233,35 @@ bool GUI_App::register_bambu_source_filter()
 {
 #ifdef __WIN32__
     namespace fs = boost::filesystem;
-    const fs::path dll_path = fs::path(data_dir()) / "plugins" / bambu_source_library_name();
-    // The guard that was missing: regsvr32 on a DLL with no DllRegisterServer can only produce the
-    // error the user reported, so never start the UAC dance unless the entry point is really there.
+    const fs::path dll_path = camera_module_dir(fs::path(data_dir())) / bambu_source_library_name();
+    // Never register something that is not the filter (UltraNet's storage module has the same name).
     if (!exports_dll_register_server(dll_path)) {
         BOOST_LOG_TRIVIAL(info) << "[camera component] not registering " << dll_path.string()
                                 << ": no DllRegisterServer export";
         return false;
     }
 
-    std::string regContent = R"(Windows Registry Editor Version 5.00
-[HKEY_CLASSES_ROOT\bambu]
-"Source Filter"="{233E64FB-2041-4A6C-AFAB-FF9BCF83E7AA}"
-)";
-    auto reg_path = (fs::temp_directory_path() / fs::unique_path()).replace_extension(".reg");
+    // Per user, no elevation. The stock route was a .reg import into HKCR (regedit, UAC) plus
+    // regsvr32 under runas (UAC again); what the filter's DllRegisterServer writes is the per-user
+    // CLSID entry below (seen on a working install: HKCU\Software\Classes\CLSID\{233E...}\
+    // InprocServer32 = <dll>, ThreadingModel = Both), and DirectShow finds the bambu: source filter
+    // through HKEY_CLASSES_ROOT, which merges HKCU\Software\Classes over HKLM.
+    const wxString clsid = "{233E64FB-2041-4A6C-AFAB-FF9BCF83E7AA}";
+    bool ok = true;
     {
-        boost::nowide::ofstream temp_reg_file(reg_path.string().c_str());
-        if (!temp_reg_file)
-            return false;
-        temp_reg_file << regContent;
+        wxRegKey key(wxRegKey::HKCU, "Software\\Classes\\CLSID\\" + clsid + "\\InprocServer32");
+        ok = key.Create() && key.SetValue(wxEmptyString, wxString(dll_path.wstring())) &&
+             key.SetValue("ThreadingModel", "Both");
     }
-    auto sei_params = L"/q /s " + reg_path.wstring();
-    SHELLEXECUTEINFO sei{sizeof(sei), SEE_MASK_NOCLOSEPROCESS, NULL, L"open",
-                         L"regedit", sei_params.c_str(), SW_HIDE, SW_HIDE};
-    ::ShellExecuteEx(&sei);
-
-    std::wstring quoted_dll_path = L"\"" + dll_path.wstring() + L"\"";
-    SHELLEXECUTEINFO info{sizeof(info), 0, NULL, L"runas", L"regsvr32", quoted_dll_path.c_str(), SW_HIDE};
-    ::ShellExecuteEx(&info);
-
-    boost::system::error_code ec;
-    fs::remove(reg_path, ec);
-    BOOST_LOG_TRIVIAL(info) << "[camera component] registered " << dll_path.string();
+    if (ok) {
+        wxRegKey key(wxRegKey::HKCU, "Software\\Classes\\bambu");
+        ok = key.Create() && key.SetValue("Source Filter", clsid);
+    }
+    if (!ok) {
+        BOOST_LOG_TRIVIAL(error) << "[camera component] could not write the per-user filter registration for " << dll_path.string();
+        return false;
+    }
+    BOOST_LOG_TRIVIAL(info) << "[camera component] registered " << dll_path.string() << " as the bambu: source filter for this user";
     return true;
 #else
     return false;
@@ -3716,12 +3740,18 @@ bool GUI_App::on_init_inner()
             BOOST_LOG_TRIVIAL(warning) << "[UltraNet] ultranet_keep_foreign_plugin is set; leaving a foreign network plug-in in " << pf.string();
         }
 
+        // The camera module first (Windows/macOS): a Bambu camera module sitting in plugins/ moves to
+        // cameratools and UltraNet's storage module comes back, then cameratools is seeded from the
+        // app's bundled camera files. After this, plugins/ never holds Bambu's module there.
+        sync_bambu_camera_module();
+
         // BambuSource follows the sidecar on its own. It carries the storage browser's tunnel now,
         // so it can change while bambu_networking.dll stays byte-identical, and it used to be
         // copied only together with a plug-in replacement - with an overwrite that silently fails
         // while another EdgeSlicer instance (the hub) has the old file loaded, after which nothing
         // retried. Move the old one aside first, like the plug-in above. Bambu's real camera
-        // filter, when the user fetched it, is never replaced (live view needs it).
+        // filter is never replaced here; on Windows/macOS sync_bambu_camera_module() above has
+        // already moved it to cameratools, so this only still applies on Linux.
         {
             const char    *bs_name     = bambu_source_library_name(); // BambuSource.dll / libBambuSource.dylib / .so
             const fs::path bs_ours     = bundled / bs_name;

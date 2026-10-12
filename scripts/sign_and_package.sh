@@ -273,6 +273,23 @@ if [ -d "$APP_FRAMEWORKS_DIR" ]; then
     done
 fi
 
+# 2.2b EdgeSlicer: Mach-O files under Contents/Resources - the UltraNet sidecar (ultranet/), Bambu's
+# camera files (cameratools/: libBambuSource.dylib + liblive555.dylib, signed by Bambu's team), and
+# the hub's go2rtc/ffmpeg (tools/go2rtc/). `codesign` on the bundle does not visit them, and the
+# notary service rejects a submission with any Mach-O that lacks a Developer ID signature with a
+# secure timestamp, so each one is (re-)signed with ours here - for Bambu's files that replaces
+# their signature, which the app's disable-library-validation entitlement does not need anyway.
+# CI uses scripts/macos_sign_app.sh, which signs every nested Mach-O the same way.
+echo "2.2b 签名 Contents/Resources 下的 Mach-O (ultranet, cameratools, tools)..."
+while IFS= read -r -d '' res_file; do
+    case "$(file -b "$res_file")" in
+        *Mach-O*)
+            echo "  - 签名: ${res_file#"$FINAL_APP"/}"
+            codesign --force --verbose --options runtime --timestamp --sign "$CERTIFICATE_ID" "$res_file"
+            ;;
+    esac
+done < <(find "$FINAL_APP/Contents/Resources" -type f \( -name '*.dylib' -o -name '*.so' -o -name 'go2rtc' -o -name 'ffmpeg' \) -print0)
+
 # 2.3 签名辅助工具
 echo "2.3 签名辅助工具（使用 runtime 选项）..."
 if [ -f "$APP_MACOS_DIR/crashpad_handler" ]; then

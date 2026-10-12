@@ -610,15 +610,18 @@ jobs:
         shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
           $ErrorActionPreference = 'Stop'
-          # The UltraNet / FlashNetwork / ffmpeg binaries are not in this public repo and are
-          # not redistributable from it. If the owner has staged them on the VM under
-          # C:\Dev\ship\{ultranet,flashnetwork,ffmpeg}, pass the corresponding -D so the same
-          # workflow produces a complete package; otherwise build without them and say so.
+          # The UltraNet / FlashNetwork / ffmpeg / Bambu camera binaries are not in this public repo
+          # and are not redistributable from it. If the owner has staged them on the VM under
+          # C:\Dev\ship\{ultranet,flashnetwork,ffmpeg,cameratools}, pass the corresponding -D so the
+          # same workflow produces a complete package; otherwise build without them and say so.
+          # cameratools holds Bambu's own live-view files, BambuSource.dll + live555.dll, exactly as
+          # Bambu signed them (owner decision 2026-10-11, docs/superpowers/specs/2026-10-11-bambu-camera-module.md).
           $flags = @()
           $probes = @(
             @{ d = 'ultranet';     f = 'bambu_networking.dll'; var = 'ULTRANET_BIN_DIR' },
             @{ d = 'flashnetwork'; f = 'FlashNetwork.dll';     var = 'FLASHNETWORK_BIN_DIR' },
-            @{ d = 'ffmpeg';       f = 'ffmpeg.exe';           var = 'FFMPEG_BIN_DIR' }
+            @{ d = 'ffmpeg';       f = 'ffmpeg.exe';           var = 'FFMPEG_BIN_DIR' },
+            @{ d = 'cameratools';  f = 'BambuSource.dll';      var = 'CAMERA_BIN_DIR' }
           )
           foreach ($p in $probes) {
             $dir = Join-Path $env:SHIP_ROOT $p.d
@@ -751,7 +754,10 @@ jobs:
             # The DLL's server-settings file: without it fnet_initlize fails and the FlashForge
             # tab is dead even though the DLL landed (2.4.2.0).
             @{ var = 'FLASHNETWORK_BIN_DIR'; path = 'resources\data\FLASHNETWORK9.DAT' },
-            @{ var = 'FFMPEG_BIN_DIR';       path = 'resources\tools\go2rtc\ffmpeg.exe' }
+            @{ var = 'FFMPEG_BIN_DIR';       path = 'resources\tools\go2rtc\ffmpeg.exe' },
+            # Bambu's camera files: the filter and the RTSP library it needs for X1/H2D/H2C.
+            @{ var = 'CAMERA_BIN_DIR';       path = 'cameratools\BambuSource.dll' },
+            @{ var = 'CAMERA_BIN_DIR';       path = 'cameratools\live555.dll' }
           )
           $missing = @()
           foreach ($e in $expect) {
@@ -794,7 +800,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::signing the portable tree failed - not packaging an unsigned build"; exit 1 }
           $allow = @()
           if ($env:EDGESLICER_SIGN_FLASHNETWORK -ne '1') { $allow = @('FlashNetwork.dll') }
-          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\windows_verify_signatures.ps1') -Path $tree -AllowUnsigned $allow
+          # Bambu's camera files keep Bambu's signature (windows_sign.ps1 skipped them as validly
+          # signed); -AllowBambuCameraFiles accepts that signer for cameratools\ only.
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\windows_verify_signatures.ps1') -Path $tree -AllowUnsigned $allow -AllowBambuCameraFiles
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::the signed portable tree failed verification"; exit 1 }
 
       # ---- Sentry: debug symbols for opt-in crash reports ------------------------------------
@@ -925,7 +933,7 @@ jobs:
           $installer = Get-ChildItem -LiteralPath $build -Filter '*.exe' -File | Where-Object { $_.Name -match 'Installer' } | Select-Object -First 1
           if ($installer) { $targets += $installer.FullName }
           elseif (-not [string]::IsNullOrEmpty($env:NSIS_DIR)) { Write-Host "::error::NSIS is present but there is no installer to verify"; exit 1 }
-          & $verify -Path $targets -ExtractInstaller -AllowUnsigned $allow
+          & $verify -Path $targets -ExtractInstaller -AllowUnsigned $allow -AllowBambuCameraFiles
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::signature verification failed - nothing is uploaded"; exit 1 }
 
       - name: Collect artifacts and checksums

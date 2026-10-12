@@ -980,6 +980,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/MainThreadGate.hpp
     Utils/ServerLifetime.cpp
     Utils/ServerLifetime.hpp
+    Utils/LoopbackAcceptLoop.cpp
+    Utils/LoopbackAcceptLoop.hpp
     Utils/SnapmakerSilentLogin.cpp
     Utils/SnapmakerSilentLogin.hpp
     Utils/BambuSyncPolicy.cpp
