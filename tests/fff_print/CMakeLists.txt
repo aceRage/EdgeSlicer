@@ -29,6 +29,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fuzzy_skin_overhangs.cpp
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
+	test_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
