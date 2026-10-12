@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <fstream>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -51,6 +52,16 @@ int part_fan_value(const std::string &line)
     return s == std::string::npos ? -1 : std::atoi(body.c_str() + s + 2);
 }
 
+// With EDGE_TEST_DUMP_GCODE set to a directory, writes `gcode` there as <name>.gcode for inspection.
+const std::string &dumped(const std::string &name, const std::string &gcode)
+{
+    if (const char *dir = std::getenv("EDGE_TEST_DUMP_GCODE"); dir != nullptr && *dir != 0) {
+        std::ofstream out(std::string(dir) + "/" + name + ".gcode", std::ios::binary);
+        out << gcode;
+    }
+    return gcode;
+}
+
 // `gcode` without its part-cooling fan command lines.
 std::string without_fan_lines(const std::string &gcode)
 {
@@ -91,9 +102,11 @@ std::vector<FanAtExtrusion> fan_at_extrusions(const std::string &gcode)
         else if (const int v = part_fan_value(line); v >= 0)
             fan = v;
         else if (line.rfind("G1 ", 0) == 0 || line.rfind("G2 ", 0) == 0 || line.rfind("G3 ", 0) == 0) {
+            // An extruding XY move (not a de-retraction, which carries E only).
             const std::string body = line.substr(0, line.find(';'));
             const size_t      e    = body.find(" E");
-            if (e != std::string::npos && std::atof(body.c_str() + e + 2) > 0.)
+            const bool        xy   = body.find(" X") != std::string::npos || body.find(" Y") != std::string::npos;
+            if (xy && e != std::string::npos && std::atof(body.c_str() + e + 2) > 0.)
                 out.push_back({layer, role, tool, fan});
         }
     }
@@ -241,6 +254,8 @@ TEST_CASE("The fan returns to the layer speed after ironing", "[Cooling][Orca125
         {"ironing_fan_speed", "100"},
         {"fan_min_speed", "20"},
         {"fan_max_speed", "20"},
+        // The ironed layer takes long; keep its fan at the minimum rather than off.
+        {"reduce_fan_stop_start_freq", "1"},
         {"close_fan_the_first_x_layers", "1"},
         {"full_fan_speed_layer", "0"},
         {"slow_down_for_layer_cooling", "0"},
@@ -248,7 +263,7 @@ TEST_CASE("The fan returns to the layer speed after ironing", "[Cooling][Orca125
         {"machine_start_gcode", ""},
         {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]"},
     });
-    const auto moves = fan_at_extrusions(slice({step}, config));
+    const auto moves = fan_at_extrusions(dumped("orca12595_ironing", slice({step}, config)));
 
     size_t checked = 0;
     for (size_t i = 1; i + 1 < moves.size(); ++i)
@@ -462,7 +477,11 @@ TEST_CASE("A fan-only overhang transition inside a wall reaches the G-code", "[C
         {"overhang_4_4_speed", "0"},
         {"slowdown_for_curled_perimeters", "1"},
     });
-    const auto moves = fan_at_extrusions(slice({make_sphere(15., PI / 24.)}, config));
+    // A cube tilted by 30 degrees about X: its walls lean out (overhang) on one side only, so an outer
+    // wall loop is cooled along that side and not along the others. (A sphere overhangs evenly all round.)
+    TriangleMesh tilted = make_cube(20., 20., 20.);
+    tilted.rotate_x(float(PI / 6.));
+    const auto moves = fan_at_extrusions(dumped("orca15158_fan_only", slice({tilted}, config)));
     // Layers whose outer wall prints partly with and partly without the overhang fan.
     std::vector<int> cooled, uncooled;
     for (const FanAtExtrusion &m : moves)
@@ -645,7 +664,8 @@ TEST_CASE("Tool change G-code stays intact with the fan speed-up and the overhan
     config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
     config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
     // A long hand-routed travel in the tool change, in relative coordinates FanMover cannot follow.
-    config.set_key_value("change_filament_gcode", new ConfigOptionString("G91\nG1 X40 F600\nG1 Y40 F600\nG90\n"));
+    // (Different feed rates: CoolingBuffer drops an F that repeats the one in force, also in custom G-code.)
+    config.set_key_value("change_filament_gcode", new ConfigOptionString("G91\nG1 X40 F600\nG1 Y40 F700\nG90\n"));
     config.set_deserialize_strict({
         {"layer_height", "0.2"},
         {"initial_layer_print_height", "0.2"},
@@ -675,9 +695,17 @@ TEST_CASE("Tool change G-code stays intact with the fan speed-up and the overhan
          start = gcode.find("; custom gcode start\n", start + 1)) {
         const size_t end = gcode.find("; custom gcode end", start);
         REQUIRE(end != std::string::npos);
-        const std::string body = without_fan_lines(gcode.substr(start, end - start));
+        // Without fan commands and the print progress (M73) the time estimate writes between any lines.
+        std::string body;
+        {
+            std::istringstream in(without_fan_lines(gcode.substr(start, end - start)));
+            std::string        line;
+            while (std::getline(in, line))
+                if (line.rfind("M73 ", 0) != 0)
+                    body += line + "\n";
+        }
         INFO(body);
-        CHECK(body == "; custom gcode start\nG91\nG1 X40 F600\nG1 Y40 F600\nG90\n");
+        CHECK(body == "; custom gcode start\nG91\nG1 X40 F600\nG1 Y40 F700\nG90\n");
         ++changes;
     }
     CHECK(changes > 10);
