@@ -4,6 +4,7 @@
 #include "libslic3r/EmbossShape.hpp"
 #include "libslic3r/NSVGUtils.hpp"
 #include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/AMF.hpp"
 #include "libslic3r/Format/AssembleList.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/OBJ.hpp"
@@ -3005,4 +3006,64 @@ TEST_CASE("a 3MF whose SVG entry declares more than the cap is refused before al
     CHECK(loaded.file_data == nullptr);
     CHECK(log.saw("was not loaded"));
     CHECK(log.saw("larger than the allowed size"));
+}
+
+// Orca #16060: a depth-2 <metadata> with no type used to store a null const char* into
+// std::string and crash. The parse now stops and load_amf returns false.
+namespace {
+
+std::string one_triangle_amf(const char *metadata_open)
+{
+    return std::string("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                       "<amf unit=\"millimeter\">\n"
+                       "  <object id=\"0\">\n"
+                       "    ") +
+           metadata_open +
+           "oops</metadata>\n"
+           "    <mesh>\n"
+           "      <vertices>\n"
+           "        <vertex><coordinates><x>0</x><y>0</y><z>0</z></coordinates></vertex>\n"
+           "        <vertex><coordinates><x>1</x><y>0</y><z>0</z></coordinates></vertex>\n"
+           "        <vertex><coordinates><x>0</x><y>1</y><z>0</z></coordinates></vertex>\n"
+           "      </vertices>\n"
+           "      <volume>\n"
+           "        <triangle><v1>0</v1><v2>1</v2><v3>2</v3></triangle>\n"
+           "      </volume>\n"
+           "    </mesh>\n"
+           "  </object>\n"
+           "</amf>\n";
+}
+
+void write_temp_amf(const fs::path &path, const std::string &xml)
+{
+    boost::nowide::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
+    REQUIRE(out);
+    out << xml;
+    REQUIRE(out);
+}
+
+} // namespace
+
+TEST_CASE("an AMF metadata tag without a type fails to load instead of crashing", "[Untrusted][AMF]")
+{
+    const fs::path dir  = fs::temp_directory_path() / fs::unique_path("edgeslicer_amf_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path bad  = dir / "no_type.amf";
+    const fs::path good = dir / "typed.amf";
+    write_temp_amf(bad, one_triangle_amf("<metadata>"));
+    write_temp_amf(good, one_triangle_amf("<metadata type=\"name\">"));
+
+    DynamicPrintConfig        cfg;
+    ConfigSubstitutionContext ctx{ForwardCompatibilitySubstitutionRule::Enable};
+    Model                     bad_model;
+    bool                      loaded = true;
+    REQUIRE_NOTHROW(loaded = load_amf(bad.string().c_str(), &cfg, &ctx, &bad_model, nullptr));
+    CHECK_FALSE(loaded);
+
+    Model good_model;
+    CHECK(load_amf(good.string().c_str(), &cfg, &ctx, &good_model, nullptr));
+    CHECK(good_model.objects.size() == 1);
+
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
 }

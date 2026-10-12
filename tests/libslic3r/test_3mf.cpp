@@ -1010,7 +1010,7 @@ static void store_painted_cube(const std::string &path, Model *out_model = nullp
 }
 
 // Loads `path` through the BBS importer into `model`, releasing the plates it returns.
-static bool load_project(const std::string &path, Model &model)
+static bool load_project(const std::string &path, Model &model, bool *is_bambu_studio = nullptr)
 {
     DynamicPrintConfig        config;
     ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Enable};
@@ -1019,7 +1019,8 @@ static bool load_project(const std::string &path, Model &model)
     bool                      is_bbl_3mf = false;
     Semver                    file_version;
     const bool loaded = load_bbs_3mf(path.c_str(), &config, &ctxt, &model, &plates, &project_presets, &is_bbl_3mf,
-                                     &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence);
+                                     &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::Silence,
+                                     nullptr, 0, is_bambu_studio);
     release_PlateData_list(plates);
     for (Preset *preset : project_presets)
         delete preset;
@@ -1228,6 +1229,92 @@ TEST_CASE("Paint states 20, 200 and 255 round-trip through a 3MF byte-identicall
     REQUIRE_NOTHROW(restored.deserialize(dst_vol.mmu_segmentation_facets.get_data()));
     for (int i = 0; i < 3; ++i)
         REQUIRE(restored.num_facets(static_cast<EnforcerBlockerType>(states[i])) == 1);
+}
+
+TEST_CASE("The BambuStudio generator flag is set only for a BambuStudio Application stamp", "[3mf][Regression]")
+{
+    // Orca #16153 / D-13a: Edge stamps its own and Snapmaker Orca 3MFs as From_BBS, so
+    // the substitution-dialog gate must key on the generator stamp, not From_BBS.
+    const std::string path    = make_temp_3mf_path("generator_stamp.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    auto load_flag = [&](bool &flag) {
+        Model model;
+        flag          = true;
+        const bool ok = load_project(path, model, &flag);
+        REQUIRE(ok);
+        return flag;
+    };
+
+    bool is_bambu = true;
+    CHECK_FALSE(load_flag(is_bambu));
+
+    auto stamp = [](const std::string &value) {
+        return rewrite_3mf_entries(path, [&](std::string &name, std::string &data) {
+            if (!boost::algorithm::ends_with(name, "3dmodel.model"))
+                return false;
+            const std::string key = "name=\"Application\">";
+            const size_t      pos = data.find(key);
+            if (pos == std::string::npos)
+                return false;
+            const size_t val_beg = pos + key.size();
+            const size_t val_end = data.find("</metadata>", val_beg);
+            if (val_end == std::string::npos)
+                return false;
+            data.replace(val_beg, val_end - val_beg, value);
+            return true;
+        });
+    };
+
+    REQUIRE(stamp("BambuStudio-02.03.00.70"));
+    CHECK(load_flag(is_bambu));
+
+    REQUIRE(stamp("Snapmaker_Orca-2.2.0"));
+    CHECK_FALSE(load_flag(is_bambu));
+}
+
+TEST_CASE("A project whose components reference themselves fails to load", "[3mf][Regression]")
+{
+    // Point the assembly object's component back at itself. Without a visit cap the BFS
+    // in _generate_current_object_list walks A→A forever. Do not add <regex>: rewrite
+    // the objectid attributes with string find (D-03a).
+    const std::string path    = make_temp_3mf_path("cyclic_components.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    REQUIRE(rewrite_3mf_entries(path, [](std::string &name, std::string &data) {
+        if (!boost::algorithm::ends_with(name, "3dmodel.model"))
+            return false;
+        const size_t components = data.find("<components");
+        if (components == std::string::npos)
+            return false;
+        const size_t object_tag = data.rfind("<object id=\"", components);
+        if (object_tag == std::string::npos)
+            return false;
+        const size_t id_beg = object_tag + 12;
+        const size_t id_end = data.find('"', id_beg);
+        if (id_end == std::string::npos)
+            return false;
+        const std::string object_id = data.substr(id_beg, id_end - id_beg);
+        const std::string key       = "objectid=\"";
+        bool              changed   = false;
+        for (size_t pos = data.find(key, components); pos != std::string::npos; pos = data.find(key, pos + key.size())) {
+            const size_t val_beg = pos + key.size();
+            const size_t val_end = data.find('"', val_beg);
+            if (val_end == std::string::npos)
+                break;
+            data.replace(val_beg, val_end - val_beg, object_id);
+            changed = true;
+            pos     = val_beg + object_id.size();
+        }
+        return changed;
+    }));
+
+    Model model;
+    bool  loaded = true;
+    REQUIRE_NOTHROW(loaded = load_project(path, model));
+    REQUIRE_FALSE(loaded);
 }
 
 // Object and volume config are written as double-quoted XML attributes. ConfigOptionString
