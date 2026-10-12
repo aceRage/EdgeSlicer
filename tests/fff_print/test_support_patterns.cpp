@@ -56,6 +56,7 @@ StringObjectException validate_warning(std::initializer_list<ConfigBase::SetDese
 
 const std::string kTwoWalls  = "For Organic supports, two walls are supported only with the Hollow/Default base pattern.";
 const std::string kLightning = "The Lightning base pattern is not supported by this support type; Rectilinear will be used instead.";
+const std::string kHollow    = "The Hollow base pattern is not supported by this support type; Rectilinear will be used instead.";
 
 // ----------------------------------------------------------------------------- organic base fill
 
@@ -158,6 +159,47 @@ TEST_CASE("Lightning warns for every support type but the classic trees", "[Supp
     } else {
         CHECK(w.string.empty());
     }
+}
+
+TEST_CASE("Hollow warns for the non-tree support types only", "[SupportPatterns][Validate]")
+{
+    // Orca #12710: normal supports have no hollow mode and print Rectilinear.
+    auto [type, style, warns] = GENERATE(table<const char *, const char *, bool>({
+        { "normal(auto)",   "default",     true },
+        { "normal(auto)",   "grid",        true },
+        { "normal(auto)",   "snug",        true },
+        { "normal(manual)", "default",     true },
+        { "tree(auto)",     "organic",     false },
+        { "tree(auto)",     "default",     false },
+        { "tree(auto)",     "tree_slim",   false },
+        { "tree(auto)",     "tree_strong", false },
+        { "tree(auto)",     "tree_hybrid", false },
+        { "tree(manual)",   "tree_slim",   false },
+    }));
+    CAPTURE(type, style);
+    const StringObjectException w = validate_warning({ { "support_type", type }, { "support_style", style },
+                                                       { "support_base_pattern", "hollow" } });
+    if (warns) {
+        CHECK(w.string == kHollow);
+        CHECK(w.opt_key == "support_base_pattern");
+    } else {
+        CHECK(w.string.empty());
+    }
+}
+
+TEST_CASE("Normal supports print Hollow as Rectilinear", "[SupportPatterns]")
+{
+    // What the #12710 warning says: the base of a normal support is the same with either pattern.
+    auto slice_normal = [](const char *pattern) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({ { "enable_support", "1" }, { "support_type", "normal(auto)" }, { "layer_height", "0.2" },
+                                        { "support_on_build_plate_only", "1" }, { "support_base_pattern", pattern } });
+        config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+        return toolpaths_only(Slic3r::Test::slice({ TestMesh::overhang }, config));
+    };
+    const std::string rectilinear = slice_normal("rectilinear");
+    REQUIRE(support_base_length(rectilinear) > 0.);
+    CHECK(slice_normal("hollow") == rectilinear);
 }
 
 TEST_CASE("Default base patterns raise no support warning", "[SupportPatterns][Validate]")
