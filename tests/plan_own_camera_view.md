@@ -223,11 +223,15 @@ the test plan checks they still work in the same clean-data-dir run.
    HEVC extension, and an older Mac may not decode it. Check the player overlay ("MSE") and video.
 4. **macOS** (not built here, no Mac CI): WKWebView MSE + muted autoplay inside `wxWebView`,
    `wxWebView` loading `http://127.0.0.1`, and go2rtc on a local build (bundled via
-   `GO2RTC_BIN_DIR`, else Homebrew `go2rtc`). Also: on `main`, `wxMediaCtrl2.mm`'s constructor
-   calls `create_player()` at panel creation, which `dlopen`s `<datadir>/plugins/libBambuSource.dylib`
-   - UltraNet's storage module in a clean data dir, which has no `BambuPlayer` class. Expected,
-   harmless, and the reason the module check below looks for `BambuPlayer`/`live555` rather than
-   the file name. (PR #443 changes that file; the spike deliberately leaves it alone.)
+   `GO2RTC_BIN_DIR`, else Homebrew `go2rtc`). **Found by the owner's Mac test (revision 3) and
+   fixed in revision 4:** `wxMediaCtrl2.mm`'s constructor called `create_player()`, which (since
+   #443) `dlopen`s Bambu's `cameratools/libBambuSource.dylib` and `liblive555.dylib` as soon as the
+   Device tab's media control was built - before any Play. The constructor no longer does; the
+   player (and with it Bambu's module) is made by the first `Load()`/`Play()`, i.e. the first Play
+   that takes the Bambu-player path, and `Stop()` with no player only reports "stopped". Windows
+   was already lazy (the DirectShow filter is only instantiated by `Load()` of a `bambu:` URL;
+   start-up only copies files and writes the per-user registration) and so is Linux (`gstbambusrc`
+   loads the library when the element starts).
 5. **Windows: a stale DirectShow registration.** A clean data dir does **not** remove the HKCU
    registration of Bambu's filter left by OrcaSlicer / Bambu Studio
    (`HKCU\Software\Classes\CLSID\{233E64FB-…}\InprocServer32` → `%APPDATA%\OrcaSlicer\plugins\BambuSource.dll`
@@ -375,11 +379,17 @@ build/arm64/Snapmaker_Orca/EdgeSlicer.app/Contents/MacOS/EdgeSlicer --datadir ~/
    ```sh
    for p in $(pgrep -f 'EdgeSlicer.app/Contents/MacOS/EdgeSlicer'); do echo "pid $p"; vmmap "$p" 2>/dev/null | grep -iE 'live555|BambuSource' | awk '{print $NF}' | sort -u; done
    ```
-   Pass: no `liblive555`. A `libBambuSource.dylib` may appear **only** from
-   `~/edge-camspike-data/plugins/` (UltraNet's, loaded by the storage browser and by the old
-   player's constructor); confirm it is not Bambu's camera module:
+   Pass: no `liblive555` and nothing from `cameratools` - with the Device tab open, a printer
+   selected, and Play pressed (own view). A `libBambuSource.dylib` may appear **only** from
+   `~/edge-camspike-data/plugins/` (UltraNet's, loaded by the storage browser); confirm it is not
+   Bambu's camera module:
    `nm -gU ~/edge-camspike-data/plugins/libBambuSource.dylib | grep -c BambuPlayer` → `0`.
-3. Log check: `grep -h '\[own camera\]\|own live view stream' ~/edge-camspike-data/log/*` finds lines;
+   Then untick "New Bambu LiveView" and Play: now `cameratools/libBambuSource.dylib` and
+   `liblive555.dylib` appear (the Bambu player's first Play loads them).
+3. Log check: every Play logs one warning line `MediaPlayCtrl: Play -> own view (go2rtc, mse)` or
+   `MediaPlayCtrl: Play -> Bambu player: <reason>` (`New Bambu LiveView is off`, `no LAN stream ...`,
+   `no LAN address`, `no access code`, `no web view could be created`);
+   `grep -h '\[own camera\]\|own live view stream' ~/edge-camspike-data/log/*` finds lines;
    `grep -h 'MediaPlayCtrl: bambu:\|MediaPlayCtrl: start load\|\[camera component\]\|LAN Connection Failed' ~/edge-camspike-data/log/*` finds nothing.
 4. Sharing as Windows step 9, counting with `lsof -nP -iTCP:322 -sTCP:ESTABLISHED`.
 5. Storage/timelapse, setting-off and upgrade as Windows steps 10, 11 and 13 (the setting is ON by default).

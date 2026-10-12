@@ -607,8 +607,16 @@ void MediaPlayCtrl::SetOwnView(std::function<wxWebView *()> make_view, std::func
 
 bool MediaPlayCtrl::try_play_own()
 {
-    if (!m_make_own_view || !wxGetApp().app_config->get_bool("liveview_go2rtc"))
-        return false; // setting off: the Bambu-player path, untouched
+    // One warning-level line per Play naming the path it took, so a support log shows it at the
+    // default log level. Never the address or the access code.
+    auto bambu_path = [](const std::string &reason) {
+        BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: Play -> Bambu player: " << reason;
+        return false;
+    };
+    if (!m_make_own_view)
+        return bambu_path("no own-view slot on this panel");
+    if (!wxGetApp().app_config->get_bool("liveview_go2rtc"))
+        return bambu_path("New Bambu LiveView is off"); // the Bambu-player path, untouched
     std::string kind;
     if (m_lan_proto == MachineObject::LVL_Rtsps)      kind = "rtsps";
     else if (m_lan_proto == MachineObject::LVL_Rtsp)  kind = "rtsp";
@@ -616,18 +624,18 @@ bool MediaPlayCtrl::try_play_own()
     // Only a printer this path can actually play: a LAN stream, its address and its access code.
     // Anything else (LAN liveview switched off, cloud-only remote liveview, no access code yet) goes
     // on to the Bambu-player path, which has its own messages and its own fallbacks for those.
-    if (kind.empty() || m_lan_ip.empty() || m_lan_passwd.empty()) {
-        BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: [own camera] not usable for this printer (lan proto " << m_lan_proto
-                                << (m_lan_ip.empty() ? ", no LAN address" : "") << (m_lan_passwd.empty() ? ", no access code" : "")
-                                << "); using the Bambu player path";
-        return false;
-    }
+    if (kind.empty())
+        return bambu_path(m_lan_proto == MachineObject::LVL_Disable ? "no LAN stream (LAN liveview is off on the printer)"
+                                                                     : "no LAN stream (lan proto " + std::to_string(m_lan_proto) + ")");
+    if (m_lan_ip.empty())
+        return bambu_path("no LAN address");
+    if (m_lan_passwd.empty())
+        return bambu_path("no access code");
     if (m_own_view == nullptr)
         m_own_view = m_make_own_view();
-    if (m_own_view == nullptr) {
-        BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: [own camera] no web view could be created; using the Bambu player path";
-        return false;
-    }
+    if (m_own_view == nullptr)
+        return bambu_path("no web view could be created");
+    BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: Play -> own view (go2rtc, " << (kind == "local" ? "mjpeg" : "mse") << ")";
     m_failed_code = 0;
     m_own_busy    = true;
     m_last_state  = MEDIASTATE_INITIALIZING;
