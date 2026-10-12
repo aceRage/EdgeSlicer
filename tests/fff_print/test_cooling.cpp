@@ -204,3 +204,51 @@ TEST_CASE("A role fan region continuing across a layer change keeps its fan spee
             CHECK(fan >= 3 * lowest);
     }
 }
+
+// Orca #12595: ironing is the last thing printed on an object's layer, so the IRONING_FAN_END marker
+// is written with the first extrusion of the next layer. CoolingBuffer reads the fan requests one
+// layer at a time and only honoured that END when its own layer had opened the ironing request, so
+// the fan kept running at the ironing speed above an ironed step.
+TEST_CASE("The fan returns to the layer speed after ironing", "[Cooling][Orca12595]")
+{
+    // A 20 x 20 x 10 mm step with a 10 x 10 x 10 mm tower on one corner: the step's top is ironed,
+    // then the tower carries on for another 50 layers.
+    TriangleMesh step  = make_cube(20., 20., 10.);
+    TriangleMesh tower = make_cube(10., 10., 10.);
+    tower.translate(0.f, 0.f, 10.f);
+    step.merge(tower);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"ironing_type", "top"},
+        {"ironing_fan_speed", "100"},
+        {"fan_min_speed", "20"},
+        {"fan_max_speed", "20"},
+        {"close_fan_the_first_x_layers", "1"},
+        {"full_fan_speed_layer", "0"},
+        {"slow_down_for_layer_cooling", "0"},
+        {"enable_overhang_bridge_fan", "0"},
+        {"machine_start_gcode", ""},
+        {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]"},
+    });
+    const auto moves = fan_at_extrusions(slice({step}, config));
+
+    size_t checked = 0;
+    for (size_t i = 1; i + 1 < moves.size(); ++i)
+        if (moves[i].role == "Ironing" && moves[i + 1].role != "Ironing") {
+            // The fan before the ironing started.
+            size_t before = i;
+            while (before > 0 && moves[before].role == "Ironing")
+                --before;
+            INFO("ironing ends in layer " << moves[i].layer << ", next move is " << moves[i + 1].role << " in layer "
+                                          << moves[i + 1].layer);
+            CHECK(moves[i].fan == 255);
+            CHECK(moves[i + 1].fan == moves[before].fan);
+            ++checked;
+        }
+    CHECK(checked > 0);
+}
