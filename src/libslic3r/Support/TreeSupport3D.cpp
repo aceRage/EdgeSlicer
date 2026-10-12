@@ -3790,7 +3790,6 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
             if (layer) layer->polygons = intersection(layer->polygons, volumes.m_bed_area);
         });
 
-        // Don't fill in the tree supports, make them hollow with just a single sheath line.
         print.set_status(69, _L("Generating support"));
         // Ultra (support groups, Stage 4a): an empty `group_toolpaths` - which is what a
         // single-group object produces - makes generate_support_toolpaths take exactly the path it
