@@ -367,6 +367,10 @@ public:
     // ask, or no reply to a request would ever come back.
     bool subscribe_device_topics(std::string& msg);
 
+    // Wait up to timeout_ms for this printer's response topic to be subscribed on the engine in
+    // use (the Device page subscribes it itself, on another worker). True once it is.
+    bool wait_response_subscribed(int timeout_ms);
+
     // Callback structure for MQTT requests
     struct RequestCallback {
         std::function<void(const nlohmann::json&)> success_cb;  // Success callback

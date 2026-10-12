@@ -106,6 +106,24 @@ HomePanel::~HomePanel()
     *m_library_cancel = true;
 }
 
+void HomePanel::open_connector_link(const std::string& url)
+{
+    show_home();
+    wxGetApp().app_config->set(SECTION_KEY, "vendors");
+    if (m_page_ready)
+        send({{"type", "show_section"}, {"section", "vendors"}});
+    ensure_vendors();
+    m_vendors->import_from_link(url);
+}
+
+void HomePanel::ensure_vendors()
+{
+    if (!m_vendors)
+        m_vendors = std::make_unique<HomeVendors>(
+            this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); },
+            [this](const std::string& path) { open_downloaded(path); });
+}
+
 void HomePanel::ensure_browser()
 {
     if (m_browser != nullptr)
@@ -344,8 +362,7 @@ void HomePanel::handle(const json& msg)
         if (m_library_loaded)
             send_library(); // the page was reloaded (a theme change): it starts empty
         library_refresh(false);
-        if (!m_vendors)
-            m_vendors = std::make_unique<HomeVendors>(this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); });
+        ensure_vendors();
         m_vendors->send_state();
     } else if (command == "home_section") {
         const std::string section = msg.value("section", std::string());
@@ -526,15 +543,22 @@ void HomePanel::send_init()
     s["connector"]         = _u8L("Connector");
     s["add_connector"]     = _u8L("Add connector");
     s["import"]            = _u8L("Import");
+    s["import_file"]       = _u8L("From file...");
+    s["import_link"]       = _u8L("From link...");
+    s["import_paste"]      = _u8L("Paste JSON...");
+    s["copy_json"]         = _u8L("Copy JSON");
     s["export"]            = _u8L("Export");
     s["export_csv"]        = _u8L("Export CSV");
     s["edit"]              = _u8L("Edit");
     s["save"]              = _u8L("Save");
     s["cancel"]            = _u8L("Cancel");
     s["test"]              = _u8L("Test connection");
-    s["sync"]              = _u8L("Refresh list");
-    s["full_sync"]         = _u8L("Fetch everything again");
-    s["syncing"]           = _u8L("Refreshing...");
+    s["sync"]              = _u8L("Fetch Changes");
+    s["sync_tip"]          = _u8L("New and changed models since the last fetch");
+    s["full_sync"]         = _u8L("Full Refresh");
+    s["full_sync_tip"]     = _u8L("Re-read every model (after changing settings)");
+    s["settings_changed"]  = _u8L("Settings changed: the next Fetch Changes reads every model again.");
+    s["syncing"]           = _u8L("Fetching...");
     s["never_synced"]      = _u8L("Not fetched yet");
     s["synced"]            = _u8L("Fetched");
     s["models"]            = _u8L("models");
@@ -550,13 +574,14 @@ void HomePanel::send_init()
     s["open_page"]         = _u8L("Open vendor page");
     s["copy_link"]         = _u8L("Copy link");
     s["download"]          = _u8L("Download");
+    s["download_open"]     = _u8L("Download & Open");
     s["files_label"]       = _u8L("Files");
     s["plates_label"]      = _u8L("Plates");
     s["variant"]           = _u8L("Variant");
     s["print_time"]        = _u8L("Time");
     s["size"]              = _u8L("Size");
     s["vendors_empty"]     = _u8L("Connect a vendor's API to browse the models you have access to. EdgeSlicer includes no vendors: add a connector for yours, or import one someone shared.");
-    s["vendor_no_items"]   = _u8L("Nothing fetched yet. Set the credentials, then Refresh list.");
+    s["vendor_no_items"]   = _u8L("Nothing fetched yet. Set the credentials, then Fetch Changes.");
     s["edit_json"]         = _u8L("Edit as JSON");
     s["edit_form"]         = _u8L("Edit as form");
     s["delete_connector"]  = _u8L("Remove connector");
@@ -725,6 +750,43 @@ void HomePanel::open_archived(const std::string& id)
             plater->load_project(from_u8(r.path));
         break;
     case HomeTab::ArchiveOpen::None: break;
+    }
+}
+
+void HomePanel::open_downloaded(const std::string& path)
+{
+    const HomeTab::DownloadOpen kind = HomeTab::download_open_kind(path);
+    Plater*                     plater = wxGetApp().plater();
+    if (kind == HomeTab::DownloadOpen::None || plater == nullptr)
+        return;
+    boost::system::error_code ec;
+    if (!fs::is_regular_file(fs::path(path), ec)) {
+        show_error(this, _L("The file is no longer there."));
+        return;
+    }
+    if (plater->is_background_process_slicing()) {
+        show_info(this, _L("new or open project file is not allowed during the slicing process!"), _L("Open Project"));
+        return;
+    }
+    switch (kind) {
+    case HomeTab::DownloadOpen::Project:
+        // Asks about unsaved changes first, like Open Project and the Library.
+        wxGetApp().request_open_project(path);
+        break;
+    case HomeTab::DownloadOpen::AddToPlate: {
+        // The same as dropping the file on the plater.
+        wxArrayString files;
+        files.Add(from_u8(path));
+        if (plater->load_files(files))
+            if (MainFrame* mf = wxGetApp().mainframe)
+                mf->select_tab(size_t(MainFrame::tp3DEditor));
+        break;
+    }
+    case HomeTab::DownloadOpen::Gcode:
+        // Asks about the current project first, then shows the file in the preview.
+        plater->load_gcode(from_u8(path));
+        break;
+    case HomeTab::DownloadOpen::None: break;
     }
 }
 

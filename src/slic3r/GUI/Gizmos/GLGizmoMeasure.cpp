@@ -1,4 +1,5 @@
 #include "GLGizmoMeasure.hpp"
+#include "GizmoVolumeRefs.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -15,6 +16,7 @@
 
 #include <imgui/imgui_internal.h>
 
+#include <algorithm>
 #include <numeric>
 
 #include <glad/gl.h>
@@ -223,6 +225,10 @@ bool GLGizmoMeasure::on_mouse(const wxMouseEvent &mouse_event)
         if (mouse_event.CmdDown())
             return false;
 
+        // A click can land before the first frame after the canvas dropped volumes (EDGESLICER-8).
+        if (repair_stale_volume_refs())
+            m_hover_id = -1;
+
         if (m_hover_id != -1) {
             m_mouse_left_down = true;
             m_mouse_left_down_mesh_deal = true;
@@ -414,6 +420,15 @@ void GLGizmoMeasure::data_changed(bool is_serializing)
 {
     wxBusyCursor wait;
 
+    // The "pending" branch below is a partial refresh for the gizmo's own transform commits: it keeps
+    // the cached picks and only adds / re-transforms the selected volumes. It must never run when the
+    // canvas deleted or replaced a cached volume in the meantime (reload_scene() after assemble, merge,
+    // delete, undo...), or the stale pick items outlive their raycasters (EDGESLICER-8).
+    if (m_pending_scale > 0 && volume_refs_are_stale()) {
+        BOOST_LOG_TRIVIAL(info) << "GLGizmoMeasure::data_changed: cached volumes changed under the gizmo, full refresh";
+        m_pending_scale = 0;
+    }
+
     if (m_pending_scale > 0) {
         update_if_needed();
         register_single_mesh_pick();
@@ -495,9 +510,17 @@ void GLGizmoMeasure::on_set_state()
         restore_scene_raycasters_state();
         m_editing_distance = false;
         m_is_editing_distance_first_frame = true;
-        std::map<GLVolume *, std::shared_ptr<Measure::Measuring>>().swap(m_mesh_measure_map);
+        // Closing forgets every GLVolume the gizmo pointed at. Before EDGESLICER-8 only the measure map
+        // was cleared: the pick map (raw pointers to GLVolume::mesh_raycaster), the hit lists and a
+        // still-armed m_pending_scale (set by Auto-fit and the other transform commits, which never
+        // trigger the data_changed() that would consume it) survived the close, so the next open took
+        // the partial-refresh branch of data_changed(), kept those entries and ray-cast into volumes
+        // that had been deleted since.
+        drop_volume_refs();
     }
     else {
+        // A fresh open always starts from a full data_changed() refresh.
+        m_pending_scale = 0;
         m_mode = EMode::FeatureSelection;
         m_hover_id = -1;
         m_show_reset_first_tip = false;
@@ -594,6 +617,11 @@ void GLGizmoMeasure::on_render()
 #if ENABLE_MEASURE_GIZMO_DEBUG
     render_debug_dialog();
 #endif // ENABLE_MEASURE_GIZMO_DEBUG
+
+    // Last line of defence for EDGESLICER-8: every path that deletes GLVolumes is supposed to reach
+    // data_changed(), but GLCanvas3D::reset_volumes() does not, so verify the cache against the live
+    // volume list before ray-casting into it (cheap: pointer lookups, no dereference of a stale one).
+    repair_stale_volume_refs();
 
     Vec2d mouse_position = m_parent.get_local_mouse_position();
     update_if_needed();
@@ -2376,6 +2404,54 @@ void GLGizmoMeasure::reset_all_pick()
 {
    std::map<GLVolume*, std::shared_ptr<PickRaycaster>>().swap(m_mesh_raycaster_map);
    reset_gripper_pick(GripperType::UNDEFINE,true);
+}
+
+bool GLGizmoMeasure::volume_refs_are_stale() const
+{
+    const std::vector<GLVolume *> singles{m_last_hit_volume, m_ultra_exact_hover.volume, m_ultra_exact_pick.volume};
+    if (m_mesh_raycaster_map.empty() && m_mesh_measure_map.empty() && m_hit_different_volumes.empty() &&
+        m_hit_order_volumes.empty() && std::all_of(singles.begin(), singles.end(), [](const GLVolume *v) { return v == nullptr; }))
+        return false; // nothing cached, nothing to check (the closed gizmo, every frame of an empty pick)
+
+    using Live = GizmoVolumeRefs::LiveVolumes<GLVolume, MeshRaycaster>;
+    const Live live(m_parent.get_volumes().volumes, [](const GLVolume &v) { return v.mesh_raycaster.get(); });
+
+    if (!GizmoVolumeRefs::stale_pick_keys(m_mesh_raycaster_map, live).empty())
+        return true;
+    if (GizmoVolumeRefs::has_dead_key(m_mesh_measure_map, live))
+        return true;
+    if (GizmoVolumeRefs::has_dead_pointer(m_hit_different_volumes, live) ||
+        GizmoVolumeRefs::has_dead_pointer(m_hit_order_volumes, live))
+        return true;
+    return GizmoVolumeRefs::has_dead_pointer(singles, live);
+}
+
+void GLGizmoMeasure::drop_volume_refs()
+{
+    reset_all_pick();
+    std::map<GLVolume *, std::shared_ptr<Measure::Measuring>>().swap(m_mesh_measure_map);
+    m_curr_measuring.reset();
+    m_curr_feature.reset();
+    m_curr_point_on_feature_position.reset();
+    reset_all_feature(); // hit lists, last hit volume, selected features, Ultra exact pick
+    m_ultra_exact_hover = UltraExactAnchor();
+    for (UltraExactAxisCache &c : m_ultra_exact_axis_cache)
+        c = UltraExactAxisCache();
+    m_hover_id       = -1;
+    m_pending_scale  = 0;
+    m_last_inv_zoom  = 0.0f;
+    m_last_plane_idx = -1;
+}
+
+bool GLGizmoMeasure::repair_stale_volume_refs()
+{
+    if (!volume_refs_are_stale())
+        return false;
+    BOOST_LOG_TRIVIAL(warning) << "GLGizmoMeasure: cached volumes were deleted or replaced under the gizmo, rebuilding its picks";
+    drop_volume_refs();
+    if (m_state == On)
+        register_single_mesh_pick();
+    return true;
 }
 
 void GLGizmoMeasure::reset_gripper_pick(GripperType id, bool is_all)

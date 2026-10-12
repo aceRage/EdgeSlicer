@@ -1081,6 +1081,25 @@ bool Moonraker_Mqtt::subscribe_device_topics(std::string& msg)
     return notification_subscribed && response_subscribed;
 }
 
+bool Moonraker_Mqtt::wait_response_subscribed(int timeout_ms)
+{
+    m_sn_mtx.lock();
+    const std::string sn = m_sn;
+    m_sn_mtx.unlock();
+    if (sn.empty())
+        return false;
+    const std::string topic = sn + m_response_topic;
+    const auto        until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        std::shared_ptr<MqttClient> client = get_mqtt_client_tls();
+        if (client && client->IsSubscribed(topic))
+            return true;
+        if (std::chrono::steady_clock::now() >= until)
+            return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 // Ask for TLS info
 bool Moonraker_Mqtt::ask_for_tls_info(const nlohmann::json& cn_params)
 {
@@ -1375,6 +1394,17 @@ bool Moonraker_Mqtt::connect(wxString& msg, const nlohmann::json& params) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+    // The callback first, then the subscriptions: a message delivered right after a SUBACK must
+    // find somewhere to go.
+    std::weak_ptr<TimeSyncManager> weak_tsm = time_sync_manager_;
+    new_client->SetMessageCallback([this, weak_tsm](const std::string& topic, const std::string& payload) {
+        if (weak_tsm.expired()) {
+            BOOST_LOG_TRIVIAL(warning) << "[Moonraker_Mqtt] object destroyed, ignoring MQTTS message";
+            return;
+        }
+        this->on_mqtt_tls_message_arrived(topic, payload);
+    });
+
     std::string no_sub_msg              = "success";
     bool notification_subscribed = new_client->Subscribe(tmp_sn + m_notification_topic, 1, no_sub_msg);
 
@@ -1384,14 +1414,6 @@ bool Moonraker_Mqtt::connect(wxString& msg, const nlohmann::json& params) {
     BOOST_LOG_TRIVIAL(warning) << "[Moonraker_Mqtt] topic subscription result - notification topic: " << (notification_subscribed ? "success" : "failed")
                            << ", response topic: " << (response_subscribed ? "success" : "failed");
     wcp_loger.add_log("topic subscription result - notification topic: " + std::string((notification_subscribed ? "success" : "failed")) + ", response topic: " + (response_subscribed ? "success" : "failed"), false, "", "Moonraker_Mqtt", "info");
-    std::weak_ptr<TimeSyncManager> weak_tsm = time_sync_manager_;
-    new_client->SetMessageCallback([this, weak_tsm](const std::string& topic, const std::string& payload) {
-        if (weak_tsm.expired()) {
-            BOOST_LOG_TRIVIAL(warning) << "[Moonraker_Mqtt] object destroyed, ignoring MQTTS message";
-            return;
-        }
-        this->on_mqtt_tls_message_arrived(topic, payload);
-    });
 
     bool result = is_connect && notification_subscribed && response_subscribed;
     BOOST_LOG_TRIVIAL(info) << "[Moonraker_Mqtt] MQTT connection flow completed, result: " << (result ? "success" : "failed");

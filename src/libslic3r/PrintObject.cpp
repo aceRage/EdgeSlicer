@@ -780,27 +780,30 @@ void PrintObject::generate_support_material()
 
             this->_generate_support_material();
             m_print->throw_if_canceled();
+        }
 
-            // Side stabilizers ride on the support layers the generator above just made.
-            if (m_config.stabilizer_supports.value != smOff && !m_shared_object) {
-                m_print->set_status(50, L("Generating side stabilizers"));
-                const stabilizers::PlanReport stab = generate_stabilizer_supports(*this, [this]() { this->throw_if_canceled(); });
-                // Painted stabilizer points are an explicit ask: say so when one cannot be honoured.
-                if (! stab.unreachable.empty()) {
-                    const Vec3d &p = stab.unreachable.front();
-                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                        Slic3r::format(_u8L("Object %1%: %2% painted stabilizer point(s) cannot be reached by a printable strut (the first at a height of %3% mm). "
-                                            "Move the paint higher, away from the bed or out of recesses, or give the struts more room."),
-                                       this->model_object()->name, stab.unreachable.size(), std::round(p.z() * 10.) / 10.),
-                        PrintStateBase::SlicingStabilizerPaintUnreachable);
-                }
-                if (stab.manual_without_paint)
-                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                        Slic3r::format(_u8L("Object %1%: side stabilizers are set to Manual but no stabilizer points are painted, so none were generated. "
-                                            "Paint them with the support painting tool, or set the stabilizers to Auto."),
-                                       this->model_object()->name),
-                        PrintStateBase::SlicingStabilizerManualUnpainted);
+        // Side stabilizers (Support/Stabilizers.hpp) ride on whatever support layers exist - the
+        // generator's above, or none: they do not depend on Enable supports. With supports off the
+        // block above is skipped, so no support, interface or raft is made; the stabilizers insert
+        // their own support layers at the object's layer heights, as they do between supports.
+        if (this->has_stabilizers() && !m_shared_object) {
+            m_print->set_status(50, L("Generating side stabilizers"));
+            const stabilizers::PlanReport stab = generate_stabilizer_supports(*this, [this]() { this->throw_if_canceled(); });
+            // Painted stabilizer points are an explicit ask: say so when one cannot be honoured.
+            if (! stab.unreachable.empty()) {
+                const Vec3d &p = stab.unreachable.front();
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: %2% painted stabilizer point(s) cannot be reached by a printable strut (the first at a height of %3% mm). "
+                                        "Move the paint higher, away from the bed or out of recesses, or give the struts more room."),
+                                   this->model_object()->name, stab.unreachable.size(), std::round(p.z() * 10.) / 10.),
+                    PrintStateBase::SlicingStabilizerPaintUnreachable);
             }
+            if (stab.manual_without_paint)
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(_u8L("Object %1%: side stabilizers are set to Manual but no stabilizer points are painted, so none were generated. "
+                                        "Paint them with the support painting tool, or set the stabilizers to Auto."),
+                                   this->model_object()->name),
+                    PrintStateBase::SlicingStabilizerManualUnpainted);
         }
         // Ultra (support groups, plan 2026-09-02 3.7): both this feature and support filament
         // matching (Chameleon) write SupportLayer::interface_by_extruder, so running both would
@@ -832,7 +835,7 @@ void PrintObject::generate_support_material()
         // Ultra (support groups, Stage 5): the three notices the plan's Stage 5 list asks for.
         // All NON_CRITICAL, all raised here for the same reason as the two above.
         // 1. The soluble rule of 3.6. A zero top Z distance is not a per-part quantity - it sets
-        //    SlicingParameters::soluble_interface, the bottom surface classification and the
+        //    SlicingParameters::zero_gap_interface_* (Slicing.cpp), the bottom surface classification and the
         //    organic-tree static - so the strictest group wins and the WHOLE object follows it.
         //    Groups asking for a larger gap do not get their own; say so.
         if (const std::string soluble_group = this->support_group_soluble_name(); ! soluble_group.empty())
@@ -3827,7 +3830,7 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
     clamp_exturder_to_default(config.support_filament,           num_extruders);
     clamp_exturder_to_default(config.support_interface_filament, num_extruders);
     // Ultra (support groups): support_top_z_distance is object-wide behaviour - it decides
-    // SlicingParameters::soluble_interface (Slicing.cpp), bottom surface classification in
+    // SlicingParameters::zero_gap_interface_top and _bottom (Slicing.cpp), bottom surface classification in
     // detect_surfaces_type, and the organic-tree soluble static (TreeSupport3D.cpp). A per-part
     // value cannot be honoured, so the strictest group wins: any group asking for a soluble
     // interface makes the whole object soluble. No group -> no change, so this is a no-op for

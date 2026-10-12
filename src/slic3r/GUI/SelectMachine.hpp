@@ -407,6 +407,8 @@ public:
      * physical_extruder_map; and the filaments whose mapped AMS tray feeds the other extruder. */
     std::vector<int> sliced_filament_map() const;
     std::vector<int> printer_physical_extruder_map() const;
+    // Physical extruder the sliced plate prints this filament with; -1 on a one-extruder job.
+    int filament_physical_extruder(int filament_id) const;
     std::vector<int> filaments_mapped_to_wrong_extruder(MachineObject* obj_) const;
     bool get_ams_mapping_result(std::string& mapping_array_str, std::string& mapping_array_str2, std::string& ams_mapping_info);
     bool build_nozzles_info(std::string& nozzles_info);
