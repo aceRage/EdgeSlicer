@@ -614,6 +614,9 @@ private:
     std::string _encode_label_ids_to_base64(std::vector<size_t> ids);
     // ORCA: Add support for role based fan speed control
     std::array<bool, ExtrusionRole::erCount> m_is_role_based_fan_on;
+    std::array<int, ExtrusionRole::erCount>  m_role_based_fan_marker_layer;
+    // EDGE: the extruder (filament) each open role fan region was started with; a tool change starts it afresh.
+    std::array<int, ExtrusionRole::erCount>  m_role_based_fan_marker_extruder;
     // Markers for the Pressure Equalizer to recognize the extrusion type.
     // The Pressure Equalizer removes the markers from the final G-code.
     bool                                m_enable_extrusion_role_markers;
@@ -841,8 +844,9 @@ private:
 std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Print& print, bool init_order = false);
 
 // The overhang data ExtrusionQualityEstimator needs for the object layers in `layers` that process_layer() prepares it
-// for, computed ahead of the generator.
-std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vector<GCode::LayerToPrint> &layers);
+// for, computed ahead of the generator. `overhang_fan`: the overhang fan can switch on (Orca #14788), which
+// prepares every layer with extrusions.
+std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vector<GCode::LayerToPrint> &layers, bool overhang_fan = false);
 
 }
 

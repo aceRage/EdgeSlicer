@@ -2820,11 +2820,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_max_layer_z  = 0.f;
     m_last_width   = 0.f;
     m_is_role_based_fan_on.fill(false);
+    m_role_based_fan_marker_layer.fill(-1);
+    m_role_based_fan_marker_extruder.fill(-1);
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
     m_last_mm3_per_mm = 0.;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
-    m_fan_mover.release();
+    m_fan_mover.reset();
     m_layer_time_speed_smoothing.reset();
 
     m_writer.set_is_bbl_machine(is_bbl_printers);
@@ -4535,23 +4537,31 @@ struct PrecomputedLayer
 // code always had and it must stay that way, because the estimator measures each prepared layer against
 // the layer prepared before it: a region's first (Standard) enable_overhang_speed value, not "any
 // flow-variant column". Which layers get prepared decides which layer a later wall is compared with, so
-// a different rule would change the G-code. (The overhang fan needs no clause of its own: _extrude only
-// asks the estimator when overhang speed is on.)
-static bool prepares_overhang_estimator(const Layer &layer)
+// a different rule would change the G-code. Orca #14788: _extrude also asks the estimator when the overhang
+// fan can switch on (`overhang_fan`, see overhang_fan_enabled()), with the overhang slowdown off, so every
+// layer with extrusions is prepared then.
+static bool prepares_overhang_estimator(const Layer &layer, bool overhang_fan)
 {
     const LayerRegionPtrs &regions = layer.regions();
-    return std::any_of(regions.begin(), regions.end(), [](const LayerRegion *region) {
-        return region->has_extrusions() && region->region().config().enable_overhang_speed.values.front();
+    return std::any_of(regions.begin(), regions.end(), [overhang_fan](const LayerRegion *region) {
+        return region->has_extrusions() && (overhang_fan || region->region().config().enable_overhang_speed.values.front());
     });
+}
+
+// Orca #14788: whether the overhang fan can switch on for any filament, which makes _extrude measure the
+// overhangs of walls and bridges even with the overhang slowdown off.
+static bool overhang_fan_enabled(const PrintConfig &config, bool cooling_markers)
+{
+    return cooling_markers && any_enabled(config.enable_overhang_bridge_fan);
 }
 } // namespace
 
-std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vector<GCode::LayerToPrint> &layers)
+std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vector<GCode::LayerToPrint> &layers, bool overhang_fan)
 {
     std::vector<PrecomputedOverhangLayer> out;
     for (const GCode::LayerToPrint &layer : layers)
         if (layer.object_layer != nullptr && layer.object_layer->lower_layer != nullptr &&
-            prepares_overhang_estimator(*layer.object_layer)) {
+            prepares_overhang_estimator(*layer.object_layer, overhang_fan)) {
             const LayerRegionPtrs &regions = layer.object_layer->regions();
             // _extrude extrudes a region's walls with that region's config applied, so it reads that region's
             // slowdown value (for whichever filament prints): the curled-line tree is only read if some region
@@ -4567,7 +4577,7 @@ std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vect
 namespace {
 // Hands out the index of each layer to process_layers(), then computes the layers' overhang data in parallel.
 template<typename LayersAt>
-static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bool nop_layer, LayersAt layers_at)
+static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bool nop_layer, bool overhang_fan, LayersAt layers_at)
 {
     return tbb::make_filter<void, PrecomputedLayer>(slic3r_tbb_filtermode::serial_in_order,
                [&next_index, layer_count, nop_layer](tbb::flow_control &fc) -> PrecomputedLayer {
@@ -4581,9 +4591,9 @@ static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bo
                    return {};
                }) &
            tbb::make_filter<PrecomputedLayer, PrecomputedLayer>(slic3r_tbb_filtermode::parallel,
-               [layers_at](PrecomputedLayer layer) -> PrecomputedLayer {
+               [layers_at, overhang_fan](PrecomputedLayer layer) -> PrecomputedLayer {
                    if (layer.index != size_t(-1))
-                       layer.overhang_layers = precompute_overhang_layers(layers_at(layer.index));
+                       layer.overhang_layers = precompute_overhang_layers(layers_at(layer.index), overhang_fan);
                    return layer;
                });
 }
@@ -4602,6 +4612,7 @@ void GCode::process_layers(const Print&                                         
     // The pipeline is variable: The vase mode filter is optional.
     size_t     layer_to_print_idx = 0;
     const auto source             = precomputed_layers_source(layer_to_print_idx, layers_to_print.size(), m_pressure_equalizer != nullptr,
+        overhang_fan_enabled(print.config(), m_enable_cooling_markers),
         [&layers_to_print](size_t index) -> const std::vector<LayerToPrint> & { return layers_to_print[index].second; });
     const auto generator          = tbb::make_filter<PrecomputedLayer, LayerResult>(
         slic3r_tbb_filtermode::serial_in_order,
@@ -4725,6 +4736,7 @@ void GCode::process_layers(const Print&              print,
     // The pipeline is variable: The vase mode filter is optional.
     size_t     layer_to_print_idx = 0;
     const auto source             = precomputed_layers_source(layer_to_print_idx, layers_to_print.size(), m_pressure_equalizer != nullptr,
+        overhang_fan_enabled(print.config(), m_enable_cooling_markers),
         [&layers_to_print](size_t index) { return std::vector<LayerToPrint>{layers_to_print[index]}; });
     const auto generator =
         tbb::make_filter<PrecomputedLayer, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
@@ -6733,8 +6745,9 @@ LayerResult GCode::process_layer(const Print& print,
         return next_extruder;
     };
 
+    const bool overhang_fan = overhang_fan_enabled(m_config, m_enable_cooling_markers);
     for (const auto &layer_to_print : layers)
-        if (layer_to_print.object_layer && prepares_overhang_estimator(*layer_to_print.object_layer))
+        if (layer_to_print.object_layer && prepares_overhang_estimator(*layer_to_print.object_layer, overhang_fan))
             m_extrusion_quality_estimator.prepare_for_new_layer(layer_to_print.original_object, layer_to_print.object_layer);
 
     // Group extrusions by an extruder, then by an object, an island and a region.
@@ -9764,6 +9777,33 @@ static float overhang_fan_overlap_threshold(int overhang_fan_threshold)
     }
 }
 
+// Whether the overhang fan is on at a point of a path with `overlap` (the variable-speed branch of _extrude).
+//    { "0%", Overhang_threshold_none },
+//    { "10%", Overhang_threshold_1_4 },
+//    { "25%", Overhang_threshold_2_4 },
+//    { "50%", Overhang_threshold_3_4 },
+//    { "75%", Overhang_threshold_4_4 },
+//    { "95%", Overhang_threshold_bridge }
+static bool overhang_fan_on_at(int overhang_fan_threshold, float overlap, ExtrusionRole role)
+{
+    if (role == erBridgeInfill ||
+        role == erOverhangPerimeter) { // ORCA: Split out bridge infill to internal and external to apply separate fan settings
+        return true;
+    }
+    if (overhang_fan_threshold == Overhang_threshold_none)
+        return is_external_perimeter(role);
+    const float overlap_threshold = overhang_fan_overlap_threshold(overhang_fan_threshold);
+    return overlap_threshold >= 0.f && overlap <= overlap_threshold;
+}
+
+// Whether the overhang fan is on over a whole path for its role alone, whatever its overlap.
+static bool overhang_fan_on_for_role(int overhang_fan_threshold, ExtrusionRole role)
+{
+    // BBS: Overhang_threshold_none means Overhang_threshold_1_4 and forcing cooling for all external perimeter
+    return (overhang_fan_threshold == Overhang_threshold_none && is_external_perimeter(role)) ||
+           role == erBridgeInfill || role == erOverhangPerimeter;
+}
+
 std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_description, double speed)
 {
     std::string gcode;
@@ -10153,6 +10193,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     }
 
     bool                        variable_speed = false;
+    // Orca #16297: the overhang fan is on along the whole path (a uniform fan state the constant-speed branch's
+    // path-wide marker can carry).
+    bool                        path_overhang_fan_active = false;
     std::vector<ProcessedPoint> new_points{};
 
     // Ultra (over-support walls): a wall over support is a perimeter for every other purpose, but
@@ -10161,7 +10204,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // whole feature. It is excluded here rather than dropped out of is_perimeter(), so seams,
     // travel/retraction and small-perimeter handling still see it as the wall it is.
     // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
-    if (this->process_flow_value(m_config.enable_overhang_speed) && !this->on_first_layer() && !this->object_layer_over_raft() &&
+    //
+    // Orca #14788: the overhang fan needs the overhang measured too, so walls and bridges are measured
+    // when either the overhang slowdown or the overhang fan is on.
+    const bool overhang_speed_on       = this->process_flow_value(m_config.enable_overhang_speed);
+    const bool overhang_fan_on         = EXTRUDER_CONFIG(enable_overhang_bridge_fan) && m_enable_cooling_markers;
+    const bool need_overhang_detection = overhang_speed_on || overhang_fan_on;
+    if (need_overhang_detection && !this->on_first_layer() && !this->object_layer_over_raft() &&
         path.role() != erOverSupportPerimeter &&
         (is_bridge(path.role()) || is_perimeter(path.role()))) {
         bool   is_external = is_external_perimeter(path.role());
@@ -10218,9 +10267,25 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
                                                                                   ref_speed, speed, slowdown_curled, fan_overlap_threshold);
         }
+        // Orca #14788: with the slowdown off the points only carry the overhang fan transitions, printed at the
+        // path's own speed.
+        if (!overhang_speed_on)
+            for (ProcessedPoint &point : new_points)
+                point.speed = speed;
         variable_speed = std::any_of(new_points.begin(), new_points.end(), [speed](const ProcessedPoint& p) {
             return fabs(double(p.speed) - speed) > 1;
         }); // Ignore small speed variations (under 1mm/sec)
+        // Orca #15158 / #16297: a uniform overhang fan state is set by the path-wide marker of the constant-speed
+        // branch (which keeps the path's arcs); only a fan transition within the path needs point-by-point
+        // moves, so CoolingBuffer can put the fan command between them.
+        if (overhang_fan_on && fan_overlap_threshold >= 0.f && !new_points.empty()) {
+            path_overhang_fan_active = new_points.front().overlap <= fan_overlap_threshold;
+            variable_speed = variable_speed ||
+                std::adjacent_find(new_points.begin(), new_points.end(),
+                                   [fan_overlap_threshold](const ProcessedPoint &previous, const ProcessedPoint &current) {
+                                       return (previous.overlap <= fan_overlap_threshold) != (current.overlap <= fan_overlap_threshold);
+                                   }) != new_points.end();
+        }
     }
 
     double F = speed * 60; // convert mm/sec to mm/min
@@ -10415,21 +10480,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     auto overhang_fan_threshold     = EXTRUDER_CONFIG(overhang_fan_threshold);
     auto enable_overhang_bridge_fan = EXTRUDER_CONFIG(enable_overhang_bridge_fan);
 
-    //    { "0%", Overhang_threshold_none },
-    //    { "10%", Overhang_threshold_1_4 },
-    //    { "25%", Overhang_threshold_2_4 },
-    //    { "50%", Overhang_threshold_3_4 },
-    //    { "75%", Overhang_threshold_4_4 },
-    //    { "95%", Overhang_threshold_bridge }
     auto check_overhang_fan = [&overhang_fan_threshold](float overlap, ExtrusionRole role) {
-        if (role == erBridgeInfill ||
-            role == erOverhangPerimeter) { // ORCA: Split out bridge infill to internal and external to apply separate fan settings
-            return true;
-        }
-        if (overhang_fan_threshold == Overhang_threshold_none)
-            return is_external_perimeter(role);
-        const float overlap_threshold = overhang_fan_overlap_threshold(overhang_fan_threshold);
-        return overlap_threshold >= 0.f && overlap <= overlap_threshold;
+        return overhang_fan_on_at(overhang_fan_threshold, overlap, role);
     };
 
     std::string comment;
@@ -10443,12 +10495,20 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     auto append_role_based_fan_marker = [this, &gcode](const ExtrusionRole role, const std::string_view& marker_prefix, const bool fan_on) {
         assert(m_enable_cooling_markers);
 
+        // EDGE: CoolingBuffer closes the role fan requests at a tool change (the new filament starts at its
+        // layer speed), so a region the new filament continues needs a fresh START too, as on a new layer.
+        const int extruder = m_writer.extruder() != nullptr ? int(m_writer.extruder()->id()) : -1;
         if (fan_on) {
-            if (!m_is_role_based_fan_on[role]) {
+            // Orca: CoolingBuffer consumes role fan markers per layer, so continuing
+            // role-based fan regions need a fresh START marker on each new layer.
+            if (!m_is_role_based_fan_on[role] || m_role_based_fan_marker_layer[role] != m_layer_index ||
+                m_role_based_fan_marker_extruder[role] != extruder) {
                 gcode += ";";
                 gcode += marker_prefix;
                 gcode += "_FAN_START\n";
                 m_is_role_based_fan_on[role] = true;
+                m_role_based_fan_marker_layer[role] = m_layer_index;
+                m_role_based_fan_marker_extruder[role] = extruder;
             }
         } else {
             if (m_is_role_based_fan_on[role]) {
@@ -10456,6 +10516,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 gcode += marker_prefix;
                 gcode += "_FAN_END\n";
                 m_is_role_based_fan_on[role] = false;
+                m_role_based_fan_marker_layer[role] = -1;
+                m_role_based_fan_marker_extruder[role] = -1;
             }
         }
     };
@@ -10516,12 +10578,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             if (m_enable_cooling_markers) {
                 if (enable_overhang_bridge_fan) {
                     // BBS: Overhang_threshold_none means Overhang_threshold_1_4 and forcing cooling for all external
-                    // perimeter
-                    append_role_based_fan_marker(
-                        erOverhangPerimeter, "_OVERHANG"sv,
-                        (overhang_fan_threshold == Overhang_threshold_none && is_external_perimeter(path.role())) ||
-                            (path.role() == erBridgeInfill ||
-                             path.role() == erOverhangPerimeter)); // ORCA: Add support for separate internal bridge fan speed control
+                    // perimeter. ORCA: bridges and overhang perimeters always (separate internal bridge fan below).
+                    // Orca #16297: or a path overhanging past the fan threshold all along.
+                    append_role_based_fan_marker(erOverhangPerimeter, "_OVERHANG"sv,
+                                                 path_overhang_fan_active ||
+                                                     overhang_fan_on_for_role(overhang_fan_threshold, path.role()));
 
                     // ORCA: Add support for separate internal bridge fan speed control
                     append_role_based_fan_marker(erInternalBridgeInfill, "_INTERNAL_BRIDGE"sv, path.role() == erInternalBridgeInfill);

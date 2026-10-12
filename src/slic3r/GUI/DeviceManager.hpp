@@ -19,6 +19,7 @@
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
 #include "FirstRequestGate.hpp"
+#include "SsdpConnectType.hpp"
 #include "AmsDrying.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
@@ -606,6 +607,9 @@ public:
     // connect() is dialling the printer: arms the gate when no selection did (FirstRequestGate.hpp
     // SelectionGate::dial_started).
     void note_dial_started();
+    // connect(..., session_up = true): the printer's LAN session is already up (a re-selection
+    // that keeps it). Does not arm the gate (SelectionGate::dial_on_live_session).
+    void note_dial_on_live_session();
     bool m_redial_due { false };
     std::chrono::steady_clock::time_point m_redial_at {};
     // True (and logged) when the status request `what` is to be held back for the session.
@@ -1044,7 +1048,9 @@ public:
     std::vector<HMSItem>    hms_list;
 
     /* machine mqtt apis */
-    int connect(bool is_anonymous = false, bool use_openssl = true);
+    // `session_up`: the LAN session to this printer is already up and this call only confirms it
+    // (the plug-in's connect_printer is idempotent); the first-request gate is not armed.
+    int connect(bool is_anonymous = false, bool use_openssl = true, bool session_up = false);
     int disconnect();
 
     json_diff print_json;
@@ -1459,6 +1465,21 @@ public:
 
     /* create machine or update machine properties */
     void on_machine_alive(std::string json_str);
+    // The connection type a printer keeps after an announcement (SsdpConnectType.hpp). `list` is
+    // "local" or "user", for the log line written whenever the outcome for that printer and list
+    // changes.
+    void apply_ssdp_connect_type(MachineObject* obj, const char* list, const std::string& announced,
+                                 const std::string& announced_bind, bool saved_lan, bool has_access_code, long long now_ms);
+    std::map<std::string, std::string>                     m_ssdp_outcome_logged; // "<dev_id>|<list>" -> last line
+    std::map<std::string, SsdpConnectType::LanMemory>      m_ssdp_lan_memory;     // dev_id -> what it announced lately
+    static long long                                       ssdp_now_ms();
+    // The printer announced "lan" within SsdpConnectType::LAN_MEMORY_MS.
+    bool lan_announced_recently(const std::string& dev_id) const;
+    // The printer picker's "Other Device" click (SelectMachinePop): which dialog to offer for `obj`.
+    // A printer that announced "lan" recently is offered the access-code dialog, never the cloud
+    // bind; if a run of non-"lan" announcements had already switched it, it is made "lan" again
+    // here so the access code can be entered. Logs the decision (never the access code).
+    SsdpConnectType::PickerOffer picker_offer_for(MachineObject* obj, const char* panel_list);
     MachineObject* insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code);
     /* disconnect all machine connections */
     void disconnect_all();

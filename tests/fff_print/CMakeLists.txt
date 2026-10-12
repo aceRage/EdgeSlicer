@@ -7,6 +7,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fill.cpp
 	test_flow.cpp
 	test_gcode.cpp
+	test_cooling.cpp
 	test_mass_limited_acceleration.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp

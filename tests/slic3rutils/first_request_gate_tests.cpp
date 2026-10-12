@@ -492,3 +492,67 @@ TEST_CASE("[FirstRequest] an established session that drops is not re-dialled by
     h.lan_event(500);
     CHECK_FALSE(h.gate.dial_failed(60000)); // not dialling: the reconnect ladder owns this
 }
+
+// Re-selecting the LAN printer whose session is already up (DeviceManager::set_selected_machine's
+// keep_lan_session path, PR #444): connect_printer is idempotent and the plug-in reports nothing
+// back, so no session-up event follows. A hold armed for that connect would never be ended by one.
+TEST_CASE("[FirstRequest] re-selecting over a live LAN session holds nothing", "[FirstRequest]")
+{
+    GateHost h;
+    h.lan_up_at = 500;
+    h.gate.select(1, false);
+    h.lan_event(500); // the first selection's session is up
+    h.sent.clear();
+
+    SECTION("the bug: a plain dial_started arms a hold no event ends") {
+        h.gate.dial_started(30000); // what connect() did before it knew the session was up
+        CHECK(h.gate.dialling(30000));
+        h.publish(30100, "system/ledctrl", false);
+        h.publish(46000, "print/extrusion_cali_get", true); // the hold ran out: the first is dropped
+        CHECK(h.sent.size() == 1);
+        REQUIRE(h.not_sent.size() == 1);
+        CHECK(h.not_sent[0] == "system/ledctrl: the session did not come up within 15 s");
+    }
+    SECTION("dial_on_live_session: commands go straight out") {
+        SelectionGate::Up u = h.gate.dial_on_live_session(30000);
+        CHECK(u.send.empty());
+        CHECK_FALSE(h.gate.dialling(30000));
+        h.publish(30100, "system/ledctrl", false);
+        h.status_request(30200, "pushing/pushall");
+        h.publish(46000, "print/extrusion_cali_get", true);
+        CHECK(h.not_sent.empty());
+        CHECK(h.refused == 0);
+        REQUIRE(h.sent.size() == 3);
+        CHECK(h.sent[0] == "system/ledctrl");
+        CHECK(h.sent[1] == "pushing/pushall");
+        CHECK(h.sent[2] == "print/extrusion_cali_get");
+        CHECK(h.gate.queued() == 0);
+        CHECK(h.gate.held() == 0);
+    }
+    SECTION("a later real dial still holds, and the re-dial after a refusal is its own") {
+        h.gate.dial_on_live_session(30000);
+        h.gate.dial_started(40000); // e.g. the reconnect ladder after a drop
+        CHECK(h.gate.dialling(40000));
+        CHECK(h.gate.dial_failed(40100));
+    }
+}
+
+TEST_CASE("[FirstRequest] re-selecting over a live session sends what an earlier dial held", "[FirstRequest]")
+{
+    // The session's first report arrived (lan_session_up) before its Ok callback, and the user
+    // re-selected in between: what that dial held goes out, nothing is reported lost.
+    GateHost h;
+    h.lan_up_at = 300;
+    h.gate.select(1, false);
+    h.publish(100, "system/ledctrl", false);
+    REQUIRE(h.gate.queued() == 1);
+    SelectionGate::Up u = h.gate.dial_on_live_session(400);
+    REQUIRE(u.send.size() == 1);
+    for (const HeldCommand& c : u.send) h.publish(400, c.key, c.info);
+    CHECK(h.sent == std::vector<std::string>{"system/ledctrl"});
+    CHECK_FALSE(h.gate.dialling(400));
+    // A late Ok for the first dial changes nothing.
+    h.lan_event(600);
+    CHECK(h.not_sent.empty());
+    CHECK(h.refused == 0);
+}
