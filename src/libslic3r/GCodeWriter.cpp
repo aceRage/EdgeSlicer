@@ -3,6 +3,8 @@
 #include "Exception.hpp"
 #include "format.hpp"
 #include "LocalesUtils.hpp"
+#include "ClipperUtils.hpp"
+#include "Line.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -96,6 +98,92 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     m_max_jerk_z = print_config.machine_max_jerk_z.values.front();
     m_max_jerk_e = print_config.machine_max_jerk_e.values.front();
     m_resolution = print_config.resolution.value;
+    // Orca: capture the printable area(s) so a spiral lift can be skipped when its
+    // circle would leave the boundary and collide with the print limits. Full polygons
+    // are stored (not a bounding box) so the check stays correct for non-rectangular
+    // beds, and per-extruder areas are kept so printers with different boundaries per
+    // extruder use the right limit for whichever extruder is active.
+    auto to_scaled_polygon = [](const Pointfs &pts) {
+        Polygon poly;
+        poly.points.reserve(pts.size());
+        for (const Vec2d &p : pts)
+            poly.points.emplace_back(coord_t(scale_(p.x())), coord_t(scale_(p.y())));
+        poly.make_counter_clockwise();
+        return poly;
+    };
+
+    m_bed_printable_area.points.clear();
+    m_extruder_printable_areas.clear();
+
+    if (print_config.printable_area.values.size() >= 3)
+        m_bed_printable_area = to_scaled_polygon(print_config.printable_area.values);
+
+    const std::vector<Pointfs> &extruder_areas = print_config.extruder_printable_area.values;
+    if (!extruder_areas.empty()) {
+        m_extruder_printable_areas.resize(extruder_areas.size());
+        for (size_t i = 0; i < extruder_areas.size(); ++i) {
+            if (extruder_areas[i].size() < 3) {
+                // No dedicated area for this extruder: it can reach the whole bed.
+                m_extruder_printable_areas[i] = m_bed_printable_area;
+                continue;
+            }
+            Polygon extruder_poly = to_scaled_polygon(extruder_areas[i]);
+            if (m_bed_printable_area.points.size() < 3) {
+                m_extruder_printable_areas[i] = std::move(extruder_poly);
+                continue;
+            }
+            // The reachable area is the extruder area clipped to the bed. Bed shapes are
+            // convex in practice, so keep the largest resulting contour.
+            Polygons clipped = intersection(extruder_poly, m_bed_printable_area);
+            const Polygon *largest = nullptr;
+            double          best_area = 0.;
+            for (const Polygon &p : clipped) {
+                double a = std::abs(p.area());
+                if (a > best_area) { best_area = a; largest = &p; }
+            }
+            m_extruder_printable_areas[i] = largest ? *largest : std::move(extruder_poly);
+        }
+    }
+}
+
+const Polygon *GCodeWriter::active_printable_area() const
+{
+    if (const Extruder *e = this->extruder()) {
+        // Edge: our Extruder is a filament slot and has no extruder_id(); the extruder a filament
+        // prints from is filament_map (1-based), as in GCode::logical_extruder_for_filament() and
+        // find_reach_violations(). Printers without extruder_printable_area use the bed below.
+        const std::vector<int> &filament_map = this->config.filament_map.values;
+        const size_t            filament_id  = e->id();
+        if (filament_id < filament_map.size() && filament_map[filament_id] >= 1) {
+            const size_t id = size_t(filament_map[filament_id] - 1);
+            if (id < m_extruder_printable_areas.size() && m_extruder_printable_areas[id].points.size() >= 3)
+                return &m_extruder_printable_areas[id];
+        }
+    }
+    if (m_bed_printable_area.points.size() >= 3)
+        return &m_bed_printable_area;
+    return nullptr;
+}
+
+bool GCodeWriter::spiral_lift_fits_printable_area(const Vec2d &center, double radius) const
+{
+    const Polygon *area = this->active_printable_area();
+    if (area == nullptr)
+        return true; // Boundary unknown: don't restrict (preserve previous behavior).
+
+    const Point  c        = Point::new_scale(center.x(), center.y());
+    const double r_scaled = scale_(radius);
+    const double r2       = r_scaled * r_scaled;
+
+    // The spiral traces a full circle of `radius` around `center`, so the center must lie
+    // inside the printable area and every edge must be at least `radius` away from it.
+    if (!area->contains(c))
+        return false;
+    const Points &pts = area->points;
+    for (size_t i = 0, n = pts.size(); i < n; ++i)
+        if (Line::distance_to_squared(c, pts[i], pts[(i + 1) % n]) < r2)
+            return false;
+    return true;
 }
 
 void GCodeWriter::set_extruders(std::vector<unsigned int> extruder_ids)
@@ -671,7 +759,15 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
                 double radius = delta(2) / (2 * PI * atan(this->extruder()->travel_slope()));
                 Vec2d ij_offset = radius * delta_no_z.normalized();
                 ij_offset = { -ij_offset(1), ij_offset(0) };
-                slop_move = this->_spiral_travel_to_z(target(2), ij_offset, "spiral lift Z");
+                // Orca: only perform the spiral lift if its full circle stays inside the
+                // printable area of the active extruder, otherwise fall back to a normal
+                // lift to avoid colliding with the print boundary. `source` is already in
+                // bed coordinates (plate offset removed), matching the printable area.
+                const Vec2d spiral_center = { source.x() + ij_offset.x(), source.y() + ij_offset.y() };
+                if (this->spiral_lift_fits_printable_area(spiral_center, radius))
+                    slop_move = this->_spiral_travel_to_z(target(2), ij_offset, "spiral lift Z");
+                else
+                    slop_move = _travel_to_z(target.z(), "normal lift Z");
             }
             //BBS: LazyLift
             else if (m_to_lift_type == LiftType::LazyLift &&
