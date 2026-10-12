@@ -252,3 +252,143 @@ TEST_CASE("The fan returns to the layer speed after ironing", "[Cooling][Orca125
         }
     CHECK(checked > 0);
 }
+
+namespace {
+
+// A 30 mm sphere (overhangs of every degree) cooled with the overhang fan at 100% from a 25% overhang,
+// a 20% layer fan and no layer-time slowdown.
+DynamicPrintConfig sphere_overhang_fan_config(bool overhang_speed)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", "0.3"},
+        {"initial_layer_print_height", "0.3"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_arc_fitting", "0"},
+        {"enable_overhang_bridge_fan", "1"},
+        {"overhang_fan_threshold", "25%"},
+        {"overhang_fan_speed", "100"},
+        {"enable_overhang_speed", overhang_speed ? "1" : "0"},
+        {"fan_min_speed", "20"},
+        {"fan_max_speed", "20"},
+        {"close_fan_the_first_x_layers", "1"},
+        {"full_fan_speed_layer", "0"},
+        {"slow_down_for_layer_cooling", "0"},
+        {"machine_start_gcode", ""},
+        {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]"},
+    });
+    return config;
+}
+
+std::vector<std::string> feedrate_words(const std::string &gcode)
+{
+    std::vector<std::string> out;
+    std::istringstream       in(gcode);
+    std::string              line;
+    while (std::getline(in, line)) {
+        const std::string body = line.substr(0, line.find(';'));
+        std::istringstream words(body);
+        std::string        word;
+        while (words >> word)
+            if (word.size() > 1 && word.front() == 'F')
+                out.push_back(word);
+    }
+    return out;
+}
+
+} // namespace
+
+// Orca #14788: the overhang fan was only applied to walls when "Slow down for overhangs" was on,
+// because _extrude only measured the overhang for the slowdown.
+TEST_CASE("The overhang fan cools overhanging walls with the overhang slowdown off", "[Cooling][Orca14788]")
+{
+    const std::string gcode = slice({make_sphere(15., PI / 24.)}, sphere_overhang_fan_config(false));
+    const auto        moves = fan_at_extrusions(gcode);
+    size_t outer = 0, cooled = 0;
+    for (const FanAtExtrusion &m : moves)
+        if (m.role == "Outer wall" && m.layer > 1) {
+            ++outer;
+            if (m.fan == 255)
+                ++cooled;
+        }
+    INFO(cooled << " of " << outer << " outer wall moves at the overhang fan speed");
+    REQUIRE(outer > 0);
+    CHECK(cooled > 0);
+    CHECK(cooled < outer);
+
+    // The fan transitions do not slow anything down: the walls keep their speed, as with the overhang
+    // fan off.
+    DynamicPrintConfig no_fan = sphere_overhang_fan_config(false);
+    no_fan.set_deserialize_strict({{"enable_overhang_bridge_fan", "0"}});
+    const std::string no_fan_gcode = slice({make_sphere(15., PI / 24.)}, no_fan);
+    std::vector<std::string> with_fan_f = feedrate_words(gcode), without_fan_f = feedrate_words(no_fan_gcode);
+    std::sort(with_fan_f.begin(), with_fan_f.end());
+    with_fan_f.erase(std::unique(with_fan_f.begin(), with_fan_f.end()), with_fan_f.end());
+    std::sort(without_fan_f.begin(), without_fan_f.end());
+    without_fan_f.erase(std::unique(without_fan_f.begin(), without_fan_f.end()), without_fan_f.end());
+    CHECK(with_fan_f == without_fan_f);
+}
+
+namespace {
+
+// Two filaments with the same 20% layer fan: the first prints the walls, outer wall first, with every
+// outer wall cooled by its overhang fan at 100%; the second prints the infill with no overhang fan.
+// The tool change G-code is a comment, so the tool change carries the _FORCE_RESUME_FAN_SPEED marker.
+std::string slice_two_filaments_overhang_fan(const char *change_gcode)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+    config.set_key_value("change_filament_gcode", new ConfigOptionString(change_gcode));
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"wall_filament", 1},
+        {"sparse_infill_filament", 2},
+        {"solid_infill_filament", 2},
+        {"wall_loops", 2},
+        {"wall_sequence", "outer wall/inner wall"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_overhang_bridge_fan", "1,0"},
+        {"overhang_fan_threshold", "0%,0%"},
+        {"overhang_fan_speed", "100,100"},
+        {"fan_min_speed", "20,20"},
+        {"fan_max_speed", "20,20"},
+        {"close_fan_the_first_x_layers", "1,1"},
+        {"full_fan_speed_layer", "0,0"},
+        {"slow_down_for_layer_cooling", "0,0"},
+        {"machine_start_gcode", ""},
+        {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]"},
+    });
+    return slice({TestMesh::cube_20x20x20}, config);
+}
+
+} // namespace
+
+// Orca #14788: CoolingBuffer did not record the layer fan speed it wrote when an overhang fan region
+// ended, so a tool change's _FORCE_RESUME_FAN_SPEED put the first filament's overhang fan speed back
+// on, and the second filament printed at it.
+TEST_CASE("The overhang fan of one filament does not leak into the next after a tool change", "[Cooling][Orca14788]")
+{
+    const auto moves = fan_at_extrusions(slice_two_filaments_overhang_fan(";tool change\n"));
+    size_t second = 0, cooled_outer = 0;
+    for (const FanAtExtrusion &m : moves) {
+        if (m.layer < 2)
+            continue;
+        if (m.tool == 1) {
+            ++second;
+            INFO("layer " << m.layer << " " << m.role);
+            CHECK(m.fan == 51); // 20%
+        } else if (m.role == "Outer wall" && m.fan == 255)
+            ++cooled_outer;
+    }
+    CHECK(second > 0);
+    CHECK(cooled_outer > 0);
+}
