@@ -7144,14 +7144,21 @@ void DeviceManager::on_machine_alive(std::string json_str)
 
         MachineObject* obj;
 
+        // A printer the user saved as a LAN printer stays one, whatever an announcement says
+        // (SsdpConnectType.hpp): a downgrade offered it a cloud bind ("Log in printer"), dropped it
+        // from the LAN lists and erased it from the saved printers.
+        AppConfig* const app_config = Slic3r::GUI::wxGetApp().app_config;
+        const bool saved_lan = app_config && app_config->get_local_machines().count(dev_id) > 0;
+
         /* update userMachineList info */
         auto it = userMachineList.find(dev_id);
         if (it != userMachineList.end()) {
             it->second->dev_ip                  = dev_ip;
-            it->second->bind_state              = bind_state;
             it->second->bind_sec_link           = sec_link;
-            it->second->dev_connection_type     = connect_type;
             it->second->bind_ssdp_version       = ssdp_version;
+            // The cloud list's access code comes from the account, not the user: only a saved
+            // LAN printer is kept LAN here.
+            apply_ssdp_connect_type(it->second, connect_type, bind_state, saved_lan, false);
         }
 
         /* update localMachineList */
@@ -7179,8 +7186,7 @@ void DeviceManager::on_machine_alive(std::string json_str)
 
 
             obj->wifi_signal        = printer_signal;
-            obj->dev_connection_type= connect_type;
-            obj->bind_state         = bind_state;
+            apply_ssdp_connect_type(obj, connect_type, bind_state, saved_lan, obj->has_access_right());
             obj->bind_sec_link      = sec_link;
             obj->bind_ssdp_version = ssdp_version;
             {
@@ -7209,8 +7215,6 @@ void DeviceManager::on_machine_alive(std::string json_str)
             obj = new MachineObject(m_agent, dev_name, dev_id, dev_ip);
             obj->printer_type = identify_printer_type(printer_type_str, dev_id);
             obj->wifi_signal = printer_signal;
-            obj->dev_connection_type = connect_type;
-            obj->bind_state     = bind_state;
             obj->bind_sec_link  = sec_link;
             obj->dev_connection_name = connection_name;
             obj->bind_ssdp_version = ssdp_version;
@@ -7222,6 +7226,9 @@ void DeviceManager::on_machine_alive(std::string json_str)
                 obj->set_access_code(Slic3r::GUI::wxGetApp().app_config->get("access_code", dev_id));
                 obj->set_user_access_code(Slic3r::GUI::wxGetApp().app_config->get("user_access_code", dev_id));
             }
+            // After the codes: a saved LAN printer that was not loaded at start-up (no code then)
+            // still counts as one.
+            apply_ssdp_connect_type(obj, connect_type, bind_state, saved_lan, obj->has_access_right());
             localMachineList.insert(std::make_pair(dev_id, obj));
 
             /* if (!obj->dev_ip.empty()) {
@@ -7237,6 +7244,20 @@ void DeviceManager::on_machine_alive(std::string json_str)
     catch (...) {
         ;
     }
+}
+
+void DeviceManager::apply_ssdp_connect_type(MachineObject* obj, const std::string& announced, const std::string& announced_bind,
+                                            bool saved_lan, bool has_access_code)
+{
+    if (!obj) return;
+    const SsdpConnectType::Result r = SsdpConnectType::after_announcement(obj->dev_connection_type, announced, announced_bind,
+                                                                          saved_lan, has_access_code);
+    if (r.kept_lan && m_ssdp_kept_lan_logged.insert(obj->dev_id + "|" + announced).second)
+        BOOST_LOG_TRIVIAL(warning) << "SsdpDiscovery: " << obj->dev_id << " announced connect_type='" << announced << "' bind_state='"
+                                   << announced_bind << "'; kept as a LAN printer ("
+                                   << (saved_lan ? "saved LAN printer" : "access code entered") << ")";
+    obj->dev_connection_type = r.connect_type;
+    obj->bind_state          = r.bind_state;
 }
 
 MachineObject* DeviceManager::insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code)
@@ -7400,8 +7421,17 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
     auto my_machine_list = get_my_machine_list();
     auto it = my_machine_list.find(dev_id);
 
+    // Re-selecting the LAN printer whose session is already up (the Device tab and the printer
+    // picker re-select on every visit): keep the session and the state it reported, instead of the
+    // disconnect + reset + dial below, which logged "lan connected" again on every visit.
+    // connect_printer is idempotent in the plug-in for the same address and access code, and dials
+    // again when either changed (an access code just re-entered).
+    const bool keep_lan_session = m_agent && !dev_id.empty() && selected_machine == dev_id && it != my_machine_list.end() &&
+                                  it->second->connection_type() == "lan" && it->second->lan_session_up() &&
+                                  !it->second->is_connecting();
+
     // disconnect last
-    auto last_selected = my_machine_list.find(selected_machine);
+    auto last_selected = keep_lan_session ? my_machine_list.end() : my_machine_list.find(selected_machine);
     if (last_selected != my_machine_list.end()) {
         last_selected->second->m_active_state = MachineObject::NotActive;
         if (last_selected->second->connection_type() == "lan") {
@@ -7423,6 +7453,15 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
                 Slic3r::GUI::wxGetApp().on_start_subscribe_again(dev_id);
 
                 return true;
+            } else if (keep_lan_session) {
+                // No connecting state is set: no connected callback follows an idempotent connect.
+                BOOST_LOG_TRIVIAL(info) << "set_selected_machine: " << dev_id << " re-selected, LAN session already up";
+                it->second->reset_update_time();
+#if !BBL_RELEASE_TO_PUBLIC
+                it->second->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
+#else
+                it->second->connect(false, it->second->local_use_ssl_for_mqtt);
+#endif
             } else {
                 // lan mode printer reconnect printer
                 if (m_agent) {

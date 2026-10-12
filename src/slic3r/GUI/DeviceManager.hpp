@@ -19,6 +19,7 @@
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
 #include "FirstRequestGate.hpp"
+#include "SsdpConnectType.hpp"
 #include "AmsDrying.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
@@ -1450,6 +1451,11 @@ public:
 
     /* create machine or update machine properties */
     void on_machine_alive(std::string json_str);
+    // The connection type a printer keeps after an announcement (SsdpConnectType.hpp), logged
+    // once per printer and announced value when a LAN printer is kept LAN.
+    void apply_ssdp_connect_type(MachineObject* obj, const std::string& announced, const std::string& announced_bind,
+                                 bool saved_lan, bool has_access_code);
+    std::set<std::string> m_ssdp_kept_lan_logged; // "<dev_id>|<announced>"
     MachineObject* insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code);
     /* disconnect all machine connections */
     void disconnect_all();
