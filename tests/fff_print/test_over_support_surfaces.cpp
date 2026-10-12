@@ -437,19 +437,22 @@ TEST_CASE("over_support: nothing is reclassified when the generator will not sup
 
 TEST_CASE("over_support: the tree generators refuse bridges each in their own way", "[OverSupport]")
 {
-    // Read off the three remove_bridges_from_contacts call sites (PrintObject::over_support_settings):
-    // the ORGANIC tree drops every bridge under bridge_no_support, length unmeasured, so the feature
-    // stands down; the CLASSIC tree ignores bridge_no_support and drops only bridges shorter than
-    // max_bridge_length in both directions - the 20 mm slab is longer than the 10 mm default, so it
-    // is supported and reclassified, and a 30 mm limit makes it bridgeable again.
+    // Read off the remove_bridges_from_contacts call sites (PrintObject::over_support_settings): every
+    // TREE style - classic and organic alike (Orca #11295) - ignores bridge_no_support and drops only
+    // bridges shorter than max_bridge_length in both directions - the 20 mm slab is longer than the
+    // 10 mm default, so it is supported and reclassified, and a 30 mm limit makes it bridgeable again.
+    // The organic tree used to be keyed on bridge_no_support here, which its generator never read.
     DynamicPrintConfig config = base_config();
     config.set_deserialize_strict({ { "over_support_surfaces", "1" }, { "support_type", "tree(auto)" } });
 
-    SECTION("organic (the default tree style) stands down under bridge_no_support") {
-        config.set_deserialize_strict({ { "support_style", "default" }, { "bridge_no_support", "1" } });
-        CHECK_FALSE(object_has_surface_type(config, stBottomOverSupport));
-        config.set_deserialize_strict({ { "support_style", "organic" } });
-        CHECK_FALSE(object_has_surface_type(config, stBottomOverSupport));
+    SECTION("organic (the default tree style) measures against max_bridge_length and ignores bridge_no_support") {
+        for (const char *style : { "default", "organic" }) {
+            INFO("support_style " << style);
+            config.set_deserialize_strict({ { "support_style", style }, { "bridge_no_support", "1" }, { "max_bridge_length", "10" } });
+            CHECK(object_has_surface_type(config, stBottomOverSupport));
+            config.set_deserialize_strict({ { "max_bridge_length", "30" } });
+            CHECK_FALSE(object_has_surface_type(config, stBottomOverSupport));
+        }
     }
     SECTION("organic reclassifies with bridge_no_support off") {
         config.set_deserialize_strict({ { "support_style", "organic" }, { "bridge_no_support", "0" }, { "max_bridge_length", "10" } });
@@ -461,6 +464,30 @@ TEST_CASE("over_support: the tree generators refuse bridges each in their own wa
         config.set_deserialize_strict({ { "max_bridge_length", "30" } });
         CHECK_FALSE(object_has_surface_type(config, stBottomOverSupport));
     }
+}
+
+TEST_CASE("over_support: the organic generator measures bridges against max_bridge_length, not bridge_no_support", "[OverSupport][Support]")
+{
+    // The classifier above follows the generator, so check the generator itself (Orca #11295): the
+    // organic tree reads max_bridge_length through TreeSupport::detect_overhangs() and never reads
+    // bridge_no_support. Same 20 mm slab on a 2 mm leg, with supports off the over-support feature.
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({ { "support_type", "tree(auto)" }, { "support_style", "organic" } });
+    auto support_length = [&config](const char *bridge_no_support, const char *max_bridge_length) {
+        DynamicPrintConfig c = config;
+        c.set_deserialize_strict({ { "bridge_no_support", bridge_no_support }, { "max_bridge_length", max_bridge_length } });
+        const std::string gcode = slice_leg_and_slab(c);
+        return stats_for_type(gcode, "Support").xy_total + stats_for_type(gcode, "Support interface").xy_total;
+    };
+    const double supported = support_length("0", "10");
+    INFO("support under the slab, max_bridge_length 10: " << supported << " mm");
+    CHECK(supported > 100.);
+    // bridge_no_support changes nothing for an organic tree.
+    CHECK_THAT(support_length("1", "10"), WithinAbs(supported, 1e-6));
+    // A limit longer than the slab makes its underside a bridge: no support under it.
+    const double bridged = support_length("0", "30");
+    INFO("max_bridge_length 30: " << bridged << " mm");
+    CHECK(bridged < 0.1 * supported);
 }
 
 TEST_CASE("over_support: with supports off every bottom stays a bridge", "[OverSupport]")

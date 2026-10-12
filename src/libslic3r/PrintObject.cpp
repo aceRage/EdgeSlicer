@@ -1623,23 +1623,25 @@ PrintObject::OverSupportSettings PrintObject::over_support_settings() const
     // Auto support types put support under every overhang they detect, and a bottom bridge is
     // an overhang by construction. Manual (painted) types only support what the user enforced.
     s.is_auto = is_auto(m_config.support_type.value);
-    // How a generator refuses to support a bridge is not the same in all three of them, and the
+    // How a generator refuses to support a bridge is not the same in both of them, and the
     // classifier has to follow each one or it will call a face "over support" that nothing will be
-    // under. Read off the three call sites:
+    // under. Read off the two call sites:
     //   normal(auto)          SupportMaterial.cpp - `if (bridge_no_support) remove_bridges_from_
     //                         contacts(...)`, which takes NO length and drops every bridge it can
     //                         detect. The feature stands down for the whole object.
-    //   tree(auto), organic   TreeSupport3D.cpp - the same length-less removal, same gate.
-    //                         TreeSupport::generate() hands organic trees to TreeSupport3D before
-    //                         detect_overhangs() runs, so the length rule never applies here. The
-    //                         default tree style resolves to organic (SupportParameters.hpp).
-    //   tree(auto), classic   TreeSupport.cpp - `if (max_bridge_length > 0) remove_bridges_from_
-    //                         contacts(..., max_bridge_length, ...)`: a bottom bridge shorter than
+    //   tree(auto), every     TreeSupport.cpp - `if (max_bridge_length > 0) remove_bridges_from_
+    //   style                 contacts(..., max_bridge_length, ...)`: a bottom bridge shorter than
     //                         max_bridge_length in BOTH directions, and a straight perimeter segment
     //                         anchored at both ends and that short, get no support and stay real
     //                         bridges; a longer one is supported. Not gated on bridge_no_support,
     //                         and max_bridge_length defaults to 10 mm, so a gate that demanded 0
-    //                         here switched the feature off on every classic tree profile.
+    //                         here switched the feature off on every tree profile. ORGANIC trees
+    //                         take the same path: TreeSupport3D's generate_support_areas() calls
+    //                         TreeSupport::detect_overhangs() (its own length-less generate_
+    //                         overhangs() is compiled out), so bridge_no_support never reached an
+    //                         organic tree. Orca #11295 made the GUI say so (max_bridge_length shown
+    //                         and bridge_no_support hidden for every tree style); before it, this
+    //                         classifier keyed organic trees on bridge_no_support.
     // s.bridgeable is that length, scaled; 0 means nothing is bridgeable.
     if (s.is_auto) {
         if (m_config.support_type.value == stNormalAuto) {
@@ -1647,13 +1649,8 @@ PrintObject::OverSupportSettings PrintObject::over_support_settings() const
         } else if (m_config.support_type.value == stTreeAuto) {
             s.is_auto &= (m_config.support_interface_top_layers.value > 0 &&
                           m_config.support_critical_regions_only.value == false);
-            const auto style = m_config.support_style.value;
-            if (style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid) {
-                if (m_config.max_bridge_length.value > 0)
-                    s.bridgeable = scale_(m_config.max_bridge_length.value);
-            } else {
-                s.is_auto &= ! m_config.bridge_no_support.value;
-            }
+            if (m_config.max_bridge_length.value > 0)
+                s.bridgeable = scale_(m_config.max_bridge_length.value);
         }
     }
     this->slice_support_annotations(s.enforcers, s.blockers);
