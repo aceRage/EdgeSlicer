@@ -50,8 +50,9 @@ std::vector<ExtendedPoint> estimate_points_properties(const POINTS              
                                                       const AABBTreeLines::LinesDistancer<L> &unscaled_prev_layer,
                                                       float                                   flow_width,
                                                       float                                   max_line_length = -1.0f,
-                                                      [[maybe_unused]] float                  min_distance    = -1.0f,
-                                                      // Speed an overhang distance prints at. Without it, every line over 4mm is split.
+                                                      float                                   min_distance    = -1.0f,
+                                                      // Speed an overhang distance prints at. Without it, interior sampling
+                                                      // is skipped and every line over 4mm is split.
                                                       const std::function<float(float)>      &distance_to_speed     = {},
                                                       // Overlap (1 - distance / flow_width) at or below which the overhang
                                                       // fan switches on; negative when the fan does not depend on overlap.
@@ -142,10 +143,10 @@ std::vector<ExtendedPoint> estimate_points_properties(const POINTS              
         points.push_back(next_point);
     }
 
-    // ORCA: How an overhang distance prints, which is what the pass below compares. A segment is printed at the lower
+    // ORCA: How an overhang distance prints, which is what the passes below compare. A segment is printed at the lower
     // of the speeds at its two ends, and with the overhang fan on if the overlap at either end turns it on. A point
     // added to a path can therefore only change the G-code where it prints at a different speed or fan state from the
-    // points either side of it, and the pass below adds points there and nowhere else.
+    // points either side of it, and the passes below add points there and nowhere else.
     const float width_inv = 1.f / flow_width;
     // Whether an overhang distance turns the overhang fan on. The overlap test check_overhang_fan applies in GCode.cpp.
     auto fan_on = [fan_overlap_threshold, width_inv](float distance) {
@@ -162,6 +163,105 @@ std::vector<ExtendedPoint> estimate_points_properties(const POINTS              
     auto slower_or_cooled = [&distance_to_speed, &fan_on](float a, float b) {
         return distance_to_speed(a) < distance_to_speed(b) - 1.f || (fan_on(a) && !fan_on(b));
     };
+
+    // ORCA: Interior sampling
+    // The passes below infer the support under a span from its endpoints alone, so a part that is supported
+    // differently from both ends is invisible to them. The outer perimeter of an overhang whose ends are supported by
+    // reads as supported along its whole length. Probe the interior, keep the samples the endpoint interpolation fails to predict,
+    // and bisect either side of each one, so a span that is only partly unsupported gets points where its support actually changes
+    // instead of one reading being spread across all of it.
+    // Skipped where there is nothing to find: min_distance <= 0 when no overhang can slow this path down, and
+    // fan_overlap_threshold < 0 when no overhang switches the fan on. It also needs distance_to_speed to tell which of
+    // the points it could add would change the G-code.
+    if (PREV_LAYER_BOUNDARY_OFFSET && ADD_INTERSECTIONS && distance_to_speed && (min_distance > 0 || fan_overlap_threshold >= 0.f)) {
+        // Probe at least this densely before treating matching samples as evidence that a span is uniform. The
+        // segmentation pass below only splits lines of 2mm or more, and every pass here drops points closer
+        // together than min_spacing, so finer discovery would not produce a more precise transition.
+        const double max_probe_spacing = std::max(2., 4. * min_spacing);
+        // A backstop for that length test, which on a non-finite length would never be met.
+        constexpr int max_bisection_depth = 10;
+
+        // Part of a segment still to bisect: its positions along the segment and bisections left.
+        struct Subspan { double t0, t1; int depth; };
+
+        std::vector<ExtendedPoint>            sampled_points; // Populated lazily, on the first insertion
+        std::vector<std::pair<double, float>> interior;       // Samples of one segment, keyed by position along it
+        std::vector<Subspan>                  pending;
+
+        for (size_t point_idx = 0; point_idx + 1 < points.size(); ++point_idx) {
+            const ExtendedPoint& curr     = points[point_idx];
+            const ExtendedPoint& next     = points[point_idx + 1];
+            const Vec2d          step     = next.position - curr.position;
+            const double         line_len = step.norm();
+
+            interior.clear();
+            if (line_len >= max_probe_spacing)
+                pending.push_back({0., 1., max_bisection_depth});
+
+            while (!pending.empty()) {
+                const Subspan subspan = pending.back();
+                pending.pop_back();
+                if (subspan.depth <= 0 || (subspan.t1 - subspan.t0) * line_len < max_probe_spacing)
+                    continue;
+
+                const double t = 0.5 * (subspan.t0 + subspan.t1);
+                const Vec2d  probe = curr.position + t * step;
+                auto [distance, nearest_line, x] = unscaled_prev_layer.template distance_from_lines_extra<SIGNED_DISTANCE>(
+                    probe.template cast<AABBScalar>());
+                const float sampled = float(distance + boundary_offset);
+
+                interior.emplace_back(t, sampled);
+                pending.push_back({subspan.t0, t, subspan.depth - 1});
+                pending.push_back({t, subspan.t1, subspan.depth - 1});
+            }
+
+            if (!interior.empty()) {
+                std::sort(interior.begin(), interior.end(),
+                          [](const std::pair<double, float>& l, const std::pair<double, float>& r) { return l.first < r.first; });
+                // Coarse probing keeps every sample it took until this pass can see which ones bracket a speed or
+                // fan transition. Matching samples cannot be discarded during discovery: one may be the last
+                // supported point before a narrow unsupported pocket found by a later probe.
+                size_t kept = 0;
+                for (size_t i = 0; i < interior.size(); ++i) {
+                    const float sample    = interior[i].second;
+                    const bool  at_start  = kept == 0;                     // Nothing kept yet, so the segment's own start precedes it
+                    const bool  at_end    = i + 1 == interior.size();      // And nothing follows the last sample but the segment's end
+                    const float before    = at_start ? curr.distance : interior[kept - 1].second;
+                    const float after     = at_end ? next.distance : interior[i + 1].second;
+                    // A sample is worth a point in the path only where it prints differently, in speed or fan state,
+                    // from the points either side of it. Differing from one of the segment's own ends is not enough on
+                    // its own where the sample is not the slower or cooled of the two: the segmentation pass below
+                    // already confines the slowdown and cooling at an end, at a distance taken from how far out that
+                    // end is rather than from wherever bisection happened to stop, and a point here would leave the
+                    // span beside the end too short for that pass to run at all. Support an end cannot account for,
+                    // where the interior is the slower or cooled of the two, is exactly what this pass is here to find.
+                    const bool worth_before = !same_speed_and_fan(sample, before) && (!at_start || slower_or_cooled(sample, before));
+                    const bool worth_after  = !same_speed_and_fan(sample, after) && (!at_end || slower_or_cooled(sample, after));
+                    if (worth_before || worth_after)
+                        interior[kept++] = interior[i];
+                }
+                interior.resize(kept);
+            }
+
+            if (!interior.empty() && sampled_points.empty()) {
+                sampled_points.reserve(points.size() + 8);
+                sampled_points.assign(points.begin(), points.begin() + point_idx + 1);
+            }
+            if (!sampled_points.empty()) {
+                // Only a sub-span of max_probe_spacing or more is ever bisected, so these sit at least
+                // 2 * min_spacing apart, and need none of the filtering the passes either side of this one do.
+                for (const auto& [t, distance] : interior) {
+                    ExtendedPoint sample{};
+                    sample.position = curr.position + t * step;
+                    sample.distance = distance;
+                    sampled_points.push_back(sample);
+                }
+                sampled_points.push_back(next);
+            }
+        }
+        if (!sampled_points.empty())
+            points = std::move(sampled_points);
+    }
 
     // Segmentation handling
     if (PREV_LAYER_BOUNDARY_OFFSET && ADD_INTERSECTIONS) {
@@ -480,7 +580,7 @@ public:
             }
         }
 
-        // If no overhang distance slows this path down, -1 leaves splitting to a fan switch only.
+        // If no overhang distance slows this path down, -1 turns interior sampling off unless the overhang fan can switch.
         // Lines are only split where an end prints slower or cooled, so here only a fan switch splits them.
         if (!found)
             smallest_distance_with_lower_speed=-1.f;
