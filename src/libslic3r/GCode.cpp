@@ -2824,7 +2824,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_last_mm3_per_mm = 0.;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
-    m_fan_mover.release();
+    m_fan_mover.reset();
     m_layer_time_speed_smoothing.reset();
 
     m_writer.set_is_bbl_machine(is_bbl_printers);
