@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Flashforge PLA Silk @FF Adventurer A5",
-	"inherits": "Generic PLA-Silk @Flashforge",
+	"inherits": "Flashforge Generic PLA-Silk",
 	"from": "system",
 	"setting_id": "XXmeUWaLyVCTDS6G",
 	"filament_id": "OFgjgN35",

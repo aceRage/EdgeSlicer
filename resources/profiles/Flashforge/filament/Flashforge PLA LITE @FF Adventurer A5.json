@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Flashforge PLA LITE @FF Adventurer A5",
-	"inherits": "Generic PLA @Flashforge",
+	"inherits": "Flashforge Generic PLA",
 	"from": "system",
 	"setting_id": "2QZaQyg66IJPbsSc",
 	"filament_id": "OFDDdgHM",

@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Flashforge PETG Transparent @FF Adventurer A5",
-	"inherits": "Generic PETG @Flashforge",
+	"inherits": "Flashforge Generic PETG",
 	"from": "system",
 	"setting_id": "axOWrjnN5lofH9qM",
 	"filament_id": "OFwjMiKL",

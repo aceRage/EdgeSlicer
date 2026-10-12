@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Flashforge PETG Pro @FF Adventurer A5",
-	"inherits": "Generic PETG @Flashforge",
+	"inherits": "Flashforge Generic PETG",
 	"from": "system",
 	"setting_id": "rPy6e6kaIt2tI34j",
 	"filament_id": "OFXiArjA",

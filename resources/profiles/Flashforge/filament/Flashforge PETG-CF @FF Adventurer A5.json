@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Flashforge PETG-CF @FF Adventurer A5",
-	"inherits": "Generic PETG-CF10 @Flashforge",
+	"inherits": "Flashforge Generic PETG-CF10",
 	"from": "system",
 	"setting_id": "aDSOS4PWssYHk8Fh",
 	"filament_id": "OFuFEtKX",

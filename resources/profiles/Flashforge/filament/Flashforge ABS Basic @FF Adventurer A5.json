@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Flashforge ABS Basic @FF Adventurer A5",
-	"inherits": "Generic ABS @Flashforge",
+	"inherits": "Flashforge Generic ABS",
 	"from": "system",
 	"setting_id": "rDW4AwKc7SD7WIxN",
 	"filament_id": "OFibWuBd",

@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Flashforge ASA Basic @FF Adventurer A5",
-	"inherits": "Generic ASA @Flashforge",
+	"inherits": "Flashforge Generic ASA",
 	"from": "system",
 	"setting_id": "FY9mcqOyuu1Gqq1m",
 	"filament_id": "OFFFg2Pf",

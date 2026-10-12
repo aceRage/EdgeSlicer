@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Kexcelled TPU 64D @FF Adventurer A5",
-	"inherits": "Generic TPU @Flashforge",
+	"inherits": "Flashforge Generic TPU",
 	"from": "system",
 	"setting_id": "OB4I8nwZn8sCcCcF",
 	"filament_id": "OF20zavY",

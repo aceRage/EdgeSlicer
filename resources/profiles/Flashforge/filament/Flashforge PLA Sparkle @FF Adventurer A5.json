@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Flashforge PLA Sparkle @FF Adventurer A5",
-	"inherits": "Generic PLA @Flashforge",
+	"inherits": "Flashforge Generic PLA",
 	"from": "system",
 	"setting_id": "dscnwSfbrGWiS4Um",
 	"filament_id": "OFV5c8hG",
