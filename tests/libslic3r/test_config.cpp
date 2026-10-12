@@ -1512,3 +1512,13 @@ TEST_CASE("apply ignore_nonexistent is honoured when typed apply cannot run", "[
     REQUIRE_NOTHROW(region.apply(object, true));
     REQUIRE_THROWS_AS(region.apply(object, false), UnknownOptionException);
 }
+
+TEST_CASE("normalize_fdm without print_sequence does not crash", "[Config]")
+{
+    // Snap #975 / D-05a: used_filaments > 1 used to dereference a null print_sequence pointer.
+    DynamicPrintConfig cfg;
+    cfg.set_deserialize_strict({{"enable_prime_tower", "1"}});
+    REQUIRE_NOTHROW(cfg.normalize_fdm_2(2, 2));
+    REQUIRE_NOTHROW(cfg.normalize_fdm(2));
+    CHECK(cfg.opt_bool("enable_prime_tower") == true);
+}
