@@ -137,7 +137,8 @@ public:
         std::string jwt, err;
         if (!provider_token(host, jwt, err)) { res.error = err; return res; }
 
-        const std::string body = detail::apns_alert_payload(req);
+        const bool        live = req.push_type == "liveactivity";
+        const std::string body = live ? detail::apns_liveactivity_payload(req) : detail::apns_alert_payload(req);
 
         const std::string url = host + "/3/device/" + req.device_token;
         std::string       answer;
@@ -149,15 +150,16 @@ public:
             // because there is no TLS and so no ALPN to negotiate with.
             .http_version(loopback_mock ? CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE : CURL_HTTP_VERSION_2TLS)
             .header("authorization", "bearer " + jwt)
-            .header("apns-topic", bundle)
-            // Our notifications are always user-visible alerts. Apple requires this on watchOS 6+
-            // and asks that it "accurately reflect notification payload contents" everywhere.
-            .header("apns-push-type", "alert")
+            .header("apns-topic", detail::apns_topic_for(req, bundle))
+            // An alert, or a Live Activity update. Apple requires this on watchOS 6+ and asks that
+            // it "accurately reflect notification payload contents" everywhere.
+            .header("apns-push-type", detail::apns_push_type_for(req))
             .header("apns-priority", req.priority >= 10 ? "10" : "5")
             // A nonzero expiration means "store and retry for this long"; a print alert that
             // arrives after the print is over is noise, so this is short by design.
             .header("apns-expiration", std::to_string(apns_now_s() + req.ttl_seconds))
-            .header("apns-collapse-id", req.collapse_id)
+            // A Live Activity push is ordered by its aps.timestamp, never collapsed.
+            .header("apns-collapse-id", live ? std::string() : req.collapse_id)
             .header("Content-Type", "application/json")
             .set_post_body(body)
             .on_complete([&](std::string b, unsigned st) { res.ok = true; res.status = (int) st; answer = b; })
@@ -283,6 +285,23 @@ std::string apns_alert_payload(const PushRequest& req)
     payload["v"] = 1;
     payload["e"] = req.ciphertext_b64u;
     return payload.dump();
+}
+
+std::string apns_liveactivity_payload(const PushRequest& req)
+{
+    json aps;
+    try { aps = json::parse(req.la_aps); } catch (...) { aps = json::object(); }
+    return json{ { "aps", aps } }.dump();
+}
+
+std::string apns_topic_for(const PushRequest& req, const std::string& bundle)
+{
+    return req.push_type == "liveactivity" ? bundle + ".push-type.liveactivity" : bundle;
+}
+
+const char* apns_push_type_for(const PushRequest& req)
+{
+    return req.push_type == "liveactivity" ? "liveactivity" : "alert";
 }
 
 } // namespace detail
