@@ -6684,6 +6684,31 @@ void Print::export_gcode_from_previous_file(const std::string& file, GCodeProces
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ <<  boost::format(":  process the G-code file %1% successfully")%file.c_str();
 }
 
+void Print::reload_gcode_moves(GCodeProcessorResult* result) const
+{
+    GCodeProcessor processor;
+    GCodeProcessor::s_IsBBLPrinter = is_BBL_printer();
+    const Vec3d origin = this->get_plate_origin();
+    processor.set_xy_offset(origin(0), origin(1));
+    // Orca keeps nozzle_group_result on GCodeProcessorResult and re-seeds the
+    // processor from it; Edge stores grouping on Print instead, so the rest of
+    // `result` (including anything the preview does not re-read) is simply kept.
+    try {
+        processor.process_file(result->filename);
+    } catch (const std::exception& ex) {
+        // The edited file is what gets printed, so failing to preview it must not fail the slice.
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": cannot re-read the G-code file " << result->filename << ": " << ex.what();
+        std::lock_guard<std::mutex> lock(result->result_mutex);
+        result->lines_ends.clear();
+        return;
+    }
+
+    GCodeProcessorResult& reloaded = processor.result();
+    std::lock_guard<std::mutex> lock(result->result_mutex);
+    result->moves      = std::move(reloaded.moves);
+    result->lines_ends = std::move(reloaded.lines_ends);
+}
+
 std::tuple<float, float> Print::object_skirt_offset(double margin_height) const
 {
     if (config().skirt_loops == 0 || config().skirt_type != stPerObject)

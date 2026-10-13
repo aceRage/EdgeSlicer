@@ -240,8 +240,13 @@ void BackgroundSlicingProcess::process_fff()
 		//BBS: add plate index into render params
 		m_temp_output_path = this->get_current_plate()->get_tmp_gcode_path();
 		m_fff_print->export_gcode(m_temp_output_path, m_gcode_result, [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
-		if(m_fff_print->is_BBL_printer())
-			run_post_process_scripts(m_temp_output_path, false, "File", m_temp_output_path, m_fff_print->full_print_config());
+		// BBL printers post-process the g-code in place here, in the file the G-code viewer maps, so
+		// the preview re-reads its moves and line offsets from the edited file. The rest of m_gcode_result
+		// is kept (Edge stores nozzle grouping on Print, not on GCodeProcessorResult).
+		if (m_fff_print->is_BBL_printer()) {
+			if (run_post_process_scripts(m_temp_output_path, false, "File", m_temp_output_path, m_fff_print->full_print_config()))
+				m_fff_print->reload_gcode_moves(m_gcode_result);
+		}
 
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": export gcode finished");
 	}
