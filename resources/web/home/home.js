@@ -420,6 +420,46 @@
       if (/^--[a-z-]+$/.test(name) && typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value))
         root.style.setProperty(name, value);
     }
+    accentForText(theme);
+  }
+
+  // WCAG AA (4.5:1) for accent-coloured text. A theme's accent is meant for borders and fills, so
+  // unless the theme names them, --accent-strong (under --accent-fg) and --accent-text (on
+  // --accent-soft and --bg) are the accent shaded towards black or white just far enough.
+  function accentForText(theme) {
+    const root = document.documentElement, css = getComputedStyle(root);
+    const rgb = name => {
+      const m = /^#([0-9a-f]{6})$/i.exec(css.getPropertyValue(name).trim());
+      return m ? [0, 2, 4].map(i => parseInt(m[1].substr(i, 2), 16)) : null;
+    };
+    const lum = c => {
+      const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+      return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+    };
+    const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+    const hex = c => '#' + c.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+    // The least mix of accent towards black or white that clears 4.5:1 against every background.
+    const shade = (accent, backs) => {
+      let best = null;
+      for (const to of [[0, 0, 0], [255, 255, 255]]) {
+        for (let t = 0; t <= 1.0001; t += 0.02) {
+          const c = accent.map((v, i) => v + (to[i] - v) * t);
+          if (backs.every(b => ratio(c, b) >= 4.5)) { if (!best || t < best.t) best = { t, c }; break; }
+        }
+      }
+      return best ? hex(best.c) : null;
+    };
+    const accent = rgb('--accent');
+    if (!accent || !('--accent' in theme || '--accent-fg' in theme || '--accent-soft' in theme || '--bg' in theme)) return;
+    const fg = rgb('--accent-fg'), soft = rgb('--accent-soft'), bg = rgb('--bg');
+    if (!('--accent-strong' in theme) && fg) {
+      const c = shade(accent, [fg]);
+      if (c) root.style.setProperty('--accent-strong', c);
+    }
+    if (!('--accent-text' in theme) && soft && bg) {
+      const c = shade(accent, [soft, bg]);
+      if (c) root.style.setProperty('--accent-text', c);
+    }
   }
 
   function applyStrings() {
