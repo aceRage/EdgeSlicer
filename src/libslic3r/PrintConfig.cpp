@@ -3263,6 +3263,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Marlin Firmware Junction Deviation (replaces the traditional XY Jerk setting).");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
+    def->max = 0.5f; // Orca #11915: Marlin junction deviation tops out well below 0.5 mm
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 0 });
 
@@ -5020,6 +5021,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Maximum junction deviation (M205 J, only apply if JD > 0 for Marlin Firmware)");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
+    def->max = 0.5f; // Orca #11915: Marlin junction deviation tops out well below 0.5 mm
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats{0. ,0. });
 
