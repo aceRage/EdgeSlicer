@@ -5,6 +5,7 @@
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
+#include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "common_func/common_func.hpp"
 
@@ -43,6 +44,14 @@ EVT_TIMER(SILENT_LOGIN_TIMER_ID, SMUserLogin::OnSilentTimer)
 END_EVENT_TABLE()
 
 int SMUserLogin::web_sequence_id = 20000;
+
+namespace {
+// Event text for the log, without any query string or fragment.
+std::string url_for_log(const wxString &text)
+{
+    return SMSilentLogin::redact_url_queries(std::string(text.ToUTF8().data()));
+}
+} // namespace
 
 SMUserLogin::SMUserLogin(bool isLogout, bool silent) : wxDialog((wxWindow *) (wxGetApp().mainframe), wxID_ANY, "EdgeSlicer"), m_silent(silent)
 {
@@ -208,36 +217,24 @@ void SMUserLogin::finish_silent(const std::string &token, const std::string &out
     cb(r);
 }
 
-bool SMUserLogin::apply_account_info(const std::string &body, const std::string &token)
+void SMUserLogin::apply_account_info(const SMSilentLogin::AccountAnswer &answer, const std::string &token)
 {
-    std::string user_id;
-    try {
-        json response = json::parse(body);
-        if (response.count("data")) {
-            json data = response["data"];
-            if (data.count("id")) {
-                user_id = std::to_string(data["id"].get<int>());
-                wxGetApp().sm_get_userinfo()->set_user_id(user_id);
-            }
-            if (data.count("nickname")) {
-                wxGetApp().sm_get_userinfo()->set_user_name(data["nickname"].get<std::string>());
-            }
-            if (data.count("icon")) {
-                wxGetApp().sm_get_userinfo()->set_user_icon_url(data["icon"].get<std::string>());
-            }
-            if (data.count("account")) {
-                wxGetApp().sm_get_userinfo()->set_user_account(data["account"].get<std::string>());
-            }
-        }
-    } catch (const std::exception &e) {
-        BOOST_LOG_TRIVIAL(error) << "Snapmaker account lookup: unreadable answer: " << e.what();
-        return false;
-    }
-    string userInfo = BP_LOGIN_USER_ID + std::string(":") + user_id;
+    // Only a verified answer gets here: there is always an account id, so the Account menu
+    // ("signed in" = SMUserInfo::is_user_login) and the Device page (online + a userid) agree.
+    auto *info = wxGetApp().sm_get_userinfo();
+    info->clear();
+    info->set_user_id(answer.user_id);
+    info->set_user_name(answer.nickname);
+    info->set_user_icon_url(answer.icon);
+    info->set_user_account(answer.account);
+    info->set_user_token(token);
+    string userInfo = BP_LOGIN_USER_ID + std::string(":") + answer.user_id;
     sentryReportLog(SENTRY_LOG_TRACE, userInfo, BP_LOGIN);
-    wxGetApp().sm_get_userinfo()->set_user_token(token);
-    wxGetApp().sm_get_userinfo()->set_user_login(true);
-    return true;
+    info->set_user_login(true); // tells the Account menu and the pages
+    // A sign-in completed on this computer: from now on the next start may quietly reuse the saved
+    // session (SnapmakerSilentLogin.hpp, k_session_key). Before this, startup sends nothing.
+    if (wxGetApp().app_config)
+        wxGetApp().app_config->set_bool(SMSilentLogin::k_session_key, true);
 }
 
 
@@ -278,10 +275,17 @@ void SMUserLogin::OnIdle(wxIdleEvent &WXUNUSED(evt))
  */
 void SMUserLogin::OnNavigationRequest(wxWebViewEvent &evt)
 {   
-    wxString tmpUrl = evt.GetURL();
-    
-    if (tmpUrl.find("token=") != std::string::npos) {
-        const std::string token = SMSilentLogin::token_from_url(tmpUrl.ToStdString());
+    const std::string url = evt.GetURL().ToUTF8().data();
+
+    // id.snapmaker.com hands the session over by going to <redirect>?token=<T>&_act=login_success.
+    // With a valid web session it does that as soon as the page loads, so the dialog closes again
+    // at once; that is expected. Whether the person is signed in is decided only by the account
+    // lookup that follows (GUI_App::sm_finish_sign_in / sm_on_silent_login_result).
+    if (SMSilentLogin::has_token_param(url)) {
+        // The page after the hand-over is not needed, and should not be loaded with the token in
+        // its address.
+        evt.Veto();
+        const std::string token = SMSilentLogin::token_from_url(url);
 
         if (m_silent) {
             // Never shown, never modal: report and let the owner tear the dialog down.
@@ -291,7 +295,11 @@ void SMUserLogin::OnNavigationRequest(wxWebViewEvent &evt)
                 finish_silent(token, std::string(), std::string());
             return;
         }
+        if (m_token_taken)
+            return;
+        m_token_taken = true;
 
+        const bool shown = this->IsShown();
         // A dialog that was built without being shown (sm_ShowUserLogin(false)) is not modal, and
         // EndModal() asserts on a non-modal dialog.
         if (this->IsModal())
@@ -301,19 +309,8 @@ void SMUserLogin::OnNavigationRequest(wxWebViewEvent &evt)
 
         // Copy what the lookup needs: the dialog can be gone by the time this runs.
         const std::string user_info_url = m_userInfoUrl.ToStdString();
-        wxGetApp().CallAfter([token, user_info_url]() {
-            auto http = Http::get(user_info_url);
-            http.header("Authorization",token);
-            http.on_complete([&](std::string body, unsigned status) {
-                    if (status == 200)
-                        SMUserLogin::apply_account_info(body, token);
-                })
-                .on_error([&](std::string body, std::string error, unsigned status) {
-                    std::string http_code = BP_LOGIN_HTTP_CODE + string(":") + std::to_string(status) + "\n" + error + "\n" + body;
-                    sentryReportLog(SENTRY_LOG_TRACE, http_code, BP_LOGIN);
-                })
-                .perform_sync(); 
-        });
+        wxGetApp().CallAfter([token, user_info_url, shown]() { wxGetApp().sm_finish_sign_in(token, user_info_url, shown); });
+        return;
     }
     UpdateState();
 }
@@ -499,7 +496,17 @@ void SMUserLogin::OnError(wxWebViewEvent &event)
     case wxWEBVIEW_NAV_ERR_USER_CANCELLED: e = "wxWEBVIEW_NAV_ERR_USER_CANCELLED"; break;
     case wxWEBVIEW_NAV_ERR_OTHER: e = "wxWEBVIEW_NAV_ERR_OTHER"; break;
     }
-    BOOST_LOG_TRIVIAL(fatal) << __FUNCTION__<< boost::format(":SMUserLogin error loading page %1% %2% %3% %4%") % event.GetURL() % event.GetTarget() %e % event.GetString();
+    // A navigation cancelled by the sign-in success redirect (Google's account chooser, for one) or
+    // reported after the sign-in has already succeeded is not a failure. The address is logged
+    // without its query string, so no token reaches the log.
+    const bool cancelled = event.GetInt() == wxWEBVIEW_NAV_ERR_USER_CANCELLED;
+    const bool succeeded = m_token_taken || m_silent_done;
+    const std::string logged = (boost::format(":SMUserLogin error loading page %1% %2% %3% %4%") % url_for_log(event.GetURL()) %
+                                url_for_log(event.GetTarget()) % e % url_for_log(event.GetString())).str();
+    if (cancelled || succeeded)
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << logged << (cancelled ? " (navigation cancelled)" : " (after sign-in)");
+    else
+        BOOST_LOG_TRIVIAL(fatal) << __FUNCTION__ << logged;
 
     // Silent mode: a navigation that fails outright (no connection, certificate, ...) ends the
     // attempt now rather than at the timeout. A cancelled navigation is only a redirect
@@ -522,10 +529,10 @@ void SMUserLogin::OnScriptResponseMessage(wxCommandEvent &WXUNUSED(evt))
 
 bool  SMUserLogin::ShowErrorPage()
 {
-    wxString ErrorUrl = from_u8((boost::filesystem::path(resources_dir()) / "web\\login\\error.html").make_preferred().string());
+    wxString ErrorUrl = file_url_from_path((boost::filesystem::path(resources_dir()) / "web/login/error.html").make_preferred());
     wxString strlang   = wxGetApp().current_language_code_safe();
     if (strlang != "")
-        ErrorUrl = wxString::Format("file://%s/web/login/error.html?lang=%s", from_u8(resources_dir()), strlang);
+        ErrorUrl += "?lang=" + strlang;
     load_url(ErrorUrl);
 
     return true;

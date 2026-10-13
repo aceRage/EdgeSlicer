@@ -17,6 +17,11 @@
 #include <vector>
 
 #define LOCALHOST_PORT      13618
+// EdgeSlicer: the port the Bambu sign-in (OAuth / third-party) callback listener asks for
+// (GUI_App::start_http_server). Deliberately not Bambu Studio's LOCALHOST_PORT, so a Bambu
+// Studio or OrcaSlicer running alongside cannot take our callback. The sign-in page is told the
+// port that was actually bound (get_localhost_url), so a fallback port still works.
+#define BBL_LOGIN_CALLBACK_PORT 13650
 #define PAGE_HTTP_PORT      13619
 #define LOCALHOST_URL       "http://127.0.0.1:"
 // Ultra: the base URL advertised to bambulab.com/sign-in via get_localhost_url. Bambu
@@ -140,14 +145,35 @@ public:
         void write_response(std::stringstream& ssOut) override;
     };
 
-    // Ultra: a well-formed third-party login callback that could not be completed. A 200
-    // page, never a 404 - a 404 in the system browser is exactly what users report as
-    // "signing in with Google 404s".
-    class ResponseLoginFailed : public Response
+    // EdgeSlicer: the page the system browser shows at the end of a Bambu Lab sign-in that
+    // came back through the loopback callback (Google / Apple / ticket). We answer the callback
+    // with this page ourselves instead of redirecting to Bambu's studio-callback page: that page
+    // hands off to Bambu Studio's own URL scheme, which EdgeSlicer does not register, so Safari
+    // ended a successful sign-in on "the address is invalid" (and other browsers on a stray
+    // "open this app?" prompt). Always a 200, never a 404: a 404 in the system browser is what
+    // users report as "signing in with Google 404s". No script, no external resources.
+    class ResponseLoginResult : public Response
+    {
+        bool        m_success;
+        std::string m_error;
+
+    public:
+        explicit ResponseLoginResult(bool success, const std::string& error = std::string())
+            : m_success(success), m_error(error)
+        {}
+        ~ResponseLoginResult() override = default;
+        void write_response(std::stringstream& ssOut) override;
+        // The HTML of the page. `error` is a short code of ours (e.g. ticket_exchange_failed);
+        // anything but letters, digits, '_' and '-' is dropped from it. Public for the tests.
+        static std::string page_html(bool success, const std::string& error);
+    };
+
+    // A well-formed third-party login callback that could not be completed (no error code).
+    class ResponseLoginFailed : public ResponseLoginResult
     {
     public:
+        ResponseLoginFailed() : ResponseLoginResult(false) {}
         ~ResponseLoginFailed() override = default;
-        void write_response(std::stringstream& ssOut) override;
     };
 
     class ResponseRedirect : public Response
@@ -244,6 +270,10 @@ public:
     std::string localfile_url(const std::string& utf8_path) const;
 
     static std::string map_url_to_file_path(const std::string& url);
+
+    // The installed image (a file name under resources/images) behind one of the icon URLs the
+    // Stream tab page asks for next to itself, or nullptr for any other path. Closed list.
+    static const char* app_icon_file_for_page(const std::string& url_path);
 
     static std::shared_ptr<Response> bbl_auth_handle_request(const std::string& url);
 

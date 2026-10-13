@@ -132,7 +132,8 @@ static json print_error_json(MachineObject* m)
 //     tab's own), read-only on an X1 whose chamber is only a sensor;
 //   * the speed level, which the Device tab only lets a person change while a print runs;
 //   * the chamber light, when the printer reports one (lights_report);
-//   * the part fan, and the aux and chamber fans where is_support_aux_fan / is_support_chamber_fan.
+//   * the part fan, and the aux and chamber fans where has_aux_fan / has_chamber_fan (the support_*_fan
+//     flags, or an H2-series device.airduct that lists them).
 static DeviceControls::Caps bambu_caps(MachineObject* m)
 {
     using namespace DeviceControls;
@@ -152,13 +153,14 @@ static DeviceControls::Caps bambu_caps(MachineObject* m)
 
     caps.has_speed = true;
     caps.speed     = Speed { "level", (int) m->printing_speed_lvl, 1, 4, m->is_in_printing() };
-    if (m->chamber_light != MachineObject::LIGHT_EFFECT::LIGHT_EFFECT_UNKOWN) {
+    const MachineObject::LIGHT_EFFECT light = m->chamber_light_state(); // both of an H2's lights
+    if (light != MachineObject::LIGHT_EFFECT::LIGHT_EFFECT_UNKOWN) {
         caps.has_light = true;
-        caps.light_on  = m->chamber_light == MachineObject::LIGHT_EFFECT::LIGHT_EFFECT_ON;
+        caps.light_on  = light == MachineObject::LIGHT_EFFECT::LIGHT_EFFECT_ON;
     }
     caps.fans.push_back(Fan { "part", "Part cooling", percent_of_byte(m->cooling_fan_speed) });
-    if (m->is_support_aux_fan) caps.fans.push_back(Fan { "aux", "Aux", percent_of_byte(m->big_fan1_speed) });
-    if (m->is_support_chamber_fan) caps.fans.push_back(Fan { "chamber", "Chamber", percent_of_byte(m->big_fan2_speed) });
+    if (m->has_aux_fan()) caps.fans.push_back(Fan { "aux", "Aux", percent_of_byte(m->big_fan1_speed) });
+    if (m->has_chamber_fan()) caps.fans.push_back(Fan { "chamber", "Chamber", percent_of_byte(m->big_fan2_speed) });
     caps.filament_actions = true; // StatusPanel's Load / Unload, which every Bambu printer has
     return caps;
 }

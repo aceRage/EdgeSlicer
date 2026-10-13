@@ -29,7 +29,7 @@
         "Standard",
         "Standard"
     ],
-    "default_print_profile": "0.20mm Standard @Flashforge AD5M Pro 0.4 Nozzle",
+    "default_print_profile": "0.20mm Standard @FF C5",
     "deretraction_speed": [
         "30",
         "30",
@@ -348,7 +348,6 @@
     "upward_compatible_machine": [],
     "use_firmware_retraction": "0",
     "use_relative_e_distances": "1",
-    "version": "2.1.1.0",
     "wipe": [
         "1",
         "1",

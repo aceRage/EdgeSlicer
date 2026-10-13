@@ -60,3 +60,32 @@ TEST_CASE("A filament mapped to an AMS on the other extruder is reported", "[Bam
     // Unknown tray extruder or filament outside the map is not reported.
     CHECK(filaments_on_wrong_extruder(all_right, H2_MAP, { { 9, -1 }, { 42, 1 } }).empty());
 }
+
+TEST_CASE("Each extruder of a two-extruder printer has its own external spool", "[BambuExtruderMap]")
+{
+    // vir_slot 255 is the main (physical 0, right) extruder's holder, 254 the deputy's (physical 1,
+    // left) - BambuStudio VIRTUAL_TRAY_MAIN_ID / VIRTUAL_TRAY_DEPUTY_ID.
+    CHECK(external_spool_physical_extruder(255) == 0);
+    CHECK(external_spool_physical_extruder(254) == 1);
+    CHECK(external_spool_physical_extruder(0) == -1);
+    CHECK(external_spool_physical_extruder(128) == -1);
+    CHECK(external_spool_ams_id(0) == 255);
+    CHECK(external_spool_ams_id(1) == 254);
+    CHECK(external_spool_ams_id(2) == -1);
+    // On the H2D / H2D Pro / H2C / X2D map the right external spool is the right extruder's.
+    CHECK(physical_to_logical(H2_MAP, external_spool_physical_extruder(255)) == 1);
+    CHECK(physical_to_logical(H2_MAP, external_spool_physical_extruder(254)) == 0);
+
+    // People read Ext-L / Ext-R; the grouping keeps reading "Ext".
+    CHECK(tray_display_name(254, 0) == "Ext-L");
+    CHECK(tray_display_name(255, 0) == "Ext-R");
+    CHECK(tray_display_name(128, 0) == "HT-A");
+    CHECK(tray_display_name(1, 2) == "B3");
+    CHECK(tray_name(255, 0) == "Ext");
+
+    // The other-extruder check judges an external spool like an AMS slot: filament 2 sliced for
+    // the right extruder may come from Ext-R (physical 0), not from Ext-L (physical 1).
+    const std::vector<int> fil_map{ 1, 2 };
+    CHECK(filaments_on_wrong_extruder(fil_map, H2_MAP, { { 1, external_spool_physical_extruder(255) } }).empty());
+    CHECK(filaments_on_wrong_extruder(fil_map, H2_MAP, { { 1, external_spool_physical_extruder(254) } }) == std::vector<int>{ 1 });
+}

@@ -1,10 +1,12 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "slic3r/Utils/HubHomeLogic.hpp"
+#include "slic3r/Utils/TailscaleCli.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -41,6 +43,7 @@ struct Info
     int                      go2rtc_port { 0 };
     int                      relay_port { 0 };
     std::string              version;
+    std::string              exe;             // the executable the hub runs from, resolved; "" from a hub older than the field
     std::vector<std::string> ips; // LAN IPv4 addresses, default-route one first (phone on only)
     std::string              remote_url; // https://<machine>.<tailnet>.ts.net/r/<token>/ while Tailscale remote access is on
     std::string              relay_url;  // the hosted-relay link; always "" in phase 0 (nothing hosts it yet)
@@ -64,13 +67,22 @@ struct Record
 };
 Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
-Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it
+Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it, or for one
+                                                                 // already starting (up to HubHandover::START_DEADLINE_MS)
 Info set_phone(bool on, const std::string& token = ""); // off and on keeps the same link; a valid
                                                         // token seeds a hub that has none yet
 Info new_link();                                        // replace the phone link (explicit only):
                                                         // saved links, QR codes and home-screen
                                                         // icons made from the old one stop working
 bool post_state(const std::string& json); // full Stream-tab state; remembered for a hub started later
+// Spike (opt-in "liveview_go2rtc"): make sure the hub's go2rtc has a stream for this Bambu camera
+// (see Testing::own_camera_stream) without touching the Stream tab's camera list. Returns the HTTP
+// status and the hub's JSON answer ({"name","mode"} on 200, {"error"} otherwise).
+std::pair<int, std::string> register_own_camera(const std::string& kind, const std::string& ip, const std::string& code);
+// The camera list the Stream tab last saved: from the running hub, else what this process last
+// posted, else <datadir>/hub/streams.json. Empty when there is none. Every window's Stream tab
+// opens with this rather than its own localStorage, which is per port and so per window.
+std::string saved_state();
 // One printer event from this instance's watcher (RemoteEvents.hpp), handed to the hub's
 // POST /hub/event on the loopback control plane. Fire and forget: with no hub running it is a
 // failed connect and false, never an error anybody sees. The hub assigns the id and the time.
@@ -107,9 +119,10 @@ int serve_status_target_port(const std::string& serve_status_json_text);
 // --json` said into exactly one of these, so the page never has to re-derive "installed but not
 // signed in" out of three separate booleans.
 enum class RemoteAccessState {
-    NotInstalled,  // no tailscale CLI on this PC -> offer the download
+    NotInstalled,  // no tailscale CLI on this computer -> offer the download
     NotSignedIn,   // installed, BackendState=NeedsLogin -> `tailscale login`
     NotRunning,    // installed and signed in, backend is Stopped/NoState/... -> start it
+    NoAnswer,      // installed, but the CLI ran too long and was stopped (not the same as missing)
     HttpsOff,      // running, but the tailnet issues no certificates -> admin console > DNS
     Serving,       // running, certificates on, Serve is pointed at this hub: the URL works
     Ready,         // running, certificates on, remote access simply switched off
@@ -133,6 +146,10 @@ const char* remote_access_state_name(RemoteAccessState s); // "not_installed", "
 // the root to our loopback port", `on` is the hub's own remote_on switch, `error` is whatever the
 // CLI printed (only used for RemoteAccessState::Error).
 RemoteAccessInfo classify_remote_access(bool installed, const std::string& backend, bool https,
+                                        bool serving, bool on, const std::string& error);
+// The same for a named platform (the wording says "Mac"/"menu bar" there and the install link goes
+// to that platform's download page); the one above uses the platform this build runs on.
+RemoteAccessInfo classify_remote_access(TailscaleCli::Platform platform, bool installed, const std::string& backend, bool https,
                                         bool serving, bool on, const std::string& error);
 
 // ---- hub identity (design_hosted_relay.md section 2) ----
@@ -181,6 +198,144 @@ bool trusted_proxy_headers(bool peer_is_loopback, bool via_relay);
 std::string pair_identity_json(const std::string& lan_url, const std::string& remote_url,
                                const std::string& relay_url, const std::string& hubid,
                                const std::string& public_key_hex);
+
+// ---- joining a camera to the printer it watches (summary_json's "camera" field) ----
+// One entry of the Stream tab's camera wall, reduced to what the join needs: its own id, the
+// alias a person gave it, the address a "LAN camera on this printer's address" match goes by
+// (streams.json's own `ip`), and the host pulled out of its stream URL (`rurl` for a browser
+// camera, `rsrc` for a go2rtc one) for a printer whose row never got an `ip` of its own recorded
+// under that exact string - a camera someone typed in by hostname, or a printer whose LAN address
+// changed since the camera was added.
+struct CameraCandidate
+{
+    std::string id;
+    std::string alias;
+    std::string ip;
+    std::string url_host; // host_of(rurl), or host_of(rsrc) when rurl is empty
+};
+
+// Which camera (its id, or "" for none) watches `printer_id`: the camera's own id first, then one
+// on the same address as `printer_ip` - by its recorded `ip`, or failing that by the host its own
+// stream URL names. Never guesses from the printer's *name*; that join is the app's own alias
+// fallback and happens on the phone, not here. Empty strings on either side are never a match, so
+// a printer or a camera missing an address does not accidentally pair with every other one that is
+// also missing it.
+std::string camera_for_printer(const std::string& printer_id, const std::string& printer_ip,
+                               const std::vector<CameraCandidate>& cams);
+
+// ---- the Device tab's own live view (spike, opt-in "liveview_go2rtc") ----
+// The go2rtc stream a Bambu printer's camera plays through, for the desktop camera panel.
+//
+// The name is the one stream_center.html gives the same camera ('s' + hashStr(src), FNV-1a 32 in
+// unpadded lower-case hex, over src built with encodeURIComponent), so a printer that is also on
+// the Stream tab / phone camera wall is ONE go2rtc stream with one connection to the printer, not
+// a second one. That only holds when the Stream tab entry used the same address and access code.
+//
+//   kind "rtsps" (X1/X1C/X1E/H2D/H2C/H2S/P2S, LAN Liveview on): rtspx:// to port 322, played as MSE.
+//   kind "rtsp"  (plain RTSP, port 554 - rare): rtsp://, played as MSE.
+//   kind "local" (P1/A1, the JPEG-over-TLS stream on port 6000): go2rtc pulls the hub's own
+//                BambuCamRelay MJPEG (http://127.0.0.1:<relay_port>/bambu?...), played as mjpeg -
+//                go2rtc then fans one relay connection out to every viewer. relay_port 0 = none.
+// Anything invalid (an address with characters BambuCamRelay refuses, an empty or over-long
+// code, an unknown kind) gives an empty `name`.
+struct OwnCameraStream
+{
+    std::string name;
+    std::string src;
+    std::string mode; // the player's ?mode=: "mse" or "mjpeg"
+};
+OwnCameraStream own_camera_stream(const std::string& kind, const std::string& ip, const std::string& code, int relay_port);
+std::string     js_encode_uri_component(const std::string& s); // JavaScript's encodeURIComponent, byte-wise
+std::string     js_hash_str(const std::string& s);             // stream_center.html's hashStr (ASCII input)
+
+// ---- one printer reported by several windows (poll_printers) ----
+// Every slicer window lists every Bambu printer it knows, but a Bambu LAN printer reports only to
+// the one window holding its MQTT session (the network plug-in has one LAN session per window):
+// the visible window's selected printer, the hidden instance's current watch. Every other window's
+// row for it is a MachineObject nobody is updating - no temperatures, and no AMS unless it was once
+// selected there. Last-polled-wins let such a row replace the live one.
+//
+// So: a fresh row (`cached_fresh`) from the window that is `connected` to the printer is kept over a
+// not-connected row from another window (`keep_cached`). Otherwise the incoming row is taken, and
+// when it carries no filament at all (no AMS tray, no external spool) while the cached one did, the
+// cached `ams` / `ext_spools` are carried into it as the last reading, with load / unload off on
+// every slot: the window that answers would not be the one connected to the printer.
+struct MergedPrinterRow
+{
+    bool        keep_cached { false };
+    std::string row; // the row to store when !keep_cached (JSON)
+};
+MergedPrinterRow merge_printer_row(const std::string& cached_row_json, long cached_instance, bool cached_fresh,
+                                   const std::string& incoming_row_json, long incoming_instance);
+
+// What a new phone link (HubServer::new_link) revokes besides the token itself: every native-app
+// push device (AppPush) and every phone-page Web Push subscription (WebPush), all of which were
+// registered under the old token. Without this, a phone that lost its link kept receiving this
+// hub's notifications (privacy audit 2026-10). The hosted push service keeps no per-device rows,
+// so nothing is left there. Answers how many of each were forgotten.
+struct LinkRevocation
+{
+    int app_devices { 0 };
+    int web_subscriptions { 0 };
+};
+LinkRevocation revoke_push_for_old_link();
+
+// ---- go2rtc stream registration (HubServer::register_streams) ----
+// go2rtc 1.9.14 builds a NEW stream object on every PUT of a name, even an unchanged one; viewers
+// already watching stay on the old object and its upstream connection, and the next viewer opens a
+// second connection to the camera (measured: tests/phone/go2rtc_share_probe.py). DELETE only
+// unlists a stream - its producer runs on until its last viewer leaves - and PATCH of a name that
+// exists does not touch the running connection. So the hub registers a stream only when go2rtc
+// does not have it or its source really changed, and never re-PUTs one that is unchanged.
+
+// One stream as go2rtc's GET /api/streams lists it: the first producer's URL and whether that
+// producer is connected right now. An idle producer reports exactly the source it was given; a
+// connected one reports its connection's URL, which for some sources (ffmpeg:, rtspx:) is not the
+// registered string, so `url` is only compared while `active` is false.
+struct Go2rtcLiveStream
+{
+    std::string url;
+    bool        active { false };
+};
+// Parse GET /api/streams (a JSON object, name -> {producers, consumers}). False on anything that
+// is not such an object, with `out` untouched.
+bool parse_go2rtc_streams(const std::string& body, std::map<std::string, Go2rtcLiveStream>& out);
+
+// What register_streams() does to bring go2rtc to `desired` (name -> source, every Stream-tab
+// camera and its quality variants). `registered` is what this hub itself put into this go2rtc
+// (name -> source); `live` is go2rtc's own list, or nullptr when it could not be read.
+//
+//   add     - go2rtc does not have the name: PUT it.
+//   replace - the name exists with a different source (ours with a changed source, or one we did
+//             not register that is idle with another source): DELETE, PUT, then end the hub's
+//             viewer tunnels on it so the old producer closes and the players reconnect to the new
+//             one. A quality variant (`ffmpeg:<name>#...`) of a replaced stream is replaced too,
+//             because its ffmpeg is a viewer of the old stream object.
+//   remove  - registered by us and no longer wanted (a camera taken off the Stream tab, or one
+//             whose source - and so its s<hash> name - changed): DELETE and end its viewers.
+//   adopt   - already in go2rtc and not ours: idle with this very source, or connected (viewers
+//             are on it - never disturbed). Recorded as ours, nothing sent to go2rtc.
+// Unchanged streams of ours appear in none of the lists: nothing is sent and no viewer notices.
+struct StreamSyncPlan
+{
+    std::vector<std::pair<std::string, std::string>> add;     // name, source
+    std::vector<std::pair<std::string, std::string>> replace; // name, new source
+    std::vector<std::string>                         remove;  // name
+    std::vector<std::pair<std::string, std::string>> adopt;   // name, source
+};
+StreamSyncPlan plan_stream_sync(const std::map<std::string, std::string>& desired,
+                                const std::map<std::string, std::string>& registered,
+                                const std::map<std::string, Go2rtcLiveStream>* live);
+
+// The `desired` map plan_stream_sync() is given: every Stream-tab camera (and its variants) plus
+// every camera the Device tab's live view ("New Bambu LiveView", POST /hub/camera) has asked for
+// in this go2rtc run. Taking the live-view cameras into `desired` is what makes a Stream-tab save
+// unable to delete or replace a stream the Device tab is playing: a camera taken off the Stream
+// tab that the Device tab also plays under the same s<hash> name is still wanted, so it is
+// "unchanged", not "remove". On a name both lists have, the Stream tab's source wins (the names are
+// hashes of the sources, so the two only differ on a hash collision).
+std::map<std::string, std::string> merge_desired_streams(const std::map<std::string, std::string>& stream_tab,
+                                                         const std::map<std::string, std::string>& live_view);
 
 } // namespace Testing
 

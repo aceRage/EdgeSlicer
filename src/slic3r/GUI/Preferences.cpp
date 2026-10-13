@@ -1,10 +1,14 @@
 #include "Preferences.hpp"
 #include "OptionsGroup.hpp"
 #include "GUI_App.hpp"
+#include "CostsDialog.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "GLCanvas3D.hpp"
+#include "FreeCADBridge.hpp"
 #include "NotificationManager.hpp"
 #include "MsgDialog.hpp"
+#include "Theme.hpp"
 #include "PresetMirror.hpp"
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -26,6 +30,8 @@
 
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "SSWCP.hpp"
+#include "HomePanel.hpp"
+#include "ModelBrowserPanel.hpp"
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -403,8 +409,16 @@ wxBoxSizer *PreferencesDialog::create_item_loglevel_combobox(wxString title, wxW
     std::vector<wxString>::iterator iter;
     for (iter = vlist.begin(); iter != vlist.end(); iter++) { combobox->Append(*iter); }
 
+    combobox->SetToolTip(tooltip);
+
+    // Select by index, not by text: the entries are translated but the stored value is always English.
     auto severity_level = app_config->get("log_severity_level");
-    if (!severity_level.empty()) { combobox->SetValue(severity_level); }
+    for (unsigned i = 0; i < vlist.size(); ++i) {
+        if (Slic3r::get_string_logging_level(i) == severity_level) {
+            combobox->SetSelection(int(i));
+            break;
+        }
+    }
 
     m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER, 0);
 
@@ -413,6 +427,7 @@ wxBoxSizer *PreferencesDialog::create_item_loglevel_combobox(wxString title, wxW
         auto level = Slic3r::get_string_logging_level(e.GetSelection());
         Slic3r::set_logging_level(Slic3r::level_string_to_boost(level));
         app_config->set("log_severity_level",level);
+        app_config->save();
         e.Skip();
      });
     return m_sizer_combox;
@@ -1211,6 +1226,17 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
         if (param == "allow_filament_temp_mixing" && wxGetApp().plater())
             wxGetApp().plater()->notify_filament_usage_changed();
 
+        // OrcaSlicer #14705: apply the preview dimming change immediately to the loaded preview
+        if (param == "preview_dim_previous_layers") {
+            if (Plater* plater = wxGetApp().plater()) {
+                if (GLCanvas3D* canvas = plater->get_preview_canvas3D()) {
+                    canvas->get_gcode_viewer().set_dim_previous_layers(checkbox->GetValue());
+                    canvas->set_as_dirty();
+                    canvas->request_extra_frame();
+                }
+            }
+        }
+
         // Opt-in crash reports: takes effect at once, through Sentry's consent switch.
         if (param == "send_crash_reports") {
             setSentryUserConsent(checkbox->GetValue());
@@ -1244,6 +1270,11 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
             if (m_autosave_interval_textinput != nullptr) { m_autosave_interval_textinput->Enable(pbool); }
         }
 
+        // Filament prices in G-code: every plate's G-code is out of date. The next slice of each plate
+        // re-runs only its G-code export (BackgroundSlicingProcess::apply()).
+        if (param == "gcode_include_filament_prices" && wxGetApp().plater())
+            wxGetApp().plater()->post_slice_state_change_update();
+
         // Print-by-object advisory notices: take effect immediately rather than waiting for the
         // next plate switch / slice attempt to re-evaluate.
         if (param == "show_print_by_object_caution" && wxGetApp().plater()) {
@@ -1268,6 +1299,12 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
                 wxGetApp().stop_sync_user_preset();
             }
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " sync_user_preset: " << (sync ? "true" : "false");
+        }
+
+        // Home > Models appears or goes at once.
+        if (param == "model_browser_beta") {
+            if (MainFrame* mf = wxGetApp().mainframe; mf != nullptr && mf->m_home != nullptr)
+                mf->m_home->refresh_models_entry();
         }
 
         #ifdef __WXMSW__
@@ -1300,12 +1337,11 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
 
         if (param == "installed_networking") {
             bool pbool = app_config->get_bool("installed_networking");
-            // Ultra (plug-in guards): with UltraNet installed there is nothing to download - the
-            // plug-in is already there, and this offer would replace it with Bambu's package.
-            if (pbool && GUI::wxGetApp().is_ultranet_plugin_installed()) {
-                BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Preferences checkbox offer suppressed)";
-            } else if (pbool) {
-                GUI::wxGetApp().CallAfter([] { GUI::wxGetApp().ShowDownNetPluginDlg(); });
+            // Turning the network plug-in on used to offer Bambu's download. EdgeSlicer never
+            // downloads it: with UltraNet installed this is silent, otherwise the user is told the
+            // plug-in is missing from this install.
+            if (pbool && GUI::wxGetApp().getAgent() == nullptr) {
+                GUI::wxGetApp().CallAfter([] { GUI::wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true); });
             }
             if (m_legacy_networking_ckeckbox != nullptr) { m_legacy_networking_ckeckbox->Enable(pbool); }
         }
@@ -1773,6 +1809,40 @@ wxWindow* PreferencesDialog::create_general_page()
         _L("Background opacity of the tool panels on the 3D view. Lower values let you see the model behind a docked panel. Applies immediately."));
     auto camera_orbit_mult = create_camera_orbit_mult_input(_L("Orbit speed multiplier"), page, _L("Multiplies the orbit speed for finer or coarser camera movement."));
     auto item_selection_highlight = create_item_selection_highlight(page);
+    // OrcaSlicer #15769 (libvgcode stage 3): the view type the sliced preview opens with.
+    std::vector<wxString>    preview_view_type_labels;
+    std::vector<std::string> preview_view_type_values;
+    for (const auto& [value, label] : GCodeViewer::default_view_type_choices()) {
+        preview_view_type_values.push_back(value);
+        preview_view_type_labels.push_back(from_u8(label));
+    }
+    auto item_preview_view_type = create_item_combobox(_L("Default preview view type"), page,
+        _L("The color scheme the sliced preview opens with.\n"
+           "Automatic: Filament for multi material prints, Line Type for single material ones.\n"
+           "Last used: the view type you selected last.\n"
+           "Any other value always opens that view type.\n"
+           "You can still switch the view type in the preview afterwards."),
+        "preview_default_view_type", preview_view_type_labels, preview_view_type_values);
+    // OrcaSlicer #14705 / #15001 (libvgcode stage 3): darken the layers below the one the layer slider shows.
+    auto item_dim_previous_layers = create_item_checkbox(_L("Dim lower layers in the G-code preview"), page,
+        _L("When scrubbing the layer slider in the sliced preview, render the layers below the current one darkened so that only the layer being viewed is shown at full brightness."),
+        50, "preview_dim_previous_layers");
+    auto item_dim_previous_layers_brightness = create_item_input(_L("Dimmed layer brightness"), _L("%"), page,
+        _L("How brightly the dimmed layers are rendered when \"Dim lower layers\" is on: 99% is barely darkened, 0% renders them black."),
+        "preview_dim_previous_layers_brightness", [this](wxString value) {
+            long brightness = 40;
+            if (!value.ToLong(&brightness))
+                brightness = 40;
+            brightness = std::clamp(brightness, 0L, 99L);
+            app_config->set("preview_dim_previous_layers_brightness", std::to_string(brightness));
+            if (Plater* plater = wxGetApp().plater()) {
+                if (GLCanvas3D* canvas = plater->get_preview_canvas3D()) {
+                    canvas->get_gcode_viewer().set_dim_previous_layers_brightness(0.01f * float(brightness));
+                    canvas->set_as_dirty();
+                    canvas->request_extra_frame();
+                }
+            }
+        });
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
@@ -1795,12 +1865,24 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_calc_mode = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time the color changed."), page, _L("If enabled, auto-calculate every time the color changed."), 50, "auto_calculate");
     auto item_calc_in_long_retract = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time when the filament is changed."), page, _L("If enabled, auto-calculate every time when filament is changed"), 50, "auto_calculate_when_filament_change");
     auto item_remember_printer_config = create_item_checkbox(_L("Remember printer configuration"), page, _L("If enabled, Orca will remember and switch filament/process configuration for each printer automatically."), 50, "remember_printer_config");
+    auto item_remember_print_action = create_item_checkbox(_L("Remember last print action"), page,
+        _L("If enabled, EdgeSlicer will remember the last selected option in the print button's dropdown (for example Print, Print plate, Export plate sliced file, or Export G-code file) and restore it on the next startup and when the printer or preset changes, when the current printer still offers it."),
+        50, "remember_print_action");
     auto item_step_mesh_setting = create_item_checkbox(_L("Show the step mesh parameter setting dialog."), page, _L("If enabled,a parameter settings dialog will appear during STEP file import."), 50, "enable_step_mesh_setting");
     auto item_multi_machine = create_item_checkbox(_L("Multi-device Management (Take effect after restarting EdgeSlicer)."), page, _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), 50, "enable_multi_machine");
     auto item_auto_arrange  = create_item_checkbox(_L("Auto arrange plate after cloning"), page, _L("Auto arrange plate after object cloning"), 50, "auto_arrange");
+    auto item_warn_low_memory = create_item_checkbox(_L("Warn when memory is low during slicing"), page,
+        _L("When the PC is nearly out of free memory during slicing, pause and ask whether to continue. "
+           "Turn this off to keep slicing without asking (a notice and a log line are still shown). "
+           "The trade-off: if the PC really runs out of memory, the slicer may freeze or crash and unsaved work can be lost. "
+           "Slicing started from the phone or hub is always stopped when memory runs out, regardless of this setting."),
+        50, "warn_low_memory_slicing");
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     //auto title_network = create_item_title(_L("Network"), page, _L("Network"));
-    auto item_user_sync        = create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset");
+    // User presets are never synced with a cloud account (PresetSyncPolicy.hpp): no checkbox for it.
+    wxBoxSizer *item_user_sync = PresetSync::cloud_sync_enabled()
+        ? create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset")
+        : nullptr;
     auto item_system_sync        = create_item_checkbox(_L("Update built-in Presets automatically."), page, _L("System Sync"), 50, "sync_system_preset");
     auto item_save_presets = create_item_button(_L("Clear my choice on the unsaved presets."), _L("Clear"), page, L"", _L("Clear my choice on the unsaved presets."), []() {
         wxGetApp().app_config->set("save_preset_choise", "");
@@ -1824,6 +1906,20 @@ wxWindow* PreferencesDialog::create_general_page()
     auto associate_url_bambustudio = create_item_link_association(page, L"bambustudio", "Makerworld.com");
     auto associate_url_cura        = create_item_link_association(page, L"cura", "Thingiverse.com");
 #endif // _WIN32
+
+#if defined(_WIN32) || defined(__APPLE__)
+    // Home > Models (ModelBrowserPanel): Windows, and macOS versions that have what its isolation needs.
+    wxBoxSizer* title_model_browser = nullptr;
+    wxBoxSizer* item_model_browser  = nullptr;
+    if (model_browser_supported()) {
+        title_model_browser = create_item_title(_L("Model browser"), page, _L("Model browser"));
+        item_model_browser  = create_item_checkbox(_L("Model browser (beta)"), page,
+                                                   _L("Adds Models to the Home tab: browse Printables, MakerWorld and Snapmaker Space inside "
+                                                      "EdgeSlicer. It is a separate browser with its own logins and no access to EdgeSlicer; "
+                                                      "model files you download there open here."),
+                                                   50, "model_browser_beta");
+    }
+#endif
 
     // auto title_modelmall = create_item_title(_L("Online Models"), page, _L("Online Models"));
     // auto item_backup = create_item_switch(_L("Backup switch"), page, _L("Backup switch"), "units");
@@ -1864,10 +1960,37 @@ wxWindow* PreferencesDialog::create_general_page()
            "Full path to bambu-studio.exe (Windows), the BambuStudio.app bundle (macOS), or the executable (Linux)."),
         "bambu_studio_path");
 
+    // "Edit in Blender" finds Blender on its own (file association, usual install folders, PATH,
+    // Snap, Flatpak); this is for an install it cannot find.
+    auto title_blender = create_item_title(_L("Blender"), page, _L("Blender"));
+    auto item_blender_path = create_item_text_input(_L("Blender path"), page,
+        _L("Only needed if \"Edit in Blender\" cannot find Blender automatically. "
+           "Full path to blender.exe (Windows), the Blender.app bundle (macOS), or the blender executable (Linux)."),
+        "blender_path");
+
+    // "Edit in FreeCAD" finds FreeCAD on its own (file association, installed-programs list, usual
+    // install folders, PATH, Snap, Flatpak); this is for an install it cannot find. The add-on adds
+    // "Send to EdgeSlicer" and "Update EdgeSlicer" to FreeCAD for every document.
+    auto title_freecad = create_item_title(_L("FreeCAD"), page, _L("FreeCAD"));
+    auto item_freecad_path = create_item_text_input(_L("FreeCAD path"), page,
+        _L("Only needed if \"Edit in FreeCAD\" cannot find FreeCAD automatically. "
+           "Full path to FreeCAD.exe or its install folder (Windows), the FreeCAD.app bundle (macOS), or the FreeCAD executable or AppImage (Linux)."),
+        "freecad_path");
+    auto item_freecad_addon = create_item_button(_L("FreeCAD add-on"), _L("Install FreeCAD add-on"), page,
+        _L("FreeCAD add-on"),
+        _L("Copy the EdgeSlicer add-on into FreeCAD's user Mod folder (FreeCAD 0.21 and 1.x), so \"Send to EdgeSlicer\" "
+           "and \"Update EdgeSlicer\" are on a toolbar in every FreeCAD document. Restart FreeCAD afterwards."),
+        [this]() { FreeCADBridge::install_addon(this); });
+
     //dark mode
 #ifdef _WIN32
     auto title_darkmode = create_item_title(_L("Dark Mode"), page, _L("Dark Mode"));
     auto item_darkmode = create_item_darkmode_checkbox(_L("Enable Dark mode"), page,_L("Enable dark mode"), 50, "dark_color_mode");
+    if (Theme::base_dark() >= 0 && m_dark_mode_ckeckbox != nullptr) {
+        // The running theme picks light or dark itself.
+        m_dark_mode_ckeckbox->Enable(false);
+        m_dark_mode_ckeckbox->SetToolTip(_L("The current theme chooses light or dark (main menu > Themes...)."));
+    }
 #endif
 
     // The "User Experience" section ("Join Customer Experience Improvement Program", linking to
@@ -1918,6 +2041,9 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_panel_opacity, 0, wxTOP, FromDIP(3));
     sizer_page->Add(camera_orbit_mult, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_selection_highlight, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_preview_view_type, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_dim_previous_layers, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_dim_previous_layers_brightness, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_check_updates, 0, wxTOP, FromDIP(3));
@@ -1927,11 +2053,14 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_warn_low_memory, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));
+    if (item_user_sync)
+        sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_system_sync, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_remember_printer_config, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_remember_print_action, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_save_presets, 0, wxTOP, FromDIP(3));
     //sizer_page->Add(title_network, 0, wxTOP | wxEXPAND, FromDIP(20));
     //sizer_page->Add(item_check_stable_version_only, 0, wxTOP, FromDIP(3));
@@ -1953,6 +2082,12 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(associate_url_bambustudio, 0, wxTOP, FromDIP(3));
     sizer_page->Add(associate_url_cura, 0, wxTOP, FromDIP(3));
 #endif // _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
+    if (title_model_browser != nullptr && item_model_browser != nullptr) {
+        sizer_page->Add(title_model_browser, 0, wxTOP | wxEXPAND, FromDIP(20));
+        sizer_page->Add(item_model_browser, 0, wxTOP, FromDIP(3));
+    }
+#endif
     // auto item_title_modelmall = sizer_page->Add(title_modelmall, 0, wxTOP | wxEXPAND, FromDIP(20));
     // auto item_item_modelmall = sizer_page->Add(item_modelmall, 0, wxTOP, FromDIP(3));
     // auto update_modelmall = [this, item_title_modelmall, item_item_modelmall] (wxEvent & e) {
@@ -1979,6 +2114,13 @@ wxWindow* PreferencesDialog::create_general_page()
 
     sizer_page->Add(title_bambu_studio, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_studio_path, 0, wxTOP, FromDIP(3));
+
+    sizer_page->Add(title_blender, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_blender_path, 0, wxTOP, FromDIP(3));
+
+    sizer_page->Add(title_freecad, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_freecad_path, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_freecad_addon, 0, wxTOP, FromDIP(3));
 
 #ifdef _WIN32
     sizer_page->Add(title_darkmode, 0, wxTOP | wxEXPAND, FromDIP(20));
@@ -2023,6 +2165,23 @@ wxWindow* PreferencesDialog::create_ultra_page()
     auto item_hide_other_plates = create_item_checkbox(_L("Hide other plates while moving"), page,
         _L("While the Move tool is open, show only the plate you are working on. The other plates and their objects come back when the Move tool closes, and a plate you drag onto reappears when you release."), 50, "hide_other_plates_on_move");
 
+    auto title_cost = create_item_title(_L("Cost"), page, _L("Cost"));
+    // The key keeps its first name (gcode_include_filament_prices) so existing settings carry over.
+    auto item_gcode_prices = create_item_checkbox(_L("Include costs in exported G-code"), page,
+        _L("Write your costs into G-code you export or send to a printer, and into the settings of an exported "
+           "3MF with G-code: the filament prices (the \"; filament cost\" and \"; total filament cost\" lines, "
+           "filament_cost) and the machine rate (time_cost). Off by default, so a file you share does not tell "
+           "anyone what you pay for filament or charge per hour; the rest of the file is the same either way. "
+           "With it off, the cost of a G-code opened on its own reads \"not in file\"; projects and sliced plates "
+           "still show their cost here."), 50, "gcode_include_filament_prices");
+    currency_symbol(); // the locale's symbol becomes the stored default the first time
+    auto item_currency_symbol = create_item_text_input(_L("Currency symbol"), page,
+        _L("Shown before every price and cost (filament prices, machine rates, the cost after slicing). A label only: prices are never "
+           "converted. Leave it empty for plain numbers."), "cost_currency_symbol");
+    auto item_filament_prices = create_item_button(_L("Your own costs"), _L("Costs") + dots, page,
+        _L("Filament prices per kilogram and machine rates per hour that apply over the presets' values"),
+        _L("Open the Costs window"), [this]() { show_costs_dialog(this); });
+
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     auto item_prefer_last_print = create_item_checkbox(_L("Prefer Last Used Print Profile"), page,
         _L("When a project's print profile is not available, pick the profile you last used at the same layer height instead of the first compatible one."), 50, "prefer_last_print_profile");
@@ -2055,10 +2214,15 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("Connect to Bambu Lab printers (cloud login or LAN). The plug-in is downloaded from Bambu on first use; takes effect after restarting."), 50, "installed_networking");
     auto item_bambu_stealth = create_item_checkbox(_L("Stealth mode (no Bambu cloud telemetry)"), page,
         _L("Stops data transmission to Bambu's cloud services. Safe to enable for LAN-only use; disable it to sign in to a Bambu account."), 50, "stealth_mode");
-    // Ultra (plug-in guards): "legacy" only picks WHICH Bambu CDN build to download. With our own
-    // plug-in installed nothing is ever downloaded, so the switch has no effect - hide it.
-    auto item_bambu_legacy = create_item_checkbox(_L("Use legacy network plugin"), page,
-        _L("Use the older plug-in for printers on old Bambu firmware. Takes effect after restarting."), 50, "legacy_networking");
+    // "New Bambu LiveView" (tests/plan_own_camera_view.md): on by default (AppConfig::set_defaults).
+    // Read at every Play, so it applies without a restart.
+    auto item_bambu_own_liveview = create_item_checkbox(_L("New Bambu LiveView"), page,
+        _L("Play Bambu printer cameras on the Device tab through EdgeSlicer's own camera relay (go2rtc, the one the phone uses) "
+           "instead of Bambu's camera files. Used for printers on the LAN with an access code; others keep the Bambu player. "
+           "Turn it off to use Bambu's camera files instead. Applies the next time you press Play; no restart needed."),
+        50, "liveview_go2rtc");
+    // The "Use legacy network plugin" switch is gone: EdgeSlicer ships one network plug-in and
+    // ignores the legacy_networking setting (GUI_App resets it at start-up).
 
     auto title_spoolman = create_item_title(_L("Spool Manager"), page, _L("Spool Manager"));
     auto item_spoolman_enabled = create_item_checkbox(_L("Enable Spoolman integration"), page,
@@ -2090,6 +2254,16 @@ wxWindow* PreferencesDialog::create_ultra_page()
     auto item_archive_max = create_item_gcode_archive_max(page,
         _L("How many stored files to keep. When a new file takes the count past this, the oldest ones are deleted with their details and previews."));
 
+    // Support: lets a user raise the log level without a developer build. Same app_config key and the
+    // same combobox as the internal Develop page; the level is applied immediately and persisted.
+    auto title_troubleshooting = create_item_title(_L("Troubleshooting"), page, _L("Troubleshooting"));
+    auto log_level_list = std::vector<wxString>{_L("fatal"), _L("error"), _L("warning"), _L("info"), _L("debug"), _L("trace")};
+    auto item_log_level = create_item_loglevel_combobox(_L("Log level"), page,
+        _L("How much detail goes into the log files in %APPDATA%\\EdgeSlicer\\log (Help > Show Configuration Folder). "
+           "Use 'info' or 'debug' when sending a log for support; 'warning' is the default. "
+           "Verbose levels (debug, trace) make the log files grow quickly, so set it back afterwards."),
+        log_level_list);
+
     sizer_page->Add(title_project, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_autosave, 0, wxTOP, FromDIP(3));
     item_autosave->Add(item_autosave_interval, 0, wxLEFT, 0);
@@ -2099,6 +2273,10 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(item_auto_drop, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bottom_z, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hide_other_plates, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(title_cost, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_gcode_prices, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_currency_symbol, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_filament_prices, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_prefer_last_print, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_shadow, 0, wxTOP, FromDIP(3));
@@ -2108,13 +2286,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(title_bambu, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_bambu_legacy, 0, wxTOP, FromDIP(3));
-    // Ultra (plug-in guards): hidden after the Add so the sizer keeps no space for it. The switch
-    // only picks WHICH Bambu CDN build to download; with UltraNet installed nothing is downloaded.
-    if (wxGetApp().is_ultranet_plugin_installed()) {
-        sizer_page->Hide(item_bambu_legacy, true);
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Preferences legacy-plugin switch hidden)";
-    }
+    sizer_page->Add(item_bambu_own_liveview, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_spoolman_enabled, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_spoolman_url, 0, wxTOP, FromDIP(3));
@@ -2126,6 +2298,8 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(item_archive, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_archive_dir, 0, wxTOP | wxEXPAND, FromDIP(3));
     sizer_page->Add(item_archive_max, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(title_troubleshooting, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_log_level, 0, wxTOP, FromDIP(3));
 
     page->SetSizer(sizer_page);
     page->Layout();

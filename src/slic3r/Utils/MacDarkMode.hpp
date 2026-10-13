@@ -2,6 +2,10 @@
 #define slic3r_MacDarkMode_hpp_
 
 #include <wx/event.h>
+#include <cstddef>
+#include <functional>
+#include <string>
+#include <vector>
 
 namespace Slic3r {
 namespace GUI {
@@ -16,6 +20,21 @@ void set_tag_when_enter_full_screen(bool isfullscreen);
 void set_title_colour_after_set_title(void * window);
 void initGestures(void * view,  wxEvtHandler * handler);
 void openFolderForFile(wxString const & file);
+// The `--hub` helper runs from the same bundle as the slicer. Without this it is a second
+// regular app with its own Dock tile (showing the bundle icon); clicking that tile activated
+// the window-less hub and sent the slicer window behind other apps.
+void mac_make_accessory_app();
+// Bring this process to the front (an accessory app's dialogs open behind the active app).
+void mac_activate_app();
+// Call `fn` on the main thread when NSWorkspaceWillPowerOffNotification arrives (logout, restart
+// or shut down was chosen). The phone hub quits on it; registered once for the life of the process.
+void mac_on_power_off(void (*fn)());
+// Delete the named cookies that would be sent to `uri` (Snapmaker's id.snapmaker.com web session)
+// from the WebKit data store every web view of the slicer shares. Only those cookies, never the
+// rest of the store. Asynchronous: `done` runs once on the main thread with how many were deleted
+// (0 when none matched). Never gets cookie values.
+void mac_delete_site_cookies(const std::vector<std::string> &names, const std::string &uri,
+                             std::function<void(size_t deleted)> done);
 #endif
 
 

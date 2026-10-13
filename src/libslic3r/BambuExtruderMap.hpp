@@ -28,6 +28,18 @@ int physical_to_logical(const std::vector<int> &physical_extruder_map, int physi
 bool is_ams_ht_id(int ams_id);
 bool is_external_spool_ams_id(int ams_id);
 
+// The external spool holders of a two-extruder printer, one per extruder (print.vir_slot[] in the
+// report): 255 feeds the main extruder (physical 0, the RIGHT one), 254 the deputy (physical 1, the
+// LEFT one) - BambuStudio VIRTUAL_TRAY_MAIN_ID / VIRTUAL_TRAY_DEPUTY_ID. A job maps a filament to
+// one as ams_id 254/255, slot_id 0, tray id 254/255.
+// Physical extruder an external spool holder feeds; -1 for any other ams id.
+int external_spool_physical_extruder(int ams_id);
+// The external spool holder of a physical extruder (0 -> 255, 1 -> 254); -1 for any other id.
+int external_spool_ams_id(int physical_extruder);
+// "Ext-L" / "Ext-R" for the external spools (BambuStudio's names), tray_name() for everything else.
+// For what a person reads; tray_name() stays the grouping's "Ext".
+std::string tray_display_name(int ams_id, int slot_id);
+
 // The tray name the grouping's machine-filament builder expects, as BambuStudio's
 // Sidebar::build_filament_ams_list writes it: "A1".."D4" for four-slot units, "HT-A".. for
 // AMS HT units and "Ext" for the external spool. Only "Ext" marks an external spool, which

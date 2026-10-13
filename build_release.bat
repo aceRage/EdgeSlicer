@@ -38,7 +38,7 @@ cmake --build . --config %build_type% --target deps -- -m
 if "%1"=="deps" exit /b 0
 
 :slicer
-echo "building Snapmaker Orca..."
+echo "building EdgeSlicer..."
 cd %WP%
 mkdir %build_dir%
 cd %build_dir%

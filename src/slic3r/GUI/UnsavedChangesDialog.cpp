@@ -833,6 +833,19 @@ inline int UnsavedChangesDialog::ShowModal()
         BOOST_LOG_TRIVIAL(info) << "UnsavedChangesDialog: auto-answered (" << (m_exit_action == Action::Transfer ? "transfer" : "discard") << ") for a remote request";
         return wxID_OK;
     }
+    // Ultra: don't nag on every preset switch. When transfer is offered (the normal
+    // preset/printer switch), carry all modified values over automatically; they stay
+    // dirty on the new preset and remain individually revertable via the orange markers,
+    // and Save/Discard remain available in the UI. The modal dialog still appears when
+    // transfer is impossible (no compatible target), where the choice is genuinely
+    // Save/Discard/Cancel. m_buttons keeps the TRANSFER bit even when build() decided not to
+    // offer the button (printer technology mismatch), so check that the button really exists.
+    // The caller (Tab) reports what was kept in a short notification.
+    if ((m_buttons & ActionButtons::TRANSFER) && m_transfer_btn != nullptr) {
+        m_exit_action = Action::Transfer;
+        BOOST_LOG_TRIVIAL(info) << "UnsavedChangesDialog: auto-transferred modified values to the new preset";
+        return wxID_OK;
+    }
     auto choise_key = "save_preset_choise";
     auto choise     = wxGetApp().app_config->get(choise_key);
     long result = 0;
@@ -1002,9 +1015,11 @@ void UnsavedChangesDialog::build(Preset::Type type, PresetCollection *dependent_
     // "Transfer" / "Keep" button
     if (ActionButtons::TRANSFER & m_buttons) {
         const PresetCollection* switched_presets = type == Preset::TYPE_INVALID ? nullptr : wxGetApp().get_tab(type)->get_presets();
-        if (dependent_presets && switched_presets && (type == dependent_presets->type() ?
-            dependent_presets->get_edited_preset().printer_technology() == dependent_presets->find_preset(new_selected_preset)->printer_technology() :
-            switched_presets->get_edited_preset().printer_technology() == switched_presets->find_preset(new_selected_preset)->printer_technology()))
+        const PresetCollection* technology_source = (dependent_presets && type == dependent_presets->type()) ? dependent_presets : switched_presets;
+        // find_preset() can return nullptr (e.g. an unresolved alias); guard against a null deref.
+        const Preset* target_preset = technology_source ? technology_source->find_preset(new_selected_preset) : nullptr;
+        if (dependent_presets && switched_presets && technology_source && target_preset &&
+            technology_source->get_edited_preset().printer_technology() == target_preset->printer_technology())
             add_btn(&m_transfer_btn, m_move_btn_id, "menu_paste", Action::Transfer, switched_presets->get_edited_preset().name == new_selected_preset ? _L("Transfer") : _L("Transfer"), true);
     }
     if (!m_transfer_btn && (ActionButtons::KEEP & m_buttons))
@@ -1103,6 +1118,7 @@ bool UnsavedChangesDialog::save(PresetCollection* dependent_presets, bool show_s
         // for system/default/external presets we should take an edited name
         //BBS: add project embedded preset logic and refine is_external
         bool save_to_project = false;
+        ProjectPresetPrinters project_printers = ProjectPresetPrinters::Keep;
         if (preset.is_system || preset.is_default) {
         //if (preset.is_system || preset.is_default || preset.is_external) {
             SavePresetDialog save_dlg(this, preset.type);
@@ -1112,10 +1128,11 @@ bool UnsavedChangesDialog::save(PresetCollection* dependent_presets, bool show_s
             }
             name = save_dlg.get_name();
             save_to_project = save_dlg.get_save_to_project_selection(preset.type);
+            project_printers = save_dlg.get_project_printers_selection(preset.type);
         }
 
         //BBS: add project embedded preset relate logic
-        PresetData preset_data(name, preset.type, save_to_project);
+        PresetData preset_data(name, preset.type, save_to_project, project_printers);
         names_and_types.emplace_back(preset_data);
         //names_and_types.emplace_back(make_pair(name, preset.type));
     }
@@ -1154,6 +1171,7 @@ bool UnsavedChangesDialog::save(PresetCollection* dependent_presets, bool show_s
                 if (!name.empty())
                     nt.name = name;
                 nt.save_to_project = save_dlg.get_save_to_project_selection(nt.type);
+                nt.project_printers = save_dlg.get_project_printers_selection(nt.type);
             }
             //for (std::pair<std::string, Preset::Type>& nt : names_and_types) {
             //    const std::string& name = save_dlg.get_name(nt.second);

@@ -20,6 +20,15 @@ src/slic3r/GUI/Gizmos/GLGizmoText.cpp
 src/slic3r/GUI/Gizmos/GLGizmoText.hpp
 src/slic3r/GUI/Gizmos/GLGizmoEmboss.cpp
 src/slic3r/GUI/Gizmos/GLGizmoSVG.cpp
+src/slic3r/GUI/Gizmos/EmbossTransformHandles.cpp
+src/slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.cpp
+src/slic3r/GUI/UVEditorCanvas.cpp
+src/slic3r/GUI/TextureLibrary.cpp
+src/slic3r/GUI/TextureProjectorFrame.cpp
+src/slic3r/GUI/Jobs/TextureDisplacementBakeJob.cpp
+src/slic3r/GUI/Jobs/TextureDisplacementPrepareJob.cpp
+src/slic3r/GUI/Jobs/TextureDisplacementPreviewJob.cpp
+src/slic3r/GUI/Jobs/TextureDisplacementDebugJob.cpp
 src/slic3r/GUI/Gizmos/GLGizmoMeasure.cpp
 src/slic3r/GUI/GUI.cpp
 src/slic3r/GUI/GUI_App.cpp
@@ -46,6 +55,7 @@ src/slic3r/GUI/Jobs/RotoptimizeJob.cpp
 src/slic3r/GUI/Jobs/BindJob.cpp
 src/slic3r/GUI/Jobs/PrintJob.cpp
 src/slic3r/GUI/Jobs/SendJob.cpp
+src/slic3r/GUI/BambuSendDiagnosis.cpp
 src/slic3r/GUI/Jobs/SLAImportJob.cpp
 src/slic3r/GUI/Jobs/UpgradeNetworkJob.cpp
 src/slic3r/GUI/AboutDialog.cpp
@@ -135,6 +145,8 @@ src/slic3r/Utils/Http.cpp
 src/slic3r/Utils/Process.cpp
 src/slic3r/GUI/Jobs/PrintJob.cpp
 src/libslic3r/GCode.cpp
+src/libslic3r/GCode/SeamPlacer.cpp
+src/libslic3r/GCode/PreciseSeam.cpp
 src/libslic3r/ExtrusionEntity.cpp
 src/libslic3r/Flow.cpp
 src/libslic3r/Format/AMF.cpp

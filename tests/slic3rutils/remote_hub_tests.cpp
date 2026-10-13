@@ -11,6 +11,8 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -323,8 +325,55 @@ TEST_CASE("classify_remote_access offers the install link when Tailscale is miss
     REQUIRE_THAT(info.message, Catch::Matchers::Contains("Tailscale"));
     REQUIRE_THAT(info.message, Catch::Matchers::Contains("free private network"));
     REQUIRE_THAT(info.message, Catch::Matchers::Contains("same account"));
-    REQUIRE(info.action_url == "https://tailscale.com/download/windows");
+    // The download page of the platform the test runs on (Windows keeps /download/windows).
+    REQUIRE(info.action_url == Slic3r::TailscaleCli::download_url(Slic3r::TailscaleCli::current_platform()));
     REQUIRE_FALSE(info.action.empty());
+}
+
+TEST_CASE("classify_remote_access speaks about the platform it is asked about", "[RemoteHub]")
+{
+    using Slic3r::TailscaleCli::Platform;
+    const auto win = classify_remote_access(Platform::Windows, false, "", false, false, false, "");
+    const auto mac = classify_remote_access(Platform::MacOS, false, "", false, false, false, "");
+    const auto lin = classify_remote_access(Platform::Linux, false, "", false, false, false, "");
+    REQUIRE(win.action_url == "https://tailscale.com/download/windows");
+    REQUIRE(mac.action_url == "https://tailscale.com/download/mac");
+    REQUIRE(lin.action_url == "https://tailscale.com/download/linux");
+    REQUIRE_THAT(win.message, Catch::Matchers::Contains("your PC"));
+    REQUIRE_THAT(mac.message, Catch::Matchers::Contains("your Mac"));
+    REQUIRE_THAT(lin.message, Catch::Matchers::Contains("your computer"));
+    for (const auto* i : { &win, &mac, &lin }) {
+        REQUIRE(i->state == RemoteAccessState::NotInstalled);
+        REQUIRE_THAT(i->message, Catch::Matchers::Contains("free private network"));
+        REQUIRE_THAT(i->message, Catch::Matchers::Contains("same account"));
+    }
+
+    // Signed out: the tray on Windows, the menu bar on a Mac; `tailscale login` everywhere.
+    const auto win_in = classify_remote_access(Platform::Windows, true, "NeedsLogin", false, false, false, "");
+    const auto mac_in = classify_remote_access(Platform::MacOS, true, "NeedsLogin", false, false, false, "");
+    REQUIRE_THAT(win_in.message, Catch::Matchers::Contains("not signed in on this PC"));
+    REQUIRE_THAT(win_in.message, Catch::Matchers::Contains("system tray"));
+    REQUIRE_THAT(mac_in.message, Catch::Matchers::Contains("not signed in on this Mac"));
+    REQUIRE_THAT(mac_in.message, Catch::Matchers::Contains("menu bar"));
+    REQUIRE_THAT(mac_in.message, Catch::Matchers::Contains("tailscale login"));
+
+    // Stopped: no backend name, then the computer's name.
+    REQUIRE(classify_remote_access(Platform::Windows, true, "", false, false, false, "").message == "Tailscale is not running on this PC.");
+    REQUIRE(classify_remote_access(Platform::MacOS, true, "", false, false, false, "").message == "Tailscale is not running on this Mac.");
+    REQUIRE(classify_remote_access(Platform::MacOS, true, "Stopped", false, false, false, "").message == "Tailscale is not running (Stopped).");
+}
+
+TEST_CASE("classify_remote_access: a Tailscale that did not answer is not a Tailscale that is missing", "[RemoteHub]")
+{
+    using Slic3r::TailscaleCli::Platform;
+    for (Platform p : { Platform::Windows, Platform::MacOS, Platform::Linux }) {
+        const auto info = classify_remote_access(p, true, Slic3r::TailscaleCli::BACKEND_NO_ANSWER, false, false, false, "");
+        REQUIRE(info.state == RemoteAccessState::NoAnswer);
+        REQUIRE(std::string(remote_access_state_name(info.state)) == "no_answer");
+        REQUIRE_THAT(info.message, Catch::Matchers::Contains("did not answer"));
+        REQUIRE(info.action_url.empty()); // no download link: it is installed
+        REQUIRE_FALSE(info.action.empty());
+    }
 }
 
 TEST_CASE("classify_remote_access sends the HTTPS-certificates error to the admin console", "[RemoteHub]")
@@ -489,4 +538,431 @@ TEST_CASE("a non-loopback peer never gets Tailscale-User-Login trusted", "[Remot
     // peer (so is_private_v4 need not be loosened) and therefore looks exactly like Serve. Nothing
     // upstream of it strips these headers, so it must never inherit the trust.
     REQUIRE_FALSE(trusted_proxy_headers(true, true));
+}
+
+// ---- joining a camera to the printer it watches (summary_json's "camera" field) -------------
+
+TEST_CASE("camera_for_printer matches a camera added as the printer itself", "[RemoteHub][camera]")
+{
+    const std::vector<CameraCandidate> cams = { { "00M09D542800682", "X1C", "", "" } };
+    REQUIRE(camera_for_printer("00M09D542800682", "", cams) == "00M09D542800682");
+    // The printer's own id wins even when an address would also have matched something else.
+    REQUIRE(camera_for_printer("00M09D542800682", "10.0.0.150", cams) == "00M09D542800682");
+}
+
+TEST_CASE("camera_for_printer matches a LAN camera by its recorded ip", "[RemoteHub][camera]")
+{
+    // The owner's actual reports: streams.json's H2C camera (id is go2rtc's own id, alias "H2C",
+    // ip 10.0.0.206) against a Bambu printer row whose name ("ToyPrinterX1C"-style) never matches
+    // the camera's alias. Once the row carries the printer's LAN ip, the address join finds it
+    // without the name ever entering into it.
+    const std::vector<CameraCandidate> cams = {
+        { "cmtpxb0uqqhnf2", "H2C", "10.0.0.206", "" },
+        { "cmtqambvc4pbba", "X1C", "10.0.0.150", "" },
+    };
+    REQUIRE(camera_for_printer("some-h2c-serial", "10.0.0.206", cams) == "cmtpxb0uqqhnf2");
+    REQUIRE(camera_for_printer("00M09D542800682", "10.0.0.150", cams) == "cmtqambvc4pbba");
+}
+
+TEST_CASE("camera_for_printer matches a camera keyed by address under its own id", "[RemoteHub][camera]")
+{
+    // A camera streams.json stored under its LAN address as the id (the "auto" kind U1 cameras use)
+    // rather than a separate `ip` field.
+    const std::vector<CameraCandidate> cams = { { "10.0.0.108", "U1", "", "" } };
+    REQUIRE(camera_for_printer("printer-1", "10.0.0.108", cams) == "10.0.0.108");
+}
+
+TEST_CASE("camera_for_printer falls back to the host inside the camera's own stream URL", "[RemoteHub][camera]")
+{
+    // A camera whose `ip` was never recorded (added by hostname, or the field is simply blank) but
+    // whose rurl/rsrc still names an address - RemoteHub::summary_json reduces those to url_host
+    // with SnapmakerLan::host_of before this is called.
+    const std::vector<CameraCandidate> cams = { { "camid1", "Shop cam", "", "10.0.0.206" } };
+    REQUIRE(camera_for_printer("some-h2c-serial", "10.0.0.206", cams) == "camid1");
+}
+
+TEST_CASE("camera_for_printer never matches on name, and never matches two blanks", "[RemoteHub][camera]")
+{
+    // A printer row with no known address (the gap this fix closes for Bambu, but any kind can hit
+    // it) must not pair with a camera that also has no address, and the alias/name is not consulted
+    // here at all - that fallback is the app's own, over a printer's *name*.
+    const std::vector<CameraCandidate> cams = { { "cam1", "ToyPrinterX1C", "", "" } };
+    REQUIRE(camera_for_printer("printer-1", "", cams).empty());
+    REQUIRE(camera_for_printer("printer-1", "10.0.0.206", cams).empty());
+}
+
+TEST_CASE("camera_for_printer returns empty when nothing matches", "[RemoteHub][camera]")
+{
+    const std::vector<CameraCandidate> cams = { { "cam1", "X1C", "10.0.0.150", "10.0.0.150" } };
+    REQUIRE(camera_for_printer("printer-1", "10.0.0.206", cams).empty());
+    REQUIRE(camera_for_printer("printer-1", "", cams).empty());
+    REQUIRE(camera_for_printer("printer-1", "10.0.0.206", {}).empty());
+}
+
+// ---- merge_printer_row -------------------------------------------------------------------
+
+namespace {
+const char* const LIVE_ROW = R"({"id":"X1C","kind":"bambu","connected":true,"bed_temp":60,
+    "ams":[{"id":"0","trays":[{"id":"0","exists":true,"type":"PLA","can_load":true,"can_unload":false}]}],
+    "ext_spools":[{"ams_id":"254","exists":true,"type":"PETG","can_load":true,"can_unload":false}]})";
+const char* const IDLE_ROW = R"({"id":"X1C","kind":"bambu","connected":false,"bed_temp":0,"ams":[],"ext_spools":[{"ams_id":"254","exists":false}]})";
+} // namespace
+
+TEST_CASE("merge_printer_row keeps the connected window's fresh row over another window's idle one", "[RemoteHub]")
+{
+    const MergedPrinterRow m = merge_printer_row(LIVE_ROW, 100, true, IDLE_ROW, 200);
+    REQUIRE(m.keep_cached);
+}
+
+TEST_CASE("merge_printer_row takes the same window's row, and a row once the live one is stale", "[RemoteHub]")
+{
+    REQUIRE_FALSE(merge_printer_row(LIVE_ROW, 100, true, IDLE_ROW, 100).keep_cached);
+    REQUIRE_FALSE(merge_printer_row(LIVE_ROW, 100, false, IDLE_ROW, 200).keep_cached);
+}
+
+TEST_CASE("merge_printer_row carries the last AMS reading into a row with none, load and unload off", "[RemoteHub]")
+{
+    const MergedPrinterRow m = merge_printer_row(LIVE_ROW, 100, false, IDLE_ROW, 200);
+    REQUIRE_FALSE(m.keep_cached);
+    const nlohmann::json row = nlohmann::json::parse(m.row);
+    REQUIRE(row["bed_temp"] == 0); // everything else is the incoming row's
+    REQUIRE(row["ams"][0]["trays"][0]["type"] == "PLA");
+    REQUIRE(row["ams"][0]["trays"][0]["can_load"] == false);
+    REQUIRE(row["ext_spools"][0]["type"] == "PETG");
+    REQUIRE(row["ext_spools"][0]["can_load"] == false);
+    REQUIRE(row["ext_spools"][0].contains("filament_why"));
+}
+
+TEST_CASE("merge_printer_row never overrides a row that reports filament of its own", "[RemoteHub]")
+{
+    const char* const other = R"({"id":"X1C","kind":"bambu","connected":true,
+        "ams":[{"id":"0","trays":[{"id":"0","exists":true,"type":"ABS"}]}]})";
+    const MergedPrinterRow m = merge_printer_row(LIVE_ROW, 100, false, other, 200);
+    REQUIRE(nlohmann::json::parse(m.row)["ams"][0]["trays"][0]["type"] == "ABS");
+}
+
+// ---- the Device tab's own live view (spike, "liveview_go2rtc") ------------------------------
+// The names below were produced by stream_center.html's own hashStr()/encodeURIComponent() in
+// node, so a camera on the Stream tab / phone wall and the Device tab's live view of the same
+// printer are one go2rtc stream (one connection to the printer), not two.
+
+TEST_CASE("js_hash_str matches stream_center.html's hashStr", "[RemoteHub][own-camera]")
+{
+    REQUIRE(js_hash_str("") == "811c9dc5");
+    REQUIRE(js_hash_str("a") == "e40c292c");
+    // Number.toString(16) has no leading zeros, and neither may we.
+    REQUIRE(js_hash_str("x2") == "f630cef");
+}
+
+TEST_CASE("js_encode_uri_component matches encodeURIComponent", "[RemoteHub][own-camera]")
+{
+    REQUIRE(js_encode_uri_component("-_.!~*'()az09 %&/=?") == "-_.!~*'()az09%20%25%26%2F%3D%3F");
+}
+
+TEST_CASE("own_camera_stream names an RTSPS camera the way the Stream tab does", "[RemoteHub][own-camera]")
+{
+    const OwnCameraStream a = own_camera_stream("rtsps", "192.168.1.50", "12345678", 0);
+    REQUIRE(a.src == "rtspx://bblp:12345678@192.168.1.50:322/streaming/live/1");
+    REQUIRE(a.name == "se6b733ea");
+    REQUIRE(a.mode == "mse");
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "ab(c)d!*", 0).name == "sc1ebfb8f");
+    const OwnCameraStream b = own_camera_stream("rtsps", "printer.local", "a&c/d=", 0);
+    REQUIRE(b.src == "rtspx://bblp:a%26c%2Fd%3D@printer.local:322/streaming/live/1");
+    REQUIRE(b.name == "s268fa2e4");
+}
+
+TEST_CASE("own_camera_stream sends a P1/A1 camera through the hub's MJPEG relay", "[RemoteHub][own-camera]")
+{
+    const OwnCameraStream a = own_camera_stream("local", "10.0.0.9", "abc", 52540);
+    REQUIRE(a.src == "http://127.0.0.1:52540/bambu?ip=10.0.0.9&code=abc");
+    REQUIRE(a.mode == "mjpeg");
+    REQUIRE(a.name == "b4e7ecdb0");
+    // Named by the camera, not by the relay port, which changes with every hub run.
+    REQUIRE(own_camera_stream("local", "10.0.0.9", "abc", 60000).name == a.name);
+    // No relay, no stream.
+    REQUIRE(own_camera_stream("local", "10.0.0.9", "abc", 0).name.empty());
+}
+
+TEST_CASE("own_camera_stream refuses what BambuCamRelay would refuse", "[RemoteHub][own-camera]")
+{
+    REQUIRE(own_camera_stream("rtsps", "", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7/x", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7@evil", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", std::string(33, 'a'), 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "abc def", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "abc\ndef", 0).name.empty());
+    REQUIRE(own_camera_stream("tutk", "10.0.0.7", "12345678", 0).name.empty());
+}
+
+// ---- go2rtc stream registration (register_streams: plan_stream_sync, parse_go2rtc_streams) ----
+// go2rtc 1.9.14 opens a second connection to the camera when a stream that viewers are watching is
+// PUT again (tests/phone/go2rtc_share_probe.py), and the hub used to re-PUT every camera on every
+// Stream-tab save. These pin down the rule that replaced it: only what changed is touched.
+
+namespace {
+using StreamMap = std::map<std::string, std::string>;
+using LiveMap   = std::map<std::string, Go2rtcLiveStream>;
+
+// Captured from go2rtc 1.9.14's GET /api/streams on loopback: one stream idle, one with a viewer.
+const char* const G2R_IDLE = R"({"cam":{"producers":[{"url":"http://127.0.0.1:18995/bambu?ip=x&code=A"}],"consumers":null}})";
+const char* const G2R_ACTIVE = R"({"cam":{"producers":[{"id":7,"format_name":"mpjpeg","protocol":"http","remote_addr":"127.0.0.1:18995",
+    "url":"http://127.0.0.1:18995/bambu?ip=x&code=A","medias":["video, recvonly, JPEG"],"receivers":[{"id":8,"codec":{"codec_name":"mjpeg",
+    "codec_type":"video"},"childs":[9],"bytes":5976,"packets":18}],"bytes_recv":5976}],"consumers":[{"id":6,"format_name":"mjpeg",
+    "protocol":"http","remote_addr":"127.0.0.1:54703","medias":["video, sendonly, JPEG, RAW"]}]},"other":{"producers":[],"consumers":null}})";
+
+const std::string RTSPX = "rtspx://bblp:12345678@192.168.1.50:322/streaming/live/1";
+const std::string U1A   = "http://127.0.0.1:50001/relay/h264?id=u1&lt=aaaa";
+const std::string U1B   = "http://127.0.0.1:50001/relay/h264?id=u1&lt=bbbb";
+
+// The quality variants register_streams() adds beside a stream when there is an ffmpeg.
+StreamMap with_variants(StreamMap m)
+{
+    StreamMap out = m;
+    for (const auto& e : m) {
+        out[e.first + "_med"] = "ffmpeg:" + e.first + "#video=h264#width=1280#raw=-r#raw=15";
+        out[e.first + "_low"] = "ffmpeg:" + e.first + "#video=h264#width=854#raw=-r#raw=10";
+    }
+    return out;
+}
+
+LiveMap live_of(const StreamMap& m, bool active)
+{
+    LiveMap l;
+    for (const auto& e : m) l[e.first] = Go2rtcLiveStream{ active ? std::string("exec:ffmpeg ...") : e.second, active };
+    return l;
+}
+
+std::set<std::string> names_of(const std::vector<std::pair<std::string, std::string>>& v)
+{
+    std::set<std::string> s;
+    for (const auto& e : v) s.insert(e.first);
+    return s;
+}
+
+bool nothing_to_do(const StreamSyncPlan& p) { return p.add.empty() && p.replace.empty() && p.remove.empty() && p.adopt.empty(); }
+} // namespace
+
+TEST_CASE("parse_go2rtc_streams reads go2rtc's stream list, idle and connected", "[RemoteHub][go2rtc-sync]")
+{
+    LiveMap l;
+    REQUIRE(parse_go2rtc_streams(G2R_IDLE, l));
+    REQUIRE(l.size() == 1);
+    CHECK(l["cam"].url == "http://127.0.0.1:18995/bambu?ip=x&code=A");
+    CHECK_FALSE(l["cam"].active);
+
+    REQUIRE(parse_go2rtc_streams(G2R_ACTIVE, l));
+    REQUIRE(l.size() == 2);
+    CHECK(l["cam"].active);
+    CHECK(l["cam"].url == "http://127.0.0.1:18995/bambu?ip=x&code=A");
+    CHECK(l["other"].url.empty()); // listed with no producer: still "go2rtc has it"
+    CHECK_FALSE(l["other"].active);
+
+    REQUIRE(parse_go2rtc_streams("{}", l));
+    CHECK(l.empty());
+}
+
+TEST_CASE("parse_go2rtc_streams refuses anything that is not a stream list", "[RemoteHub][go2rtc-sync]")
+{
+    LiveMap l;
+    l["keep"] = Go2rtcLiveStream{ "x", false };
+    CHECK_FALSE(parse_go2rtc_streams("", l));
+    CHECK_FALSE(parse_go2rtc_streams("404 page not found", l));
+    CHECK_FALSE(parse_go2rtc_streams("[1,2]", l));
+    CHECK(l.size() == 1); // untouched
+}
+
+TEST_CASE("first registration PUTs every camera and its variants", "[RemoteHub][go2rtc-sync]")
+{
+    const StreamMap want = with_variants({ { "s1a2b3c4", RTSPX }, { "u1_u1", U1A } });
+    const LiveMap   live;
+    const StreamSyncPlan p = plan_stream_sync(want, {}, &live);
+    CHECK(p.add.size() == want.size());
+    CHECK(p.replace.empty());
+    CHECK(p.remove.empty());
+    CHECK(p.adopt.empty());
+}
+
+TEST_CASE("a Stream-tab save with no camera changes touches nothing, watched or not", "[RemoteHub][go2rtc-sync]")
+{
+    // The bug: every save re-PUT every camera, and the next viewer of a watched one opened a
+    // second RTSP session to the printer.
+    const StreamMap want = with_variants({ { "s1a2b3c4", RTSPX }, { "u1_u1", U1A } });
+    const LiveMap   idle = live_of(want, false), watched = live_of(want, true);
+    CHECK(nothing_to_do(plan_stream_sync(want, want, &idle)));
+    CHECK(nothing_to_do(plan_stream_sync(want, want, &watched))); // a connected producer's URL is not compared
+    CHECK(nothing_to_do(plan_stream_sync(want, want, nullptr)));  // go2rtc's list unreadable: trust what we sent
+}
+
+TEST_CASE("a changed source under the same name is replaced, and so are its variants", "[RemoteHub][go2rtc-sync]")
+{
+    const StreamMap before = with_variants({ { "u1_u1", U1A }, { "s1a2b3c4", RTSPX } });
+    StreamMap       after  = before;
+    after["u1_u1"]         = U1B;
+    const LiveMap   live   = live_of(before, true);
+    const StreamSyncPlan p = plan_stream_sync(after, before, &live);
+    // The variants' ffmpeg is a viewer of the old u1_u1 object: replacing only the base would keep
+    // the old upstream alive for it.
+    CHECK(names_of(p.replace) == std::set<std::string>{ "u1_u1", "u1_u1_med", "u1_u1_low" });
+    for (const auto& r : p.replace)
+        if (r.first == "u1_u1") CHECK(r.second == U1B);
+    CHECK(p.add.empty());
+    CHECK(p.remove.empty()); // the other camera is left alone
+    CHECK(p.adopt.empty());
+}
+
+TEST_CASE("a camera whose address or code changed swaps names: new one added, old one deleted", "[RemoteHub][go2rtc-sync]")
+{
+    // stream_center.html names a go2rtc camera 's' + hash(src), so a new source is a new name.
+    const StreamMap before = with_variants({ { "s1a2b3c4", RTSPX } });
+    const StreamMap after  = with_variants({ { "s99999999", "rtspx://bblp:87654321@192.168.1.50:322/streaming/live/1" } });
+    const LiveMap   live   = live_of(before, true);
+    const StreamSyncPlan p = plan_stream_sync(after, before, &live);
+    CHECK(names_of(p.add) == std::set<std::string>{ "s99999999", "s99999999_med", "s99999999_low" });
+    CHECK(std::set<std::string>(p.remove.begin(), p.remove.end()) == std::set<std::string>{ "s1a2b3c4", "s1a2b3c4_med", "s1a2b3c4_low" });
+    CHECK(p.replace.empty());
+}
+
+TEST_CASE("a camera taken off the Stream tab is deleted with its variants", "[RemoteHub][go2rtc-sync]")
+{
+    const StreamMap before = with_variants({ { "s1a2b3c4", RTSPX }, { "u1_u1", U1A } });
+    const StreamMap after  = with_variants({ { "u1_u1", U1A } });
+    const LiveMap   live   = live_of(before, false);
+    const StreamSyncPlan p = plan_stream_sync(after, before, &live);
+    CHECK(std::set<std::string>(p.remove.begin(), p.remove.end()) == std::set<std::string>{ "s1a2b3c4", "s1a2b3c4_med", "s1a2b3c4_low" });
+    CHECK(p.add.empty());
+    CHECK(p.replace.empty());
+}
+
+TEST_CASE("only streams this hub registered are ever deleted", "[RemoteHub][go2rtc-sync]")
+{
+    // e.g. the Device tab's own live view (#448) registers its own names through /hub/camera.
+    const LiveMap live = { { "b0badf00", Go2rtcLiveStream{ "http://127.0.0.1:1/bambu?ip=x&code=y", true } } };
+    CHECK(nothing_to_do(plan_stream_sync({}, {}, &live)));
+}
+
+TEST_CASE("a stream go2rtc lost is registered again", "[RemoteHub][go2rtc-sync]")
+{
+    const StreamMap want = { { "s1a2b3c4", RTSPX } };
+    const LiveMap   live; // e.g. an earlier PUT that go2rtc refused
+    const StreamSyncPlan p = plan_stream_sync(want, want, &live);
+    CHECK(names_of(p.add) == std::set<std::string>{ "s1a2b3c4" });
+}
+
+TEST_CASE("a stream already in go2rtc that this hub did not register", "[RemoteHub][go2rtc-sync]")
+{
+    const StreamMap want = { { "s1a2b3c4", RTSPX } };
+    SECTION("same source, idle: adopted, nothing sent")
+    {
+        const LiveMap live = { { "s1a2b3c4", Go2rtcLiveStream{ RTSPX, false } } };
+        const StreamSyncPlan p = plan_stream_sync(want, {}, &live);
+        CHECK(names_of(p.adopt) == std::set<std::string>{ "s1a2b3c4" });
+        CHECK(p.add.empty());
+        CHECK(p.replace.empty());
+    }
+    SECTION("someone is watching it: adopted, never disturbed")
+    {
+        const LiveMap live = { { "s1a2b3c4", Go2rtcLiveStream{ "rtsps://192.168.1.50:322/streaming/live/1", true } } };
+        const StreamSyncPlan p = plan_stream_sync(want, {}, &live);
+        CHECK(names_of(p.adopt) == std::set<std::string>{ "s1a2b3c4" });
+        CHECK(p.replace.empty());
+    }
+    SECTION("idle with another source: replaced (no viewer to double up)")
+    {
+        const LiveMap live = { { "s1a2b3c4", Go2rtcLiveStream{ "rtsp://elsewhere/1", false } } };
+        const StreamSyncPlan p = plan_stream_sync(want, {}, &live);
+        CHECK(names_of(p.replace) == std::set<std::string>{ "s1a2b3c4" });
+        CHECK(p.adopt.empty());
+    }
+}
+
+TEST_CASE("go2rtc's list unreadable: new names are sent, known ones are not", "[RemoteHub][go2rtc-sync]")
+{
+    const StreamMap registered = { { "s1a2b3c4", RTSPX } };
+    const StreamMap want       = { { "s1a2b3c4", RTSPX }, { "u1_u1", U1A } };
+    const StreamSyncPlan p = plan_stream_sync(want, registered, nullptr);
+    CHECK(names_of(p.add) == std::set<std::string>{ "u1_u1" });
+    CHECK(p.replace.empty());
+    CHECK(p.remove.empty());
+}
+
+TEST_CASE("entries without a name or a source are skipped", "[RemoteHub][go2rtc-sync]")
+{
+    const LiveMap live;
+    CHECK(nothing_to_do(plan_stream_sync({ { "", RTSPX }, { "s1", "" } }, {}, &live)));
+}
+
+// ---- the Device tab's live view and the Stream-tab sync (#448 x #450) ------------------------
+// The live view (POST /hub/camera) puts its camera into what the sync wants
+// (merge_desired_streams), never PUTs on its own. Same printer on the Device tab, the Stream tab
+// and the phone = one go2rtc stream, and a Stream-tab save can never delete or replace it.
+
+TEST_CASE("merge_desired_streams adds the live-view cameras and never overrides the Stream tab", "[RemoteHub][own-camera][go2rtc-sync]")
+{
+    const StreamMap tab  = { { "s1a2b3c4", RTSPX } };
+    const StreamMap own  = { { "s1a2b3c4", "rtspx://other" }, { "b4e7ecdb0", "http://127.0.0.1:52540/bambu?ip=10.0.0.9&code=abc" } };
+    const StreamMap want = merge_desired_streams(tab, own);
+    CHECK(want.size() == 2);
+    CHECK(want.at("s1a2b3c4") == RTSPX);
+    CHECK(want.at("b4e7ecdb0") == own.at("b4e7ecdb0"));
+    CHECK(merge_desired_streams({}, own).size() == 2);
+    CHECK(merge_desired_streams(tab, {}) == tab);
+}
+
+TEST_CASE("the live view asking for a camera the Stream tab already has sends nothing", "[RemoteHub][own-camera][go2rtc-sync]")
+{
+    // The phone is watching the Stream-tab camera; the Device tab presses Play on the same printer.
+    const OwnCameraStream cam = own_camera_stream("rtsps", "192.168.1.50", "12345678", 0);
+    REQUIRE(cam.src == RTSPX);
+    const StreamMap tab  = with_variants({ { cam.name, cam.src } });
+    const LiveMap   live = live_of(tab, true);
+    CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams(tab, { { cam.name, cam.src } }), tab, &live)));
+}
+
+TEST_CASE("a Stream-tab save that drops a camera the Device tab plays keeps its stream", "[RemoteHub][own-camera][go2rtc-sync]")
+{
+    const OwnCameraStream cam   = own_camera_stream("rtsps", "192.168.1.50", "12345678", 0);
+    const StreamMap       own   = { { cam.name, cam.src } };
+    const StreamMap       before = with_variants({ { cam.name, cam.src }, { "u1_u1", U1A } });
+    const StreamMap       after  = with_variants({ { "u1_u1", U1A } }); // the camera taken off the Stream tab
+    const LiveMap         live   = live_of(before, true);              // the Device tab is watching it
+
+    SECTION("without the live view in `desired` (#450 alone) the sync would delete it")
+    {
+        const StreamSyncPlan p = plan_stream_sync(after, before, &live);
+        CHECK(std::count(p.remove.begin(), p.remove.end(), cam.name) == 1);
+    }
+    SECTION("with it, the base stream is neither deleted nor replaced; only the Stream tab's variants go")
+    {
+        const StreamSyncPlan p = plan_stream_sync(merge_desired_streams(after, own), before, &live);
+        CHECK(std::count(p.remove.begin(), p.remove.end(), cam.name) == 0);
+        CHECK(names_of(p.replace).count(cam.name) == 0);
+        CHECK(p.add.empty());
+        CHECK(std::set<std::string>(p.remove.begin(), p.remove.end()) == std::set<std::string>{ cam.name + "_med", cam.name + "_low" });
+    }
+    SECTION("and a later Stream-tab save that adds it back is unchanged as well")
+    {
+        StreamMap registered = before;
+        registered.erase(cam.name + "_med");
+        registered.erase(cam.name + "_low");
+        const LiveMap now = live_of(registered, true); // the variants were deleted from go2rtc
+        const StreamSyncPlan p = plan_stream_sync(merge_desired_streams(before, own), registered, &now);
+        CHECK(names_of(p.replace).count(cam.name) == 0);
+        CHECK(std::count(p.remove.begin(), p.remove.end(), cam.name) == 0);
+        CHECK(names_of(p.add) == std::set<std::string>{ cam.name + "_med", cam.name + "_low" });
+    }
+}
+
+TEST_CASE("a P1/A1 live-view camera (b<hash>) is registered once and kept across Stream-tab saves", "[RemoteHub][own-camera][go2rtc-sync]")
+{
+    const OwnCameraStream cam = own_camera_stream("local", "10.0.0.9", "abc", 52540);
+    const StreamMap       own = { { cam.name, cam.src } };
+    const StreamMap       tab = { { "u1_u1", U1A } };
+    const LiveMap         empty;
+    const StreamSyncPlan  first = plan_stream_sync(merge_desired_streams(tab, own), tab, &empty);
+    CHECK(names_of(first.add).count(cam.name) == 1);
+    const StreamMap registered = merge_desired_streams(tab, own);
+    const LiveMap   live       = live_of(registered, true);
+    CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams(tab, own), registered, &live)));
+    CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams({}, own), merge_desired_streams({}, own), &live)));
 }

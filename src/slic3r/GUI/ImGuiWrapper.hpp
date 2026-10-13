@@ -56,6 +56,8 @@ class ImGuiWrapper
     bool m_is_korean{ false };
     float m_font_size{ 18.0 };
     unsigned m_font_texture{ 0 };
+    // EDGE: set_scaling() asked for a new font while a frame was open; new_frame() rebuilds it.
+    bool m_font_rebuild_pending{ false };
     unsigned m_font_another_texture{ 0 };
     float m_style_scaling{ 1.0 };
     unsigned m_mouse_buttons{ 0 };
@@ -133,6 +135,7 @@ public:
     bool bbl_button(const wxString &label, const wxString& tooltip = {});
     bool button(const wxString& label, float width, float height);
     bool button(const wxString& label, const ImVec2 &size, bool enable); // default size = ImVec2(0.f, 0.f)
+    bool glyph_button(wchar_t icon_char, ImVec2 icon_size); // ORCA (G-code viewer, libvgcode stage 3)
     bool radio_button(const wxString &label, bool active);
     static ImVec4          to_ImVec4(const ColorRGB &color);
     bool input_double(const std::string &label, const double &value, const std::string &format = "%.3f");

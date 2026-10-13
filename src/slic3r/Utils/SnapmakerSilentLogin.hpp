@@ -2,6 +2,7 @@
 #define slic3r_SnapmakerSilentLogin_hpp_
 
 #include <string>
+#include <vector>
 
 // Silent Snapmaker sign-in at startup (GUI_App::sm_start_silent_login, SMUserLogin's silent mode).
 // The login state itself lives only in memory; what survives a restart is the id.snapmaker.com
@@ -19,6 +20,15 @@ namespace SMSilentLogin {
 // app_config key of Preferences > General "Sign in to my Snapmaker account automatically at startup".
 inline constexpr const char* k_pref_key = "snapmaker_auto_login";
 
+// app_config key that remembers whether this computer has a Snapmaker sign-in to come back to:
+// true after a sign-in completed (by hand or silently), false after signing out, after a silent
+// attempt found no session, and on every install that never signed in. The startup attempt only
+// runs while it is true, so a person who never uses Snapmaker cloud gets no Snapmaker traffic at
+// startup at all (privacy audit 2026-10, EdgeSlicerSite PR 4). An install from before this key
+// existed reads it as false: someone who was signed in signs in once more by hand (with a valid
+// web session the sign-in window closes on its own).
+inline constexpr const char* k_session_key = "snapmaker_signed_in";
+
 // Give up this long after the attempt started, whatever happened.
 inline constexpr int k_overall_timeout_ms = 20000;
 // After an id.snapmaker.com page finished loading, a valid session redirects on its own within a
@@ -30,6 +40,7 @@ inline constexpr int k_tick_ms = 500;
 struct StartupInputs
 {
     bool pref_enabled       = true;  // Preferences toggle (default on)
+    bool signed_in_before   = true;  // k_session_key: a sign-in on this computer to come back to
     bool is_editor          = true;  // false for the G-code viewer
     bool hidden_instance    = false; // hub-managed / --hidden / phone-upload instance: nobody in front of it
     bool main_window_ready  = true;  // mainframe exists and the app is not closing
@@ -54,14 +65,53 @@ enum class Tick
 //   since_load_ms     time since the most recent such page finished loading (ignored if !page_loaded)
 Tick on_tick(int elapsed_ms, bool page_loaded, int since_load_ms);
 
-// The token carried by a navigation address, or "" when there is none. Same rule the sign-in
-// dialog has always used: the text after "token=" up to the next '?' or the end.
+// Whether a navigation address carries a "token" parameter (in the query or the fragment). Only
+// the parameter named exactly "token": access_token=, refresh_token= and the like do not count.
+bool has_token_param(const std::string& url);
+
+// The value of that "token" parameter, percent-decoded, or "" when there is none. The value ends
+// at the next '&', '#' or '?'. id.snapmaker.com redirects to <redirect>?token=<T>&_act=login_success
+// (URLSearchParams.append then set("_act")); up to 2.4.5.2 the value ran on to the next '?' and
+// so carried "&_act=login_success", which the account service rejects (Snapmaker upstream #741).
 std::string token_from_url(const std::string& url);
+
+// Text for the log with every query string and fragment dropped (sign-in redirects carry tokens
+// there): "https://a/b?x=1#y rest" becomes "https://a/b rest". Works on a bare address and on an
+// error message that quotes one.
+std::string redact_url_queries(const std::string& text);
+
+// The answer of GET /api/common/accounts/current, read. Snapmaker answers HTTP 200 even for a
+// token it does not accept - {"code":110002,"msg":"Missing authorization"} - so the status alone
+// says nothing: only an answer with an account id is a verified session.
+struct AccountAnswer
+{
+    bool        ok = false;
+    std::string user_id;  // never empty when ok
+    std::string nickname;
+    std::string icon;
+    std::string account;
+    // When !ok: why, for the log line ("HTTP 502", "rejected: code 110002 (Missing authorization)",
+    // "no account in the answer", ...). Never the token, never account details.
+    std::string why;
+    // When !ok: true when the service answered and refused the token (the session is not valid),
+    // false for a transport or server problem that says nothing about the session.
+    bool        rejected = false;
+};
+AccountAnswer read_account_answer(unsigned http_status, const std::string& body);
+
+// The cookies id.snapmaker.com keeps its web session in (its sign-in page's setCookies, domain
+// .snapmaker.com / .snapmaker.cn). While they exist the page hands that session straight back to
+// the slicer, so the sign-in window closes at once. After a refused session and on sign-out they
+// are deleted (only these, never the shared browser profile), so the next sign-in shows the form.
+std::vector<std::string> session_cookie_names();
+// The address those cookies are sent to: https://id.snapmaker.com/ (or .cn for the China region).
+std::string session_cookie_uri(bool china_region);
 
 enum class Outcome
 {
     SignedIn,
     NoSession,
+    Rejected,  // the page handed over a token, but the account service did not accept it
     TimedOut,
     Failed,    // page or account lookup error
     Cancelled, // the user opened the sign-in dialog (or signed out) meanwhile
@@ -69,6 +119,17 @@ enum class Outcome
 };
 
 const char* outcome_name(Outcome o);
+
+// What an attempt's outcome does to k_session_key: a sign-in sets it, "no session" and "session
+// rejected" clear it (the saved web session is gone or no good, so the next start must not ask
+// Snapmaker again), and everything else (timed out, failed, cancelled, skipped) leaves it as it was.
+enum class SessionMarker
+{
+    Set,
+    Clear,
+    Keep,
+};
+SessionMarker session_marker_after(Outcome o);
 
 // "Snapmaker silent login: <outcome>" plus " (<detail>)" when detail is not empty. The caller never
 // passes the token or a cookie as the detail.

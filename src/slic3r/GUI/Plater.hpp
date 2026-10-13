@@ -18,6 +18,7 @@
 #include "libslic3r/enum_bitmask.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/ExtruderAreas.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "Jobs/Job.hpp"
 #include "Jobs/Worker.hpp"
@@ -191,6 +192,8 @@ public:
     void update_dynamic_filament_list();
 
     void update_nozzle_settings(bool switch_machine = false);
+    // Sets the per-nozzle Flow combos from the project nozzle_volume_type (after a device auto-match).
+    void sync_nozzle_flow_combos();
 
     ObjectList*             obj_list();
     ObjectSettings*         obj_settings();
@@ -346,7 +349,8 @@ public:
     bool open_3mf_file(const fs::path &file_path, bool from_url = false);
     int  get_3mf_file_count(std::vector<fs::path> paths);
     void add_file();
-    void add_model(bool imperial_units = false, std::string fname = "");
+    // Returns false when no object was added (e.g. the user cancelled the load dialog).
+    bool add_model(bool imperial_units = false, std::string fname = "");
     void import_zip_archive();
     void import_sl1_archive();
     void extract_config_from_project();
@@ -515,6 +519,9 @@ public:
     void export_stl(bool extended = false, bool selection_only = false, bool multi_stls = false);
     // Export just the one selected part (ModelVolume) as a binary STL, in world coordinates.
     void export_stl_part();
+    // Export as a STEP file of B-rep solids (Format/STEPExport): the selected objects, or with no
+    // object selected every object on the current plate (placed relative to that plate).
+    void export_step(bool selection_only = false);
     //BBS: remove amf
     //void export_amf();
     //BBS add extra param for exporting 3mf silence
@@ -528,6 +535,10 @@ public:
 
     void reload_from_disk();
     void replace_with_stl();
+    // Opens the selected part in Blender; saving there updates the part (GUI/BlenderBridge).
+    void edit_in_blender();
+    // Opens the selected part in FreeCAD; saving there updates the part (GUI/FreeCADBridge).
+    void edit_in_freecad();
     void reload_all_from_disk();
     bool has_toolpaths_to_export() const;
     void export_toolpaths_to_obj() const;
@@ -585,7 +596,7 @@ public:
     bool leave_gizmos_stack();
 
     void on_filaments_change(size_t extruders_count);
-    void on_filaments_delete(size_t extruders_count, size_t filament_id, int replace_filament_id = -1, const std::vector<unsigned char>& is_mixed_snapshot = {});
+    void on_filaments_delete(size_t extruders_count, size_t filament_id, int replace_filament_id = -1);
     bool confirm_auto_generated_gradients(size_t num_physical);
     void set_auto_generated_gradient_decision(size_t num_physical, bool create_auto_gradients);
     // BBS
@@ -665,6 +676,10 @@ public:
     /// @brief Sync (close + re-push) cold-plate notifications for the current plate.
     /// @return True if slicing is allowed on current plate after sync.
     bool sync_cold_plate_notification();
+    /// Snap #930: grouping dialog (or volume-type sync) before an explicit slice.
+    /// On success the plate-list dirty flag is cleared so later slice entry
+    /// points do not re-prompt until the next valid-to-invalid transition.
+    bool confirm_filament_grouping_before_slice();
     /// Check and guard filament temp mixing before slicing current plate.
     bool guard_before_slice_plate();
     /// Live (non-slice) warning: yellow notification when the CURRENT plate's
@@ -725,6 +740,13 @@ public:
     GLCanvas3D* get_assmeble_canvas3D();
     wxWindow* get_select_machine_dialog();
 
+    // Docked UV-editor pane used by GLGizmoTextureDisplacement's LSCM projection preview (see
+    // UVEditorCanvas.hpp). Returns nullptr only before the main window is fully constructed.
+    class UVEditorCanvas* get_uv_editor_canvas();
+    // Shows or hides the UV-editor AUI pane, updating its docked layout accordingly. Safe to call
+    // repeatedly (e.g. every time the gizmo's active layer/projection method changes).
+    void show_uv_editor(bool show);
+
     void arrange();
     void orient();
     void find_new_position(const ModelInstancePtrs  &instances);
@@ -762,7 +784,8 @@ public:
     // Ultra: split a painted part into one solid part per filament (docs/superpowers/specs/2026-09-01-color-split-design.md).
     void split_by_color();
     // Image Fill (Phase 2): apply a picture or a gradient to the selected part.
-    void apply_image_fill();
+    // image_path .. image dropped onto the 3D scene, the dialog starts with it
+    void apply_image_fill(const wxString &image_path = wxEmptyString);
     void optimize_rotation();
     // find all empty cells on the plate and won't overlap with exclusion areas
     static std::vector<Vec2f> get_empty_cells(const Vec2f step);
@@ -792,6 +815,8 @@ public:
     bool can_redo() const;
     bool can_reload_from_disk() const;
     bool can_replace_with_stl() const;
+    bool can_edit_in_blender() const;
+    bool can_edit_in_freecad() const;
     bool can_mirror() const;
     bool can_split(bool to_objects) const;
     bool can_split_by_color() const;
@@ -877,7 +902,8 @@ public:
 
     //BBS: add bed exclude area
 	void set_bed_shape() const;
-    void set_bed_shape(const Pointfs& shape, const Pointfs& exclude_area, const double printable_height, const std::string& custom_texture, const std::string& custom_model, bool force_as_custom = false) const;
+    // extruder_areas: dual-nozzle reach (empty on every other printer, which clears the nozzle-only strips).
+    void set_bed_shape(const Pointfs& shape, const Pointfs& exclude_area, const double printable_height, const std::string& custom_texture, const std::string& custom_model, bool force_as_custom = false, const ExtruderAreas& extruder_areas = ExtruderAreas()) const;
 
 	const NotificationManager* get_notification_manager() const;
 	NotificationManager* get_notification_manager();

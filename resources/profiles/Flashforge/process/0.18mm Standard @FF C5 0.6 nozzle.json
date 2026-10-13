@@ -17,7 +17,6 @@
         "Direct Drive Standard"
     ],
     "standby_temperature_delta": "-100",
-    "version": "2.1.1.0",
     "wipe_tower_extra_rib_length": "0",
     "wipe_tower_wall_type": "rib",
     "enable_arc_fitting": "1",
@@ -41,7 +40,6 @@
     "internal_solid_infill_line_width": "0.62",
     "internal_solid_infill_pattern": "rectilinear",
     "internal_solid_infill_speed": "150",
-    "is_custom_defined": "0",
     "layer_height": "0.18",
     "line_width": "0.62",
     "max_travel_detour_distance": "300",
@@ -70,5 +68,6 @@
     "top_surface_line_width": "0.62",
     "top_surface_speed": "150",
     "wipe_tower_cone_angle": "12",
-    "wipe_tower_extra_spacing": "120%"
+    "wipe_tower_extra_spacing": "120%",
+    "type": "process"
 }

@@ -12,7 +12,10 @@
 #include "PartPlate.hpp"
 #include "MsgDialog.hpp"
 #include "RemoteHub.hpp"
+#include "Theme.hpp"
+#include "AccountStatus.hpp"
 
+#include <algorithm>
 #include <thread>
 
 #include <boost/log/trivial.hpp>
@@ -46,14 +49,65 @@ public:
     virtual void DrawButton(wxDC& dc, wxWindow* wnd, const wxAuiToolBarItem& item, const wxRect& rect) wxOVERRIDE;
 };
 
+// The stock title bar text colour, or the UI theme's.
+static wxColour topbar_text_colour()
+{
+#ifdef __WINDOWS__
+    return GUI::Theme::colour("titlebar_text", wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT));
+#else
+    return GUI::Theme::colour("titlebar_text", *wxWHITE);
+#endif
+}
+
+// The Account button's label is drawn in the theme's warning colour while the printer's account is
+// signed out (GUI/AccountStatus.cpp, BBLTopbar::SetAccountWarning).
+static bool g_account_warn = false;
+
+static wxColour topbar_warning_colour()
+{
+    return GUI::Theme::colour("titlebar_warning", wxColour(255, 200, 61));
+}
+
+// The banner scaled for the bar; made again for a new size, and dropped when the theme changes
+// (BBLTopbar::ThemeChanged) because the new theme has another banner, or none.
+static wxBitmap g_banner_scaled;
+static wxSize   g_banner_scaled_for;
+
+// The UI theme's title bar banner (docs/themes.md), scaled to the bar's height (or its whole
+// size for "stretch") once per size and drawn under the buttons and the title.
+static void draw_banner(wxDC& dc, const wxRect& rect)
+{
+    const wxBitmap& banner = GUI::Theme::banner();
+    if (!banner.IsOk() || rect.width <= 0 || rect.height <= 0)
+        return;
+    const std::string& align = GUI::Theme::spec().banner_align;
+
+    wxBitmap& scaled     = g_banner_scaled;
+    wxSize&   scaled_for = g_banner_scaled_for;
+    wxSize          want = align == "stretch" ? rect.GetSize() :
+                                                wxSize(std::max(1, banner.GetWidth() * rect.height / std::max(1, banner.GetHeight())), rect.height);
+    if (!scaled.IsOk() || scaled_for != want) {
+        scaled     = wxBitmap(banner.ConvertToImage().Scale(want.x, want.y, wxIMAGE_QUALITY_HIGH));
+        scaled_for = want;
+    }
+
+    if (align == "tile") {
+        for (int x = rect.x; x < rect.GetRight(); x += want.x)
+            dc.DrawBitmap(scaled, x, rect.y, true);
+        return;
+    }
+    int x = rect.x;
+    if (align == "center")
+        x = rect.x + (rect.width - want.x) / 2;
+    else if (align == "right")
+        x = rect.GetRight() - want.x;
+    dc.DrawBitmap(scaled, x, rect.y, true);
+}
+
 void BBLTopbarArt::DrawLabel(wxDC& dc, wxWindow* wnd, const wxAuiToolBarItem& item, const wxRect& rect)
 {
     dc.SetFont(m_font);
-#ifdef __WINDOWS__
-    dc.SetTextForeground(wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT));
-#else
-    dc.SetTextForeground(*wxWHITE);
-#endif
+    dc.SetTextForeground(item.GetId() == ID_ACCOUNT && g_account_warn ? topbar_warning_colour() : topbar_text_colour());
 
     int textWidth = 0, textHeight = 0;
     dc.GetTextExtent(item.GetLabel(), &textWidth, &textHeight);
@@ -76,12 +130,16 @@ void BBLTopbarArt::DrawLabel(wxDC& dc, wxWindow* wnd, const wxAuiToolBarItem& it
 
 void BBLTopbarArt::DrawBackground(wxDC& dc, wxWindow* wnd, const wxRect& rect)
 {
-    dc.SetBrush(wxBrush(wxColour(38, 46, 48)));
+    const wxColour bg = GUI::Theme::colour("titlebar_bg", wxColour(38, 46, 48));
+    dc.SetBrush(wxBrush(bg));
+    if (GUI::Theme::active())
+        dc.SetPen(wxPen(bg));
     wxRect clipRect = rect;
     clipRect.y -= 8;
     clipRect.height += 8;
     dc.SetClippingRegion(clipRect);
     dc.DrawRectangle(rect);
+    draw_banner(dc, rect);
     dc.DestroyClippingRegion();
 }
 
@@ -170,11 +228,7 @@ void BBLTopbarArt::DrawButton(wxDC& dc, wxWindow* wnd, const wxAuiToolBarItem& i
         dc.DrawBitmap(bmp, bmpX, bmpY, true);
 
     // set the item's text color based on if it is disabled
-#ifdef __WINDOWS__
-    dc.SetTextForeground(wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT));
-#else
-    dc.SetTextForeground(*wxWHITE);
-#endif
+    dc.SetTextForeground(item.GetId() == ID_ACCOUNT && g_account_warn ? topbar_warning_colour() : topbar_text_colour());
     if (item.GetState() & wxAUI_BUTTON_STATE_DISABLED)
     {
         dc.SetTextForeground(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
@@ -347,10 +401,27 @@ void BBLTopbar::Init(wxFrame* parent)
     this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnUndo, this, wxID_UNDO);
     //this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnModelStoreClicked, this, ID_MODEL_STORE);
     this->Bind(wxEVT_AUITOOLBAR_TOOL_DROPDOWN, &BBLTopbar::OnPublishClicked, this, ID_PUBLISH);
+
+    // The Account button shows a warning while the selected printer's account is signed out.
+    g_account_warn = false;
+    GUI::AccountStatus::attach_topbar(this);
+    GUI::AccountStatus::refresh_async();
+}
+
+void BBLTopbar::SetAccountWarning(bool warn, const wxString& tooltip)
+{
+    if (m_account_item == nullptr)
+        return;
+    const bool changed = g_account_warn != warn || m_account_item->GetShortHelp() != tooltip;
+    g_account_warn = warn;
+    m_account_item->SetShortHelp(tooltip);
+    if (changed)
+        Refresh();
 }
 
 BBLTopbar::~BBLTopbar()
 {
+    GUI::AccountStatus::detach_topbar(this);
     m_file_menu_item = nullptr;
     m_dropdown_menu_item = nullptr;
     m_file_menu = nullptr;
@@ -489,6 +560,21 @@ void BBLTopbar::SetWindowSize()
 void BBLTopbar::UpdateToolbarWidth(int width)
 {
     this->SetSize(width, m_toolbar_h);
+}
+
+void BBLTopbar::ThemeChanged()
+{
+    g_banner_scaled     = wxBitmap();
+    g_banner_scaled_for = wxSize();
+    // The text and background colours are read as the bar is drawn; the icons come from the
+    // (theme-keyed) SVG cache.
+    Rescale();
+    // Realize() (in Rescale) leaves the bar as wide as its items; it is the frame's width it has to fill.
+    if (m_frame) {
+        UpdateToolbarWidth(m_frame->GetClientSize().GetWidth());
+        m_frame->Layout();
+    }
+    Refresh();
 }
 
 void BBLTopbar::Rescale() {
@@ -666,30 +752,9 @@ void BBLTopbar::OnMobileHubToolItem(wxAuiToolBarEvent &evt)
     wxAuiToolBar *tb = static_cast<wxAuiToolBar *>(evt.GetEventObject());
     tb->SetToolSticky(evt.GetId(), true);
 
-    // The hub is a separate process. Asking it where it lives - and starting it when it is not
-    // running - takes seconds, so it happens on a worker thread and the browser is opened back
-    // on the GUI thread. The seeds are the ones GUI_App::start_remote_access() uses, so a hub
-    // started from this button comes up exactly as the slicer itself would have started it,
-    // phone access included (or not) as the user left it.
-    const std::string token = wxGetApp().app_config->get("stream_phone_token");
-    const bool        phone = wxGetApp().app_config->get("stream_phone_access") == "1";
-    std::thread([token, phone]() {
-        RemoteHub::Info info = RemoteHub::query();
-        if (!info.alive || info.admin_port == 0)
-            info = RemoteHub::ensure_running(token, phone);
-        wxGetApp().CallAfter([info]() {
-            if (info.alive && info.admin_port > 0) {
-                // The hub page is served by the loopback-only control plane, never by the
-                // listener a tunnel can front. No secret in the URL: /hub/ itself is the one
-                // route that does not need it, and the page sends it as a header afterwards.
-                wxLaunchDefaultBrowser(wxString::Format("http://127.0.0.1:%d/hub/", info.admin_port));
-            } else {
-                MessageDialog(nullptr, _L("The Mobile Hub did not start. Please try again in a moment."),
-                              _L("Mobile Hub"), wxOK | wxICON_INFORMATION)
-                    .ShowModal();
-            }
-        });
-    }).detach();
+    // The hub is a separate process; MainFrame::open_mobile_hub() finds or starts it on a worker
+    // thread and opens its page in the browser (the same code the macOS View menu entry runs).
+    Slic3r::GUI::wxGetApp().mainframe->open_mobile_hub();
 
     tb->SetToolSticky(evt.GetId(), false);
 }

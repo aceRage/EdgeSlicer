@@ -293,6 +293,18 @@ void GLGizmoMmuSegmentation::data_changed(bool is_serializing)
 }
 
 // BBS
+void GLGizmoMmuSegmentation::refresh_from_model()
+{
+    // Same reload pairing data_changed() uses on extruder-count changes, but
+    // unconditional: palette/painting rewrites that keep the total count must also
+    // re-deserialize the selector states, or the stale editing copy would keep
+    // rendering the old mapping and its next update_model_object() would write
+    // that stale copy back over the model.
+    // Also resets the pending remap table to identity and may change the selected filament.
+    init_extruders_data();
+    init_model_triangle_selectors();
+}
+
 bool GLGizmoMmuSegmentation::on_number_key_down(int number)
 {
     int extruder_idx = number - 1;
@@ -1134,6 +1146,16 @@ void GLMmSegmentationGizmo3DScene::release_geometry() {
         glsafe(::glDeleteBuffers(1, &triangle_indices_VBO_id));
         triangle_indices_VBO_id = 0;
     }
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        if (this->vertices_VAO_id > 0) {
+            glsafe(::glDeleteVertexArrays(1, &this->vertices_VAO_id));
+            this->vertices_VAO_id = 0;
+        }
+#if !SLIC3R_OPENGL_ES
+    }
+#endif // !SLIC3R_OPENGL_ES
 
     this->clear();
 }
@@ -1142,6 +1164,13 @@ void GLMmSegmentationGizmo3DScene::render(size_t triangle_indices_idx) const
 {
     assert(triangle_indices_idx < this->triangle_indices_VBO_ids.size());
     assert(this->triangle_patches.size() == this->triangle_indices_VBO_ids.size());
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        assert(this->vertices_VAO_id != 0);
+#if !SLIC3R_OPENGL_ES
+    }
+#endif // !SLIC3R_OPENGL_ES
     assert(this->vertices_VBO_id != 0);
     assert(this->triangle_indices_VBO_ids[triangle_indices_idx] != 0);
 
@@ -1149,6 +1178,13 @@ void GLMmSegmentationGizmo3DScene::render(size_t triangle_indices_idx) const
     if (shader == nullptr)
         return;
 
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        glsafe(::glBindVertexArray(this->vertices_VAO_id));
+#if !SLIC3R_OPENGL_ES
+    }
+#endif // !SLIC3R_OPENGL_ES
     // the following binding is needed to set the vertex attributes
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, this->vertices_VBO_id));
     const GLint position_id = shader->get_attrib_location("v_position");
@@ -1169,17 +1205,48 @@ void GLMmSegmentationGizmo3DScene::render(size_t triangle_indices_idx) const
         glsafe(::glDisableVertexAttribArray(position_id));
 
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        OpenGLManager::bind_default_vao();
+#if !SLIC3R_OPENGL_ES
+    }
+#endif // !SLIC3R_OPENGL_ES
 }
 
 void GLMmSegmentationGizmo3DScene::finalize_vertices()
 {
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        assert(this->vertices_VAO_id == 0);
+#if !SLIC3R_OPENGL_ES
+    }
+#endif // !SLIC3R_OPENGL_ES
     assert(this->vertices_VBO_id == 0);
     if (!this->vertices.empty()) {
+#if !SLIC3R_OPENGL_ES
+        if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+            glsafe(::glGenVertexArrays(1, &this->vertices_VAO_id));
+            glsafe(::glBindVertexArray(this->vertices_VAO_id));
+#if !SLIC3R_OPENGL_ES
+        }
+#endif // !SLIC3R_OPENGL_ES
+
         glsafe(::glGenBuffers(1, &this->vertices_VBO_id));
         glsafe(::glBindBuffer(GL_ARRAY_BUFFER, this->vertices_VBO_id));
         glsafe(::glBufferData(GL_ARRAY_BUFFER, this->vertices.size() * sizeof(float), this->vertices.data(), GL_STATIC_DRAW));
         glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
         this->vertices.clear();
+
+#if !SLIC3R_OPENGL_ES
+        if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+            OpenGLManager::bind_default_vao();
+#if !SLIC3R_OPENGL_ES
+        }
+#endif // !SLIC3R_OPENGL_ES
     }
 }
 

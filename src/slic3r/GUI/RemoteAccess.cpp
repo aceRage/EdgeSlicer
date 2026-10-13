@@ -16,6 +16,8 @@
 #include "RemoteHub.hpp"
 #include "RemoteSend.hpp"
 #include "RemoteSnapmaker.hpp"
+#include "RemoteTimelapse.hpp"
+#include "PrinterTimelapse.hpp"
 #include "SnapmakerLan.hpp"
 #include "Selection.hpp"
 #include "Tab.hpp"
@@ -32,6 +34,7 @@
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
+#include "slic3r/Utils/LoopbackAcceptLoop.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
 #include <boost/asio.hpp>
@@ -180,6 +183,10 @@ static const ClassRule k_class_rules[] = {
     // colour import (OBJ / glTF): its OK handler is what fills the filament ids, so a returned OK
     // without a click imports without colour anyway; say so instead of pretending to agree
     { "ObjColorDialog",          wxID_CANCEL, false },
+    // Confirm's button id is wxID_APPLY but EndModal is wxID_OK. The hook returns
+    // ShowModal's result (it does not click the button), so wxID_OK is the
+    // apply-equivalent that lets confirm_grouping_before_slice proceed.
+    { "FilamentGroupDialog",     wxID_OK,     false },
 };
 
 static bool has_btn(wxDialog* d, int id) { return d->FindWindow(id) != nullptr; }
@@ -209,6 +216,9 @@ static long style_of(wxDialog* d)
     if (has_btn(d, wxID_YES))    s |= wxYES;
     if (has_btn(d, wxID_NO))     s |= wxNO;
     if (has_btn(d, wxID_CANCEL)) s |= wxCANCEL;
+    // DialogButtons "Confirm" is wxID_APPLY; treat it as the affirmative OK so a
+    // missed class rule in Request mode still returns wxID_OK, not Cancel.
+    if (has_btn(d, wxID_APPLY))  s |= wxOK;
     return s;
 }
 
@@ -232,10 +242,11 @@ static int default_answer(long s, bool affirmative)
 static const char* answer_name(int id)
 {
     switch (id) {
-    case wxID_YES: return "yes";
-    case wxID_NO:  return "no";
-    case wxID_OK:  return "ok";
-    default:       return "cancel";
+    case wxID_YES:   return "yes";
+    case wxID_NO:    return "no";
+    case wxID_OK:    return "ok";
+    case wxID_APPLY: return "ok";
+    default:         return "cancel";
     }
 }
 
@@ -289,6 +300,16 @@ public:
         if (DeviceManager* dm = wxGetApp().getDeviceManager()) {
             try {
                 dm->lan_reconnect_tick();
+            } catch (...) {}
+            // And a cloud printer that has never reported its AMS / spools is asked to, so the
+            // phone's printer screen has a filament list for it (DeviceManager::full_report_tick).
+            try {
+                dm->full_report_tick();
+            } catch (...) {}
+            // And every LAN printer besides the selected one gets a session of its own to report
+            // over, when the plug-in can do that (DeviceManager::lan_watch_tick).
+            try {
+                dm->lan_watch_tick();
             } catch (...) {}
         }
         // The printer event watcher rides on this tick: it needs the GUI thread for the Bambu
@@ -441,6 +462,16 @@ void RemoteAccess::reopen_gui_gate()
 
 bool RemoteAccess::gui_closing() { return gui_gate().closed(); }
 
+// Set on a Printers-tab worker thread (RemoteAccess::monitor_*): its requests are the desktop's
+// own polling, so a GUI thread that is slow to answer one is not a reason to flag the instance.
+static thread_local bool t_quiet_requests = false;
+struct QuietRequests
+{
+    bool was;
+    QuietRequests() : was(t_quiet_requests) { t_quiet_requests = true; }
+    ~QuietRequests() { t_quiet_requests = was; }
+};
+
 static bool run_on_main(std::function<void()> fn, int timeout_ms = 15000, const char* what = "a request")
 {
     const MainCallResult r = RemoteAccess::call_on_main([fn]() {
@@ -455,6 +486,10 @@ static bool run_on_main(std::function<void()> fn, int timeout_ms = 15000, const 
         // Not a stall: the window is going away and the request is answered 503 (crash c2a7d4de:
         // this used to run anyway, against a Plater that had already been freed).
         BOOST_LOG_TRIVIAL(info) << "RemoteAccess: " << what << " was not run: the slicer is closing";
+        return false;
+    }
+    if (t_quiet_requests) {
+        BOOST_LOG_TRIVIAL(info) << "RemoteAccess: the Printers tab's " << what << " did not finish within " << timeout_ms / 1000 << " s";
         return false;
     }
     RemoteAccess::get().raise_attention(std::string(what) + " did not finish on the PC within " + std::to_string(timeout_ms / 1000) + " s", "timeout");
@@ -485,12 +520,29 @@ void RemoteAccess::start()
         // Lives for the process and is never destroyed: the connection threads are detached, and a
         // socket destroyed after its io_context crashes in the socket service (see ServerLifetime.hpp).
         static asio::io_context& ioc = *new asio::io_context();
-        auto* acceptor = new tcp::acceptor(ioc, tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+        std::unique_ptr<tcp::acceptor> acceptor(new tcp::acceptor(ioc, tcp::endpoint(asio::ip::address_v4::loopback(), 0)));
         acceptor->listen();
-        m_acceptor = acceptor;
-        m_port     = acceptor->local_endpoint().port();
-        m_on       = true;
-        std::thread([this]() { accept_loop(); }).detach();
+        const int port = acceptor->local_endpoint().port();
+        // From here on only the accept thread touches the acceptor; stop() reaches it through the
+        // loop's wake-up connection, never directly (EDGESLICER-9, LoopbackAcceptLoop.hpp).
+        auto           loop  = std::make_shared<LoopbackAcceptLoop>((unsigned short) port);
+        tcp::acceptor* owned = acceptor.get();
+        std::thread([this, loop, owned]() {
+            std::unique_ptr<tcp::acceptor> acceptor(owned);
+            const bool stopped = loop->run(*acceptor, [this](tcp::socket* sock) {
+                try {
+                    std::thread([this, sock]() { serve(sock); }).detach();
+                } catch (const std::exception&) {
+                    delete sock; // no thread to answer it: the peer sees the connection close
+                }
+            });
+            if (!stopped)
+                BOOST_LOG_TRIVIAL(error) << "RemoteAccess: the instance API listener failed; the hub no longer reaches this instance";
+        }).detach();
+        acceptor.release();
+        m_accept_loop = std::move(loop);
+        m_port        = port;
+        m_on          = true;
         write_instance_file();
         if (s_heartbeat == nullptr) s_heartbeat = new GuiHeartbeat(); // GUI thread: start() runs there
         s_heartbeat->Start(1000);
@@ -504,19 +556,28 @@ void RemoteAccess::start()
 
 void RemoteAccess::stop()
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_on)
-        return;
-    m_on = false;
-    RemoteEvents::stop();
-    if (s_heartbeat) s_heartbeat->Stop();
-    boost::system::error_code ig;
-    fs::remove(fs::path(RemoteHub::instances_dir()) / (std::to_string(wxGetProcessId()) + ".json"), ig);
-    if (auto* acceptor = static_cast<tcp::acceptor*>(m_acceptor)) {
-        acceptor->close(ig); // unblocks accept_loop, which deletes the acceptor
-        m_acceptor = nullptr;
+    std::shared_ptr<LoopbackAcceptLoop> loop;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_on)
+            return;
+        m_on = false;
+        RemoteEvents::stop();
+        RemoteTimelapse::shutdown();
+        if (s_heartbeat) s_heartbeat->Stop();
+        boost::system::error_code ig;
+        fs::remove(fs::path(RemoteHub::instances_dir()) / (std::to_string(wxGetProcessId()) + ".json"), ig);
+        loop.swap(m_accept_loop);
+        m_port = 0;
     }
-    m_port = 0;
+    // EDGESLICER-9: this used to close the acceptor here while the accept thread, woken by that
+    // very close, deleted it - two threads tearing down one acceptor, a double close and a write
+    // into freed memory, which macOS reported a moment later as a double free when the main window
+    // was hidden. Now the accept thread closes and deletes its own acceptor; this only asks it to,
+    // with a loopback connection that ends its accept(). Outside m_mutex: the wait is bounded, but
+    // no request thread should queue behind it.
+    if (loop && !loop->stop())
+        BOOST_LOG_TRIVIAL(warning) << "RemoteAccess: could not wake the instance API listener; it ends with the process";
 }
 
 int RemoteAccess::port()
@@ -836,7 +897,8 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
         const int          last  = (int) zs.size() - 1;
         const unsigned int top   = (unsigned int) std::max(0, std::min(last, layer < 0 ? last : layer));
         const std::array<unsigned int, 2> range = { 0u, top };
-        if (v.get_layers_z_range() != range) {
+        const libvgcode::Interval&        shown = v.get_layers_z_range();
+        if (shown[0] != range[0] || shown[1] != range[1]) {
             IMSlider* slider = v.get_layers_slider();
             slider->SetSelectionSpan(0, (int) top);
             slider->set_as_dirty(false);
@@ -1053,6 +1115,16 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate)
             p["id"]           = m->dev_id;
             p["name"]         = m->dev_name;
             p["model"]        = m->printer_type;
+            // The friendly name ("Bambu Lab H2C") next to the code ("O1C2"): what the Printers tab
+            // and the app show. A newer hardware revision ("O1C2-V2") resolves through its parent.
+            {
+                std::string display = DeviceManager::get_printer_display_name(m->printer_type);
+                if (display.empty() && !m->printer_type.empty()) {
+                    const std::string parent = DeviceManager::parse_printer_type(m->printer_type);
+                    if (!parent.empty()) display = DeviceManager::get_printer_display_name(parent);
+                }
+                if (!display.empty()) p["model_name"] = display;
+            }
             p["online"]       = m->is_online();
             p["connected"]    = m->is_connected();
             p["status"]       = m->print_status;
@@ -1064,12 +1136,23 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate)
             p["task"]         = m->subtask_name;
             p["bed_temp"]     = m->bed_temp;
             p["bed_target"]   = m->bed_temp_target;
+            // The LAN address, when this PC knows it - a LAN-mode printer always has it, and a
+            // cloud-bound one usually does too once discovery or a previous LAN session has seen it.
+            // This is what lets the hub join a Bambu printer to the camera streams.json added for
+            // its address (RemoteHub::summary_json); never invented when the printer object has none.
+            if (!m->dev_ip.empty()) p["ip"] = m->dev_ip;
             p["nozzles"]      = nlohmann::json::array();
             for (const Extder& e : m->m_extder_data.extders) {
                 nlohmann::json n;
                 n["temp"]   = e.temp;
                 n["target"] = e.target_temp;
                 p["nozzles"].push_back(n);
+            }
+            // The cloud's picture of the running plate, when the cloud told us about this job (the
+            // Device tab shows the same one). LAN-only and SD-card jobs have none.
+            if (m->slice_info && m->is_in_printing() && !m->is_sdcard_printing()) {
+                const std::string& u = m->slice_info->thumbnail_url;
+                if (u.compare(0, 8, "https://") == 0 && u.size() < 4096) p["cover_url"] = u;
             }
             p["selected"] = (selected == m);
             RemoteSend::describe_bambu(m, p);    // kind, send capabilities, option defaults
@@ -1170,6 +1253,30 @@ RemoteAccess::ApiResponse RemoteAccess::api_jobs(int id)
     r.status = 404;
     r.body   = json_error("no such job");
     return r;
+}
+
+std::pair<int, std::string> RemoteAccess::monitor_printers()
+{
+    QuietRequests quiet;
+    const ApiResponse r = api_printers(-1);
+    return { r.status, r.body };
+}
+
+std::pair<int, std::string> RemoteAccess::monitor_control(const std::string& printer, const std::string& action, bool confirm)
+{
+    // Only the tab's three verbs; the id is checked again (and looked up) by RemoteControl::prepare.
+    if (action != "pause" && action != "resume" && action != "stop")
+        return { 400, json_error("unknown action") };
+    QuietRequests quiet;
+    const ApiResponse r = api_printer_control(printer, "action=" + action + (confirm ? "&confirm=1" : ""));
+    return { r.status, r.body };
+}
+
+std::pair<int, std::string> RemoteAccess::monitor_job(int id)
+{
+    if (id <= 0) return { 404, json_error("no such job") };
+    const ApiResponse r = api_jobs(id);
+    return { r.status, r.body };
 }
 
 // ------------------------------------------------------- the G-code archive ----
@@ -2419,6 +2526,9 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "POST"}, {"path", "/api/objects/transform"},       {"description", "form obj=&inst=[&x=&y=][&rz=][&scale=][&center=1]: move / rotate / scale one instance like the sidebar (undoable)"} },
             { {"method", "GET"},  {"path", "/api/printers[?plate={index}]"}, {"description", "known printers with live status and what a send needs: kind bambu|printhost|connect|snapmaker, online, lan_mode, access_code_set, sdcard, has_ams, model_matches, can_upload, can_print, options (the desktop's remembered defaults), upload_name (the file name the desktop's export would give plate {index}, the current plate without it - print hosts, the connected Snapmaker and a Snapmaker over the LAN); a Snapmaker over the LAN adds ip, port, added_by, toolheads, layer, total_layers and left_time_s, so one card can show everything /api/snapmaker/devices reports; and what a control needs: can_pause, can_resume, can_stop, print_status, stage, print_error {code, message, job_id, actions[]} (null when there is none; each action is {id, verb, label, needs_job_id, remote_safe} - the same buttons the desktop error dialog draws for that code) and the hms summary; a print host or connected Snapmaker that answers as a Moonraker printer adds bed_temp, bed_target and nozzles too (absent when it does not); and what the phone's native printer screen draws: controls {heaters[] {id bed|chamber|nozzle{N}, label, temp, target, min, max, settable, active}, speed {kind level|factor, value, min, max, settable, levels[]}, light {on} (absent without one), fans[] {id, label, percent}} on a Bambu printer, a LAN Snapmaker and a Moonraker print host, and ams[] {id, nozzle, side L|R|'', humidity_level, humidity_pct, temp, trays[] {id, exists, type, sub_type, color, remain, can_load, can_unload, filament_why}} plus ext_spools[] {ams_id 254|255, side, exists, type, color, can_load, can_unload} on a Bambu printer; controls.filament {load, unload, assumed} where load / unload is offered, and can_load / can_unload on each U1 toolhead"} },
             { {"method", "POST"}, {"path", "/api/printers/{id}/control"},  {"description", "form action=pause|resume|stop[&confirm=1][&dry_run=1]: pause, resume or stop the print on that printer, exactly as the desktop's own buttons do (stop = cancel the print and needs confirm=1; pause and resume do not). Returns a job id; the job's result says what the printer then reported. 409 when the printer's own state does not allow it (see can_pause / can_resume / can_stop). {id} is any id /api/printers lists, sm:{id} for a Snapmaker over the LAN included. The same route answers a Bambu printer error with the buttons its own dialog would draw: action=resume_error|stop_error|ignore_error|idle_ignore_error|ack_close&err={code} (stop_error needs confirm=1). Which of them a given error offers is print_error.actions on GET /api/printers, where each entry is {id, verb, label, needs_job_id, remote_safe}; a verb the error does not offer, one whose code is no longer the one the printer reports, or one that needs a job_id the printer has not got, is 409, and a verb this phase keeps desktop-only (the AMS controls, drying, nozzle recheck, buzzer, purification) is 403. The same route also changes the settings the desktop Device tab changes, as that printer's `controls` on GET /api/printers lists them: action=set_temp&heater=bed|chamber|nozzle{N}&target={C} (0 = off; confirm=1 is required above 50 C while the printer is not printing; 400 above the heater's max, 409 for a read-only heater), action=set_speed&value={level 1..4 on a Bambu, only while printing | speed factor % on a Klipper printer}, action=set_light&on=1|0, action=set_fan&fan={id}&percent=0..100 - a Bambu printer through the same MachineObject calls the Device tab makes, a Moonraker printer as one /printer/gcode/script. And filament: action=load_filament|unload_filament&ams={AMS id, 128+ AMS HT, 254/255 external spool}&slot={0..3} on a Bambu printer (command_ams_change_filament, as the Device tab's Load / Unload), slot={toolhead 0..3} on a Snapmaker U1 whose G-code help lists the macros (controls.filament.assumed: INNER_FILAMENT_UNLOAD / SM_PRINT_AUTO_FEED, unverified); 409 while printing or paused, or when that slot's can_load / can_unload is false"} },
+            { {"method", "GET"},  {"path", "/api/printers/{id}/timelapses"}, {"description", "the timelapse videos on that printer, newest first: {printer {id, name, kind}, source bambu_storage|moonraker, files [{name, size, time (unix s, 0 = unknown), duration_s (null = unknown), mime, has_thumbnail}], note?, stale}. A Snapmaker over the LAN (sm:{id}) or a Moonraker print host (host, ph:{id}, connect) is read through Moonraker's `timelapse` file root; a Bambu printer through the storage tunnel the Device tab uses, over the LAN (it needs the printer's IP and access code on this PC, an SD card, and the network plug-in's storage component). stale = the printer's storage was busy (a video being copied) and this is the last list. Failures are {error, code}: no_printer 404, offline 409, no_storage 409, no_lan 409, busy 409, unsupported 501, no_tunnel 501, printer_error 502/504"} },
+            { {"method", "GET"},  {"path", "/api/printers/{id}/timelapses/thumbnail?name={file}"}, {"description", "one video's preview picture (image/jpeg or image/png); 404 no_thumbnail when it has none"} },
+            { {"method", "GET"},  {"path", "/api/printers/{id}/timelapses/video?name={file}[&download=1]"}, {"description", "the video itself. A single-range Range header is honoured (206 + Content-Range; 416 when it is not in the file), Accept-Ranges: bytes is always sent, Content-Type follows the extension, download=1 adds Content-Disposition: attachment. A Moonraker printer's file is proxied with the Range passed on; a Bambu printer's is copied to this PC's temp folder on the first request (that request is answered from the part that has arrived, so playback starts at once) and every later request for it is answered from that copy. Errors before the first byte are JSON as for the list"} },
             { {"method", "POST"}, {"path", "/api/slice?plate={index}|all"}, {"description", "start slicing one plate (selects it) or all; returns a job id; 409 while slicing"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/send"},    {"description", "form printer={id}&mode=upload|print[&confirm=1][&force=1][&dry_run=1][&bed_leveling=0|1&flow_cali=0|1&timelapse=0|1&vibration_cali=0|1&use_ams=0|1][&name=][&mapping=0:1,1:2]: send the sliced plate to a printer exactly like the desktop's Send / Print dialogs (upload = to the printer's storage, print = start it; print needs confirm=1). A Snapmaker over the LAN (printer sm:{id}) takes `mapping` = which toolhead prints each of the file's filaments, defaulting to the colour match its own app makes; returns a job id; 409 unless the plate is sliced and no other send is running"} },
             { {"method", "GET"},  {"path", "/api/events?since={id}"},      {"description", "what this instance's printer watcher has seen, newest last: {events, last_id, watcher}. Each event is {local_id, time, instance, printer {id, name, kind}, kind started|finished|failed|cancelled|paused|resumed|runout|error, severity info|warning|error, title, text, code?, job?}. The hub keeps the merged history of every instance at /events on the phone link. `watcher` says what the live poll has seen: {poll_ms, last_poll, last_poll_ms, printers[{id, kind, online, watched, state, seen_at?}]}, where seen_at is the poll that seeded that printer - until it has one, and until last_poll has moved past it, a change on that printer seeds the watcher instead of making an event"} },
@@ -2518,6 +2628,20 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         return api_object_transform(body.empty() ? query : body);
     if (path == "/printers" && method == "GET")
         return api_printers(num(query_param(query, "plate"), -1));
+    // The timelapse list and pictures (the video itself is streamed by serve(), see there). The id
+    // is a printer id like /control's, percent-decoded; the name is checked by RemoteTimelapse.
+    if (method == "GET") {
+        std::string printer, what;
+        if (Timelapse::match_route(path, printer, what) && what != "video") {
+            const RemoteTimelapse::Answer a = what == "list" ? RemoteTimelapse::list(percent_decode(printer)) :
+                                                               RemoteTimelapse::thumbnail(percent_decode(printer), query_param(query, "name"));
+            r.status  = a.status;
+            r.type    = a.type;
+            r.body    = a.body;
+            r.headers = a.headers;
+            return r;
+        }
+    }
     if (path.compare(0, 10, "/printers/") == 0 && method == "POST") {
         const std::string rest  = path.substr(10);
         const size_t      slash = rest.find('/');
@@ -2582,22 +2706,6 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     return r;
 }
 
-void RemoteAccess::accept_loop()
-{
-    auto* acceptor = static_cast<tcp::acceptor*>(m_acceptor);
-    for (;;) {
-        boost::system::error_code ec;
-        auto* sock = new tcp::socket(acceptor->get_executor());
-        acceptor->accept(*sock, ec);
-        if (ec) {
-            delete sock;
-            break; // closed by stop()
-        }
-        std::thread([this, sock]() { serve(sock); }).detach();
-    }
-    delete acceptor;
-}
-
 // Loopback peers only (the hub); small bodies (form parameters); /api/... routes.
 void RemoteAccess::serve(void* socket_ptr)
 {
@@ -2624,7 +2732,8 @@ void RemoteAccess::serve(void* socket_ptr)
         std::istringstream first(head.substr(0, head.find("\r\n")));
         std::string        method, target, version;
         first >> method >> target >> version;
-        size_t content_length = 0;
+        size_t      content_length = 0;
+        std::string range; // the Range header, for the timelapse video route
         {
             size_t pos = head.find("\r\n") + 2;
             while (pos < head_end - 2) {
@@ -2634,6 +2743,8 @@ void RemoteAccess::serve(void* socket_ptr)
                 std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return (char) std::tolower(c); });
                 if (key == "content-length:")
                     content_length = (size_t) std::max(0, std::atoi(line.c_str() + 15));
+                else if (key.compare(0, 6, "range:") == 0)
+                    range = line.substr(6);
                 pos = nl + 2;
             }
         }
@@ -2654,11 +2765,25 @@ void RemoteAccess::serve(void* socket_ptr)
             size_t n = client.read_some(asio::buffer(buf, std::min(sizeof(buf), content_length - body.size())));
             body.append(buf, n);
         }
+        // A timelapse video is the one answer too large to build in memory: RemoteTimelapse writes
+        // it to the socket itself, Range and all, while the bytes arrive from the printer.
+        {
+            std::string printer, what;
+            if (method == "GET" && Timelapse::match_route(path.substr(4), printer, what) && what == "video") {
+                if (gui_closing()) {
+                    respond(client, "503 Service Unavailable", "application/json", json_error("the slicer is closing"));
+                    return;
+                }
+                RemoteTimelapse::video(client, percent_decode(printer), query_param(query, "name"), range, query_param(query, "download") == "1");
+                return;
+            }
+        }
         ApiResponse ar = handle_api(method, path.substr(4), query, body);
         if (ar.status == 503 && gui_closing()) // it began before the close; its GUI step was dropped
             ar.body = json_error("the slicer is closing");
         const char* status = ar.status == 200 ? "200 OK" : ar.status == 400 ? "400 Bad Request" : ar.status == 404 ? "404 Not Found"
                            : ar.status == 409 ? "409 Conflict" : ar.status == 413 ? "413 Payload Too Large"
+                           : ar.status == 501 ? "501 Not Implemented"
                            : ar.status == 502 ? "502 Bad Gateway" : ar.status == 504 ? "504 Gateway Timeout"
                            : ar.status == 503 ? "503 Service Unavailable" : "500 Internal Server Error";
         respond(client, status, ar.type, ar.body, ar.headers);

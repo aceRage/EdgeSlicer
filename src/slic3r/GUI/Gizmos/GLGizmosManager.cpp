@@ -22,9 +22,11 @@
 //#include "slic3r/GUI/Gizmos/GLGizmoHollow.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSeam.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMmuSegmentation.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSimplify.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSculpt.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEdit.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoCadFillet.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEmboss.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
@@ -167,6 +169,13 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case(EType::FuzzySkin):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg");
             break;
+        case(EType::TextureDisplacement):
+            // One shared icon in both themes (no dedicated dark variant yet) - but it must still be
+            // *this* gizmo's icon. Handing it the fuzzy-skin one here quietly replaced the icon set at
+            // construction, so the toolbar ended up showing two identical fuzzy-skin buttons after any
+            // light/dark switch.
+            gizmo->set_icon_filename("toolbar_texture_displacement.svg");
+            break;
         case(EType::MeshBoolean):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_meshboolean_dark.svg" : "toolbar_meshboolean.svg");
             break;
@@ -183,6 +192,7 @@ void GLGizmosManager::switch_gizmos_icon_filename()
             gizmo->set_icon_filename(m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg");
             break;
         case (EType::Edit):
+        case (EType::CadFillet):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg");
             break;
         }
@@ -221,6 +231,8 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoSeam(m_parent, m_is_dark ? "toolbar_seam_dark.svg" : "toolbar_seam.svg", EType::Seam));
     m_gizmos.emplace_back(new GLGizmoFuzzySkin(m_parent, m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg", EType::FuzzySkin));
     m_gizmos.emplace_back(new GLGizmoMmuSegmentation(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::MmSegmentation));
+    // One shared icon (no dedicated dark variant yet); it recolours acceptably in both themes.
+    m_gizmos.emplace_back(new GLGizmoTextureDisplacement(m_parent, "toolbar_texture_displacement.svg", EType::TextureDisplacement));
     m_gizmos.emplace_back(new GLGizmoEmboss(m_parent, m_is_dark ? "toolbar_text_dark.svg" : "toolbar_text.svg", EType::Emboss));
     m_gizmos.emplace_back(new GLGizmoSVG(m_parent));
     m_gizmos.emplace_back(new GLGizmoMeasure(m_parent, m_is_dark ? "toolbar_measure_dark.svg" : "toolbar_measure.svg", EType::Measure));
@@ -229,6 +241,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
     m_gizmos.emplace_back(new GLGizmoSculpt(m_parent, m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg", EType::Sculpt));
     m_gizmos.emplace_back(new GLGizmoEdit(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::Edit));
+    m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::CadFillet));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -552,6 +565,8 @@ bool GLGizmosManager::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_p
         return dynamic_cast<GLGizmoCut3D*>(m_gizmos[Cut].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == FuzzySkin)
         return dynamic_cast<GLGizmoFuzzySkin*>(m_gizmos[FuzzySkin].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+    else if (m_current == TextureDisplacement)
+        return dynamic_cast<GLGizmoTextureDisplacement*>(m_gizmos[TextureDisplacement].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == MeshBoolean)
         return dynamic_cast<GLGizmoMeshBoolean*>(m_gizmos[MeshBoolean].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == BrimEars)
@@ -567,6 +582,7 @@ bool GLGizmosManager::is_paint_gizmo()
     return m_current == EType::FdmSupports ||
            m_current == EType::MmSegmentation ||
            m_current == EType::FuzzySkin ||
+           m_current == EType::TextureDisplacement ||
            m_current == EType::Seam;
 }
 
@@ -619,6 +635,11 @@ void GLGizmosManager::render_current_gizmo() const
     if (!m_enabled || m_current == Undefined)
         return;
 
+    // Only a gizmo that is really open draws (and ray-casts for its hover state, which the Measure /
+    // Assembly gizmo does from on_render()).
+    if (m_gizmos[m_current]->get_state() != GLGizmoBase::On)
+        return;
+
     m_gizmos[m_current]->render();
 }
 
@@ -664,6 +685,12 @@ std::string GLGizmosManager::get_tooltip() const
 bool GLGizmosManager::on_mouse_wheel(const wxMouseEvent &evt)
 {
     bool processed = false;
+
+    // EdgeSlicer: the Move gizmo's Snap face to surface spins the dragged selection with the wheel.
+    if (m_current == Move) {
+        if (auto *move = dynamic_cast<GLGizmoMove3D *>(m_gizmos[Move].get()); move != nullptr && move->on_mouse_wheel_snap(evt))
+            return true;
+    }
 
     if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == FdmSupports || m_current == Seam || m_current == MmSegmentation || m_current == FuzzySkin || m_current == BrimEars || m_current == Sculpt) {
         float rot = (float)evt.GetWheelRotation() / (float)evt.GetWheelDelta();
@@ -785,8 +812,8 @@ bool GLGizmosManager::on_mouse(const wxMouseEvent &mouse_event)
     // tool bar wants to use event?
     if (gizmos_toolbar_on_mouse(mouse_event)) return true;
 
-    // current gizmo wants to use event?
-    if (m_current != Undefined &&
+    // current gizmo wants to use event? (only a gizmo that is really open gets mouse events)
+    if (m_current != Undefined && m_gizmos[m_current]->get_state() == GLGizmoBase::On &&
         // check if gizmo override method could be slower than simple call virtual function
         // &m_gizmos[m_current]->on_mouse != &GLGizmoBase::on_mouse &&
         m_gizmos[m_current]->on_mouse(mouse_event))
@@ -853,6 +880,14 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
     if (m_current == Edit) {
         if (auto *edit = dynamic_cast<GLGizmoEdit *>(m_gizmos[Edit].get());
             edit != nullptr && edit->on_edit_char(keyCode, evt.ShiftDown(), evt.CmdDown())) {
+            m_parent.set_as_dirty();
+            return true;
+        }
+    }
+
+    // Move gizmo: Esc cancels "pick target surface" mode before it would close the gizmo.
+    if (m_current == Move && keyCode == WXK_ESCAPE && !evt.HasModifiers()) {
+        if (auto *move = dynamic_cast<GLGizmoMove3D *>(m_gizmos[Move].get()); move != nullptr && move->on_snap_escape()) {
             m_parent.set_as_dirty();
             return true;
         }
@@ -1464,6 +1499,13 @@ bool GLGizmosManager::activate_gizmo(EType type)
                 snapshot(wxGetApp().plater(),
                          old_gizmo.get_gizmo_leaving_text(),
                          UndoRedo::SnapshotType::LeavingGizmoWithAction);
+
+        // The old gizmo is Off now. Do not leave it as the current one while the new one is being
+        // tried: when the new gizmo is not activable or refuses to turn on, the early returns below
+        // used to keep m_current on a gizmo that was already Off with its raycasters unregistered,
+        // and render_current_gizmo() / on_mouse() kept driving it with its toolbar icon and panel
+        // gone (EDGESLICER-8).
+        m_current = Undefined;
     }
 
     if (type == Undefined) { 
@@ -1555,6 +1597,10 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Sculpt";
     case GLGizmosManager::EType::Edit:
         return "Edit";
+    case GLGizmosManager::EType::CadFillet:
+        return "CAD Fillet";
+    case GLGizmosManager::EType::TextureDisplacement:
+        return "Texture Displacement";
     default:
         return "";
     }

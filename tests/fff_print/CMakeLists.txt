@@ -4,15 +4,24 @@ add_executable(${_TEST_NAME}_tests
 	test_data.cpp
 	test_data.hpp
 	test_extrusion_entity.cpp
+	test_extrusion_processor.cpp
 	test_fill.cpp
 	test_flow.cpp
 	test_gcode.cpp
+	test_cooling.cpp
+	test_mass_limited_acceleration.cpp
+	test_cost_breakdown.cpp
+	test_cost_overrides_slice.cpp
+	test_cost_pricing_slice.cpp
 	test_gcodeprocessor.cpp
+	test_gcode_timing.cpp
+	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
 	test_image_row_preview.cpp
 	test_image_row_walls.cpp
 	test_model.cpp
 	test_print.cpp
+	test_locked_zag_width_validation.cpp
 	test_printgcode.cpp
 	test_printobject.cpp
 	test_skirt_brim.cpp
@@ -22,15 +31,30 @@ add_executable(${_TEST_NAME}_tests
 	test_fuzzy_skin_overhangs.cpp
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
+	test_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
 	test_slice_bake.cpp
+	test_status_callback_race.cpp
 	test_modifier_effect.cpp
 	test_tree_support_determinism.cpp
+	test_tree_support.cpp
+	test_support_interface.cpp
+	test_stabilizers.cpp
+	test_stabilizer_bake.cpp
+	test_stabilizers_v2.cpp
+	test_stabilizers_without_supports.cpp
+	test_fdm_hollowing.cpp
+	test_extra_bridge_layer_determinism.cpp
 	test_bed_temperature.cpp
+	test_chamber_temperature.cpp
+	test_texture_displacement.cpp
 	test_trianglemesh.cpp
 	test_wipe.cpp
+	test_adaptive_pa.cpp
+	test_extruder_variant_arrays.cpp
+	test_core_guards.cpp
 	)
 # libslic3r_cgal links CGAL privately, so the GMP/MPFR libraries are needed at link time.
 # They are not propagated to this test target; find them under the deps prefix or the

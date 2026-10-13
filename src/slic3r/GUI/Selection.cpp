@@ -11,6 +11,7 @@
 #include "Plater.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
+#include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -67,7 +68,7 @@ bool Selection::Clipboard::is_sla_compliant() const
             return false;
 
         for (const ModelVolume* v : o->volumes) {
-            if (v->is_modifier())
+            if (v->is_modifier() || v->is_precise_seam()) // Precise Seam not supported in SLA
                 return false;
         }
     }
@@ -445,7 +446,8 @@ void Selection::add_curr_plate()
 
     PartPlate* plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
     for (int obj_idx = 0; obj_idx < m_model->objects.size(); obj_idx++) {
-        if (plate && plate->contain_instance_totally(obj_idx, 0)) {
+        // Membership, not contain_instance_totally(): objects outside the bed still need selecting.
+        if (plate && plate->contain_instance(obj_idx, 0)) {
             std::vector<unsigned int> volume_idxs = get_volume_idxs_from_object(obj_idx);
             do_add_volumes(volume_idxs);
         }
@@ -631,9 +633,23 @@ void Selection::set_deserialized(EMode mode, const std::vector<std::pair<size_t,
     for (unsigned int i : m_list)
         (*m_volumes)[i]->selected = false;
     m_list.clear();
+    // Volumes are re-added in index order; keep the previous click order (the alignment anchor
+    // is the last-selected item) for those that stay selected.
+    const std::vector<SelectionOrderKey> previous_order = std::move(m_selection_order);
+    m_selection_order.clear();
     for (unsigned int i = 0; i < (unsigned int)m_volumes->size(); ++ i)
 		if (std::binary_search(volumes_and_instances.begin(), volumes_and_instances.end(), (*m_volumes)[i]->geometry_id))
 			do_add_volume(i);
+    {
+        std::vector<SelectionOrderKey> reordered;
+        for (const SelectionOrderKey& k : m_selection_order)
+            if (std::find(previous_order.begin(), previous_order.end(), k) == previous_order.end())
+                reordered.push_back(k);
+        for (const SelectionOrderKey& k : previous_order)
+            if (std::find(m_selection_order.begin(), m_selection_order.end(), k) != m_selection_order.end())
+                reordered.push_back(k);
+        m_selection_order = std::move(reordered);
+    }
     update_type();
     set_bounding_boxes_dirty();
 }
@@ -642,6 +658,8 @@ void Selection::clear(bool notify_sidebar)
 {
     if (!m_valid)
         return;
+
+    m_selection_order.clear();
 
     if (m_list.empty())
         return;
@@ -682,7 +700,8 @@ void Selection::clear(bool notify_sidebar)
 #endif
 
     // #et_FIXME fake KillFocus from sidebar
-    if (notify_sidebar)
+    // Skip on shutdown: Plater's pImpl is already freed (Orca #14588), so plater()->canvas3D() would use-after-free.
+    if (notify_sidebar && !wxGetApp().is_closing())
         wxGetApp().plater()->canvas3D()->handle_sidebar_focus_event("", false);
 }
 
@@ -1377,6 +1396,26 @@ void Selection::flattening_rotate(const Vec3d& normal)
     this->set_bounding_boxes_dirty();
 }
 
+void Selection::flattening_rotate_part(const Vec3d& normal)
+{
+    assert(Slic3r::is_approx(normal.norm(), 1.));
+
+    if (!m_valid || !is_single_volume())
+        return;
+
+    GLVolume& v = *(*m_volumes)[*m_list.begin()];
+    const ModelVolume& model_volume = *m_model->objects[v.object_idx()]->volumes[v.volume_idx()];
+    v.set_volume_transformation(lay_part_on_face_matrix(model_volume, v.get_volume_transformation().get_matrix(),
+                                                        v.get_instance_transformation().get_matrix(), normal));
+
+#if !DISABLE_INSTANCES_SYNCH
+    // The part is shared by all instances of the object.
+    synchronize_unselected_volumes();
+#endif // !DISABLE_INSTANCES_SYNCH
+
+    this->set_bounding_boxes_dirty();
+}
+
 void Selection::scale(const Vec3d& scale, TransformationType transformation_type)
 {
     scale_and_translate(scale, Vec3d::Zero(), transformation_type);
@@ -1877,6 +1916,10 @@ void Selection::notify_instance_update(int object_idx, int instance_idx)
         for (unsigned int i : m_list)
         {
             int obj_index = (*m_volumes)[i]->object_idx();
+            // Orca #14499: skip the wipe tower (synthetic id >= 1000) and any other volume that is
+            // not a ModelObject; the id is not an index into m_model->objects.
+            if (obj_index < 0 || obj_index >= int(m_model->objects.size()))
+                continue;
             //-1 means all the instance in this object
             if (instance_idx == -1)
             {
@@ -2552,10 +2595,52 @@ void Selection::set_caches()
     m_cache.rotation_pivot = get_bounding_sphere().first;
 }
 
+int Selection::get_anchor_volume_idx() const
+{
+    return find_ordered_volume_idx(false);
+}
+
+int Selection::get_first_selected_volume_idx() const
+{
+    return find_ordered_volume_idx(true);
+}
+
+// The oldest (oldest_first) or newest still-selected volume in the selection order, or -1.
+int Selection::find_ordered_volume_idx(bool oldest_first) const
+{
+    if (!m_valid)
+        return -1;
+    auto find_selected = [this](const SelectionOrderKey& key) -> int {
+        for (unsigned int i : m_list) {
+            if (i >= (unsigned int) m_volumes->size())
+                continue;
+            const GLVolume& v = *(*m_volumes)[i];
+            if (v.object_idx() == key.object_idx && v.instance_idx() == key.instance_idx && v.volume_idx() == key.volume_idx)
+                return (int) i;
+        }
+        return -1;
+    };
+    if (oldest_first) {
+        for (auto it = m_selection_order.begin(); it != m_selection_order.end(); ++it)
+            if (int i = find_selected(*it); i >= 0)
+                return i;
+    } else {
+        for (auto it = m_selection_order.rbegin(); it != m_selection_order.rend(); ++it)
+            if (int i = find_selected(*it); i >= 0)
+                return i;
+    }
+    return -1;
+}
+
 void Selection::do_add_volume(unsigned int volume_idx)
 {
     m_list.insert(volume_idx);
     GLVolume* v = (*m_volumes)[volume_idx];
+    {
+        const SelectionOrderKey key{v->object_idx(), v->instance_idx(), v->volume_idx()};
+        m_selection_order.erase(std::remove(m_selection_order.begin(), m_selection_order.end(), key), m_selection_order.end());
+        m_selection_order.push_back(key);
+    }
     v->selected = true;
     if (v->hover == GLVolume::HS_Select || v->hover == GLVolume::HS_Deselect)
         v->hover = GLVolume::HS_Hover;
@@ -2578,6 +2663,11 @@ void Selection::do_remove_volume(unsigned int volume_idx)
 
     m_list.erase(v_it);
 
+    {
+        const GLVolume& rv = *(*m_volumes)[volume_idx];
+        const SelectionOrderKey key{rv.object_idx(), rv.instance_idx(), rv.volume_idx()};
+        m_selection_order.erase(std::remove(m_selection_order.begin(), m_selection_order.end(), key), m_selection_order.end());
+    }
     (*m_volumes)[volume_idx]->selected = false;
 }
 
@@ -2720,9 +2810,14 @@ void Selection::render_bounding_box(const BoundingBoxf3& box, const Transform3d&
 
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-    glsafe(::glLineWidth(2.0f * m_scale_factor));
+#if SLIC3R_OPENGL_ES
+    GLShaderProgram* shader = wxGetApp().get_shader("dashed_lines");
+#else
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(2.0f * m_scale_factor));
 
-    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    GLShaderProgram* shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");
+#endif // SLIC3R_OPENGL_ES
     if (shader == nullptr)
         return;
 
@@ -2730,6 +2825,16 @@ void Selection::render_bounding_box(const BoundingBoxf3& box, const Transform3d&
     const Camera& camera = wxGetApp().plater()->get_camera();
     shader->set_uniform("view_model_matrix", camera.get_view_matrix() * trafo);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+#if !SLIC3R_OPENGL_ES
+    if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+        const std::array<int, 4>& viewport = camera.get_viewport();
+        shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
+        shader->set_uniform("width", 1.5f);
+        shader->set_uniform("gap_size", 0.0f);
+#if !SLIC3R_OPENGL_ES
+    }
+#endif // !SLIC3R_OPENGL_ES
     m_box.set_color(to_rgba(color));
     m_box.render();
     shader->stop_using();

@@ -191,6 +191,13 @@ private:
     int 	    m_last_selected_column = -1;
 #endif /* __MSW__ */
 
+#ifdef __WXOSX__
+    bool m_starting_filament_editor = false;
+    wxDataViewItem m_filament_editor_item { nullptr };
+    bool is_live_model_item(wxDataViewItem item) const;
+    void start_filament_editor(wxDataViewItem item);
+#endif // __WXOSX__
+
 #if 0
     SettingsFactory::Bundle m_freq_settings_fff;
     SettingsFactory::Bundle m_freq_settings_sla;
@@ -428,12 +435,21 @@ public:
 
     ModelVolume* get_selected_model_volume();
     void change_part_type();
+    // preserve_ps_subtype = true: when new_type is PRECISE_SEAM_CENTER, volumes that are
+    //   already Precise Seam keep their existing subtype (LEFT/RIGHT/etc.). Used by the
+    //   modal "Change type" dialog where CENTER is a default fallback.
+    // preserve_ps_subtype = false: no preservation — target type is applied verbatim. Used
+    //   by the "Precise Seam Type" subtype picker where the user explicitly wants CENTER.
+    void set_volume_type(ModelVolumeType new_type, bool preserve_ps_subtype = true);
+    ModelVolumeType get_selected_volume_type();
 
     void last_volume_is_deleted(const int obj_idx);
     void update_and_show_object_settings_item();
     void update_settings_item_and_selection(wxDataViewItem item, wxDataViewItemArray& selections);
     void update_object_list_by_printer_technology();
     void update_info_items(size_t obj_idx, wxDataViewItemArray* selections = nullptr, bool added_object = false);
+    // EdgeSlicer: refreshes the text/SVG icon of every part row of an object from its ModelVolumes.
+    void update_volume_text_svg_icons(size_t obj_idx);
 
     void instances_to_separated_object(const int obj_idx, const std::set<int>& inst_idx);
     void instances_to_separated_objects(const int obj_idx);
@@ -458,11 +474,23 @@ public:
     void bake_slice_to_mesh();
     // Whether the menu item should be enabled for the current selection.
     static bool can_bake_slice_to_mesh();
+    // Side stabilizers baked into real geometry (a separate object or a part), so they print in
+    // other slicers too. Enabled when the object is sliced and its side stabilizers are not Off.
+    // tests/research_stabilizer_bake.md
+    void bake_stabilizers();
+    static bool can_bake_stabilizers();
+    // Re-reads an object's own settings into its list row and the settings panel, after code (not
+    // the user) changed ModelObject::config.
+    void refresh_object_settings(int obj_idx);
     void toggle_visibility_state(const wxDataViewItem& item);
     void update_visibility_icons();
     // Ultra (support groups): resync every part row's group badge with ModelVolume::config.
     void update_support_group_badges();
     void simplify();
+    // Open the exact CAD fillet / chamfer / shell gizmo on the selected part. from_gizmo: switch
+    // over from another open gizmo (the Edit panel's button) instead of refusing.
+    void open_cad_fillet(bool from_gizmo = false);
+    static bool can_open_cad_fillet();
     void update_item_error_icon(const int obj_idx, int vol_idx) const ;
 
     void copy_layers_to_clipboard();

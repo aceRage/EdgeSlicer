@@ -226,9 +226,6 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     // as an interface consistently everywhere interface_shells is consulted.
     g.has_bounded_paint_depth = this->layer()->object()->has_bounded_paint_depth();
 
-    if (this->layer()->lower_layer != nullptr)
-        // Cummulative sum of polygons over all the regions.
-        g.lower_slices = &this->layer()->lower_layer->lslices;
     if (this->layer()->upper_layer != NULL)
         g.upper_slices = &this->layer()->upper_layer->lslices;
 
@@ -240,6 +237,13 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter);
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
+
+    // Cumulative sum of polygons over all the regions, less what the lower layer could not print.
+    ExPolygons lower_slices;
+    if (this->layer()->lower_layer != nullptr) {
+        lower_slices   = g.printable_slices(this->layer()->lower_layer->lslices);
+        g.lower_slices = &lower_slices;
+    }
 
     // Ultra (over-support walls): hand the generator the slice-time reconstruction of "there is
     // support under here" for this layer, the same way lower_slices is handed in. Null (and the
@@ -1161,7 +1165,7 @@ void LayerRegion::simplify_entity_collection(ExtrusionEntityCollection* entity_c
 
 void LayerRegion::simplify_path(ExtrusionPath* path)
 {
-    const auto print_config = this->layer()->object()->print()->config();
+    const PrintConfig &print_config = this->layer()->object()->print()->config();
     const bool spiral_mode = print_config.spiral_mode;
     const bool enable_arc_fitting = print_config.enable_arc_fitting;
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);
@@ -1179,7 +1183,7 @@ void LayerRegion::simplify_path(ExtrusionPath* path)
 
 void LayerRegion::simplify_multi_path(ExtrusionMultiPath* multipath)
 {
-    const auto print_config = this->layer()->object()->print()->config();
+    const PrintConfig &print_config = this->layer()->object()->print()->config();
     const bool spiral_mode = print_config.spiral_mode;
     const bool enable_arc_fitting = print_config.enable_arc_fitting;
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);
@@ -1199,7 +1203,7 @@ void LayerRegion::simplify_multi_path(ExtrusionMultiPath* multipath)
 
 void LayerRegion::simplify_loop(ExtrusionLoop* loop)
 {
-    const auto print_config = this->layer()->object()->print()->config();
+    const PrintConfig &print_config = this->layer()->object()->print()->config();
     const bool spiral_mode = print_config.spiral_mode;
     const bool enable_arc_fitting = print_config.enable_arc_fitting;
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);

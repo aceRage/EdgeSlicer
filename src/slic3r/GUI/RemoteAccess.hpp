@@ -2,8 +2,10 @@
 
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -11,6 +13,7 @@
 #include "slic3r/Utils/MainThreadGate.hpp"
 
 namespace Slic3r {
+class LoopbackAcceptLoop;
 namespace GUI {
 
 // This slicer instance's JSON API, on a loopback-only port picked by the OS.
@@ -29,7 +32,7 @@ public:
 
     // Idempotent; call from the main thread once the Plater exists.
     void start();
-    void stop(); // removes the instance file; the listener dies with the process
+    void stop(); // removes the instance file and ends the listener (its own thread closes it)
     int  port();
 
     // ---- handing work to the GUI thread (MainThreadGate.hpp) ----
@@ -102,13 +105,22 @@ public:
     void note_slice_progress(int plate, int percent, const std::string& text);
     void note_slice_done(bool finished_all, bool ok, const std::string& error);
 
+    // ---- the desktop's own Printers tab (PrintersPanel.cpp) ----
+    // The same rows as GET /api/printers, the same pause / resume / stop and job state, called in
+    // process: the tab never goes through the loopback API or the hub. Worker threads only (they
+    // wait for the GUI thread). A GUI thread that is slow to answer one of these does not raise the
+    // hub's "needs attention" flag: nobody remote is waiting, and the tab simply tries again.
+    // Each returns { HTTP-style status, JSON body } exactly as the API route would.
+    std::pair<int, std::string> monitor_printers();
+    std::pair<int, std::string> monitor_control(const std::string& printer, const std::string& action, bool confirm);
+    std::pair<int, std::string> monitor_job(int id);
+
     // Send jobs (RemoteSend) report here from their worker thread.
     void update_job(int id, int percent, const std::string& text);
     void finish_job(int id, bool ok, const std::string& error, const nlohmann::json& result);
 
 private:
     RemoteAccess() = default;
-    void accept_loop();
     void serve(void* socket); // boost::asio tcp::socket*, owned by the call
     void write_instance_file();
 
@@ -176,7 +188,8 @@ private:
     std::mutex       m_mutex;
     bool             m_on { false };
     int              m_port { 0 };
-    void*            m_acceptor { nullptr };
+    // Shared with the accept thread, which alone touches (and finally deletes) the acceptor.
+    std::shared_ptr<LoopbackAcceptLoop> m_accept_loop;
     std::vector<Job> m_jobs;
     int              m_next_job { 1 };
     bool             m_send_running { false }; // one transfer at a time, like the desktop's dialogs
