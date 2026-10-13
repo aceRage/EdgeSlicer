@@ -1415,6 +1415,8 @@ bool UpgradePanel::Show(bool show)
                    const wxString &name /*= wxEmptyString*/)
     : wxPanel(parent,id,pos,size,style)
 {
+     SetBackgroundColour(*wxWHITE);
+
      upgrade_green_icon = ScalableBitmap(this, "monitor_upgrade_online", 5);
 
      auto ams_sizer = new wxFlexGridSizer(0, 2, 0, 0);
@@ -1494,6 +1496,7 @@ bool UpgradePanel::Show(bool show)
      const wxString& name /*= wxEmptyString*/)
      : wxPanel(parent, id, pos, size, style)
  {
+     SetBackgroundColour(*wxWHITE);
      
      upgrade_green_icon = ScalableBitmap(this, "monitor_upgrade_online", 5);
 

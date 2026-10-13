@@ -61,6 +61,7 @@ HMSNotifyItem::HMSNotifyItem(const std::string& dev_id, wxWindow *parent, HMSIte
     auto main_sizer = new wxBoxSizer(wxVERTICAL);
 
     m_panel_hms = new wxPanel(this, wxID_ANY, wxDefaultPosition, HMS_NOTIFY_ITEM_SIZE, wxTAB_TRAVERSAL);
+    m_panel_hms->SetBackgroundColour(*wxWHITE);
     auto m_panel_sizer = new wxBoxSizer(wxVERTICAL);
 
     auto m_panel_sizer_inner = new wxBoxSizer(wxHORIZONTAL);
@@ -156,6 +157,8 @@ HMSNotifyItem::HMSNotifyItem(const std::string& dev_id, wxWindow *parent, HMSIte
         open_hms_wiki_later(url);
         });
 #endif
+
+    wxGetApp().UpdateDarkUIWin(this);
 }
 HMSNotifyItem ::~HMSNotifyItem() {
     ;
@@ -198,6 +201,7 @@ HMSPanel::HMSPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, const wx
     auto m_main_sizer = new wxBoxSizer(wxVERTICAL);
 
     m_scrolledWindow = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL);
+    m_scrolledWindow->SetBackgroundColour(*wxWHITE);
     m_scrolledWindow->SetScrollRate(5, 5);
 
     m_top_sizer = new wxBoxSizer(wxVERTICAL);
@@ -211,6 +215,8 @@ HMSPanel::HMSPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, const wx
     this->SetSizerAndFit(m_main_sizer);
 
     Layout();
+
+    wxGetApp().UpdateDarkUIWin(this);
 }
 
 HMSPanel::~HMSPanel() {

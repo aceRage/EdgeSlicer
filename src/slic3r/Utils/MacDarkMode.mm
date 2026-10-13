@@ -120,6 +120,16 @@ void mac_activate_app()
     [NSApp activateIgnoringOtherApps:YES];
 }
 
+void mac_on_power_off(void (*fn)())
+{
+    if (fn == nullptr) return;
+    // NSWorkspace posts this on its own notification centre, not the default one.
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserverForName:NSWorkspaceWillPowerOffNotification
+                                                                    object:nil
+                                                                     queue:[NSOperationQueue mainQueue]
+                                                                usingBlock:^(NSNotification *note) { (void) note; fn(); }];
+}
+
 void mac_delete_site_cookies(const std::vector<std::string> &names, const std::string &uri,
                              std::function<void(size_t deleted)> done)
 {

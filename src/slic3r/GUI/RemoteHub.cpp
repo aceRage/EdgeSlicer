@@ -20,6 +20,7 @@
 #include "slic3r/Utils/WinFirewall.hpp"
 #include "slic3r/Utils/TailscaleCli.hpp" // where the CLI lives per platform, and the POSIX way to run it
 #include "slic3r/Utils/HubPlatform.hpp"   // go2rtc/ffmpeg lookup, macOS/Linux firewall, port holder, route, keep-alive, child processes
+#include "slic3r/Utils/HubQuit.hpp"       // SIGTERM/SIGINT/SIGHUP -> the tray's Quit, and the shutdown safety net
 
 #include <boost/asio.hpp>
 #include <boost/beast/core/detail/base64.hpp>
@@ -40,6 +41,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -79,6 +81,7 @@
 #endif
 
 #include <wx/app.h>
+#include <wx/dialog.h>
 #include <wx/icon.h>
 #include <wx/image.h>
 #include <wx/init.h>
@@ -2758,13 +2761,19 @@ public:
     bool shutdown();
     // A detached helper thread that shutdown() knows about and waits for. False once shutting down.
     bool spawn(std::function<void()> fn) { return m_life.spawn(std::move(fn)); }
-    // `reason` ends up in last_exit.json ("tray", "request", "idle"); the first one given wins,
-    // so the OnExit() that follows a tray quit does not overwrite it.
+    // `reason` ends up in last_exit.json ("tray", "request", "idle", "signal", "session_end",
+    // "close"); the first one given wins, so the OnExit() that follows a tray quit does not
+    // overwrite it. Every way the hub is asked to stop ends here, and it wakes loop() at once.
+    // Any thread, but never a signal handler (HubQuit hands a signal to a thread first).
     void request_quit(const char* reason = nullptr)
     {
         const char* none = nullptr;
         if (reason != nullptr) m_quit_reason.compare_exchange_strong(none, reason);
-        m_quit = true;
+        {
+            std::lock_guard<std::mutex> lock(m_quit_mutex);
+            m_quit = true;
+        }
+        m_quit_cv.notify_all();
     }
 
     struct Snapshot
@@ -2945,6 +2954,8 @@ private:
     void*                          m_job { nullptr };
     std::atomic<bool>              m_quit { false };
     std::atomic<const char*>       m_quit_reason { nullptr }; // a string literal, see request_quit()
+    std::mutex                     m_quit_mutex;              // with m_quit_cv: loop()'s wait between rounds
+    std::condition_variable        m_quit_cv;
     // Printer events, newest last. The hub owns the sequence, so ids keep increasing across every
     // instance that reports and across a restart of the hub itself.
     std::deque<json>               m_events;
@@ -4276,6 +4287,9 @@ void HubServer::start_go2rtc()
     if (m_go2rtc_pid > 0) {
         boost::nowide::ofstream pf(pid_file, std::ios::trunc);
         pf << m_go2rtc_pid << "\n";
+        // go2rtc leads its own process group (with any ffmpeg it starts): the group a forced exit
+        // (a second signal, or the shutdown deadline) kills before the process goes.
+        HubQuit::set_forced_exit_group(m_go2rtc_pid);
     }
 #endif
     if (m_go2rtc_pid <= 0) {
@@ -4310,7 +4324,10 @@ void HubServer::reap_go2rtc()
     if (!HubPlatform::reap_child_posix(pid, &code)) return;
     BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc (pid " << pid << ") ended with status " << code << "; camera video through the hub is off until the hub restarts";
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_go2rtc_pid == pid) m_go2rtc_pid = 0;
+    if (m_go2rtc_pid == pid) {
+        m_go2rtc_pid = 0;
+        HubQuit::set_forced_exit_group(0); // reaped, so its pid may be reused
+    }
 #endif
 }
 
@@ -6177,7 +6194,13 @@ void HubServer::loop(bool idle_exit)
     auto install_check_at = std::chrono::steady_clock::now();
     int  install_misses   = 0;
     while (!m_quit) {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        {
+            // Two seconds between rounds, cut short by request_quit(): a quit from a signal or the
+            // end of the session should not wait out the rest of a round.
+            std::unique_lock<std::mutex> lock(m_quit_mutex);
+            m_quit_cv.wait_for(lock, std::chrono::seconds(2), [this] { return m_quit.load(); });
+        }
+        if (m_quit) break;
         flush_logs(); // the file sink buffers; keep hub.log readable while we run
         reap_go2rtc();
         // A hub whose install folder was deleted under it (a scratch test copy that was removed)
@@ -6272,7 +6295,10 @@ bool HubServer::shutdown()
                                    << SHUTDOWN_DRAIN_MS << " ms; the server is left in place for them";
 #ifndef _WIN32
     if (m_go2rtc_pid > 0) {
-        HubPlatform::terminate_child_posix(m_go2rtc_pid, 2000); // SIGTERM, then SIGKILL; reaped either way
+        // go2rtc and the ffmpeg it started (its process group): SIGTERM, then SIGKILL; reaped either way.
+        HubPlatform::terminate_child_group_posix(m_go2rtc_pid, 2000);
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: go2rtc (pid " << m_go2rtc_pid << ") stopped";
+        HubQuit::set_forced_exit_group(0);
         m_go2rtc_pid = 0;
         boost::system::error_code ig;
         fs::remove(fs::path(hub_dir()) / "go2rtc.pid", ig);
@@ -6430,6 +6456,17 @@ private:
 };
 
 // A wxApp with no windows: the tray icon plus the server running on its own thread.
+//
+// Every way the hub is asked to stop ends in HubServer::request_quit(): the tray's Quit, POST
+// /hub/quit, the idle and install checks, SIGTERM / SIGINT / SIGHUP (macOS, Linux), WM_CLOSE
+// (Windows, to the tray icon's hidden window), macOS's power-off notice and the end of the session.
+// loop() then returns, its thread hands over to the GUI thread, which leaves the main loop, and
+// OnExit() runs the one stop_server(): go2rtc stopped by pid, the listeners closed, hub.json
+// removed, "RemoteHub: shutting down" in hub.log. The one exception is the end of the session
+// (wxEVT_END_SESSION), after which the OS may end the process without going back to the main
+// loop - there stop_server() runs right away. Once the quit has begun a watchdog gives the process
+// HubQuit::SHUTDOWN_DEADLINE_MS to be gone, and a second signal ends it at once; both stop
+// go2rtc's process group first (Windows: the kill-on-close job does it).
 class HubApp : public wxApp
 {
 public:
@@ -6452,8 +6489,13 @@ public:
         SetAppName("Edge Hub");
         SetExitOnFrameDelete(false); // no frames: the loop runs until the server thread ends
         wxInitAllImageHandlers();
+        // Before start(): from here on a request to terminate takes the clean way out, and start()
+        // is what launches go2rtc. A request that arrives while start() runs is acted on as soon as
+        // loop() begins.
+        watch_for_quit_requests();
         if (!m_server.start()) {
             BOOST_LOG_TRIVIAL(error) << "RemoteHub: could not start the listener";
+            stop_watching(); // OnExit() does not run after a failed OnInit()
             return false;
         }
         m_icon = new HubTaskBarIcon(m_server, [this]() { m_server.request_quit("tray"); });
@@ -6466,6 +6508,7 @@ public:
         });
         m_thread = std::thread([this]() {
             m_server.loop(false);
+            arm_watchdog(); // the quit has begun, whatever asked for it
             CallAfter([this]() {
                 if (m_icon) m_icon->RemoveIcon();
                 ExitMainLoop();
@@ -6479,9 +6522,117 @@ public:
 
     int OnExit() override
     {
+        stop_server(nullptr);
+        stop_watching();
+        delete m_icon;
+        m_icon = nullptr;
+        return 0;
+    }
+
+#ifdef __WXMSW__
+    // WM_CLOSE to the only wx window this process has, wxTaskBarIcon's hidden one (class
+    // wxWindowNR; a tool that closes an app's windows). Closing it used to destroy that window and
+    // leave the hub running with no tray icon; now it is the tray's Quit. `taskkill /PID <pid>`
+    // without /F is no way to reach it: tried 2026-10-12, it closed a driver (NVOpenGLPbuffer) and
+    // an IME window of the hub and left wxWindowNR alone. Every event passes through here, and only
+    // this one is taken.
+    int FilterEvent(wxEvent& event) override
+    {
+        if (event.GetEventType() == wxEVT_CLOSE_WINDOW && !m_stopped && wxDynamicCast(event.GetEventObject(), wxDialog) == nullptr) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: asked to close (WM_CLOSE), quitting as the tray's Quit does";
+            arm_watchdog();
+            m_server.request_quit("close");
+            return Event_Processed; // the window stays; the quit takes it down with everything else
+        }
+        return wxApp::FilterEvent(event);
+    }
+#endif
+
+private:
+    void watch_for_quit_requests()
+    {
+        s_app = this;
+#ifndef _WIN32
+        // macOS sends SIGTERM at logout and restart to whatever has not quit by then, `kill` sends
+        // it by default, SIGINT is ^C in the terminal that started a hub by hand and SIGHUP that
+        // terminal closing. The callback runs on HubQuit's own thread, never in signal context.
+        HubQuit::install_signal_handlers({ SIGTERM, SIGINT, SIGHUP }, [this](int sig) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: " << HubQuit::signal_name(sig)
+                                    << " received, quitting as the tray's Quit does (a second signal exits at once)";
+            arm_watchdog();
+            m_server.request_quit("signal");
+        });
+#endif
+#ifdef __APPLE__
+        mac_on_power_off(&HubApp::on_power_off);
+#endif
+        // Logout, restart or shut down. wxApp's own handlers would Close() the top window - on
+        // Windows that is the tray icon's hidden window, whose loss left the process without an
+        // icon and without a clean stop - and on Windows end with exit() from inside the window
+        // procedure. Neither handler below calls Skip(), so those never run.
+        Bind(wxEVT_QUERY_END_SESSION, [](wxCloseEvent& e) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: the session is ending (" << (e.GetLoggingOff() ? "log off" : "restart or shut down")
+                                    << "); not objecting";
+        });
+        Bind(wxEVT_END_SESSION, [this](wxCloseEvent&) {
+            // The OS may end the process as soon as this returns (Windows), or call exit() right
+            // after it (macOS, applicationWillTerminate), so the stop happens here and now.
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: the session is ending, stopping now";
+            stop_server("session_end");
+            if (m_icon) m_icon->RemoveIcon();
+            stop_watching();
+            flush_logs();
+            // And leave on our own if the OS has not ended the process by then (OnExit() finds
+            // the server stopped already).
+            ExitMainLoop();
+        });
+    }
+
+    // Undo watch_for_quit_requests(): the signal callback and the power-off notice use this app.
+    void stop_watching()
+    {
+        s_app = nullptr;
+#ifndef _WIN32
+        HubQuit::uninstall_signal_handlers();
+#endif
+    }
+
+#ifdef __APPLE__
+    // NSWorkspaceWillPowerOffNotification (main thread): logout, restart or shut down was chosen.
+    // It comes before the quit Apple event (wxEVT_QUERY_END_SESSION / wxEVT_END_SESSION) and before
+    // any SIGTERM, so the hub may well be gone before either arrives.
+    static void on_power_off()
+    {
+        if (HubApp* app = s_app) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: this Mac is logging out, restarting or shutting down; quitting";
+            app->arm_watchdog();
+            app->m_server.request_quit("session_end");
+        }
+    }
+#endif
+
+    // The safety net: the process is gone within HubQuit::SHUTDOWN_DEADLINE_MS of the quit
+    // beginning, stopped cleanly or not. Any thread; the first call sets the deadline.
+    void arm_watchdog()
+    {
+        m_watchdog.arm(std::chrono::milliseconds(HubQuit::SHUTDOWN_DEADLINE_MS), []() {
+            BOOST_LOG_TRIVIAL(error) << "RemoteHub: still running " << HubQuit::SHUTDOWN_DEADLINE_MS / 1000
+                                     << " s after it began to quit; exiting now";
+            flush_logs();
+            HubQuit::forced_exit(3); // go2rtc's process group first (POSIX); Windows: its job goes with us
+        });
+    }
+
+    // The one clean stop: the server thread joined, then shutdown(). GUI thread; runs once, from
+    // OnExit() or from the end of the session, whichever comes first.
+    void stop_server(const char* reason)
+    {
+        if (m_stopped) return;
+        m_stopped = true;
+        arm_watchdog();
         m_timer.Stop();
         set_balloon(nullptr); // the icon is about to go; nothing may reach it after this
-        m_server.request_quit();
+        m_server.request_quit(reason);
         if (m_thread.joinable()) m_thread.join();
         if (!m_server.shutdown()) {
             // A connection or helper thread is still running and still uses the server. Leave it
@@ -6489,17 +6640,16 @@ public:
             // it here is what crashed (a2375b06).
             (void) m_owned.release();
         }
-        delete m_icon;
-        m_icon = nullptr;
-        return 0;
     }
 
-private:
+    inline static HubApp* s_app { nullptr }; // for on_power_off(); set and read on the GUI thread only
     std::unique_ptr<HubServer> m_owned; // released, not destroyed, if shutdown() could not drain
     HubServer&      m_server;
     HubTaskBarIcon* m_icon { nullptr };
     std::thread     m_thread;
     wxTimer         m_timer;
+    bool            m_stopped { false }; // stop_server() has run (GUI thread only)
+    HubQuit::Watchdog m_watchdog;        // declared last: destroyed (and so disarmed) first
 };
 
 int run_server(const std::string& token_hint, bool phone_on)
