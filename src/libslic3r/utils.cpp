@@ -1265,7 +1265,7 @@ CopyFileResult copy_file(const std::string &from, const std::string &to, std::st
     BOOL result = CopyFileW(src_wstr, dst_wstr, FALSE);
     if (!result) {
         DWORD errCode = GetLastError();
-        error_message = "Error: " + errCode;
+        error_message = "Error: " + std::to_string(errCode);
         ret = FAIL_COPY_FILE;
         goto __finished;
     }
@@ -1573,6 +1573,24 @@ unsigned get_current_pid()
 #else
     return ::getpid();
 #endif
+}
+
+std::string per_user_temp_id()
+{
+#ifdef WIN32
+    return {};
+#else
+    return std::to_string(static_cast<unsigned long>(::getuid()));
+#endif
+}
+
+std::string per_user_temp_dir(const std::string &base, const std::string &user_id)
+{
+    if (user_id.empty())
+        return base;
+    // Keep the id at the top level so each user's dir sits directly in the world-writable temp
+    // root; a shared parent dir would be owned by whichever user created it first.
+    return base + "/edgeslicer_" + user_id;
 }
 
 std::string resolve_cli_input_path(const std::string &path)
