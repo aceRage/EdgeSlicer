@@ -254,6 +254,22 @@ TEST_CASE("Reloaded moves name their lines in G-code a script rewrote in place",
     CHECK(result.moves.size() < exported_moves.size() + 20);
 }
 
+TEST_CASE("GCodeProcessorResult::reset releases print-sized buffers", "[GCodeProcessor]")
+{
+    GCodeProcessorResult result;
+    result.moves.resize(64);
+    result.lines_ends.resize(64);
+    REQUIRE(result.moves.capacity() >= 64);
+    REQUIRE(result.lines_ends.capacity() >= 64);
+
+    result.reset();
+
+    CHECK(result.moves.empty());
+    CHECK(result.lines_ends.empty());
+    CHECK(result.moves.capacity() == 0);
+    CHECK(result.lines_ends.capacity() == 0);
+}
+
 TEST_CASE("Rewritten G-code that cannot be re-read keeps the moves and hides the G-code window", "[GCodeProcessor]")
 {
     Print print;
