@@ -63,6 +63,9 @@ double calculate_infill_rotation_angle(const PrintObject* object,
     if (template_string.empty()) {
         return Geometry::deg2rad(fixed_infill_angle);
     }
+    // Convert the id to an index. Layer::id() counts the raft layers, object->layers() does not.
+    const size_t first_object_layer_id = object->get_layer(0)->id();
+    layer_id = layer_id > first_object_layer_id ? layer_id - first_object_layer_id : 0;
     double             angle = 0.0;
     ConfigOptionFloats rotate_angles;
     const std::string  search_string = "/NnZz$LlUuQq~^|#";
@@ -81,6 +84,8 @@ double calculate_infill_rotation_angle(const PrintObject* object,
         double angle_start  = 0;
         double limit_fill_z = object->get_layer(0)->bottom_z();
         double start_fill_z = limit_fill_z;
+        // The raft height, or 0 without a raft.
+        const double print_z_offset = object->slicing_parameters().object_print_z_min;
         bool   _noop        = false;
         auto              fill_form = std::string::npos;
         bool              _absolute = false;
@@ -90,7 +95,8 @@ double calculate_infill_rotation_angle(const PrintObject* object,
         for (int i = 0; i <= layer_id; i++) {
             double fill_z = object->get_layer(i)->bottom_z();
 
-            if (limit_fill_z < object->get_layer(i)->slice_z) {
+            // slice_z is measured from the bottom of the model, limit_fill_z from the build plate.
+            if (limit_fill_z < object->get_layer(i)->slice_z + print_z_offset) {
                 if (repeats) { // if repeats >0 then restore parameters for new iteration
                     limit_fill_z += limit_fill_z - start_fill_z;
                     start_fill_z = fill_z;
@@ -272,16 +278,14 @@ struct SurfaceFillParams
 
 	// Index of this entry in a linear vector.
     size_t 			idx = 0;
-	// infill speed settings
-	float			sparse_infill_speed = 0;
-	float			top_surface_speed = 0;
-	float			solid_infill_speed = 0;
+	// Infill speed setting for the effective extrusion role.
+	float role_speed = 0;
     // Ultra (over-support surfaces): the flow ratio and the speed an erBottomSurfaceOverSupport
     // fill will be extruded with. They are region keys, and two regions whose surfaces would
     // otherwise be filled identically are MERGED into one fill that is attributed to the first
     // region - GCode::extrude_infill then applies that one region's config to the lot. Naming
-    // them here keeps two parts with their own values apart, the way solid_infill_speed already
-    // does for internal solid infill. Zero for every other role, so nothing else changes.
+    // them here keeps two parts with their own values apart, the way role_speed already
+    // does for the other infill roles. Zero for every other role, so nothing else changes.
     float			over_support_flow  = 0;
     float			over_support_speed = 0;
 
@@ -342,9 +346,7 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(flow.nozzle_diameter());
 		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, bridge);
 		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, extrusion_role);
-		RETURN_COMPARE_NON_EQUAL(sparse_infill_speed);
-		RETURN_COMPARE_NON_EQUAL(top_surface_speed);
-		RETURN_COMPARE_NON_EQUAL(solid_infill_speed);
+		RETURN_COMPARE_NON_EQUAL(role_speed);
 		RETURN_COMPARE_NON_EQUAL(over_support_flow);
 		RETURN_COMPARE_NON_EQUAL(over_support_speed);
         RETURN_COMPARE_NON_EQUAL(lateral_lattice_angle_1);
@@ -376,9 +378,7 @@ struct SurfaceFillParams
 				this->anchor_length_max == rhs.anchor_length_max &&
 				this->flow 				== rhs.flow 			&&
 				this->extrusion_role	== rhs.extrusion_role	&&
-				this->sparse_infill_speed	== rhs.sparse_infill_speed &&
-				this->top_surface_speed		== rhs.top_surface_speed &&
-				this->solid_infill_speed	== rhs.solid_infill_speed &&
+				this->role_speed			== rhs.role_speed &&
 				this->over_support_flow		== rhs.over_support_flow &&
 				this->over_support_speed	== rhs.over_support_speed &&
                 this->lateral_lattice_angle_1		== rhs.lateral_lattice_angle_1 &&
@@ -657,16 +657,34 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
 {
     assert(fill.surface.surface_type == stInternalSolid);
 
-	switch (fill.params.pattern) {
-    case ipRectilinear:
-    case ipMonotonic:
-    case ipMonotonicLine:
-    case ipAlignedRectilinear:
-        // Only support straight line based infill
-        break;
+    const bool line_based_pattern =
+        fill.params.pattern == ipRectilinear || fill.params.pattern == ipMonotonic ||
+        fill.params.pattern == ipMonotonicLine || fill.params.pattern == ipAlignedRectilinear;
 
-    default:
-        // For all other types, don't split
+    // ORCA: For non-line patterns, split by a geometric "core" so only thin areas get rerouted.
+    if (!line_based_pattern) {
+        const coord_t scaled_spacing = scaled<coord_t>(fill.params.spacing);
+
+        for (const ExPolygon &expolygon : fill.expolygons) {
+            Polygons filled_area = to_polygons(expolygon);
+
+            // "Core" area: open (erode+dilate) to drop thin features, then clamp back to the original polygon.
+            Polygons inner_area  = intersection(filled_area, opening(filled_area, scaled_spacing, scaled_spacing));
+
+            if (inner_area.empty()) {
+                narrow_infill.emplace_back(expolygon);
+                continue;
+            }
+
+            ExPolygons inner_ex = union_ex(inner_area);
+            ExPolygons expolys{expolygon};
+            ExPolygons narrow_ex = diff_ex(expolys, inner_ex);
+            ExPolygons normal_ex = intersection_ex(expolys, inner_ex);
+
+            append(normal_infill, normal_ex); // normal infill area
+            append(narrow_infill, narrow_ex); // narrow infill area
+        }
+
         return;
     }
 
@@ -848,8 +866,10 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
         return;
     }
 
-    // Expand the normal infills a little bit to avoid gaps between normal and narrow infills
-    normal_infill = intersection_ex(offset_ex(normal_fill_areas_ex, scaled_spacing * 0.1), fill.expolygons);
+    // Expand the normal infills to avoid gaps between normal and narrow infills.
+    // The inner_area was shrunk by scaled_spacing * 0.5, so we need to expand
+    // by at least that amount to ensure proper coverage and avoid gaps.
+    normal_infill = intersection_ex(offset_ex(normal_fill_areas_ex, scaled_spacing * 0.5), fill.expolygons);
     narrow_infill = narrow_fill_areas;
 
 #ifdef DEBUG_SURFACE_SPLIT
@@ -1333,7 +1353,10 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                             params.pattern = ipRectilinear;
                         params.density = 100.f;
                     }
-                } else if (params.density <= 0)
+                }
+                // A 0% top surface density means "walls only" on the top layer: drop the surface here,
+                // as the fillers divide their line spacing by the density.
+                if (params.density <= 0)
                     continue;
 
 				params.extrusion_role = erInternalInfill;
@@ -1386,17 +1409,26 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 					//Orca: enable thick bridge based on config
 					layerm.bridging_flow(extrusion_role, is_thick_bridge) :
 					layerm.flow(extrusion_role, (surface.thickness == -1) ? layer.height : surface.thickness);
-				// record speed params
+				// record speed params: the speed GCode::_extrude will use for this role (flow variant
+				// slot of the fill's filament), so two regions with different speeds are never merged.
+                const PrintConfig  &print_config = layer.object()->print()->config();
+                const unsigned int  filament_id  = params.extruder > 0 ? params.extruder - 1 : 0;
+				params.role_speed = 0;
+                if (params.extrusion_role == erBridgeInfill)
+                    params.role_speed = float(get_value_at(print_config, region_config.bridge_speed, ConfigFlowDomain::Process, filament_id));
+                else if (params.extrusion_role == erInternalBridgeInfill) {
+                    // internal_bridge_speed is a FloatOrPercent vector over bridge_speed, resolved as GCode::_extrude does.
+                    const FloatOrPercent ib_fop  = get_value_at(print_config, region_config.internal_bridge_speed, ConfigFlowDomain::Process, filament_id);
+                    const double         ib_base = get_value_at(print_config, region_config.bridge_speed, ConfigFlowDomain::Process, filament_id);
+                    params.role_speed = float(ib_fop.percent ? ib_fop.value * 0.01 * ib_base : ib_fop.value);
+                } else if (params.extrusion_role == erInternalInfill)
+                    params.role_speed = float(get_value_at(print_config, region_config.sparse_infill_speed, ConfigFlowDomain::Process, filament_id));
+                else if (params.extrusion_role == erTopSolidInfill)
+                    params.role_speed = float(get_value_at(print_config, region_config.top_surface_speed, ConfigFlowDomain::Process, filament_id));
+                else if (params.extrusion_role == erSolidInfill)
+                    params.role_speed = float(get_value_at(print_config, region_config.internal_solid_infill_speed, ConfigFlowDomain::Process, filament_id));
                 if (!params.bridge) {
-                    const PrintConfig  &print_config = layer.object()->print()->config();
-                    const unsigned int  filament_id  = params.extruder > 0 ? params.extruder - 1 : 0;
-                    if (params.extrusion_role == erInternalInfill)
-                        params.sparse_infill_speed = get_value_at(print_config, region_config.sparse_infill_speed, ConfigFlowDomain::Process, filament_id);
-                    else if (params.extrusion_role == erTopSolidInfill) {
-                        params.top_surface_speed = get_value_at(print_config, region_config.top_surface_speed, ConfigFlowDomain::Process, filament_id);
-                    } else if (params.extrusion_role == erSolidInfill)
-                        params.solid_infill_speed = get_value_at(print_config, region_config.internal_solid_infill_speed, ConfigFlowDomain::Process, filament_id);
-                    else if (params.extrusion_role == erBottomSurfaceOverSupport) {
+                    if (params.extrusion_role == erBottomSurfaceOverSupport) {
                         // Ultra (over-support surfaces): the EFFECTIVE speed, so that a speed of 0
                         // ("match the outer wall") still tells two parts with different outer wall
                         // speeds apart. GCode::_extrude resolves the same way.
@@ -1833,6 +1865,9 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 
             params.symmetric_infill_y_axis = surface_fill.params.symmetric_infill_y_axis;
 
+        } else if (surface_fill.params.pattern == ipZigZag) {
+            params.symmetric_infill_y_axis = surface_fill.params.symmetric_infill_y_axis;
+
         }
 		if (surface_fill.params.pattern == ipGrid)
 			params.can_reverse = false;
@@ -2157,7 +2192,7 @@ void Layer::make_ironing()
 			if (ironing_params.extruder != -1) {
 				//TODO just_infill is currently not used.
 				ironing_params.just_infill 	= false;
-				ironing_params.line_spacing = config.ironing_spacing;
+				ironing_params.line_spacing = std::max(IRONING_SPACING_MIN, double(config.ironing_spacing));
                 ironing_params.inset 		= config.ironing_inset;
 				ironing_params.height 		= default_layer_height * 0.01 * config.ironing_flow;
 				ironing_params.speed 		= config.ironing_speed.values.front();

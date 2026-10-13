@@ -19,7 +19,9 @@
 #include "libslic3r.h"
 #include "Config.hpp"
 #include "Polygon.hpp"
+#include "BoundingBox.hpp"
 #include "PaintDepth.hpp"
+#include <algorithm>
 #include <boost/preprocessor/facilities/empty.hpp>
 #include <boost/preprocessor/punctuation/comma_if.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
@@ -39,6 +41,7 @@ enum GCodeFlavor : unsigned char {
 enum class FuzzySkinType {
     None,
     External,
+    Hole,
     All,
     AllWalls,
 };
@@ -55,6 +58,7 @@ enum class NoiseType {
     Billow,
     RidgedMulti,
     Voronoi,
+    Ripple,
 };
 
 enum PrintHostType {
@@ -85,6 +89,10 @@ enum class IroningType {
     AllSolid,
     Count,
 };
+
+// Smallest usable ironing line spacing. Anything tighter yields an unprintable number of lines,
+// and zero stops the fillers from making progress.
+constexpr double IRONING_SPACING_MIN = 0.05;
 
 //BBS
 enum class WallInfillOrder {
@@ -300,6 +308,18 @@ enum DraftShield {
     dsDisabled, dsEnabled
 };
 
+// Side stabilizers (Support/Stabilizers.hpp): off, the automatic rings plus any painted points, or the
+// painted points only. Replaced a bool; PrintConfigDef::handle_legacy maps 1 to auto and 0 to off.
+enum StabilizerMode {
+    smOff, smAuto, smManual
+};
+
+// Cross-section of the side stabilizer pillars: round, a filleted rectangle like a prime tower (stiffer),
+// or round with rounded-rectangle columns where a pillar is tall and left unbraced.
+enum StabilizerColumnShape {
+    scsRound, scsRoundedRect, scsAuto
+};
+
 enum class PerimeterGeneratorType
 {
     // Classic perimeter generator using Clipper offsets with constant extrusion width.
@@ -463,6 +483,71 @@ enum FilamentVolumeType {
 constexpr const char* FILAMENT_GROUPING_STANDARD = "standard";
 constexpr const char* FILAMENT_GROUPING_CUSTOM   = "custom";
 
+// Edge's grouping-dialog gate (Slice button and Snap #930 Preview re-slice).
+// CUSTOM grouping AND at least two distinct nozzle flow types. Snapmaker's
+// any_nozzle_high_flow() / FilamentGroupDialog(parent, all_high_flow) gate is
+// intentionally not used here.
+inline bool filament_group_dialog_required(const std::string& grouping_mode, size_t distinct_nozzle_flow_type_count)
+{
+    return grouping_mode == FILAMENT_GROUPING_CUSTOM && distinct_nozzle_flow_type_count >= 2;
+}
+
+// Snap #930: a valid→invalid slice-result transition dirties grouping so Preview
+// re-slice can re-confirm. Other transitions do not set the flag.
+inline bool filament_group_dirty_on_invalidation(bool was_slice_result_valid, bool now_valid)
+{
+    return was_slice_result_valid && !now_valid;
+}
+
+// What confirm_grouping_before_slice should do. Interactive is a person at the PC;
+// Request / Background (phone, hidden instance) must not open FilamentGroupDialog.
+enum class FilamentGroupSliceDecision {
+    Sync,          // dialog not required: normalize volume types
+    Prompt,        // show FilamentGroupDialog; Cancel aborts
+    SkipAndProceed // keep the current mapping and slice
+};
+
+inline FilamentGroupSliceDecision filament_group_slice_decision(bool dialog_required, bool interactive)
+{
+    if (!dialog_required)
+        return FilamentGroupSliceDecision::Sync;
+    return interactive ? FilamentGroupSliceDecision::Prompt : FilamentGroupSliceDecision::SkipAndProceed;
+}
+
+// Preview plate-pick after the grouping step. Dirty + Prompt + Cancel => abort
+// (N1: no switch, no slice -- Snapmaker always returns 0). Non-interactive always
+// continues (N2). A clean pick continues.
+inline bool filament_group_plate_pick_continues(bool dirty, bool dialog_required, bool interactive, bool dialog_confirmed)
+{
+    if (!dirty)
+        return true;
+    if (filament_group_slice_decision(dialog_required, interactive) != FilamentGroupSliceDecision::Prompt)
+        return true;
+    return dialog_confirmed;
+}
+
+// S1: a clean plate-pick still syncs volume types when the grouping dialog is not
+// required. CUSTOM + mixed nozzles keep the custom mapping.
+inline bool filament_group_sync_on_clean_plate_pick(bool dirty, bool dialog_required) { return !dirty && !dialog_required; }
+
+// Target filament_volume_type that sync_filament_volume_types_for_slice writes
+// (or keeps, when the grouping dialog owns the mapping). Calib reads this
+// before the first slice so a U1 nozzle switched to High-Flow is not still
+// Standard. CUSTOM + mixed nozzles keep current_filament_type. Uniform nozzles
+// follow that single type. Mixed nozzles in standard grouping fall back to Standard.
+inline FilamentVolumeType slice_sync_target_filament_volume_type(
+    const std::string     &grouping_mode,
+    size_t                 distinct_nozzle_flow_type_count,
+    FilamentVolumeType     uniform_nozzle_type,
+    FilamentVolumeType     current_filament_type)
+{
+    if (filament_group_dialog_required(grouping_mode, distinct_nozzle_flow_type_count))
+        return current_filament_type;
+    if (distinct_nozzle_flow_type_count < 2 && uniform_nozzle_type == fvtHighFlow)
+        return fvtHighFlow;
+    return fvtStandard;
+}
+
 // Bounds-checked: values outside the mapping render as FLOW_MODE_STANDARD.
 const char* to_string(FilamentVolumeType type);
 
@@ -487,11 +572,159 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
+// name one slot per (extruder, variant) pair, extruder-major, and the retraction settings below carry one
+// value per slot (upstream Orca's Custom MyToolChanger: 5 extruders x 3 variants = 15 values).
+bool is_printer_extruder_variant_option(const std::string &key);
+
+// The slots of each extruder in that layout (extruder e's at [e]), or empty when the config has none:
+// printer_extruder_id / printer_extruder_variant missing or of different sizes, ids not grouped as
+// 1, 1, .., 2, 2, .., n, or a single variant per extruder (where per-variant and per-extruder vectors are
+// the same thing).
+std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config);
+
+// The slot of extruder `extruder_idx`'s current variant (extruder_type + nozzle_volume_type), its first
+// slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
+// in size or do not list the extruder.
+int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
+
+// extruder_type per extruder (ExtruderType values) as the 3MF slice_info reports it, `extruder_count` long.
+// PrintConfigDef::handle_legacy drops a profile's extruder_type on load, so the option usually holds its
+// one-element Direct Drive default; when it is shorter than the extruder count, each extruder's type is read
+// off its extruder_variant_list entry ("Bowden Standard,..." -> Bowden), which is what Bambu Studio's
+// extruder_type says for the same profile (X2D: Direct Drive, Bowden). Entries with nothing to go on repeat
+// the last known value.
+std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extruder_count);
+
+// The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
+// (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
+// one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine
+// (support_different_extruders), the first value per extruder index as the slicer has always read them
+// there. Leaves any other config alone.
+class DynamicPrintConfig;
+void resolve_printer_extruder_variants(DynamicPrintConfig &config);
+
+// The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
+std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
+
+// The index of extruder `extruder_idx`'s value of `key` that the slicer uses: its slot from `sources`
+// (printer_extruder_variant_sources) when `key` is a per-variant vector of the layout's length, else
+// `extruder_idx`. The printer tab binds its extruder pages to it.
+size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
+                                            size_t extruder_idx);
+
 template<typename VectorOption>
 inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
     -> decltype(opt.get_at(0))
 {
     return opt.get_at(get_config_idx(config, domain, filament_id));
+}
+
+// Packed filament_flow_ratio for calib / G-code-adjacent readers. get_at(filament_id)
+// is the wrong slot when an earlier filament declares Standard+High-Flow.
+inline double filament_flow_ratio_at(const ConfigBase &config, unsigned int filament_id = 0)
+{
+    const auto *opt = config.option<ConfigOptionFloats>("filament_flow_ratio");
+    if (opt == nullptr || opt->values.empty())
+        return 1.0;
+    return get_value_at(config, *opt, ConfigFlowDomain::Filament, filament_id);
+}
+
+// BBS: how far a filament's nozzle cools below its print temperature before the BBL wipe tower
+// (filament_cooling_before_tower at the filament's flow-variant slot; nil reads as 0, no cooling).
+// with_switcher_extra adds Bambu Studio's 10 degrees for a filament switcher that feeds extruders of
+// different types (GCode.cpp g_filament_switcher_extra_cooling_before_tower), which Bambu applies to
+// the toolchange through the tower. GCode's M620.15 C and the tower's "Wipe tower reheat before wipe"
+// both read this, so a toolchange that cools always heats back.
+double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra);
+
+// Packed flow-variant vectors are segmented by filament_flow_step_size. Filament / tool id
+// count is filament_diameter, not the packed length.
+inline size_t flow_variant_filament_count(const ConfigBase &config)
+{
+    if (const auto *opt = config.option<ConfigOptionFloats>("filament_diameter")) {
+        if (!opt->values.empty())
+            return opt->values.size();
+    }
+    return 1;
+}
+
+// True when any filament declares packed Standard/High-Flow columns (step_size > 1) or
+// get_config_idx remaps an id. T0 Standard-only + T1 [std,hf] set to Standard remaps
+// nothing (idx 0/1), but T1's ratio still lives at packed slot 1, not get_at(0).
+// Stay false when every filament is a single column so S5 non-variant F / M73 stay
+// byte-identical.
+inline bool filament_flow_variants_active(const ConfigBase &config)
+{
+    if (const auto *steps = config.option<ConfigOptionInts>("filament_flow_step_size")) {
+        for (int step : steps->values)
+            if (step > 1)
+                return true;
+    }
+    const size_t n = flow_variant_filament_count(config);
+    for (size_t i = 0; i < n; ++i)
+        if (get_config_idx(config, ConfigFlowDomain::Filament, static_cast<unsigned int>(i)) != i)
+            return true;
+    return false;
+}
+
+// The per-filament values GCode::_extrude reads on every extrusion path, resolved
+// once per export (GCode::apply_print_config) instead of through string-keyed
+// option lookups and get_config_idx on every path. The *_for accessors return the
+// same value the uncached expression gives, falling back to it for an id outside
+// the resolved range, so the G-code is identical either way.
+// process_config_idx is the slot get_config_idx(config, Process, id) picks, which
+// GCode::process_flow_value used to recompute (two string-keyed option lookups and a
+// variant-name search) for every option it read, a few dozen times per extrusion path
+// (the config-lookup caching of Orca #16028, adapted to the flow-variant lookup).
+struct ResolvedFilamentFlow
+{
+    bool                       variants_active{false};
+    std::vector<size_t>        process_config_idx;
+    std::vector<double>        flow_ratio;
+    std::vector<double>        max_volumetric_speed;
+    std::vector<unsigned char> enable_pressure_advance;
+
+    static ResolvedFilamentFlow resolve(const ConfigBase &config);
+
+    // The uncached expressions, one lookup each: what _extrude computed per path.
+    // _extrude's flow ratio stays get_at(0) unless flow variants are active (S5).
+    static double uncached_flow_ratio(const ConfigBase &config, unsigned int filament_id);
+    static double uncached_max_volumetric_speed(const ConfigBase &config, unsigned int filament_id);
+    static bool   uncached_enable_pressure_advance(const ConfigBase &config, unsigned int filament_id);
+
+    size_t process_config_idx_for(const ConfigBase &config, unsigned int filament_id) const
+    {
+        return filament_id < process_config_idx.size() ? process_config_idx[filament_id] :
+                                                         get_config_idx(config, ConfigFlowDomain::Process, filament_id);
+    }
+    double flow_ratio_for(const ConfigBase &config, unsigned int filament_id) const
+    {
+        return filament_id < flow_ratio.size() ? flow_ratio[filament_id] : uncached_flow_ratio(config, filament_id);
+    }
+    double max_volumetric_speed_for(const ConfigBase &config, unsigned int filament_id) const
+    {
+        return filament_id < max_volumetric_speed.size() ? max_volumetric_speed[filament_id] :
+                                                           uncached_max_volumetric_speed(config, filament_id);
+    }
+    bool enable_pressure_advance_for(const ConfigBase &config, unsigned int filament_id) const
+    {
+        return filament_id < enable_pressure_advance.size() ? enable_pressure_advance[filament_id] != 0 :
+                                                              uncached_enable_pressure_advance(config, filament_id);
+    }
+};
+
+template<typename VectorOption>
+inline auto unpack_filament_values(const ConfigBase &config, const VectorOption &opt)
+    -> std::vector<typename std::decay<decltype(opt.get_at(0))>::type>
+{
+    using T = typename std::decay<decltype(opt.get_at(0))>::type;
+    const size_t n = flow_variant_filament_count(config);
+    std::vector<T> out;
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i)
+        out.push_back(get_value_at(config, opt, ConfigFlowDomain::Filament, static_cast<unsigned int>(i)));
+    return out;
 }
 
 // end Snapmaker: flow variant------------------------------------------------------------------------
@@ -633,6 +866,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TimelapseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BedType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SkirtType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(StabilizerColumnShape)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeThumbnailsFormat)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
@@ -687,6 +922,20 @@ public:
     static void handle_legacy(t_config_option_key &opt_key, std::string &value);
     static void handle_legacy_composite(DynamicPrintConfig &config);
 
+    // Keys a bundled or user preset file may carry although this build deliberately does not load
+    // them into presets (yet). They are dropped on load exactly like any other key that is not part
+    // of the preset type, but they are expected, so Preset::remove_invalid_keys() reports them once
+    // per session at info level instead of one error per file. A genuinely unknown key is not listed
+    // here and keeps logging as an error. This is a "known to be absent" list, not a support list:
+    // adding a key here never changes a loaded value or the G-code.
+    enum class ForeignKeyOrigin {
+        BambuStudio,   // Bambu Studio option this fork has not implemented in presets (see docs/bambu-flush-keys.md)
+        ProjectScoped, // option that lives in the project config; older saves also wrote it into preset files
+    };
+    // True (and the origin) when opt_key is such a key.
+    static bool unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin = nullptr);
+    static const char *foreign_key_origin_label(ForeignKeyOrigin origin);
+
     // Array options growing with the number of extruders
     const std::vector<std::string>& extruder_option_keys() const { return m_extruder_option_keys; }
     // Options defining the extruder retract properties. These keys are sorted lexicographically.
@@ -731,6 +980,18 @@ class StaticPrintConfig;
 
 // Minimum object distance for arrangement, based on printer technology.
 double min_object_distance(const ConfigBase &cfg);
+
+// Whether any value is set, a nil value included.
+template<bool NULLABLE> bool any_enabled(const ConfigOptionBoolsTempl<NULLABLE> &option)
+{
+    return std::any_of(option.values.begin(), option.values.end(), [](unsigned char enabled) { return enabled != 0; });
+}
+
+// The clearance radius of print-by-object collision checks and arrange. Bambu Studio's
+// extruder_clearance_max_radius on a Bambu Lab printer (printer_model "Bambu Lab ..."), as Bambu
+// Studio uses it everywhere; extruder_clearance_radius on every other printer, whose profiles do not
+// set the max radius (its default of 68 mm would otherwise change their spacing).
+double sequential_clearance_radius(const ConfigBase &cfg);
 
 // Slic3r dynamic configuration, used to override the configuration
 // per object, per modification volume or per printing material.
@@ -791,7 +1052,7 @@ public:
     // Ultra (dual-nozzle): returns true when the printer's extruders carry more than one distinct
     // extruder variant (H2D/H2C/X2D), i.e. it is a multi-nozzle grouping machine. extruder_count is
     // filled with the nozzle count. Single-nozzle machines and same-variant toolchangers (U1) → false.
-    bool support_different_extruders(int& extruder_count);
+    bool support_different_extruders(int& extruder_count) const;
 };
 
 void handle_legacy_sla(DynamicPrintConfig &config);
@@ -952,40 +1213,51 @@ public: \
         { PrintConfigDef::handle_legacy(opt_key, value); }
 
 #define PRINT_CONFIG_CLASS_ELEMENT_DEFINITION(r, data, elem) BOOST_PP_TUPLE_ELEM(0, elem) BOOST_PP_TUPLE_ELEM(1, elem);
-#define PRINT_CONFIG_CLASS_ELEMENT_INITIALIZATION2(KEY) cache.opt_add(BOOST_PP_STRINGIZE(KEY), base_ptr, this->KEY);
-#define PRINT_CONFIG_CLASS_ELEMENT_INITIALIZATION(r, data, elem) PRINT_CONFIG_CLASS_ELEMENT_INITIALIZATION2(BOOST_PP_TUPLE_ELEM(1, elem))
-#define PRINT_CONFIG_CLASS_ELEMENT_HASH(r, data, elem) boost::hash_combine(seed, BOOST_PP_TUPLE_ELEM(1, elem).hash());
-#define PRINT_CONFIG_CLASS_ELEMENT_EQUAL(r, data, elem) if (! (BOOST_PP_TUPLE_ELEM(1, elem) == rhs.BOOST_PP_TUPLE_ELEM(1, elem))) return false;
-#define PRINT_CONFIG_CLASS_ELEMENT_LOWER(r, data, elem) \
-        if (BOOST_PP_TUPLE_ELEM(1, elem) < rhs.BOOST_PP_TUPLE_ELEM(1, elem)) return true; \
-        if (! (BOOST_PP_TUPLE_ELEM(1, elem) == rhs.BOOST_PP_TUPLE_ELEM(1, elem))) return false;
+#define PRINT_CONFIG_CLASS_ELEMENT_VISIT(r, data, elem) if (! f(BOOST_PP_STRINGIZE(BOOST_PP_TUPLE_ELEM(1, elem)), this->BOOST_PP_TUPLE_ELEM(1, elem), rhs.BOOST_PP_TUPLE_ELEM(1, elem))) return;
+#define PRINT_CONFIG_CLASS_ELEMENT_VISIT_SELF(r, data, elem) if (! f(BOOST_PP_STRINGIZE(BOOST_PP_TUPLE_ELEM(1, elem)), self.BOOST_PP_TUPLE_ELEM(1, elem), rhs.BOOST_PP_TUPLE_ELEM(1, elem))) return;
+// Each option list is expanded into the members and again into for_each_option_pair(), which calls
+// f(key, this->option, rhs.option) in declaration order and stops when f returns false. hash(),
+// operator==, operator<, initialize() and apply_to() iterate the options through that visitor.
+#define PRINT_CONFIG_CLASS_COMMON_BODY(CLASS_NAME) \
+    size_t hash() const throw() \
+    { \
+        size_t seed = 0; \
+        this->for_each_option_pair(*this, [&seed](const char*, const auto &a, const auto&) { boost::hash_combine(seed, a.hash()); return true; }); \
+        return seed; \
+    } \
+    bool operator==(const CLASS_NAME &rhs) const throw() \
+    { \
+        bool eq = true; \
+        this->for_each_option_pair(rhs, [&eq](const char*, const auto &a, const auto &b) { eq = (a == b); return eq; }); \
+        return eq; \
+    } \
+    bool operator!=(const CLASS_NAME &rhs) const throw() { return ! (*this == rhs); } \
+    bool operator<(const CLASS_NAME &rhs) const throw() \
+    { \
+        int c = 0; \
+        this->for_each_option_pair(rhs, [&c](const char*, const auto &a, const auto &b) { if (a < b) c = -1; else if (! (a == b)) c = 1; return c == 0; }); \
+        return c < 0; \
+    } \
+protected: \
+    void initialize(StaticCacheBase &cache, const char *base_ptr) \
+    { \
+        this->for_each_option_pair(*this, [&cache, base_ptr](const char *key, const auto &a, const auto&) { cache.opt_add(key, base_ptr, a); return true; }); \
+    }
 
 #define PRINT_CONFIG_CLASS_DEFINE(CLASS_NAME, PARAMETER_DEFINITION_SEQ) \
 class CLASS_NAME : public StaticPrintConfig { \
     STATIC_PRINT_CONFIG_CACHE(CLASS_NAME) \
 public: \
     BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_DEFINITION, _, PARAMETER_DEFINITION_SEQ) \
-    size_t hash() const throw() \
+    template<typename F> void for_each_option_pair(const CLASS_NAME &rhs, F &&f) const { visit_option_pairs(*this, rhs, f); } \
+    /* Defined in PrintConfig.cpp. */ \
+    bool apply_to(ConfigBase &target) const override; \
+    PRINT_CONFIG_CLASS_COMMON_BODY(CLASS_NAME) \
+private: \
+    /* The one expansion of the option list, for a const self and for apply_to()'s mutable target. */ \
+    template<typename Self, typename F> static void visit_option_pairs(Self &self, const CLASS_NAME &rhs, F &&f) \
     { \
-        size_t seed = 0; \
-        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_HASH, _, PARAMETER_DEFINITION_SEQ) \
-        return seed; \
-    } \
-    bool operator==(const CLASS_NAME &rhs) const throw() \
-    { \
-        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_EQUAL, _, PARAMETER_DEFINITION_SEQ) \
-        return true; \
-    } \
-    bool operator!=(const CLASS_NAME &rhs) const throw() { return ! (*this == rhs); } \
-    bool operator<(const CLASS_NAME &rhs) const throw() \
-    { \
-        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_LOWER, _, PARAMETER_DEFINITION_SEQ) \
-        return false; \
-    } \
-protected: \
-    void initialize(StaticCacheBase &cache, const char *base_ptr) \
-    { \
-        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_INITIALIZATION, _, PARAMETER_DEFINITION_SEQ) \
+        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_VISIT_SELF, _, PARAMETER_DEFINITION_SEQ) \
     } \
 };
 
@@ -1000,43 +1272,45 @@ protected: \
     if (! (*static_cast<const elem*>(this) == static_cast<const elem&>(rhs))) return false;
 
 // Generic version, with or without new parameters. Don't use this directly.
-#define PRINT_CONFIG_CLASS_DERIVED_DEFINE1(CLASS_NAME, CLASSES_PARENTS_TUPLE, PARAMETER_DEFINITION, PARAMETER_REGISTRATION, PARAMETER_HASHES, PARAMETER_EQUALS) \
+#define PRINT_CONFIG_CLASS_DERIVED_DEFINE1(CLASS_NAME, CLASSES_PARENTS_TUPLE, PARAMETER_DEFINITION, PARAMETER_VISIT) \
 class CLASS_NAME : PRINT_CONFIG_CLASS_DERIVED_CLASS_LIST(CLASSES_PARENTS_TUPLE) { \
     STATIC_PRINT_CONFIG_CACHE_DERIVED(CLASS_NAME) \
     CLASS_NAME() : PRINT_CONFIG_CLASS_DERIVED_INITIALIZER(CLASSES_PARENTS_TUPLE, 0) { assert(s_cache_##CLASS_NAME.initialized()); *this = s_cache_##CLASS_NAME.defaults(); } \
 public: \
     PARAMETER_DEFINITION \
+    template<typename F> void for_each_option_pair(const CLASS_NAME &rhs, F &&f) const { PARAMETER_VISIT } \
+    /* Its parents each apply themselves to a target member by member, so this one keeps the lookup by name. */ \
+    bool apply_to(ConfigBase &/*target*/) const override { return false; } \
     size_t hash() const throw() \
     { \
         size_t seed = 0; \
         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_DERIVED_HASH, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_PARENTS_TUPLE)) \
-        PARAMETER_HASHES \
+        this->for_each_option_pair(*this, [&seed](const char*, const auto &a, const auto&) { boost::hash_combine(seed, a.hash()); return true; }); \
         return seed; \
     } \
     bool operator==(const CLASS_NAME &rhs) const throw() \
     { \
         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_DERIVED_EQUAL, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_PARENTS_TUPLE)) \
-        PARAMETER_EQUALS \
-        return true; \
+        bool eq = true; \
+        this->for_each_option_pair(rhs, [&eq](const char*, const auto &a, const auto &b) { eq = (a == b); return eq; }); \
+        return eq; \
     } \
     bool operator!=(const CLASS_NAME &rhs) const throw() { return ! (*this == rhs); } \
 protected: \
     CLASS_NAME(int) : PRINT_CONFIG_CLASS_DERIVED_INITIALIZER(CLASSES_PARENTS_TUPLE, 1) {} \
     void initialize(StaticCacheBase &cache, const char* base_ptr) { \
         PRINT_CONFIG_CLASS_DERIVED_INITCACHE(CLASSES_PARENTS_TUPLE) \
-        PARAMETER_REGISTRATION \
+        this->for_each_option_pair(*this, [&cache, base_ptr](const char *key, const auto &a, const auto&) { cache.opt_add(key, base_ptr, a); return true; }); \
     } \
 };
 // Variant without adding new parameters.
 #define PRINT_CONFIG_CLASS_DERIVED_DEFINE0(CLASS_NAME, CLASSES_PARENTS_TUPLE) \
-    PRINT_CONFIG_CLASS_DERIVED_DEFINE1(CLASS_NAME, CLASSES_PARENTS_TUPLE, BOOST_PP_EMPTY(), BOOST_PP_EMPTY(), BOOST_PP_EMPTY(), BOOST_PP_EMPTY())
+    PRINT_CONFIG_CLASS_DERIVED_DEFINE1(CLASS_NAME, CLASSES_PARENTS_TUPLE, BOOST_PP_EMPTY(), BOOST_PP_EMPTY())
 // Variant with adding new parameters.
 #define PRINT_CONFIG_CLASS_DERIVED_DEFINE(CLASS_NAME, CLASSES_PARENTS_TUPLE, PARAMETER_DEFINITION_SEQ) \
     PRINT_CONFIG_CLASS_DERIVED_DEFINE1(CLASS_NAME, CLASSES_PARENTS_TUPLE, \
         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_DEFINITION, _, PARAMETER_DEFINITION_SEQ), \
-        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_INITIALIZATION, _, PARAMETER_DEFINITION_SEQ), \
-        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_HASH, _, PARAMETER_DEFINITION_SEQ), \
-        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_EQUAL, _, PARAMETER_DEFINITION_SEQ))
+        BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CLASS_ELEMENT_VISIT, _, PARAMETER_DEFINITION_SEQ))
 
 // This object is mapped to Perl as Slic3r::Config::PrintObject.
 PRINT_CONFIG_CLASS_DEFINE(
@@ -1183,9 +1457,27 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,              tree_support_branch_diameter_angle))
     ((ConfigOptionFloat,              tree_support_angle_slow))
     ((ConfigOptionInt,                tree_support_wall_count))
-    ((ConfigOptionBool,               tree_support_adaptive_layer_height))
     ((ConfigOptionBool,               tree_support_auto_brim))
     ((ConfigOptionFloat,              tree_support_brim_width))
+    // Side stabilizers (Support/Stabilizers.hpp)
+    ((ConfigOptionEnum<StabilizerMode>, stabilizer_supports))
+    ((ConfigOptionFloat,              stabilizer_ring_spacing))
+    ((ConfigOptionInt,                stabilizer_points_per_ring))
+    ((ConfigOptionFloat,              stabilizer_tip_diameter))
+    ((ConfigOptionFloat,              stabilizer_tip_gap))
+    ((ConfigOptionFloat,              stabilizer_pillar_diameter))
+    ((ConfigOptionFloat,              stabilizer_max_island_width))
+    ((ConfigOptionFloat,              stabilizer_pillar_base_diameter))
+    ((ConfigOptionBool,               stabilizer_bracing))
+    ((ConfigOptionFloat,              stabilizer_brace_max_unbraced))
+    ((ConfigOptionFloat,              stabilizer_brace_max_span))
+    ((ConfigOptionEnum<StabilizerColumnShape>, stabilizer_column_shape))
+    ((ConfigOptionFloat,              stabilizer_column_width))
+    ((ConfigOptionFloat,              stabilizer_column_length))
+    ((ConfigOptionFloat,              stabilizer_column_min_height))
+    ((ConfigOptionInt,                stabilizer_wall_loops))
+    ((ConfigOptionPercent,            stabilizer_infill_density))
+    ((ConfigOptionEnum<InfillPattern>, stabilizer_infill_pattern))
     ((ConfigOptionBool,               detect_narrow_internal_solid_infill))
     // ((ConfigOptionBool,               adaptive_layer_height))
     ((ConfigOptionFloat,              support_bottom_interface_spacing))
@@ -1289,6 +1581,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                lateral_lattice_angle_2))
     ((ConfigOptionFloat,                infill_overhang_angle))
     ((ConfigOptionBool,                 align_infill_direction_to_model))
+    // FDM hollowing (FDMHollowing.hpp). Region settings, so a part can override the object.
+    ((ConfigOptionBool,                 hollow_interior))
+    ((ConfigOptionFloat,                hollow_shell_thickness))
     ((ConfigOptionString,               extra_solid_infills))
     ((ConfigOptionEnum<FuzzySkinType>,  fuzzy_skin))
     ((ConfigOptionFloat,                fuzzy_skin_thickness))
@@ -1300,6 +1595,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  fuzzy_skin_octaves))
     ((ConfigOptionFloat,                fuzzy_skin_persistence))
     ((ConfigOptionBool,                 fuzzy_skin_skip_overhangs))
+    ((ConfigOptionInt,                  fuzzy_skin_ripples_per_layer))
+    ((ConfigOptionPercent,              fuzzy_skin_ripple_offset))
+    ((ConfigOptionInt,                  fuzzy_skin_layers_between_ripple_offset))
     ((ConfigOptionFloats,                gap_infill_speed))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))
@@ -1456,6 +1754,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,               machine_min_travel_rate))
     // M205 S... [mm/sec]
     ((ConfigOptionFloats,               machine_min_extruding_rate))
+    // Bed-slinger mass model (A2L): Y-axis drive force [N] and bed mass [g], 0 = not modelled.
+    ((ConfigOptionFloat,                machine_max_force_Y))
+    ((ConfigOptionFloat,                machine_bed_mass_Y))
 
     //resonance avoidance ported from qidi slicer
     ((ConfigOptionBool,                 resonance_avoidance))
@@ -1500,9 +1801,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
-    ((ConfigOptionInts,                filament_flush_temp))  // Ultra: BBS 2.x flush temp (0 = use nozzle_temperature_range_high)
-    ((ConfigOptionFloats,              filament_flush_volumetric_speed))  // Ultra: BBS 2.x flush speed (0 = use filament_max_volumetric_speed)
-    ((ConfigOptionFloats,              filament_cooling_before_tower))  // Ultra: BBS 2.x change_filament (per-filament, °C)
+    // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
+    // stored per flow variant (read them with get_value_at, ConfigFlowDomain::Filament).
+    ((ConfigOptionIntsNullable,        filament_flush_temp))  // 0 = use nozzle_temperature_range_high
+    ((ConfigOptionIntsNullable,        filament_flush_temp_fast))  // prime_volume_mode Fast; 0 = range high
+    ((ConfigOptionFloatsNullable,      filament_flush_volumetric_speed))  // 0 = use filament_max_volumetric_speed
+    ((ConfigOptionFloatsNullable,      filament_cooling_before_tower))  // °C below the print temperature
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
     ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature
@@ -1577,6 +1881,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                auxiliary_fan))
     ((ConfigOptionBool,                support_air_filtration))
     ((ConfigOptionEnum<PrinterStructure>,printer_structure))
+    ((ConfigOptionBool,                farthest_point_timelapse))
     ((ConfigOptionBool,                support_chamber_temp_control))
 
 
@@ -1722,6 +2027,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              extruder_clearance_height_to_rod))//BBs
     ((ConfigOptionFloat,              extruder_clearance_height_to_lid))//BBS
     ((ConfigOptionFloat,              extruder_clearance_radius))
+    // Bambu Studio's clearance radius (its only one). Here read by the timelapse position picker;
+    // by-object collision and arrange keep extruder_clearance_radius.
+    ((ConfigOptionFloat,              extruder_clearance_max_radius))
     ((ConfigOptionFloat,              nozzle_height))
     ((ConfigOptionStrings,            extruder_colour))
     ((ConfigOptionPoints,             extruder_offset))
@@ -1882,6 +2190,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
 
     ((ConfigOptionBools,               activate_chamber_temp_control))
     ((ConfigOptionInts ,               chamber_temperature))
+    ((ConfigOptionInts ,               chamber_minimal_temperature))
     
     // Orca: support adaptive bed mesh
     ((ConfigOptionFloat,               preferred_orientation))
@@ -2107,11 +2416,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
 #undef STATIC_PRINT_CONFIG_CACHE_BASE
 #undef STATIC_PRINT_CONFIG_CACHE_DERIVED
 #undef PRINT_CONFIG_CLASS_ELEMENT_DEFINITION
-#undef PRINT_CONFIG_CLASS_ELEMENT_EQUAL
-#undef PRINT_CONFIG_CLASS_ELEMENT_LOWER
-#undef PRINT_CONFIG_CLASS_ELEMENT_HASH
-#undef PRINT_CONFIG_CLASS_ELEMENT_INITIALIZATION
-#undef PRINT_CONFIG_CLASS_ELEMENT_INITIALIZATION2
+#undef PRINT_CONFIG_CLASS_ELEMENT_VISIT
+#undef PRINT_CONFIG_CLASS_ELEMENT_VISIT_SELF
+#undef PRINT_CONFIG_CLASS_COMMON_BODY
 #undef PRINT_CONFIG_CLASS_DEFINE
 #undef PRINT_CONFIG_CLASS_DERIVED_CLASS_LIST
 #undef PRINT_CONFIG_CLASS_DERIVED_CLASS_LIST_ITEM
@@ -2166,6 +2473,17 @@ std::string nozzle_diameter_summary(const ConfigBase &config);
 // physical_extruder_for_filament. 0 when the config has no nozzle_diameter. This is what the
 // per-slot filament preset compatibility rule measures against.
 double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+
+// CLI --uptodate_settings / --downward_check: load_config_file() uses
+// ConfigBase::load_from_json()'s 4-arg form, which does not flatten inherits.
+// Un-guarded opt_float("printable_height") dereferences a null option when the
+// key lives only on the parent (typical BBL nozzle variants).
+inline int cli_printable_height_or_zero(const ConfigBase &config)
+{
+    if (const auto *opt = config.option<ConfigOptionFloat>("printable_height"))
+        return static_cast<int>(opt->value);
+    return 0;
+}
 
 class CLIActionsConfigDef : public ConfigDef
 {
@@ -2327,6 +2645,18 @@ std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_co
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);
 Points get_bed_shape(const SLAPrinterConfig &cfg);
+// bed_exclude_area is one flat point list that vendors author two ways: a list of 4-point
+// rectangles (Bambu, Qidi, Anycubic Kobra 3 Max, Snapmaker, Elegoo) or one polygon (upstream
+// Orca's Kobra 3 ring, the option's tooltip). Every reader goes through these helpers so that
+// validation, arrange, the plate's "object inside" check and the timelapse picker agree; see
+// bed_exclude_area_is_rectangles() in PrintConfig.cpp for the rule.
+bool bed_exclude_area_is_rectangles(const Pointfs &points);
+// The excluded region as hole-free, counter-clockwise, scaled polygons (zero-area pieces dropped).
+Slic3r::Polygons bed_exclude_area_polygons(const Pointfs &points);
+// Unscaled boxes for the GUI, which works in boxes (PartPlate exclusion boxes, arrange's fixed
+// items). For a rectangle list this is exactly the old "one box per 4 points" list, zero-area
+// boxes included; for a polygon it is one box per hole-free piece.
+std::vector<BoundingBoxf> bed_exclude_area_boxes(const Pointfs &points);
 Slic3r::Polygons get_bed_excluded_area(const PrintConfig& cfg);
 Slic3r::Polygon get_bed_shape_with_excluded_area(const PrintConfig& cfg);
 bool has_skirt(const DynamicPrintConfig& cfg);

@@ -44,7 +44,14 @@ struct Status
     std::string state;        // print_stats: standby | printing | paused | complete | cancelled | error
     std::string filename;     // the job the printer is on
     std::string message;      // the printer's own error / display message
-    double      progress { 0 };   // 0..1
+    // 0..1, on the basis the printer's own Device page uses: the share of the G-code body consumed
+    // (virtual_sdcard.file_position against the file's gcode_start_byte / gcode_end_byte), falling
+    // back to display_status.progress. See MoonrakerProgress.hpp.
+    double      progress { 0 };
+    // Seconds left, as the Device page shows it: the slicer's estimated_time scaled by `progress`
+    // (linear extrapolation only past the first few percent, when the file has no estimate).
+    // 0 = unknown or no job.
+    int         left_time_s { 0 };
     double      bed_temp { 0 }, bed_target { 0 }, nozzle_temp { 0 }, nozzle_target { 0 };
     // (temperature, target) of every toolhead heater that answered, toolhead order; nozzle_temp /
     // nozzle_target above are the first one's, kept for the readers that show a single nozzle.

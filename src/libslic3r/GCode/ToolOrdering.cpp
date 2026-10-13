@@ -4,6 +4,7 @@
 #include "Layer.hpp"
 #include "ClipperUtils.hpp"
 #include "ParameterUtils.hpp"
+#include "../BambuFlowSupport.hpp"
 #include "../BrimFilament.hpp"
 // Ultra (dual-nozzle): filament->nozzle grouping compute.
 #include "../FilamentGroup.hpp"
@@ -283,19 +284,27 @@ bool LayerTools::is_extruder_order(unsigned int a, unsigned int b) const
     return false;
 }
 
-// Resolve a 1-based filament ID through the mixed-filament manager for this layer.
-unsigned int LayerTools::resolve_mixed_1based(unsigned int filament_id) const
+unsigned int LayerTools::resolve_mixed_1based_at(unsigned int       filament_id,
+                                                 float              layer_print_z,
+                                                 float              layer_height,
+                                                 const PrintObject *current_object) const
 {
     return resolve_mixed_with_layer_heights(mixed_mgr,
                                             num_physical,
                                             filament_id,
                                             this->layer_index,
-                                            float(this->print_z),
-                                            float(this->layer_height),
+                                            layer_print_z,
+                                            layer_height,
                                             mixed_layer_height_a,
                                             mixed_layer_height_b,
                                             mixed_base_layer_height,
-                                            this->current_object);
+                                            current_object != nullptr ? current_object : this->current_object);
+}
+
+// Resolve a 1-based filament ID through the mixed-filament manager for this layer.
+unsigned int LayerTools::resolve_mixed_1based(unsigned int filament_id) const
+{
+    return resolve_mixed_1based_at(filament_id, float(this->print_z), float(this->layer_height), this->current_object);
 }
 
 // Wave A fix-wave / C-1 (.superpowers/sdd/2026-08-31-paint-depth/wave-a-review.md): wall_filament,
@@ -376,7 +385,8 @@ static double calc_max_layer_height(const PrintConfig &config, double max_object
 {
     double max_layer_height = std::numeric_limits<double>::max();
     for (size_t i = 0; i < config.nozzle_diameter.values.size(); ++ i) {
-        double mlh = config.max_layer_height.values[i];
+        // max_layer_height may be shorter than the extruder count; get_at() clamps.
+        double mlh = config.max_layer_height.get_at(i);
         if (mlh == 0.)
             mlh = 0.75 * config.nozzle_diameter.values[i];
         max_layer_height = std::min(max_layer_height, mlh);
@@ -743,9 +753,27 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         layer_tools.current_object           = &object;
     }
 
-    // Collect the support extruders.
+    // Collect the support extruders. Stamp layer_index only at this object's
+    // support print_z (inherited from the last object layer at or below it).
+    // ByLayer shares LayerTools across objects: writing every m_layer_tools
+    // entry let a later shorter object overwrite a taller object's indices
+    // above the short top, so mixed walls/infill resolved to unscheduled tools.
+    const auto &object_layers = object.layers();
+    auto inherited_layer_index = [&object_layers](coordf_t print_z) {
+        int inherited = 0;
+        for (size_t i = 0; i < object_layers.size(); ++i) {
+            if (object_layers[i]->print_z <= print_z + EPSILON)
+                inherited = int(i);
+            else
+                break;
+        }
+        return inherited;
+    };
+
     for (auto support_layer : object.support_layers()) {
         LayerTools   &layer_tools = this->tools_for_layer(support_layer->print_z);
+        layer_tools.layer_index        = inherited_layer_index(support_layer->print_z);
+        layer_tools.object_layer_count = int(object_layers.size());
         layer_tools.layer_height = support_layer->height;
         ExtrusionRole role = support_layer->support_fills.role();
         bool         has_support        = role == erMixed || role == erSupportMaterial || role == erSupportTransition;
@@ -1378,6 +1406,15 @@ void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)
         sort_remove_duplicates(m_all_printing_extruders);
     }
 
+    // Orca #15849 (bcbb8746): record the print_z of each extruder's last LayerTools entry.
+    // m_layer_tools is sorted by print_z, so the last assignment wins.
+    m_last_layer_per_extruder.clear();
+    for (const LayerTools &lt : m_layer_tools) {
+        for (unsigned int ext : lt.extruders) {
+            m_last_layer_per_extruder[ext] = lt.print_z;
+        }
+    }
+
     if (prime_multi_material && ! m_all_printing_extruders.empty()) {
         // Reorder m_all_printing_extruders in the sequence they will be primed, the last one will be m_first_printing_extruder.
         // Then set m_first_printing_extruder to the 1st extruder primed.
@@ -1436,6 +1473,21 @@ static NozzleVolumeType nozzle_volume_type_at(const PrintConfig& print_config, s
     return idx < values.size() ? NozzleVolumeType(values[idx]) : NozzleVolumeType::nvtStandard;
 }
 
+// extruder_max_nozzle_count is one value per extruder, but nothing sizes it to the extruder count:
+// a printer preset that does not set it (every non-Bambu profile) keeps the one-entry default, and a
+// profile can write it shorter than nozzle_diameter. Reading values[idx] past the end returned heap
+// garbage, which build_nozzle_list then expanded into that many nozzles - gigabytes within seconds
+// (upstream's Custom MyToolChanger, five extruders). A missing or nil entry is one nozzle; the upper
+// bound only keeps a corrupt value from doing the same (the H2C rack, the largest real cluster, is 6).
+static int extruder_max_nozzle_count_at(const PrintConfig& print_config, size_t idx)
+{
+    constexpr int max_sane_count = 64;
+    const auto&   values         = print_config.extruder_max_nozzle_count.values;
+    if (idx >= values.size() || values[idx] == ConfigOptionIntsNullable::nil_value())
+        return 1;
+    return std::clamp(values[idx], 1, max_sane_count);
+}
+
 std::vector<MultiNozzleUtils::NozzleGroupInfo> build_nozzle_groups(const PrintConfig& print_config, size_t extruder_nums)
 {
     std::vector<MultiNozzleUtils::NozzleGroupInfo> nozzle_groups;
@@ -1443,7 +1495,7 @@ std::vector<MultiNozzleUtils::NozzleGroupInfo> build_nozzle_groups(const PrintCo
     for (size_t idx = 0; idx < extruder_nums; ++idx) {
         if (idx >= extruder_nozzle_counts.size() || extruder_nozzle_counts[idx].empty()) {
             nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), nozzle_volume_type_at(print_config, idx), idx,
-                                       print_config.extruder_max_nozzle_count.values[idx]);
+                                       extruder_max_nozzle_count_at(print_config, idx));
         } else {
             NozzleVolumeType type = nozzle_volume_type_at(print_config, idx);
             if (type == nvtHybrid) {
@@ -1478,6 +1530,10 @@ std::vector<FlushMatrix> prepare_flush_matrices(const PrintConfig& print_config)
     std::vector<FlushMatrix> nozzle_flush_mtx;
     for (size_t nozzle_id = 0; nozzle_id < extruder_nums; ++nozzle_id) {
         std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(print_config.flush_volumes_matrix.values, nozzle_id, extruder_nums)));
+        // A flush matrix shorter than filaments x filaments per nozzle (a preset written for another
+        // extruder count) must not be sliced past its end below: missing entries flush nothing.
+        if (flush_matrix.size() < filament_nums * filament_nums)
+            flush_matrix.resize(filament_nums * filament_nums, 0.f);
         std::vector<std::vector<float>> wipe_volumes;
         for (unsigned int i = 0; i < filament_nums; ++i)
             wipe_volumes.push_back(std::vector<float>(flush_matrix.begin() + i * filament_nums, flush_matrix.begin() + (i + 1) * filament_nums));
@@ -1533,8 +1589,11 @@ FilamentGroupContext build_filament_group_context(
             s = std::max(s, total_filaments);
     }
 
-    std::vector<bool> prefer_non_model_filament(extruder_nums);
-    for (size_t idx = 0; idx < extruder_nums; ++idx)
+    // extruder_type is one value per extruder in Bambu's profiles but is dropped on load here (a legacy
+    // key, PrintConfigDef::handle_legacy), so the config holds its one-entry default: a missing entry
+    // is Direct Drive rather than whatever lies past the end of the vector.
+    std::vector<bool> prefer_non_model_filament(extruder_nums, false);
+    for (size_t idx = 0; idx < extruder_nums && idx < print_config.extruder_type.values.size(); ++idx)
         prefer_non_model_filament[idx] = (print_config.extruder_type.values[idx] == ExtruderType::etBowden);
 
     auto machine_filament_info = build_machine_filaments(print->get_extruder_filament_info(), extruder_ams_counts, ignore_ext_filament);
@@ -1625,7 +1684,8 @@ FilamentGroupContext build_filament_group_context(
         for (auto& nozzle : context.nozzle_info.nozzle_list) {
             for (auto fil_id : used_filaments) {
                 auto uv = context.model_info.unprintable_volumes[fil_id];
-                if (uv.count(nozzle.volume_type))
+                // The unprintable limits are the engine's two extruders (collect_unprintable_limits).
+                if (uv.count(nozzle.volume_type) && nozzle.extruder_id >= 0 && nozzle.extruder_id < (int) ext_unprintable_filaments_with_volume.size())
                     ext_unprintable_filaments_with_volume[nozzle.extruder_id].insert(fil_id);
             }
         }
@@ -1689,6 +1749,18 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
 
     int master_extruder_id = print_config.master_extruder_id.value - 1;
     std::vector<int> ret(filament_nums, master_extruder_id);
+
+    // The grouping engine knows two extruders (collect_unprintable_limits, the match mode's machine
+    // filaments, the add_volume_type_limits pass below). DynamicPrintConfig::support_different_extruders()
+    // keeps larger machines out of this path; should one get here anyway, each filament keeps its own
+    // tool, as on any other toolchanger, instead of running the engine past its two extruders.
+    if (extruder_nums > 2) {
+        BOOST_LOG_TRIVIAL(warning) << "filament map: " << extruder_nums << " extruders, the nozzle grouping supports two; filaments keep their own tools";
+        for (size_t f = 0; f < ret.size(); ++f)
+            ret[f] = int(std::min(f, extruder_nums - 1));
+        auto result_opt = LayeredNozzleGroupResult::create(ret, nozzle_list, used_filaments);
+        return result_opt ? *result_opt : LayeredNozzleGroupResult();
+    }
 
     if (has_multiple_extruder || has_multiple_nozzle) {
         auto context = build_filament_group_context(print, layer_filaments, physical_unprintables, geometric_unprintables, unprintable_volumes, mode, nozzle_status);
@@ -1909,6 +1981,15 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
                     if (m_print_full_config) {
                         auto* opt = const_cast<DynamicPrintConfig*>(m_print_full_config)->option<ConfigOptionInts>("filament_map", true);
                         if (opt) opt->values = em;
+                    }
+                    // Owner decision D2: on a dual-nozzle printer with High Flow support each filament slices
+                    // the column of the nozzle its extruder carries. The grouping above is what decides the
+                    // extruder (an auto-grouped filament may land on the High Flow nozzle), so the per-filament
+                    // flow type follows the final map here, before the wipe tower and G-code read it.
+                    if (BambuFlowSupport::apply_filament_volume_types_from_map(const_cast<PrintConfig&>(m_print->config()))) {
+                        if (m_print_full_config)
+                            const_cast<DynamicPrintConfig*>(m_print_full_config)->option<ConfigOptionEnumsGeneric>("filament_volume_type", true)->values =
+                                m_print->config().filament_volume_type.values;
                     }
                 }
             }
@@ -2240,6 +2321,11 @@ bool WipingExtrusions::is_overriddable(const ExtrusionEntityCollection& eec, con
 bool WipingExtrusions::is_support_overriddable(const ExtrusionRole role, const PrintObject& object) const
 {
     if (!object.config().flush_into_support)
+        return false;
+
+    // Side stabilizers without supports: the support layers are the stabilizers' alone. They stay in
+    // their own filament; purging into them is a support feature and supports are off.
+    if (object.has_stabilizers() && !object.has_support_material())
         return false;
 
     // v2.5a (spec item 1, "residual pin", root cause A of the khaki-in-white/teal-
@@ -2574,6 +2660,22 @@ unsigned int ToolOrdering::resolve_mixed(unsigned int filament_id_1based,
                                             m_mixed_layer_height_b,
                                             m_mixed_base_layer_height,
                                             current_object);
+}
+
+bool ToolOrdering::is_last_extrusion_layer(coordf_t print_z, unsigned int extruder_id) const
+{
+    // Compare print-wide Z directly (Orca #15849 bcbb8746) instead of resolving print_z to a
+    // LayerTools index: print_z may come from any object's or support's layer (multiple objects,
+    // differing layer heights, rafts) or from a Local-Z sub-layer pass that has no LayerTools
+    // entry of its own. A sub-layer Z below the extruder's last print_z reads as "not finished",
+    // which keeps the tool at standby (the safe side).
+    auto it = m_last_layer_per_extruder.find(extruder_id);
+    if (it == m_last_layer_per_extruder.end())
+        // Edge keeps this stricter than upstream (which returns true): an extruder that never
+        // appears in any LayerTools has no known last use, so treat it as still needed (keep
+        // it heated) rather than assume it is finished.
+        return false;
+    return print_z >= it->second - EPSILON;
 }
 
 } // namespace Slic3r

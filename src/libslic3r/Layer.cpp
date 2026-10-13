@@ -212,6 +212,12 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
 		&& config.detect_thin_wall                  == other_config.detect_thin_wall
 		&& config.infill_wall_overlap              == other_config.infill_wall_overlap
         && config.top_bottom_infill_wall_overlap              == other_config.top_bottom_infill_wall_overlap
+        // Orca: these flags directly change the effective wall count produced by the perimeter
+        // generator. If two regions disagree on any of them, merging their slices into one shared make_perimeters
+        // call would silently use the first region's flag for both.
+        && config.only_one_wall_first_layer == other_config.only_one_wall_first_layer
+        && config.only_one_wall_top         == other_config.only_one_wall_top
+        && config.min_width_top_surface     == other_config.min_width_top_surface
         && config.seam_slope_type         == other_config.seam_slope_type
         && config.seam_slope_conditional == other_config.seam_slope_conditional
         && config.scarf_angle_threshold  == other_config.scarf_angle_threshold
@@ -311,6 +317,23 @@ void Layer::make_perimeters()
                         //BBS: Separate fill_no_overlap
                         (*l)->fill_no_overlap_expolygons = intersection_ex((*l)->slices.surfaces, fill_no_overlap, ApplySafetyOffset::Yes);
 	                }
+
+	                // When counterbore hole bridging (chbFilled) is active, process_no_bridge may
+	                // create fill surfaces that extend beyond all region slices (e.g. by clearing
+	                // holes in the bridge expolygon). These "extra" fills are lost during the
+	                // intersection-based splitting above. Recover them and assign to the first
+	                // merged region so the sacrificial bridge layer is not broken.
+	                if (layerm_config->region().config().counterbore_hole_bridging.value != chbNone) {
+	                    Polygons all_region_slices_p;
+	                    for (LayerRegion *l : layerms)
+	                        polygons_append(all_region_slices_p, to_polygons(l->slices.surfaces));
+	                    ExPolygons extra_fill = diff_ex(fill_surfaces.surfaces, all_region_slices_p, ApplySafetyOffset::Yes);
+	                    if (!extra_fill.empty()) {
+	                        append(layerms.front()->fill_expolygons, extra_fill);
+	                        layerms.front()->fill_expolygons = union_ex(layerms.front()->fill_expolygons);
+	                        layerms.front()->fill_surfaces.append(std::move(extra_fill), fill_surfaces.surfaces.front());
+	                    }
+	                }
 	            }
 	        }
 	    }
@@ -381,7 +404,7 @@ void Layer::simplify_support_entity_collection(ExtrusionEntityCollection* entity
 //BBS: method to simplify support path
 void Layer::simplify_support_path(ExtrusionPath * path)
 {
-    const auto print_config = this->object()->print()->config();
+    const PrintConfig &print_config = this->object()->print()->config();
     const bool spiral_mode = print_config.spiral_mode;
     const bool enable_arc_fitting = print_config.enable_arc_fitting;
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);
@@ -396,7 +419,7 @@ void Layer::simplify_support_path(ExtrusionPath * path)
 //BBS: method to simplify support path
 void Layer::simplify_support_multi_path(ExtrusionMultiPath* multipath)
 {
-    const auto print_config = this->object()->print()->config();
+    const PrintConfig &print_config = this->object()->print()->config();
     const bool spiral_mode = print_config.spiral_mode;
     const bool enable_arc_fitting = print_config.enable_arc_fitting;
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);
@@ -413,7 +436,7 @@ void Layer::simplify_support_multi_path(ExtrusionMultiPath* multipath)
 //BBS: method to simplify support path
 void Layer::simplify_support_loop(ExtrusionLoop* loop)
 {
-    const auto print_config = this->object()->print()->config();
+    const PrintConfig &print_config = this->object()->print()->config();
     const bool spiral_mode = print_config.spiral_mode;
     const bool enable_arc_fitting = print_config.enable_arc_fitting;
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);

@@ -1,12 +1,17 @@
 #include "libslic3r/libslic3r.h"
 #include "DeviceManager.hpp"
+#include "AccountStatus.hpp"
 #include "FilamentCommands.hpp"
 #include "PrintErrorCommands.hpp"
 #include "AmsDrying.hpp"
 #include "AmsDualLayout.hpp"
 #include "DeviceModelCode.hpp"
+#include "ChamberLights.hpp"
+#include "BambuSendDiagnosis.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
+#include "libslic3r/BambuFlowSupport.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
 
 #include "GUI_App.hpp"
@@ -16,6 +21,7 @@
 #include "ReleaseNote.hpp"
 #include <thread>
 #include <mutex>
+#include <set>
 #include <codecvt>
 #include <algorithm>
 #include <iterator>
@@ -30,8 +36,6 @@
 #define CALI_DEBUG
 #define MINUTE_30 1800000    //ms
 #define TIME_OUT  5000       //ms
-
-#define ORCA_NETWORK_DEBUG
 
 namespace pt = boost::property_tree;
 
@@ -895,6 +899,41 @@ void MachineObject::get_ams_colors(std::vector<wxColour> &ams_colors) {
     }
 }
 
+std::vector<AmsTray> MachineObject::external_spools() const
+{
+    if (!is_multi_extruders())
+        return {};
+    if (!vir_slots.empty())
+        return vir_slots;
+    if (!ams_support_virtual_tray)
+        return {};
+    AmsTray main_slot = vt_tray;
+    main_slot.id      = std::to_string(BambuExtruderMap::external_spool_ams_id(0));
+    return { main_slot };
+}
+
+bool MachineObject::external_spool_mapping_info(int ext_ams_id, FilamentInfo &info) const
+{
+    if (!BambuExtruderMap::is_external_spool_ams_id(ext_ams_id))
+        return false;
+    for (AmsTray tray : external_spools()) {
+        if (atoi(tray.id.c_str()) != ext_ams_id || !tray.is_tray_info_ready())
+            continue;
+        info             = FilamentInfo();
+        info.id          = ext_ams_id;
+        info.tray_id     = ext_ams_id;
+        info.color       = tray.color;
+        info.type        = tray.get_filament_type();
+        info.filament_id = tray.setting_id;
+        info.ctype       = tray.ctype;
+        info.colors      = tray.cols;
+        info.ams_id      = std::to_string(ext_ams_id);
+        info.slot_id     = "0";
+        return true;
+    }
+    return false;
+}
+
 int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std::vector<FilamentInfo> &result, std::vector<int> exclude_id,
                                         int only_physical_extruder)
 {
@@ -939,6 +978,23 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
                 tray_filaments.emplace(std::make_pair(tray_index, info));
             }
         }
+    }
+
+    /* Two-extruder machine, one extruder's filaments: an extruder no AMS feeds prints from its own
+     * external spool holder (BambuStudio do_ams_mapping: use_left_ext = !has_left_ams, and the
+     * same for the right). Without this a filament sliced for such an extruder never got a tray,
+     * and the X2D with an AMS HT on the left and a spool on the right holder could not be sent
+     * (2026-10-09). An extruder that has an AMS keeps mapping against its AMS only; its external
+     * spool can still be picked by hand. Tray ids 254/255 cannot clash with an AMS tray index. */
+    if (only_physical_extruder >= 0 && is_multi_extruders()) {
+        bool extruder_has_ams = false;
+        for (const auto &ams : amsList)
+            if (ams.second && ams.second->nozzle == only_physical_extruder)
+                extruder_has_ams = true;
+        FilamentInfo ext_info;
+        const int    ext_id = BambuExtruderMap::external_spool_ams_id(only_physical_extruder);
+        if (!extruder_has_ams && external_spool_mapping_info(ext_id, ext_info))
+            tray_filaments.emplace(std::make_pair(ext_id, ext_info));
     }
 
     // tray info list
@@ -1188,7 +1244,12 @@ bool MachineObject::is_valid_mapping_result(std::vector<FilamentInfo>& result, b
         // invalid mapping result
         if (result[i].tray_id < 0)
             valid_ams_mapping_result = false;
-        else {
+        else if (is_multi_extruders() && result[i].tray_id == atoi(result[i].ams_id.c_str()) &&
+                 BambuExtruderMap::is_external_spool_ams_id(result[i].tray_id)) {
+            // A two-extruder printer's external spool holder (tray 254/255, ams_id "254"/"255"):
+            // not an AMS, valid as BambuStudio's is_valid_mapping_result accepts it. tray_id / 4
+            // below would look for "AMS 63" and throw the mapping away.
+        } else {
             int ams_id = result[i].tray_id / 4;
             auto ams_item = amsList.find(std::to_string(ams_id));
             if (ams_item == amsList.end()) {
@@ -1218,6 +1279,9 @@ bool MachineObject::is_mapping_exceed_filament(std::vector<FilamentInfo> & resul
 {
     bool is_exceed = false;
     for (int i = 0; i < result.size(); i++) {
+        if (is_multi_extruders() && result[i].tray_id == atoi(result[i].ams_id.c_str()) &&
+            BambuExtruderMap::is_external_spool_ams_id(result[i].tray_id))
+            continue; // an external spool holder, not an AMS slot (see is_valid_mapping_result)
         int ams_id = result[i].tray_id / 4;
         if (amsList.find(std::to_string(ams_id)) == amsList.end()) {
             exceed_index = result[i].tray_id;
@@ -1728,6 +1792,8 @@ int MachineObject::command_get_version(bool with_retry)
     j["info"]["command"] = "get_version";
     if (with_retry)
         get_version_retry = GET_VERSION_RETRYS;
+    if (hold_status_request("get_version"))
+        return 0;
     return this->publish_json(j.dump(), 1);
 }
 
@@ -1759,6 +1825,11 @@ int MachineObject::command_request_push_all(bool request_now)
         BOOST_LOG_TRIVIAL(trace) << "static: command_request_push_all, dev_id=" << dev_id;
         last_request_push = std::chrono::system_clock::now();
     }
+
+    // Asked for while this selection's session is still being dialled: the plug-in has nothing to
+    // publish on yet and would refuse it (-1). The connected callback asks for the report itself.
+    if (hold_status_request("pushall"))
+        return 0;
 
     json j;
     j["pushing"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
@@ -1930,11 +2001,12 @@ std::string MachineObject::command_error_ignore_key(const std::string& dev_id, i
 // thread and a wxWindow may not be made there. The weak token is what makes that safe: a
 // MachineObject destroyed between the reply and the callback (the printer went away, the user
 // switched devices) drops the token, and the callback returns without touching `this`.
-void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::json& action_json)
+void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::json& action_json, const std::string& command)
 {
     if (command_err <= 0) return;
 
-    BOOST_LOG_TRIVIAL(error) << "add_command_error_code_dlg: dev " << dev_id << " refused a command, err_code "
+    BOOST_LOG_TRIVIAL(error) << "add_command_error_code_dlg: dev " << dev_id << " refused a command"
+                             << (command.empty() ? std::string() : " \"" + command + "\"") << ", err_code "
                              << GUI::HMSQuery::print_error_code(command_err)
                              << (action_json.is_null() ? " (no action json)" : " (with action json)");
 
@@ -1951,7 +2023,12 @@ void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::
     m_command_error_code        = command_err;
     m_command_error_action_json = action_json;
 
-    GUI::wxGetApp().CallAfter([this, command_err, action_json, token = std::weak_ptr<int>(m_token)] {
+    // Stop / Resume Printing only make sense when what was refused was a print action. A refused
+    // anything-else (a light, a fan, an AMS setting) has no print to stop or resume, so it gets OK.
+    // An empty name is a caller that does not know which command it was; that keeps the old set.
+    const bool print_action = command.empty() || GUI::is_print_action_command(command);
+
+    GUI::wxGetApp().CallAfter([this, command_err, action_json, print_action, token = std::weak_ptr<int>(m_token)] {
         if (token.expired()) return;
 
         GUI::HMSQuery* q = GUI::wxGetApp().get_hms_query();
@@ -1964,8 +2041,9 @@ void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::
         std::vector<int> table_actions;
         const wxString   image_url = q->query_print_error_url_action(dev_id, command_err, table_actions);
         bool             used_fallback = false;
-        const std::vector<int> used_button = GUI::resolve_print_error_actions(table_actions, used_fallback);
-        BOOST_LOG_TRIVIAL(info) << "command error " << code << ": table actions ["
+        const std::vector<int> used_button = GUI::resolve_command_error_actions(table_actions, print_action, used_fallback);
+        BOOST_LOG_TRIVIAL(info) << "command error " << code << (print_action ? " (print action)" : " (not a print action)")
+                                << ": table actions ["
                                 << GUI::format_action_ids(table_actions) << "] -> buttons ["
                                 << GUI::format_action_ids(used_button) << "]"
                                 << (used_fallback ? " (generic fallback)" : "");
@@ -2076,12 +2154,23 @@ int MachineObject::command_go_home2()
 
 int MachineObject::command_control_fan(FanType fan_type, bool on_off)
 {
-    std::string gcode = (boost::format("M106 P%1% S%2% \n") % (int)fan_type % (on_off ? 255 : 0)).str();
-    return this->publish_gcode(gcode);
+    return command_control_fan_val(fan_type, on_off ? 255 : 0);
 }
 
+// val is 0..255. A printer that reports this fan in device.airduct (the H2 series) takes Bambu
+// Studio's new-protocol set_fan in percent (DevFan::command_control_fan_new); every other printer
+// takes M106 P<fan> S<val>, as before.
 int MachineObject::command_control_fan_val(FanType fan_type, int val)
 {
+    const int fan_index = GUI::BambuFans::airduct_fan_index((int) fan_type);
+    const int reported  = fan_type == COOLING_FAN ? m_airduct_fans.part :
+                          fan_type == BIG_COOLING_FAN ? m_airduct_fans.aux :
+                          fan_type == CHAMBER_FAN ? m_airduct_fans.chamber : -1;
+    if (is_enable_np && m_airduct_fans.present && fan_index >= 0 && reported >= 0) {
+        json j = GUI::BambuFans::set_fan_command(fan_index, val, std::to_string(MachineObject::m_sequence_id++));
+        BOOST_LOG_TRIVIAL(info) << "command_control_fan_val: set_fan fan_index=" << fan_index << " speed=" << j["print"]["speed"];
+        return this->publish_json(j.dump());
+    }
     std::string gcode = (boost::format("M106 P%1% S%2% \n") % (int)fan_type % (val)).str();
     return this->publish_gcode(gcode);
 }
@@ -2300,19 +2389,42 @@ int MachineObject::command_ams_control(std::string action)
 }
 
 
+bool MachineObject::has_two_chamber_lights() const
+{
+    return GUI::ChamberLights::has_two_lights(DeviceManager::get_printer_series(printer_type), chamber_light2_reported);
+}
+
+MachineObject::LIGHT_EFFECT MachineObject::chamber_light_state() const
+{
+    auto to_mode = [](LIGHT_EFFECT e) {
+        switch (e) {
+        case LIGHT_EFFECT::LIGHT_EFFECT_ON: return GUI::ChamberLights::Mode::On;
+        case LIGHT_EFFECT::LIGHT_EFFECT_OFF: return GUI::ChamberLights::Mode::Off;
+        case LIGHT_EFFECT::LIGHT_EFFECT_FLASHING: return GUI::ChamberLights::Mode::Flashing;
+        default: return GUI::ChamberLights::Mode::Unknown;
+        }
+    };
+    switch (GUI::ChamberLights::combined(to_mode(chamber_light), to_mode(chamber_light2), has_two_chamber_lights())) {
+    case GUI::ChamberLights::Mode::On: return LIGHT_EFFECT::LIGHT_EFFECT_ON;
+    case GUI::ChamberLights::Mode::Off: return LIGHT_EFFECT::LIGHT_EFFECT_OFF;
+    case GUI::ChamberLights::Mode::Flashing: return LIGHT_EFFECT::LIGHT_EFFECT_FLASHING;
+    default: return LIGHT_EFFECT::LIGHT_EFFECT_UNKOWN;
+    }
+}
+
+// One ledctrl per chamber light: "chamber_light" on every printer, and "chamber_light2" as well on
+// the H2 series, whose two interior lights are separate nodes (Bambu Studio's DevLamp sends both).
 int MachineObject::command_set_chamber_light(LIGHT_EFFECT effect, int on_time, int off_time, int loops, int interval)
 {
-    json j;
-    j["system"]["command"] = "ledctrl";
-    j["system"]["led_node"] = "chamber_light";
-    j["system"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
-    j["system"]["led_mode"] = light_effect_str(effect);
-    j["system"]["led_on_time"] = on_time;
-    j["system"]["led_off_time"] = off_time;
-    j["system"]["loop_times"] = loops;
-    j["system"]["interval_time"] = interval;
-
-    return this->publish_json(j.dump());
+    const GUI::ChamberLights::Mode mode = GUI::ChamberLights::parse_mode(light_effect_str(effect));
+    int                       rc   = 0;
+    for (const json& j : GUI::ChamberLights::chamber_commands(has_two_chamber_lights(), mode,
+                                                         [] { return std::to_string(MachineObject::m_sequence_id++); }, on_time,
+                                                         off_time, loops, interval)) {
+        const int r = this->publish_json(j.dump());
+        if (r != 0 && rc == 0) rc = r;
+    }
+    return rc;
 }
 
 
@@ -2924,6 +3036,7 @@ void MachineObject::reset()
     BOOST_LOG_TRIVIAL(trace) << "reset dev_id=" << dev_id;
     last_update_time = std::chrono::system_clock::now();
     m_push_count = 0;
+    m_full_report_seen = false;
     is_220V_voltage = false;
     get_version_retry = 0;
     camera_recording = false;
@@ -2960,7 +3073,7 @@ void MachineObject::set_print_state(std::string status)
     print_status = status;
 }
 
-int MachineObject::connect(bool is_anonymous, bool use_openssl)
+int MachineObject::connect(bool is_anonymous, bool use_openssl, bool session_up)
 {
     if (dev_ip.empty()) return -1;
     std::string username;
@@ -2970,6 +3083,13 @@ int MachineObject::connect(bool is_anonymous, bool use_openssl)
         password = get_access_code();
     }
     if (m_agent) {
+        // Every LAN dial comes through here, whatever started it; hold this printer's requests
+        // until the session it starts is up. A re-selection that keeps a live session starts none:
+        // nothing would report it up, so nothing is held for it.
+        if (session_up)
+            note_dial_on_live_session();
+        else
+            note_dial_started();
         try {
             return m_agent->connect_printer(dev_id, dev_ip, username, password, use_openssl);
         } catch (...) {
@@ -3047,8 +3167,151 @@ bool MachineObject::is_camera_busy_off()
     return false;
 }
 
+// ------------------------------------------------- the first request after a selection ----
+// See FirstRequestGate.hpp. Times are steady-clock milliseconds.
+static long long first_request_now_ms()
+{
+    return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void MachineObject::note_selected(bool session_already_up)
+{
+    report_not_sent(m_gate.select(first_request_now_ms(), session_already_up));
+    if (session_already_up)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " selected, the cloud session is already up";
+}
+
+void MachineObject::note_session_up(const char* kind)
+{
+    FirstRequestGate::SelectionGate::Up up = m_gate.session_up(first_request_now_ms());
+    if (up.ms >= 0)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << kind << " session up " << up.ms
+                                << " ms after selection" << (up.held > 0 ? " (" + std::to_string(up.held) + " early request(s) held for it)" : std::string());
+    // Before anything else goes out on the new session (the connected callbacks' own pushall
+    // included): these were asked for first.
+    send_held(up.send);
+}
+
+void MachineObject::note_session_down()
+{
+    m_redial_due = false;
+    report_not_sent(m_gate.session_down());
+}
+
+void MachineObject::note_dial_started()
+{
+    m_redial_due = false;
+    const long long now = first_request_now_ms();
+    if (m_gate.dialling(now))
+        return; // a selection armed it already (or this is its re-dial)
+    report_not_sent(m_gate.dial_started(now));
+    BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " LAN dial started outside a Device-tab selection: holding its requests until the session is up";
+}
+
+void MachineObject::note_dial_on_live_session()
+{
+    m_redial_due = false;
+    FirstRequestGate::SelectionGate::Up up = m_gate.dial_on_live_session(first_request_now_ms());
+    if (!up.send.empty())
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " re-selected over its live LAN session: sending what an earlier dial held";
+    send_held(up.send);
+}
+
+bool MachineObject::note_dial_failed()
+{
+    const long long now = first_request_now_ms();
+    if (!m_gate.dial_failed(now)) {
+        note_session_down();
+        return false;
+    }
+    m_redial_due = true;
+    m_redial_at  = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    BOOST_LOG_TRIVIAL(warning) << "connect: dev=" << dev_id << " the LAN dial was refused " << (now - m_gate.watch().selected_at)
+                               << " ms after selection; dialling again in 1.5 s, " << m_gate.held() << " request(s) still held";
+    return true;
+}
+
+void MachineObject::send_held(const std::vector<FirstRequestGate::HeldCommand>& held)
+{
+    if (held.empty())
+        return;
+    BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " session up, sending " << held.size() << " held command(s)";
+    for (const FirstRequestGate::HeldCommand& c : held)
+        publish_json(c.payload, c.qos, c.flag);
+}
+
+void MachineObject::report_not_sent(const FirstRequestGate::SelectionGate::Dropped& d)
+{
+    if (d.send) {
+        send_held(d.commands);
+        return;
+    }
+    for (const FirstRequestGate::HeldCommand& c : d.commands)
+        BOOST_LOG_TRIVIAL(error) << "connect: dev=" << dev_id << " " << c.key << " was not sent: " << d.why;
+}
+
+bool MachineObject::hold_status_request(const char* what)
+{
+    const long long now = first_request_now_ms();
+    if (!m_gate.hold_status(now))
+        return false;
+    // The first hold of a selection at info, so a log shows why no request went out; the
+    // refresh timer's repeats (at most one per REQUEST_PUSH_MIN_TIME) at trace.
+    if (m_gate.held() == 1)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << what << " held until the "
+                                << (is_lan_mode_printer() ? "LAN" : "cloud") << " session is up ("
+                                << (now - m_gate.watch().selected_at) << " ms after selection)";
+    else
+        BOOST_LOG_TRIVIAL(trace) << "connect: dev=" << dev_id << " " << what << " held (" << m_gate.held() << ")";
+    return true;
+}
+
+void MachineObject::note_status_received()
+{
+    const long long ms = m_gate.on_status(first_request_now_ms());
+    if (ms >= 0)
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " first status " << ms << " ms after selection";
+}
+
 int MachineObject::publish_json(std::string json_str, int qos, int flag)
 {
+    // This selection's session is still being dialled: the plug-in has nothing to publish on and
+    // would refuse the command (-1). Keep it and send it once the session is up
+    // (note_session_up). The caller gets 0 - the command is accepted, it just waits.
+    const long long now = first_request_now_ms();
+    if (m_gate.dialling(now)) {
+        FirstRequestGate::HeldCommand c;
+        c.payload = json_str;
+        c.qos     = qos;
+        c.flag    = flag;
+        const json parsed = json::parse(json_str, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_object()) {
+            for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+                if (!it.value().is_object()) continue;
+                auto cmd = it.value().find("command");
+                if (cmd == it.value().end() || !cmd->is_string()) continue;
+                c.key  = it.key() + "/" + cmd->get<std::string>();
+                c.info = GUI::is_status_or_info_command(cmd->get<std::string>());
+                break;
+            }
+        }
+        if (c.key.empty())
+            c.key = "(unnamed command)";
+        const std::string key      = c.key;
+        bool              replaced = false;
+        m_gate.hold_command(now, std::move(c), &replaced);
+        BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " " << key << " held until the "
+                                << (is_lan_mode_printer() ? "LAN" : "cloud") << " session is up ("
+                                << (now - m_gate.watch().selected_at) << " ms after selection"
+                                << (replaced ? ", replacing an earlier copy" : "") << ")";
+        return 0;
+    }
+    // Held commands still waiting although the selection is no longer dialling: the hold ran out
+    // without the plug-in reporting either way (a session that came up was flushed already).
+    if (m_gate.queued() > 0)
+        report_not_sent(m_gate.settle(now));
+
     int rtn = 0;
     if (is_lan_mode_printer()) {
         rtn = local_publish_json(json_str, qos, flag);
@@ -3058,11 +3321,22 @@ int MachineObject::publish_json(std::string json_str, int qos, int flag)
 
     if (rtn == 0) {
         BOOST_LOG_TRIVIAL(info) << "publish_json: " << json_str << " code: " << rtn;
+        // Remember what went out under which sequence id, so a reply naming it can be told apart
+        // from replies to other slicers' commands that share the same id range. Parsed without
+        // exceptions: a payload that is not JSON is simply not tracked.
+        const json sent = json::parse(json_str, nullptr, false);
+        if (!sent.is_discarded())
+            m_sent_commands.note_sent_payload(sent, GUI::SentCommandTracker::Clock::now());
     } else {
         BOOST_LOG_TRIVIAL(error) << "publish_json: " << json_str << " code: " << rtn;
     }
 
     return rtn;
+}
+
+void MachineObject::note_agent_command_sent(const std::string& command)
+{
+    m_sent_commands.note_sent_by_agent(command, GUI::SentCommandTracker::Clock::now());
 }
 
 std::string MachineObject::command_get_auto_nozzle_mapping(const std::string& request_json)
@@ -3098,6 +3372,20 @@ int MachineObject::local_publish_json(std::string json_str, int qos, int flag)
     return result;
 }
 
+// Status pushes arrive every second or so per printer and several helpers below are re-run on each one, so a
+// message that describes a *condition* (not an event) would otherwise be repeated forever. log_first_time()
+// returns true only the first time a given key is seen in this session; callers log the first sighting at info
+// and every repeat at trace. The set is bounded so a pathological stream of distinct keys cannot grow it.
+static bool log_first_time(const std::string &key)
+{
+    static std::mutex s_mutex;
+    static std::set<std::string> s_seen;
+    std::lock_guard<std::mutex> lock(s_mutex);
+    if (s_seen.size() > 1024)
+        s_seen.clear();
+    return s_seen.insert(key).second;
+}
+
 std::string MachineObject::setting_id_to_type(std::string setting_id, std::string tray_type)
 {
     std::string type;
@@ -3116,7 +3404,12 @@ std::string MachineObject::setting_id_to_type(std::string setting_id, std::strin
 
     if (tray_type != type || type.empty()) {
         if (type.empty()) { type = tray_type; }
-        BOOST_LOG_TRIVIAL(info) << "The values of tray_info_idx and tray_type do not match tray_info_idx " << setting_id << " tray_type " << tray_type << " system_type" << type;
+        // Runs for every tray on every status push: info the first time this combination is seen, trace after.
+        const bool first = log_first_time("tray_mismatch|" + setting_id + "|" + tray_type + "|" + type);
+        if (first)
+            BOOST_LOG_TRIVIAL(info) << "The values of tray_info_idx and tray_type do not match tray_info_idx " << setting_id << " tray_type " << tray_type << " system_type" << type;
+        else
+            BOOST_LOG_TRIVIAL(trace) << "The values of tray_info_idx and tray_type do not match tray_info_idx " << setting_id << " tray_type " << tray_type << " system_type" << type;
     }
     return type;
 }
@@ -3131,10 +3424,12 @@ static ENUM enum_index_of(char const *key, char const **enum_names, int enum_cou
 
 int MachineObject::parse_json(std::string payload, bool key_field_only)
 {
-#ifdef ORCA_NETWORK_DEBUG
-    BOOST_LOG_TRIVIAL(info) << "parse_json: payload = " << payload;
-    flush_logs();
-#endif
+    // The full status JSON (several KB per push, per printer) is trace-only: at info it made up ~90% of a day's log.
+    // Set Preferences > Log level to "trace" to get it back. The per-message flush is only paid when it is wanted.
+    if (get_logging_level() >= 5) {
+        BOOST_LOG_TRIVIAL(trace) << "parse_json: payload = " << payload;
+        flush_logs();
+    }
 
     parse_msg_count++;
     std::chrono::system_clock::time_point clock_start = std::chrono::system_clock::now();
@@ -3168,6 +3463,20 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
         if (j_pre.empty()) {
             return 0;
         }
+        // One line per message that is not the periodic status push (acks, info replies, ...): which command,
+        // which sequence id, how big. The push_status stream itself is not logged at info.
+        if (get_logging_level() >= 3) {
+            for (auto it = j_pre.begin(); it != j_pre.end(); ++it) {
+                if (!it.value().is_object()) continue;
+                auto cmd = it.value().find("command");
+                if (cmd == it.value().end() || !cmd->is_string()) continue;
+                if (cmd->get<std::string>() == "push_status") continue;
+                auto seq = it.value().find("sequence_id");
+                BOOST_LOG_TRIVIAL(info) << "parse_json: dev " << dev_id << " " << it.key() << "/" << cmd->get<std::string>()
+                                        << " seq " << ((seq != it.value().end() && seq->is_string()) ? seq->get<std::string>() : std::string("-"))
+                                        << " (" << payload.size() << " bytes)";
+            }
+        }
         if (j_pre.contains("print")) {
             if (m_active_state == NotActive) m_active_state = Active;
             if (j_pre["print"].contains("command")) {
@@ -3176,6 +3485,7 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         if (j_pre["print"]["msg"].get<int>() == 0) {           //all message
                             BOOST_LOG_TRIVIAL(trace) << "static: get push_all msg, dev_id=" << dev_id;
                             m_push_count++;
+                            note_status_received();
                             if (!printer_type.empty())
                                 print_json.load_compatible_settings(printer_type, "");
                             print_json.diff2all_base_reset(j_pre);
@@ -3593,11 +3903,17 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
 
                 // ---- a command the slicer sent came back refused ----
                 //
-                // Any reply on the "print" topic that carries our own sequence id together with an
-                // "err_code" is the printer saying no to something this slicer asked for, and
-                // until now the fork dropped it on the floor: the command simply appeared to do
-                // nothing. The dialog is the same PrintErrorDialog the status-push errors use, so
-                // the text and the button set come from the shipped hms_action tables either way.
+                // A reply on the "print" topic that answers a command this slicer published - same
+                // command name, same sequence id, sent within the last minute and not yet refused -
+                // together with an "err_code" is the printer saying no to something we asked for.
+                // The sequence-id range alone is not enough: Bambu Studio and OrcaSlicer use the
+                // same range, and the push_status answering our own pushall echoes its sequence id
+                // alongside the printer's standing error, which is how a leftover 0502 4007 from an
+                // earlier task used to open this dialog the moment the Device page connected.
+                // Status and info replies never count (accept_command_refusal).
+                //
+                // The dialog is the same PrintErrorDialog the status-push errors use, so the text
+                // and the button set come from the shipped hms_action tables either way.
                 //
                 // "err_index" is what makes the error answerable. When it is there the whole reply
                 // is the action_json blob - it names the command to re-send and the index to
@@ -3605,14 +3921,25 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                 // absent the dialog still shows, with those two buttons greyed: there is nothing
                 // to build them from. Upstream passes an empty json in exactly that case.
                 if (!key_field_only) {
-                    int  command_err = 0;
-                    json action_json;
-                    if (GUI::parse_command_error_reply(jj, is_studio_cmd(sequence_id), command_err, action_json))
-                        add_command_error_code_dlg(command_err, action_json);
+                    int         command_err = 0;
+                    json        action_json;
+                    std::string refused_command;
+                    if (GUI::accept_command_refusal(jj, m_sent_commands, GUI::SentCommandTracker::Clock::now(),
+                                                    command_err, action_json, refused_command)) {
+                        add_command_error_code_dlg(command_err, action_json, refused_command);
+                    } else if (!refused_command.empty() && !GUI::is_status_or_info_command(refused_command)) {
+                        // Somebody else's refusal (another slicer, the printer's screen, a previous
+                        // session). Logged so it can be told apart from ours, never shown.
+                        BOOST_LOG_TRIVIAL(info) << "parse_json: dev " << dev_id << " ignoring err_code "
+                                                << GUI::HMSQuery::print_error_code(jj["err_code"].get<int>())
+                                                << " on \"" << refused_command << "\" seq " << sequence_id
+                                                << ": not a command this slicer is waiting on";
+                    }
                 }
 
                 if (jj["command"].get<std::string>() == "push_status") {
                     m_push_count++;
+                    note_status_received();
                     last_push_time = last_update_time;
 #pragma region printing
                     // U0 firmware
@@ -3754,7 +4081,10 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
 
                     if (!key_field_only) {
                         if (jj.contains("printer_type")) {
-                            printer_type = parse_printer_type(jj["printer_type"].get<std::string>());
+                            // Unidentified and empty: keep the model SSDP or the saved record gave us.
+                            const std::string identified = DeviceManager::identify_printer_type(jj["printer_type"].get<std::string>(), dev_id);
+                            if (! identified.empty() || printer_type.empty())
+                                printer_type = identified;
                         }
 
                         if (jj.contains("layer_num")) {
@@ -3887,29 +4217,16 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             cooling_fan_speed = (int)((fan_gear & 0x000000FF) >> 0);
                         }
                         else {
-                            if (jj.contains("cooling_fan_speed")) {
-                                cooling_fan_speed = stoi(jj["cooling_fan_speed"].get<std::string>());
-                                cooling_fan_speed = round(floor(cooling_fan_speed / float(1.5)) * float(25.5));
-                            }
-                            else {
-                                cooling_fan_speed = 0;
-                            }
-
-                            if (jj.contains("big_fan1_speed")) {
-                                big_fan1_speed = stoi(jj["big_fan1_speed"].get<std::string>());
-                                big_fan1_speed = round( floor(big_fan1_speed / float(1.5)) * float(25.5) );
-                            }
-                            else {
-                                big_fan1_speed = 0;
-                            }
-
-                            if (jj.contains("big_fan2_speed")) {
-                                big_fan2_speed = stoi(jj["big_fan2_speed"].get<std::string>());
-                                big_fan2_speed = round( floor(big_fan2_speed / float(1.5)) * float(25.5) );
-                            }
-                            else {
-                                big_fan2_speed = 0;
-                            }
+                            // "0".."15" steps as 0..255 (BambuFans::classic_fan_byte, Bambu
+                            // Studio's DevFan::ParseV1_0); missing or unreadable reads as off
+                            // instead of throwing out of the rest of the report.
+                            auto classic = [&jj](const char* key) {
+                                const int v = jj.contains(key) ? GUI::BambuFans::classic_fan_byte(jj[key]) : -1;
+                                return v < 0 ? 0 : v;
+                            };
+                            cooling_fan_speed = classic("cooling_fan_speed");
+                            big_fan1_speed    = classic("big_fan1_speed");
+                            big_fan2_speed    = classic("big_fan2_speed");
                         }
 
                         if (jj.contains("heatbreak_fan_speed")) {
@@ -4005,6 +4322,10 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                                 for (auto it = jj["lights_report"].begin(); it != jj["lights_report"].end(); it++) {
                                     if ((*it)["node"].get<std::string>().compare("chamber_light") == 0)
                                         chamber_light = light_effect_parse((*it)["mode"].get<std::string>());
+                                    if ((*it)["node"].get<std::string>().compare("chamber_light2") == 0) {
+                                        chamber_light2          = light_effect_parse((*it)["mode"].get<std::string>());
+                                        chamber_light2_reported = true;
+                                    }
                                     if ((*it)["node"].get<std::string>().compare("work_light") == 0)
                                         work_light = light_effect_parse((*it)["mode"].get<std::string>());
                                 }
@@ -4067,13 +4388,12 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                                                 else if (hw == "01") nt = NozzleType::ntHardenedSteel;
                                             }
                                             m_extder_data.extders[MAIN_NOZZLE_ID].current_nozzle_type = nt;
-                                            // Ultra: derive flow variant from the 2nd char of the code
-                                            // ('H'/'E' = High Flow, else Standard) to auto-match nozzle_volume_type.
+                                            // Ultra: derive flow variant from the 2nd char of the code to
+                                            // auto-match nozzle_volume_type (owner decision D6: 'H'/'E' High Flow,
+                                            // 'U' TPU High Flow and the rest Standard).
                                             NozzleVolumeType nflow = NozzleVolumeType::nvtStandard;
-                                            if (nozzle_type.length() >= 2) {
-                                                char fc = (char) std::toupper((unsigned char) nozzle_type[1]);
-                                                if (fc == 'H' || fc == 'E') nflow = NozzleVolumeType::nvtHighFlow;
-                                            }
+                                            if (nozzle_type.length() >= 2)
+                                                nflow = BambuFlowSupport::nozzle_flow_from_device_code(nozzle_type[1]);
                                             m_extder_data.extders[MAIN_NOZZLE_ID].current_nozzle_flow = nflow;
                                         }
                                     }
@@ -4358,6 +4678,8 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                     }
                     update_printer_preset_name();
                     update_filament_list();
+                    if (!key_field_only && (jj.contains("ams") || jj.contains("vt_tray")))
+                        m_full_report_seen = true; // DeviceManager::full_report_tick
                     if (jj.contains("ams")) {
                         if (jj["ams"].contains("ams")) {
                             long int last_ams_exist_bits = ams_exist_bits;
@@ -4811,6 +5133,16 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         if (result == "FAIL") {
                             wxString text = _L("Failed to start print job");
                             GUI::wxGetApp().push_notification(text);
+                        }
+                        // Ultra: firmware with Authorization Control answers an unsigned command
+                        // with result "failed", reason "mqtt message verify failed". Count it so the
+                        // send job can say why the printer did not start (BambuSendDiagnosis).
+                        const std::string reason = jj.contains("reason") && jj["reason"].is_string() ? jj["reason"].get<std::string>() : std::string();
+                        if (GUI::bambu_reply_is_auth_refusal(result, reason)) {
+                            ++project_file_refusals;
+                            BOOST_LOG_TRIVIAL(warning) << "parse_json, " << dev_id << " refused project_file: result=" << result
+                                                       << ", reason=" << reason
+                                                       << ", err_code=" << (jj.contains("err_code") ? jj["err_code"].dump() : std::string("none"));
                         }
                     }
                 } else if (jj["command"].get<std::string>() == "ams_filament_setting" && !key_field_only) {
@@ -5387,11 +5719,11 @@ void MachineObject::update_model_task()
     if (!model_task) return;
     if (!subtask_) return;
     if (model_task->task_id != subtask_->task_id) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " times: " << request_model_result << " model_task_id !=subtask_id";
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << " times: " << request_model_result << " model_task_id !=subtask_id";
         return;
     }
     if (model_task->instance_id <= 0) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " times: " << request_model_result << " instance_id <= 0";
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << " times: " << request_model_result << " instance_id <= 0";
         return;
     }
 
@@ -5406,7 +5738,7 @@ void MachineObject::update_model_task()
             get_model_mall_result_need_retry = false;
         }
     } else {
-        BOOST_LOG_TRIVIAL(info) << "subtask_id_ no change and do not need retry";
+        BOOST_LOG_TRIVIAL(trace) << "subtask_id_ no change and do not need retry";
         return;
     }
 
@@ -5813,15 +6145,16 @@ void MachineObject::parse_new_info(json print)
     is_enable_np = check_enable_np(print);
     if (!is_enable_np)
     {
+        m_airduct_fans = GUI::BambuFans::AirductFans();
         return;
     }
 
-    BOOST_LOG_TRIVIAL(info) << "using new print data for parsing";
+    BOOST_LOG_TRIVIAL(trace) << "using new print data for parsing";
 
     /*cfg*/
     std::string cfg = print["cfg"].get<std::string>();
 
-    BOOST_LOG_TRIVIAL(info) << "new print data cfg = " << cfg;
+    BOOST_LOG_TRIVIAL(trace) << "new print data cfg = " << cfg;
 
     if(!cfg.empty()){
         if (ams_user_setting_hold_count > 0) ams_user_setting_hold_count--;
@@ -5880,7 +6213,7 @@ void MachineObject::parse_new_info(json print)
 
     /*fun*/
     std::string fun = print["fun"].get<std::string>();
-    BOOST_LOG_TRIVIAL(info) << "new print data fun = " << fun;
+    BOOST_LOG_TRIVIAL(trace) << "new print data fun = " << fun;
 
     if (!fun.empty()) {
 
@@ -5924,7 +6257,7 @@ void MachineObject::parse_new_info(json print)
     /*aux*/
     std::string aux = print["aux"].get<std::string>();
 
-    BOOST_LOG_TRIVIAL(info) << "new print data aux = " << aux;
+    BOOST_LOG_TRIVIAL(trace) << "new print data aux = " << aux;
 
     if (!aux.empty()) {
          sdcard_state = MachineObject::SdcardState(get_flag_bits(aux, 12, 2));
@@ -5933,7 +6266,7 @@ void MachineObject::parse_new_info(json print)
     /*stat*/
     std::string stat = print["stat"].get<std::string>();
 
-    BOOST_LOG_TRIVIAL(info) << "new print data stat = " << stat;
+    BOOST_LOG_TRIVIAL(trace) << "new print data stat = " << stat;
 
     if (!stat.empty()) {
         camera_recording = get_flag_bits(stat, 7);
@@ -5957,12 +6290,14 @@ void MachineObject::parse_new_info(json print)
             chamber_temp_target = get_flag_bits(device["cham_temp"].get<int>(), 16, 16);
         }
 
-        if (device.contains("fan")) {
-            big_fan1_speed = get_flag_bits(device["fan"].get<int>(), 0, 3);
-            big_fan2_speed = get_flag_bits(device["fan"].get<int>(), 4, 3);
-            cooling_fan_speed = get_flag_bits(device["fan"].get<int>(), 8, 3);
-            heatbreak_fan_speed = get_flag_bits(device["fan"].get<int>(), 12, 3);
-        }
+        // Fans. device.fan is not read: its 3-bit fields are not speeds (Bambu Studio dropped them
+        // in Dec 2024), and reading them overwrote the classic 0..255 values with 0..7 - the Device
+        // tab's 0 % and the phone's 2 %. An H2-series printer's device.airduct gives each fan's
+        // speed in percent, which then replaces the classic value (BambuFans.hpp).
+        m_airduct_fans = GUI::BambuFans::parse_airduct_fans(device);
+        if (m_airduct_fans.part >= 0) cooling_fan_speed = GUI::BambuFans::byte_of_percent(m_airduct_fans.part);
+        if (m_airduct_fans.aux >= 0) big_fan1_speed = GUI::BambuFans::byte_of_percent(m_airduct_fans.aux);
+        if (m_airduct_fans.chamber >= 0) big_fan2_speed = GUI::BambuFans::byte_of_percent(m_airduct_fans.chamber);
 
         if (device.contains("nozzle")) {
             json const &nozzle = device["nozzle"];
@@ -5988,12 +6323,9 @@ void MachineObject::parse_new_info(json print)
                 } else {
                     nozzle_obj.nozzle_type = NozzleType::ntUndefine;
                 }
-                // Ultra: flow variant from the 2nd char ('H'/'E' = High Flow, else Standard).
-                if (type.length() >= 2) {
-                    char fc = (char) std::toupper((unsigned char) type[1]);
-                    nozzle_obj.nozzle_flow = (fc == 'H' || fc == 'E') ? NozzleVolumeType::nvtHighFlow
-                                                                      : NozzleVolumeType::nvtStandard;
-                }
+                // Ultra: flow variant from the 2nd char (owner decision D6: 'H'/'E' High Flow, else Standard).
+                if (type.length() >= 2)
+                    nozzle_obj.nozzle_flow = BambuFlowSupport::nozzle_flow_from_device_code(type[1]);
 
                 if (type.length() >= 2) {
                     switch ((char) std::toupper((unsigned char) type[1])) {
@@ -6240,7 +6572,7 @@ void MachineObject::update_filament_list()
 
 void MachineObject::update_printer_preset_name()
 {
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << "start update preset_name";
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << " " << __LINE__ << "start update preset_name";
     PresetBundle *     preset_bundle = Slic3r::GUI::wxGetApp().preset_bundle;
     if (!preset_bundle) return;
     auto               printer_model = MachineObject::get_preset_printer_model_name(this->printer_type);
@@ -6258,8 +6590,14 @@ void MachineObject::update_printer_preset_name()
             data.printer_preset_name = *printer_set.begin();
             m_nozzle_filament_data[nozzle_diameter_str] = data;
         }
-        else
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << " update printer preset name failed: "<< "printer_type: " << printer_type << "nozzle_diameter_str" << nozzle_diameter_str;
+        else {
+            // Same answer on every status push while no matching preset exists: info once per printer/nozzle, trace after.
+            const bool first = log_first_time("preset_name_failed|" + dev_id + "|" + printer_type + "|" + nozzle_diameter_str);
+            if (first)
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << " update printer preset name failed: "<< "printer_type: " << printer_type << "nozzle_diameter_str" << nozzle_diameter_str;
+            else
+                BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << " " << __LINE__ << " update printer preset name failed: "<< "printer_type: " << printer_type << "nozzle_diameter_str" << nozzle_diameter_str;
+        }
     }
 
     for (auto iter = m_nozzle_filament_data.begin(); iter != m_nozzle_filament_data.end();)
@@ -6345,8 +6683,16 @@ void MachineObject::check_ams_filament_valid()
     /*for (auto vt_tray : vt_slot)*/ do{
         int vt_id = std::stoi(vt_tray.id);
         int index = 255 - vt_id;
-        if (index >= m_extder_data.total_extder_count) {
-            BOOST_LOG_TRIVIAL(error) << " vt_tray id map for nozzle id is not exist, index is: " << index << " nozzle count" << m_extder_data.total_extder_count;
+        if (index < 0 || index >= m_extder_data.total_extder_count) {
+            // Single-nozzle printers (P1S among them) report their external spool as id 254, which
+            // this mapping reads as nozzle 1. Nothing to check there, and it is the same answer on
+            // every status push, so it is noted once rather than logged as an error every second.
+            if (!m_vt_tray_unmapped_logged) {
+                m_vt_tray_unmapped_logged = true;
+                BOOST_LOG_TRIVIAL(debug) << "check_ams_filament_valid: dev " << dev_id << " vt_tray " << vt_tray.id
+                                         << " maps to nozzle index " << index << ", printer has "
+                                         << m_extder_data.total_extder_count << " nozzle(s); not checked";
+            }
             continue;
         }
         auto diameter = m_extder_data.extders[index].current_nozzle_diameter;
@@ -6427,8 +6773,22 @@ DeviceManager::DeviceManager(NetworkAgent* agent)
         const auto local_machines = config->get_local_machines();
         for (auto& it : local_machines) {
             const auto&    m         = it.second;
+            // A FlashForge printer saved by the FlashForge Device tab shares this table. It has a
+            // check code, so it would pass the access-code test below and turn up as a Bambu LAN
+            // printer with no model and no address; and without one it would be erased here. Leave
+            // it to its own tab.
+            if (m.is_flashforge())
+                continue;
             MachineObject* obj       = new MachineObject(m_agent, m.dev_name, m.dev_id, m.dev_ip);
-            obj->printer_type        = m.printer_type;
+            // Re-identify the stored code: a printer saved by a build that had no definition for its
+            // model was stored with an empty model (an X2D, 2.4.5.0), which made the send dialog
+            // call it incompatible until its next announcement - or forever, when it is reached by
+            // IP and never announces. The serial number still identifies it.
+            obj->printer_type        = identify_printer_type(m.printer_type, m.dev_id);
+            const bool repaired      = obj->printer_type != m.printer_type;
+            if (repaired)
+                BOOST_LOG_TRIVIAL(info) << "Saved LAN printer " << m.dev_id.substr(0, 3) << "...: stored model '" << m.printer_type
+                                        << "' re-identified as '" << obj->printer_type << "'";
             obj->dev_connection_type = "lan";
             obj->bind_state          = "free";
             obj->bind_sec_link       = "secure";
@@ -6438,6 +6798,12 @@ DeviceManager::DeviceManager(NetworkAgent* agent)
             obj->set_user_access_code(config->get("user_access_code", m.dev_id), false);
             if (obj->has_access_right()) {
                 localMachineList.insert(std::make_pair(m.dev_id, obj));
+                if (repaired) {
+                    // Store the repair, keeping the rest of the saved record as it was.
+                    BBLocalMachine fixed = m;
+                    fixed.printer_type   = obj->printer_type;
+                    config->update_local_machine(fixed);
+                }
             } else {
                 config->erase_local_machine(m.dev_id);
                 delete obj;
@@ -6587,6 +6953,9 @@ void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
         m_agent->disconnect_printer();
         obj->set_lan_session_up(false); // up again when the new dial's on_local_connect(Ok) lands
         obj->reset();
+        // connect() arms the first-request gate for this dial (note_dial_started) - and leaves it
+        // as it is when this is the one re-dial after a refused first dial, so what that selection
+        // held keeps waiting for this session.
 #if !BBL_RELEASE_TO_PUBLIC
         obj->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
 #else
@@ -6645,6 +7014,13 @@ void DeviceManager::lan_reconnect_tick()
 
     for (MachineObject* obj : want) {
         if (!obj->has_access_right() || obj->dev_ip.empty()) continue;
+        // The selection's first dial was refused (MachineObject::note_dial_failed): its one
+        // re-dial, while what it held keeps waiting.
+        if (obj->m_redial_due && std::chrono::steady_clock::now() >= obj->m_redial_at) {
+            obj->m_redial_due = false;
+            lan_reconnect_now(obj, "first dial refused, dialling once more");
+            continue;
+        }
         LanReconnect& r = m_lan_reconnect[obj->dev_id];
         const LanReconnect before = r;
         const long long silence = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -6679,6 +7055,54 @@ void DeviceManager::lan_reconnect_tick()
             lan_reconnect_now(obj, !session_up ? "session lost" : "no report for two minutes");
             break;
         }
+    }
+}
+
+void DeviceManager::full_report_tick()
+{
+    // Only the cloud printers: a LAN printer is reached over the one LAN session the agent holds,
+    // which lan_reconnect_tick already keeps asking for reports.
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& kv : userMachineList) {
+        MachineObject* m = kv.second;
+        if (!m || m->is_lan_mode_printer() || !m->is_online() || m->m_full_report_seen)
+            continue;
+        if (m->m_full_report_asked != std::chrono::steady_clock::time_point{} &&
+            now - m->m_full_report_asked < std::chrono::milliseconds(FULL_REPORT_RETRY_MS))
+            continue;
+        m->m_full_report_asked = now;
+        const int rc = m->command_request_push_all();
+        BOOST_LOG_TRIVIAL(info) << "full_report: dev_id=" << m->dev_id << " has sent no AMS / spool report yet, asked for one (rc="
+                                << rc << ")";
+    }
+}
+
+void DeviceManager::lan_watch_tick()
+{
+    if (!m_agent || Slic3r::GUI::wxGetApp().is_hub_managed()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (m_lan_watch_set_at != std::chrono::steady_clock::time_point{} &&
+        now - m_lan_watch_set_at < std::chrono::milliseconds(LAN_WATCH_SET_MS))
+        return;
+    m_lan_watch_set_at = now;
+
+    // The selected printer is on the agent's own session and is left out; the plug-in skips it
+    // too, but naming it here would only log a set that is not what is being watched.
+    const MachineObject* sel = get_selected_machine();
+    json        targets = json::array();
+    std::string ids;
+    for (const auto& kv : get_my_machine_list()) {
+        MachineObject* m = kv.second;
+        if (!m || !m->is_lan_mode_printer() || m == sel) continue;
+        if (!m->has_access_right() || m->dev_ip.empty()) continue;
+        targets.push_back({{"dev_id", m->dev_id}, {"dev_ip", m->dev_ip}, {"username", "bblp"}, {"password", m->get_access_code()}});
+        ids += (ids.empty() ? "" : ",") + m->dev_id;
+    }
+    const int n = m_agent->watch_printers(targets.dump());
+    if (ids != m_lan_watch_set) {
+        m_lan_watch_set = ids;
+        BOOST_LOG_TRIVIAL(info) << "lan_watch: watching [" << ids << "] besides the selected printer (plug-in says " << n
+                                << (n < 0 ? ": not supported" : "") << ")";
     }
 }
 
@@ -6770,14 +7194,25 @@ void DeviceManager::on_machine_alive(std::string json_str)
 
         MachineObject* obj;
 
+        // A printer the user saved as a LAN printer stays one, whatever an announcement says
+        // (SsdpConnectType.hpp): a downgrade offered it a cloud bind ("Log in printer"), dropped it
+        // from the LAN lists and erased it from the saved printers.
+        AppConfig* const app_config = Slic3r::GUI::wxGetApp().app_config;
+        const bool saved_lan = app_config && app_config->get_local_machines().count(dev_id) > 0;
+        // A printer that announced "lan" lately rides out a short run of "cloud bind=free" ones
+        // (an H2C in LAN-only mode sends one now and then): fed once per announcement.
+        const long long now_ms = ssdp_now_ms();
+        m_ssdp_lan_memory[dev_id].observe(connect_type, now_ms);
+
         /* update userMachineList info */
         auto it = userMachineList.find(dev_id);
         if (it != userMachineList.end()) {
             it->second->dev_ip                  = dev_ip;
-            it->second->bind_state              = bind_state;
             it->second->bind_sec_link           = sec_link;
-            it->second->dev_connection_type     = connect_type;
             it->second->bind_ssdp_version       = ssdp_version;
+            // The cloud list's access code comes from the account, not the user: only a saved
+            // LAN printer is kept LAN here.
+            apply_ssdp_connect_type(it->second, "user", connect_type, bind_state, saved_lan, false, now_ms);
         }
 
         /* update localMachineList */
@@ -6805,11 +7240,16 @@ void DeviceManager::on_machine_alive(std::string json_str)
 
 
             obj->wifi_signal        = printer_signal;
-            obj->dev_connection_type= connect_type;
-            obj->bind_state         = bind_state;
+            apply_ssdp_connect_type(obj, "local", connect_type, bind_state, saved_lan, obj->has_access_right(), now_ms);
             obj->bind_sec_link      = sec_link;
             obj->bind_ssdp_version = ssdp_version;
-            obj->printer_type = MachineObject::parse_printer_type(printer_type_str);
+            {
+                // An announcement without a usable model code must not blank a model we know (a
+                // saved printer is loaded with its stored code before its first announcement).
+                const std::string identified = identify_printer_type(printer_type_str, dev_id);
+                if (! identified.empty() || obj->printer_type.empty())
+                    obj->printer_type = identified;
+            }
 
             // U0 firmware
             if (obj->dev_connection_type.empty() && obj->bind_state.empty())
@@ -6827,10 +7267,8 @@ void DeviceManager::on_machine_alive(std::string json_str)
         else {
             /* insert a new machine */
             obj = new MachineObject(m_agent, dev_name, dev_id, dev_ip);
-            obj->printer_type = MachineObject::parse_printer_type(printer_type_str);
+            obj->printer_type = identify_printer_type(printer_type_str, dev_id);
             obj->wifi_signal = printer_signal;
-            obj->dev_connection_type = connect_type;
-            obj->bind_state     = bind_state;
             obj->bind_sec_link  = sec_link;
             obj->dev_connection_name = connection_name;
             obj->bind_ssdp_version = ssdp_version;
@@ -6842,6 +7280,9 @@ void DeviceManager::on_machine_alive(std::string json_str)
                 obj->set_access_code(Slic3r::GUI::wxGetApp().app_config->get("access_code", dev_id));
                 obj->set_user_access_code(Slic3r::GUI::wxGetApp().app_config->get("user_access_code", dev_id));
             }
+            // After the codes: a saved LAN printer that was not loaded at start-up (no code then)
+            // still counts as one.
+            apply_ssdp_connect_type(obj, "local", connect_type, bind_state, saved_lan, obj->has_access_right(), now_ms);
             localMachineList.insert(std::make_pair(dev_id, obj));
 
             /* if (!obj->dev_ip.empty()) {
@@ -6859,8 +7300,79 @@ void DeviceManager::on_machine_alive(std::string json_str)
     }
 }
 
+long long DeviceManager::ssdp_now_ms()
+{
+    return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void DeviceManager::apply_ssdp_connect_type(MachineObject* obj, const char* list, const std::string& announced,
+                                            const std::string& announced_bind, bool saved_lan, bool has_access_code, long long now_ms)
+{
+    if (!obj) return;
+    const std::string                 before = obj->dev_connection_type;
+    const SsdpConnectType::LanMemory& mem    = m_ssdp_lan_memory[obj->dev_id];
+    const SsdpConnectType::Result     r      = SsdpConnectType::after_announcement(before, announced, announced_bind, saved_lan,
+                                                                                   has_access_code, mem, now_ms);
+    obj->dev_connection_type = r.connect_type;
+    obj->bind_state          = r.bind_state;
+
+    // Warning level: the release build logs nothing below it, and this is what the "Log in
+    // printer" question is decided on. Written whenever the outcome for this printer and list
+    // changes, not on every announcement. Never an access code.
+    std::string line = std::string("SsdpDiscovery: ") + obj->dev_id + " [" + list + "] announced connect_type='" + announced +
+                       "' bind_state='" + announced_bind + "' -> dev_connection_type='" + r.connect_type + "' bind_state='" +
+                       r.bind_state + "' (" + SsdpConnectType::why_text(r.why) + ")";
+    std::string& last = m_ssdp_outcome_logged[obj->dev_id + "|" + list];
+    if (line != last) {
+        last = line;
+        if (r.why == SsdpConnectType::Why::RecentLan)
+            line += " last lan " + std::to_string((now_ms - mem.last_lan_ms) / 1000) + " s ago, non-lan for " +
+                    std::to_string((now_ms - mem.cloud_since_ms) / 1000) + " s";
+        if (before != r.connect_type)
+            line += " (was '" + before + "')";
+        BOOST_LOG_TRIVIAL(warning) << line;
+    }
+}
+
+bool DeviceManager::lan_announced_recently(const std::string& dev_id) const
+{
+    auto it = m_ssdp_lan_memory.find(dev_id);
+    return it != m_ssdp_lan_memory.end() && it->second.lan_recently(ssdp_now_ms());
+}
+
+SsdpConnectType::PickerOffer DeviceManager::picker_offer_for(MachineObject* obj, const char* panel_list)
+{
+    if (!obj) return SsdpConnectType::PickerOffer::Bind;
+    const bool is_lan = obj->is_lan_mode_printer();
+    const bool recent = lan_announced_recently(obj->dev_id);
+    const SsdpConnectType::PickerOffer offer = SsdpConnectType::picker_offer(is_lan, recent);
+    const char* object_list = get_local_machine(obj->dev_id) == obj ? "local" : get_user_machine(obj->dev_id) == obj ? "user" : "other";
+    BOOST_LOG_TRIVIAL(warning) << "printer picker: " << obj->dev_id << " clicked in '" << panel_list << "' (" << object_list
+                               << " list object): dev_connection_type='" << obj->dev_connection_type << "' bind_state='"
+                               << obj->bind_state << "' lan_announced_recently=" << (recent ? "yes" : "no")
+                               << " access_code=" << (obj->has_access_right() ? "entered" : "none") << " -> "
+                               << (offer == SsdpConnectType::PickerOffer::AccessCode ? "access-code dialog" : "Log in printer (bind)");
+    if (offer == SsdpConnectType::PickerOffer::AccessCode && !is_lan) {
+        // Switched by a run of "cloud" announcements, but it was LAN a moment ago: the access code
+        // is what the user is about to enter, and ConnectPrinterDialog / update_local_machine only
+        // treat a "lan" printer as a LAN printer.
+        obj->dev_connection_type = "lan";
+        if (obj->bind_state.empty()) obj->bind_state = "free";
+        BOOST_LOG_TRIVIAL(warning) << "printer picker: " << obj->dev_id << " made LAN again for the access-code dialog";
+    }
+    return offer;
+}
+
 MachineObject* DeviceManager::insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code)
 {
+    // A printer without a serial number cannot be addressed (MQTT topics, AppConfig keys, the
+    // device lists are all keyed on it). Connect via IP used to insert one when the network
+    // plug-in's bind_detect answered with an empty result.
+    if (machine.dev_id.empty()) {
+        BOOST_LOG_TRIVIAL(error) << "insert_local_device: refused a printer with an empty serial number (ip "
+                                 << machine.dev_ip << ")";
+        return nullptr;
+    }
     MachineObject* obj;
     auto           it = localMachineList.find(machine.dev_id);
     if (it != localMachineList.end()) {
@@ -6869,7 +7381,7 @@ MachineObject* DeviceManager::insert_local_device(const BBLocalMachine& machine,
         obj = new MachineObject(m_agent, machine.dev_name, machine.dev_id, machine.dev_ip);
         localMachineList.insert(std::make_pair(machine.dev_id, obj));
     }
-    obj->printer_type = MachineObject::parse_printer_type(machine.printer_type);
+    obj->printer_type = identify_printer_type(machine.printer_type, machine.dev_id);
     obj->dev_connection_type = connection_type;
     obj->bind_state = bind_state;
     obj->bind_sec_link = "secure";
@@ -7015,11 +7527,22 @@ void DeviceManager::clean_user_info()
 bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnect)
 {
     BOOST_LOG_TRIVIAL(info) << "set_selected_machine=" << dev_id;
+    // Whether the selected printer needs the cloud account shows on the title bar's Account button.
+    Slic3r::GUI::AccountStatus::refresh_async();
     auto my_machine_list = get_my_machine_list();
     auto it = my_machine_list.find(dev_id);
 
+    // Re-selecting the LAN printer whose session is already up (the Device tab and the printer
+    // picker re-select on every visit): keep the session and the state it reported, instead of the
+    // disconnect + reset + dial below, which logged "lan connected" again on every visit.
+    // connect_printer is idempotent in the plug-in for the same address and access code, and dials
+    // again when either changed (an access code just re-entered).
+    const bool keep_lan_session = m_agent && !dev_id.empty() && selected_machine == dev_id && it != my_machine_list.end() &&
+                                  it->second->connection_type() == "lan" && it->second->lan_session_up() &&
+                                  !it->second->is_connecting();
+
     // disconnect last
-    auto last_selected = my_machine_list.find(selected_machine);
+    auto last_selected = keep_lan_session ? my_machine_list.end() : my_machine_list.find(selected_machine);
     if (last_selected != my_machine_list.end()) {
         last_selected->second->m_active_state = MachineObject::NotActive;
         if (last_selected->second->connection_type() == "lan") {
@@ -7041,11 +7564,24 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
                 Slic3r::GUI::wxGetApp().on_start_subscribe_again(dev_id);
 
                 return true;
+            } else if (keep_lan_session) {
+                // No connecting state is set: no connected callback follows an idempotent connect.
+                // For the same reason connect() is told the session is up, so it does not arm the
+                // first-request gate (a hold nothing would end: 15 s of held, then dropped, commands).
+                BOOST_LOG_TRIVIAL(info) << "set_selected_machine: " << dev_id << " re-selected, LAN session already up";
+                it->second->reset_update_time();
+#if !BBL_RELEASE_TO_PUBLIC
+                it->second->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false,
+                                    /* session_up */ true);
+#else
+                it->second->connect(false, it->second->local_use_ssl_for_mqtt, /* session_up */ true);
+#endif
             } else {
                 // lan mode printer reconnect printer
                 if (m_agent) {
                     if (!need_disconnect) {m_agent->disconnect_printer();}
                     it->second->reset();
+                    it->second->note_selected(false);
 #if !BBL_RELEASE_TO_PUBLIC
                     it->second->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
 #else
@@ -7062,12 +7598,16 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
                     }
                     else {
                         BOOST_LOG_TRIVIAL(info) << "static: set_selected_machine: same dev_id = " << dev_id;
+                        // Before set_user_selected_machine: that call is what opens the plug-in's
+                        // cloud session when none is up yet.
+                        it->second->note_selected(m_cloud_session_up);
                         m_agent->set_user_selected_machine(dev_id);
                         it->second->reset();
                     }
                 } else {
                     BOOST_LOG_TRIVIAL(info) << "static: set_selected_machine: same dev_id = empty";
                     it->second->reset();
+                    it->second->note_selected(false);
 #if !BBL_RELEASE_TO_PUBLIC
                     it->second->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
 #else
@@ -7094,6 +7634,27 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
         m_lan_watch_pinned_at = m_lan_watch_since;
     }
     return true;
+}
+
+void DeviceManager::on_cloud_session(int code)
+{
+    const bool up      = code == 0;
+    const bool changed = up != m_cloud_session_up;
+    m_cloud_session_up = up;
+    if (changed)
+        BOOST_LOG_TRIVIAL(info) << "connect: cloud session " << (up ? "up" : "down") << " (code " << code << ")";
+    MachineObject* sel = get_selected_machine();
+    if (!sel || !FirstRequestGate::event_applies(sel->is_lan_mode_printer(), /* event_is_lan */ false))
+        return;
+    if (up) {
+        sel->note_session_up("cloud"); // also sends what was held for it
+        // The session's own on-connect pushall (UltraNet replays one to every subscribed printer)
+        // and the set_user_selected_machine that GUI_App's handler makes next both ask for the
+        // report; keep_alive waits its REQUEST_PUSH_MIN_TIME before asking a third time.
+        sel->last_request_push = std::chrono::system_clock::now();
+    } else {
+        sel->note_session_down();
+    }
 }
 
 MachineObject* DeviceManager::get_selected_machine()
@@ -7263,9 +7824,7 @@ void DeviceManager::parse_user_print_info(std::string body)
                     // The cloud list reports the same model codes as SSDP, sub-series included, so
                     // it goes through the same resolution; an unknown code keeps the raw value so
                     // the "no printer definition" message can still name it.
-                    const std::string code = elem["dev_model_name"].get<std::string>();
-                    const std::string resolved = MachineObject::parse_printer_type(code);
-                    obj->printer_type = resolved.empty() ? code : resolved;
+                    obj->printer_type = identify_printer_type(elem["dev_model_name"].get<std::string>(), obj->dev_id);
                 }
                 if (!elem["task_status"].is_null())
                     obj->iot_print_status = elem["task_status"].get<std::string>();
@@ -7347,34 +7906,59 @@ json DeviceManager::filaments_blacklist = json::object();
 
 std::string DeviceManager::parse_printer_type(std::string type_str)
 {
-    // The straight case: resources/printers/<code>.json exists.
-    std::string type = get_value_from_config<std::string>(type_str, "printer_type");
-    if (! type.empty() || type_str.empty())
-        return type;
-
-    // A later hardware revision reports a sub-series code ("O1C2-V2" for an H2C) that has no file
-    // of its own; the parent definition lists it under "subseries". Without this an H2C from a
-    // newer batch showed as an unknown model and Send refused with "incompatible model". The
-    // table is read once per run - the folder does not change while the app is running.
+    if (type_str.empty())
+        return "";
+    // resources/printers/<code>.json; else a later hardware revision's sub-series code ("O1C2-V2"
+    // for an H2C), which the parent definition lists under "subseries"; else the code without its
+    // "-V<n>" revision. The table is read once per run - the folder does not change while the app
+    // is running.
     static const std::map<std::string, std::vector<std::string>> subseries =
         GUI::load_model_subseries(Slic3r::resources_dir() + "/printers");
-    std::string parent = GUI::resolve_model_subseries(type_str, subseries);
-    if (parent.empty()) {
-        // A revision newer than the table we ship: "-V<n>" is Bambu's revision suffix, so try the
-        // bare code before giving up.
-        const std::string bare = GUI::strip_model_revision(type_str);
-        if (bare != type_str)
-            parent = bare;
-    }
-    if (! parent.empty()) {
-        type = get_value_from_config<std::string>(parent, "printer_type");
-        if (! type.empty()) {
+    const std::string type = GUI::resolve_model_code(type_str, Slic3r::resources_dir() + "/printers", subseries);
+    if (! type.empty()) {
+        if (type != type_str)
             BOOST_LOG_TRIVIAL(info) << "parse_printer_type: model code " << type_str << " resolved to " << type;
-            return type;
-        }
+        return type;
     }
-    BOOST_LOG_TRIVIAL(warning) << "parse_printer_type: no printer definition for model code " << type_str;
+    // SSDP repeats every few seconds; say it once per code and run, not on every announcement.
+    static std::mutex            warned_mutex;
+    static std::set<std::string> warned;
+    {
+        std::lock_guard<std::mutex> lock(warned_mutex);
+        if (warned.insert(type_str).second)
+            BOOST_LOG_TRIVIAL(warning) << "parse_printer_type: no printer definition for model code " << type_str;
+    }
     return "";
+}
+
+std::string DeviceManager::identify_printer_type(const std::string& code, const std::string& dev_id)
+{
+    // Aliases ("3DPrinter-X1-Carbon"), the code's definition, its sub-series parent or its bare
+    // code without the -V<n> revision.
+    std::string type = MachineObject::parse_printer_type(code);
+    if (! type.empty())
+        return type;
+
+    // Bambu Studio's fallback (DevPrinterConfigUtil::get_printer_type_by_dev_id): the first three
+    // characters of the serial number name the model ("20P" is an X2D). This covers a printer that
+    // reported no model code at all, or one saved before this build knew its code.
+    const std::string printers_dir = Slic3r::resources_dir() + "/printers";
+    static const std::map<std::string, std::vector<std::string>> subseries   = GUI::load_model_subseries(printers_dir);
+    static const std::map<std::string, std::string>              sn_prefixes = GUI::load_model_sn_prefixes(printers_dir);
+    type = GUI::identify_device_model(code, dev_id, printers_dir, subseries, sn_prefixes);
+    if (! type.empty()) {
+        static std::mutex            logged_mutex;
+        static std::set<std::string> logged;
+        std::lock_guard<std::mutex>  lock(logged_mutex);
+        if (logged.insert(code + "|" + type).second)
+            BOOST_LOG_TRIVIAL(info) << "identify_printer_type: model code '" << code << "' identified as " << type
+                                    << " from the serial number prefix";
+        return type;
+    }
+    // Unidentified: keep what the printer reported, as Bambu Studio's _parse_printer_type does, so
+    // the send dialog can name the code instead of showing an empty model. The cloud device list
+    // already kept its raw code this way.
+    return code;
 }
 std::string DeviceManager::get_printer_display_name(std::string type_str)
 {

@@ -10,6 +10,7 @@
 #include "ParamsPanel.hpp"
 #include "MainFrame.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "format.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -2291,17 +2292,24 @@ void NotificationManager::update_slicing_notif_dailytips(bool need_change)
 	// Slicing progress notification was not found - init it thru plater so correct cancel callback function is appended
 	wxGetApp().plater()->init_notification_manager();
 }
+// Orca: Ensures the slicing-progress controller exists before applying the first slicing transition.
 void NotificationManager::set_slicing_progress_began()
 {
-	for (std::unique_ptr<PopNotification> & notification : m_pop_notifications) {
-		if (notification->get_type() == NotificationType::SlicingProgress) {
-			SlicingProgressNotification* spn = dynamic_cast<SlicingProgressNotification*>(notification.get());
-			spn->set_progress_state(SlicingProgressNotification::SlicingProgressState::SP_BEGAN);
-			return;
+	auto find_slicing_progress = [this]() -> SlicingProgressNotification* {
+		for (std::unique_ptr<PopNotification>& notification : m_pop_notifications) {
+			if (notification->get_type() == NotificationType::SlicingProgress)
+				return dynamic_cast<SlicingProgressNotification*>(notification.get());
 		}
+		return nullptr;
+	};
+
+	SlicingProgressNotification* notification = find_slicing_progress();
+	if (notification == nullptr) {
+		wxGetApp().plater()->init_notification_manager();
+		notification = find_slicing_progress();
 	}
-	// Slicing progress notification was not found - init it thru plater so correct cancel callback function is appended
-	wxGetApp().plater()->init_notification_manager();
+	if (notification != nullptr)
+		notification->set_progress_state(SlicingProgressNotification::SlicingProgressState::SP_BEGAN);
 }
 void NotificationManager::set_slicing_progress_percentage(const std::string& text, float percentage)
 {
@@ -2518,7 +2526,9 @@ bool NotificationManager::push_notification_data(std::unique_ptr<NotificationMan
 	bool retval = false;
 	if (this->activate_existing(notification.get())) {
 		if (m_initialized) { // ignore update action - it cant be initialized if canvas and imgui context is not ready
-			if (notification->get_type() == NotificationType::SlicingWarning) {
+			// Precise Seam already aggregates all causes; replace it on repeated warning events.
+			if (notification->get_type() == NotificationType::SlicingWarning &&
+				notification->get_data().sub_msg_id != PrintStateBase::SlicingPreciseSeamWarning) {
 				m_pop_notifications.back()->append(notification->get_data().ori_text);
 			} else {
                 m_pop_notifications.back()->update(notification->get_data());
@@ -2955,14 +2965,9 @@ void NotificationManager::close_print_by_object_caution_notification(const std::
 
 void NotificationManager::bbl_show_plugin_install_notification(const std::string &text)
 {
-    std::string hyper_text;
-    auto callback = [](wxEvtHandler *) {
-        wxCommandEvent *evt = new wxCommandEvent(EVT_INSTALL_PLUGIN_NETWORKING);
-        wxQueueEvent(wxGetApp().plater(), evt);
-        return false;
-    };
-    hyper_text =  _u8L(" Click here to install it.");
-    NotificationData data{NotificationType::BBLPluginInstallHint, NotificationLevel::WarningNotificationLevel, 0, text, hyper_text, callback};
+    // No "Click here to install it" link: EdgeSlicer never downloads Bambu's plug-in, so the text
+    // alone says it is missing and that a reinstall restores it.
+    NotificationData data{NotificationType::BBLPluginInstallHint, NotificationLevel::WarningNotificationLevel, 0, text};
 
     for (std::unique_ptr<PopNotification> &notification : m_pop_notifications) {
         if (notification->get_type() == NotificationType::BBLPluginInstallHint) {

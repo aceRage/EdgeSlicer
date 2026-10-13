@@ -20,6 +20,7 @@
 #include "GCode/GCodeProcessor.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "MixedFilament.hpp"
+#include "ExtruderAreas.hpp"
 #include "libslic3r.h"
 
 #include <Eigen/Geometry>
@@ -36,6 +37,7 @@ namespace Slic3r {
 class GCode;
 class Layer;
 class ModelObject;
+class ModelVolume;
 class Print;
 class PrintObject;
 class SupportLayer;
@@ -184,7 +186,7 @@ public:
 
     // Collect 0-based extruder indices used to print this region's object.
 	void                        collect_object_printing_extruders(const Print &print, std::vector<unsigned int> &object_extruders) const;
-	static void                 collect_object_printing_extruders(const PrintConfig &print_config, const PrintRegionConfig &region_config, const bool has_brim, std::vector<unsigned int> &object_extruders);
+	static void                 collect_object_printing_extruders(const PrintConfig &print_config, const PrintRegionConfig &region_config, const bool has_brim, std::vector<unsigned int> &object_extruders, size_t num_filaments = 0);
 
 // Methods modifying the PrintRegion's state:
 public:
@@ -207,6 +209,13 @@ private:
 
 inline bool operator==(const PrintRegion &lhs, const PrintRegion &rhs) { return lhs.config_hash() == rhs.config_hash() && lhs.config() == rhs.config(); }
 inline bool operator!=(const PrintRegion &lhs, const PrintRegion &rhs) { return ! (lhs == rhs); }
+
+// Shared by PrintApply region building and the plate filament helper. A non-zero volume/object
+// `extruder` overrides wall/sparse/solid, zeroes the outer wall, and ignores feature values of 0.
+PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &default_or_parent_region_config,
+                                                  const DynamicPrintConfig *layer_range_config,
+                                                  const ModelVolume        &volume,
+                                                  size_t                    num_extruders);
 
 template<typename T>
 class ConstVectorOfPtrsAdaptor {
@@ -502,6 +511,13 @@ public:
     bool                        has_support()           const { return m_config.enable_support || m_config.enforce_support_layers > 0; }
     bool                        has_raft()              const { return m_config.raft_layers > 0; }
     bool                        has_support_material()  const { return this->has_support() || this->has_raft(); }
+    // Side stabilizers (Support/Stabilizers.hpp) are configured for this object. They do NOT need
+    // Enable supports: they print as support-role extrusions of their own, so with supports off the
+    // support step runs in a stabilizers-only mode (no support, interface or raft is made).
+    bool                        has_stabilizers()       const { return m_config.stabilizer_supports.value != smOff; }
+    // Something prints with the support filament: supports, a raft or stabilizers. The support
+    // INTERFACE filament is used only when has_support_material().
+    bool                        uses_support_filament() const { return this->has_support_material() || this->has_stabilizers(); }
     // Checks if the model object is painted using the multi-material painting gizmo.
     bool                        is_mm_painted()         const { return this->model_object()->is_mm_painted(); }
     // Checks if the model object is painted using the fuzzy skin painting gizmo.
@@ -601,6 +617,10 @@ public:
     // function is now a two-liner over it, so enforcer / blocker behaviour is unchanged by
     // construction and support_group_masks() reuses exactly the same machinery.
     std::vector<Polygons>       slice_volumes_at_layers(const std::vector<const ModelVolume*> &volumes) const;
+    // Precise Seam (Orca #12974 stage C): aliases of slice_volumes_at_layers so 7D can slice
+    // one helper at a time without merging. Edge already extracted the shared body for support groups.
+    std::vector<Polygons>       slice_modifier_volumes(const std::vector<const ModelVolume*> &volumes) const { return this->slice_volumes_at_layers(volumes); }
+    std::vector<Polygons>       slice_single_volume(const ModelVolume *volume) const { return this->slice_volumes_at_layers({volume}); }
     // Helpers to slice support enforcer / blocker meshes by the support generator.
     std::vector<Polygons>       slice_support_volumes(const ModelVolumeType model_volume_type) const;
     std::vector<Polygons>       slice_support_blockers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_BLOCKER); }
@@ -708,6 +728,10 @@ private:
     ExPolygons _shrink_contour_holes(double contour_delta, double hole_delta, const ExPolygons& polys) const;
     // BBS
     void detect_overhangs_for_lift();
+    // Dual-nozzle: per extruder, the 0-based filaments this object prints somewhere that extruder cannot
+    // reach (its unprintable strip of the bed, or above its own height limit). Needs the sliced layers.
+    // Fed to the filament grouping so an automatic grouping never sends such a filament to that nozzle.
+    std::vector<std::set<int>> detect_extruder_geometric_unprintables() const;
     void clear_overhangs_for_lift();
 
    void _transform_hole_to_polyholes();
@@ -999,6 +1023,7 @@ struct WipeTowerData
         number_of_toolchanges = -1;
         depth = 0.f;
         width = 0.f;
+        height = 0.f;
         local_z_reserve_boxes.clear();
         brim_width = 0.f;
         wipe_tower_mesh_data.reset();
@@ -1154,6 +1179,13 @@ public:
     std::vector<std::set<int>> get_physical_unprintable_filaments(const std::vector<unsigned int>& used_filaments) const;
     std::map<int, std::set<NozzleVolumeType>> get_filament_unprintable_flow(const std::vector<unsigned int>& used_filaments) const;
 
+    // Dual-nozzle (H2D / H2C / X2D): what each nozzle reaches, in plate-local coordinates like printable_area.
+    // Empty (single-nozzle result) on single-nozzle machines and on the Snapmaker U1, which declare no
+    // extruder_printable_area. See ExtruderAreas.hpp.
+    ExtruderAreas         get_extruder_areas() const;
+    std::vector<Polygons> get_extruder_printable_polygons() const;
+    std::vector<Polygons> get_extruder_unprintable_polygons() const;
+
     // Ultra (Phase 10): AMS-aware grouping inputs carried OUTSIDE the print config. The per-nozzle AMS slot
     // budget (extruder_ams_count "cap#numBanks" per nozzle) and the "force match mode" flag are set from the
     // connected printer's AMS before slicing. Kept as Print members (not config keys) because
@@ -1218,6 +1250,8 @@ public:
     
     double              max_allowed_layer_height() const;
     bool                has_support_material() const;
+    // Any object prints with the support filament (supports, a raft or side stabilizers).
+    bool                uses_support_filament() const;
     // Make sure the background processing has no access to this model_object during this call!
     void                auto_assign_extruders(ModelObject* model_object) const;
 
@@ -1292,6 +1326,20 @@ public:
     void set_gcode_file_ready();
     void set_gcode_file_invalidated();
     void export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+    // Re-reads the moves and line offsets of `result` from its G-code file after the file was rewritten in
+    // place (post-processing scripts or plugins), so the preview and its G-code window follow the file on
+    // disk. Everything else in `result` was computed while slicing and is kept. If the file cannot be
+    // re-read, the moves are kept and the line offsets are cleared, which hides the G-code window.
+    void reload_gcode_moves(GCodeProcessorResult* result) const;
+
+    // Whether the exported G-code carries the costs: the "; filament cost" and "; total filament cost"
+    // lines, and filament_cost and time_cost (the machine rate) in the CONFIG_BLOCK. Everything else in the
+    // file is the same either way. A GUI preference ("gcode_include_filament_prices", default off,
+    // applied by BackgroundSlicingProcess) and a CLI switch (--no-filament-prices); a Print built
+    // any other way keeps today's G-code (on). Not a config key, so it never reaches presets,
+    // projects or the G-code itself. Returns true when the change invalidated an exported G-code.
+    bool set_gcode_filament_prices(bool include);
+    bool gcode_filament_prices() const { return m_gcode_filament_prices; }
     //BBS: add modify_count logic
     int get_modified_count() const {return m_modified_count;}
     //BBS: add status for whether support used
@@ -1389,6 +1437,10 @@ private:
     // dual-nozzle Bambu printer overwrites m_config.filament_map with the map it computed (ToolOrdering),
     // so apply() compares an incoming map with this, not with that output (see keep_sliced_filament_map).
     std::vector<int>                                      m_filament_map_input;
+    // filament_volume_type as the config last handed it to apply(). On a dual-nozzle printer with High Flow
+    // support the slice rewrites m_config.filament_volume_type from the final filament_map (ToolOrdering,
+    // BambuFlowSupport::apply_filament_volume_types_from_map); same keep rule as m_filament_map_input.
+    std::vector<int>                                      m_filament_volume_type_input;
     // Print config keys that differed in the last apply() (diagnostics for the GUI).
     std::vector<std::string>                              m_last_apply_changed_keys;
 
@@ -1397,6 +1449,8 @@ private:
     // value for a Print built any other way (tests, tools): as an uninitialized member of a stack Print it
     // was garbage, and a non-zero byte moved the whole config dump into the G-code header.
     bool m_isBBLPrinter = false;
+    // See set_gcode_filament_prices().
+    bool m_gcode_filament_prices = true;
 
     // Ordered collections of extrusion paths to build skirt loops and brim.
     ExtrusionEntityCollection               m_skirt;

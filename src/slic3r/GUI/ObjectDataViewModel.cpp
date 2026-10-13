@@ -337,6 +337,8 @@ bool ObjectDataViewModelNode::SetValue(const wxVariant& variant, unsigned col)
         m_visibility_icon << variant;
         return true;
     case colName: {
+        if (variant.GetType() != wxT("DataViewBitmapText"))
+            return false;
         DataViewBitmapText data;
         data << variant;
         m_bmp = data.GetBitmap();
@@ -350,6 +352,8 @@ bool ObjectDataViewModelNode::SetValue(const wxVariant& variant, unsigned col)
         m_name = text;
         return true; }
     case colFilament: {
+        if (variant.GetType() != wxT("DataViewBitmapText"))
+            return false;
         DataViewBitmapText data;
         data << variant;
         m_extruder_bmp = data.GetBitmap();
@@ -565,13 +569,20 @@ void ObjectDataViewModel::UpdateBitmapForNode(ObjectDataViewModelNode *node)
 {
     bool is_volume_node = node->GetType() & itVolume;
     int  vol_type       = static_cast<int>(node->GetVolumeType());
-    is_volume_node &= (vol_type >= int(ModelVolumeType::MODEL_PART) && vol_type <= int(ModelVolumeType::SUPPORT_ENFORCER));
+    // Extended range to include Precise Seam modifier types
+    is_volume_node &= (vol_type >= int(ModelVolumeType::MODEL_PART) && vol_type <= int(ModelVolumeType::PRECISE_SEAM_NEUTRAL));
+
+    auto bitmap_at = [vol_type](const std::vector<wxBitmap> &bmps, const wxBitmap &fallback) {
+        if (vol_type >= 0 && vol_type < int(bmps.size()))
+            return bmps[size_t(vol_type)];
+        return fallback;
+    };
 
     if (!node->has_warning_icon() && !node->has_lock()) {
         node->SetBitmap(is_volume_node ? (
-            node->is_text_volume() ? m_text_volume_bmps.at(vol_type) : 
-            node->is_svg_volume() ? m_svg_volume_bmps.at(vol_type) : 
-            m_volume_bmps.at(vol_type)) : m_empty_bmp);
+            node->is_text_volume() ? bitmap_at(m_text_volume_bmps, m_empty_bmp) :
+            node->is_svg_volume() ? bitmap_at(m_svg_volume_bmps, m_empty_bmp) :
+            bitmap_at(m_volume_bmps, m_empty_bmp)) : m_empty_bmp);
         return;
     }
 
@@ -601,9 +612,9 @@ void ObjectDataViewModel::UpdateBitmapForNode(ObjectDataViewModelNode *node)
             if (!bmps.empty()) // ORCA: Add spacing between icons if there are multiple
                 bmps.emplace_back(create_scaled_bitmap("dot", nullptr, int(wxGetApp().em_unit() / 10) * 4));
             bmps.emplace_back(
-                node->is_text_volume() ? m_text_volume_bmps[vol_type] :
-                node->is_svg_volume() ? m_svg_volume_bmps[vol_type] : 
-                m_volume_bmps[vol_type]);
+                node->is_text_volume() ? bitmap_at(m_text_volume_bmps, m_empty_bmp) :
+                node->is_svg_volume() ? bitmap_at(m_svg_volume_bmps, m_empty_bmp) :
+                bitmap_at(m_volume_bmps, m_empty_bmp));
         }
         bmp = m_bitmap_cache->insert(scaled_bitmap_name, bmps);
     }
@@ -2267,12 +2278,25 @@ void ObjectDataViewModel::SetVolumeType(const wxDataViewItem &item, const Slic3r
 
     ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(item.GetID());
     node->SetVolumeType(volume_type);
-    node->SetBitmap(m_volume_bmps[int(volume_type)]);
+    UpdateBitmapForNode(node);
     if (volume_type != Slic3r::ModelVolumeType::MODEL_PART && volume_type != Slic3r::ModelVolumeType::PARAMETER_MODIFIER)
         node->SetExtruder("");          // hide extruder
     else if (node->GetExtruder().IsEmpty())
         node->SetExtruder("default");   // show extruder ans set it to default
     node->UpdateExtruderAndColorIcon();
+    ItemChanged(item);
+}
+
+void ObjectDataViewModel::SetVolumeTextSvg(const wxDataViewItem &item, bool is_text, bool is_svg)
+{
+    if (!item.IsOk() || GetItemType(item) != itVolume)
+        return;
+
+    ObjectDataViewModelNode *node = static_cast<ObjectDataViewModelNode*>(item.GetID());
+    if (node->is_text_volume() == is_text && node->is_svg_volume() == is_svg)
+        return;
+    node->SetTextSvgVolume(is_text, is_svg);
+    UpdateBitmapForNode(node);
     ItemChanged(item);
 }
 

@@ -2,7 +2,8 @@
 
 #include <condition_variable>
 #include <mutex>
-#include <set>
+#include <map>
+#include <string>
 #include <thread>
 
 #ifdef _WIN32
@@ -20,7 +21,7 @@ struct ServerLifetime::State
     std::condition_variable  cv;
     bool                     stopping { false };
     int                      running { 0 };
-    std::set<tcp::socket*>   sockets;
+    std::map<tcp::socket*, std::string> sockets; // tracked socket -> its tag ("" = none)
 
     // Ends blocking reads and writes on the socket without touching asio's own bookkeeping for it:
     // the thread that owns the socket still closes and destroys it. mutex held.
@@ -82,7 +83,7 @@ ServerLifetime::Tracked::Tracked(ServerLifetime& life, tcp::socket& socket) : m_
 {
     State* st = static_cast<State*>(m_state.get());
     std::lock_guard<std::mutex> lock(st->mutex);
-    st->sockets.insert(m_socket);
+    st->sockets.emplace(m_socket, std::string());
     if (st->stopping)
         State::shut(m_socket);
 }
@@ -92,6 +93,28 @@ ServerLifetime::Tracked::~Tracked()
     State* st = static_cast<State*>(m_state.get());
     std::lock_guard<std::mutex> lock(st->mutex); // stop() cannot be mid-shutdown on this socket
     st->sockets.erase(m_socket);
+}
+
+void ServerLifetime::Tracked::tag(const std::string& tag)
+{
+    State* st = static_cast<State*>(m_state.get());
+    std::lock_guard<std::mutex> lock(st->mutex);
+    auto it = st->sockets.find(m_socket);
+    if (it != st->sockets.end())
+        it->second = tag;
+}
+
+int ServerLifetime::shut_tagged(const std::function<bool(const std::string&)>& match)
+{
+    State* st = m_state.get();
+    std::lock_guard<std::mutex> lock(st->mutex); // a Tracked cannot be destroyed (nor its socket) meanwhile
+    int n = 0;
+    for (auto& s : st->sockets)
+        if (match(s.second)) {
+            State::shut(s.first);
+            ++n;
+        }
+    return n;
 }
 
 bool ServerLifetime::stopping() const
@@ -111,8 +134,8 @@ bool ServerLifetime::stop(std::chrono::milliseconds timeout)
     State*                       st = m_state.get();
     std::unique_lock<std::mutex> lock(st->mutex);
     st->stopping = true;
-    for (tcp::socket* s : st->sockets)
-        State::shut(s);
+    for (auto& s : st->sockets)
+        State::shut(s.first);
     return st->cv.wait_for(lock, timeout, [st]() { return st->running == 0; });
 }
 

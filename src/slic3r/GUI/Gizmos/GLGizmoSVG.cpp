@@ -9,6 +9,10 @@
 #include "slic3r/GUI/MsgDialog.hpp"
 #include "slic3r/GUI/format.hpp"
 #include "slic3r/GUI/CameraUtils.hpp"
+#include "slic3r/GUI/CodeEmbossDialog.hpp"
+#include "slic3r/GUI/SimpleShapeDialog.hpp"
+#include "slic3r/GUI/ImageTraceDialog.hpp"
+#include "slic3r/GUI/SvgSplitDialog.hpp"
 #include "slic3r/GUI/Jobs/EmbossJob.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -19,6 +23,8 @@
 #include "libslic3r/Emboss.hpp" // heal_shape
 
 #include "libslic3r/NSVGUtils.hpp"
+#include "libslic3r/SvgSplit.hpp" // SVG (Split)
+#include "libslic3r/UntrustedInput.hpp" // SVG size and complexity limits
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ClipperUtils.hpp" // union_ex
 
@@ -47,6 +53,7 @@ GLGizmoSVG::GLGizmoSVG(GLCanvas3D &parent)
     : GLGizmoBase(parent, M_ICON_FILENAME, -3)
     , m_gui_cfg(nullptr)
     , m_rotate_gizmo(parent, GLGizmoRotate::Axis::Z) // grab id = 2 (Z axis)
+    , m_handles(parent)
 {
     m_rotate_gizmo.set_group_id(0);
     m_rotate_gizmo.set_force_local_coordinate(true);
@@ -62,6 +69,15 @@ const std::string rotation_snapshot_name = L("SVG rotate");
 // TRN - Title in Undo/Redo stack after move with SVG along emboss axe - From surface
 const std::string move_snapshot_name = L("SVG move");
 // NOTE: Translation is made in "m_parent.do_translate()"
+
+// TRN - Title in Undo/Redo stack after the SVG was moved by the arrows of the SVG tool
+const std::string move_3d_snapshot_name = L("SVG 3D move");
+// TRN - Title in Undo/Redo stack after the SVG was turned by the rings of the SVG tool
+const std::string rotate_3d_snapshot_name = L("SVG 3D rotate");
+// TRN - Title in Undo/Redo stack after a traced image was moved by the arrows of the SVG tool
+const std::string image_move_3d_snapshot_name = L("Image 3D move");
+// TRN - Title in Undo/Redo stack after a traced image was turned by the rings of the SVG tool
+const std::string image_rotate_3d_snapshot_name = L("Image 3D rotate");
 
 // Variable keep limits for variables
 const struct Limits
@@ -217,12 +233,394 @@ bool GLGizmoSVG::create_volume(std::string_view svg_file, ModelVolumeType volume
     return start_create_volume_without_position(input, std::move(base));
 }
 
+bool GLGizmoSVG::create_object(std::string_view svg_file)
+{
+    CreateVolumeParams input = create_input(m_parent, m_raycast_manager, ModelVolumeType::MODEL_PART);
+    input.gl_volume          = nullptr; // never onto an object under the mouse
+    // own cancel flag: several imported files must not cancel each other's job
+    std::shared_ptr<std::atomic<bool>> cancel;
+    DataBasePtr base = create_emboss_data_base(cancel, ModelVolumeType::MODEL_PART, svg_file);
+    if (!base)
+        return false; // Uninterpretable svg
+    Size  size = m_parent.get_canvas_size();
+    Vec2d screen_center(size.get_width() / 2., size.get_height() / 2.);
+    return start_create_volume(input, std::move(base), screen_center);
+}
+
 bool GLGizmoSVG::create_volume(std::string_view svg_file, const Vec2d &mouse_pos, ModelVolumeType volume_type)
 {
     CreateVolumeParams input = create_input(m_parent, m_raycast_manager, volume_type);
     DataBasePtr base = create_emboss_data_base(m_job_cancel, volume_type, svg_file);
     if (!base) return false; // Uninterpretable svg
     return start_create_volume(input, std::move(base), mouse_pos);
+}
+
+namespace {
+// Transformation of embossed volume without transformation baked by store into .3mf
+Transform3d emboss_matrix(const ModelVolume &volume)
+{
+    Transform3d tr = volume.get_matrix();
+    if (volume.emboss_shape.has_value() && volume.emboss_shape->fix_3mf_tr.has_value())
+        tr = tr * volume.emboss_shape->fix_3mf_tr->inverse();
+    return tr;
+}
+
+// Shape of code part loaded from .3mf is not created yet
+bool ensure_shapes(EmbossShape &shape)
+{
+    if (!shape.shapes_with_ids.empty())
+        return true;
+    if (!shape.svg_file.has_value() || init_image(*shape.svg_file) == nullptr)
+        return false;
+    NSVGLineParams params{get_tesselation_tolerance(1.)};
+    params.max_flat_points = untrusted::SVG_MAX_FLAT_POINTS; // the SVG may come from a project file
+    bool too_complex = false;
+    shape.shapes_with_ids = create_shape_with_ids(*shape.svg_file->image, params, &too_complex);
+    return !too_complex && !shape.shapes_with_ids.empty();
+}
+
+// Emboss shape of one code part, SVG data are generated
+std::optional<EmbossShape> create_code_part_shape(const CodeEmbossPart &part, const std::string &group_id, bool use_surface)
+{
+    EmbossShape shape;
+    shape.projection.depth       = part.depth;
+    shape.projection.use_surface = use_surface;
+    EmbossShape::SvgFile svg;
+    // Generated SVG does not contain private data, store it into .3mf without asking
+    svg.path_in_3mf = code_part_path_in_3mf(group_id, part.role);
+    svg.file_data   = std::make_shared<std::string>(part.svg);
+    shape.svg_file  = std::move(svg);
+    if (!ensure_shapes(shape))
+        return {};
+    return shape;
+}
+
+int volume_extruder(const ModelVolume &volume)
+{
+    const ConfigOption *opt = volume.config.option("extruder");
+    return opt != nullptr ? opt->getInt() : 0;
+}
+} // namespace
+
+namespace {
+// Where to create new volumes, it has to be captured before a dialog is shown:
+// the dialog takes the mouse out of the canvas, which clears the hover state.
+struct CreateTarget
+{
+    ModelVolumeType                      volume_type;
+    bool                                 is_new_object = false;
+    std::optional<GLVolume::CompositeID> hovered_id;
+    bool                                 has_object = false;
+    std::optional<Vec2d>                 mouse_pos;
+};
+
+CreateTarget capture_create_target(const GLCanvas3D &canvas, ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos)
+{
+    CreateTarget target;
+    target.is_new_object = volume_type == ModelVolumeType::INVALID;
+    target.volume_type   = target.is_new_object ? ModelVolumeType::MODEL_PART : volume_type;
+    target.mouse_pos     = mouse_pos;
+    if (!target.is_new_object && mouse_pos.has_value())
+        if (const GLVolume *hovered = get_first_hovered_gl_volume(canvas); hovered != nullptr)
+            target.hovered_id = hovered->composite_id;
+    const Selection &selection = canvas.get_selection();
+    bool has_selected_object   = !selection.is_empty() && selection.get_object_idx() >= 0;
+    target.has_object          = !target.is_new_object && (target.hovered_id.has_value() || has_selected_object);
+    return target;
+}
+
+bool start_create_parts(GLCanvas3D &canvas, RaycastManager &raycaster, const CreateTarget &target, CreateVolumeParts &&parts,
+                        const std::string &object_name)
+{
+    if (parts.empty())
+        return false;
+    CreateVolumeParams   input    = create_input(canvas, raycaster, target.volume_type);
+    std::optional<Vec2d> position = target.mouse_pos;
+    input.gl_volume               = nullptr;
+    if (!target.is_new_object) {
+        // Find the clicked volume again, the scene could be reloaded while the dialog was open
+        if (target.hovered_id.has_value())
+            for (const GLVolume *v : canvas.get_volumes().volumes)
+                if (v != nullptr && v->composite_id == *target.hovered_id) {
+                    input.gl_volume = v;
+                    break;
+                }
+        // Without the clicked volume place it near the selected object, never on the bed
+        if (input.gl_volume == nullptr)
+            position.reset();
+    } else if (!position.has_value()) {
+        // new object is created on the bed under the mouse or in the center of screen
+        Size size = canvas.get_canvas_size();
+        position  = Vec2d(size.get_width() / 2., size.get_height() / 2.);
+    }
+    return start_create_volumes(input, std::move(parts), position, object_name);
+}
+} // namespace
+
+bool GLGizmoSVG::create_code(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos)
+{
+    CreateTarget target = capture_create_target(m_parent, volume_type, mouse_pos);
+    volume_type         = target.volume_type;
+
+    CodeEmbossDialogOptions options;
+    options.allow_light_part  = volume_type == ModelVolumeType::MODEL_PART;
+    options.allow_use_surface = target.has_object;
+    options.use_surface       = true;
+    options.allow_filaments   = volume_type != ModelVolumeType::NEGATIVE_VOLUME;
+    CodeEmbossDialog dialog(nullptr, CodeEmbossDialog::load_from_config(), options);
+    if (dialog.ShowModal() != wxID_OK)
+        return false;
+
+    CodeEmbossParams params = dialog.params();
+    params.group_id         = create_code_group_id();
+    const ExPolygons &logo  = dialog.logo();
+    CodeEmbossResult result = create_code_emboss(params, logo.empty() ? nullptr : &logo);
+    if (!result.is_valid()) {
+        show_error(nullptr, result.error);
+        return false;
+    }
+
+    bool use_surface = dialog.options().use_surface && target.has_object;
+    CreateVolumeParts parts;
+    for (const CodeEmbossPart &part : result.parts) {
+        std::optional<EmbossShape> shape = create_code_part_shape(part, params.group_id, use_surface);
+        if (!shape.has_value())
+            continue;
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
+        auto base   = std::make_unique<DataBase>(code_part_name(params, part.role), cancel, std::move(*shape));
+        base->is_outside = volume_type == ModelVolumeType::MODEL_PART;
+        parts.push_back({std::move(base), volume_type, dialog.options().extruders[size_t(part.role)]});
+    }
+    std::string object_name = params.symbology == Barcode::Symbology::QR ? _u8L("QR code") : _u8L("Barcode");
+    return start_create_parts(m_parent, m_raycast_manager, target, std::move(parts), object_name);
+}
+
+namespace {
+// Emboss shape of simple shape (circle, star, ...)
+std::optional<EmbossShape> create_simple_shape(const SimpleShapeParams &params, double depth, bool use_surface)
+{
+    EmbossShape shape;
+    shape.projection.depth       = depth;
+    shape.projection.use_surface = use_surface;
+    EmbossShape::SvgFile svg;
+    // Generated SVG does not contain private data, store it into .3mf without asking
+    svg.path_in_3mf = simple_shape_path_in_3mf(params);
+    svg.file_data   = std::make_shared<std::string>(create_simple_shape_svg(params));
+    shape.svg_file  = std::move(svg);
+    if (!ensure_shapes(shape))
+        return {};
+    return shape;
+}
+} // namespace
+
+bool GLGizmoSVG::create_shape(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos)
+{
+    CreateTarget target = capture_create_target(m_parent, volume_type, mouse_pos);
+    volume_type         = target.volume_type;
+
+    SimpleShapeDialogOptions options;
+    options.allow_use_surface = target.has_object;
+    options.use_surface       = true;
+    options.allow_filament    = volume_type != ModelVolumeType::NEGATIVE_VOLUME;
+    SimpleShapeDialog dialog(nullptr, SimpleShapeDialog::load_from_config(), options);
+    if (dialog.ShowModal() != wxID_OK)
+        return false;
+
+    const SimpleShapeParams   &params = dialog.params();
+    std::optional<EmbossShape> shape  = create_simple_shape(params, params.depth, dialog.options().use_surface && target.has_object);
+    if (!shape.has_value())
+        return false;
+    auto cancel      = std::make_shared<std::atomic<bool>>(false);
+    std::string name = _u8L(simple_shape_name(params.type));
+    auto base        = std::make_unique<DataBase>(name, cancel, std::move(*shape));
+    base->is_outside = volume_type == ModelVolumeType::MODEL_PART;
+    CreateVolumeParts parts;
+    parts.push_back({std::move(base), volume_type, dialog.options().extruder});
+    return start_create_parts(m_parent, m_raycast_manager, target, std::move(parts), name);
+}
+
+namespace {
+// Emboss shape of one colour level of a traced image, SVG data are generated
+std::optional<EmbossShape> create_trace_part_shape(const ImageTraceLayer &layer, const std::string &group_id, int index, bool use_surface)
+{
+    EmbossShape shape;
+    shape.projection.depth       = layer.depth;
+    shape.projection.use_surface = use_surface;
+    EmbossShape::SvgFile svg;
+    // Generated SVG never contains the local path of the image, the optional copy of the image
+    // was allowed by the user in the dialog, so store it into .3mf without asking
+    svg.path_in_3mf = image_trace_path_in_3mf(group_id, index);
+    svg.file_data   = std::make_shared<std::string>(layer.svg);
+    shape.svg_file  = std::move(svg);
+    if (!ensure_shapes(shape))
+        return {};
+    return shape;
+}
+
+// Name of the parts of a traced image without the number of the colour level
+std::string trace_base_name(const std::string &name, int layers)
+{
+    if (layers <= 1)
+        return name;
+    size_t pos = name.rfind(" - ");
+    if (pos == std::string::npos || pos + 3 >= name.size())
+        return name;
+    for (size_t i = pos + 3; i < name.size(); ++i)
+        if (name[i] < '0' || name[i] > '9')
+            return name;
+    return name.substr(0, pos);
+}
+} // namespace
+
+bool GLGizmoSVG::create_image(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos, const std::string &image_path)
+{
+    CreateTarget target = capture_create_target(m_parent, volume_type, mouse_pos);
+    // Image dropped beside objects creates a new object under the mouse
+    if (!image_path.empty() && !target.is_new_object && mouse_pos.has_value() && !target.hovered_id.has_value()) {
+        target.is_new_object = true;
+        target.volume_type   = ModelVolumeType::MODEL_PART;
+        target.has_object    = false;
+    }
+    volume_type = target.volume_type;
+
+    wxString path = from_u8(image_path);
+    if (path.empty())
+        path = ImageTraceDialog::choose_image_file(nullptr);
+    if (path.empty())
+        return false;
+    TraceImage  image;
+    std::string source_png, name;
+    if (!ImageTraceDialog::load_image_file(nullptr, path, image, source_png, name))
+        return false;
+
+    ImageTraceDialogOptions options;
+    options.allow_use_surface = target.has_object;
+    options.use_surface       = true;
+    options.allow_filaments   = volume_type != ModelVolumeType::NEGATIVE_VOLUME;
+    ImageTraceDialog dialog(nullptr, image, source_png, name, ImageTraceDialog::load_from_config(), options);
+    if (dialog.ShowModal() != wxID_OK)
+        return false;
+
+    const ImageTraceResult &result      = dialog.result();
+    const std::string      &group_id    = dialog.params().group_id;
+    const std::vector<int> &extruders   = dialog.options().extruders;
+    bool                    use_surface = dialog.options().use_surface && target.has_object;
+    int                     count       = int(result.layers.size());
+    CreateVolumeParts       parts;
+    for (int i = 0; i < count; ++i) {
+        const ImageTraceLayer     &layer = result.layers[size_t(i)];
+        std::optional<EmbossShape> shape = create_trace_part_shape(layer, group_id, i, use_surface);
+        if (!shape.has_value())
+            continue;
+        auto cancel      = std::make_shared<std::atomic<bool>>(false);
+        auto base        = std::make_unique<DataBase>(image_trace_part_name(dialog.image_name(), i, count), cancel, std::move(*shape));
+        base->is_outside = volume_type == ModelVolumeType::MODEL_PART;
+        CreateVolumePart part{std::move(base), volume_type, size_t(i) < extruders.size() ? extruders[size_t(i)] : 0};
+        // every level is centered by its own bounding box, move it back to its place in the image
+        part.offset = layer.offset;
+        parts.push_back(std::move(part));
+    }
+    std::string object_name = dialog.image_name().empty() ? _u8L("Image") : dialog.image_name();
+    return start_create_parts(m_parent, m_raycast_manager, target, std::move(parts), object_name);
+}
+
+namespace {
+// Emboss shape of one part of an SVG split by its shapes, SVG data are generated
+std::optional<EmbossShape> create_split_part_shape(const SvgSplitPart &part, const std::string &group_id, size_t index)
+{
+    EmbossShape shape;
+    // same as the plain SVG import (select_shape)
+    shape.projection.depth       = 10.;
+    shape.projection.use_surface = false;
+    EmbossShape::SvgFile svg;
+    // Generated SVG holds only the outline of the part, never the local path of the file
+    svg.path_in_3mf = svg_split_path_in_3mf(group_id, index);
+    svg.file_data   = std::make_shared<std::string>(part.svg);
+    shape.svg_file  = std::move(svg);
+    if (!ensure_shapes(shape))
+        return {};
+    return shape;
+}
+} // namespace
+
+bool GLGizmoSVG::create_volume_split(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos, const std::string &svg_path)
+{
+    CreateTarget target = capture_create_target(m_parent, volume_type, mouse_pos);
+    // SVG dropped beside objects creates a new object under the mouse (as the plain SVG drop)
+    if (!svg_path.empty() && !target.is_new_object && mouse_pos.has_value() && !target.hovered_id.has_value()) {
+        target.is_new_object = true;
+        target.volume_type   = ModelVolumeType::MODEL_PART;
+        target.has_object    = false;
+    }
+    volume_type = target.volume_type;
+
+    EmbossShape::SvgFile svg;
+    svg.path = svg_path.empty() ? choose_svg_file() : svg_path;
+    if (svg.path.empty())
+        return false; // file was not selected
+    const std::string too_complex_msg = GUI::format(
+        _u8L("SVG file is too complex to be loaded, it has too many shapes or points (%1%). Simplify it in a vector editor and try again."),
+        svg.path);
+    SvgRefusal refusal = SvgRefusal::None;
+    if (init_image(svg, &refusal) == nullptr) {
+        const double limit_mb = double(untrusted::SVG_SIZE_LIMIT) / (1024. * 1024.);
+        if (refusal == SvgRefusal::TooLarge)
+            show_error(nullptr, GUI::format(_u8L("SVG file is too large to be loaded (limit %1% MB) (%2%)."), limit_mb, svg.path));
+        else if (refusal == SvgRefusal::TooComplex)
+            show_error(nullptr, too_complex_msg);
+        else
+            show_error(nullptr, GUI::format(_u8L("Nano SVG parser can't load from file (%1%)."), svg.path));
+        return false;
+    }
+
+    NSVGLineParams params{get_tesselation_tolerance(1.)};
+    params.max_flat_points = untrusted::SVG_MAX_FLAT_POINTS;
+    SvgSplitResult split   = split_svg_by_shapes(*svg.image, params);
+    if (split.too_complex) {
+        show_error(nullptr, too_complex_msg);
+        return false;
+    }
+    if (!split.is_valid()) {
+        show_error(nullptr, GUI::format(_u8L("SVG file does NOT contain a single path to be embossed (%1%)."), svg.path));
+        return false;
+    }
+
+    std::string name = get_file_name(svg.path);
+    if (name.empty())
+        name = "SVG shape";
+
+    // Filament per colour, asked before the parts are created, so the import stays one undo step.
+    // Cancel keeps every part on the default filament of the object.
+    std::vector<int>           part_extruders(split.parts.size(), 0);
+    std::vector<SvgSplitColor> colors = svg_split_colors(split);
+    std::vector<int>           color_extruders;
+    if (ask_svg_split_filaments(nullptr, from_u8(name), colors, split.parts.size(), color_extruders))
+        for (size_t c = 0; c < colors.size() && c < color_extruders.size(); ++c)
+            for (size_t part : colors[c].parts)
+                part_extruders[part] = color_extruders[c];
+
+    const std::string group_id = create_code_group_id();
+    CreateVolumeParts parts;
+    for (size_t i = 0; i < split.parts.size(); ++i) {
+        std::optional<EmbossShape> shape = create_split_part_shape(split.parts[i], group_id, i);
+        if (!shape.has_value()) {
+            // never drop a part silently, the picture would miss it
+            show_error(nullptr, too_complex_msg);
+            return false;
+        }
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
+        // Same names as Bambu Studio: <file name>_<index>
+        auto base        = std::make_unique<DataBase>(name + "_" + std::to_string(i), cancel, std::move(*shape));
+        base->is_outside = volume_type == ModelVolumeType::MODEL_PART;
+        // 0 .. filament of the object, as the plain SVG import
+        CreateVolumePart part{std::move(base), volume_type, part_extruders[i]};
+        // every part is centered by its own bounding box, move it back to its place in the drawing
+        part.offset = split.parts[i].offset;
+        parts.push_back(std::move(part));
+    }
+    BOOST_LOG_TRIVIAL(info) << "SVG (Split): " << split.parts.size() << " parts from " << split.painted << " fills and strokes, "
+                            << split.covered << " covered by later shapes";
+    return start_create_parts(m_parent, m_raycast_manager, target, std::move(parts), name);
 }
 
 bool GLGizmoSVG::is_svg(const ModelVolume &volume) {
@@ -246,7 +644,8 @@ bool GLGizmoSVG::on_mouse_for_rotation(const wxMouseEvent &mouse_event)
     bool used = use_grabbers(mouse_event);
     if (!m_dragging) return used;
 
-    if (mouse_event.Dragging())
+    // the 3D handles transform the part themselves (on_dragging)
+    if (mouse_event.Dragging() && !EmbossTransformHandles::is_handle(m_hover_id))
         dragging_rotate_gizmo(m_rotate_gizmo.get_angle(), m_angle, m_rotate_start_angle, m_parent.get_selection());
     
     return used;
@@ -262,13 +661,28 @@ bool GLGizmoSVG::on_mouse_for_translate(const wxMouseEvent &mouse_event)
     const Camera &camera = wxGetApp().plater()->get_camera();
 
     bool was_dragging = m_surface_drag.has_value();
+    bool was_moved    = was_dragging && m_surface_drag->moved;
     bool res = on_mouse_surface_drag(mouse_event, camera, m_surface_drag, m_parent, m_raycast_manager, up_limit);
     bool is_dragging  = m_surface_drag.has_value();
 
-    // End with surface dragging?
-    if (was_dragging && !is_dragging) {
+    // End with surface dragging? A press and release that moved nothing changes nothing,
+    // except that a job the press cancelled has to run again.
+    if (was_dragging && !is_dragging && !was_moved) {
+        if (m_surface_drag_cancelled_job)
+            process(false);
+        m_surface_drag_cancelled_job = false;
+    }
+    else if (was_dragging && !is_dragging) {
+        // The drag placed the part on the surface again: give back the projection a 3D handle took.
+        std::optional<EmbossFreeTransform::Projection> back =
+            EmbossFreeTransform::reattach(current_projection(), m_detached_projection);
+        if (back.has_value())
+            m_volume_shape.projection.use_surface = back->use_surface;
+        m_detached_projection.reset();
+        m_placement_key.reset();
+
         // Update surface by new position
-        if (m_volume->emboss_shape->projection.use_surface)
+        if (back.has_value() || m_volume->emboss_shape->projection.use_surface)
             process();
 
         // TODO: Remove it when it will be stable
@@ -283,6 +697,7 @@ bool GLGizmoSVG::on_mouse_for_translate(const wxMouseEvent &mouse_event)
     // Start with dragging
     else if (!was_dragging && is_dragging) {
         // Cancel job to prevent interuption of dragging (duplicit result)
+        m_surface_drag_cancelled_job = m_job_cancel != nullptr && !m_job_cancel->load();
         if (m_job_cancel != nullptr)
             m_job_cancel->store(true);
     }
@@ -350,6 +765,7 @@ std::string GLGizmoSVG::get_action_snapshot_name() const { return _u8L("SVG acti
 bool GLGizmoSVG::on_init()
 {
     m_rotate_gizmo.init();
+    m_handles.init();
     ColorRGBA gray_color(.6f, .6f, .6f, .3f);
     m_rotate_gizmo.set_highlight_color(gray_color);
     // Set rotation gizmo upwardrotate
@@ -370,18 +786,25 @@ void GLGizmoSVG::on_render() {
     bool is_parent_dragging = m_parent.is_mouse_dragging();
     // Do NOT render rotation grabbers when dragging object
     bool is_rotate_by_grabbers = m_dragging;
-    if (is_rotate_by_grabbers || 
+    if (is_rotate_by_grabbers ||
         (!is_surface_dragging && !is_parent_dragging)) {
         glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
-        m_rotate_gizmo.render();
+        // while one of them is dragged, only that one is drawn
+        const bool is_handle_dragging = m_handles.is_handle_dragging();
+        if (!is_handle_dragging)
+            m_rotate_gizmo.render();
+        if (!m_dragging || is_handle_dragging)
+            m_handles.render();
     }
 }
 
 void GLGizmoSVG::on_register_raycasters_for_picking(){
     m_rotate_gizmo.register_raycasters_for_picking();
+    m_handles.on_host_register();
 }
 void GLGizmoSVG::on_unregister_raycasters_for_picking(){
     m_rotate_gizmo.unregister_raycasters_for_picking();
+    m_handles.on_host_unregister();
 }
 
 namespace{
@@ -517,10 +940,12 @@ void GLGizmoSVG::on_set_state()
     m_parent.set_raycaster_gizmos_on_top(GLGizmoBase::m_state == GLGizmoBase::On);
 
     m_rotate_gizmo.set_state(GLGizmoBase::m_state);
+    m_handles.set_state(GLGizmoBase::m_state);
 
     // Closing gizmo. e.g. selecting another one
     if (GLGizmoBase::m_state == GLGizmoBase::Off) {
         reset_volume();
+        m_detached_projection.reset();
     } else if (GLGizmoBase::m_state == GLGizmoBase::On) {
         // Try(when exist) set text configuration by volume 
         set_volume_by_selection();
@@ -533,9 +958,26 @@ void GLGizmoSVG::data_changed(bool is_serializing) {
         close();
 }
 
-void GLGizmoSVG::on_start_dragging() { m_rotate_gizmo.start_dragging(); }
+void GLGizmoSVG::on_start_dragging()
+{
+    if (EmbossTransformHandles::is_handle(m_hover_id)) {
+        if (m_handles.start_drag(m_hover_id)) {
+            // Cancel a running update, it would overwrite the dragged part (as the surface drag does)
+            m_handles_cancelled_job = m_job_cancel != nullptr && !m_job_cancel->load();
+            if (m_job_cancel != nullptr)
+                m_job_cancel->store(true);
+        }
+        return;
+    }
+    m_rotate_gizmo.start_dragging();
+}
 void GLGizmoSVG::on_stop_dragging()
 {
+    if (EmbossTransformHandles::is_handle(m_hover_id) || m_handles.is_handle_dragging()) {
+        if (std::optional<EmbossTransformHandles::Result> result = m_handles.stop_drag(); result.has_value())
+            on_handles_drag_finished(*result);
+        return;
+    }
     m_rotate_gizmo.stop_dragging();
 
     // TODO: when start second rotatiton previous rotation rotate draggers
@@ -555,7 +997,109 @@ void GLGizmoSVG::on_stop_dragging()
         m_volume->emboss_shape->projection.use_surface)
         process();
 }
-void GLGizmoSVG::on_dragging(const UpdateData &data) { m_rotate_gizmo.dragging(data); }
+void GLGizmoSVG::on_dragging(const UpdateData &data)
+{
+    if (EmbossTransformHandles::is_handle(m_hover_id))
+        m_handles.drag(data);
+    else
+        m_rotate_gizmo.dragging(data);
+}
+
+EmbossFreeTransform::Projection GLGizmoSVG::current_projection() const
+{
+    EmbossFreeTransform::Projection res;
+    res.use_surface = m_volume_shape.projection.use_surface;
+    return res;
+}
+
+void GLGizmoSVG::update_handles_visibility()
+{
+    // The handles move a part of an object; an SVG object moves with the Move and Rotate tools.
+    const Selection &selection = m_parent.get_selection();
+    const bool visible = m_handles.is_enabled() && m_volume != nullptr && !m_volume->is_the_only_one_part() &&
+                         selection.volumes_count() == 1 && selection.get_mode() == Selection::Volume;
+    m_handles.set_visible(visible);
+    // Together with the handles the in-plane ring is the blue Z ring of the three.
+    m_rotate_gizmo.set_highlight_color(visible ? AXES_COLOR[2] : ColorRGBA(.6f, .6f, .6f, .3f));
+}
+
+void GLGizmoSVG::on_handles_drag_finished(const EmbossTransformHandles::Result &result)
+{
+    using namespace EmbossFreeTransform;
+    const bool cancelled_job = m_handles_cancelled_job;
+    m_handles_cancelled_job  = false;
+    m_placement_key.reset();
+    if (m_volume == nullptr || !m_volume->emboss_shape.has_value())
+        return;
+
+    const Kind kind = result.rotation ? classify_rotation(result.axis, result.normal, result.angle) :
+                                        classify_move(result.displacement, result.normal);
+    if (kind == Kind::None) {
+        // a press and release without a move: no undo step (the handles put the part back exactly)
+        if (cancelled_job)
+            process(false);
+        return;
+    }
+
+    // One undo step for the whole change: the snapshot holds the state before the drag, the
+    // emboss update below is not given one of its own. The other colours of a traced image and
+    // the other parts of a code follow this part (sync_code_parts) once the drag is over.
+    const bool is_image = m_trace.has_value();
+    if (result.rotation)
+        m_parent.do_rotate(is_image ? image_rotate_3d_snapshot_name : rotate_3d_snapshot_name);
+    else
+        m_parent.do_move(is_image ? image_move_3d_snapshot_name : move_3d_snapshot_name);
+
+    const Projection before = current_projection();
+    const Outcome    out    = outcome(before, kind);
+    if (out.detach) {
+        if (!m_detached_projection.has_value())
+            m_detached_projection = before;
+        m_volume_shape.projection.use_surface = detached(before).use_surface;
+    }
+
+    const Selection &selection = m_parent.get_selection();
+    m_angle = calc_angle(selection);
+    if (out.measure_distance)
+        if (const GLVolume *gl_volume = get_selected_gl_volume(selection); gl_volume != nullptr)
+            m_distance = calc_distance(*gl_volume, m_raycast_manager, m_parent);
+
+    if (out.reprocess || cancelled_job)
+        process(false);
+    else
+        wxGetApp().plater()->changed_object(*m_volume->get_object());
+
+    calculate_scale();
+}
+
+void GLGizmoSVG::draw_placement()
+{
+    using namespace EmbossFreeTransform;
+    const Selection &selection = m_parent.get_selection();
+    const GLVolume  *gl_volume = get_selected_gl_volume(selection);
+    if (m_volume == nullptr || gl_volume == nullptr)
+        return;
+
+    const bool       is_object  = m_volume->is_the_only_one_part();
+    const Projection projection = current_projection();
+    if (is_object || projection.follows_surface()) {
+        m_placement_key.reset();
+        m_placement_probe.reset();
+    } else if (!m_surface_drag.has_value() && !m_dragging) {
+        // measure again once the part moved (not while it is dragged)
+        const Transform3d &key = gl_volume->world_matrix();
+        if (!m_placement_key.has_value() || (m_placement_key->matrix() - key.matrix()).cwiseAbs().maxCoeff() > 1e-9) {
+            m_placement_key   = key;
+            m_placement_probe = probe_surface(*gl_volume, m_raycast_manager, m_parent);
+        }
+    }
+
+    const double    max_distance = std::max(2. * double(m_volume_shape.projection.depth), std::sqrt(10.));
+    const Placement placement    = classify_placement(is_object, projection, m_placement_probe, max_distance);
+    const double    distance     = m_placement_probe.has_value() ? m_placement_probe->distance : 0.;
+    if (m_handles.draw_options(*m_imgui, placement, distance, m_detached_projection.has_value(), m_gui_cfg->max_tooltip_width))
+        update_handles_visibility();
+}
 
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "nanosvg/nanosvgrast.h"
@@ -1171,6 +1715,11 @@ void GLGizmoSVG::set_volume_by_selection()
     if (!is_svg(*volume)) 
         return reset_volume();
 
+    // Job which update volume change its id, but it is still the same volume (undo/redo creates new volumes)
+    std::optional<CodeEmbossMeta> prev_code   = m_code;
+    std::optional<ImageTraceMeta> prev_trace  = m_trace;
+    const ModelVolume            *prev_volume = m_volume;
+
     // cancel previous job
     if (m_job_cancel != nullptr) {
         m_job_cancel->store(true);
@@ -1193,10 +1742,22 @@ void GLGizmoSVG::set_volume_by_selection()
     ExPolygonsWithIds &shape_ids = es.shapes_with_ids;
     if (shape_ids.empty()) {        
         NSVGLineParams params{get_tesselation_tolerance(get_scale_for_tolerance())};
-        shape_ids = create_shape_with_ids(image, params);                
+        params.max_flat_points = untrusted::SVG_MAX_FLAT_POINTS; // the SVG may come from a project file
+        bool too_complex = false;
+        shape_ids = create_shape_with_ids(image, params, &too_complex);
+        if (too_complex) {
+            BOOST_LOG_TRIVIAL(warning) << "SVG of the volume is too complex to be edited, the baked mesh is kept.";
+            return reset_volume();
+        }
     }
 
     reset_volume(); // clear cached data
+
+    // a projection remembered by the 3D handles belongs to the part it was taken from (an update of
+    // the part gives it a new id, not a new pointer)
+    if (volume != prev_volume)
+        m_detached_projection.reset();
+    m_placement_key.reset();
 
     m_volume = volume;
     m_volume_id = volume->id();
@@ -1208,6 +1769,21 @@ void GLGizmoSVG::set_volume_by_selection()
     m_distance = calc_distance(*gl_volume, m_raycast_manager, m_parent);
     
     m_shape_bb = get_extents(m_volume_shape.shapes_with_ids);
+
+    m_simple_shape = read_simple_shape_meta(*volume);
+    m_code = read_code_emboss_meta(*volume);
+    m_trace = read_image_trace_meta(*volume);
+    bool is_same_code_part = m_code.has_value() && prev_code.has_value() && volume == prev_volume &&
+                             m_code->params.group_id == prev_code->params.group_id && m_code->role == prev_code->role;
+    bool is_same_trace_part = m_trace.has_value() && prev_trace.has_value() && volume == prev_volume &&
+                              m_trace->params.group_id == prev_trace->params.group_id && m_trace->layer == prev_trace->layer;
+    if ((m_code.has_value() && !is_same_code_part) || (m_trace.has_value() && !is_same_trace_part)) {
+        m_code_synced_tr          = emboss_matrix(*volume);
+        m_code_synced_use_surface = es.projection.use_surface;
+        m_code_can_use_surface    = !create_volume_sources(*volume).empty();
+    }
+
+    update_handles_visibility();
 }
 namespace {
 void delete_texture(Texture& texture){
@@ -1224,6 +1800,12 @@ void GLGizmoSVG::reset_volume()
 
     m_volume = nullptr;
     m_volume_id.id = 0;
+    m_handles.set_visible(false);
+    m_placement_key.reset();
+    m_placement_probe.reset();
+    m_code.reset();
+    m_trace.reset();
+    m_simple_shape.reset();
     m_volume_shape.shapes_with_ids.clear();
     m_filename_preview.clear();
     m_shape_warnings.clear();
@@ -1334,11 +1916,20 @@ void GLGizmoSVG::draw_window()
         return;
     }
 
+    sync_code_parts();
+
     draw_preview();
     draw_filename();
 
     // Is SVG baked?
     if (m_volume == nullptr) return;
+
+    if (m_code.has_value())
+        draw_code();
+    if (m_simple_shape.has_value())
+        draw_simple_shape();
+    if (m_trace.has_value())
+        draw_image_trace();
 
     ImGui::Separator();
 
@@ -1352,7 +1943,13 @@ void GLGizmoSVG::draw_window()
     draw_mirroring();
     draw_face_the_camera();
 
-    ImGui::Unindent(m_gui_cfg->icon_width);  
+    ImGui::Unindent(m_gui_cfg->icon_width);
+
+    // Placement on the surface and the 3D move / rotate handles (parts only)
+    if (!m_volume->is_the_only_one_part()) {
+        ImGui::Separator();
+        draw_placement();
+    }
 
     if (!m_volume->is_the_only_one_part()) {
         ImGui::Separator();
@@ -1486,6 +2083,8 @@ void GLGizmoSVG::draw_filename(){
     }
 
     std::string tooltip = "";
+    bool import_image = false;
+    bool import_svg_split = false;
     ImGuiComboFlags flags = ImGuiComboFlags_PopupAlignLeft | ImGuiComboFlags_NoPreview;
     ImGui::SameLine();
     ImGuiWrapper::push_combo_style(m_parent.get_scale());
@@ -1505,6 +2104,24 @@ void GLGizmoSVG::draw_filename(){
             }
         } else if (ImGui::IsItemHovered()) {
             tooltip = _u8L("Change to another .svg file");
+        }
+
+        draw(get_icon(m_icons, IconType::change_file, IconState::hovered));
+        ImGui::SameLine();
+        if (ImGui::Selectable((_L("Import image") + dots).ToUTF8().data())) {
+            import_image = true;
+        } else if (ImGui::IsItemHovered()) {
+            tooltip = _u8L("Trace a PNG or JPG image into new shapes on this object");
+        }
+
+        if (m_volume->is_model_part()) {
+            draw(get_icon(m_icons, IconType::change_file, IconState::hovered));
+            ImGui::SameLine();
+            if (ImGui::Selectable((_L("Import SVG (Split)") + dots).ToUTF8().data())) {
+                import_svg_split = true;
+            } else if (ImGui::IsItemHovered()) {
+                tooltip = _u8L("Add an SVG file to this object as one part per shape. Shapes painted later cut away what they cover.");
+            }
         }
 
         std::string forget_path = _u8L("Forget the file path");
@@ -1612,6 +2229,15 @@ void GLGizmoSVG::draw_filename(){
     ImGuiWrapper::pop_combo_style();
     if (!tooltip.empty())
         m_imgui->tooltip(tooltip, m_gui_cfg->max_tooltip_width);
+    if (import_image && m_volume != nullptr) {
+        // the dialog is modal, do not open it in the middle of the ImGui frame
+        ModelVolumeType type = m_volume->type();
+        wxGetApp().plater()->CallAfter([this, type]() { create_image(type); });
+    }
+    if (import_svg_split && m_volume != nullptr) {
+        // the file dialog is modal, do not open it in the middle of the ImGui frame
+        wxGetApp().plater()->CallAfter([this]() { create_volume_split(ModelVolumeType::MODEL_PART); });
+    }
 
     if (file_changed) {
         float scale = get_scale_for_tolerance();
@@ -1798,7 +2424,11 @@ void GLGizmoSVG::draw_size()
         assert(img != NULL);
         if (img != NULL){
             NSVGLineParams params{get_tesselation_tolerance(get_scale_for_tolerance())};
-            m_volume_shape.shapes_with_ids = create_shape_with_ids(*img, params);
+            params.max_flat_points = untrusted::SVG_MAX_FLAT_POINTS;
+            bool too_complex = false;
+            ExPolygonsWithIds shapes = create_shape_with_ids(*img, params, &too_complex);
+            if (!too_complex) // otherwise keep the shapes of the previous scale
+                m_volume_shape.shapes_with_ids = std::move(shapes);
             m_volume_shape.final_shape = {}; // reset cache for final shape
             if (!make_snap) // Be carefull: Last change may be without change of scale
                 process(false);
@@ -1812,7 +2442,8 @@ void GLGizmoSVG::draw_size()
 void GLGizmoSVG::draw_use_surface() 
 {
     bool can_use_surface = (m_volume->emboss_shape->projection.use_surface)? true : // already used surface must have option to uncheck
-        !m_volume->is_the_only_one_part();
+        ((m_code.has_value() || m_trace.has_value()) ? m_code_can_use_surface : // other parts of code are not surface to project on
+        !m_volume->is_the_only_one_part());
     m_imgui->disabled_begin(!can_use_surface);
     ScopeGuard sc([imgui = m_imgui]() { imgui->disabled_end(); });
 
@@ -1820,8 +2451,12 @@ void GLGizmoSVG::draw_use_surface()
     ImGuiWrapper::text(m_gui_cfg->translations.use_surface);
     ImGui::SameLine(m_gui_cfg->input_offset);
 
-    if (m_imgui->bbl_checkbox("##useSurface", m_volume_shape.projection.use_surface))
+    if (m_imgui->bbl_checkbox("##useSurface", m_volume_shape.projection.use_surface)) {
+        // the user decides now, a later surface drag does not change it back
+        m_detached_projection.reset();
+        m_placement_key.reset();
         process();
+    }
 }
 
 void GLGizmoSVG::draw_distance()
@@ -1982,6 +2617,449 @@ void GLGizmoSVG::draw_mirroring()
     }
 }
 
+void GLGizmoSVG::draw_code()
+{
+    const CodeEmbossParams &p = m_code->params;
+    ImGui::Separator();
+    std::string type = p.symbology == Barcode::Symbology::QR ? _u8L("QR code") : _u8L("Barcode");
+    std::string part;
+    switch (m_code->role) {
+    case CodePartRole::Dark: part = _u8L("dark modules"); break;
+    case CodePartRole::Light: part = _u8L("light modules"); break;
+    case CodePartRole::Logo: part = _u8L("logo"); break;
+    }
+    ImGui::AlignTextToFramePadding();
+    ImGuiWrapper::text(type + " (" + part + "): " + ImGuiWrapper::trunc(p.text, m_gui_cfg->input_width));
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(p.text + "\n\n" +
+                             _u8L("Moving, rotating, scaling and surface projection of this part is applied to all parts of the code. "
+                                  "Depth and filament are set per part."),
+                         m_gui_cfg->max_tooltip_width);
+    if (ImGui::Button((_L("Edit code") + dots).ToUTF8().data()))
+        edit_code();
+    else if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_u8L("Change content, size, logo or parts of the code."), m_gui_cfg->max_tooltip_width);
+}
+
+void GLGizmoSVG::draw_simple_shape()
+{
+    ImGui::Separator();
+    ImGui::AlignTextToFramePadding();
+    ImGuiWrapper::text(_u8L("Shape") + ": " + _u8L(simple_shape_name(m_simple_shape->type)));
+    ImGui::SameLine();
+    if (ImGui::Button((_L("Edit shape") + dots).ToUTF8().data()))
+        edit_simple_shape();
+    else if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_u8L("Change the shape, its proportions or corners."), m_gui_cfg->max_tooltip_width);
+}
+
+void GLGizmoSVG::edit_simple_shape()
+{
+    if (!m_simple_shape.has_value() || m_volume == nullptr)
+        return;
+
+    SimpleShapeParams params = *m_simple_shape;
+    params.depth             = m_volume_shape.projection.depth; // could be changed by gizmo
+    SimpleShapeDialogOptions options;
+    options.is_edit        = true;
+    options.allow_filament = m_volume->type() != ModelVolumeType::NEGATIVE_VOLUME;
+    options.extruder       = volume_extruder(*m_volume);
+    SimpleShapeDialog dialog(nullptr, params, options);
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+
+    // volume could be removed meanwhile
+    if (m_volume == nullptr || get_model_volume(m_volume_id, m_parent.get_selection().get_model()->objects) == nullptr)
+        return;
+
+    const SimpleShapeParams   &new_params = dialog.params();
+    std::optional<EmbossShape> shape      = create_simple_shape(new_params, new_params.depth, m_volume_shape.projection.use_surface);
+    if (!shape.has_value())
+        return;
+
+    // keep name given by user
+    std::string old_name = _u8L(simple_shape_name(m_simple_shape->type));
+    if (m_volume->name == old_name && new_params.type != m_simple_shape->type) {
+        m_volume->name = _u8L(simple_shape_name(new_params.type));
+        const ModelObjectPtrs &objects = m_parent.get_selection().get_model()->objects;
+        const ModelObject     *object  = m_volume->get_object();
+        int object_idx = int(std::find(objects.begin(), objects.end(), object) - objects.begin());
+        int volume_idx = int(std::find(object->volumes.begin(), object->volumes.end(), m_volume) - object->volumes.begin());
+        if (object_idx < int(objects.size()) && volume_idx < int(object->volumes.size()))
+            wxGetApp().obj_list()->update_name_in_list(object_idx, volume_idx);
+    }
+    if (options.allow_filament)
+        m_volume->config.set_key_value("extruder", new ConfigOptionInt(dialog.options().extruder));
+
+    m_volume_shape.svg_file          = shape->svg_file;
+    m_volume_shape.shapes_with_ids   = shape->shapes_with_ids;
+    m_volume_shape.final_shape       = {};
+    m_volume_shape.projection.depth  = new_params.depth;
+    m_simple_shape                   = new_params;
+    m_shape_bb                       = get_extents(m_volume_shape.shapes_with_ids);
+    m_shape_warnings.clear();
+    m_filename_preview.clear();
+    wxGetApp().plater()->CallAfter([&texture = m_texture]() { delete_texture(texture); });
+    process();
+}
+
+bool GLGizmoSVG::start_code_part_update(ModelVolume &volume, EmbossShape &&shape)
+{
+    if (!ensure_shapes(shape))
+        return false;
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    m_code_job_cancels.push_back(cancel);
+    auto base        = std::make_unique<DataBase>(volume.name, cancel, std::move(shape));
+    base->is_outside = volume.type() == ModelVolumeType::MODEL_PART;
+    DataUpdate data{std::move(base), volume.id(), false};
+    return start_update_volume(std::move(data), volume, m_parent.get_selection(), m_raycast_manager);
+}
+
+void GLGizmoSVG::sync_code_parts()
+{
+    if ((!m_code.has_value() && !m_trace.has_value()) || m_volume == nullptr || !m_volume->emboss_shape.has_value())
+        return;
+    // wait until user finish the change
+    if (m_surface_drag.has_value() || m_dragging || ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        return;
+
+    Transform3d tr          = emboss_matrix(*m_volume);
+    bool        use_surface = m_volume->emboss_shape->projection.use_surface;
+    if (tr.isApprox(m_code_synced_tr, 1e-9) && use_surface == m_code_synced_use_surface)
+        return;
+    m_code_synced_tr          = tr;
+    m_code_synced_use_surface = use_surface;
+
+    ModelObject *object = m_volume->get_object();
+    if (object == nullptr)
+        return;
+
+    // cancel previous updates of other parts
+    for (const auto &cancel : m_code_job_cancels)
+        cancel->store(true);
+    m_code_job_cancels.clear();
+
+    // Levels of a traced image are centered by their own bounding box, they are moved by their
+    // offset inside of the image (code parts share one center, their offset is zero)
+    std::vector<std::pair<ModelVolume *, Vec2d>> group;
+    Vec2d                                        own_offset = Vec2d::Zero();
+    if (m_code.has_value()) {
+        for (ModelVolume *volume : get_code_volumes(*object, m_code->params.group_id))
+            group.emplace_back(volume, Vec2d::Zero());
+    } else {
+        own_offset = m_trace->offset;
+        for (ModelVolume *volume : get_image_trace_volumes(*object, m_trace->params.group_id)) {
+            std::optional<ImageTraceMeta> meta = read_image_trace_meta(*volume);
+            group.emplace_back(volume, meta.has_value() ? meta->offset : Vec2d::Zero());
+        }
+    }
+    Transform3d group_tr = tr * Eigen::Translation3d(-own_offset.x(), -own_offset.y(), 0.);
+    for (const auto &[volume, offset] : group) {
+        if (volume == m_volume || !volume->emboss_shape.has_value())
+            continue;
+        EmbossShape &es = *volume->emboss_shape;
+        Transform3d  fix = es.fix_3mf_tr.value_or(Transform3d::Identity());
+        volume->set_transformation(group_tr * Eigen::Translation3d(offset.x(), offset.y(), 0.) * fix);
+
+        bool was_surface = es.projection.use_surface;
+        // mark as already projected, so the job does not move volume onto surface again
+        es.projection.use_surface = use_surface;
+        if (use_surface || was_surface) {
+            EmbossShape shape = es; // copy
+            start_code_part_update(*volume, std::move(shape));
+        }
+    }
+    wxGetApp().plater()->changed_object(*object);
+}
+
+void GLGizmoSVG::edit_code()
+{
+    if (!m_code.has_value() || m_volume == nullptr)
+        return;
+    ModelObject *object = m_volume->get_object();
+    if (object == nullptr)
+        return;
+
+    const std::string group_id = m_code->params.group_id;
+    std::vector<ModelVolume *> volumes = get_code_volumes(*object, group_id);
+    std::map<CodePartRole, ModelVolume *> by_role;
+    for (ModelVolume *v : volumes)
+        if (std::optional<CodeEmbossMeta> meta = read_code_emboss_meta(*v); meta.has_value())
+            by_role[meta->role] = v;
+
+    ExPolygons logo;
+    if (auto it = by_role.find(CodePartRole::Logo); it != by_role.end())
+        logo = load_code_logo(*it->second->emboss_shape->svg_file->file_data);
+
+    ModelVolume *dark = by_role.count(CodePartRole::Dark) ? by_role[CodePartRole::Dark] : m_volume;
+    ModelVolumeType type = dark->type();
+
+    CodeEmbossDialogOptions options;
+    options.is_edit          = true;
+    options.allow_light_part = type == ModelVolumeType::MODEL_PART;
+    options.allow_filaments  = type != ModelVolumeType::NEGATIVE_VOLUME;
+    for (const auto &[role, v] : by_role)
+        options.extruders[size_t(role)] = volume_extruder(*v);
+
+    CodeEmbossDialog dialog(nullptr, m_code->params, options, logo);
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+
+    CodeEmbossParams params = dialog.params();
+    params.group_id         = group_id;
+    const ExPolygons &new_logo = dialog.logo();
+    CodeEmbossResult result = create_code_emboss(params, new_logo.empty() ? nullptr : &new_logo);
+    if (!result.is_valid()) {
+        show_error(nullptr, result.error);
+        return;
+    }
+
+    // volume could be removed meanwhile (dialog is modal but be carefull)
+    if (m_volume == nullptr || get_model_volume(m_volume_id, m_parent.get_selection().get_model()->objects) == nullptr)
+        return;
+
+    Plater *plater = wxGetApp().plater();
+    // TRN: This is the title of the action appearing in undo/redo stack.
+    Plater::TakeSnapshot snapshot(plater, _u8L("Edit QR code / barcode"), UndoRedo::SnapshotType::GizmoAction);
+
+    bool         use_surface = m_volume->emboss_shape->projection.use_surface;
+    Transform3d  tr          = emboss_matrix(*m_volume);
+    bool         list_changed = false;
+    ModelVolume *keep_selected = m_volume;
+    std::vector<std::pair<ModelVolume *, EmbossShape>> updates;
+    for (const CodeEmbossPart &part : result.parts) {
+        std::optional<EmbossShape> shape = create_code_part_shape(part, group_id, use_surface);
+        if (!shape.has_value())
+            continue;
+        ModelVolume *volume = by_role.count(part.role) ? by_role[part.role] : nullptr;
+        if (volume == nullptr) {
+            // new part (e.g. logo was added) - copy of the edited volume
+            volume = object->add_volume(*m_volume, part.role == CodePartRole::Light ? ModelVolumeType::MODEL_PART : type);
+            volume->set_transformation(tr);
+            list_changed = true;
+        }
+        volume->name = code_part_name(params, part.role);
+        volume->config.set_key_value("extruder", new ConfigOptionInt(dialog.options().extruders[size_t(part.role)]));
+        // write new svg immediately, so all parts are recognized by new metadata
+        volume->emboss_shape = *shape;
+        volume->emboss_shape->fix_3mf_tr.reset();
+        volume->set_transformation(tr);
+        updates.emplace_back(volume, std::move(*shape));
+        by_role.erase(part.role);
+    }
+
+    // remove parts which are not used any more (e.g. logo was removed)
+    for (const auto &[role, volume] : by_role) {
+        if (volume == keep_selected) {
+            // edited volume is removed, select the dark part instead
+            keep_selected = updates.empty() ? nullptr : updates.front().first;
+            reset_volume();
+        }
+        auto it = std::find(object->volumes.begin(), object->volumes.end(), volume);
+        if (it != object->volumes.end()) {
+            object->delete_volume(size_t(it - object->volumes.begin()));
+            list_changed = true;
+        }
+    }
+
+    // cancel previous updates of parts
+    for (const auto &cancel : m_code_job_cancels)
+        cancel->store(true);
+    m_code_job_cancels.clear();
+
+    if (list_changed) {
+        ObjectList *obj_list = wxGetApp().obj_list();
+        const ModelObjectPtrs &objects = plater->model().objects;
+        int object_idx = int(std::find(objects.begin(), objects.end(), object) - objects.begin());
+        auto add_to_selection = [keep_selected](const ModelVolume *v) { return v == keep_selected; };
+        wxDataViewItemArray sel = obj_list->reorder_volumes_and_get_selection(object_idx, add_to_selection);
+        if (!sel.IsEmpty())
+            obj_list->select_item(sel.front());
+        obj_list->selection_changed();
+    }
+
+    for (auto &[volume, shape] : updates) {
+        if (volume == m_volume) {
+            m_volume_shape = shape;
+            m_code         = read_code_emboss_meta(*volume);
+            m_shape_bb     = get_extents(m_volume_shape.shapes_with_ids);
+            m_shape_warnings.clear();
+            wxGetApp().plater()->CallAfter([&texture = m_texture]() { delete_texture(texture); });
+            process(false);
+        } else {
+            start_code_part_update(*volume, std::move(shape));
+        }
+    }
+    plater->changed_object(*object);
+}
+
+void GLGizmoSVG::draw_image_trace()
+{
+    ImGui::Separator();
+    ImGui::AlignTextToFramePadding();
+    std::string text = _u8L("Traced image");
+    if (m_trace->layers > 1)
+        text += " (" + GUI::format(_u8L("colour %1% of %2%"), m_trace->layer + 1, m_trace->layers) + ")";
+    ImGuiWrapper::text(text);
+    if (ImGui::IsItemHovered() && m_trace->layers > 1)
+        m_imgui->tooltip(_u8L("Moving, rotating, scaling and surface projection of this part is applied to all colours of the image. "
+                              "Depth and filament are set per part."),
+                         m_gui_cfg->max_tooltip_width);
+    if (ImGui::Button((_L("Edit trace") + dots).ToUTF8().data()))
+        edit_image_trace();
+    else if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_u8L("Change the colours, threshold, smoothing or size of the traced image."), m_gui_cfg->max_tooltip_width);
+}
+
+void GLGizmoSVG::edit_image_trace()
+{
+    if (!m_trace.has_value() || m_volume == nullptr)
+        return;
+    ModelObject *object = m_volume->get_object();
+    if (object == nullptr)
+        return;
+
+    const std::string            group_id = m_trace->params.group_id;
+    std::map<int, ModelVolume *> by_layer;
+    std::string                  source_png;
+    for (ModelVolume *v : get_image_trace_volumes(*object, group_id))
+        if (std::optional<ImageTraceMeta> meta = read_image_trace_meta(*v, true); meta.has_value()) {
+            if (by_layer.count(meta->layer) == 0 || v == m_volume)
+                by_layer[meta->layer] = v;
+            if (source_png.empty())
+                source_png = std::move(meta->source_png);
+        }
+    if (by_layer.empty())
+        by_layer[m_trace->layer] = m_volume;
+    ModelVolume    *first     = by_layer.begin()->second;
+    ModelVolumeType type      = first->type();
+    std::string     base_name = trace_base_name(first->name, m_trace->layers);
+
+    TraceImage image;
+    if (!source_png.empty() && !decode_trace_image(source_png, image))
+        image = TraceImage{};
+    if (image.empty()) {
+        source_png.clear();
+        MessageDialog question(nullptr,
+                               _L("The image of this trace is not stored in the project.") + "\n" +
+                                   _L("Choose the image file again to change the trace?"),
+                               _L("Edit trace"), wxYES_NO | wxICON_QUESTION);
+        if (question.ShowModal() != wxID_YES)
+            return;
+        wxString path = ImageTraceDialog::choose_image_file(nullptr);
+        if (path.empty())
+            return;
+        std::string name;
+        if (!ImageTraceDialog::load_image_file(nullptr, path, image, source_png, name))
+            return;
+    }
+
+    ImageTraceParams params = m_trace->params;
+    // depth of the first level could be changed by the gizmo
+    if (auto it = by_layer.find(0); it != by_layer.end() && it->second->emboss_shape.has_value())
+        params.depth = it->second->emboss_shape->projection.depth;
+    ImageTraceDialogOptions options;
+    options.is_edit         = true;
+    options.allow_filaments = type != ModelVolumeType::NEGATIVE_VOLUME;
+    for (const auto &[layer, v] : by_layer) {
+        if (options.extruders.size() <= size_t(layer))
+            options.extruders.resize(size_t(layer) + 1, 0);
+        options.extruders[size_t(layer)] = volume_extruder(*v);
+    }
+    ImageTraceDialog dialog(nullptr, image, source_png, base_name, params, options);
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+    const ImageTraceResult &result    = dialog.result();
+    const std::vector<int> &extruders = dialog.options().extruders;
+
+    // volume could be removed meanwhile (dialog is modal but be carefull)
+    if (m_volume == nullptr || get_model_volume(m_volume_id, m_parent.get_selection().get_model()->objects) == nullptr)
+        return;
+
+    Plater *plater = wxGetApp().plater();
+    // TRN: This is the title of the action appearing in undo/redo stack.
+    Plater::TakeSnapshot snapshot(plater, _u8L("Edit image trace"), UndoRedo::SnapshotType::GizmoAction);
+
+    bool use_surface = m_volume->emboss_shape->projection.use_surface;
+    // transformation of the image center, every level is moved by its offset from it
+    Transform3d  group_tr      = emboss_matrix(*m_volume) * Eigen::Translation3d(-m_trace->offset.x(), -m_trace->offset.y(), 0.);
+    bool         list_changed  = false;
+    ModelVolume *keep_selected = m_volume;
+    int          count         = int(result.layers.size());
+    std::vector<std::pair<ModelVolume *, EmbossShape>> updates;
+    for (int i = 0; i < count; ++i) {
+        const ImageTraceLayer     &layer = result.layers[size_t(i)];
+        std::optional<EmbossShape> shape = create_trace_part_shape(layer, group_id, i, use_surface);
+        if (!shape.has_value())
+            continue;
+        auto         it     = by_layer.find(i);
+        ModelVolume *volume = it != by_layer.end() ? it->second : nullptr;
+        if (volume == nullptr) {
+            // new colour level - copy of the edited volume
+            volume       = object->add_volume(*m_volume, type);
+            list_changed = true;
+        }
+        volume->name = image_trace_part_name(dialog.image_name(), i, count);
+        if (options.allow_filaments)
+            volume->config.set_key_value("extruder", new ConfigOptionInt(size_t(i) < extruders.size() ? extruders[size_t(i)] : 0));
+        // write new svg immediately, so all levels are recognized by new metadata
+        volume->emboss_shape = *shape;
+        volume->emboss_shape->fix_3mf_tr.reset();
+        volume->set_transformation(group_tr * Eigen::Translation3d(layer.offset.x(), layer.offset.y(), 0.));
+        updates.emplace_back(volume, std::move(*shape));
+        if (it != by_layer.end())
+            by_layer.erase(it);
+    }
+    if (updates.empty())
+        return;
+
+    // remove levels which are not used any more (fewer colours)
+    for (const auto &[layer, volume] : by_layer) {
+        if (volume == keep_selected) {
+            // edited volume is removed, select the first level instead
+            keep_selected = updates.front().first;
+            reset_volume();
+        }
+        auto it = std::find(object->volumes.begin(), object->volumes.end(), volume);
+        if (it != object->volumes.end()) {
+            object->delete_volume(size_t(it - object->volumes.begin()));
+            list_changed = true;
+        }
+    }
+
+    // cancel previous updates of parts
+    for (const auto &cancel : m_code_job_cancels)
+        cancel->store(true);
+    m_code_job_cancels.clear();
+
+    if (list_changed) {
+        ObjectList            *obj_list   = wxGetApp().obj_list();
+        const ModelObjectPtrs &objects    = plater->model().objects;
+        int                    object_idx = int(std::find(objects.begin(), objects.end(), object) - objects.begin());
+        auto add_to_selection             = [keep_selected](const ModelVolume *v) { return v == keep_selected; };
+        wxDataViewItemArray sel           = obj_list->reorder_volumes_and_get_selection(object_idx, add_to_selection);
+        if (!sel.IsEmpty())
+            obj_list->select_item(sel.front());
+        obj_list->selection_changed();
+    }
+
+    for (auto &[volume, shape] : updates) {
+        if (volume == m_volume) {
+            m_volume_shape            = shape;
+            m_trace                   = read_image_trace_meta(*volume);
+            m_shape_bb                = get_extents(m_volume_shape.shapes_with_ids);
+            m_code_synced_tr          = emboss_matrix(*volume);
+            m_code_synced_use_surface = use_surface;
+            m_shape_warnings.clear();
+            wxGetApp().plater()->CallAfter([&texture = m_texture]() { delete_texture(texture); });
+            process(false);
+        } else {
+            start_code_part_update(*volume, std::move(shape));
+        }
+    }
+    plater->changed_object(*object);
+}
+
 void GLGizmoSVG::draw_model_type()
 {
     ImGui::AlignTextToFramePadding();
@@ -2045,7 +3123,7 @@ void GLGizmoSVG::draw_model_type()
         if ((is_volume_move_inside || is_volume_move_outside))
             process();
 
-        // inspiration in ObjectList::change_part_type()
+        // inspiration in ObjectList::set_volume_type()
         // how to view correct side panel with objects
         ObjectList *obj_list = app.obj_list();
         wxDataViewItemArray sel = obj_list->reorder_volumes_and_get_selection(
@@ -2224,14 +3302,27 @@ EmbossShape select_shape(std::string_view filepath, double tesselation_tolerance
         return {};
     }
 
-    if(init_image(svg) == nullptr) {
-        show_error(nullptr, GUI::format(_u8L("Nano SVG parser can't load from file (%1%)."), svg.path));
+    SvgRefusal refusal = SvgRefusal::None;
+    if(init_image(svg, &refusal) == nullptr) {
+        const double limit_mb = double(untrusted::SVG_SIZE_LIMIT) / (1024. * 1024.);
+        if (refusal == SvgRefusal::TooLarge)
+            show_error(nullptr, GUI::format(_u8L("SVG file is too large to be loaded (limit %1% MB) (%2%)."), limit_mb, svg.path));
+        else if (refusal == SvgRefusal::TooComplex)
+            show_error(nullptr, GUI::format(_u8L("SVG file is too complex to be loaded, it has too many shapes or points (%1%). Simplify it in a vector editor and try again."), svg.path));
+        else
+            show_error(nullptr, GUI::format(_u8L("Nano SVG parser can't load from file (%1%)."), svg.path));
         return {};
     }
 
     // Set default and unchanging scale
     NSVGLineParams params{tesselation_tolerance};
-    shape.shapes_with_ids = create_shape_with_ids(*svg.image, params);
+    params.max_flat_points = untrusted::SVG_MAX_FLAT_POINTS;
+    bool too_complex = false;
+    shape.shapes_with_ids = create_shape_with_ids(*svg.image, params, &too_complex);
+    if (too_complex) {
+        show_error(nullptr, GUI::format(_u8L("SVG file is too complex to be loaded, it has too many shapes or points (%1%). Simplify it in a vector editor and try again."), svg.path));
+        return {};
+    }
 
     // Must contain some shapes !!!
     if (shape.shapes_with_ids.empty()) {

@@ -17,6 +17,9 @@ enum class EnforcerBlockerType : int16_t {
     BLOCKER   = 2,
     // For the fuzzy skin, we use just two values (NONE and FUZZY_SKIN).
     FUZZY_SKIN = ENFORCER,
+    // Paint-on supports carry a third state: the side stabilizer points (Support/Stabilizers.hpp),
+    // spots where a stabilizer strut must touch the part. Serialized like any state above BLOCKER.
+    STABILIZER = 3,
     // Extruder states are serialized using a 2-bit prefix plus one or more 4-bit nibbles.
     // This allows more than 16 painted states while keeping backward compatibility.
     Extruder1 = ENFORCER,
@@ -280,8 +283,24 @@ public:
             std::fill(used_states.begin(), used_states.end(), false);
         }
 
-        // Update used states based on the bitstream. It just iterated over the bitstream from the bitstream_start_idx till the end.
-        void update_used_states(size_t bitstream_start_idx);
+        // Update used states from the triangle trees stored between bitstream_start_idx and the end of the bitstream.
+        // Returns false and leaves used states untouched if a tree is truncated or malformed.
+        [[nodiscard]] bool update_used_states(size_t bitstream_start_idx);
+
+        // Read the 4-bit code at bit index ibit (LSB first) and advance ibit past it.
+        // Returns false without advancing when fewer than 4 bits remain.
+        bool read_nibble(int &ibit, int &nibble) const {
+            if (ibit < 0 || static_cast<size_t>(ibit) + 4 > bitstream.size())
+                return false;
+            nibble = 0;
+            for (int i = 0; i < 4; ++i)
+                nibble |= static_cast<int>(bitstream[ibit++]) << i;
+            return true;
+        }
+
+        // Decode a leaf state using Edge's multi-nibble encoding (0b1111 extension loop, up to ExtruderMax).
+        // `code` is the already-read leaf nibble. Returns false on truncation or state > ExtruderMax.
+        bool read_leaf_state(int code, int &ibit, int &state) const;
 
     private:
         friend class cereal::access;
@@ -309,7 +328,8 @@ public:
                       EnforcerBlockerType       new_state,                     // enforcer or blocker?
                       const Transform3d        &trafo_no_translate,            // matrix to get from mesh to world without translation
                       bool                      triangle_splitting,            // If triangles will be split base on the cursor or not
-                      float                     highlight_by_angle_deg = 0.f); // The maximal angle of overhang. If it is set to a non-zero value, it is possible to paint only the triangles of overhang defined by this angle in degrees.
+                      float                     highlight_by_angle_deg = 0.f,  // The maximal angle of overhang. If it is set to a non-zero value, it is possible to paint only the triangles of overhang defined by this angle in degrees.
+                      bool                      select_partially = false);     // Select a triangle if it's partially in the cursor but too small to be subdivided
 
     void seed_fill_select_triangles(const Vec3f        &hit,                          // point where to start
                                     int                 facet_start,                  // facet of the original mesh (unsplit) that the hit point belongs to
@@ -332,7 +352,14 @@ public:
     // Get facets at a given state. Don't triangulate T-joints.
     indexed_triangle_set get_facets(EnforcerBlockerType state) const;
     // Get facets at a given state. Triangulate T-joints.
-    indexed_triangle_set get_facets_strict(EnforcerBlockerType state) const;
+    // Sub-triangles in `state`, with the *whole* mesh's referenced vertex array (only .indices is
+    // filtered by state, so two calls with different states share one indexing).
+    //
+    // `out_source`, when given, is filled parallel to the returned .indices with the index of the
+    // original mesh triangle each sub-triangle came from. That is what lets a caller carry partial
+    // paint - the pieces of a triangle a brush stroke only partly covered - across a refinement of
+    // the same surface, instead of having to round each source triangle to wholly painted or not.
+    indexed_triangle_set get_facets_strict(EnforcerBlockerType state, std::vector<int> *out_source = nullptr) const;
     // Get edges around the selected area by seed fill.
     std::vector<Vec2i32> get_seed_fill_contour() const;
 
@@ -373,6 +400,25 @@ public:
     // For all triangles selected by seed fill, set new EnforcerBlockerType and remove flag indicating that triangle was selected by seed fill.
     // The operation may merge split triangles if they are being assigned the same color.
     void seed_fill_apply_on_triangles(EnforcerBlockerType new_state);
+
+    // Saved painting data for remapping after mesh change.
+    struct SavedPainting {
+        TriangleMesh          mesh;  // Original mesh
+        TriangleSplittingData supported;
+        TriangleSplittingData seam;
+        TriangleSplittingData mmu;
+        TriangleSplittingData fuzzy;
+    };
+
+    // Remap painting data from source mesh to target mesh using spatial mapping.
+    // `target_transform` should transform the target mesh into source's coordinate space.
+    // If `existing_painting` is present, the result will be a combine of `existing_painting` and remapped `source_painting`.
+    static TriangleSplittingData remap_painting(
+        const indexed_triangle_set& source_its,
+        const TriangleSplittingData& source_painting,
+        const indexed_triangle_set& target_its,
+        const Transform3d& target_transform,
+        const std::optional<std::reference_wrapper<const TriangleSplittingData>>& existing_painting);
 
 protected:
     // Triangle and info about how it's split.
@@ -479,8 +525,8 @@ protected:
 
     // Private functions:
 private:
-    bool select_triangle(int facet_idx, EnforcerBlockerType type, bool triangle_splitting);
-    bool select_triangle_recursive(int facet_idx, const Vec3i32 &neighbors, EnforcerBlockerType type, bool triangle_splitting);
+    bool select_triangle(int facet_idx, EnforcerBlockerType type, bool triangle_splitting, bool select_partially);
+    bool select_triangle_recursive(int facet_idx, const Vec3i32 &neighbors, EnforcerBlockerType type, bool triangle_splitting, bool select_partially);
     void undivide_triangle(int facet_idx);
     void split_triangle(int facet_idx, const Vec3i32 &neighbors);
     void remove_useless_children(int facet_idx); // No hidden meaning. Triangles are meant.
@@ -523,10 +569,9 @@ private:
 
     int m_free_triangles_head { -1 };
     int m_free_vertices_head { -1 };
+
+    friend class TriangleCursor;
 };
-
-
-
 
 } // namespace Slic3r
 

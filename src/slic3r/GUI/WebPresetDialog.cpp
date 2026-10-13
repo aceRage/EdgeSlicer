@@ -1,10 +1,12 @@
 #include "WebPresetDialog.hpp"
+#include "libslic3r/NozzleSync.hpp"
 #include "ConfigWizard.hpp"
 
 #include <string.h>
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
+#include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
 
@@ -280,18 +282,14 @@ wxString WebPresetDialog::SetStartPage(GuidePage startpage, bool load)
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" enter, load=%1%, start_page=%2%") % load % int(startpage);
     // wxLogMessage("GUIDE: webpage_1  %s", (boost::filesystem::path(resources_dir()) /
     // "web\\guide\\1\\index.html").make_preferred().string().c_str() );
-    wxString TargetUrl = from_u8((boost::filesystem::path(resources_dir()) / "web/guide/1/index.html").make_preferred().string());
-    // wxLogMessage("GUIDE: webpage_2  %s", TargetUrl.mb_str());
-
-    TargetUrl = from_u8((boost::filesystem::path(resources_dir()) / "web/preset_bind/24/index.html").make_preferred().string());
+    wxString TargetUrl = file_url_from_path((boost::filesystem::path(resources_dir()) / "web/preset_bind/24/index.html").make_preferred());
     // TargetUrl = from_u8((boost::filesystem::path(resources_dir()) / "web/guide/24/index.html").make_preferred().string());
 
     wxString strlang = wxGetApp().current_language_code_safe();
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", strlang=%1%") % into_u8(strlang);
     if (strlang != "")
-        TargetUrl = wxString::Format("%s?lang=%s", w2s(TargetUrl), strlang);
+        TargetUrl += "?lang=" + strlang;
 
-    TargetUrl = "file://" + TargetUrl;
     if (load)
         load_url(TargetUrl);
 
@@ -547,7 +545,7 @@ void WebPresetDialog::OnScriptMessage(wxWebViewEvent& evt)
             this->EndModal(wxID_OK);
 
             if (InstallNetplugin)
-                GUI::wxGetApp().CallAfter([this] { GUI::wxGetApp().ShowDownNetPluginDlg(); });
+                GUI::wxGetApp().CallAfter([this] { GUI::wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true); });
 
             if (bLogin)
                 GUI::wxGetApp().CallAfter([this] { login(); });
@@ -632,7 +630,7 @@ void WebPresetDialog::SendUserGuideProfile()
             if (item.count("nozzle_selected")) {
                 if (item["model"].get<std::string>() == model_name) {
                     if (!nozzle_sizes.empty()) {
-                        item["nozzle_selected"] = nozzle_sizes[0];
+                        item["nozzle_selected"] = NozzleSync::first_nozzle(nozzle_sizes);
                     } else {
                         item["nozzle_selected"] = "";
                     }
@@ -778,7 +776,7 @@ int WebPresetDialog::SaveProfile()
     // m_MainPtr->app_config->set_bool("stealth_mode", StealthMode);
 
     // finish
-    m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "finish", "1");
+    m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "finish", true);
 
     m_MainPtr->app_config->save();
 
@@ -876,7 +874,8 @@ static std::string get_first_added_preset(const std::map<std::string, std::strin
     return *diff.begin();
 }
 
-bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_bundle, const PresetUpdater* updater, bool& apply_keeped_changes)
+bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_bundle, const PresetUpdater* updater, bool& apply_keeped_changes,
+                                   bool silent_transfer)
 {
     const auto enabled_vendors     = m_appconfig_new.vendors();
     const auto old_enabled_vendors = app_config->vendors();
@@ -918,7 +917,11 @@ bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_b
     wxString caption             = _L("Configuration package changed");
     int      act_btns            = ActionButtons::KEEP | ActionButtons::SAVE;
 
-    if (check_unsaved_preset_changes && !wxGetApp().check_and_keep_current_preset_changes(caption, header, act_btns, &apply_keeped_changes))
+    int silently_kept = 0;
+    if (check_unsaved_preset_changes && silent_transfer) {
+        // Nobody asked for this reload, so nobody is asked about it: keep the modified values.
+        silently_kept = wxGetApp().cache_current_preset_changes_for_transfer("Configuration package changed by a printer connect");
+    } else if (check_unsaved_preset_changes && !wxGetApp().check_and_keep_current_preset_changes(caption, header, act_btns, &apply_keeped_changes))
         return false;
 
     if (install_bundles.size() > 0) {
@@ -958,7 +961,7 @@ bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_b
         // for (const auto& vendor_profile : preset_bundle->vendors) {
         for (const auto& model_it : model_maps) {
             if (model_it.second.size() > 0) {
-                variant               = *model_it.second.begin();
+                variant               = PresetBundle::default_printer_variant(model_it.second);
                 const auto config_old = old_enabled_vendors.find(bundle_name);
                 if (config_old == old_enabled_vendors.end())
                     return model_it.first;
@@ -966,11 +969,12 @@ bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_b
                 if (model_it_old == config_old->second.end())
                     return model_it.first;
                 else if (model_it_old->second != model_it.second) {
-                    for (const auto& var : model_it.second)
-                        if (model_it_old->second.find(var) == model_it_old->second.end()) {
-                            variant = var;
-                            return model_it.first;
-                        }
+                    // Variants were added: activate the default one (0.4) when the model has it, not the first newly
+                    // added one (the smallest nozzle, "0.2", when only 0.4 was enabled before).
+                    if (std::string added = PresetBundle::variant_to_activate(model_it_old->second, model_it.second); !added.empty()) {
+                        variant = added;
+                        return model_it.first;
+                    }
                 }
             }
         }
@@ -1013,6 +1017,14 @@ bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_b
 
     // Update the selections from the compatibilty.
     preset_bundle->export_selections(*app_config);
+
+    // The values kept above go back onto the reloaded presets (what run() does after the dialog's
+    // Transfer, through apply_keeped_changes).
+    if (silently_kept > 0) {
+        wxGetApp().apply_keeped_preset_modifications();
+        BOOST_LOG_TRIVIAL(info) << "Configuration package changed by a printer connect: " << silently_kept
+                                << " modified value(s) transferred to the reloaded presets";
+    }
 
     return true;
 }
@@ -1414,7 +1426,7 @@ int WebPresetDialog::LoadProfileFamily(std::string strVendor, std::string strFil
                     cover_path = (boost::filesystem::absolute(boost::filesystem::path(resources_dir()) / "/web/image/printer/") / cover_file)
                                      .make_preferred();
                 }
-                OneModel["cover"] = cover_path.string();
+                OneModel["cover"] = into_u8(file_url_from_path(cover_path));
 
                 OneModel["nozzle_selected"] = "";
 
@@ -1462,6 +1474,11 @@ int WebPresetDialog::LoadProfileFamily(std::string strVendor, std::string strFil
                     }
                     OneMachine["model"]  = pm["printer_model"];
                     OneMachine["nozzle"] = (nd.is_array() && !nd.empty()) ? nd[0] : json();
+                    // A mixed-nozzle machine (printer_variant "0.4+0.6") is its own entry in the model's nozzle list.
+                    // Keyed by its first head it would file its filaments under the plain 0.4 variant.
+                    if (pm.contains("printer_variant") && pm["printer_variant"].is_string() &&
+                        pm["printer_variant"].get<std::string>().find('+') != std::string::npos)
+                        OneMachine["nozzle"] = pm["printer_variant"];
 
                     slot = std::move(OneMachine);
                 }
@@ -1648,19 +1665,6 @@ bool WebPresetDialog::LoadFile(std::string jPath, std::string& sContent)
     }
 
     return true;
-}
-
-int WebPresetDialog::DownloadPlugin()
-{
-    return wxGetApp().download_plugin(
-        "plugins", "network_plugin.zip",
-        [this](int status, int percent, bool& cancel) { return ShowPluginStatus(status, percent, cancel); }, nullptr);
-}
-
-int WebPresetDialog::InstallPlugin()
-{
-    return wxGetApp().install_plugin("plugins", "network_plugin.zip",
-                                     [this](int status, int percent, bool& cancel) { return ShowPluginStatus(status, percent, cancel); });
 }
 
 int WebPresetDialog::ShowPluginStatus(int status, int percent, bool& cancel)

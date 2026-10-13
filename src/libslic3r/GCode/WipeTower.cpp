@@ -1295,6 +1295,12 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
         if (logical >= 0)
             m_filpar[idx].physical_extruder = logical < int(config.physical_extruder_map.values.size()) ? config.physical_extruder_map.values[logical] : logical;
     }
+    // BBS: Bambu Studio's tower reheats the nozzle before the wipe of a toolchange whose change_filament_gcode
+    // cooled it (WipeTower.cpp toolchange_wipe_new: "Wipe tower reheat before wipe"). Its M104 always names the
+    // physical extruder: the filament's on a multi-nozzle machine, extruder 0's otherwise.
+    m_filpar[idx].cooling_before_tower = float(filament_cooling_before_tower_at(config, (unsigned int) idx, true));
+    m_filpar[idx].reheat_extruder      = m_filpar[idx].physical_extruder >= 0 ? m_filpar[idx].physical_extruder :
+                                         config.physical_extruder_map.values.empty() ? 0 : std::max(0, config.physical_extruder_map.values.front());
 
     m_perimeter_width = nozzle_diameter * Width_To_Nozzle_Ratio; // all extruders are now assumed to have the same diameter
     // BBS: remove useless config
@@ -1331,6 +1337,7 @@ std::vector<WipeTower::ToolChangeResult> WipeTower::prime(
 WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_perimeter, bool first_toolchange_to_nonsoluble)
 {
     size_t old_tool = m_current_tool;
+    bool   reheats_after_cooling = false;
 
     float wipe_depth = 0.f;
 	float wipe_length = 0.f;
@@ -1393,6 +1400,17 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
                           is_first_layer() ? m_filpar[tool].nozzle_temperature_initial_layer : m_filpar[tool].nozzle_temperature);
         toolchange_Change(writer, tool, m_filpar[tool].material); // Change the tool, set a speed override for soluble and flex materials.
         toolchange_Load(writer, cleaning_box);
+        // BBS: Bambu Studio's "Wipe tower reheat before wipe" (WipeTower.cpp toolchange_wipe_new,
+        // add_M104_by_requirement). change_filament_gcode (in toolchange_Change) left the nozzle
+        // filament_cooling_before_tower below the print temperature (M620.15 C); heat back up before the new
+        // filament's first extrusion on the tower, without waiting (format_line_M104 with is_heating: no M400).
+        // Bambu writes it where its wipe starts, right after the load; this tower prints its wall first,
+        // so it goes here, before the wall. Not on the tower's first layer and not on an interface
+        // ("contact") toolchange: GCode publishes no cooling for those (tcr.reheats_after_cooling).
+        reheats_after_cooling = !is_first_layer() && !(planned != nullptr && planned->is_interface);
+        if (reheats_after_cooling && m_filpar[tool].cooling_before_tower > EPSILON)
+            writer.append("M104 T" + std::to_string(m_filpar[tool].reheat_extruder) + " S" + std::to_string(m_filpar[tool].nozzle_temperature) +
+                          " N0 ;Wipe tower reheat before wipe\n");
         // BBS
         //writer.travel(writer.x(), writer.y()-m_perimeter_width); // cooling and loading were done a bit down the road
         if (extrude_perimeter) {
@@ -1461,7 +1479,9 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
     if (m_current_tool < m_used_filament_length.size())
         m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
 
-    return construct_tcr(writer, false, old_tool, false, purge_volume);
+    ToolChangeResult result = construct_tcr(writer, false, old_tool, false, purge_volume);
+    result.reheats_after_cooling = reheats_after_cooling;
+    return result;
 }
 
 
@@ -1958,7 +1978,13 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
             // limit max chamfer width to 3 mm
             int chamfer_loops_num = (int)(max_chamfer_width / spacing);
             int dist_to_1st = m_layer_info - m_plan.begin() - m_first_layer_idx;
-            loops_num = std::min(loops_num, chamfer_loops_num) - dist_to_1st;
+            // A layer below the tower's first real layer gets no chamfer. With "no sparse layers"
+            // the first real layer is the first tool change, which can sit far up the print; the
+            // layers below it are sparse and never printed, but their walls still go into
+            // m_outer_wall for the conflict checker. Counting a negative distance there added a
+            // brim loop per layer down - hundreds of loops reaching across the bed, which the
+            // checker then reported as the tower hitting the objects.
+            loops_num = dist_to_1st < 0 ? 0 : std::min(loops_num, chamfer_loops_num) - dist_to_1st;
         }
     }
 

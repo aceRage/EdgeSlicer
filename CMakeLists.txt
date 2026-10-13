@@ -155,7 +155,12 @@ option(SLIC3R_SENTRY            "Build in the Sentry/crashpad crash handler (loc
 # in the build tree, not onto compiler command lines, and is never printed here.
 set(EDGESLICER_SENTRY_DSN "" CACHE STRING "Sentry DSN compiled in for opt-in crash reports (empty = no uploads)")
 mark_as_advanced(EDGESLICER_SENTRY_DSN)
-set(EDGESLICER_SENTRY_ENVIRONMENT "" CACHE STRING "Sentry environment reported with crashes (default: dev)")
+# The environment is also how a build says whether it is a real release. The CI workflows set it
+# (build_orca.yml, build_windows_selfhosted.yml, nightly.yml: release / ci / nightly); nothing else
+# does, so an empty value - every local, agent and test build - means "development": reported as
+# environment "development" and as release edgeslicer@<version>-dev+<short commit>, which keeps
+# those crashes apart from the ones real users send from the published release.
+set(EDGESLICER_SENTRY_ENVIRONMENT "" CACHE STRING "Sentry environment reported with crashes (empty = development; CI sets release, ci or nightly)")
 set(_edge_sentry_dsn "${EDGESLICER_SENTRY_DSN}")
 if (_edge_sentry_dsn STREQUAL "" AND DEFINED ENV{EDGESLICER_SENTRY_DSN})
     set(_edge_sentry_dsn "$ENV{EDGESLICER_SENTRY_DSN}")
@@ -165,8 +170,8 @@ set(_edge_sentry_env "${EDGESLICER_SENTRY_ENVIRONMENT}")
 if (_edge_sentry_env STREQUAL "" AND DEFINED ENV{EDGESLICER_SENTRY_ENVIRONMENT})
     set(_edge_sentry_env "$ENV{EDGESLICER_SENTRY_ENVIRONMENT}")
 endif ()
-if (_edge_sentry_env STREQUAL "")
-    set(_edge_sentry_env "dev")
+if (_edge_sentry_env STREQUAL "" OR _edge_sentry_env STREQUAL "dev")
+    set(_edge_sentry_env "development")
 endif ()
 if (NOT _edge_sentry_dsn STREQUAL "" AND NOT _edge_sentry_dsn MATCHES "^https?://[^\"\\ ]+$")
     message(FATAL_ERROR "EDGESLICER_SENTRY_DSN is not a Sentry DSN (expected https://<key>@<host>/<project>)")
@@ -181,8 +186,19 @@ else ()
 endif ()
 set(EDGESLICER_SENTRY_DSN_VALUE "${_edge_sentry_dsn}")
 set(EDGESLICER_SENTRY_ENVIRONMENT_VALUE "${_edge_sentry_env}")
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/sentry_wrapper/edgeslicer_sentry_config.h.in
-               ${CMAKE_CURRENT_BINARY_DIR}/generated/edgeslicer_sentry_config.h @ONLY)
+# A development build's release suffix is "-dev+<short commit>" (the commit as of this configure
+# run). It goes after the whole version, so it is kept apart until the version suffix is known
+# (below). Build metadata may hold only one '+': a development build that also has a '+' in its
+# version suffix gets "-dev.<commit>" instead.
+set(EDGESLICER_SENTRY_RELEASE_SUFFIX_VALUE "")
+if (_edge_sentry_env STREQUAL "development")
+    set(_edge_sentry_sha "${GIT_COMMIT_HASH}")
+    if (_edge_sentry_sha STREQUAL "" OR NOT _edge_sentry_sha MATCHES "^[0-9A-Za-z]+$")
+        set(_edge_sentry_sha "nogit")
+    endif ()
+    set(EDGESLICER_SENTRY_RELEASE_SUFFIX_VALUE "-dev+${_edge_sentry_sha}")
+endif ()
+# edgeslicer_sentry_config.h is written below, once the version suffix is known.
 
 # Build flavour suffix: empty for releases and local builds, "-nightly.<YYYYMMDD>+<shortsha>" for
 # the nightly builds (.github/workflows/nightly.yml, docs/nightly.md). It is appended to
@@ -208,11 +224,19 @@ if (NOT _edge_version_suffix STREQUAL "" AND NOT _edge_version_suffix MATCHES "^
 endif ()
 set(EDGESLICER_VERSION_SUFFIX_VALUE "${_edge_version_suffix}")
 set(EDGESLICER_FULL_VERSION "${Snapmaker_VERSION}${_edge_version_suffix}")
+if (NOT EDGESLICER_SENTRY_RELEASE_SUFFIX_VALUE STREQUAL "" AND EDGESLICER_FULL_VERSION MATCHES "[+]")
+    string(REPLACE "+" "." EDGESLICER_SENTRY_RELEASE_SUFFIX_VALUE "${EDGESLICER_SENTRY_RELEASE_SUFFIX_VALUE}")
+endif ()
 # File names avoid '+': GitHub renames release assets whose names carry special characters.
 string(REPLACE "+" "-" EDGESLICER_FILE_VERSION "${EDGESLICER_FULL_VERSION}")
 if (NOT _edge_version_suffix STREQUAL "")
     message(STATUS "EdgeSlicer version: ${EDGESLICER_FULL_VERSION}")
 endif ()
+# The release a crash report names, and the one CI uploads symbols for: edgeslicer@<version>, plus
+# "-dev+<commit>" on development builds only (see EDGESLICER_SENTRY_ENVIRONMENT above).
+set(EDGESLICER_SENTRY_RELEASE_VALUE "edgeslicer@${EDGESLICER_FULL_VERSION}${EDGESLICER_SENTRY_RELEASE_SUFFIX_VALUE}")
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/sentry_wrapper/edgeslicer_sentry_config.h.in
+               ${CMAKE_CURRENT_BINARY_DIR}/generated/edgeslicer_sentry_config.h @ONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/common_func/edgeslicer_version.h.in
                ${CMAKE_CURRENT_BINARY_DIR}/generated/edgeslicer_version.h @ONLY)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -671,7 +695,14 @@ if(SLIC3R_STATIC)
     set(TBB_STATIC 1)
 endif()
 set(TBB_DEBUG 1)
-set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO RelWithDebInfo Release "")
+# Adapted from Orca #14593 (case-insensitive): only map RelWithDebInfo imported configs to Release when
+# that config is in use, or on MSVC. Non-MSVC multi-config generators with
+# CMAKE_BUILD_TYPE unset now fall back to the deps' first available config,
+# which is harmless with Edge's single-config deps.
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _bt)
+if (_bt STREQUAL "RELWITHDEBINFO" OR MSVC)
+    set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO RelWithDebInfo Release "")
+endif()
 find_package(TBB REQUIRED)
 # include_directories(SYSTEM ${TBB_INCLUDE_DIRS})
 # add_definitions(${TBB_DEFINITIONS})
@@ -918,6 +949,20 @@ else()
 endif()
 
 set(TOP_LEVEL_PROJECT_DIR ${PROJECT_SOURCE_DIR})
+
+# OCCT (STEP import/export, B-rep tools) comes from the deps prefix. OCCT_PREFIX points at a
+# separately built OCCT instead (same layout: bin/occt, lib/occt, lib/cmake/occt, include/occt),
+# e.g. to try an OCCT with other modules without touching the shared deps prefix.
+set(OCCT_PREFIX "${CMAKE_PREFIX_PATH}" CACHE PATH "Prefix holding OCCT (bin/occt, lib/cmake/occt)")
+
+# OCCT toolkits the app loads at run time on Windows (OCCT is shared there). TKBool, TKFillet,
+# TKOffset and TKFeat come from OCCT's ModelingAlgorithms module (B-rep booleans, fillets,
+# offsets, features).
+set(OCCT_RUNTIME_TOOLKITS
+    TKBO TKBool TKBRep TKCAF TKCDF TKernel TKFeat TKFillet TKG2d TKG3d TKGeomAlgo TKGeomBase
+    TKHLR TKLCAF TKMath TKMesh TKOffset TKPrim TKService TKShHealing TKSTEP TKSTEP209
+    TKSTEPAttr TKSTEPBase TKTopAlgo TKV3d TKVCAF TKXCAF TKXDESTEP TKXSBase)
+
 function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
     if ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "AMD64")
         set(_arch "x64")
@@ -954,32 +999,13 @@ function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
         )
     endif()
 
-    file(COPY ${CMAKE_PREFIX_PATH}/bin/occt/TKBO.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKBRep.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKCAF.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKCDF.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKernel.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKG2d.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKG3d.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKGeomAlgo.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKGeomBase.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKHLR.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKLCAF.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKMath.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKMesh.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKPrim.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKService.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKShHealing.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKSTEP.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKSTEP209.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKSTEPAttr.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKSTEPBase.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKTopAlgo.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKV3d.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKVCAF.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKXCAF.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKXDESTEP.dll
-            ${CMAKE_PREFIX_PATH}/bin/occt/TKXSBase.dll
+    set(_occt_dlls_src "")
+    set(_occt_dlls_out "")
+    foreach (_tk IN LISTS OCCT_RUNTIME_TOOLKITS)
+        list(APPEND _occt_dlls_src ${OCCT_PREFIX}/bin/occt/${_tk}.dll)
+        list(APPEND _occt_dlls_out ${_out_dir}/${_tk}.dll)
+    endforeach ()
+    file(COPY ${_occt_dlls_src}
             ${CMAKE_PREFIX_PATH}/bin/freetype.dll
          DESTINATION ${_out_dir})
 
@@ -989,32 +1015,7 @@ function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
         ${_out_dir}/libmpfr-4.dll
         ${_out_dir}/WebView2Loader.dll
 
-        ${_out_dir}/TKBO.dll
-        ${_out_dir}/TKBRep.dll
-        ${_out_dir}/TKCAF.dll
-        ${_out_dir}/TKCDF.dll
-        ${_out_dir}/TKernel.dll
-        ${_out_dir}/TKG2d.dll
-        ${_out_dir}/TKG3d.dll
-        ${_out_dir}/TKGeomAlgo.dll
-        ${_out_dir}/TKGeomBase.dll
-        ${_out_dir}/TKHLR.dll
-        ${_out_dir}/TKLCAF.dll
-        ${_out_dir}/TKMath.dll
-        ${_out_dir}/TKMesh.dll
-        ${_out_dir}/TKPrim.dll
-        ${_out_dir}/TKService.dll
-        ${_out_dir}/TKShHealing.dll
-        ${_out_dir}/TKSTEP.dll
-        ${_out_dir}/TKSTEP209.dll
-        ${_out_dir}/TKSTEPAttr.dll
-        ${_out_dir}/TKSTEPBase.dll
-        ${_out_dir}/TKTopAlgo.dll
-        ${_out_dir}/TKV3d.dll
-        ${_out_dir}/TKVCAF.dll
-        ${_out_dir}/TKXCAF.dll
-        ${_out_dir}/TKXDESTEP.dll
-        ${_out_dir}/TKXSBase.dll
+        ${_occt_dlls_out}
 
         ${_out_dir}/freetype.dll
     )
@@ -1086,6 +1087,30 @@ if (WIN32)
         message(STATUS "EdgeSlicer: shipping the network plugin from ${ULTRANET_BIN_DIR}")
     endif()
 
+    # EdgeSlicer: Bambu's own camera files for Bambu live view (owner decision 2026-10-11), shipped
+    # until EdgeSlicer's go2rtc live view is proven on every platform. BambuSource.dll is Bambu's
+    # DirectShow source filter and live555.dll the RTSP library it loads for X1/H2D/H2C cameras; they
+    # are redistributed unmodified and keep Bambu's own Authenticode signature (windows_sign.ps1 skips
+    # validly signed files; windows_verify_signatures.ps1 -AllowBambuCameraFiles accepts that signer
+    # for these two paths only). They are NOT in this public repo: point CAMERA_BIN_DIR at a folder
+    # holding them (the VM stages C:\Dev\ship\cameratools). They install to <exe dir>\cameratools and
+    # the app copies them into <data dir>\cameratools at start-up (PluginGuard: "The camera module"),
+    # never into plugins\, where UltraNet's storage module of the same name lives. Only these two
+    # named files are taken - never Bambu's network plug-in or the cloud (agora) libraries.
+    if (CAMERA_BIN_DIR AND EXISTS "${CAMERA_BIN_DIR}/BambuSource.dll")
+        install(FILES "${CAMERA_BIN_DIR}/BambuSource.dll" DESTINATION "./cameratools")
+        if (EXISTS "${CAMERA_BIN_DIR}/live555.dll")
+            install(FILES "${CAMERA_BIN_DIR}/live555.dll" DESTINATION "./cameratools")
+        else()
+            message(WARNING "EdgeSlicer: ${CAMERA_BIN_DIR} has BambuSource.dll but no live555.dll - RTSP cameras (X1/H2D/H2C) will not play")
+        endif()
+        message(STATUS "EdgeSlicer: shipping Bambu's camera files from ${CAMERA_BIN_DIR}")
+    elseif (CAMERA_BIN_DIR)
+        message(WARNING "EdgeSlicer: CAMERA_BIN_DIR=${CAMERA_BIN_DIR} holds no BambuSource.dll - no camera files shipped")
+    else()
+        message(STATUS "EdgeSlicer: no CAMERA_BIN_DIR - Bambu live view relies on a filter registered by another install or the camera-component download")
+    endif()
+
     # EdgeSlicer: FlashForge's FlashNetwork library. The FlashForge device tab drives Creator 5 and
     # friends entirely through this closed, pre-built DLL - without it the tab cannot initialise and
     # no LAN send is possible. FlashForge publishes it nowhere: it exists only inside their Flash
@@ -1094,14 +1119,31 @@ if (WIN32)
     #
     #   -DFLASHNETWORK_BIN_DIR=C:/path/to/flashnetwork_out/ship
     #
-    # The library is redistributed unmodified; see docs/superpowers/specs/2026-09-11-flashforge-lan-ship.md
+    # The library is redistributed unmodified (Windows release signing leaves it unsigned unless the
+    # owner opts in, see docs/windows-signing.md); see docs/superpowers/specs/2026-09-11-flashforge-lan-ship.md
     # for its provenance (Flash Studio Desktop 1.7.13) and the sha256 it is pinned to. It is x64 and
     # needs only the MSVC runtime we already ship, so no companion DLLs travel with it.
+    #
+    # It does need one data file: FLASHNETWORK9.DAT, FlashForge's server-settings file, which
+    # fnet_initlize() reads and without which it returns FNET_ERROR - so a package with the DLL and
+    # no DAT has a FlashForge tab that never starts (2.4.2.0). The file is published by FlashForge
+    # in its AGPL-3.0 Orca-Flashforge repository (resources/data/FLASHNETWORK9.DAT); it is
+    # generation-matched to the library (the older FLASHNETWORK7.DAT is rejected by the 3.4.2 DLL),
+    # so it travels in the same ship folder as the DLL rather than in this tree, and installs where
+    # FlashForge's own client reads it: resources/data.
     if (FLASHNETWORK_BIN_DIR AND EXISTS "${FLASHNETWORK_BIN_DIR}/FlashNetwork.dll")
         install(FILES "${FLASHNETWORK_BIN_DIR}/FlashNetwork.dll" DESTINATION ".")
         # Any companion DLLs a future build of the library may need.
         install(DIRECTORY "${FLASHNETWORK_BIN_DIR}/" DESTINATION "." FILES_MATCHING PATTERN "*.dll")
         message(STATUS "EdgeSlicer: shipping FlashForge's FlashNetwork library from ${FLASHNETWORK_BIN_DIR}")
+        file(GLOB _flashnetwork_dats "${FLASHNETWORK_BIN_DIR}/FLASHNETWORK*.DAT")
+        if (_flashnetwork_dats)
+            install(FILES ${_flashnetwork_dats} DESTINATION "./resources/data")
+            message(STATUS "EdgeSlicer: shipping FlashNetwork server settings ${_flashnetwork_dats}")
+        else()
+            message(WARNING "EdgeSlicer: ${FLASHNETWORK_BIN_DIR} has FlashNetwork.dll but no FLASHNETWORK9.DAT - "
+                            "the library will refuse to initialise and the FlashForge tab will not work")
+        endif()
     else()
         message(STATUS "EdgeSlicer: no FLASHNETWORK_BIN_DIR - FlashForge LAN printing will be unavailable in this package")
     endif()
@@ -1116,7 +1158,8 @@ if (WIN32)
     #
     # The build is **LGPL-3.0** (BtbN/FFmpeg-Builds, --disable-libx264 --disable-libx265), chosen
     # over a GPL one so the tool carries no copyleft stronger than the app's own AGPL-3.0. It is
-    # redistributed unmodified as a separate executable that the hub invokes as a subprocess; its
+    # redistributed unmodified (apart from the Authenticode signature Windows release builds add,
+    # docs/windows-signing.md) as a separate executable that the hub invokes as a subprocess; its
     # LICENSE.txt ships beside it and it is listed in CopyrightsDialog::fill_entries(). See
     # docs/superpowers/specs/2026-09-12-bundled-ffmpeg.md for the pinned release tag, the sha256,
     # and why the H.264 encoder is libopenh264 rather than libx264.
@@ -1147,6 +1190,8 @@ elseif (SLIC3R_FHS)
     set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/${SLIC3R_APP_KEY}")
     install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/ DESTINATION ${SLIC3R_FHS_RESOURCES}
         PATTERN "*/udev" EXCLUDE
+        # Windows tool binaries (go2rtc.exe, ffmpeg.exe, DLLs) are no use in a Linux package.
+        REGEX "/resources/tools/.*[.](exe|dll)$" EXCLUDE
     )
     install(FILES src/dev-utils/platform/unix/Snapmaker_Orca.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
     foreach(SIZE 32 128 192)
@@ -1158,7 +1203,42 @@ elseif (CMAKE_MACOSX_BUNDLE)
     # install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/Snapmaker Orca.app/Contents/resources")
 else ()
     install(FILES src/dev-utils/platform/unix/Snapmaker_Orca.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
-    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
+    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources"
+        REGEX "/resources/tools/.*[.](exe|dll)$" EXCLUDE
+    )
+endif ()
+
+# EdgeSlicer: the remote hub's camera tools on Linux (the macOS app gets the same two files from
+# build_release_macos.sh, which assembles the bundle by hand). Stage a folder holding the binaries,
+# unmodified, named exactly `go2rtc` and `ffmpeg`, and point the build at it:
+#
+#   -DGO2RTC_BIN_DIR=/path/to/go2rtc_linux/ship    (go2rtc, MIT, github.com/AlexxIT/go2rtc)
+#   -DFFMPEG_BIN_DIR=/path/to/ffmpeg_linux/ship    (an LGPL build + FFMPEG-LICENSE.txt, as for Windows)
+#
+# They install beside the hub page assets as <resources>/tools/go2rtc/{go2rtc,ffmpeg}, which is
+# where RemoteHub.cpp looks first; without them the hub falls back to a system go2rtc / ffmpeg
+# (/usr/local/bin, /usr/bin, PATH) and, with neither, to relayed video only. Provenance, pinned
+# release tags and sha256 are recorded in docs/superpowers/specs/2026-10-09-hub-posix-parity.md.
+if (UNIX AND NOT APPLE)
+    if (SLIC3R_FHS)
+        set(_hub_tools_dest "${SLIC3R_FHS_RESOURCES}/tools/go2rtc")
+    else ()
+        set(_hub_tools_dest "${CMAKE_INSTALL_PREFIX}/resources/tools/go2rtc")
+    endif ()
+    foreach (_tool go2rtc ffmpeg)
+        string(TOUPPER "${_tool}" _TOOL)
+        if (${_TOOL}_BIN_DIR AND EXISTS "${${_TOOL}_BIN_DIR}/${_tool}")
+            install(PROGRAMS "${${_TOOL}_BIN_DIR}/${_tool}" DESTINATION "${_hub_tools_dest}")
+            foreach (_note FFMPEG-LICENSE.txt LICENSE-NOTE.txt)
+                if (EXISTS "${${_TOOL}_BIN_DIR}/${_note}")
+                    install(FILES "${${_TOOL}_BIN_DIR}/${_note}" DESTINATION "${_hub_tools_dest}")
+                endif ()
+            endforeach ()
+            message(STATUS "EdgeSlicer: shipping ${_tool} for the remote hub from ${${_TOOL}_BIN_DIR}")
+        else ()
+            message(STATUS "EdgeSlicer: no ${_TOOL}_BIN_DIR with a ${_tool} in it - the hub will use a system ${_tool} if there is one")
+        endif ()
+    endforeach ()
 endif ()
 
 install(FILES ${CMAKE_SOURCE_DIR}/LICENSE.txt DESTINATION ".")
@@ -1185,35 +1265,25 @@ set (CPACK_NSIS_MUI_UNIICON "${CPACK_PACKAGE_ICON}")
 set (CPACK_NSIS_INSTALLED_ICON_NAME "$INSTDIR\\\\EdgeSlicer.exe")
 set(CPACK_NSIS_UNINSTALL_NAME "Uninstall")
 # Preinstall guard in one place:
-# 1) Block while app is running.
-# 2) If old version exists, uninstall it with clear failure reason.
+# 1) Find the previous install (its folder is also scanned below).
+# 2) Close every EdgeSlicer process that runs from the new or the previous install folder:
+#    the phone/camera hub (`EdgeSlicer.exe --hub`) and its go2rtc / ffmpeg, which run headless
+#    and used to make the old tasklist check say "EdgeSlicer is still running" with nothing to
+#    close. A window the user has open is asked about, never killed. See SnapmakerCloseRunning.nsh.
+#    This comes BEFORE the old uninstaller runs: that one is the old version's code and only
+#    deletes files, it cannot cope with a hub holding them.
+# 3) If an old version exists, uninstall it with clear failure reason.
 # We keep this in EXTRA_PREINSTALL because CPack's default .onInit uninstall prompt runs before section logic.
 set(CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS [=[
-SnapmakerOrcaPre_check_loop:
-  ; Three arms: the name we ship now, and the two names this fork shipped under before the
-  ; binary rename. An upgrade over either old install must still be blocked while it runs.
-  ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq EdgeSlicer.exe" 2>nul | find /i "EdgeSlicer.exe" >nul' $0
-  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_try_legacy1 SnapmakerOrcaPre_try_legacy1
-SnapmakerOrcaPre_try_legacy1:
-  ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq snapmaker-orca.exe" 2>nul | find /i "snapmaker-orca.exe" >nul' $0
-  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_try_legacy2 SnapmakerOrcaPre_try_legacy2
-SnapmakerOrcaPre_try_legacy2:
-  ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq Snapmaker_Orca.exe" 2>nul | find /i "Snapmaker_Orca.exe" >nul' $0
-  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_idle SnapmakerOrcaPre_idle
-SnapmakerOrcaPre_idle:
-  Goto SnapmakerOrcaPre_done
-SnapmakerOrcaPre_in_use:
-  IfSilent SnapmakerOrcaPre_silent SnapmakerOrcaPre_prompt
-SnapmakerOrcaPre_silent:
-  SetErrorLevel 7
-  Quit
-SnapmakerOrcaPre_prompt:
-  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "EdgeSlicer is still running.$\nClose the program, then click Retry to continue, or Cancel to exit the installer." IDRETRY SnapmakerOrcaPre_check_loop
-  Abort
-SnapmakerOrcaPre_done:
-  ; Only look for a previous install of OURS - never touch the official Snapmaker Orca entry.
-  ; Every name this fork has shipped under is checked, newest first, so the first EdgeSlicer
-  ; installer still finds an UltraOne or a Snapmaker-Ultra install and offers to remove it.
+  ; The closer script travels inside the installer; the uninstaller gets its own copy (see
+  ; SnapmakerURLProtocols_install.nsh) because it cannot extract files.
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\close_edgeslicer.ps1" "@SNORCA_CLOSER_PS1@"
+
+  ; Where was the previous install? Every name this fork has shipped under is checked, newest
+  ; first, so the first EdgeSlicer installer still finds an UltraOne or a Snapmaker-Ultra install
+  ; and offers to remove it. Only look for a previous install of OURS - never touch the official
+  ; Snapmaker Orca entry.
   ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\EdgeSlicer" "UninstallString"
   StrCmp $0 "" 0 +2
   ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\UltraOne" "UninstallString"
@@ -1227,13 +1297,10 @@ SnapmakerOrcaPre_read_hkcu_uninst:
   StrCmp $0 "" 0 +2
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Snapmaker-Ultra" "UninstallString"
 SnapmakerOrcaPre_has_uninst:
-  StrCmp $0 "" SnapmakerOrcaPre_finish
-
-  MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "A previous version (EdgeSlicer, UltraOne or Snapmaker-Ultra) is already installed.$\n$\nDo you want to uninstall the old version before installing the new one?" /SD IDYES IDYES SnapmakerOrcaPre_uninst IDNO SnapmakerOrcaPre_finish
-  Abort
-
-SnapmakerOrcaPre_uninst:
-  ClearErrors
+  ; $0 = the old uninstaller's path (quotes trimmed), $3 = the old install folder. Both "" when
+  ; there is no previous install.
+  StrCpy $3 ""
+  StrCmp $0 "" SnapmakerOrcaPre_close
   StrCpy $2 $0 1 0
   StrCmp $2 "$\"" SnapmakerOrcaPre_trim_first_quote SnapmakerOrcaPre_check_last_quote
 SnapmakerOrcaPre_trim_first_quote:
@@ -1244,18 +1311,33 @@ SnapmakerOrcaPre_check_last_quote:
 SnapmakerOrcaPre_trim_last_quote:
   StrCpy $0 $0 -1
 SnapmakerOrcaPre_have_uninst_path:
-
   StrLen $2 "Uninstall.exe"
   StrCpy $3 $0 -$2
-  ; $3 ends with "\" (e.g. ...\Snapmaker_Orca\). _?="...\" breaks Windows cmdline parsing
-  ; (\" escapes the closing quote), truncating _?= at the first space — strip trailing backslashes.
+  ; $3 ends with "\" (e.g. ...\Snapmaker_Orca\). _?=$DIR breaks Windows cmdline parsing with
+  ; a trailing backslash (\" escapes the closing quote), so strip trailing backslashes.
 SnapmakerOrcaPre_trim_inst_slash:
   StrCpy $2 $3 1 -1
-  StrCmp $2 "\" SnapmakerOrcaPre_do_trim_slash SnapmakerOrcaPre_trim_slash_done
+  StrCmp $2 "\" SnapmakerOrcaPre_do_trim_slash SnapmakerOrcaPre_close
 SnapmakerOrcaPre_do_trim_slash:
   StrCpy $3 $3 -1
   Goto SnapmakerOrcaPre_trim_inst_slash
-SnapmakerOrcaPre_trim_slash_done:
+
+SnapmakerOrcaPre_close:
+  StrCpy $R0 "$INSTDIR"
+  StrCmp $3 "" +2
+    StrCpy $R0 "$INSTDIR|$3"
+  StrCpy $R1 "$PLUGINSDIR\close_edgeslicer.ps1"
+  Call EdgeSlicerCloseRunning
+  StrCmp $R9 "0" +2
+    Abort
+
+  StrCmp $0 "" SnapmakerOrcaPre_finish
+
+  MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "A previous version of EdgeSlicer is already installed.$\n$\nDo you want to uninstall the old version before installing the new one?" /SD IDYES IDYES SnapmakerOrcaPre_uninst IDNO SnapmakerOrcaPre_finish
+  Abort
+
+SnapmakerOrcaPre_uninst:
+  ClearErrors
   IfFileExists "$0" 0 SnapmakerOrcaPre_uninst_launch_failed
   ; Same as CMake CPack NSIS.template.in and NSIS maintainer guidance: use _?=$DIR with NO
   ; extra quotes around the directory. _?="C:\Program Files\..." breaks parsing (log shows
@@ -1274,8 +1356,35 @@ SnapmakerOrcaPre_uninst_launch_failed:
 
 SnapmakerOrcaPre_finish:
 ]=])
+# The closer script path, as the NSIS File command wants it, goes in where the token is.
+file(TO_NATIVE_PATH "${CMAKE_SOURCE_DIR}/cmake/nsis/close_edgeslicer.ps1" SNORCA_CLOSER_PS1)
+string(REPLACE "@SNORCA_CLOSER_PS1@" "${SNORCA_CLOSER_PS1}" CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS "${CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS}")
+# Function definitions (EdgeSlicerCloseRunning and its un. twin) go to the top level of the script.
+file(READ "${CMAKE_SOURCE_DIR}/cmake/nsis/SnapmakerCloseRunning.nsh" CPACK_NSIS_DEFINES)
 file(READ "${CMAKE_SOURCE_DIR}/cmake/nsis/SnapmakerURLProtocols_install.nsh" CPACK_NSIS_EXTRA_INSTALL_COMMANDS)
 file(READ "${CMAKE_SOURCE_DIR}/cmake/nsis/SnapmakerURLProtocols_uninstall.nsh" CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS)
+# The uninstaller cannot extract files, so the installer leaves the closer script next to it.
+# Uninstalling closes the hub the same way installing does, then removes the copy again.
+string(APPEND CPACK_NSIS_EXTRA_INSTALL_COMMANDS [=[
+
+; Copy of the closer script for the uninstaller (see SnapmakerCloseRunning.nsh).
+SetOutPath "$INSTDIR\installer_helpers"
+File "/oname=$INSTDIR\installer_helpers\close_edgeslicer.ps1" "@SNORCA_CLOSER_PS1@"
+SetOutPath "$INSTDIR"
+]=])
+string(REPLACE "@SNORCA_CLOSER_PS1@" "${SNORCA_CLOSER_PS1}" CPACK_NSIS_EXTRA_INSTALL_COMMANDS "${CPACK_NSIS_EXTRA_INSTALL_COMMANDS}")
+string(PREPEND CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS [=[
+; Close the hub (EdgeSlicer.exe --hub), its go2rtc / ffmpeg and anything else running from this
+; folder first, or the delete below leaves the files they hold behind.
+StrCpy $R0 "$INSTDIR"
+StrCpy $R1 "$INSTDIR\installer_helpers\close_edgeslicer.ps1"
+Call un.EdgeSlicerCloseRunning
+StrCmp $R9 "0" +2
+  Abort
+Delete "$INSTDIR\installer_helpers\close_edgeslicer.ps1"
+RMDir "$INSTDIR\installer_helpers"
+
+]=])
 # Desktop shortcut inside MUI_STARTMENU_WRITE_BEGIN: respects "do not create shortcuts" on the start menu page.
 set(CPACK_NSIS_CREATE_ICONS_EXTRA [=[
   SetShellVarContext current
@@ -1403,4 +1512,6 @@ FunctionEnd
     file(WRITE "${_snapmaker_nsis_tpl_dir}/NSIS.template.in" "${_snapmaker_nsis_tpl}")
     list(PREPEND CMAKE_MODULE_PATH "${_snapmaker_nsis_tpl_dir}")
 endif ()
+# Authenticode signing hooks (option EDGESLICER_SIGN_WINDOWS, default OFF: adds nothing).
+include(${CMAKE_SOURCE_DIR}/cmake/signing/WindowsSigning.cmake)
 include(CPack)

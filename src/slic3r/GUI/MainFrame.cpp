@@ -1,4 +1,5 @@
 #include "MainFrame.hpp"
+#include "PrintSelectKeys.hpp"
 
 #include <wx/panel.h>
 #include <wx/notebook.h>
@@ -53,10 +54,13 @@
 #include "Preferences.hpp"
 #include "Widgets/ProgressDialog.hpp"
 #include "BindDialog.hpp"
+#include "AccountStatus.hpp"
+#include "RemoteHub.hpp"
 #include "../Utils/MacDarkMode.hpp"
 
 #include <fstream>
 #include <string_view>
+#include <thread>
 #include <iomanip>
 #include <sstream>
 #include <cstdlib>
@@ -65,18 +69,21 @@
 #include <ctime>
 
 #include "GUI_App.hpp"
-#include "FilamentGroupDialog.hpp"
+#include "CostsDialog.hpp"
 #include "DualNozzleState.hpp"
 #include "FlowTypeHelper.hpp"
 #include "SliceModePopup.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "MsgDialog.hpp"
 #include "Notebook.hpp"
+#include "Theme.hpp"
 #include "GUI_Factories.hpp"
 #include "GUI_ObjectList.hpp"
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
 #include "NetworkTestDialog.hpp"
+#include "FirewallCheckDialog.hpp"
+#include "BambuSetupNoticeDialog.hpp"
 #include "ConfigWizard.hpp"
 #include "Widgets/WebView.hpp"
 #include "DailyTips.hpp"
@@ -286,7 +293,8 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     m_topbar         = new BBLTopbar(this);
 #else
     auto panel_topbar = new wxPanel(this, wxID_ANY);
-    panel_topbar->SetBackgroundColour(wxColour(38, 46, 48));
+    panel_topbar->SetBackgroundColour(Theme::colour("titlebar_bg", wxColour(38, 46, 48)));
+    m_mac_topbar_panel = panel_topbar;
     auto sizer_tobar = new wxBoxSizer(wxVERTICAL);
     panel_topbar->SetSizer(sizer_tobar);
     panel_topbar->Layout();
@@ -323,8 +331,12 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     switch (wxGetApp().get_app_mode()) {
     default:
     case GUI_App::EAppMode::Editor:
+        // Only for the Dock menu (CreatePopupMenu); wx registers it in the constructor. No
+        // SetIcon(): on a wxTBI_DOCK icon that calls [NSApp setApplicationIconImage:], which
+        // replaced the bundle's Icon.icns (padded to Apple's icon grid) with the unpadded
+        // Windows .ico art the moment the main window opened, so the running Dock tile no
+        // longer matched the installed app. Without it the Dock shows the bundle icon.
         m_taskbar_icon = std::make_unique<Snapmaker_OrcaTaskBarIcon>(wxTBI_DOCK);
-        m_taskbar_icon->SetIcon(wxIcon(Slic3r::var("EdgeSlicer-mac_256px.ico"), wxBITMAP_TYPE_ICO), "EdgeSlicer");
         break;
     case GUI_App::EAppMode::GCodeViewer:
         break;
@@ -629,7 +641,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
     if (m_plater != nullptr) {
         // BBS
-        update_slice_print_status(eEventSliceUpdate, true, true);
+        // Constructor-time init: bypass the teardown guard in
+        // update_slice_print_status — mainframe is not registered yet.
+        update_slice_print_status_impl(eEventSliceUpdate, true, true);
 
         // BBS: backup project
         if (wxGetApp().app_config->get("backup_switch") == "true") {
@@ -1095,15 +1109,16 @@ void MainFrame::update_autosave_timer()
 }
 
 // Called when closing the application and when switching the application language.
-void MainFrame::request_quit(bool discard)
+bool MainFrame::request_quit(bool discard)
 {
     m_quit_requested = true;
-    Close(discard); // discard -> CanVeto() == false -> no prompts at all
+    return Close(discard); // discard -> CanVeto() == false -> no prompts at all; false: the user cancelled
 }
 
 void MainFrame::shutdown(bool isRecreate)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "MainFrame::shutdown enter";
+    m_shutting_down = true;
     // First of all: no phone/agent request, send or control job may queue work for the GUI thread
     // any more, and what is already queued is dropped. The Plater is torn down below and freed
     // with this frame, and a request that ran after that crashed (c2a7d4de, 2026-09-22). A quit
@@ -1264,13 +1279,12 @@ LazyPanelHolder* MainFrame::make_calibration_holder()
     });
 }
 
-LazyPanelHolder* MainFrame::make_multi_machine_holder()
+LazyPanelHolder* MainFrame::make_printers_holder()
 {
-    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=MultiMachinePage", [this](wxWindow* parent) -> wxWindow* {
-        m_multi_machine = new MultiMachinePage(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-        m_multi_machine->SetBackgroundColour(*wxWHITE);
-        apply_theme_to_lazy_panel(m_multi_machine);
-        return m_multi_machine;
+    // Lazy like the others: the page is a web view, built when the tab is first opened.
+    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=PrintersPanel", [this](wxWindow* parent) -> wxWindow* {
+        m_printers = new PrintersPanel(parent);
+        return m_printers;
     });
 }
 
@@ -1313,8 +1327,26 @@ CalibrationPanel* MainFrame::calibration()
 
 MultiMachinePage* MainFrame::multi_machine()
 {
-    if (m_multi_machine == nullptr && m_multi_machine_holder != nullptr)
-        m_multi_machine_holder->realize();
+    // The old Multi-device tab's pages (Device / Task Sending / Task Sent) live on for the cloud
+    // "Send to Multi-device" dialog, in a window of their own: the Printers tab took their slot.
+    if (m_multi_machine == nullptr) {
+        m_multi_machine_dlg = new wxDialog(this, wxID_ANY, _L("Multi-device tasks"), wxDefaultPosition, wxDefaultSize,
+                                           wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX);
+        m_multi_machine = new MultiMachinePage(m_multi_machine_dlg, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_multi_machine->SetBackgroundColour(*wxWHITE);
+        auto* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(m_multi_machine, 1, wxEXPAND);
+        m_multi_machine_dlg->SetSizer(sizer);
+        m_multi_machine_dlg->SetSize(m_multi_machine_dlg->FromDIP(wxSize(1000, 700)));
+        m_multi_machine_dlg->CentreOnParent();
+        // Closing hides the window (its pages keep their state) and stops their refresh timer.
+        m_multi_machine_dlg->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent&) {
+            if (m_multi_machine)
+                m_multi_machine->Show(false);
+            m_multi_machine_dlg->Hide();
+        });
+        apply_theme_to_lazy_panel(m_multi_machine_dlg);
+    }
     return m_multi_machine;
 }
 
@@ -1381,8 +1413,7 @@ void MainFrame::init_tabpanel() {
 
         // Send "inactive" to previous tab if leaving a monitored tab
         if (prev_monitored_tab == tpHome && sel != tpHome) {
-            // Leaving Home: the hub view pauses; the start page (if it is the one showing) hears
-            // "inactive" from HomePanel.
+            // Leaving Home: the start page (if it is the one showing) hears "inactive" from HomePanel.
             if (m_home)
                 m_home->on_tab_changed(false);
         } else if (prev_monitored_tab == tpMonitor && sel != tpMonitor) {
@@ -1395,8 +1426,8 @@ void MainFrame::init_tabpanel() {
 
         // Send "active" to current tab if entering a monitored tab
         if (sel == tpHome) {
-            // Entering Home: the hub view loads (first time) or re-checks the hub; the start page
-            // (if it is the one showing) hears "active" from HomePanel.
+            // Entering Home: the Home page is built (first time) or refreshed; the start page (if it
+            // is the one showing) hears "active" from HomePanel.
             if (m_home)
                 m_home->on_tab_changed(true);
             prev_monitored_tab = tpHome;
@@ -1438,8 +1469,8 @@ void MainFrame::init_tabpanel() {
 
     if (wxGetApp().is_editor()) {
         {
-            // Home shows the phone hub. The old start page (m_webview) is built only when asked
-            // for (show_start_page / start_page), so nothing loads it at startup any more.
+            // Home shows Recent and Print History. The old start page (m_webview) is built only when
+            // asked for (show_start_page / start_page), so nothing loads it at startup any more.
             Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=HomePanel");
             m_home = new HomePanel(m_tabpanel);
         }
@@ -1499,16 +1530,17 @@ void MainFrame::init_tabpanel() {
     Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent &evt) {
         wxString url = evt.GetString();
         wxString key = evt.GetAPIkey();
-        m_printer_view->load_url(url, key);
+        m_printer_view->load_url(url, key, evt.GetInt() ? DevicePageLoad::Kind::Reload : DevicePageLoad::Kind::Show);
     });
 
     m_printer_view->Hide();
 
-    if (wxGetApp().is_enable_multi_machine()) {
-        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=MultiMachinePage(deferred)");
-        m_multi_machine_holder = make_multi_machine_holder();
-        // TODO: change the bitmap
-        m_tabpanel->AddPage(m_multi_machine_holder, _L("Multi-device"), std::string("tab_multi_active"), std::string("tab_multi_active"), false);
+    {
+        // Printers: every printer at a glance. Always present (whatever the printer preset and the
+        // "Multi-device Management" preference), in the slot the Multi-device tab had (tpPrinters).
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=PrintersPanel(deferred)");
+        m_printers_holder = make_printers_holder();
+        m_tabpanel->AddPage(m_printers_holder, _L("Printers"), std::string("tab_multi_active"), std::string("tab_multi_active"), false);
     }
 
     {
@@ -1570,19 +1602,11 @@ void MainFrame::show_device(bool bBBLPrinter) {
         m_monitor_holder->Show(false);
         m_tabpanel->InsertPage(tpMonitor, m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
 
-        if (wxGetApp().is_enable_multi_machine()) {
-            if (!m_multi_machine_holder)
-                m_multi_machine_holder = make_multi_machine_holder();
-            // TODO: change the bitmap
-            m_multi_machine_holder->Show(false);
-            m_tabpanel->InsertPage(tpMultiDevice, m_multi_machine_holder, _L("Multi-device"), std::string("tab_multi_active"),
-                                   std::string("tab_multi_active"), false);
-        }
         if (!m_calibration_holder)
             m_calibration_holder = make_calibration_holder();
         m_calibration_holder->Show(false);
-        // Calibration is always the last page, so don't use InsertPage here. Otherwise, if multi_machine page is not enabled,
-        // the calibration tab won't be properly added as well, due to the TabPosition::tpCalibration no longer matches the real tab position.
+        // Calibration is always the last page, so don't use InsertPage here: AddPage needs no index to agree
+        // with TabPosition::tpCalibration.
         m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"),
                                std::string("tab_calibration_active"), false);
 
@@ -1598,10 +1622,6 @@ void MainFrame::show_device(bool bBBLPrinter) {
             m_calibration_holder->Show(false);
             m_tabpanel->RemovePage(idx);
         }
-        if (m_multi_machine_holder && (idx = m_tabpanel->FindPage(m_multi_machine_holder)) != wxNOT_FOUND) {
-            m_multi_machine_holder->Show(false);
-            m_tabpanel->RemovePage(idx);
-        }
         if (m_monitor_holder && (idx = m_tabpanel->FindPage(m_monitor_holder)) != wxNOT_FOUND) {
             m_monitor_holder->Show(false);
             m_tabpanel->RemovePage(idx);
@@ -1611,7 +1631,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
             Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent& evt) {
                 wxString url = evt.GetString();
                 wxString key = evt.GetAPIkey();
-                m_printer_view->load_url(url, key);
+                m_printer_view->load_url(url, key, evt.GetInt() ? DevicePageLoad::Kind::Reload : DevicePageLoad::Kind::Show);
             });
         }
         m_printer_view->Show(false);
@@ -1628,10 +1648,6 @@ void MainFrame::show_flashforge_device()
     int idx;
     if (m_calibration_holder && (idx = m_tabpanel->FindPage(m_calibration_holder)) != wxNOT_FOUND) {
         m_calibration_holder->Show(false);
-        m_tabpanel->RemovePage(idx);
-    }
-    if (m_multi_machine_holder && (idx = m_tabpanel->FindPage(m_multi_machine_holder)) != wxNOT_FOUND) {
-        m_multi_machine_holder->Show(false);
         m_tabpanel->RemovePage(idx);
     }
     if (m_monitor_holder && (idx = m_tabpanel->FindPage(m_monitor_holder)) != wxNOT_FOUND) {
@@ -2001,6 +2017,126 @@ bool MainFrame::can_reslice() const
     return (m_plater != nullptr) && !m_plater->model().objects.empty();
 }
 
+namespace {
+// Static check: PrintSelectKeys integers must stay aligned with PrintSelectType.
+static_assert(static_cast<int>(MainFrame::ePrintAll) == PrintSelectKeys::ePrintAll);
+static_assert(static_cast<int>(MainFrame::ePrintPlate) == PrintSelectKeys::ePrintPlate);
+static_assert(static_cast<int>(MainFrame::eExportSlicedFile) == PrintSelectKeys::eExportSlicedFile);
+static_assert(static_cast<int>(MainFrame::eExportGcode) == PrintSelectKeys::eExportGcode);
+static_assert(static_cast<int>(MainFrame::eSendGcode) == PrintSelectKeys::eSendGcode);
+static_assert(static_cast<int>(MainFrame::eSendToPrinter) == PrintSelectKeys::eSendToPrinter);
+static_assert(static_cast<int>(MainFrame::eSendToPrinterAll) == PrintSelectKeys::eSendToPrinterAll);
+static_assert(static_cast<int>(MainFrame::eUploadGcode) == PrintSelectKeys::eUploadGcode);
+static_assert(static_cast<int>(MainFrame::eExportAllSlicedFile) == PrintSelectKeys::eExportAllSlicedFile);
+static_assert(static_cast<int>(MainFrame::ePrintMultiMachine) == PrintSelectKeys::ePrintMultiMachine);
+
+const char *print_select_type_key(MainFrame::PrintSelectType type)
+{
+    return PrintSelectKeys::key(static_cast<int>(type));
+}
+
+// Single source for the print button and print dropdown labels. Keep Edge's strings
+// (eSendGcode is _L("Print"), not upstream's _L_CONTEXT("Print","Verb")).
+wxString print_select_type_label(MainFrame::PrintSelectType type)
+{
+    switch (type) {
+    case MainFrame::ePrintAll:            return _L("Print all");
+    case MainFrame::ePrintPlate:          return _L("Print plate");
+    case MainFrame::eExportSlicedFile:    return _L("Export plate sliced file");
+    case MainFrame::eExportAllSlicedFile: return _L("Export all sliced file");
+    case MainFrame::eExportGcode:         return _L("Export G-code file");
+    case MainFrame::eSendGcode:           return _L("Print");
+    case MainFrame::eSendToPrinter:       return _L("Send");
+    case MainFrame::eSendToPrinterAll:    return _L("Send all");
+    case MainFrame::ePrintMultiMachine:   return _L("Send to Multi-device");
+    case MainFrame::eUploadGcode:         break; // no dropdown entry
+    }
+    return _L("Print plate");
+}
+} // namespace
+
+std::vector<MainFrame::PrintSelectType> MainFrame::available_print_actions() const
+{
+    std::vector<PrintSelectType> actions;
+    const auto                   preset_bundle = wxGetApp().preset_bundle;
+
+    if (preset_bundle && !preset_bundle->is_bbl_vendor()) {
+        // Third-party: Print (send gcode), both sliced-file exports, Export G-code.
+        // A plate-sliced file ("<name>.gcode.3mf") is not a Bambu-only artefact: the Flashforge
+        // Creator 5 and other third-party hosts consume it, and File > Export already offers it
+        // via can_export_gcode() (Ctrl+G). Upstream gates the sliced-file item on use_3mf; Edge
+        // offers both exports to every vendor.
+        actions.push_back(eSendGcode);
+        actions.push_back(eExportSlicedFile);
+        actions.push_back(eExportAllSlicedFile);
+        actions.push_back(eExportGcode);
+        return actions;
+    }
+
+    // BBL vendor (LAN or cloud): Print plate, optional Multi-device, both sliced-file exports,
+    // Export G-code. No Print all / Send / Send all on Edge. The native print flow is ePrintPlate
+    // / EVT_GLTOOLBAR_PRINT_PLATE (SelectMachineDialog). eSendGcode is the third-party print-host
+    // flow and additionally gates on can_send_gcode(); keep the label and the enum in sync with
+    // set_print_button_to_default(ePrintPlate) and the Ctrl+Shift+G shortcut.
+    actions.push_back(ePrintPlate);
+    if (enable_multi_machine)
+        actions.push_back(ePrintMultiMachine);
+    actions.push_back(eExportSlicedFile);
+    actions.push_back(eExportAllSlicedFile);
+    actions.push_back(eExportGcode);
+    return actions;
+}
+
+void MainFrame::apply_print_select_state(PrintSelectType select_type)
+{
+    // Dropdown path (and the shared setup for set_print_button_to_default): (1) set the label,
+    // (2) set m_print_select to the SAME enum the matching dropdown item uses, and (3)
+    // unconditionally recompute m_print_enable from get_enable_print_status() only — the same
+    // enable rule a dropdown pick used on main. The extra can_send_gcode() gate for eSendGcode
+    // lives only in set_print_button_to_default; export actions never depend on a print host, so
+    // "Export G-code file" is not greyed when no print host is configured.
+    m_print_btn->SetLabel(print_select_type_label(select_type));
+    m_print_select = select_type;
+    m_print_enable = get_enable_print_status();
+    m_print_btn->Enable(m_print_enable);
+    this->Layout();
+}
+
+void MainFrame::select_print_action(PrintSelectType select_type)
+{
+    apply_print_select_state(select_type);
+    remember_print_select(select_type);
+}
+
+void MainFrame::remember_print_select(PrintSelectType select_type)
+{
+    if (!wxGetApp().app_config->get_bool("remember_print_action"))
+        return;
+    // AppConfig is marked dirty here and flushed by the regular autosave.
+    wxGetApp().app_config->set("last_print_action", print_select_type_key(select_type));
+}
+
+bool MainFrame::get_remembered_print_select(PrintSelectType &out) const
+{
+    if (!wxGetApp().app_config->get_bool("remember_print_action"))
+        return false;
+    const auto        offered = available_print_actions();
+    std::vector<int>  offered_ints;
+    offered_ints.reserve(offered.size());
+    for (PrintSelectType type : offered)
+        offered_ints.push_back(static_cast<int>(type));
+    const int resolved = PrintSelectKeys::resolve_or_default(wxGetApp().app_config->get("last_print_action"),
+                                                            offered_ints.data(), offered_ints.size(), -1);
+    if (resolved < 0)
+        return false;
+    // Edge: do not restore send_gcode when this printer cannot send (no host). Upstream
+    // would still restore it and leave Print greyed; we fall back to the computed default.
+    if (resolved == static_cast<int>(eSendGcode) && !can_send_gcode())
+        return false;
+    out = static_cast<PrintSelectType>(resolved);
+    return true;
+}
+
 wxBoxSizer* MainFrame::create_side_tools()
 {
     enable_multi_machine = wxGetApp().is_enable_multi_machine();
@@ -2016,6 +2152,14 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_print_btn = new SideButton(this, _L("Print plate"), "");
     m_print_option_btn = new SideButton(this, "", "sidebutton_dropdown", 0, 14);
 
+    // Restore the last used print/export action if the user opted to remember it.
+    // preset_bundle may not be final here; Plater's printer-switch calls re-validate.
+    PrintSelectType remembered_print_select;
+    if (get_remembered_print_select(remembered_print_select)) {
+        m_print_select = remembered_print_select;
+        m_print_btn->SetLabel(print_select_type_label(remembered_print_select));
+    }
+
     update_side_button_style();
     // m_publish_btn->Hide();
     m_slice_option_btn->Enable();
@@ -2030,7 +2174,7 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_slice_mode_popup = new SliceModePopup(this);
     auto try_show_slice_mode_popup = [this](wxMouseEvent &e) {
         e.Skip();
-        if (m_slice_enable && GUI::FlowType::distinct_nozzle_flow_type_count() >= 2)
+        if (m_slice_enable && GUI::FlowType::slice_mode_popup_enabled()) // D8: never on dual-nozzle Bambu
             m_slice_mode_popup->ShowFor({m_slice_btn, m_slice_option_btn}, m_slice_btn);
     };
     m_slice_btn->Bind(wxEVT_ENTER_WINDOW, try_show_slice_mode_popup);
@@ -2057,13 +2201,6 @@ wxBoxSizer* MainFrame::create_side_tools()
         {
             if (m_slice_mode_popup)
                 m_slice_mode_popup->HidePopup();
-            if (GUI::FlowType::grouping_mode() == FILAMENT_GROUPING_CUSTOM && GUI::FlowType::distinct_nozzle_flow_type_count() >= 2) {
-                GUI::FilamentGroupDialog dlg(this);
-                if (dlg.ShowModal() != wxID_OK)
-                    return;
-            } else {
-                GUI::FlowType::sync_filament_volume_types_for_slice();
-            }
             start_slice();
         });
 
@@ -2159,165 +2296,15 @@ wxBoxSizer* MainFrame::create_side_tools()
     m_print_option_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& event)
         {
         SidePopup* p = new SidePopup(this);
-
-        if (wxGetApp().preset_bundle && !wxGetApp().preset_bundle->is_bbl_vendor())
-        //if (0)
-        {
-            // ThirdParty Buttons
-            SideButton* export_gcode_btn = new SideButton(p, _L("Export G-code file"), "");
-            export_gcode_btn->SetCornerRadius(0);
-            export_gcode_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Export G-code file"));
-                m_print_select = eExportGcode;
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                this->Layout();
+        for (PrintSelectType type : available_print_actions()) {
+            SideButton* btn = new SideButton(p, print_select_type_label(type), "");
+            btn->SetCornerRadius(0);
+            btn->Bind(wxEVT_BUTTON, [this, p, type](wxCommandEvent&) {
+                select_print_action(type);
                 p->Dismiss();
             });
-
-            // upload and print
-            SideButton* send_gcode_btn = new SideButton(p, _L("Print"), "");
-            send_gcode_btn->SetCornerRadius(0);
-            send_gcode_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Print"));
-                m_print_select = eSendGcode;
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                this->Layout();
-                p->Dismiss();
-            });
-
-            // A plate-sliced file ("<name>.gcode.3mf") is not a Bambu-only artefact: it is what
-            // the Flashforge Creator 5 and other third-party hosts consume, and File > Export
-            // already offers it to every vendor via can_export_gcode() (Ctrl+G). Only this
-            // dropdown withheld it, so a C5 owner had no way to reach it from the Print button.
-            // Both selections are vendor-neutral downstream: get_enable_print_status() gates
-            // them on is_slice_result_ready_for_export() alone and the events land on
-            // Plater::export_gcode_3mf(), which names the file ".gcode.3mf".
-            SideButton* export_sliced_file_btn = new SideButton(p, _L("Export plate sliced file"), "");
-            export_sliced_file_btn->SetCornerRadius(0);
-            export_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Export plate sliced file"));
-                m_print_select = eExportSlicedFile;
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                this->Layout();
-                p->Dismiss();
-            });
-
-            SideButton* export_all_sliced_file_btn = new SideButton(p, _L("Export all sliced file"), "");
-            export_all_sliced_file_btn->SetCornerRadius(0);
-            export_all_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Export all sliced file"));
-                m_print_select = eExportAllSlicedFile;
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                this->Layout();
-                p->Dismiss();
-            });
-
-            p->append_button(send_gcode_btn);
-            p->append_button(export_sliced_file_btn);
-            p->append_button(export_all_sliced_file_btn);
-            p->append_button(export_gcode_btn);
-        } else {
-            // BBL vendor (LAN or cloud): the native print flow is ePrintPlate /
-            // EVT_GLTOOLBAR_PRINT_PLATE, which on_action_print_plate() wires to
-            // SelectMachineDialog. eSendGcode/send_gcode_legacy() is the third-party
-            // print-host flow (bound above for !is_bbl_vendor()) and additionally gates
-            // on can_send_gcode(), i.e. PrintHostDevices::can_send_for() / a non-empty
-            // print_host - neither of which a native Bambu printer normally populates.
-            // This item used to set m_print_select = eSendGcode while showing the same
-            // "Print" label as the default ePrintPlate state, so re-selecting "Print"
-            // after e.g. "Export plate sliced file" would wrongly gate the button on
-            // can_send_gcode() and leave it greyed out even though the plate was
-            // print-ready. Keep the label and the enum in sync with
-            // set_print_button_to_default(ePrintPlate) and the Ctrl+Shift+G shortcut
-            // ("Print plate" in KBShortcutsDialog).
-            SideButton* print_plate_btn = new SideButton(p, _L("Print plate"), "");
-            print_plate_btn->SetCornerRadius(0);
-
-            SideButton* export_sliced_file_btn = new SideButton(p, _L("Export plate sliced file"), "");
-            export_sliced_file_btn->SetCornerRadius(0);
-
-            SideButton* export_all_sliced_file_btn = new SideButton(p, _L("Export all sliced file"), "");
-            export_all_sliced_file_btn->SetCornerRadius(0);
-
-            print_plate_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Print plate"));
-                m_print_select = ePrintPlate;
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                this->Layout();
-                p->Dismiss();
-            });
-
-            export_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Export plate sliced file"));
-                m_print_select = eExportSlicedFile;
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                this->Layout();
-                p->Dismiss();
-            });
-
-            export_all_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Export all sliced file"));
-                m_print_select = eExportAllSlicedFile;
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                this->Layout();
-                p->Dismiss();
-            });
-
-            bool support_send      = true;
-            bool support_print_all = true;
-
-            const auto preset_bundle = wxGetApp().preset_bundle;
-            if (preset_bundle) {
-                if (preset_bundle->use_bbl_network()) {
-                    // BBL network support everything
-                } else {
-                    support_send = false; // All 3rd print hosts do not have the send options
-
-                    auto       cfg       = preset_bundle->printers.get_edited_preset().config;
-                    const auto host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
-
-                    // Only simply print support uploading all plates
-                    support_print_all = host_type == PrintHostType::htSimplyPrint;
-                }
-            }
-
-            p->append_button(print_plate_btn);
-
-            if (enable_multi_machine) {
-                SideButton* print_multi_machine_btn = new SideButton(p, _L("Send to Multi-device"), "");
-                print_multi_machine_btn->SetCornerRadius(0);
-                print_multi_machine_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                    m_print_btn->SetLabel(_L("Send to Multi-device"));
-                    m_print_select = ePrintMultiMachine;
-                    m_print_enable = get_enable_print_status();
-                    m_print_btn->Enable(m_print_enable);
-                    this->Layout();
-                    p->Dismiss();
-                });
-                p->append_button(print_multi_machine_btn);
-            }
-            p->append_button(export_sliced_file_btn);
-            p->append_button(export_all_sliced_file_btn);
-            SideButton* export_gcode_btn = new SideButton(p, _L("Export G-code file"), "");
-            export_gcode_btn->SetCornerRadius(0);
-            export_gcode_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Export G-code file"));
-                m_print_select = eExportGcode;
-                m_print_enable = get_enable_print_status();
-                m_print_btn->Enable(m_print_enable);
-                this->Layout();
-                p->Dismiss();
-            });
-            p->append_button(export_gcode_btn);
+            p->append_button(btn);
         }
-
         p->Popup(m_print_btn);
          }
     );
@@ -2535,6 +2522,32 @@ void MainFrame::update_side_button_style()
 
 void MainFrame::update_slice_print_status(SlicePrintEventType event, bool can_slice, bool can_print)
 {
+    // Stale callbacks may still reach this after the frame was torn down by
+    // recreate_GUI / shutdown; skip the UI update and log loudly in that
+    // state. The leading checks do not dereference this.
+    //
+    // The MainFrame constructor updates its initial button state through
+    // update_slice_print_status_impl instead: at construction time
+    // wxGetApp().mainframe does not point at this frame yet, so going
+    // through this entry the mainframe != this check would always fire and
+    // log a false PROBE-ABNORMAL on every startup / recreate.
+    MainFrame* live_frame = wxGetApp().mainframe;
+    if ((live_frame && live_frame != this) || m_shutting_down || IsBeingDeleted()) {
+        std::string probe = std::string(__FUNCTION__) + " PROBE-ABNORMAL"
+            + " event=" + std::to_string(static_cast<int>(event))
+            + " can_slice=" + std::to_string(can_slice)
+            + " can_print=" + std::to_string(can_print)
+            + " stale_this=" + std::to_string(live_frame != this)
+            + " being_deleted=" + std::to_string(IsBeingDeleted())
+            + " shutting_down=" + std::to_string(m_shutting_down);
+        BOOST_LOG_TRIVIAL(warning) << probe;
+        return;
+    }
+    update_slice_print_status_impl(event, can_slice, can_print);
+}
+
+void MainFrame::update_slice_print_status_impl(SlicePrintEventType event, bool can_slice, bool can_print)
+{
     bool enable_print = true, enable_slice = true;
 
     if (event == eEventPlateUpdate)
@@ -2648,6 +2661,16 @@ void MainFrame::on_sys_color_changed()
     // update label colors in respect to the system mode
     wxGetApp().init_label_colours();
 
+    // A UI theme colours the bar behind the tab buttons and the title bar. Both were set when they
+    // were built, so redo them: this is also how a live theme switch reaches them (Theme.hpp).
+    m_tabpanel->GetBtnsListCtrl()->UpdateColours();
+    if (m_topbar)
+        m_topbar->ThemeChanged();
+    if (m_mac_topbar_panel) {
+        m_mac_topbar_panel->SetBackgroundColour(Theme::colour("titlebar_bg", wxColour(38, 46, 48)));
+        m_mac_topbar_panel->Refresh();
+    }
+
 #ifndef __WINDOWS__
     wxGetApp().force_colors_update();
     wxGetApp().update_ui_from_settings();
@@ -2685,6 +2708,9 @@ void MainFrame::on_sys_color_changed()
     // Before RecreateAll: the hub view switches theme in place (it is excluded from the reload).
     if (m_home)
         m_home->sys_color_changed();
+    // So does the Printers page.
+    if (m_printers)
+        m_printers->sys_color_changed();
     WebView::RecreateAll();
 
     this->Refresh();
@@ -2763,6 +2789,19 @@ static wxMenu* generate_help_menu()
         NetworkTestDialog dlg(wxGetApp().mainframe);
         dlg.ShowModal();
     });
+
+    // Windows Firewall dropping Bambu LAN discovery (UDP 2021/1990) is the usual reason printers
+    // never show up in the Device list; the dialog reads the rules and offers a one-UAC fix.
+    // Windows only: there is no Windows Firewall to check elsewhere.
+    if (FirewallCheckDialog::supported())
+        append_menu_item(helpMenu, wxID_ANY, _L("Check Windows Firewall..."),
+                         _L("Check whether Windows Firewall blocks printer discovery, and fix its rules"),
+                         [](wxCommandEvent&) { FirewallCheckDialog::show_modal(wxGetApp().mainframe); });
+
+    // The checklist the first-time notice shows (account, firewall, LAN mode, access code, SD card, network).
+    append_menu_item(helpMenu, wxID_ANY, _L("Bambu Lab Printer Help..."),
+                     _L("What a Bambu Lab printer needs to show up and connect"),
+                     [](wxCommandEvent&) { BambuSetupNoticeDialog::show_modal(wxGetApp().mainframe); });
 
     // About
 #ifndef __APPLE__
@@ -2870,6 +2909,8 @@ void MainFrame::refresh_account_menu(wxMenu* menu)
             append_menu_item(m_account_menu, wxID_ANY, _L("Log out of Bambu Account"), _L("Sign out of your Bambu Lab account"),
                 [](wxCommandEvent&) { wxGetApp().request_user_logout(); });
         } else {
+            wxMenuItem* who = m_account_menu->Append(wxID_ANY, _L("Bambu Lab") + ": " + _L("signed out"));
+            who->Enable(false);
             append_menu_item(m_account_menu, wxID_ANY, _L("Log in to Bambu Account..."), _L("Sign in to your Bambu Lab account to see your cloud printers"),
                 [](wxCommandEvent&) { wxGetApp().request_login(true); });
         }
@@ -2885,10 +2926,71 @@ void MainFrame::refresh_account_menu(wxMenu* menu)
             append_menu_item(m_account_menu, wxID_ANY, _L("Log out of Snapmaker Account"), _L("Sign out of your Snapmaker account"),
                 [](wxCommandEvent&) { wxGetApp().sm_request_user_logout(); });
         } else {
+            wxMenuItem* who = m_account_menu->Append(wxID_ANY, _L("Snapmaker") + ": " + _L("signed out"));
+            who->Enable(false);
             append_menu_item(m_account_menu, wxID_ANY, _L("Log in to Snapmaker Account..."), _L("Sign in to your Snapmaker account"),
                 [](wxCommandEvent&) { wxGetApp().sm_request_login(true); });
         }
     }
+}
+
+// What refresh_account_menu() would show right now, as one string: the selected printer's vendor and
+// each provider's sign-in state and name. Lets the macOS menu bar skip rebuilding an unchanged menu.
+static std::string account_menu_signature()
+{
+    auto&       app = wxGetApp();
+    std::string sig = AccountStatus::current_printer_vendor_id();
+    sig += "|bbl:";
+    if (app.is_user_login())
+        sig += app.get_bambu_user_name();
+    else
+        sig += "-";
+    sig += "|sm:";
+    auto* ui = app.sm_get_userinfo();
+    if (ui && ui->is_user_login())
+        sig += ui->get_user_name();
+    else
+        sig += "-";
+    return sig;
+}
+
+void MainFrame::update_account_menubar()
+{
+    if (m_account_menubar_menu == nullptr)
+        return;
+    const std::string sig = account_menu_signature();
+    if (sig == m_account_menubar_sig)
+        return;
+    m_account_menubar_sig = sig;
+    refresh_account_menu(m_account_menubar_menu);
+}
+
+void MainFrame::open_mobile_hub()
+{
+    // The hub is a separate process. Asking it where it lives - and starting it when it is not
+    // running - takes seconds, so it happens on a worker thread and the browser is opened back
+    // on the GUI thread. The seeds are the ones GUI_App::start_remote_access() uses, so a hub
+    // started from here comes up exactly as the slicer itself would have started it,
+    // phone access included (or not) as the user left it.
+    const std::string token = wxGetApp().app_config->get("stream_phone_token");
+    const bool        phone = wxGetApp().app_config->get("stream_phone_access") == "1";
+    std::thread([token, phone]() {
+        RemoteHub::Info info = RemoteHub::query();
+        if (!info.alive || info.admin_port == 0)
+            info = RemoteHub::ensure_running(token, phone);
+        wxGetApp().CallAfter([info]() {
+            if (info.alive && info.admin_port > 0) {
+                // The hub page is served by the loopback-only control plane, never by the
+                // listener a tunnel can front. No secret in the URL: /hub/ itself is the one
+                // route that does not need it, and the page sends it as a header afterwards.
+                wxLaunchDefaultBrowser(wxString::Format("http://127.0.0.1:%d/hub/", info.admin_port));
+            } else {
+                MessageDialog(nullptr, _L("The Mobile Hub did not start. Please try again in a moment."),
+                              _L("Mobile Hub"), wxOK | wxICON_INFORMATION)
+                    .ShowModal();
+            }
+        });
+    }).detach();
 }
 
 void MainFrame::init_menubar_as_editor()
@@ -2942,8 +3044,8 @@ void MainFrame::init_menubar_as_editor()
 
         Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& evt) { evt.Enable(can_open_project() && (m_recent_projects.GetCount() > 0)); }, recent_projects_submenu->GetId());
 
-        // The Home tab shows the phone hub; the old start page (recent projects, Snapmaker's
-        // model library) stays one click away here.
+        // The Home tab shows Recent and Print History; the old start page (Snapmaker's model
+        // library) stays one click away here.
         append_menu_item(fileMenu, wxID_ANY, _L("Start page"), _L("Show the start page with recent projects on the Home tab"),
             [this](wxCommandEvent&) { show_start_page(); }, "", nullptr,
             [this]() { return m_home != nullptr; }, this);
@@ -3006,6 +3108,10 @@ void MainFrame::init_menubar_as_editor()
             [this](){return can_export_model(); }, this);
         append_menu_item(export_menu, wxID_ANY, _L("Export all objects as STLs") + dots, _L("Export all objects as STLs"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_stl(false, false, true); }, "menu_export_stl", nullptr,
+            [this](){return can_export_model(); }, this);
+        append_menu_item(export_menu, wxID_ANY, _L("Export as STEP") + dots,
+            _L("Export the selected objects, or all objects on the current plate, as a STEP file of solids"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->export_step(); }, "menu_export_stl", nullptr,
             [this](){return can_export_model(); }, this);
         append_menu_item(export_menu, wxID_ANY, _L("Export Generic 3MF") + dots/* + "\t" + ctrl + "G"*/, _L("Export 3mf file without using some 3mf-extensions"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_core_3mf(); }, "menu_export_sliced_file", nullptr,
@@ -3386,6 +3492,14 @@ void MainFrame::init_menubar_as_editor()
                 plater()->refresh_print();
         },
         "", nullptr, []() { return true; }, this, 1);
+    append_menu_item(
+        parent_menu, wxID_ANY, _L("Themes") + dots, _L("Colours, fonts, corners and the title bar"),
+        [this](wxCommandEvent &) { wxGetApp().open_themes(); },
+        "", nullptr, []() { return true; }, this, 2);
+    append_menu_item(
+        parent_menu, wxID_ANY, _L("Costs") + dots, _L("Your own filament prices and machine rates, over the presets' values"),
+        [this](wxCommandEvent &) { show_costs_dialog(this); },
+        "", nullptr, []() { return true; }, this, 3);
     //parent_menu->Insert(1, preference_item);
 #endif
     // Help menu
@@ -3406,6 +3520,17 @@ void MainFrame::init_menubar_as_editor()
             wxGetApp().open_preferences();
             plater()->get_current_canvas3D()->force_set_focus();
         },
+        "", nullptr, []() { return true; }, this);
+    // Themes live in a window of their own so Preferences stays quick to open. No shortcut: the
+    // obvious letters are taken.
+    append_menu_item(
+        m_topbar->GetTopMenu(), wxID_ANY, _L("Themes") + dots, _L("Colours, fonts, corners and the title bar"),
+        [this](wxCommandEvent &) { wxGetApp().open_themes(); },
+        "", nullptr, []() { return true; }, this);
+    // Your own costs: filament prices and machine rates over every preset (also in the Filament and Printer tabs).
+    append_menu_item(
+        m_topbar->GetTopMenu(), wxID_ANY, _L("Costs") + dots, _L("Your own filament prices and machine rates, over the presets' values"),
+        [this](wxCommandEvent &) { show_costs_dialog(this); },
         "", nullptr, []() { return true; }, this);
 
     m_topbar->AddDropDownSubMenu(helpMenu, _L("Help"));
@@ -3523,6 +3648,13 @@ void MainFrame::init_menubar_as_editor()
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
 #else
+    // The title bar's Mobile Hub button has no menu bar equivalent on macOS; it goes at the end of View.
+    if (viewMenu) {
+        viewMenu->AppendSeparator();
+        append_menu_item(viewMenu, wxID_ANY, _L("Mobile Hub") + dots, _L("Open the Mobile Hub page in your browser (phone access, cameras, open windows)"),
+            [this](wxCommandEvent&) { open_mobile_hub(); }, "", nullptr,
+            []() { return true; }, this);
+    }
     m_menubar->Append(fileMenu, wxString::Format("&%s", _L("File")));
     if (editMenu)
         m_menubar->Append(editMenu, wxString::Format("&%s", _L("Edit")));
@@ -3637,8 +3769,13 @@ void MainFrame::init_menubar_as_editor()
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
     m_menubar->Append(calib_menu,wxString::Format("&%s", _L("Calibration")));
-    // Ultra: the Account entry lives in the custom top bar (BBLTopbar), not this native
-    // menubar (which the fork hides) - see BBLTopbar's ID_ACCOUNT tool + refresh_account_menu.
+    // Ultra: on Windows / Linux the Account entry is a button in the custom top bar (BBLTopbar's
+    // ID_ACCOUNT tool). macOS keeps its native title bar and menu bar, so the same contextual menu
+    // (refresh_account_menu) is an Account menu here, kept current by update_account_menubar().
+    m_account_menubar_menu = new wxMenu();
+    refresh_account_menu(m_account_menubar_menu);
+    m_account_menubar_sig = account_menu_signature();
+    m_menubar->Append(m_account_menubar_menu, wxString::Format("&%s", _L("Account")));
     if (helpMenu)
         m_menubar->Append(helpMenu, wxString::Format("&%s", _L("Help")));
     SetMenuBar(m_menubar);
@@ -3784,8 +3921,11 @@ void MainFrame::update_menubar()
 
 void MainFrame::reslice_now()
 {
-    if (m_plater)
-        (void)m_plater->reslice();
+    if (!m_plater)
+        return;
+    if (!m_plater->confirm_filament_grouping_before_slice())
+        return;
+    (void) m_plater->reslice();
 }
 
 void MainFrame::start_slice()
@@ -4105,11 +4245,46 @@ ProgressDialog* MainFrame::createLogProgress()
 
 void MainFrame::jump_to_multipage()
 {
-    m_tabpanel->SetSelection(tpMultiDevice);
     MultiMachinePage* mm = multi_machine();
-    if (!mm)
+    if (!mm || !m_multi_machine_dlg)
         return;
+    m_multi_machine_dlg->Show();
+    m_multi_machine_dlg->Raise();
+    mm->Show(true); // starts its refresh timer
     mm->jump_to_send_page();
+}
+
+bool MainFrame::open_printer_device_page(const std::string& id, const PrintersMonitor::Target& target, std::string& why)
+{
+    using PrintersMonitor::OpenWay;
+    // What the Device tab holds right now follows the selected printer preset (show_device): the
+    // Bambu MonitorPanel, the PrinterWebView, or the Flashforge tab. The preset is never switched
+    // from here - that would change the plate's printer behind the person's back.
+    const bool bambu_shown = m_monitor_holder && m_tabpanel->FindPage(m_monitor_holder) != wxNOT_FOUND;
+    const bool view_shown  = m_printer_view && m_tabpanel->FindPage(m_printer_view) != wxNOT_FOUND;
+    switch (PrintersMonitor::open_way(target, bambu_shown, view_shown)) {
+    case OpenWay::BambuMonitor:
+        // What the old Multi-device tab's View button did: the Device tab, on that printer.
+        jump_to_monitor(id);
+        return true;
+    case OpenWay::PrinterWebView: {
+        wxString url = wxString::FromUTF8(target.url);
+        m_printer_view->load_url(url);
+        const int idx = m_tabpanel->FindPage(m_printer_view);
+        if (idx != wxNOT_FOUND)
+            select_tab(size_t(idx));
+        return true;
+    }
+    case OpenWay::Browser:
+        if (wxLaunchDefaultBrowser(wxString::FromUTF8(target.url)))
+            return true;
+        why = "The system browser did not open " + target.url;
+        return false;
+    case OpenWay::NotHere:
+    default:
+        why = PrintersMonitor::not_here_reason(target);
+        return false;
+    }
 }
 
 
@@ -4234,38 +4409,34 @@ void MainFrame::on_config_changed(DynamicPrintConfig* config) const
 
 void MainFrame::set_print_button_to_default(PrintSelectType select_type)
 {
-    // Every branch here must: (1) set the label callers see, (2) set m_print_select to
-    // the SAME enum the matching dropdown item in create_side_tools() uses for that
-    // label, and (3) unconditionally recompute m_print_enable from the *new* selection.
-    //
-    // Recomputing only "if (m_print_enable)" (the old code) meant that once the button
-    // had been left disabled - e.g. while m_print_select was some other mode that failed
-    // its own gate - a later call here could never re-enable it, even though the newly
-    // selected mode's own get_enable_print_status() would say it should be enabled. That
-    // left the button stuck grey until something else happened to flip m_print_enable
-    // true first. Always recompute so the button's enabled state matches whatever mode
-    // is being switched to, independent of whatever it was before.
-    wxString label;
+    // Keep the user's remembered print/export action instead of resetting it to the computed
+    // default. get_remembered_print_select() already rejects anything this printer does not offer.
+    PrintSelectType remembered;
+    if (get_remembered_print_select(remembered))
+        select_type = remembered;
+
     switch (select_type) {
-    case PrintSelectType::ePrintPlate:       label = _L("Print plate"); break;
-    case PrintSelectType::eSendGcode:        label = _L("Print"); break;
-    case PrintSelectType::eExportGcode:      label = _L("Export G-code file"); break;
-    case PrintSelectType::eExportSlicedFile: label = _L("Export plate sliced file"); break;
-    case PrintSelectType::eExportAllSlicedFile: label = _L("Export all sliced file"); break;
+    case ePrintPlate:
+    case eSendGcode:
+    case eExportGcode:
+    case eExportSlicedFile:
+    case eExportAllSlicedFile:
+    case ePrintMultiMachine:
+        apply_print_select_state(select_type);
+        // Only the print-host flow (eSendGcode) needs a host. Export actions, eExportGcode
+        // included, never depend on one: with "remember last print action" on, a restored
+        // "Export G-code file" must stay enabled on a printer without a print host. The dropdown
+        // path (select_print_action) does not AND can_send_gcode() at all.
+        if (PrintSelectKeys::requires_print_host(static_cast<int>(select_type))) {
+            m_print_enable = m_print_enable && can_send_gcode();
+            m_print_btn->Enable(m_print_enable);
+        }
+        break;
     default:
         // unsupported from this entry point (ePrintAll / eSendToPrinter / eSendToPrinterAll /
-        // eUploadGcode / ePrintMultiMachine are only reachable via the dropdown items
-        // themselves, which set their own label/select/enable directly).
+        // eUploadGcode are never offered on Edge).
         return;
     }
-
-    m_print_btn->SetLabel(label);
-    m_print_select = select_type;
-    m_print_enable = get_enable_print_status();
-    if (select_type == PrintSelectType::eSendGcode || select_type == PrintSelectType::eExportGcode)
-        m_print_enable = m_print_enable && can_send_gcode();
-    m_print_btn->Enable(m_print_enable);
-    this->Layout();
 }
 
 void MainFrame::add_to_recent_projects(const wxString& filename)
@@ -4521,13 +4692,20 @@ void MainFrame::load_url(wxString url)
     wxQueueEvent(this, evt);
 }
 
-void MainFrame::load_printer_url(wxString url, wxString apikey)
+void MainFrame::load_printer_url(wxString url, wxString apikey, bool reload)
 {
     BOOST_LOG_TRIVIAL(trace) << "load_printer_url:" << url;
     auto evt = new LoadPrinterViewEvent(EVT_LOAD_PRINTER_URL, this->GetId());
     evt->SetString(url);
     evt->SetAPIkey(apikey);
+    evt->SetInt(reload ? 1 : 0);
     wxQueueEvent(this, evt);
+}
+
+void MainFrame::on_startup_settled()
+{
+    if (m_printer_view)
+        m_printer_view->release_startup_hold("startup is over");
 }
 
 void MainFrame::load_printer_url()
@@ -4775,6 +4953,10 @@ void MainFrame::update_side_preset_ui()
 
 void MainFrame::on_select_default_preset(SimpleEvent& evt)
 {
+    // The "synchronize from Bambu Cloud" question: user presets are never synced (PresetSyncPolicy.hpp).
+    if (!PresetSync::cloud_sync_enabled())
+        return;
+
     MessageDialog dialog(this,
                     _L("Do you want to synchronize your personal data from Bambu Cloud?\n"
                         "It contains the following information:\n"

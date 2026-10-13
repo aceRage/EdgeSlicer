@@ -983,6 +983,70 @@ TEST_CASE("slice bake: a scaled, rotated, offset instance bakes to the same worl
     }
 }
 
+// The "Add as new" copy of an object on plate 2 or later landed on plate 1: instance_offset was
+// computed from shift_without_plate_offset(), which is plate-LOCAL, while a new ModelInstance's
+// offset is a WORLD value (all plates share one model space, and the plate an instance belongs to
+// comes from its world bounding box). The yardstick here is therefore the instance's FULL shift,
+// not the plate-relative one the other tests use. In the test harness the plate origin is set
+// with Print::set_plate_origin(), exactly as the GUI/CLI does for a later plate; it does not move
+// the instance (shift comes from the model instance's world offset), it only makes the
+// plate-relative shift differ from the full one - which is what the bug confused.
+TEST_CASE("slice bake: an object on a later plate bakes at its world position, not the plate-local one", "[slice_bake]")
+{
+    const double lh = 0.2;
+    const Vec3d  plate_origin(300., 0., 0.);        // plate 2 sits one bed-pitch to the +X side
+    Placement place;
+    place.offset = plate_origin.head<2>() + Vec2d(30., -20.);   // world position, on plate 2
+
+    Print print;
+    print.set_plate_origin(plate_origin);
+    Model model;
+    const PrintObject *object = slice_one(print, model, TriangleMesh(its_make_cube(10., 10., 10.)),
+                                          bake_config(lh, false), "cube10_plate2", place);
+    REQUIRE(! object->instances().empty());
+
+    // The setup really differs between the two frames: full shift minus plate-relative shift is
+    // exactly the plate origin. If this does not hold the test would pass vacuously.
+    const Point  full  = object->instances().front().shift;
+    const Point  local = object->instances().front().shift_without_plate_offset();
+    REQUIRE(unscaled(full.x() - local.x()) == Approx(plate_origin.x()).margin(1e-6));
+
+    SliceBakeOptions opts;
+    opts.frame = SliceBakeFrame::World;
+    SliceBakeReport rep;
+    const indexed_triangle_set mesh = slice_bake_to_mesh(*object, opts, &rep);
+    REQUIRE(! mesh.indices.empty());
+
+    // The new instance must be given the source instance's own world offset, plate origin included.
+    const Vec3d src_offset = model.objects.front()->instances.front()->get_offset();
+    INFO("report instance offset " << rep.instance_offset.transpose()
+         << ", source instance offset " << src_offset.transpose());
+    CHECK(rep.instance_offset.x() == Approx(src_offset.x()).margin(1e-3));
+    CHECK(rep.instance_offset.y() == Approx(src_offset.y()).margin(1e-3));
+    CHECK(rep.instance_offset.x() > plate_origin.x());   // i.e. not the plate-local 30
+
+    // And the baked world box (mesh + instance offset) is on plate 2, over the sliced geometry.
+    BoundingBoxf3 want;
+    for (const Layer *layer : object->layers())
+        if (layer != nullptr)
+            for (const ExPolygon &ex : layer->lslices)
+                for (const Point &p : ex.contour.points) {
+                    const Vec2d q = unscaled(p) + unscaled(full);
+                    want.merge(Vec3d(q.x(), q.y(), layer->bottom_z()));
+                    want.merge(Vec3d(q.x(), q.y(), layer->print_z));
+                }
+    BoundingBoxf3 got = bbox_of(mesh);
+    got.min += rep.instance_offset;
+    got.max += rep.instance_offset;
+    INFO("baked world bbox " << got.min.transpose() << " .. " << got.max.transpose()
+         << " vs sliced " << want.min.transpose() << " .. " << want.max.transpose());
+    for (int k = 0; k < 3; ++k) {
+        CHECK(got.min(k) == Approx(want.min(k)).margin(lh));
+        CHECK(got.max(k) == Approx(want.max(k)).margin(lh));
+    }
+    CHECK(got.min.x() > plate_origin.x());
+}
+
 // =============================================================================================
 // (g) THE SMOOTHNESS: the slice contour is a truer circle than the extrusion, and a finer
 //     resolution buys more triangles where the curvature asks for them
@@ -1115,8 +1179,16 @@ TEST_CASE("slice bake: the slice contour bakes a rounder cylinder than the extru
          << " tris / " << ext_fine_rep.points_added << " added");
     CHECK(ext_fine_rep.points_added > ext_coarse_rep.points_added);
     CHECK(ext_fine_rep.triangles > ext_coarse_rep.triangles);
-    // And densifying moves it towards the circle, which is what the tolerance MEANS.
-    CHECK(radial_error(ext_fine_mesh, z_mid, r) <= radial_error(ext_coarse_mesh, z_mid, r));
+    // Densifying puts the new points ON the chord it splits, so it never moves a vertex onto the
+    // circle: what it guarantees is that the flat between two points is short enough to stay inside
+    // the tolerance. Measured by vertices that is only a bound - no vertex is further from the true
+    // circle than the path's own `resolution` (0.1 mm here) - not an improvement on the coarse mesh.
+    // (This used to read "fine <= coarse". That held only because the slice contour then carried the
+    // off-circle points that a slicing plane makes where it crosses the diagonal of a planar quad, so
+    // the coarse path started from a worse error; since Orca #15366 those points are no longer in
+    // the contour and the coarse path's vertices lie on the circle.)
+    CHECK(radial_error(ext_fine_mesh, z_mid, r) <= 0.1);
+    CHECK(radial_error(ext_coarse_mesh, z_mid, r) <= 0.1);
 
     // The estimator the dialog shows moves the same way, which is what makes the live figure worth
     // showing at all.

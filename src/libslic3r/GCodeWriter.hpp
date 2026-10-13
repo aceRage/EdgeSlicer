@@ -8,6 +8,7 @@
 #include <functional>
 #include "Extruder.hpp"
 #include "Point.hpp"
+#include "Polygon.hpp"
 #include "PrintConfig.hpp"
 #include "GCode/CoolingBuffer.hpp"
 
@@ -103,6 +104,7 @@ public:
     std::string toolchange_prefix() const;
     std::string toolchange(unsigned int extruder_id);
     std::string set_speed(double F, const std::string &comment = std::string(), const std::string &cooling_marker = std::string());
+    void        set_speed(std::string &out, double F, const std::string &comment = std::string(), const std::string &cooling_marker = std::string());
     // SoftFever NOTE: the returned speed is mm/minute
     double      get_current_speed() const { return m_current_speed;}
 
@@ -145,6 +147,10 @@ public:
     //BBS: generate G2 or G3 extrude which moves by arc
     std::string extrude_arc_to_xy(const Vec2d &point, const Vec2d &center_offset, double dE, const bool is_ccw, const std::string &comment = std::string(), bool force_no_extrusion = false);
     std::string extrude_to_xyz(const Vec3d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false);
+    // Each appends its line to `out` (Orca #16108). Returning overloads above wrap these.
+    void        extrude_to_xy(std::string &out, const Vec2d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false);
+    void        extrude_arc_to_xy(std::string &out, const Vec2d &point, const Vec2d &center_offset, double dE, const bool is_ccw, const std::string &comment = std::string(), bool force_no_extrusion = false);
+    void        extrude_to_xyz(std::string &out, const Vec3d &point, double dE, const std::string &comment = std::string(), bool force_no_extrusion = false);
     std::string retract(bool before_wipe = false, double retract_length = 0);
     std::string retract_for_toolchange(bool before_wipe = false, double retract_length = 0);
     std::string unretract();
@@ -185,6 +191,9 @@ public:
     const bool is_bbl_printers() const {return m_is_bbl_printers;}
     void set_is_first_layer(bool bval) { m_is_first_layer = bval; }
     GCodeFlavor get_gcode_flavor() const { return config.gcode_flavor; }
+    // Forget the cached motion limits after custom G-code changed them behind the writer's back.
+    void invalidate_acceleration() { m_last_acceleration = 0; m_last_travel_acceleration = 0; }
+    void invalidate_jerk() { m_last_jerk = 0; }
 
     // Returns whether this flavor supports separate print and travel acceleration.
     static bool supports_separate_travel_acceleration(GCodeFlavor flavor);
@@ -228,7 +237,18 @@ public:
     //BBS: x, y offset for gcode generated
     double          m_x_offset{ 0 };
     double          m_y_offset{ 0 };
-    
+
+    // Orca: slicing resolution in mm
+    double          m_resolution = 0.01;
+    // Orca: printable area polygons (scaled, bed coordinates) used to keep spiral lifts
+    // from colliding with the print boundary. m_extruder_printable_areas holds the
+    // per-extruder reachable area (intersected with the bed) when a printer defines
+    // different boundaries per extruder; m_bed_printable_area is the global fallback.
+    // Storing full polygons (rather than a bounding box) keeps the check correct for
+    // non-rectangular beds such as delta/circular printers.
+    Polygon              m_bed_printable_area;
+    std::vector<Polygon> m_extruder_printable_areas;
+
     std::string m_gcode_label_objects_start;
     std::string m_gcode_label_objects_end;
 
@@ -249,6 +269,10 @@ public:
 
     std::string _travel_to_z(double z, const std::string &comment);
     std::string _spiral_travel_to_z(double z, const Vec2d &ij_offset, const std::string &comment);
+    // Orca: printable area of the active extruder (per-extruder when configured, otherwise the bed). Null when unknown.
+    const Polygon *active_printable_area() const;
+    // Orca: true if a full spiral-lift circle (center in bed coordinates, mm) fits inside the active printable area.
+    bool spiral_lift_fits_printable_area(const Vec2d &center, double radius) const;
     std::string _retract(double length, double restart_extra, const std::string &comment);
     std::string set_acceleration_internal(Acceleration type, unsigned int acceleration);
 
@@ -347,8 +371,14 @@ public:
     }
 
     std::string string() {
+        std::string out;
+        this->append_to(out);
+        return out;
+    }
+
+    void append_to(std::string &out) {
         *ptr_err.ptr ++ = '\n';
-        return std::string(this->buf, ptr_err.ptr - buf);
+        out.append(this->buf, ptr_err.ptr - buf);
     }
 
 protected:

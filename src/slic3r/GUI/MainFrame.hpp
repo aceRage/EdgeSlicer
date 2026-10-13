@@ -13,6 +13,7 @@
 
 #include <string>
 #include <map>
+#include <vector>
 
 #include "GUI_Utils.hpp"
 #include "Event.hpp"
@@ -32,6 +33,7 @@
 #include "BBLTopbar.hpp"
 #include "PrinterWebView.hpp"
 #include "StreamPanel.hpp"
+#include "PrintersPanel.hpp"
 #include "calib_dlg.hpp"
 #include "MultiMachinePage.hpp"
 #include "LazyPanelHolder.hpp"
@@ -106,6 +108,8 @@ class MainFrame : public DPIFrame
     wxString    m_last_config = wxEmptyString;
 
     wxMenuBar*  m_menubar{ nullptr };
+    wxMenu*     m_account_menubar_menu{ nullptr }; // macOS only: the menu bar's Account menu (owned by m_menubar)
+    std::string m_account_menubar_sig;             // what that menu currently shows
     //wxMenu* publishMenu{ nullptr };
     wxMenu *    m_calib_menu{nullptr};
     bool        enable_multi_machine{ false };
@@ -221,13 +225,22 @@ public:
     // Ultra: populate the given menu contextually for the current printer's brand
     // (login/logout). Called by the topbar's Account button just before it pops the menu.
     void        refresh_account_menu(wxMenu* menu);
+    // macOS: there is no custom title bar to carry the Account button, so the same contextual menu is
+    // an entry in the native menu bar. AccountStatus::refresh() calls this when the sign-in state or
+    // the selected printer changes; it rebuilds that menu only when what it shows would differ. A
+    // no-op where there is no such menu (Windows / Linux).
+    void        update_account_menubar();
+    // The title bar's Mobile Hub button (Windows / Linux) and the macOS View menu entry: opens the
+    // hub page in the browser, starting the hub first when it is not running.
+    void        open_mobile_hub();
 
     // BBS: auto-save the project to its own file on a timer, in addition to auto-backup
     void update_autosave_timer();
 
     // Ultra: the only way a hub-managed (hidden-launch) instance really closes; a plain
     // close just hides it. discard = skip the unsaved-project handling (Close(true)).
-    void request_quit(bool discard = false);
+    // Returns false when the close was cancelled (the unsaved-project prompt, say).
+    bool request_quit(bool discard = false);
 
     //BBS GUI refactor
     enum TabPosition
@@ -237,7 +250,8 @@ public:
         tpPreview       = 2,
         tpMonitor       = 3,
         tpStream        = 4,
-        tpMultiDevice   = 5,
+        tpPrinters      = 5, // the Printers tab (PrintersPanel); always present
+        tpMultiDevice   = tpPrinters, // its old name: the Multi-device tab had this slot
         tpProject       = 6,
         tpCalibration   = 7,
         tpAuxiliary     = 8,
@@ -317,6 +331,10 @@ public:
 
     bool        is_loaded() const { return m_loaded; }
     bool        is_last_input_file() const  { return !m_qs_last_input_file.IsEmpty(); }
+    // True once the close/restart path entered MainFrame::shutdown(): children
+    // must stop pumping the event loop (e.g. synchronous webview scripts whose
+    // wxYield would run the pending frame deletion mid-handler and crash).
+    bool        is_shutting_down() const { return m_shutting_down; }
     //BBS GUI refactor: remove unused layout new/dlg
     //bool        is_dlg_layout() const { return m_layout == ESettingsLayout::Dlg; }
 
@@ -343,7 +361,12 @@ public:
     void        show_flashforge_device();
     void        jump_to_monitor_exit(const std::string& dev_id = "");
     ProgressDialog* createLogProgress();
+    // The old Multi-device pages (cloud "Send to Multi-device" queue and history), in a window of
+    // their own since the Printers tab took their slot; landing on "Task Sending".
     void        jump_to_multipage();
+    // Printers tab: open that printer's Device page (Bambu: the Device tab; Snapmaker / Moonraker:
+    // its web UI in the Device tab's web view, or the system browser). false + why when it cannot.
+    bool        open_printer_device_page(const std::string& id, const PrintersMonitor::Target& target, std::string& why);
     //BBS: hint when jump to 3Deditor under preview only mode
     bool        preview_only_hint();
     // Select tab in m_tabpanel
@@ -361,6 +384,20 @@ public:
     // Propagate changed configuration from the Tab to the Plater and save changes to the AppConfig
     void        on_config_changed(DynamicPrintConfig* cfg) const ;
     void        set_print_button_to_default(PrintSelectType select_type);
+    // The print/export actions the current printer offers, in the order the dropdown lists them.
+    // The dropdown is built from this, and a remembered action is only restored if it appears here.
+    std::vector<PrintSelectType> available_print_actions() const;
+    // Apply an action picked from the print dropdown to the print button and remember it.
+    void        select_print_action(PrintSelectType select_type);
+    // Remember the user's preferred print/export action across sessions (see "remember_print_action").
+    void        remember_print_select(PrintSelectType select_type);
+    bool        get_remembered_print_select(PrintSelectType &out) const;
+
+private:
+    // Label + m_print_select + always-recompute enable via get_enable_print_status() only.
+    void        apply_print_select_state(PrintSelectType select_type);
+
+public:
 
     bool can_save() const;
     bool can_save_as() const;
@@ -380,8 +417,12 @@ public:
 
     //BBS
     void        load_url(wxString url);
-    void        load_printer_url(wxString url, wxString apikey = "");
+    // Shows `url` in the Device tab's web view. `reload` loads it again even when the view shows
+    // it already (a connect made from another page); otherwise our own page is left as it is.
+    void        load_printer_url(wxString url, wxString apikey = "", bool reload = false);
     void        load_printer_url();
+    // GUI_App: startup is over, the Device tab may load its page now.
+    void        on_startup_settled();
     bool        is_printer_view() const;
     void        refresh_plugin_tips();
     void        RunScript(wxString js);
@@ -404,6 +445,7 @@ public:
 
     // BBS. Replace title bar and menu bar with top bar.
     BBLTopbar*            m_topbar{ nullptr };
+    wxPanel*              m_mac_topbar_panel{ nullptr }; // macOS: the plain bar the UI theme's title bar colour goes on
     PrintHostQueueDialog* printhost_queue_dlg() { return m_printhost_queue_dlg; }
     Plater*               m_plater { nullptr };
     //BBS: GUI refactor
@@ -417,8 +459,11 @@ public:
     StreamPanel*          m_stream{ nullptr };
 
     //AuxiliaryPanel*       m_auxiliary{ nullptr };
+    // The old Multi-device pages, built on first use inside m_multi_machine_dlg (jump_to_multipage).
     MultiMachinePage*     m_multi_machine{ nullptr };
-    LazyPanelHolder*      m_multi_machine_holder{ nullptr };
+    wxDialog*             m_multi_machine_dlg{ nullptr };
+    PrintersPanel*        m_printers{ nullptr };
+    LazyPanelHolder*      m_printers_holder{ nullptr };
     ProjectPanel*         m_project{ nullptr };
     LazyPanelHolder*      m_project_holder{ nullptr };
 
@@ -427,8 +472,8 @@ public:
 
     // On-demand accessors for the deferred tabs. Each builds its panel if it has not been
     // built yet, and returns nullptr only when the tab is not part of this layout at all
-    // (multi_machine() with multi-device management disabled, or any of them before
-    // init_tabpanel has run).
+    // (any of them before init_tabpanel has run). multi_machine() builds the old Multi-device
+    // pages in their window without showing it.
     MonitorPanel*     monitor();
     CalibrationPanel* calibration();
     MultiMachinePage* multi_machine();
@@ -436,15 +481,14 @@ public:
     // Fresh placeholders for the deferred tabs (show_device() re-creates pages).
     LazyPanelHolder*  make_monitor_holder();
     LazyPanelHolder*  make_calibration_holder();
-    LazyPanelHolder*  make_multi_machine_holder();
+    LazyPanelHolder*  make_printers_holder();
     LazyPanelHolder*  make_project_holder();
     // Dark-mode/DPI treatment for a panel built after the startup theme pass.
     void              apply_theme_to_lazy_panel(wxWindow* panel);
 
-    // The Home tab (HomePanel): the phone hub page, with the old flutter start page kept behind it.
-    // m_webview IS that start page. It is built only when something asks for it (File > Start page,
-    // EVT_LOAD_URL, the hub view's "Open start page"), so test it for null before use - or go
-    // through start_page(), which builds it.
+    // The Home tab (HomePanel): Recent and Print History, with the old flutter start page kept behind
+    // it. m_webview IS that start page. It is built only when something asks for it (File > Start
+    // page, EVT_LOAD_URL), so test it for null before use - or go through start_page(), which builds it.
     HomePanel*            m_home { nullptr };
     WebViewPanel*         m_webview { nullptr };
     WebViewPanel*         start_page();
@@ -476,6 +520,7 @@ public:
     SideButton* m_print_option_btn{ nullptr };
     mutable bool          m_slice_enable{ true };
     mutable bool          m_print_enable{ true };
+    bool                  m_shutting_down{ false };
     bool get_enable_slice_status();
     bool get_enable_print_status();
     //BBS
@@ -491,6 +536,12 @@ public:
     uint32_t  			m_ulSHChangeNotifyRegister { 0 };
 	static constexpr int WM_USER_MEDIACHANGED { 0x7FFF }; // WM_USER from 0x0400 to 0x7FFF, picking the last one to not interfere with wxWidgets allocation
 #endif // _WIN32
+
+private:
+    // Initial button state path for the MainFrame constructor; bypasses the
+    // teardown guard in update_slice_print_status (wxGetApp().mainframe does
+    // not point at this frame yet during construction).
+    void update_slice_print_status_impl(SlicePrintEventType event, bool can_slice, bool can_print);
 };
 
 wxDECLARE_EVENT(EVT_HTTP_ERROR, wxCommandEvent);

@@ -54,6 +54,8 @@ class GLModel;
             bool unsent_compressed_data_available() const;
             void send_compressed_data_to_gpu();
             bool all_compressed_data_sent_to_gpu() const { return m_levels.empty(); }
+            // EDGE: level 0 holds its compressed image (or there is nothing pending).
+            bool first_level_sent_to_gpu() const { return m_levels.empty() || m_levels.front().sent_to_gpu; }
 
         private:
             void compress();
@@ -97,7 +99,10 @@ class GLModel;
         bool load_from_file(const std::string& filename, bool use_mipmaps, ECompressionType compression_type, bool apply_anisotropy);
         bool load_from_svg_file(const std::string& filename, bool use_mipmaps, bool compress, bool apply_anisotropy, unsigned int max_size_px);
         //BBS load GLTexture from raw pixel data
-        bool load_from_raw_data(std::vector<unsigned char> data, unsigned int w, unsigned int h, bool apply_anisotropy = false);
+        // `data` is RGBA, w * h * 4 bytes. With use_mipmaps, a real box-filtered mipmap chain is
+        // built, so the texture may safely be drawn smaller than its pixel size.
+        bool load_from_raw_data(std::vector<unsigned char> data, unsigned int w, unsigned int h, bool apply_anisotropy = false,
+                                bool use_mipmaps = true);
         // meanings of states: (std::pair<int, bool>)
         // first field (int):
         // 0 -> no changes
@@ -126,6 +131,11 @@ class GLModel;
         bool unsent_compressed_data_available() const { return m_compressor.unsent_compressed_data_available(); }
         void send_compressed_data_to_gpu() { m_compressor.send_compressed_data_to_gpu(); }
         bool all_compressed_data_sent_to_gpu() const { return m_compressor.all_compressed_data_sent_to_gpu(); }
+        // EDGE (core profile): there is something to sample. False for no texture, and for a compressed
+        // texture whose level 0 the background compressor has not delivered yet (its storage exists but
+        // holds no image). Draw code skips the draw rather than sampling it: macOS reports such a draw as
+        // "unit 0 GLD_TEXTURE_INDEX_2D is unloadable", other drivers sample black or garbage.
+        bool ready_to_sample() const { return m_id != 0 && m_compressor.first_level_sent_to_gpu(); }
 
         static void render_texture(unsigned int tex_id, float left, float right, float bottom, float top);
         static void render_sub_texture(unsigned int tex_id, float left, float right, float bottom, float top, const Quad_UVs& uvs);

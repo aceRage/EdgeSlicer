@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <string>
 #include <vector>
@@ -69,7 +70,29 @@ struct PrinterState
     // `error_code` (the worst) is ever announced; the rest keep an already-announced code "held"
     // while a worse one sits on top of it, so it is not announced again when it resurfaces.
     std::vector<std::string>           active_codes;
+    // True while a printer that says it failed has not (yet) said why. Bambu reports gcode_state
+    // FAILED and the print_error behind it in separate pushes, and a cancel the owner pressed
+    // is both, in that order: the failure arrives first and the "task was cancelled" code a few
+    // seconds later. The rule waits a settle window for the code before it calls the stop a
+    // failure (see FAIL_SETTLE_MS); a source that sends state and code together leaves this off.
+    bool                               error_may_follow { false };
 };
+
+// The print errors a Bambu printer raises when the PERSON stopped the print, not when something
+// went wrong: 0300400C "The task was canceled." (a cancel from the screen, Studio, the app or
+// Handy) and 0500400E "Job was cancelled." (the older firmware's spelling). Both come with
+// gcode_state FAILED, which is why a cancel used to be announced as a failure and then as an error.
+// `code` is the printer's print_error as hex8 ("0300400C"); separators and case do not matter.
+inline bool is_user_cancel_code(const std::string& code)
+{
+    std::string c;
+    for (char ch : code) {
+        if (ch == ' ' || ch == '-' || ch == '_') continue;
+        c.push_back((char) std::toupper((unsigned char) ch));
+    }
+    if (c.compare(0, 2, "0X") == 0) c.erase(0, 2);
+    return c == "0300400C" || c == "0500400E";
+}
 
 struct Snapshot
 {
@@ -258,7 +281,22 @@ struct Memory
     // being the worst, is one event, not one per change. Survives the printer going offline, for
     // the same reason `jobs` does: not seeing a code is not the code clearing.
     std::map<std::string, std::map<std::string, long long>> codes;
+    // A printer that has just reported FAILED without saying why (PrinterState::error_may_follow):
+    // the snapshot time it did, and the job it was on. The failure is held back until the reason
+    // arrives or FAIL_SETTLE_MS has passed, so a user cancel is announced as a cancel and not as
+    // a failure that a second, "error", event then contradicts.
+    struct FailHold
+    {
+        long long   at { 0 };
+        std::string job;
+    };
+    std::map<std::string, FailHold> holds;
 };
+
+// How long a failure with no reason is held back for the reason to arrive. The reason has been
+// seen five seconds behind (one poll) on an H2C; two further polls of slack cost a real failure
+// ten seconds of delay and nothing else.
+static constexpr long long FAIL_SETTLE_MS = 10000;
 
 // How long a code must be missing (while the printer is visible) before it counts as cleared, so
 // that its return is a new occurrence and announced again.

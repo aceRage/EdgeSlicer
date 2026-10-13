@@ -112,6 +112,8 @@ struct PlateData
     std::vector<int>          limit_filament_maps;
     // EdgeSlicer: DualNozzleSync::Confirmation JSON of the plate (empty = none).
     std::string               dual_nozzle_confirm;
+    // EdgeSlicer: the plate's print history (PlateHistory::History::serialize() JSON; empty = none).
+    std::string               print_history;
     std::vector<unsigned int> filament_change_sequence;
     std::vector<unsigned int> nozzle_change_sequence;
     std::vector<int>          optimal_assignment;
@@ -178,6 +180,11 @@ enum class LoadStrategy
     LoadAuxiliary = 16,
     Silence = 32,
     ImperialUnits = 64,
+    // With LoadModel and without LoadConfig: keep the per-object / per-part settings the file
+    // carries (the plain "geometry only" import drops them) while still never touching the
+    // presets or the plates of the current project. Read by Plater::load_files; "Add Custom
+    // Models" uses it for the 3MFs of the library.
+    KeepObjectSettings = 128,
 
     Restore = 0x10000 | LoadModel | LoadConfig | LoadAuxiliary | Silence,
 };
@@ -258,6 +265,12 @@ struct StoreParams
     // Studio's vocabulary (Format/BambuExport.hpp). What had to change is added to bambu_report.
     bool bambu_compat = false;
     BambuExport::Report* bambu_report = nullptr;
+    // A sliced-plate file (.gcode.3mf, the config 3MF of a cloud send) made while the preference
+    // "Include filament prices in exported G-code" is off: filament_cost is left out of
+    // project_settings.config and of the embedded filament presets, and time_cost from it and the
+    // embedded printer presets (CostOverrides::strip_prices()).
+    // Project saves never set it.
+    bool strip_filament_prices = false;
 
     StoreParams() {}
 };
@@ -267,7 +280,7 @@ struct StoreParams
 // add restore logic
 // Load the content of a 3mf file into the given model and preset bundle.
 extern bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, PlateDataPtrs* plate_data_list, std::vector<Preset*>* project_presets,
-        bool* is_bbl_3mf, Semver* file_version, Import3mfProgressFn proFn = nullptr, LoadStrategy strategy = LoadStrategy::Default, BBLProject *project = nullptr, int plate_id = 0);
+        bool* is_bbl_3mf, Semver* file_version, Import3mfProgressFn proFn = nullptr, LoadStrategy strategy = LoadStrategy::Default, BBLProject *project = nullptr, int plate_id = 0, bool *is_bambu_studio = nullptr);
 
 extern std::string bbs_3mf_get_thumbnail(const char * path);
 

@@ -24,6 +24,9 @@ class ConfigManipulation
     bool                m_is_initialized_support_material_overhangs_queried{ false };
     bool                m_support_material_overhangs_queried{ false };
     bool                is_BBL_Printer{false};
+    // Ultra: the saved preset the edited config belongs to (process tab only; null elsewhere).
+    // See update_print_fff_config(): a value the preset itself stores is never "corrected".
+    const DynamicPrintConfig* m_reference_config{ nullptr };
 
     // function to loading of changed configuration 
     std::function<void()>                                       load_config = nullptr;
@@ -75,11 +78,21 @@ public:
 
     //BBS: FFF filament nozzle temperature range
     void    check_nozzle_recommended_temperature_range(DynamicPrintConfig *config);
-    void    check_nozzle_temperature_range(DynamicPrintConfig* config);
-    void    check_nozzle_temperature_initial_layer_range(DynamicPrintConfig* config);
+    void    check_nozzle_temperature_range(DynamicPrintConfig* config, int variant_index = 0);
+    void    check_nozzle_temperature_initial_layer_range(DynamicPrintConfig* config, int variant_index = 0);
     void    check_filament_max_volumetric_speed(DynamicPrintConfig *config);
     void    check_chamber_temperature(DynamicPrintConfig* config);
+    void    check_chamber_minimal_temperature(DynamicPrintConfig* config);
+    // Checks "layer_height" or "initial_layer_print_height" (opt_key) against the printer's layer height limits.
+    bool    check_layer_height(DynamicPrintConfig* config, const std::string& opt_key = "layer_height");
+    bool    layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key = "layer_height");
+    // Where a layer height (or initial layer height) stands against the printer limits. A limit <= EPSILON is "not set".
+    // Zero: the value is 0 and a minimum is set (it is raised to the minimum without asking); TooHigh / TooLow: Adjust / Ignore dialog.
+    enum class LayerHeightCheck { InRange, Zero, TooHigh, TooLow };
+    static LayerHeightCheck classify_layer_height(double value, double min_limit, double max_limit);
+    void    layer_height_limits(double& min_layer_height, double& max_layer_height) const;
     void    set_is_BBL_Printer(bool is_bbl_printer) { is_BBL_Printer = is_bbl_printer; };
+    void    set_reference_config(const DynamicPrintConfig *reference) { m_reference_config = reference; }
     // SLA print
     void    update_print_sla_config(DynamicPrintConfig* config, const bool is_global_config = false);
     void    toggle_print_sla_options(DynamicPrintConfig* config);

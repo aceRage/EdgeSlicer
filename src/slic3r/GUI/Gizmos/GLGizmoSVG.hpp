@@ -5,6 +5,7 @@
 // which overrides our localization "L" macro.
 #include "GLGizmoBase.hpp"
 #include "GLGizmoRotate.hpp"
+#include "EmbossTransformHandles.hpp"
 #include "slic3r/GUI/SurfaceDrag.hpp"
 #include "slic3r/GUI/GLTexture.hpp"
 #include "slic3r/Utils/RaycastManager.hpp"
@@ -15,6 +16,9 @@
 #include <atomic>
 
 #include "libslic3r/Emboss.hpp"
+#include "libslic3r/CodeEmboss.hpp"
+#include "libslic3r/SimpleShape.hpp"
+#include "libslic3r/ImageTrace.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Model.hpp"
 
@@ -65,6 +69,52 @@ public:
     bool create_volume(std::string_view svg_file, ModelVolumeType volume_type = ModelVolumeType::MODEL_PART);
 
     /// <summary>
+    /// Plain "SVG" of a file as a new object in the center of the screen, never onto the selected
+    /// object (File > Import)
+    /// </summary>
+    bool create_object(std::string_view svg_file);
+
+    /// <summary>
+    /// Ask user for QR code / barcode and create its parts (dark, light, logo) as SVG volumes
+    /// </summary>
+    /// <param name="volume_type">Object part / Negative volume / Modifier, INVALID means new object</param>
+    /// <param name="mouse_pos">Position on screen where to create volumes, when not set it is near the selection</param>
+    /// <returns>True on succesfull start creation otherwise False</returns>
+    bool create_code(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos = {});
+
+    /// <summary>
+    /// Ask user for simple shape (circle, square, star, ...) and create it as SVG volume
+    /// </summary>
+    /// <param name="volume_type">Object part / Negative volume / Modifier, INVALID means new object</param>
+    /// <param name="mouse_pos">Position on screen where to create volume, when not set it is near the selection</param>
+    /// <returns>True on succesfull start creation otherwise False</returns>
+    bool create_shape(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos = {});
+
+    /// <summary>
+    /// Trace a PNG / JPG image into shapes (one SVG volume per colour level)
+    /// </summary>
+    /// <param name="volume_type">Object part / Negative volume / Modifier, INVALID means new object</param>
+    /// <param name="mouse_pos">Position on screen where to create volumes, when not set it is near the selection</param>
+    /// <param name="image_path">Image to trace (dropped file), empty = ask for the file.
+    /// A dropped image which is not over an object creates a new object.</param>
+    /// <returns>True on succesfull start creation otherwise False</returns>
+    bool create_image(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos = {}, const std::string &image_path = {});
+
+    /// <summary>
+    /// "SVG (Split)": create one SVG volume per painted shape of the file (fill or stroke), the way
+    /// Bambu Studio imports an SVG. Shapes painted later win: every part loses the area covered by the
+    /// shapes after it, so the parts do not overlap. Before the parts are created the user chooses a
+    /// filament per colour (nearest project filament preselected; Cancel = default filament).
+    /// The plain create_volume() keeps embossing the union of all shapes as one volume.
+    /// </summary>
+    /// <param name="volume_type">Object part, INVALID means new object</param>
+    /// <param name="mouse_pos">Position on screen where to create volumes, when not set it is near the selection</param>
+    /// <param name="svg_path">SVG file (dropped file), empty = ask for the file.
+    /// A dropped SVG which is not over an object creates a new object.</param>
+    /// <returns>True on succesfull start creation otherwise False</returns>
+    bool create_volume_split(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos = {}, const std::string &svg_path = {});
+
+    /// <summary>
     /// Check whether volume is object containing only emboss volume
     /// </summary>
     /// <param name="volume">Pointer to volume</param>
@@ -89,7 +139,11 @@ protected:
     bool on_is_selectable() const override { return false; }
     void on_set_state() override;    
     void data_changed(bool is_serializing) override; // selection changed
-    void on_set_hover_id() override{ m_rotate_gizmo.set_hover_id(m_hover_id); }
+    void on_set_hover_id() override
+    {
+        m_rotate_gizmo.set_hover_id(m_hover_id == 0 ? 0 : -1);
+        m_handles.set_host_hover_id(m_hover_id);
+    }
     void on_enable_grabber(unsigned int id) override { m_rotate_gizmo.enable_grabber(); }
     void on_disable_grabber(unsigned int id) override { m_rotate_gizmo.disable_grabber(); }
     void on_start_dragging() override;
@@ -107,6 +161,7 @@ protected:
     std::string get_gizmo_entering_text() const override;
     std::string get_gizmo_leaving_text() const override;
     std::string get_action_snapshot_name() const override;
+    std::string get_tooltip() const override { return m_handles.get_tooltip(); }
 private:
     void set_volume_by_selection();
     void reset_volume();
@@ -125,12 +180,29 @@ private:
     void draw_mirroring();
     void draw_face_the_camera();
     void draw_model_type();
+    void draw_code();
+    void draw_simple_shape();
+    void edit_simple_shape();
+    void draw_image_trace();
+    void edit_image_trace();
+
+    // Parts of QR code / barcode and levels of a traced image keep the same transformation and surface projection
+    void sync_code_parts();
+    void edit_code();
+    // Start job to recreate mesh of other code part than edited one
+    bool start_code_part_update(ModelVolume &volume, EmbossShape &&shape);
 
     // process mouse event
     bool on_mouse_for_rotation(const wxMouseEvent &mouse_event);
     bool on_mouse_for_translate(const wxMouseEvent &mouse_event);
 
     void volume_transformation_changed();
+
+    // EdgeSlicer: free 3D move / rotate handles (hover ids 1-5, the ring is 0)
+    void update_handles_visibility();
+    void on_handles_drag_finished(const EmbossTransformHandles::Result &result);
+    EmbossFreeTransform::Projection current_projection() const;
+    void draw_placement();
     
     struct GuiCfg;
     std::unique_ptr<const GuiCfg> m_gui_cfg;
@@ -172,6 +244,19 @@ private:
 
     // Keep data about dragging only during drag&drop
     std::optional<SurfaceDrag> m_surface_drag;
+    // The press that started m_surface_drag cancelled a job that was still making the volume.
+    // A release without any move then runs it again (a real move re-processes anyway).
+    bool m_surface_drag_cancelled_job = false;
+
+    // EdgeSlicer: free 3D move / rotate handles
+    EmbossTransformHandles m_handles;
+    // A job the press on a handle cancelled; it runs again when the drag changes nothing
+    bool m_handles_cancelled_job = false;
+    // Projection of m_volume before a handle freed it from the surface; the next surface drag puts it back
+    std::optional<EmbossFreeTransform::Projection> m_detached_projection;
+    // Placement line of the tool window, measured again when the part moved
+    std::optional<EmbossFreeTransform::SurfaceProbe> m_placement_probe;
+    std::optional<Transform3d> m_placement_key;
 
     // For volume on scaled objects
     std::optional<float> m_scale_width;
@@ -191,6 +276,21 @@ private:
 
     IconManager m_icon_manager;
     IconManager::VIcons m_icons;
+
+    // Set when edited volume is a simple shape (circle, star, ...)
+    std::optional<SimpleShapeParams> m_simple_shape;
+
+    // Set when edited volume is part of QR code / barcode
+    std::optional<CodeEmbossMeta> m_code;
+    // Set when edited volume is a level of a traced image (without the stored source image)
+    std::optional<ImageTraceMeta> m_trace;
+    // Transformation and surface projection of edited volume, which is already copied to other parts
+    Transform3d m_code_synced_tr = Transform3d::Identity();
+    bool        m_code_synced_use_surface = false;
+    // Other than code parts are in object to project on
+    bool m_code_can_use_surface = false;
+    // cancel of jobs which update other parts of code
+    std::vector<std::shared_ptr<std::atomic<bool>>> m_code_job_cancels;
 
     // only temporary solution
     static const std::string M_ICON_FILENAME;

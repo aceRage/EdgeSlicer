@@ -4,7 +4,9 @@
 #include "AmsUiPreview.hpp"
 #include "DarkModeBackground.hpp"
 #include "RemoteAccess.hpp"
+#include "BambuSetupNoticeDialog.hpp"
 #include "RemoteHub.hpp"
+#include "Theme.hpp"
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GUI_Factories.hpp"
@@ -23,6 +25,7 @@
 #include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/Config/Version.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 
 // Localization headers: include libslic3r version first so everything in this file
 // uses the slic3r/GUI version (the macros will take precedence over the functions).
@@ -88,6 +91,7 @@
 #include "libslic3r/StartupProfile.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/miniz_extension.hpp"
+#include "libslic3r/UntrustedInput.hpp"
 #include "libslic3r/DataDirMigration.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Color.hpp"
@@ -100,11 +104,13 @@
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
 #include "slic3r/GUI/FlashForge/FFDiagnostics.hpp"
 #include "Plater.hpp"
+#include "AccountStatus.hpp"
 #include "GLCanvas3D.hpp"
 #include "GeneratedConfig.hpp"
 
 #include "../Utils/PresetUpdater.hpp"
 #include "../Utils/AppUpdateCheck.hpp"
+#include "../Utils/StartupWizardLogic.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "../Utils/Process.hpp"
 #include "../Utils/MacDarkMode.hpp"
@@ -113,7 +119,14 @@
 #include "../Utils/UndoRedo.hpp"
 #include "slic3r/Config/Snapshot.hpp"
 #include "Preferences.hpp"
+#include "ThemesPage.hpp"
+#include "WindowColourStash.hpp"
+#include <set>
+#include <cwctype>
 #include "PluginGuard.hpp"
+#include "slic3r/Utils/PluginLoadDiagnostics.hpp"
+#include "slic3r/Utils/VendorConnector.hpp"
+#include "HomePanel.hpp"
 #include "PresetMirror.hpp"
 #include "Tab.hpp"
 #include "SysInfoDialog.hpp"
@@ -121,6 +134,7 @@
 #include "Mouse3DController.hpp"
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
+#include "slic3r/Utils/InstanceRouting.hpp"
 #include "NotificationManager.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "SavePresetDialog.hpp"
@@ -129,15 +143,14 @@
 #include "SendSystemInfoDialog.hpp"
 #include "ParamsDialog.hpp"
 #include "KBShortcutsDialog.hpp"
-#include "DownloadProgressDialog.hpp"
 
 #include "BitmapCache.hpp"
 #include "Notebook.hpp"
 #include "Widgets/Label.hpp"
+#include "Widgets/SideButton.hpp"
 #include "Widgets/ProgressDialog.hpp"
 
 //BBS: DailyTip and UserGuide Dialog
-#include "WebDownPluginDlg.hpp"
 #include "WebGuideDialog.hpp"
 #include "ReleaseNote.hpp"
 #include "PrivacyUpdateDialog.hpp"
@@ -178,6 +191,7 @@ typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS2)(
 #include <boost/dll/runtime_symbol_info.hpp>
 #endif
 #include "slic3r/Utils/SnapmakerSilentLogin.hpp"
+#include "slic3r/Utils/BambuSyncPolicy.hpp"
 
 #ifdef WIN32
 #include "dev-utils/BaseException.h"
@@ -1423,7 +1437,9 @@ void GUI_App::post_init()
             %this->init_params->input_files.size() %this->init_params->input_gcode;
         const auto first_url = this->init_params->input_files.front();
         if (this->init_params->input_files.size() == 1 && is_supported_open_protocol(first_url)) {
-            switch_to_3d = true;
+            // A connector link shows Home > Vendors: no model is loaded, so the usual start-up applies.
+            std::string connector_url;
+            switch_to_3d = !Vendors::parse_connector_link(first_url, connector_url);
             start_download(first_url);
             m_open_method = "url";
         } else {
@@ -1545,29 +1561,24 @@ void GUI_App::post_init()
     hms_query = new HMSQuery();
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
-    // Ultra (plug-in guards): "the plug-in needs updating" means "its version does not match the
-    // Bambu build we were forked from", which is true of our own plug-in by construction. Acting on
-    // it would download Bambu's package over ours, so it is dropped while UltraNet is installed.
+    // "The plug-in needs updating" means the plug-in is absent, did not load, or its version does
+    // not match the Bambu build we were forked from (true of our own plug-in by construction).
+    // EdgeSlicer never downloads Bambu's plug-in, so there is nothing to update: with UltraNet
+    // installed the flag is dropped silently, without it the user is told the plug-in is missing
+    // (once per session).
     if (m_networking_need_update && m_ultranet_plugin_installed) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (network plug-in update prompt skipped)";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, network plug-in update prompt skipped";
         m_networking_need_update = false;
     }
-    if (m_networking_need_update && m_hub_managed && RemoteAccess::get().hidden()) {
-        RemoteAccess::get().raise_attention("the network plug-in needs updating", "manual");
-    } else if (m_networking_need_update) {
-        //updating networking
-        int ret = updating_bambu_networking();
-        if (!ret) {
-            BOOST_LOG_TRIVIAL(info) << __FUNCTION__<<":networking plugin updated successfully";
-            //restart_networking();
-        }
-        else {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<<":networking plugin updated failed";
-        }
+    if (m_networking_need_update) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": the network plug-in is missing or unusable; Bambu's is never downloaded";
+        ShowNetworkPluginMissing(/*user_requested*/ false);
     }
 
     // Start preset sync after project opened, otherwise we could have preset change during project opening which could cause crash
-    if (app_config->get("sync_user_preset") == "true") {
+    if (!PresetSync::cloud_sync_enabled()) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " user preset cloud sync: disabled";
+    } else if (app_config->get("sync_user_preset") == "true") {
         // BBS loading user preset
         // Always async, not such startup step
         // BOOST_LOG_TRIVIAL(info) << "Loading user presets...";
@@ -1598,6 +1609,14 @@ void GUI_App::post_init()
             this->preset_updater->sync(http_url, language, network_ver, sys_preset ? preset_bundle : nullptr);
             this->preset_updater->sync_web_async(true);
             this->check_new_version_sf(false, false);
+            // Bambu Lab's resources only for people with a Bambu printer or login (privacy audit
+            // 2026-10); otherwise look again every 30 s, so a printer added later still gets them.
+            this->maybe_start_bambu_sync("startup");
+            if (!m_bambu_sync_started && !m_bambu_sync_timer) {
+                m_bambu_sync_timer = new wxTimer();
+                m_bambu_sync_timer->Bind(wxEVT_TIMER, [this](wxTimerEvent&) { maybe_start_bambu_sync("later"); });
+                m_bambu_sync_timer->Start(30000);
+            }
 
         });
     }
@@ -1674,6 +1693,9 @@ void GUI_App::post_init()
         });
         silent_login_timer->StartOnce(2000);
     }
+
+    // Startup is over at the next idle event (see the wxEVT_IDLE handler).
+    m_startup_settle_pending = true;
 
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
 //BBS: remove the single instance currently
@@ -1761,6 +1783,11 @@ void GUI_App::shutdown(bool isRecreate)
     }
     if (m_sm_silent_active)
         sm_cancel_silent_login("app closing");
+    if (m_bambu_sync_timer != nullptr) {
+        m_bambu_sync_timer->Stop();
+        delete m_bambu_sync_timer;
+        m_bambu_sync_timer = nullptr;
+    }
 
     if (web_device_dialog != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": web device dialog");
@@ -1844,7 +1871,7 @@ std::string GUI_App::get_plugin_url(std::string name, std::string country_code)
 {
     std::string url = get_http_url(country_code);
 
-    std::string curr_version = NetworkAgent::use_legacy_network ? BAMBU_NETWORK_AGENT_VERSION_LEGACY : BAMBU_NETWORK_AGENT_VERSION;
+    std::string curr_version = NetworkAgent::expected_version();
     std::string using_version = curr_version.substr(0, 9) + "00";
     if (name == "cameratools")
         using_version = curr_version.substr(0, 6) + "00.00";
@@ -1870,6 +1897,17 @@ static std::string decode(std::string const& extra, std::string const& path = {}
 
 int GUI_App::download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
 {
+    // The one gate in front of the Bambu CDN: EdgeSlicer never downloads Bambu's network plug-in
+    // (owner decision, 2026-10), nor the virtual-camera tools. Only the camera component, which the
+    // user is asked about first, may pass (see bambu_cdn_package_allowed()).
+    if (!bambu_cdn_package_allowed(package_name)) {
+        BOOST_LOG_TRIVIAL(warning) << "[download_plugin]: refused '" << name << "/" << package_name
+                                   << "' - EdgeSlicer does not download Bambu plug-ins";
+        bool cancel = false;
+        if (pro_fn) pro_fn(InstallStatusDownloadFailed, 0, cancel);
+        return -1;
+    }
+
     int result = 0;
     json j;
     std::string err_msg;
@@ -1890,7 +1928,7 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
     tmp_path += format(".%1%%2%", get_current_pid(), ".tmp");
 
 #if defined(__WINDOWS__)
-    if (is_running_on_arm64() && !NetworkAgent::use_legacy_network) {
+    if (is_running_on_arm64()) {
         //set to arm64 for plugins
         std::map<std::string, std::string> current_headers = Slic3r::Http::get_extra_headers();
         current_headers["X-BBL-OS-Type"] = "windows_arm";
@@ -1958,7 +1996,7 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
         }).perform_sync();
 
 #if defined(__WINDOWS__)
-    if (is_running_on_arm64() && !NetworkAgent::use_legacy_network) {
+    if (is_running_on_arm64()) {
         //set back
         std::map<std::string, std::string> current_headers = Slic3r::Http::get_extra_headers();
         current_headers["X-BBL-OS-Type"] = "windows";
@@ -2043,155 +2081,50 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
     return result;
 }
 
-int GUI_App::install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
-{
-    bool cancel = false;
-    std::string target_file_path = (fs::temp_directory_path() / package_name).string();
-
-    BOOST_LOG_TRIVIAL(info) << "[install_plugin] enter";
-    // Ultra (plug-in guards): this unzips Bambu's CDN package straight over data_dir/plugins. When
-    // our own clean-room plug-in lives there, that would silently replace it - refuse. The check is
-    // re-read from disk rather than taken from the cache so a late first-run copy is still seen.
-    refresh_ultranet_plugin_state();
-    if (m_ultranet_plugin_installed) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install_plugin refused)";
-        return -1;
-    }
-    // get plugin folder
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto plugin_folder = data_dir_path / name;
-    //auto plugin_folder = boost::filesystem::path(wxStandardPaths::Get().GetUserDataDir().ToUTF8().data()) / "plugins";
-    auto backup_folder = plugin_folder/"backup";
-    if (!boost::filesystem::exists(plugin_folder)) {
-        BOOST_LOG_TRIVIAL(info) << "[install_plugin] will create directory "<<plugin_folder.string();
-        boost::filesystem::create_directory(plugin_folder);
-    }
-    if (!boost::filesystem::exists(backup_folder)) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", will create directory %1%")%backup_folder.string();
-        boost::filesystem::create_directory(backup_folder);
-    }
-
-    if (m_networking_cancel_update) {
-        BOOST_LOG_TRIVIAL(info) << boost::format("[install_plugin]: %1%, cancelled by user")%__LINE__;
-        return -1;
-    }
-    if (pro_fn) {
-        pro_fn(InstallStatusNormal, 50, cancel);
-    }
-    // unzip
-    mz_zip_archive archive;
-    mz_zip_zero_struct(&archive);
-    if (!open_zip_reader(&archive, target_file_path)) {
-        BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, open zip file failed")%__LINE__;
-        if (pro_fn) pro_fn(InstallStatusDownloadFailed, 0, cancel);
-        return InstallStatusUnzipFailed;
-    }
-
-    mz_uint num_entries = mz_zip_reader_get_num_files(&archive);
-    mz_zip_archive_file_stat stat;
-    BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, got %2% files")%__LINE__ %num_entries;
-    for (mz_uint i = 0; i < num_entries; i++) {
-        if (m_networking_cancel_update || cancel) {
-            BOOST_LOG_TRIVIAL(info) << boost::format("[install_plugin]: %1%, cancelled by user")%__LINE__;
-            return -1;
-        }
-        if (mz_zip_reader_file_stat(&archive, i, &stat)) {
-            if (stat.m_uncomp_size > 0) {
-                std::string dest_file;
-                if (stat.m_is_utf8) {
-                    dest_file = stat.m_filename;
-                }
-                else {
-                    std::string extra(1024, 0);
-                    size_t n = mz_zip_reader_get_extra(&archive, stat.m_file_index, extra.data(), extra.size());
-                    dest_file = decode(extra.substr(0, n), stat.m_filename);
-                }
-                auto dest_file_path = boost::filesystem::path(dest_file);
-                dest_file = dest_file_path.filename().string();
-                auto dest_path = boost::filesystem::path(plugin_folder.string() + "/" + dest_file);
-                std::string dest_zip_file = encode_path(dest_path.string().c_str());
-                try {
-                    if (fs::exists(dest_path))
-                        fs::remove(dest_path);
-                    mz_bool res = mz_zip_reader_extract_to_file(&archive, stat.m_file_index, dest_zip_file.c_str(), 0);
-                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", extract  %1% from plugin zip %2%\n") % dest_file % stat.m_filename;
-                    if (res == 0) {
-#ifdef WIN32
-                        std::wstring new_dest_zip_file = boost::locale::conv::utf_to_utf<wchar_t>(dest_path.generic_string());
-                        res                            = mz_zip_reader_extract_to_file_w(&archive, stat.m_file_index, new_dest_zip_file.c_str(), 0);
-#endif
-                        if (res == 0) {
-                            mz_zip_error zip_error = mz_zip_get_last_error(&archive);
-                            BOOST_LOG_TRIVIAL(error) << "[install_plugin]Archive read error:" << mz_zip_get_error_string(zip_error) << std::endl;
-                            close_zip_reader(&archive);
-                            if (pro_fn) { pro_fn(InstallStatusUnzipFailed, 0, cancel); }
-                            return InstallStatusUnzipFailed;
-                        }
-                    }
-                    else {
-                        if (pro_fn) {
-                            pro_fn(InstallStatusNormal, 50 + i/num_entries, cancel);
-                        }
-                        try {
-                            auto backup_path = boost::filesystem::path(backup_folder.string() + "/" + dest_file);
-                            if (fs::exists(backup_path))
-                                fs::remove(backup_path);
-                            std::string error_message;
-                            CopyFileResult cfr = copy_file(dest_path.string(), backup_path.string(), error_message, false);
-                            if (cfr != CopyFileResult::SUCCESS) {
-                                BOOST_LOG_TRIVIAL(error) << "Copying to backup failed(" << cfr << "): " << error_message;
-                            }
-                        }
-                        catch (const std::exception& e)
-                        {
-                            BOOST_LOG_TRIVIAL(error) << "Copying to backup failed: " << e.what();
-                            //continue
-                        }
-                    }
-                }
-                catch (const std::exception& e)
-                {
-                    // ensure the zip archive is closed and rethrow the exception
-                    close_zip_reader(&archive);
-                    BOOST_LOG_TRIVIAL(error) << "[install_plugin]Archive read exception:"<<e.what();
-                    if (pro_fn) {
-                        pro_fn(InstallStatusUnzipFailed, 0, cancel);
-                    }
-                    return InstallStatusUnzipFailed;
-                }
-            }
-        }
-        else {
-            BOOST_LOG_TRIVIAL(error) << boost::format("[install_plugin]: %1%, mz_zip_reader_file_stat for file %2% failed")%__LINE__%i;
-        }
-    }
-
-    close_zip_reader(&archive);
-
-    if (pro_fn)
-        pro_fn(InstallStatusInstallCompleted, 100, cancel);
-    if (name == "plugins")
-        app_config->set_bool("installed_networking", true);
-    BOOST_LOG_TRIVIAL(info) << "[install_plugin] success";
-    return 0;
-}
-
 // ---------------------------------------------------------------------------------------------
 // Ultra (live view): Bambu's camera component.
 //
 // The Device-tab live view plays through BambuSource, a proprietary DirectShow source filter. It
 // is not something UltraNet replaces - we ship a ~9.7 KB placeholder under that name purely so the
 // agent's LoadLibrary probe of the plug-ins folder succeeds. The filter itself only ever arrives in
-// Bambu's network plug-in package, and every other route to that package is (correctly) shut off
-// while UltraNet is installed. This is the one deliberate exception, and it is surgical: only
-// BambuSource and live555 are taken out of the zip, so bambu_networking.dll and the ultranet.txt
-// marker are never at risk.
+// Bambu's package, and every other route to the Bambu CDN is shut off (download_plugin() refuses
+// all other packages). This is the one deliberate exception, asked about first, and it is
+// surgical: only BambuSource and live555 are taken out of the zip, so bambu_networking.dll and the
+// ultranet.txt marker are never at risk and the network plug-in itself is never installed.
 
 bool GUI_App::has_bambu_camera_component() const
 {
     namespace fs = boost::filesystem;
-    return exports_dll_register_server(fs::path(data_dir()) / "plugins" / bambu_source_library_name());
+    return is_real_camera_component(camera_module_dir(fs::path(data_dir())) / bambu_source_library_name());
+}
+
+void GUI_App::sync_bambu_camera_module()
+{
+#if defined(_WIN32) || defined(__APPLE__)
+    try {
+        namespace fs = boost::filesystem;
+        const fs::path   exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
+        CameraSyncPaths  paths;
+        paths.plugins_dir  = fs::path(data_dir()) / "plugins";
+        paths.camera_dir   = camera_module_dir(fs::path(data_dir()));
+        paths.sidecar_dir  = ultranet_sidecar_dir(exe_dir);
+        paths.bundled_dir  = bundled_camera_dir(exe_dir);
+        paths.source_name  = bambu_source_library_name();
+        paths.live_name    = live555_library_name();
+        paths.keep_foreign = app_config && app_config->get_bool("ultranet_keep_foreign_plugin");
+        for (const CameraSyncLog &line : sync_camera_module_files(paths)) {
+            switch (line.level) {
+            case CameraSyncLog::Error:   BOOST_LOG_TRIVIAL(error)   << "[camera module] " << line.text; break;
+            case CameraSyncLog::Warning: BOOST_LOG_TRIVIAL(warning) << "[camera module] " << line.text; break;
+            default:                     BOOST_LOG_TRIVIAL(info)    << "[camera module] " << line.text; break;
+            }
+        }
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(error) << "[camera module] start-up sync failed: " << e.what();
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(error) << "[camera module] start-up sync failed";
+    }
+#endif
 }
 
 int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
@@ -2200,8 +2133,8 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
     bool cancel = false;
 
     const std::string package_name = "camera_component.zip";
-    // Deliberately NOT install_plugin(): that unzips the whole package over plugins/ and is refused
-    // while UltraNet is installed. download_plugin() only fetches, so it is safe to reuse as is.
+    // download_plugin() only fetches (and lets this one package name through); nothing here
+    // unzips the whole package over plugins/.
     int result = download_plugin("plugins", package_name, pro_fn, cancel_fn);
     if (result < 0) {
         BOOST_LOG_TRIVIAL(error) << "[camera component] download failed";
@@ -2219,11 +2152,11 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
 
     // Matched on the bare filename so a package that nests them in a folder still works. The
     // network library is never taken: bambu_networking.dll and the ultranet.txt marker stay ours.
+    // Only into cameratools: plugins/ holds UltraNet's storage module under the same name, and a
+    // camera module there breaks the storage browser (see sync_bambu_camera_module).
     const std::string want_source = bambu_source_library_name();
-    const fs::path plugins_dir     = fs::path(data_dir()) / "plugins";
-    const fs::path cameratools_dir = fs::path(data_dir()) / "cameratools";
+    const fs::path cameratools_dir = camera_module_dir(fs::path(data_dir()));
     boost::system::error_code ec;
-    fs::create_directories(plugins_dir, ec);
     fs::create_directories(cameratools_dir, ec);
 
     bool got_source = false;
@@ -2245,7 +2178,12 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
             size_t n = mz_zip_reader_get_extra(&archive, stat.m_file_index, extra.data(), extra.size());
             entry = decode(extra.substr(0, n), stat.m_filename);
         }
-        const std::string leaf = fs::path(entry).filename().string();
+        std::string normalized_entry;
+        if (untrusted::normalize_archive_entry_path(entry, normalized_entry) != untrusted::ArchiveEntryName::Ok) {
+            BOOST_LOG_TRIVIAL(warning) << "[camera component] skipping entry with an unsafe or empty name: " << stat.m_filename;
+            continue;
+        }
+        const std::string leaf = untrusted::archive_entry_leaf(normalized_entry);
         const bool is_source  = boost::iequals(leaf, want_source);
         // Bambu's package carries the filter's own dependencies next to it (live555 for LAN RTSP,
         // the agora_* / libaosl set for cloud streams); the filter fails to load without them, so
@@ -2259,15 +2197,9 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
         // Extract to a temp file first, so a half-written download can never leave a truncated
         // filter sitting where a working one used to be.
         const fs::path staged = fs::temp_directory_path() / (std::string("edgeslicer_cam_") + leaf);
-        std::string staged_enc = encode_path(staged.string().c_str());
-        mz_bool res = mz_zip_reader_extract_to_file(&archive, stat.m_file_index, staged_enc.c_str(), 0);
-#ifdef WIN32
-        if (res == 0) {
-            std::wstring staged_w = boost::locale::conv::utf_to_utf<wchar_t>(staged.generic_string());
-            res = mz_zip_reader_extract_to_file_w(&archive, stat.m_file_index, staged_w.c_str(), 0);
-        }
-#endif
-        if (res == 0) {
+        // Wide API on Windows, never narrowed through the ANSI code page (see the confined extractors).
+        const bool res = extract_entry_to_file(archive, stat.m_file_index, staged);
+        if (!res) {
             BOOST_LOG_TRIVIAL(error) << "[camera component] failed to extract " << leaf;
             continue;
         }
@@ -2279,11 +2211,9 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
             fs::remove(staged, ec);
             continue;
         }
-        for (const fs::path &dir : {plugins_dir, cameratools_dir}) {
-            fs::copy_file(staged, dir / leaf, fs::copy_option::overwrite_if_exists, ec);
-            if (ec)
-                BOOST_LOG_TRIVIAL(error) << "[camera component] copy to " << dir.string() << " failed: " << ec.message();
-        }
+        fs::copy_file(staged, cameratools_dir / leaf, fs::copy_option::overwrite_if_exists, ec);
+        if (ec)
+            BOOST_LOG_TRIVIAL(error) << "[camera component] copy to " << cameratools_dir.string() << " failed: " << ec.message();
         fs::remove(staged, ec);
         if (is_source)
             got_source = true;
@@ -2306,38 +2236,35 @@ bool GUI_App::register_bambu_source_filter()
 {
 #ifdef __WIN32__
     namespace fs = boost::filesystem;
-    const fs::path dll_path = fs::path(data_dir()) / "plugins" / bambu_source_library_name();
-    // The guard that was missing: regsvr32 on a DLL with no DllRegisterServer can only produce the
-    // error the user reported, so never start the UAC dance unless the entry point is really there.
+    const fs::path dll_path = camera_module_dir(fs::path(data_dir())) / bambu_source_library_name();
+    // Never register something that is not the filter (UltraNet's storage module has the same name).
     if (!exports_dll_register_server(dll_path)) {
         BOOST_LOG_TRIVIAL(info) << "[camera component] not registering " << dll_path.string()
                                 << ": no DllRegisterServer export";
         return false;
     }
 
-    std::string regContent = R"(Windows Registry Editor Version 5.00
-[HKEY_CLASSES_ROOT\bambu]
-"Source Filter"="{233E64FB-2041-4A6C-AFAB-FF9BCF83E7AA}"
-)";
-    auto reg_path = (fs::temp_directory_path() / fs::unique_path()).replace_extension(".reg");
+    // Per user, no elevation. The stock route was a .reg import into HKCR (regedit, UAC) plus
+    // regsvr32 under runas (UAC again); what the filter's DllRegisterServer writes is the per-user
+    // CLSID entry below (seen on a working install: HKCU\Software\Classes\CLSID\{233E...}\
+    // InprocServer32 = <dll>, ThreadingModel = Both), and DirectShow finds the bambu: source filter
+    // through HKEY_CLASSES_ROOT, which merges HKCU\Software\Classes over HKLM.
+    const wxString clsid = "{233E64FB-2041-4A6C-AFAB-FF9BCF83E7AA}";
+    bool ok = true;
     {
-        boost::nowide::ofstream temp_reg_file(reg_path.string().c_str());
-        if (!temp_reg_file)
-            return false;
-        temp_reg_file << regContent;
+        wxRegKey key(wxRegKey::HKCU, "Software\\Classes\\CLSID\\" + clsid + "\\InprocServer32");
+        ok = key.Create() && key.SetValue(wxEmptyString, wxString(dll_path.wstring())) &&
+             key.SetValue("ThreadingModel", "Both");
     }
-    auto sei_params = L"/q /s " + reg_path.wstring();
-    SHELLEXECUTEINFO sei{sizeof(sei), SEE_MASK_NOCLOSEPROCESS, NULL, L"open",
-                         L"regedit", sei_params.c_str(), SW_HIDE, SW_HIDE};
-    ::ShellExecuteEx(&sei);
-
-    std::wstring quoted_dll_path = L"\"" + dll_path.wstring() + L"\"";
-    SHELLEXECUTEINFO info{sizeof(info), 0, NULL, L"runas", L"regsvr32", quoted_dll_path.c_str(), SW_HIDE};
-    ::ShellExecuteEx(&info);
-
-    boost::system::error_code ec;
-    fs::remove(reg_path, ec);
-    BOOST_LOG_TRIVIAL(info) << "[camera component] registered " << dll_path.string();
+    if (ok) {
+        wxRegKey key(wxRegKey::HKCU, "Software\\Classes\\bambu");
+        ok = key.Create() && key.SetValue("Source Filter", clsid);
+    }
+    if (!ok) {
+        BOOST_LOG_TRIVIAL(error) << "[camera component] could not write the per-user filter registration for " << dll_path.string();
+        return false;
+    }
+    BOOST_LOG_TRIVIAL(info) << "[camera component] registered " << dll_path.string() << " as the bambu: source filter for this user";
     return true;
 #else
     return false;
@@ -2354,9 +2281,7 @@ bool GUI_App::offer_bambu_camera_component(wxWindow *parent)
     if (dlg.ShowModal() != wxID_YES)
         return false;
 
-    // The DownloadProgressDialog job machinery routes through install_plugin(), which must stay
-    // refused while UltraNet is installed, so run the fetch synchronously behind a busy cursor
-    // rather than reusing that dialog.
+    // Run the fetch synchronously behind a busy cursor.
     int result = 0;
     {
         wxBusyCursor busy;
@@ -2446,26 +2371,31 @@ void GUI_App::remove_old_networking_plugins()
     }
 }
 
-int GUI_App::updating_bambu_networking()
-{
-    DownloadProgressDialog dlg(_L("Downloading Bambu Network Plug-in"));
-    dlg.ShowModal();
-    return 0;
-}
-
 bool GUI_App::check_networking_version()
 {
     std::string network_ver = Slic3r::NetworkAgent::get_version();
     if (!network_ver.empty()) {
         BOOST_LOG_TRIVIAL(info) << "get_network_agent_version=" << network_ver;
     }
-    std::string studio_ver = NetworkAgent::use_legacy_network ? BAMBU_NETWORK_AGENT_VERSION_LEGACY : BAMBU_NETWORK_AGENT_VERSION;
-    if (network_ver.length() >= 8) {
-        if (network_ver.substr(0,8) == studio_ver.substr(0,8)) {
-            m_networking_compatible = true;
-            return true;
-        }
+    // Only the current plug-in version is accepted: EdgeSlicer ships one network plug-in, and the
+    // old "legacy_networking" switch no longer selects another expected version.
+    const std::string studio_ver = NetworkAgent::expected_version();
+    if (NetworkAgent::is_compatible_version(network_ver)) {
+        m_networking_compatible = true;
+        return true;
     }
+
+    // The library loaded but reports a version this EdgeSlicer cannot use (or none: "00.00.00.00"
+    // is what get_version() answers for a debug/release mismatch or a missing export).
+    BOOST_LOG_TRIVIAL(warning) << "[plugin] network plug-in rejected: it reports version \"" << network_ver
+                               << "\" but this EdgeSlicer needs \"" << studio_ver << "\" (first 8 characters must match)";
+    PluginLoadFailure rejected;
+    rejected.kind        = PluginLoadFailureKind::Incompatible;
+    rejected.detail           = "version " + network_ver + ", expected " + studio_ver;
+    rejected.found_version    = network_ver;
+    rejected.expected_version = studio_ver;
+    rejected.file_exists = true;
+    record_plugin_load_failure(rejected);
 
     m_networking_compatible = false;
     return false;
@@ -2488,6 +2418,14 @@ void GUI_App::init_networking_callbacks()
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": enter, m_agent=%1%")%m_agent;
     if (m_agent) {
 
+        // The plug-in's own sign-in / sign-out reports (a session it ended itself) reach the Account button.
+        m_agent->set_on_user_login_fn([](int /*online_login*/, bool login) {
+            GUI::AccountStatus::refresh_async();
+            // Signing in to Bambu Lab is one of the signals that allow the Bambu startup sync.
+            if (login)
+                wxGetApp().CallAfter([] { wxGetApp().maybe_start_bambu_sync("Bambu login"); });
+        });
+
         m_agent->set_server_callback([](std::string url, int status) {
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": server_callback, url=%1%, status=%2%") % url % status;
 
@@ -2507,15 +2445,20 @@ void GUI_App::init_networking_callbacks()
                 });
                 return;
             }
-            GUI::wxGetApp().CallAfter([this] {
+            GUI::wxGetApp().CallAfter([this, return_code] {
                 if (m_is_closing)
                     return;
                 BOOST_LOG_TRIVIAL(trace) << "static: server connected";
-                m_agent->set_user_selected_machine(m_agent->get_user_selected_machine());
+                // Before set_user_selected_machine below asks for the selected printer's report:
+                // a selection made while the session was still connecting held its own request.
+                if (m_device_manager)
+                    m_device_manager->on_cloud_session(return_code);
                     if (this->is_enable_multi_machine()) {
                         auto evt = new wxCommandEvent(EVT_UPDATE_MACHINE_LIST);
                         wxQueueEvent(this, evt);
                     }
+                    // Once (it used to be made twice, before and after the event above, and each
+                    // call asks the printer for a full report).
                     m_agent->set_user_selected_machine(m_agent->get_user_selected_machine());
                     //subscribe device
                     if (m_agent->is_user_login()) {
@@ -2585,6 +2528,17 @@ void GUI_App::init_networking_callbacks()
                     // asked for a report, a session reported down is re-dialled.
                     if (obj)
                         obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    // The one "connected" line per connect, and the end of holding this
+                    // selection's early requests: the held commands go out now, the held status
+                    // requests are replaced by the pushall + get_version below.
+                    if (obj && FirstRequestGate::event_applies(obj->is_lan_mode_printer(), /* event_is_lan */ true)) {
+                        if (state == ConnectStatus::ConnectStatusOk)
+                            obj->note_session_up("LAN");
+                        else
+                            // A refused first dial is dialled once more with its requests still
+                            // held; anything else reports the session down.
+                            obj->note_dial_failed();
+                    }
                     if (MachineObject* local = m_device_manager->get_local_machine(dev_id); local && local != obj)
                         local->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
 
@@ -2662,12 +2616,13 @@ void GUI_App::init_networking_callbacks()
 
                     auto sel = this->m_device_manager->get_selected_machine();
 
-                    if (sel && sel->dev_id == dev_id) {
-                        obj->parse_json(msg);
-                    }
-                    else {
-                        obj->parse_json(msg, true);
-                    }
+                    // Ultra: every printer is parsed in full, not only the selected one. Upstream
+                    // parses the others key-fields-only, which skips the AMS trays and the external
+                    // spools - so the phone's printer screen (RemoteControl::describe_bambu) showed a
+                    // filament list only for a printer this PC had selected, which in practice meant
+                    // one it had just sent a print to. The hidden hub-managed instance selects
+                    // nothing, so there it never had one at all.
+                    obj->parse_json(msg);
 
 
                     if (!this->is_enable_multi_machine()) {
@@ -3234,6 +3189,14 @@ int GUI_App::OnExit()
         BOOST_LOG_TRIVIAL(error) << "Failed to clean up encrypt bbl network log file";
     }
 
+    // A restart was asked for (request_relaunch). It was started once the window closed; if that
+    // did not happen (the window went some other way), start it now.
+    if (m_relaunch_pending) {
+        BOOST_LOG_TRIVIAL(warning) << "OnExit: relaunch " << (m_relaunch_started ? "already started" : "starting now");
+        m_single_instance_checker.reset(); // the lock is let go before the process is gone
+        relaunch_now();
+    }
+
     return wxApp::OnExit();
 }
 
@@ -3262,16 +3225,22 @@ bool GUI_App::on_init_inner()
 #endif
     StartupProfiler profiler("GUI_App::on_init_inner");
 
+    // Started by GUI_App::request_relaunch of the instance it replaces (main() already waited for it).
+    {
+        wxString note;
+        if (wxGetEnv("EDGESLICER_RELAUNCH_NOTE", &note)) {
+            BOOST_LOG_TRIVIAL(warning) << "Relaunch: this process replaces another (" << note.ToUTF8().data() << ")";
+            wxUnsetEnv("EDGESLICER_RELAUNCH_NOTE");
+        }
+    }
+
     // Ultra: hidden launch. Precedence: SNORCA_HIDDEN (1/0, lets the hub or a test force
     // either way) > --hidden on the command line > app_config "start_hidden".
     {
         wxString env;
-        if (wxGetEnv("SNORCA_HIDDEN", &env) && !env.empty())
-            m_hub_managed = env != "0";
-        else if (init_params != nullptr && init_params->start_hidden)
-            m_hub_managed = true;
-        else
-            m_hub_managed = app_config->get_bool("start_hidden");
+        m_hub_managed = InstanceRouting::resolve_hidden_start(
+            wxGetEnv("SNORCA_HIDDEN", &env) ? std::optional<std::string>(env.ToStdString()) : std::nullopt,
+            init_params != nullptr && init_params->start_hidden, app_config->get_bool("start_hidden"));
         if (m_hub_managed)
             BOOST_LOG_TRIVIAL(info) << "starting hidden: no splash, no window until the hub shows it";
     }
@@ -3289,6 +3258,8 @@ bool GUI_App::on_init_inner()
     ::SetCurrentProcessExplicitAppUserModelID(L"aceRage.EdgeSlicer");
 #endif // _WIN32
 
+    // The UI theme (docs/themes.md) hands over its colours, fonts and shapes before any are made.
+    Theme::load(app_config->get("ui_theme"));
     ::Label::initSysFont();
 
     // Set initialization of image handlers before any UI actions - See GH issue #7469
@@ -3330,6 +3301,18 @@ bool GUI_App::on_init_inner()
         for (auto d : dialogStack)
             d->EndModal(wxID_ABORT);
     });
+
+#ifdef __APPLE__
+    // A quit request from the Dock, a logout or a restart ends with AppKit calling exit() right after this
+    // event, so OnExit() and ~GUI_App() never run. Stop the preset sync and unload the Bambu network module
+    // here as OnExit() does: its static destructors abort if its agent's threads are still running.
+    wxGetApp().Bind(wxEVT_END_SESSION, [this](wxCloseEvent &e) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "received wxEVT_END_SESSION";
+        stop_sync_user_preset();
+        Slic3r::NetworkAgent::unload_network_module();
+        e.Skip();
+    });
+#endif
 
     // Verify resources path
     const wxString resources_dir = from_u8(Slic3r::resources_dir());
@@ -3709,8 +3692,8 @@ bool GUI_App::on_init_inner()
 
         auto write_marker = [&]() {
             // The library name is Bambu's, so the file alone cannot say whose plug-in this is; the
-            // marker is what stops install_plugin() and the update prompts from replacing ours with
-            // a CDN download. The sidecar folder may ship its own copy - prefer that one.
+            // marker is what tells our plug-in from a foreign one. The sidecar folder may ship its
+            // own copy - prefer that one.
             if (fs::exists(bundled / kUltraNetMarkerName, ec)) {
                 fs::copy_file(bundled / kUltraNetMarkerName, pf / kUltraNetMarkerName, fs::copy_option::overwrite_if_exists, ec);
             } else {
@@ -3760,12 +3743,18 @@ bool GUI_App::on_init_inner()
             BOOST_LOG_TRIVIAL(warning) << "[UltraNet] ultranet_keep_foreign_plugin is set; leaving a foreign network plug-in in " << pf.string();
         }
 
+        // The camera module first (Windows/macOS): a Bambu camera module sitting in plugins/ moves to
+        // cameratools and UltraNet's storage module comes back, then cameratools is seeded from the
+        // app's bundled camera files. After this, plugins/ never holds Bambu's module there.
+        sync_bambu_camera_module();
+
         // BambuSource follows the sidecar on its own. It carries the storage browser's tunnel now,
         // so it can change while bambu_networking.dll stays byte-identical, and it used to be
         // copied only together with a plug-in replacement - with an overwrite that silently fails
         // while another EdgeSlicer instance (the hub) has the old file loaded, after which nothing
         // retried. Move the old one aside first, like the plug-in above. Bambu's real camera
-        // filter, when the user fetched it, is never replaced (live view needs it).
+        // filter is never replaced here; on Windows/macOS sync_bambu_camera_module() above has
+        // already moved it to cameratools, so this only still applies on Linux.
         {
             const char    *bs_name     = bambu_source_library_name(); // BambuSource.dll / libBambuSource.dylib / .so
             const fs::path bs_ours     = bundled / bs_name;
@@ -3824,8 +3813,16 @@ bool GUI_App::on_init_inner()
         }
     } catch (...) {}
 
-    // Orca: select network plugin version
-    NetworkAgent::use_legacy_network = app_config->get_bool("legacy_networking");
+    // EdgeSlicer ships one network plug-in. The Orca "legacy_networking" switch (it made the
+    // version check expect the old 01.10 ABI, so UltraNet was rejected on every start) is ignored,
+    // and reset so nothing else reads it either. Its Preferences switch is gone, so a stale true
+    // could otherwise never be undone.
+    NetworkAgent::use_legacy_network = false;
+    if (app_config->get_bool("legacy_networking")) {
+        BOOST_LOG_TRIVIAL(warning) << "[plugin] ignoring legacy_networking=true (EdgeSlicer ships one network plug-in)";
+        app_config->set_bool("legacy_networking", false);
+        app_config->save();
+    }
     // Force legacy network plugin if debugger attached
     // See https://github.com/bambulab/BambuStudio/issues/6726
     /* if (!NetworkAgent::use_legacy_network) {
@@ -4004,6 +4001,16 @@ bool GUI_App::on_init_inner()
         if (! plater_)
             return;
 
+        // The first idle event after post_init(): everything post_init() queued has run (wx sends
+        // idle events only once its own event queue is empty), so the GUI thread is free.
+        if (m_startup_settle_pending) {
+            m_startup_settle_pending = false;
+            m_startup_settled        = true;
+            BOOST_LOG_TRIVIAL(info) << "startup is over: the event queue post_init() filled has drained";
+            if (mainframe)
+                mainframe->on_startup_settled();
+        }
+
         // BBS
         //this->obj_manipul()->update_if_dirty();
 
@@ -4024,9 +4031,14 @@ bool GUI_App::on_init_inner()
             this->post_init();
 
             update_publish_status();
+            if (!m_pending_connector_link.empty()) {
+                const std::string link = std::move(m_pending_connector_link);
+                m_pending_connector_link.clear();
+                open_connector_link(link);
+            }
         }
 
-        if (m_post_initialized && app_config->dirty())
+        if (m_post_initialized && app_config->dirty() && app_config->save_due())
             app_config->save();
 
     });
@@ -4124,84 +4136,28 @@ void GUI_App::machine_find()
 
 void GUI_App::copy_network_if_available()
 {
-    if (app_config->get("update_network_plugin") != "true")
+    // EdgeSlicer never installs Bambu's network plug-in (owner decision, 2026-10). An older build
+    // could stage one in <data_dir>/ota (`update_network_plugin` = true) and copy it over
+    // data_dir/plugins at the next start; a data dir carried over from such a build is cleaned up
+    // here instead: clear the flag and remove the staged files by exact name.
+    if (ota_plugin_install_decision(app_config->get("update_network_plugin") == "true") == OtaPluginInstall::NothingStaged)
         return;
-    std::string network_library, player_library, live555_library, network_library_dst, player_library_dst, live555_library_dst;
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto plugin_folder = data_dir_path / "plugins";
-    auto cache_folder = data_dir_path / "ota";
-    std::string changelog_file = cache_folder.string() + "/network_plugins.json";
-#if defined(_MSC_VER) || defined(_WIN32)
-    network_library = cache_folder.string() + "/bambu_networking.dll";
-    player_library      = cache_folder.string() + "/BambuSource.dll";
-    live555_library     = cache_folder.string() + "/live555.dll";
-    network_library_dst = plugin_folder.string() + "/bambu_networking.dll";
-    player_library_dst  = plugin_folder.string() + "/BambuSource.dll";
-    live555_library_dst = plugin_folder.string() + "/live555.dll";
-#elif defined(__WXMAC__)
-    network_library = cache_folder.string() + "/libbambu_networking.dylib";
-    player_library = cache_folder.string() + "/libBambuSource.dylib";
-    live555_library = cache_folder.string() + "/liblive555.dylib";
-    network_library_dst = plugin_folder.string() + "/libbambu_networking.dylib";
-    player_library_dst = plugin_folder.string() + "/libBambuSource.dylib";
-    live555_library_dst = plugin_folder.string() + "/liblive555.dylib";
-#else
-    network_library = cache_folder.string() + "/libbambu_networking.so";
-    player_library      = cache_folder.string() + "/libBambuSource.so";
-    live555_library     = cache_folder.string() + "/liblive555.so";
-    network_library_dst = plugin_folder.string() + "/libbambu_networking.so";
-    player_library_dst  = plugin_folder.string() + "/libBambuSource.so";
-    live555_library_dst = plugin_folder.string() + "/liblive555.so";
-#endif
-
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": checking network_library " << network_library << ", player_library " << player_library;
-    if (!boost::filesystem::exists(plugin_folder)) {
-        BOOST_LOG_TRIVIAL(info)<< __FUNCTION__ << ": create directory "<<plugin_folder.string();
-        boost::filesystem::create_directory(plugin_folder);
-    }
-    std::string error_message;
-    if (boost::filesystem::exists(network_library)) {
-        CopyFileResult cfr = copy_file(network_library, network_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(network_library_dst, perms);
-        fs::remove(network_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": Copying network library from" << network_library << " to " << network_library_dst<<" successfully.";
-    }
-
-    if (boost::filesystem::exists(player_library)) {
-        CopyFileResult cfr = copy_file(player_library, player_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(player_library_dst, perms);
-        fs::remove(player_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": Copying player library from" << player_library << " to " << player_library_dst<<" successfully.";
-    }
-
-    if (boost::filesystem::exists(live555_library)) {
-        CopyFileResult cfr = copy_file(live555_library, live555_library_dst, error_message, false);
-        if (cfr != CopyFileResult::SUCCESS) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": Copying failed(" << cfr << "): " << error_message;
-            return;
-        }
-
-        static constexpr const auto perms = fs::owner_read | fs::owner_write | fs::group_read | fs::others_read;
-        fs::permissions(live555_library_dst, perms);
-        fs::remove(live555_library);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": Copying live555 library from" << live555_library << " to " << live555_library_dst<<" successfully.";
-    }
-    if (boost::filesystem::exists(changelog_file))
-        fs::remove(changelog_file);
     app_config->set("update_network_plugin", "false");
+    namespace fs = boost::filesystem;
+    const fs::path ota_dir = fs::path(data_dir()) / "ota";
+    size_t n = 0;
+    const char *const *names = ota_plugin_staged_names(n);
+    int removed = 0;
+    for (size_t i = 0; i < n; ++i) {
+        boost::system::error_code ec;
+        const fs::path f = ota_dir / names[i]; // exact names, directly inside ota/ only
+        if (fs::is_regular_file(f, ec) && fs::remove(f, ec))
+            ++removed;
+        else if (ec)
+            BOOST_LOG_TRIVIAL(warning) << "[plugin] could not remove the staged " << names[i] << ": " << ec.message();
+    }
+    BOOST_LOG_TRIVIAL(warning) << "[plugin] refused to install a staged Bambu network plug-in; cleared update_network_plugin and removed "
+                               << removed << " staged file(s) from " << ota_dir.string();
 }
 
 bool GUI_App::on_init_network(bool try_backup)
@@ -4256,6 +4212,7 @@ __retry:
     }
 
     if (create_network_agent) {
+        clear_plugin_load_failure(); // everything loaded (possibly from the backup folder): nothing to report
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", create network agent...");
         //std::string data_dir = wxStandardPaths::Get().GetUserDataDir().ToUTF8().data();
         std::string data_directory = data_dir();
@@ -4370,21 +4327,26 @@ bool GUI_App::init_flashnetwork(const std::string &explicit_path)
 
     if (found.empty()) {
         m_flashnetwork_error = ff_flashnetwork_missing_text(m_flashnetwork_searched);
-        BOOST_LOG_TRIVIAL(info) << "FlashNetwork.dll not present; Flashforge device connectivity disabled";
+        BOOST_LOG_TRIVIAL(warning) << "[FlashForge] FlashNetwork.dll not present; Flashforge device connectivity disabled";
         return false;
     }
 
     m_flashnetwork_path = found;
     if (!MultiComMgr::inst()->initalize(found, data_dir())) {
-        // Found but would not load: wrong architecture, a truncated copy, or a DLL that needs a
-        // runtime this machine lacks. The path is the useful half of the message.
-        m_flashnetwork_error = ff_flashnetwork_load_failed_text(found);
-        BOOST_LOG_TRIVIAL(error) << "FlashNetwork found but failed to initialize: " << found;
+        // Found but would not come up. MultiComMgr knows which step failed (load, missing export,
+        // version, or fnet_initlize itself - which is what a missing FLASHNETWORK9.DAT looks
+        // like) and has logged it; carry that reason into the Device tab text.
+        const std::string &reason = MultiComMgr::inst()->lastInitError();
+        m_flashnetwork_error = ff_flashnetwork_init_failed_text(found, reason);
+        BOOST_LOG_TRIVIAL(error) << "FlashNetwork found but failed to initialize: " << found
+                                 << (reason.empty() ? std::string() : ": " + reason);
         return false;
     }
 
     m_flashnetwork_loaded = true;
-    BOOST_LOG_TRIVIAL(info) << "FlashNetwork initialized from " << found;
+    // Warning level on purpose: the default log level drops info, and this is the line that tells a
+    // support log whether the FlashForge Device tab could start at all.
+    BOOST_LOG_TRIVIAL(warning) << "[FlashForge] FlashNetwork " << MultiComMgr::inst()->libraryVersion() << " initialized from " << found;
     return true;
 }
 
@@ -4411,6 +4373,9 @@ bool GUI_App::dark_mode()
     // proper dark mode was first introduced.
     return wxPlatformInfo::Get().CheckOSVersion(10, 14) && mac_dark_mode();
 #else
+    // A theme built on the light or dark look decides it; macOS follows the system either way.
+    if (const int themed = Theme::base_dark(); themed >= 0)
+        return themed == 1;
     return wxGetApp().app_config->get("dark_color_mode") == "1" ? true : check_dark_mode();
     //const unsigned luma = get_colour_approx_luma(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
     //return luma < 128;
@@ -4504,6 +4469,10 @@ static bool is_default(wxWindow* win)
 }
 #endif
 
+// The windows UpdateDarkUI has already taken back to stock colours during the live theme switch that
+// is running (see StateColor::BeginUntheme).
+static std::set<wxWindow*> g_unthemed_windows;
+
 void GUI_App::UpdateDarkUI(wxWindow* window, bool highlited/* = false*/, bool just_font/* = false*/)
 {
     if (wxButton *btn = dynamic_cast<wxButton*>(window)) {
@@ -4550,6 +4519,26 @@ void GUI_App::UpdateDarkUI(wxWindow* window, bool highlited/* = false*/, bool ju
 
     /*if (m_is_dark_mode != dark_mode() )
         m_is_dark_mode = dark_mode();*/
+
+    // SideButton (Slice plate / Print plate) keeps its colours as state lists that are themed as it
+    // is drawn, but its SetBackgroundColour/SetForegroundColour replace the whole list with one
+    // colour. Painting it here would freeze it in the look it was painted in.
+    if (dynamic_cast<SideButton*>(window))
+        return;
+
+    // A live theme switch: turn the colours of the look being left back into stock ones first, for
+    // windows whose colour nobody remembers (see StateColor::unpainted). Once per window per switch.
+    if (StateColor::UnthemeActive() && g_unthemed_windows.insert(window).second) {
+        const wxColour bg = window->GetBackgroundColour(), stock_bg = StateColor::unpainted(bg);
+        if (stock_bg != bg)
+            window->SetBackgroundColour(stock_bg);
+        const wxColour fg = window->GetForegroundColour(), stock_fg = StateColor::unpainted(fg);
+        if (stock_fg != fg)
+            window->SetForegroundColour(stock_fg);
+    }
+
+    // Keep the colours the window had, so a live theme switch can put them back (WindowColourStash.hpp).
+    const WindowColourStash::Stock stock_colours = WindowColourStash::snapshot(window);
 
     if (m_is_dark_mode) {
 
@@ -4602,6 +4591,8 @@ void GUI_App::UpdateDarkUI(wxWindow* window, bool highlited/* = false*/, bool ju
             window->SetForegroundColour(fg_col);
         }
     }
+
+    WindowColourStash::commit(window, stock_colours);
 }
 
 // recursive function for scaling fonts for all controls in Window
@@ -4839,6 +4830,11 @@ void GUI_App::set_auto_toolbar_icon_scale(float scale) const
     long int_val = std::min(int(std::lround(scale / icon_sc * 100)), 100);
     std::string val = std::to_string(int_val);
 
+    // Logged only when the stored value changes (the caller asks every frame while the toolbar
+    // is capped at 100 %): "toolkit_size" is the 3D toolbar's auto-fit size in percent.
+    const std::string old_val = app_config->get("toolkit_size");
+    if (old_val != val)
+        BOOST_LOG_TRIVIAL(warning) << "3D toolbar auto size: toolkit_size " << (old_val.empty() ? std::string("(unset)") : old_val) << " -> " << val;
     app_config->set("toolkit_size", val);
 }
 
@@ -4867,6 +4863,53 @@ void GUI_App::schedule_recreate_gui_when_no_modal(const wxString &msg_name)
             return;
         recreate_GUI(msg_name);
     });
+}
+
+void GUI_App::request_relaunch()
+{
+    if (m_relaunch_pending || mainframe == nullptr)
+        return;
+    m_relaunch_pending = true;
+    BOOST_LOG_TRIVIAL(warning) << "Relaunch: requested (process " << wxGetProcessId() << "), closing the main window first";
+    CallAfter([this]() { relaunch_when_idle(0); });
+}
+
+void GUI_App::relaunch_when_idle(int attempt)
+{
+    if (mainframe == nullptr) {
+        m_relaunch_pending = false;
+        return;
+    }
+    // The dialog that asked is closing; closing the main window under a modal one is asking for trouble.
+    if (!mainframe->IsEnabled() && attempt < 40) {
+        wxMilliSleep(25);
+        CallAfter([this, attempt]() { relaunch_when_idle(attempt + 1); });
+        return;
+    }
+    // The same close File > Quit does: it asks about the unsaved project and can be cancelled.
+    if (!mainframe->request_quit(false)) {
+        BOOST_LOG_TRIVIAL(warning) << "Relaunch: cancelled, the close was vetoed (unsaved-project prompt, say)";
+        m_relaunch_pending = false;
+        return;
+    }
+    // The window is closed and the project dealt with. Start the new process now: it waits for this
+    // one to exit (--relaunch-after), so it cannot collide with it, and it is not lost if the
+    // teardown that follows hangs or crashes. The window tear-down of a big project can take a
+    // while; the new process has its own start-up to do in the meantime.
+    BOOST_LOG_TRIVIAL(warning) << "Relaunch: the main window is closed";
+    relaunch_now();
+}
+
+void GUI_App::relaunch_now()
+{
+    if (!m_relaunch_pending || m_relaunch_started)
+        return;
+    if (init_params == nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "Relaunch: no command line to start again with, not relaunching";
+        return;
+    }
+    m_relaunch_started = true;
+    relaunch_slicer(init_params->argc, init_params->argv, init_params->input_files);
 }
 
 void GUI_App::start_remote_access()
@@ -5070,19 +5113,102 @@ void GUI_App::refresh_ultranet_plugin_state()
     const bool was = m_ultranet_plugin_installed;
     m_ultranet_plugin_installed = is_ultranet_plugin(plugin_present, marker);
     if (m_ultranet_plugin_installed)
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present";
     else if (was)
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet no longer present, Bambu CDN download re-enabled";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet no longer present; the network plug-in is missing (Bambu's is never downloaded)";
     else
         BOOST_LOG_TRIVIAL(info) << "[UltraNet] no UltraNet plugin (present=" << plugin_present
-                                << ", marker=" << marker << "), Bambu CDN download path available";
+                                << ", marker=" << marker << "); the network plug-in is missing (Bambu's is never downloaded)";
+}
+
+// The user-facing text of every "network plug-in missing" message.
+wxString GUI_App::network_plugin_missing_text()
+{
+    return _L("EdgeSlicer's network plug-in is missing, so Bambu Lab sign-in and printing are unavailable. "
+              "Reinstall EdgeSlicer to restore it.");
+}
+
+// The message for "the plug-in is installed but there is no network agent". A restart only helps
+// when nothing failed (the plug-in was copied in after start-up's load point); every other cause
+// repeats on each start, so the text says what actually went wrong (NetworkAgent recorded it, with
+// the Windows error code, when LoadLibrary failed).
+wxString GUI_App::network_plugin_not_loaded_text(bool *load_failed)
+{
+    const PluginLoadFailure failure = last_plugin_load_failure();
+
+    // Is the file that failed to load there now? The first-run copy runs after the load point, so a
+    // "missing" failure followed by a file on disk is the restart case after all.
+    bool          exists_now = false;
+    std::uint64_t size_now   = 0;
+    plugin_file_facts(failure.library, exists_now, size_now);
+
+    const PluginLoadMessage kind = plugin_load_message(failure.kind, exists_now, size_now);
+    if (load_failed)
+        *load_failed = kind != PluginLoadMessage::Restart;
+    if (kind != PluginLoadMessage::Restart)
+        BOOST_LOG_TRIVIAL(warning) << "[plugin] network plug-in not loaded: error=" << plugin_load_error_text(failure)
+                                   << " file=" << failure.library << " detail=" << failure.detail;
+
+    const wxString code = wxString::FromUTF8(plugin_load_error_text(failure));
+    switch (kind) {
+    case PluginLoadMessage::Blocked:
+        return wxString::Format(_L("Windows blocked EdgeSlicer's network plug-in (a security policy such as Smart App Control, or antivirus software). "
+                                   "Allow the EdgeSlicer folder in your antivirus, or check Windows Security > App & browser control > Smart App Control, "
+                                   "then restart EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::MissingDependency:
+        return wxString::Format(_L("The network plug-in could not load because a Windows component is missing (usually the Microsoft Visual C++ Redistributable). "
+                                   "Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::MissingFile:
+        return wxString::Format(_L("The network plug-in is missing or damaged, possibly removed by antivirus. Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::BadImage:
+        return wxString::Format(_L("The network plug-in is damaged or for a different system. Reinstall EdgeSlicer. (error %s)"), code);
+    case PluginLoadMessage::Incompatible:
+        return wxString::Format(_L("The network plug-in does not match this version of EdgeSlicer (plug-in version %s, needed %s). "
+                                   "Reinstall EdgeSlicer, and send the log (Help > Export Logs) if it keeps happening."),
+                                wxString::FromUTF8(failure.found_version), wxString::FromUTF8(failure.expected_version));
+    case PluginLoadMessage::Other:
+        return wxString::Format(_L("The network plug-in could not be loaded (error %s). Reinstall EdgeSlicer, "
+                                   "and send the log (Help > Export Logs) if it keeps happening."), code);
+    case PluginLoadMessage::Restart:
+        break;
+    }
+    return _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again.");
+}
+
+// EdgeSlicer never downloads Bambu's network plug-in (owner decision, 2026-10). This is what every
+// former "offer the download" entry point does instead; see PluginGuard.hpp for when it speaks.
+void GUI_App::ShowNetworkPluginMissing(bool user_requested)
+{
+    try {
+        if (network_plugin_missing_notice(m_ultranet_plugin_installed, user_requested, m_network_plugin_missing_shown) ==
+            PluginMissingNotice::Suppress) {
+            BOOST_LOG_TRIVIAL(info) << "[plugin] network plug-in missing message suppressed (ultranet=" << m_ultranet_plugin_installed
+                                    << ", user_requested=" << user_requested << ", shown_before=" << m_network_plugin_missing_shown << ")";
+            return;
+        }
+        m_network_plugin_missing_shown = true;
+        BOOST_LOG_TRIVIAL(warning) << "[plugin] the network plug-in is missing from this install; Bambu's is never downloaded. "
+                                   << "Reinstall EdgeSlicer (developers: build with ULTRANET_BIN_DIR).";
+        if (m_hub_managed && RemoteAccess::get().hidden()) {
+            RemoteAccess::get().raise_attention("the network plug-in is missing; reinstall EdgeSlicer", "manual");
+            return;
+        }
+        if (m_network_plugin_missing_open)
+            return;
+        m_network_plugin_missing_open = true;
+        MessageDialog dlg(nullptr, network_plugin_missing_text(), _L("Network plug-in missing"), wxOK | wxICON_ERROR);
+        dlg.ShowModal();
+        m_network_plugin_missing_open = false;
+    } catch (std::exception &) {
+        m_network_plugin_missing_open = false;
+    }
 }
 
 // Ultra (plug-in guards): the guarded way in to Account > Login. Bambu cloud sign-in ends with the
 // system browser hitting our loopback on 13650 and the ticket being handed to the network plug-in;
 // with no agent loaded there is nothing to hand it to and the user just watches the sign-in page
-// fail. Offer the plug-in instead - or, when our own plug-in is already installed, ask for the
-// restart that actually loads it (never the CDN download, which would overwrite ours).
+// fail. Say so instead - or, when our own plug-in is already installed, ask for the restart that
+// actually loads it. Never a download: EdgeSlicer does not fetch Bambu's plug-in.
 void GUI_App::ShowUserLoginGuarded()
 {
     const LoginGuardAction action = plugin_guard_decision(
@@ -5097,45 +5223,17 @@ void GUI_App::ShowUserLoginGuarded()
     }
 
     if (action == LoginGuardAction::RestartRequired) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no agent but UltraNet is installed, asking for a restart";
-        MessageDialog dlg(nullptr,
-                          _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again."),
-                          _L("Sign in to Bambu Lab"), wxOK | wxICON_INFORMATION);
+        bool load_failed = false;
+        const wxString text = network_plugin_not_loaded_text(&load_failed);
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no agent but UltraNet is installed, "
+                                << (load_failed ? "the plug-in failed to load this session" : "asking for a restart");
+        MessageDialog dlg(nullptr, text, _L("Sign in to Bambu Lab"), load_failed ? (wxOK | wxICON_ERROR) : (wxOK | wxICON_INFORMATION));
         dlg.ShowModal();
         return;
     }
 
-    BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no network agent, offering the plug-in download instead of the sign-in page";
-    MessageDialog dlg(nullptr,
-                      _L("Signing in to a Bambu account needs the network plugin. Install it now?"),
-                      _L("Sign in to Bambu Lab"), wxYES_NO | wxICON_QUESTION);
-    if (dlg.ShowModal() != wxID_YES)
-        return;
-    ShowDownNetPluginDlg();
-    // After a successful install the plug-in still needs the restart before an agent exists, so
-    // the retry is the user's: the next Login click either signs in or lands on the branch above.
-    refresh_ultranet_plugin_state();
-}
-
-void GUI_App::ShowDownNetPluginDlg() {
-    try {
-        // Ultra (plug-in guards): our own plug-in is installed. This dialog downloads Bambu's
-        // package from their CDN and unzips it over data_dir/plugins, which would replace it.
-        if (m_ultranet_plugin_installed) {
-            BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (download dialog suppressed)";
-            return;
-        }
-        if (m_hub_managed && RemoteAccess::get().hidden()) { RemoteAccess::get().raise_attention("the network plug-in needs installing", "manual"); return; }
-        auto iter = std::find_if(dialogStack.begin(), dialogStack.end(), [](auto dialog) {
-            return dynamic_cast<DownloadProgressDialog *>(dialog) != nullptr;
-        });
-        if (iter != dialogStack.end())
-            return;
-        DownloadProgressDialog dlg(_L("Downloading Bambu Network Plug-in"));
-        dlg.ShowModal();
-    } catch (std::exception &) {
-        ;
-    }
+    BOOST_LOG_TRIVIAL(info) << "[plugin] login guard armed: no network agent and no plug-in, showing the plug-in-missing message instead of the sign-in page";
+    ShowNetworkPluginMissing(/*user_requested*/ true);
 }
 
 void GUI_App::ShowUserLogin(bool show)
@@ -5273,6 +5371,108 @@ void GUI_App::update_ui_from_settings()
     if (mainframe) {mainframe->update_ui_from_settings();}
 }
 
+// Redraws a window and everything in it (Refresh() does not reach every child on every platform).
+static void refresh_tree(wxWindow* window)
+{
+    if (window == nullptr)
+        return;
+    window->Refresh();
+    for (wxWindow* child : window->GetChildren())
+        refresh_tree(child);
+}
+
+void GUI_App::apply_theme_live()
+{
+    // The hidden instance the hub manages has no window anyone sees, and its first-run and plug-in
+    // prompts already stay away from it: it keeps the look it started with and loads the chosen one
+    // at its next start.
+    if (mainframe == nullptr || (m_hub_managed && RemoteAccess::get().hidden())) {
+        BOOST_LOG_TRIVIAL(info) << "Theme: live switch skipped, no visible window";
+        return;
+    }
+    static bool running = false;
+    if (running)
+        return;
+    running = true;
+    struct Done
+    {
+        ~Done() { running = false; }
+    } done;
+
+    wxBusyCursor wait;
+    const std::string id = app_config->get("ui_theme");
+    BOOST_LOG_TRIVIAL(info) << "Theme: applying \"" << id << "\" live";
+
+    // 1. Put every window UpdateDarkUI painted back to the colours it had (WindowColourStash.hpp);
+    //    they are themed again from the new tables below. Windows whose colour came from elsewhere
+    //    (copied from a parent, set by a widget's own code) have no stash entry: they are taken
+    //    back through the old theme's colours instead, while the walk below reaches them.
+    WindowColourStash::restore_all();
+    g_unthemed_windows.clear();
+    const std::map<wxColour, wxColour> old_theme_inverse = StateColor::ThemeInverse();
+    const bool                         was_dark          = m_is_dark_mode;
+
+    // 2. The new theme: resets the colour table, radii and banner, then loads it. Fonts stay.
+    if (!Theme::apply(id))
+        BOOST_LOG_TRIVIAL(warning) << "Theme \"" << id << "\" could not be applied; using the stock look";
+
+    // 3. The labels, the dark flag and the widgets' dark mode follow the theme's base look. The
+    //    SVG icon cache needs nothing: its keys carry the theme's icon and accent colours.
+    init_label_colours();
+    Update_dark_mode_flag();
+    StateColor::BeginUntheme(old_theme_inverse, was_dark);
+    struct EndUntheme
+    {
+        ~EndUntheme()
+        {
+            StateColor::EndUntheme();
+            g_unthemed_windows.clear();
+        }
+    } end_untheme;
+
+    // 4. Everything that shows a colour. The 3D view and the GL toolbar take the dark flag from the
+    //    Plater, so tell it (async, it is what the dark mode checkbox does).
+    SimpleEvent color_mode_changed(EVT_GLCANVAS_COLOR_MODE_CHANGED);
+    if (plater_ != nullptr)
+        wxPostEvent(plater_, color_mode_changed);
+
+#ifdef __WINDOWS__
+    // The dark title bar and explorer theme for the new base, then the main frame: on_sys_color_changed()
+    // (tabs, side bar, menus, title bar, Home page and web views), scroll bars and every child's colours.
+    force_colors_update();
+    update_ui_from_settings();
+#else
+    // The system colour change handler does the same, and more.
+    mainframe->theme_changed();
+#endif
+
+    // 5. Windows that are open next to the main one (and the ones kept hidden) are themed too.
+    std::vector<wxWindow*> others;
+    for (wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node; node = node->GetNext())
+        if (wxWindow* top = node->GetData(); top != nullptr && top != mainframe)
+            others.push_back(top);
+    for (wxWindow* top : others) {
+        if (wxDialog* dialog = dynamic_cast<wxDialog*>(top))
+            UpdateDlgDarkUI(dialog);
+        else if (wxFrame* frame = dynamic_cast<wxFrame*>(top))
+            UpdateFrameDarkUI(frame);
+        else
+            update_dark_children_ui(top);
+        if (top->IsShown()) {
+            if (auto* dpi_dialog = dynamic_cast<DPIDialog*>(top))
+                dpi_dialog->theme_changed();
+            else if (auto* dpi_frame = dynamic_cast<DPIFrame*>(top))
+                dpi_frame->theme_changed();
+        }
+        refresh_tree(top);
+    }
+
+    refresh_tree(mainframe);
+    if (plater_ != nullptr)
+        if (GLCanvas3D* canvas = plater_->get_current_canvas3D())
+            canvas->set_as_dirty();
+}
+
 void GUI_App::persist_window_geometry(wxTopLevelWindow *window, bool default_maximized)
 {
     const std::string name = into_u8(window->GetName());
@@ -5348,15 +5548,27 @@ void GUI_App::load_gcode(wxWindow* parent, wxString& input_file) const
 wxString GUI_App::transition_tridid(int trid_id)
 {
     wxString maping_dict[] = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z" };
+    constexpr int dict_size = int(sizeof(maping_dict) / sizeof(maping_dict[0]));
+
+    // The external spool holders of a two-extruder printer (tray 254 = left, 255 = right) are
+    // mapped like trays; "AMS 63" indexed past the end of the table.
+    if (trid_id == 254 || trid_id == 255)
+        return wxString::FromUTF8(BambuExtruderMap::tray_display_name(trid_id, 0));
+    if (trid_id < 0)
+        return "-";
 
     if (trid_id >= 128 * 4) {
         trid_id -= 128 * 4;
         int id_index = trid_id / 4;
+        if (id_index >= dict_size)
+            return "?";
         return wxString::Format("%s", maping_dict[id_index]);
     }
     else {
         int id_index = ceil(trid_id / 4);
         int id_suffix = trid_id % 4 + 1;
+        if (id_index >= dict_size)
+            return "?";
         return wxString::Format("%s%d", maping_dict[id_index], id_suffix);
     }
 }
@@ -5477,6 +5689,9 @@ void GUI_App::sm_start_silent_login()
 {
     SMSilentLogin::StartupInputs in;
     in.pref_enabled      = app_config->get_bool(SMSilentLogin::k_pref_key);
+    // Only someone who signed in on this computer has a session to come back to; everybody else
+    // gets no Snapmaker traffic at startup (the hidden web view would load id.snapmaker.com).
+    in.signed_in_before  = app_config->get_bool(SMSilentLogin::k_session_key);
     in.is_editor         = is_editor();
     // SNORCA_SM_SILENT_LOGIN=1 runs the attempt in a hidden instance too. Test-only knob: it lets
     // an agent check the never-shown path without a window on anyone's screen. No effect unless set.
@@ -5512,6 +5727,57 @@ void GUI_App::sm_start_silent_login()
     sm_silent_login_dlg->start_silent([this, gen](const SMUserLogin::SilentResult& r) { sm_on_silent_login_result(gen, r); });
 }
 
+void GUI_App::maybe_start_bambu_sync(const char* why)
+{
+    if (m_bambu_sync_started || m_is_closing || !preset_updater || !app_config)
+        return;
+
+    BambuSync::Inputs in;
+    in.stealth_mode    = app_config->get_stealth_mode();
+    in.bambu_login     = m_agent != nullptr && m_agent->is_user_login();
+    // Saved Bambu LAN printers, then the Device tab's lists (bound to the account, or found on the LAN).
+    in.bambu_device = false;
+    for (const auto& saved : app_config->get_local_machines()) {
+        // FlashForge printers share this table; they are not Bambu devices.
+        if (!saved.second.is_flashforge()) {
+            in.bambu_device = true;
+            break;
+        }
+    }
+    if (!in.bambu_device && m_device_manager)
+        in.bambu_device = !m_device_manager->get_my_machine_list().empty() || !m_device_manager->get_local_machine_list().empty();
+    // A Bambu Lab printer among the visible printer presets: an installed system preset, a user
+    // preset based on one, or the selected printer.
+    if (preset_bundle) {
+        in.bbl_printer_preset = preset_bundle->is_bbl_vendor();
+        for (const Preset& p : preset_bundle->printers.get_presets()) {
+            if (in.bbl_printer_preset)
+                break;
+            if (!p.is_visible)
+                continue;
+            const Preset* sys = p.is_system ? &p : preset_bundle->printers.get_preset_parent(p);
+            if (sys != nullptr && sys->vendor != nullptr && sys->vendor->id == "BBL")
+                in.bbl_printer_preset = true;
+        }
+    }
+
+    const BambuSync::Plan plan = BambuSync::plan(in);
+    if (!plan.run) {
+        if (std::string(why) == "startup")
+            BOOST_LOG_TRIVIAL(info) << "Bambu startup sync: not contacting Bambu Lab (" << plan.reason << ")";
+        return;
+    }
+    m_bambu_sync_started = true;
+    if (m_bambu_sync_timer != nullptr) {
+        m_bambu_sync_timer->Stop();
+        wxTimer* t         = m_bambu_sync_timer;
+        m_bambu_sync_timer = nullptr;
+        CallAfter([t] { delete t; }); // may be inside its own event handler
+    }
+    BOOST_LOG_TRIVIAL(info) << "Bambu startup sync: starting (" << why << "; " << plan.reason << ")";
+    preset_updater->sync_bambu(get_http_url(app_config->get_country_code()));
+}
+
 void GUI_App::sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentResult& r)
 {
     // Called from inside the hidden dialog's own event handler: tear it down deferred.
@@ -5523,39 +5789,139 @@ void GUI_App::sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentR
         const SMSilentLogin::Outcome o = r.outcome == "no session" ? SMSilentLogin::Outcome::NoSession :
                                          r.outcome == "timed out"  ? SMSilentLogin::Outcome::TimedOut :
                                                                      SMSilentLogin::Outcome::Failed;
+        // The saved web session is gone: stop asking Snapmaker at every start until the person
+        // signs in again by hand. A time-out or a failure keeps the marker (try again next start).
+        if (SMSilentLogin::session_marker_after(o) == SMSilentLogin::SessionMarker::Clear)
+            app_config->set_bool(SMSilentLogin::k_session_key, false);
         sm_finish_silent_login(SMSilentLogin::log_line(o, r.detail));
         return;
     }
 
-    // The session was valid. Look the account up off the UI thread, then fill SMUserInfo on it
-    // (the same end state as a manual sign-in: Account menu, pages told through the login events).
+    // The page handed over a token. That alone proves nothing (the account service answers HTTP 200
+    // to a token it refuses): look the account up off the UI thread, and sign in only with a
+    // verified answer (the same end state as a manual sign-in: Account menu, pages told through
+    // the login events).
     const std::string token = r.token;
-    Http http = Http::get(r.user_info_url);
+    sm_lookup_account(token, r.user_info_url, [this, gen, token](const SMSilentLogin::AccountAnswer& a) {
+        if (gen != m_sm_silent_gen || !m_sm_silent_active)
+            return;
+        if (a.ok) {
+            SMUserLogin::apply_account_info(a, token);
+            sm_get_login_info();
+            sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::SignedIn));
+            return;
+        }
+        // Refused: the saved session is no good. Stay (or become) signed out everywhere, and do not
+        // ask again at the next start; the sign-in dialog works as on a fresh install. A transport
+        // or server problem says nothing about the session: try again next start.
+        const SMSilentLogin::Outcome o = a.rejected ? SMSilentLogin::Outcome::Rejected : SMSilentLogin::Outcome::Failed;
+        if (SMSilentLogin::session_marker_after(o) == SMSilentLogin::SessionMarker::Clear)
+            app_config->set_bool(SMSilentLogin::k_session_key, false);
+        sm_sign_out_locally();
+        sm_finish_silent_login(SMSilentLogin::log_line(o, "account lookup: " + a.why));
+        if (a.rejected)
+            sm_clear_web_session("startup session refused");
+    });
+}
+
+void GUI_App::sm_lookup_account(const std::string& token, const std::string& user_info_url,
+                                std::function<void(const SMSilentLogin::AccountAnswer&)> done)
+{
+    if (token.empty()) {
+        SMSilentLogin::AccountAnswer a;
+        a.why      = "the sign-in page handed over an empty token";
+        a.rejected = true;
+        done(a);
+        return;
+    }
+    auto shared_done = std::make_shared<std::function<void(const SMSilentLogin::AccountAnswer&)>>(std::move(done));
+    Http http = Http::get(user_info_url);
     http.header("Authorization", token);
     http.timeout_max(15);
-    http.on_complete([this, gen, token](std::string body, unsigned status) {
-            CallAfter([this, gen, token, body, status] {
-                if (gen != m_sm_silent_gen || !m_sm_silent_active)
-                    return;
-                if (status == 200 && SMUserLogin::apply_account_info(body, token)) {
-                    sm_get_login_info();
-                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::SignedIn));
-                } else {
-                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
-                                                                   "account lookup HTTP " + std::to_string(status)));
-                }
-            });
+    http.on_complete([this, shared_done](std::string body, unsigned status) {
+            SMSilentLogin::AccountAnswer a = SMSilentLogin::read_account_answer(status, body);
+            CallAfter([shared_done, a] { (*shared_done)(a); });
         })
-        .on_error([this, gen](std::string /*body*/, std::string error, unsigned status) {
-            CallAfter([this, gen, error, status] {
-                if (gen != m_sm_silent_gen || !m_sm_silent_active)
-                    return;
-                sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
-                                                               "account lookup HTTP " + std::to_string(status) +
-                                                                   (error.empty() ? std::string() : ", " + error)));
-            });
+        .on_error([this, shared_done](std::string body, std::string error, unsigned status) {
+            SMSilentLogin::AccountAnswer a = SMSilentLogin::read_account_answer(status, body);
+            if (status == 0)
+                a.why = "no answer" + (error.empty() ? std::string() : ": " + error);
+            else if (!error.empty() && !a.rejected)
+                a.why += ", " + error;
+            sentryReportLog(SENTRY_LOG_TRACE, BP_LOGIN_HTTP_CODE + std::string(":") + std::to_string(status), BP_LOGIN);
+            CallAfter([shared_done, a] { (*shared_done)(a); });
         })
         .perform();
+}
+
+void GUI_App::sm_sign_out_locally()
+{
+    const bool had_something = m_login_userinfo.is_user_login() || !m_login_userinfo.get_user_token().empty() ||
+                               !m_login_userinfo.get_user_id().empty();
+    m_login_userinfo.clear();
+    if (had_something)
+        m_login_userinfo.set_user_login(false); // notify: Account menu and pages say signed out
+}
+
+void GUI_App::sm_clear_web_session(const char* why)
+{
+    const bool china = app_config != nullptr && app_config->get_country_code().find("CN") != std::string::npos;
+#ifdef __APPLE__
+    // The slicer's web views share WKWebsiteDataStore's default store: delete the cookies through
+    // its cookie store, no open web view needed. Asynchronous, so the outcome is logged from the
+    // completion (main thread). Cookie names and counts only, never values.
+    const std::string why_copy = why;
+    mac_delete_site_cookies(SMSilentLogin::session_cookie_names(), SMSilentLogin::session_cookie_uri(china),
+                            [why_copy](size_t deleted) {
+                                BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: web session cookies "
+                                                           << (deleted > 0 ? "cleared (" + std::to_string(deleted) + " deleted)" :
+                                                                             std::string("already clear (none found)"))
+                                                           << " (" << why_copy << ")";
+                            });
+#else
+    // Windows deletes through any live view's cookie manager (one shared profile). Linux has no
+    // such call here and goes by script, from a view showing id.snapmaker.com.
+    wxWebView* page = sm_login_dlg != nullptr ? sm_login_dlg->browser() :
+                      sm_silent_login_dlg != nullptr ? sm_silent_login_dlg->browser() : nullptr;
+    const bool done = WebView::DeleteSiteCookies(SMSilentLogin::session_cookie_names(), SMSilentLogin::session_cookie_uri(china), page);
+    BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: web session cookies " << (done ? "cleared" : "not cleared (no web view)")
+                               << " (" << why << ")";
+#endif
+}
+
+void GUI_App::sm_finish_sign_in(const std::string& token, const std::string& user_info_url, bool shown)
+{
+    const unsigned gen = m_sm_signin_gen;
+    sm_lookup_account(token, user_info_url, [this, gen, token, shown](const SMSilentLogin::AccountAnswer& a) {
+        if (gen != m_sm_signin_gen) {
+            BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: dropped (signed out while the account was looked up)";
+            return;
+        }
+        if (a.ok) {
+            SMUserLogin::apply_account_info(a, token);
+            sm_get_login_info();
+            BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: signed in";
+            flush_logs();
+            return;
+        }
+        // Not verified: signed out everywhere (no half state where the Account menu says signed in
+        // and the Device page does not), and no startup attempt with a session that is no good.
+        if (a.rejected && app_config)
+            app_config->set_bool(SMSilentLogin::k_session_key, false);
+        sm_sign_out_locally();
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker sign-in: not signed in (account lookup: " << a.why << ")";
+        // A refused session would come straight back at the next try (the window flashes and
+        // closes): drop it, so the next sign-in shows the form.
+        if (a.rejected)
+            sm_clear_web_session("session refused");
+        flush_logs();
+        if (shown && mainframe != nullptr && !m_is_closing) {
+            const wxString msg = a.rejected ?
+                _L("Snapmaker sign-in didn't complete, so you are still signed out of your Snapmaker account. Snapmaker's sign-in service may be having problems; please try again later.") :
+                _L("Snapmaker sign-in didn't complete: Snapmaker's sign-in service could not be reached. Please check the connection and try again later.");
+            MessageDialog(mainframe, msg, _L("Snapmaker sign-in"), wxOK | wxICON_WARNING).ShowModal();
+        }
+    });
 }
 
 void GUI_App::sm_finish_silent_login(const std::string& log_line)
@@ -5589,9 +5955,18 @@ void GUI_App::sm_request_user_logout()
 {
     if (m_sm_silent_active)
         sm_cancel_silent_login("signed out");
-    if (m_login_userinfo.is_user_login()) {
-        m_login_userinfo.set_user_login(false);
-    }
+    // Signed out on purpose: no silent sign-in at the next start (SnapmakerSilentLogin.hpp).
+    app_config->set_bool(SMSilentLogin::k_session_key, false);
+    ++m_sm_signin_gen; // a sign-in lookup still in flight is dropped when it answers
+    // The token is dropped with the rest of the account (it used to stay in memory after a sign-out).
+    const std::string token = m_login_userinfo.get_user_token();
+    sm_sign_out_locally();
+    // Signing out also ends the web session; before, the next sign-in got it straight back.
+    sm_clear_web_session("signed out");
+    // Nothing to revoke without a token: a page asking to sign out somebody who never signed in
+    // must not reach Snapmaker either.
+    if (token.empty())
+        return;
     try {
         wxString region = wxString::FromUTF8(app_config->get_country_code());
         std::string url    = "";
@@ -5602,7 +5977,7 @@ void GUI_App::sm_request_user_logout()
         }
 
         Http http = Http::post(url);
-        http.form_add("token", m_login_userinfo.get_user_token()).perform();
+        http.form_add("token", token).perform();
     } catch (std::exception&) {
         ;
     }
@@ -5653,14 +6028,21 @@ wxString GUI_App::get_international_url(const wxString& origin_url) {
         region = "US";
     }
 
-    string dark_mode = wxGetApp().app_config->get("dark_color_mode");
+    // The look the slicer shows (a dark theme pack, or macOS in dark mode, count too): the Snapmaker
+    // pages take their theme from it, and in dark mode the colours of the slicer's Device page
+    // and its accent (dark_bg, dark_card, dark_strip, dark_title, dark_accent, dark_accent_text:
+    // WebView::FlutterDarkColours,
+    // scripts/patch_flutter_web_dark.py).
+    string dark = dark_mode() ? "1" : "0";
+    for (const auto &[role, hex] : WebView::FlutterDarkColours())
+        dark += "&dark_" + role + "=" + hex.substr(1);
 
     if (baseUrl.find("?") != std::string::npos) {
         return baseUrl + wxString::FromUTF8("&locale=") + lang + wxString::FromUTF8("-") + region +
-               wxString::FromUTF8("&dark_mode=" + dark_mode);
+               wxString::FromUTF8("&dark_mode=" + dark);
     } else {
         return baseUrl + wxString::FromUTF8("?locale=") + lang + wxString::FromUTF8("-") + region +
-               wxString::FromUTF8("&dark_mode=" + dark_mode);
+               wxString::FromUTF8("&dark_mode=" + dark);
     }
 
 }
@@ -5700,6 +6082,8 @@ void GUI_App::request_user_logout()
         // Update data first before showing dialogs
         m_agent->user_logout(true);
         m_agent->set_user_selected_machine("");
+        if (m_device_manager)
+            m_device_manager->on_cloud_session(-1); // the plug-in drops its cloud session on logout
         /* delete old user settings */
         bool     transfer_preset_changes = false;
         wxString header = _L("Some presets are modified.") + "\n" +
@@ -5949,12 +6333,10 @@ std::string GUI_App::handle_web_request(std::string cmd)
                 }
             }
             else if (command_str.compare("begin_network_plugin_download") == 0) {
-                // Ultra (plug-in guards): the home-page banner. ShowDownNetPluginDlg() refuses on
-                // its own when our plug-in is installed; logging here says which entry point asked.
-                if (m_ultranet_plugin_installed)
-                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (home-page banner ignored)";
-                else
-                    CallAfter([this] { wxGetApp().ShowDownNetPluginDlg(); });
+                // The home-page banner's "download the network plug-in" link. There is no download;
+                // ShowNetworkPluginMissing() is silent when our plug-in is installed and otherwise
+                // says the plug-in is missing.
+                CallAfter([this] { wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true); });
             }
             else if (command_str.compare("get_web_shortcut") == 0) {
                 if (root.get_child_optional("key_event") != boost::none) {
@@ -6848,6 +7230,10 @@ void  GUI_App::push_notification(wxString msg, wxString title, UserNotificationS
 
 void GUI_App::reload_settings()
 {
+    // load_user_presets() with a cloud list deletes the local presets that list does not know, so it
+    // must never run while the cloud sync is off.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     if (preset_bundle && m_agent) {
         std::map<std::string, std::map<std::string, std::string>> user_presets;
         m_agent->get_user_presets(&user_presets);
@@ -6875,6 +7261,9 @@ void GUI_App::remove_user_presets()
 
 void GUI_App::sync_preset(Preset* preset)
 {
+    // Cloud preset sync is off (PresetSyncPolicy.hpp): never talk to the cloud about a preset.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     int result = -1;
     unsigned int http_code = 200;
     std::string updated_info;
@@ -7007,6 +7396,14 @@ void GUI_App::sync_preset(Preset* preset)
 
 void GUI_App::start_sync_user_preset(bool with_progress_dlg)
 {
+    // Cloud preset sync is off (PresetSyncPolicy.hpp): no sync thread, no get_setting_list2 /
+    // request_setting_id / put_setting / delete_setting call, and no cloud list that could remove or
+    // replace a local preset (reload_settings runs only when this thread finishes).
+    if (!PresetSync::cloud_sync_enabled()) {
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": user preset cloud sync is disabled";
+        return;
+    }
+
     if (app_config->get_stealth_mode())
         return;
 
@@ -7169,7 +7566,7 @@ void GUI_App::start_http_server()
         // report of 2026-09-08 carried the URL http://localhost:13650/?ticket=...&redirect_url=...,
         // i.e. Google's redirect reached this port. That 404 was ours - the ticket exchange had no
         // network plugin to run through - and is now a redirect with result=fail instead.
-        m_http_server.setPort(13650);
+        m_http_server.setPort(BBL_LOGIN_CALLBACK_PORT);
         m_http_server.start();
     }
     // The OAuth callback listener is short-lived; the 5s health-check auto-restart can
@@ -7486,7 +7883,7 @@ bool GUI_App::load_language(wxString language, bool initial)
 			language_info = wxLocale::GetLanguageInfo(wxLANGUAGE_ENGLISH_US);
     }
 
-	BOOST_LOG_TRIVIAL(trace) << boost::format("Switching wxLocales to %1%") % language_info->CanonicalName.ToUTF8().data();
+	BOOST_LOG_TRIVIAL(trace) << boost::format("Requested translation language %1%") % language_info->CanonicalName.ToUTF8().data();
 
     // Select language for locales. This language may be different from the language of the dictionary.
     //if (language_info == m_language_info_best || language_info == m_language_info_system) {
@@ -7506,22 +7903,55 @@ bool GUI_App::load_language(wxString language, bool initial)
 		BOOST_LOG_TRIVIAL(info) << "Using Czech dictionaries for Slovak language";
     }
 
+    // The language of the translation dictionary (language_info / language_dict) is kept apart from the
+    // OS locale that wxLocale is initialised with: a regional OS locale that is not installed (en_IL,
+    // pt_XX, ...) must not fail the start or silently replace the user's language.
+    const wxLanguageInfo *locale_language_info = language_info;
+
 #ifdef __linux__
     // If we can't find this locale , try to use different one for the language
     // instead of just reporting that it is impossible to switch.
-    if (! wxLocale::IsAvailable(language_info->Language) && m_language_info_system) {
-        std::string original_lang = into_u8(language_info->CanonicalName);
-        language_info = linux_get_existing_locale_language(language_info, m_language_info_system);
+    if (! wxLocale::IsAvailable(locale_language_info->Language) && m_language_info_system) {
+        std::string original_lang = into_u8(locale_language_info->CanonicalName);
+        locale_language_info = linux_get_existing_locale_language(locale_language_info, m_language_info_system);
         BOOST_LOG_TRIVIAL(info) << boost::format("Can't switch language to %1% (missing locales). Using %2% instead.")
-                                    % original_lang % language_info->CanonicalName.ToUTF8().data();
+                                    % original_lang % locale_language_info->CanonicalName.ToUTF8().data();
     }
 #endif
 
-    if (! wxLocale::IsAvailable(language_info->Language)&&initial) {
-        language_info = wxLocale::GetLanguageInfo(wxLANGUAGE_ENGLISH_UK);
-        app_config->set("language", language_info->CanonicalName.ToUTF8().data());
+    // Try base language without region (e.g., "en" from "en_IL") on all platforms
+    if (locale_language_info == nullptr || !wxLocale::IsAvailable(locale_language_info->Language)) {
+        const wxString requested_code = language_info->CanonicalName;
+        wxString base_lang = requested_code.BeforeFirst('_');
+        if (base_lang != requested_code) {
+            const wxLanguageInfo *base_info = wxLocale::FindLanguageInfo(base_lang);
+            if (base_info && wxLocale::IsAvailable(base_info->Language)) {
+                BOOST_LOG_TRIVIAL(info) << boost::format("Locale %1% not available. Falling back to base language %2%.")
+                    % requested_code.ToUTF8().data() % base_info->CanonicalName.ToUTF8().data();
+                locale_language_info = base_info;
+            }
+        }
     }
-    else if (initial) {
+
+    // Generic fallback chain for all platforms
+    if (locale_language_info == nullptr || !wxLocale::IsAvailable(locale_language_info->Language)) {
+        auto try_locale = [](const wxLanguageInfo* candidate) -> const wxLanguageInfo* {
+            return (candidate && wxLocale::IsAvailable(candidate->Language)) ? candidate : nullptr;
+        };
+        const wxLanguageInfo* fallback_locale_info =
+            try_locale(m_wxLocale ? wxLocale::GetLanguageInfo(wxLanguage(m_wxLocale->GetLanguage())) : nullptr);
+        if (!fallback_locale_info) fallback_locale_info = try_locale(m_language_info_system);
+        if (!fallback_locale_info) fallback_locale_info = try_locale(m_language_info_best);
+        if (!fallback_locale_info) fallback_locale_info = try_locale(wxLocale::GetLanguageInfo(wxLANGUAGE_ENGLISH_US));
+        if (!fallback_locale_info) fallback_locale_info = try_locale(wxLocale::GetLanguageInfo(wxLANGUAGE_ENGLISH_UK));
+        if (fallback_locale_info != nullptr) {
+            BOOST_LOG_TRIVIAL(info) << boost::format("Using fallback locale %1% while keeping translation dictionary %2%.")
+                                        % fallback_locale_info->CanonicalName.ToUTF8().data() % language_info->CanonicalName.ToUTF8().data();
+            locale_language_info = fallback_locale_info;
+        }
+    }
+
+    if (initial) {
         // bbs supported languages
         //TODO: use a global one with Preference
         //wxLanguage supported_languages[]{
@@ -7555,7 +7985,7 @@ bool GUI_App::load_language(wxString language, bool initial)
         //}
     }
 
-    if (! wxLocale::IsAvailable(language_info->Language)) {
+    if (locale_language_info == nullptr || ! wxLocale::IsAvailable(locale_language_info->Language)) {
     	// Loading the language dictionary failed.
         wxString message = "Switching EdgeSlicer to language " + language_info->CanonicalName + " failed.";
 #if !defined(_WIN32) && !defined(__APPLE__)
@@ -7563,7 +7993,7 @@ bool GUI_App::load_language(wxString language, bool initial)
         message += "\nYou may need to reconfigure the missing locales, likely by running the \"locale-gen\" and \"dpkg-reconfigure locales\" commands.\n";
 #endif
         if (initial)
-        	message + "\n\nApplication will close.";
+        	message += "\n\nApplication will close.";
         wxMessageBox(message, "EdgeSlicer - Switching language failed", wxOK | wxICON_ERROR);
         if (initial)
 			std::exit(EXIT_FAILURE);
@@ -7575,7 +8005,7 @@ bool GUI_App::load_language(wxString language, bool initial)
     //FIXME wxWidgets cause havoc if the current locale is deleted. We just forget it causing memory leaks for now.
     m_wxLocale.release();
     m_wxLocale = Slic3r::make_unique<wxLocale>();
-    m_wxLocale->Init(language_info->Language);
+    m_wxLocale->Init(locale_language_info->Language);
     // Override language at the active wxTranslations class (which is stored in the active m_wxLocale)
     // to load possibly different dictionary, for example, load Czech dictionary for Slovak language.
     wxTranslations::Get()->SetLanguage(language_dict);
@@ -7725,6 +8155,19 @@ void  GUI_App::show_ip_address_enter_dialog_handler(wxCommandEvent& evt)
     show_modal_ip_address_enter_dialog(title);
 }
 
+void GUI_App::open_themes()
+{
+    if (mainframe == nullptr)
+        return;
+    {
+        ThemesDialog dlg(mainframe);
+        dlg.ShowModal();
+    }
+    if (plater_ != nullptr)
+        if (GLCanvas3D* canvas = plater_->get_current_canvas3D())
+            canvas->force_set_focus();
+}
+
 void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_option)
 {
     bool app_layout_changed = false;
@@ -7845,7 +8288,7 @@ bool GUI_App::check_and_save_current_preset_changes(const wxString& caption, con
         {
             //BBS: add project embedded preset relate logic
             for (const UnsavedChangesDialog::PresetData& nt : dlg.get_names_and_types())
-                preset_bundle->save_changes_for_preset(nt.name, nt.type, dlg.get_unselected_options(nt.type), nt.save_to_project);
+                preset_bundle->save_changes_for_preset(nt.name, nt.type, dlg.get_unselected_options(nt.type), nt.save_to_project, nt.project_printers);
             //for (const std::pair<std::string, Preset::Type>& nt : dlg.get_names_and_types())
             //    preset_bundle->save_changes_for_preset(nt.first, nt.second, dlg.get_unselected_options(nt.second));
 
@@ -7871,6 +8314,44 @@ void GUI_App::apply_keeped_preset_modifications()
             tab->apply_config_from_cache();
     }
     load_current_presets(false);
+}
+
+int GUI_App::cache_current_preset_changes_for_transfer(const char* why)
+{
+    if (!has_current_preset_changes())
+        return 0;
+    int                     count              = 0;
+    const PrinterTechnology printer_technology = preset_bundle->printers.get_edited_preset().printer_technology();
+    for (Tab* tab : tabs_list) {
+        if (!tab->supports_printer_technology(printer_technology) || !tab->current_preset_is_dirty())
+            continue;
+        // As the dialog's Transfer does (check_and_keep_current_preset_changes): option names
+        // without the "#<index>" of a vector element, and the printer's extruder count on its own.
+        std::vector<std::string> options;
+        for (const std::string& o : tab->m_presets->current_dirty_options()) {
+            const size_t      i     = o.find('#');
+            const std::string plain = i != std::string::npos ? o.substr(0, i) : o;
+            if (std::find(options.begin(), options.end(), plain) == options.end())
+                options.push_back(plain);
+        }
+        if (tab->type() == Preset::TYPE_PRINTER) {
+            auto it = std::find(options.begin(), options.end(), "extruders_count");
+            if (it != options.end()) {
+                options.erase(it);
+                static_cast<TabPrinter*>(tab)->cache_extruder_cnt();
+            }
+        }
+        if (options.empty())
+            continue;
+        tab->cache_config_diff(options);
+        count += int(options.size());
+        std::string names;
+        for (const std::string& o : options)
+            names += (names.empty() ? "" : ", ") + o;
+        BOOST_LOG_TRIVIAL(info) << why << ": keeping the modified " << Preset::get_type_string(tab->type()) << " values of \""
+                                << tab->m_presets->get_edited_preset().name << "\" without asking: " << names;
+    }
+    return count;
 }
 
 // This is called when creating new project or load another project
@@ -7910,7 +8391,7 @@ bool GUI_App::check_and_keep_current_preset_changes(const wxString& caption, con
             const auto& preset_names_and_types = dlg.get_names_and_types();
             if (dlg.save_preset()) {
                 for (const UnsavedChangesDialog::PresetData& nt : preset_names_and_types)
-                    preset_bundle->save_changes_for_preset(nt.name, nt.type, dlg.get_unselected_options(nt.type), nt.save_to_project);
+                    preset_bundle->save_changes_for_preset(nt.name, nt.type, dlg.get_unselected_options(nt.type), nt.save_to_project, nt.project_printers);
 
                 // if we saved changes to the new presets, we should to
                 // synchronize config.ini with the current selections.
@@ -8089,6 +8570,9 @@ std::vector<std::string> GUI_App::get_delete_cache_presets_lock()
 
 void GUI_App::delete_preset_from_cloud(std::string setting_id)
 {
+    // Nothing is deleted in the cloud (cloud preset sync is off); do not queue the id either.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     std::scoped_lock l(mutex_delete_cache_presets);
     need_delete_presets.push_back(setting_id);
 }
@@ -8156,6 +8640,11 @@ void GUI_App::MacOpenURL(const wxString& url)
     // post_init() decides whether to start a blank project based on init_params->input_files,
     // which is always empty here: macOS launches the app first and delivers the URL afterwards.
     // Without this flag post_init resets the project that this download is about to load.
+    std::string connector_url;
+    if (Vendors::parse_connector_link(into_u8(url), connector_url)) {
+        start_download(into_u8(url)); // Home > Vendors, not a model: the blank project is still wanted
+        return;
+    }
     m_url_open_pending = true;
     start_download(into_u8(url));
 }
@@ -8331,9 +8820,9 @@ void GUI_App::open_mall_page_dialog()
     }
 
     if (link_url.find("?") != std::string::npos) {
-        link_url += "&from=Snapmaker_Orca";
+        link_url += "&from=EdgeSlicer";
     } else {
-        link_url += "?from=Snapmaker_Orca";
+        link_url += "?from=EdgeSlicer";
     }
 
     wxLaunchDefaultBrowser(link_url);
@@ -8519,6 +9008,9 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
     long        pStyle    = wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU;
     if (strFinish == "false" || strFinish.empty())
         pStyle = wxCAPTION | wxTAB_TRAVERSAL;
+    // The Printer Selection table (sidebar "Select/Remove printers") can be resized and maximised.
+    if (start_page == ConfigWizard::SP_PRINTERS)
+        pStyle |= wxRESIZE_BORDER | wxMAXIMIZE_BOX;
 
     GuideFrame wizard(this, pStyle);
     auto page = start_page == ConfigWizard::SP_WELCOME ? GuideFrame::BBL_WELCOME :
@@ -8544,6 +9036,8 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
         mainframe->refresh_plugin_tips();
         m_fltviews.reload_all();
         // BBS: remove SLA related message
+        // First-time Bambu printer setup notice (waits for the main window; a no-op for other vendors).
+        BambuSetupNoticeDialog::on_wizard_finished();
     }
     auto isAgree = wxGetApp().app_config->get("app", PRIVACY_POLICY_FLAGS);
 
@@ -8788,28 +9282,30 @@ bool GUI_App::config_wizard_startup()
     auto isAgree = wxGetApp().app_config->get("app", PRIVACY_POLICY_FLAGS);
     user_update_privacy_notify(isAgree == "true");
     BOOST_LOG_TRIVIAL(warning) << "config_wizard_startup changed the privacy policy with: " << (isAgree);
-    
-        if (!m_app_conf_exists || preset_bundle->printers.only_default_printers()) {
-            if (m_hub_managed && RemoteAccess::get().hidden()) {
-                // Ultra: the wizard needs a person; a printer-less instance cannot serve the phone anyway.
-                RemoteAccess::get().raise_attention("this slicer has no printer configured yet", "manual");
-                return false;
-            }
-            BOOST_LOG_TRIVIAL(info) << "run wizard...";
-            run_wizard(ConfigWizard::RR_DATA_EMPTY);
-            BOOST_LOG_TRIVIAL(info) << "finished run wizard";
 
-            return true;
-        }
+    // An empty privacy flag alone no longer means "never set up": the wizard stopped writing it
+    // in 2.4.0.0, so every install set up since then re-ran the wizard at each launch (Windows and
+    // macOS). See Utils/StartupWizardLogic.hpp.
+    const bool setup_finished = StartupWizard::finish_flag_set(app_config->get("firstguide", "finish"));
+    const StartupWizard::Reason reason = StartupWizard::reason_to_run(
+        m_app_conf_exists, preset_bundle->printers.only_default_printers(), isAgree, setup_finished);
+    BOOST_LOG_TRIVIAL(warning) << "config_wizard_startup: config existed=" << m_app_conf_exists
+                               << ", firstguide/finish=" << app_config->get("firstguide", "finish")
+                               << ", privacy flag=\"" << isAgree << "\" -> wizard: " << StartupWizard::reason_name(reason);
+    if (reason == StartupWizard::Reason::None)
+        return false;
 
-    if (isAgree.empty())
-    {
-        if (m_hub_managed && RemoteAccess::get().hidden()) { RemoteAccess::get().raise_attention("first-run setup is waiting", "manual"); return false; }
-        run_wizard(ConfigWizard::RR_DATA_EMPTY); // Compatible with older versions
-        return true;
+    if (m_hub_managed && RemoteAccess::get().hidden()) {
+        // Ultra: the wizard needs a person; a printer-less instance cannot serve the phone anyway.
+        RemoteAccess::get().raise_attention(reason == StartupWizard::Reason::NeverFinished ? "first-run setup is waiting" :
+                                                                                             "this slicer has no printer configured yet",
+                                            "manual");
+        return false;
     }
-
-    return false;
+    BOOST_LOG_TRIVIAL(info) << "run wizard...";
+    run_wizard(ConfigWizard::RR_DATA_EMPTY);
+    BOOST_LOG_TRIVIAL(info) << "finished run wizard";
+    return true;
 }
 
 void GUI_App::check_updates(const bool verbose)
@@ -9161,8 +9657,52 @@ bool GUI_App::sm_disconnect_current_machine(bool need_reload_printerview)
     return true;
 }
 
+static std::wstring web_download_key(const boost::filesystem::path& path)
+{
+    std::wstring key = path.lexically_normal().wstring();
+    std::transform(key.begin(), key.end(), key.begin(), [](wchar_t c) { return c == L'\\' ? L'/' : wchar_t(std::towlower(c)); });
+    return key;
+}
+
+void GUI_App::mark_web_download(const boost::filesystem::path& path)
+{
+    if (!path.empty())
+        m_web_downloads.insert(web_download_key(path));
+}
+
+bool GUI_App::is_web_download(const boost::filesystem::path& path) const
+{
+    return !path.empty() && m_web_downloads.count(web_download_key(path)) > 0;
+}
+
+void GUI_App::open_connector_link(const std::string& url)
+{
+    if (!m_post_initialized) {
+        m_pending_connector_link = url;
+        return;
+    }
+    if (mainframe == nullptr || mainframe->m_home == nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "Connector link: there is no Home tab to open it in.";
+        show_error(nullptr, _u8L("The connector link could not be opened because the Home tab is not available."));
+        return;
+    }
+    // After the event that delivered the link (and, at start-up, after post_init) is done: it opens dialogs.
+    CallAfter([this, url]() {
+        if (mainframe == nullptr || mainframe->m_home == nullptr)
+            return;
+        mainframe->Raise();
+        mainframe->select_tab(size_t(MainFrame::tpHome));
+        mainframe->m_home->open_connector_link(url);
+    });
+}
+
 void GUI_App::start_download(std::string url)
 {
+    std::string connector_url;
+    if (Vendors::parse_connector_link(url, connector_url)) {
+        open_connector_link(connector_url);
+        return;
+    }
     if (!plater_) {
         BOOST_LOG_TRIVIAL(error) << "Could not start URL download: plater is nullptr.";
         return;
@@ -9195,6 +9735,8 @@ void GUI_App::SMUserInfo::notify() {
 
     wxGetApp().user_login_notify(data);
 
+    // The title bar's Account button follows the Snapmaker sign-in state.
+    GUI::AccountStatus::refresh_async();
 }
 bool is_support_filament(int extruder_id)
 {

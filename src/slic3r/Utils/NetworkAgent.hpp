@@ -41,6 +41,7 @@ typedef int (*func_stop_device_subscribe)(void* agent);
 typedef int (*func_send_message)(void *agent, std::string dev_id, std::string json_str, int qos, int flag);
 typedef int (*func_connect_printer)(void *agent, std::string dev_id, std::string dev_ip, std::string username, std::string password, bool use_ssl);
 typedef int (*func_disconnect_printer)(void *agent);
+typedef int (*func_watch_printers)(void *agent, std::string targets_json);
 typedef int (*func_send_message_to_printer)(void *agent, std::string dev_id, std::string json_str, int qos, int flag);
 typedef int (*func_check_cert)(void* agent);
 typedef void (*func_install_device_cert)(void* agent, std::string dev_id, bool lan_only);
@@ -129,7 +130,16 @@ public:
 #endif
     static std::string get_version();
     static void* get_network_function(const char* name);
+    // Always false: EdgeSlicer ships one network plug-in (its own, the current ABI). The old
+    // "legacy_networking" setting no longer reaches this flag (GUI_App resets it at start-up), and
+    // neither the expected plug-in version nor the version check read it.
     static bool use_legacy_network;
+    // The plug-in version this EdgeSlicer needs (BAMBU_NETWORK_AGENT_VERSION), whatever
+    // use_legacy_network says.
+    static std::string expected_version();
+    // The plug-in's reported version against expected_version(): the first 8 characters
+    // ("MM.mm.pp") must match. "00.00.00.00" (inconsistent build / no get_version export) never does.
+    static bool is_compatible_version(const std::string &plugin_version);
     NetworkAgent(std::string log_dir);
     ~NetworkAgent();
 
@@ -163,6 +173,10 @@ public:
     int send_message(std::string dev_id, std::string json_str, int qos, int flag);
     int connect_printer(std::string dev_id, std::string dev_ip, std::string username, std::string password, bool use_ssl);
     int disconnect_printer();
+    // UltraNet only (absent from Bambu's plug-in, then -1): read-only LAN sessions to every
+    // printer in targets_json besides the connected one, so each one reports. See
+    // DeviceManager::lan_watch_tick.
+    int watch_printers(const std::string& targets_json);
     int send_message_to_printer(std::string dev_id, std::string json_str, int qos, int flag);
     int check_cert();
     void install_device_cert(std::string dev_id, bool lan_only);
@@ -170,6 +184,10 @@ public:
     int change_user(std::string user_info);
     bool is_user_login();
     int  user_logout(bool request = false);
+    // Called (from whichever thread made the change) after change_user() or user_logout() ran, so
+    // the UI can follow the Bambu sign-in state (GUI/AccountStatus.cpp). Not called when the plug-in
+    // changes the state by itself; set_on_user_login_fn covers that where the plug-in reports it.
+    static void set_login_changed_hook(std::function<void()> hook);
     std::string get_user_id();
     std::string get_user_name();
     std::string get_user_avatar();
@@ -219,6 +237,10 @@ public:
     int get_model_mall_detail_url(std::string* url, std::string id);
     int get_my_profile(std::string token, unsigned int* http_code, std::string* http_body);
     int get_my_token(std::string ticket, unsigned int* http_code, std::string* http_body);
+    // What get_my_token / get_my_profile log of a failed call's response body: the credential
+    // the call carried is cut out by value, then the text is scrubbed (tokens, e-mail, account
+    // and user values) and cut to max_len. Public for the unit test.
+    static std::string login_failure_body_for_log(const std::string& body, const std::string& credential, size_t max_len = 300);
     int track_enable(bool enable);
     int track_remove_files();
     int track_event(std::string evt_key, std::string content);
@@ -273,10 +295,12 @@ private:
     static func_send_message                   send_message_ptr;
     static func_connect_printer                connect_printer_ptr;
     static func_disconnect_printer             disconnect_printer_ptr;
+    static func_watch_printers                 watch_printers_ptr;
     static func_send_message_to_printer        send_message_to_printer_ptr;
     static func_check_cert                     check_cert_ptr;
     static func_install_device_cert            install_device_cert_ptr;
     static func_start_discovery                start_discovery_ptr;
+    static std::function<void()>               s_login_changed_hook;
     static func_change_user                    change_user_ptr;
     static func_is_user_login                  is_user_login_ptr;
     static func_user_logout                    user_logout_ptr;

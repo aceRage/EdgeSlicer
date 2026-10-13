@@ -1,6 +1,7 @@
 #include "ReleaseNote.hpp"
 #include "RemoteAccess.hpp"
 #include "DeviceManager.hpp"
+#include "BindDetectGuard.hpp"
 #include "PrintErrorCommands.hpp"
 #include "I18N.hpp"
 
@@ -19,6 +20,8 @@
 #include "Jobs/PlaterWorker.hpp"
 
 #include <wx/regex.h>
+#include <wx/display.h>
+#include <wx/dcclient.h>
 #include <wx/progdlg.h>
 #include <wx/clipbrd.h>
 #include <wx/dcgraph.h>
@@ -309,10 +312,7 @@ UpdateVersionDialog::UpdateVersionDialog(wxWindow *parent)
 	}
 	// Make absolute to get proper "C:/..." prefix for file:// URL
 	ph = fs::absolute(ph);
-	auto url = ph.string();
-	std::replace(url.begin(), url.end(), '\\', '/');
-	url = "file:///" + url;
-    m_vebview_release_note->LoadURL(from_u8(url));
+    m_vebview_release_note->LoadURL(file_url_from_path(ph));
 
     m_simplebook_release_note->AddPage(m_scrollwindows_release_note, wxEmptyString, false);
     m_simplebook_release_note->AddPage(m_vebview_release_note, wxEmptyString, false);
@@ -921,7 +921,8 @@ PrintErrorDialog::PrintErrorDialog(wxWindow* parent, wxWindowID id, const wxStri
     m_vebview_release_note->SetMinSize(wxSize(FromDIP(320), FromDIP(250)));
     m_sizer_right->Add(m_vebview_release_note, 0, wxEXPAND | wxRIGHT | wxLEFT, FromDIP(15));
 
-    m_error_prompt_pic_static = new wxStaticBitmap(m_vebview_release_note, wxID_ANY, wxBitmap(), wxDefaultPosition, wxSize(FromDIP(300), FromDIP(180)));
+    m_error_prompt_pic_static = new wxStaticBitmap(m_vebview_release_note, wxID_ANY, wxBitmap(), wxDefaultPosition, wxSize(FromDIP(320), FromDIP(180)));
+    m_error_prompt_pic_static->SetMinSize(wxSize(FromDIP(320), FromDIP(180)));
 
     auto bottom_sizer = new wxBoxSizer(wxVERTICAL);
     m_sizer_button = new wxBoxSizer(wxVERTICAL);
@@ -969,15 +970,17 @@ void PrintErrorDialog::on_webrequest_state(wxWebRequestEvent& evt)
             wxImage resize_img = img.Scale(FromDIP(320), FromDIP(180), wxIMAGE_QUALITY_HIGH);
             wxBitmap error_prompt_pic = resize_img;
             m_error_prompt_pic_static->SetBitmap(error_prompt_pic);
-            Layout();
-            Fit();
+            refit_to_content();
 
         break;
     }
     case wxWebRequest::State_Failed:
     case wxWebRequest::State_Cancelled:
     case wxWebRequest::State_Unauthorized: {
+        // No picture is coming: give its space back rather than leaving a blank box.
         m_error_prompt_pic_static->SetBitmap(wxBitmap());
+        m_error_prompt_pic_static->Hide();
+        refit_to_content();
         break;
     }
     case wxWebRequest::State_Active:
@@ -988,31 +991,34 @@ void PrintErrorDialog::on_webrequest_state(wxWebRequestEvent& evt)
 
 void PrintErrorDialog::update_text_image(const wxString& text, const wxString& error_code, const wxString& image_url)
 {
-    //if (!m_sizer_text_release_note) {
-    //    m_sizer_text_release_note = new wxBoxSizer(wxVERTICAL);
-    //}
-    wxBoxSizer* sizer_text_release_note = new wxBoxSizer(wxVERTICAL);
+    // The sizer is made once. This used to build a new one and SetSizer() it on every call, which
+    // deleted the previous sizer (and with it the layout of the labels and picture) and left the
+    // new one empty - so the second error shown in the same dialog was laid out by hand-me-down
+    // positions from the first.
+    if (!m_sizer_text) {
+        m_sizer_text = new wxBoxSizer(wxVERTICAL);
+        // Plain Labels, wrapped here at a known width (see refit_to_content). LB_AUTO_WRAP re-wraps
+        // on every size event from whatever width the layout happens to hand it, so the text was
+        // measured at one width and drawn at another.
+        m_staticText_release_note = new Label(m_vebview_release_note, wxString());
+        m_staticText_error_code   = new Label(m_vebview_release_note, wxString());
+        m_sizer_text->Add(m_error_prompt_pic_static, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(10));
+        m_sizer_text->Add(m_staticText_release_note, 0, wxEXPAND, 0);
+        m_sizer_text->Add(m_staticText_error_code, 0, wxEXPAND | wxTOP, FromDIP(8));
+        m_vebview_release_note->SetSizer(m_sizer_text);
+    }
 
-    wxString error_code_msg = error_code;
+    // describe_error ends the sentence with " (0300 400C)". The code is shown once, on its own
+    // line below, with the timestamp suffix that identifies this occurrence.
+    const std::string plain = strip_trailing_error_code(text.ToUTF8().data(), error_code.ToUTF8().data());
+    m_message_text = wxString::FromUTF8(plain.c_str());
+
+    m_code_text = error_code;
     if (!error_code.IsEmpty()) {
         wxDateTime now       = wxDateTime::Now();
         wxString  show_time = now.Format("%H%M%d");
-        error_code_msg = wxString::Format("[%S %S]", error_code, show_time);
+        m_code_text = wxString::Format("[%s %s]", error_code, show_time);
     }
-
-    if (!m_staticText_release_note) {
-        m_staticText_release_note = new Label(m_vebview_release_note, text, LB_AUTO_WRAP);
-        sizer_text_release_note->Add(m_error_prompt_pic_static, 0, wxALIGN_CENTER, FromDIP(5));
-        sizer_text_release_note->AddSpacer(10);
-        sizer_text_release_note->Add(m_staticText_release_note, 0, wxALIGN_CENTER , FromDIP(5));
-    }
-    if (!m_staticText_error_code) {
-        m_staticText_error_code = new Label(m_vebview_release_note, error_code_msg, LB_AUTO_WRAP);
-        sizer_text_release_note->AddSpacer(5);
-        sizer_text_release_note->Add(m_staticText_error_code, 0, wxALIGN_CENTER, FromDIP(5));
-    }
-
-    m_vebview_release_note->SetSizer(sizer_text_release_note);
 
     if (!image_url.empty()) {
         web_request = wxWebSession::GetDefault().CreateRequest(this, image_url);
@@ -1021,32 +1027,58 @@ void PrintErrorDialog::update_text_image(const wxString& text, const wxString& e
             web_request.Start();
         BOOST_LOG_TRIVIAL(trace) << "monitor: start new webrequest, state = " << web_request.GetState() << ", url = " << image_url;
         m_error_prompt_pic_static->Show();
-
     }
     else {
         m_error_prompt_pic_static->Hide();
     }
-    sizer_text_release_note->Layout();
-    m_staticText_release_note->SetMaxSize(wxSize(FromDIP(300), -1));
-    m_staticText_release_note->SetMinSize(wxSize(FromDIP(300), -1));
-    m_staticText_release_note->SetLabelText(text);
-    m_staticText_error_code->SetMaxSize(wxSize(FromDIP(300), -1));
-    m_staticText_error_code->SetMinSize(wxSize(FromDIP(300), -1));
-    m_staticText_error_code->SetLabelText(error_code_msg);
-    m_vebview_release_note->Layout();
 
-    auto text_size = m_staticText_release_note->GetBestSize();
-    if (text_size.y < FromDIP(360))
-        if (!image_url.empty()) {
-            m_vebview_release_note->SetMinSize(wxSize(FromDIP(320), text_size.y + FromDIP(220)));
+    const bool was_shown = IsShown();
+    refit_to_content();
+    // A new error opens a fresh window; an update to one already on screen stays where it is.
+    if (!was_shown) CenterOnParent();
+}
+
+void PrintErrorDialog::refit_to_content()
+{
+    if (!m_sizer_text || !m_staticText_release_note || !m_staticText_error_code) return;
+
+    // Wrap width for the message. The text area is a little wider than this so the vertical
+    // scrollbar, when there is one, does not cover the end of a line.
+    const int wrap_w   = FromDIP(360);
+    const int scroll_w = FromDIP(24);
+
+    auto set_wrapped = [wrap_w](Label* label, const wxString& text) {
+        wxString wrapped;
+        {
+            wxClientDC dc(label);
+            dc.SetFont(label->GetFont());
+            Label::split_lines(dc, wrap_w, text, wrapped);
         }
-        else {
-            m_vebview_release_note->SetMinSize(wxSize(FromDIP(320), text_size.y + FromDIP(25)));
-        }
-    else {
-        m_vebview_release_note->SetMinSize(wxSize(FromDIP(320), FromDIP(340)));
+        label->SetLabelText(wrapped);
+        label->SetMinSize(wxSize(wrap_w, -1));
+        label->InvalidateBestSize();
+    };
+    set_wrapped(m_staticText_release_note, m_message_text);
+    set_wrapped(m_staticText_error_code, m_code_text);
+    m_staticText_error_code->Show(!m_code_text.IsEmpty());
+
+    // The height of what is inside, capped. Past the cap the area scrolls (genuinely long text);
+    // the cap also respects a small display, since the buttons need room beneath it.
+    int max_h = FromDIP(420);
+    const int display = wxDisplay::GetFromWindow(this);
+    if (display != wxNOT_FOUND) {
+        const int avail = wxDisplay(display).GetClientArea().GetHeight();
+        max_h = std::max(FromDIP(120), std::min(max_h, avail * 55 / 100));
     }
+    m_sizer_text->Layout();
+    const int content_h = m_sizer_text->CalcMin().y + FromDIP(8);
+    const bool scrolls  = content_h > max_h;
+    m_vebview_release_note->SetMinSize(wxSize(wrap_w + scroll_w, scrolls ? max_h : content_h));
 
+    m_vebview_release_note->Layout();
+    m_vebview_release_note->FitInside();
+    // Let the frame follow the new minimum (it may have to shrink as well as grow).
+    SetMinSize(wxDefaultSize);
     Layout();
     Fit();
 }
@@ -1118,12 +1150,10 @@ void PrintErrorDialog::update_title_style(wxString title, std::vector<int> butto
             BOOST_LOG_TRIVIAL(info) << "PrintErrorDialog: action id " << button_id
                                     << " disabled, no job_id for this error";
         }
-        m_sizer_button->Add(it->second, 0, wxALL, FromDIP(5));
+        m_sizer_button->Add(it->second, 0, wxALL | wxEXPAND, FromDIP(5));
         it->second->Show();
     }
-    Layout();
-    Fit();
-
+    refit_to_content();
 }
 
 void PrintErrorDialog::set_error_context(MachineObject* obj, int print_error, const std::string& job_id)
@@ -2032,7 +2062,11 @@ void InputIpAddressDialog::set_machine_obj(MachineObject* obj)
     m_input_printer_name->GetTextCtrl()->SetLabelText(m_obj->dev_name);
 
     std::string img_str = DeviceManager::get_printer_diagram_img(m_obj->printer_type);
-    auto diagram_bmp = create_scaled_bitmap(img_str + "_en", this, 198);
+    if (img_str.empty())
+        img_str = "input_access_code_x1";
+
+    const std::string language = wxGetApp().app_config->get("language");
+    auto diagram_bmp = create_scaled_bitmap(img_str + (language == "zh_CN" ? "_cn" : "_en"), this, 198);
     m_img_help->SetBitmap(diagram_bmp);
 
     
@@ -2174,6 +2208,22 @@ void InputIpAddressDialog::workerThreadFunc(std::string str_ip, std::string str_
         detectData.bind_state   = "free";
     }
 
+    // Auto-detect: never insert a printer without a serial number. A plug-in that reports success
+    // with an empty (or unusable) serial is a failed detection, and the dialog asks for the serial
+    // instead (manual entry, as macOS does). The result is normalised too (serial upper-cased, name
+    // defaulting to the serial, connect_type / bind_state lower-cased, empty ones taken as "lan" /
+    // "free"). Manual entry has its own checks (on_text: a 15-character serial and a name).
+    if (current_input_index == 0) {
+        const int raw = result;
+        result        = vet_bind_detect_result(result, detectData);
+        if (raw >= 0 && result < 0)
+            BOOST_LOG_TRIVIAL(warning) << "InputIpAddressDialog: bind_detect returned " << raw
+                                       << " without a usable serial number; asking for it instead";
+        else if (raw < 0)
+            BOOST_LOG_TRIVIAL(info) << "InputIpAddressDialog: bind_detect failed, code " << raw << " ("
+                                    << detectData.result_msg << ")";
+    }
+
     if (result < 0) {
         post_update_test_msg(wxEmptyString, true);
         if (result == -1) {
@@ -2212,11 +2262,14 @@ void InputIpAddressDialog::workerThreadFunc(std::string str_ip, std::string str_
         machine.printer_type = detectData.model_id;
         m_obj = dev->insert_local_device(machine, detectData.connect_type, detectData.bind_state, detectData.version, str_access_code);
 
-
-        if (m_obj) {
-            m_obj->set_user_access_code(str_access_code);
-            wxGetApp().getDeviceManager()->set_selected_machine(m_obj->dev_id, true);
+        if (!m_obj) {
+            post_update_test_msg(wxEmptyString, true);
+            post_update_test_msg(_L("Failed to connect to printer."), false);
+            return;
         }
+
+        m_obj->set_user_access_code(str_access_code);
+        wxGetApp().getDeviceManager()->set_selected_machine(m_obj->dev_id, true);
 
 
         closeCount = 1;

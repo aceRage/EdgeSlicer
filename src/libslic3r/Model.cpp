@@ -19,6 +19,7 @@
 
 #include "libslic3r/Geometry/ConvexHull.hpp"
 
+#include <algorithm>
 #include <float.h>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -93,6 +94,7 @@ Model& Model::assign_copy(const Model &rhs)
     // BBS: for design info
     this->design_info = rhs.design_info;
     this->model_info = rhs.model_info;
+    this->pricing = rhs.pricing;
     this->stl_design_id = rhs.stl_design_id;
     this->stl_design_country = rhs.stl_design_country;
     this->profile_info = rhs.profile_info;
@@ -144,6 +146,7 @@ Model& Model::assign_copy(Model &&rhs)
     this->next_object_backup_id = rhs.next_object_backup_id;
     this->design_info = rhs.design_info;
     rhs.design_info.reset();
+    this->pricing = std::move(rhs.pricing);
     this->model_info = rhs.model_info;
     rhs.model_info.reset();
     this->profile_info = rhs.profile_info;
@@ -429,7 +432,7 @@ Model Model::read_from_file(const std::string&                                  
 // BBS: backup & restore
 // Loading model from a file (3MF or AMF), not from a simple geometry file (STL or OBJ).
 Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, En3mfType& out_file_type, LoadStrategy options,
-        PlateDataPtrs* plate_data, std::vector<Preset*>* project_presets, Semver* file_version, Import3mfProgressFn proFn, BBLProject *project)
+        PlateDataPtrs* plate_data, std::vector<Preset*>* project_presets, Semver* file_version, Import3mfProgressFn proFn, BBLProject *project, bool *is_bambu_studio)
 {
     assert(config != nullptr);
     assert(config_substitutions != nullptr);
@@ -447,7 +450,7 @@ Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig
         } else {
             // BBS: add part plate related logic
             // BBS: backup & restore
-            result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, &is_bbl_3mf, file_version, proFn, options, project);
+            result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, &is_bbl_3mf, file_version, proFn, options, project, 0, is_bambu_studio);
         }
     }
     else if (boost::algorithm::iends_with(input_file, ".zip.amf"))
@@ -1219,6 +1222,7 @@ void Model::load_from(Model& model)
     stl_design_country = model.stl_design_country;
     model_info  = model.model_info;
     profile_info  = model.profile_info;
+    pricing = model.pricing;
     mk_name = model.mk_name;
     mk_version = model.mk_version;
     md_name = model.md_name;
@@ -1477,6 +1481,28 @@ ModelVolume* ModelObject::add_volume_with_shared_mesh(const ModelVolume &other, 
     return v;
 }
 
+ModelVolume* ModelObject::replace_volume_with_object_mesh(size_t src_idx, TriangleMesh &&mesh_in_object_coords, const std::string &name_suffix)
+{
+    assert(src_idx < this->volumes.size());
+    const ModelVolume *old_volume = this->volumes[src_idx];
+    // add_volume() centres the mesh and sets the volume offset to the centre it removed, with
+    // an identity rotation / scale: the source's rotation, scale and mirror are already baked
+    // into the object-space mesh. That transformation is exactly right and must be kept.
+    // (It used to be overwritten with the SOURCE volume's offset, which moved the result by
+    // source offset - result centre: a different direction for every part pair.)
+    ModelVolume       *new_volume = this->add_volume(std::move(mesh_in_object_coords), old_volume->type());
+    new_volume->name = old_volume->name + " - " + name_suffix;
+    new_volume->set_new_unique_id();
+    new_volume->config.apply(old_volume->config);
+    new_volume->set_type(old_volume->type());
+    new_volume->set_material_id(old_volume->material_id());
+
+    // The new volume takes the source's slot; the source is deleted.
+    std::swap(this->volumes[src_idx], this->volumes.back());
+    this->delete_volume(this->volumes.size() - 1);
+    return new_volume;
+}
+
 void ModelObject::delete_volume(size_t idx)
 {
     ModelVolumePtrs::iterator i = this->volumes.begin() + idx;
@@ -1539,6 +1565,20 @@ void ModelObject::sort_volumes(bool full_sort)
     // sort volumes inside the object to order "Model Part, Negative Volume, Modifier, Support Blocker and Support Enforcer. "
     if (full_sort)
         std::stable_sort(volumes.begin(), volumes.end(), [](ModelVolume* vl, ModelVolume* vr) {
+            // Special handling for Precise Seam modifiers: group-based sorting with user order preservation
+            if (vl->is_precise_seam() && vr->is_precise_seam()) {
+                // Strong (center/left/right) always before weak (enforced/blocked/neutral)
+                bool vl_strong = vl->is_precise_seam_strong();
+                bool vr_strong = vr->is_precise_seam_strong();
+                if (vl_strong != vr_strong)
+                    return vl_strong; // strong < weak → strong group appears first
+
+                // Within same group (both strong or both weak): preserve current order
+                // stable_sort will maintain relative positions when comparator returns false
+                return false;
+            }
+
+            // For non-Precise-Seam or mixed types: use standard enum-based ordering
             return vl->type() < vr->type();
         });
     // sort have to controll "place" of the support blockers/enforcers. But one of the model parts have to be on the first place.
@@ -1546,6 +1586,16 @@ void ModelObject::sort_volumes(bool full_sort)
         std::stable_sort(volumes.begin(), volumes.end(), [](ModelVolume* vl, ModelVolume* vr) {
             ModelVolumeType vl_type = vl->type() > ModelVolumeType::PARAMETER_MODIFIER ? vl->type() : ModelVolumeType::PARAMETER_MODIFIER;
             ModelVolumeType vr_type = vr->type() > ModelVolumeType::PARAMETER_MODIFIER ? vr->type() : ModelVolumeType::PARAMETER_MODIFIER;
+
+            // Apply same Precise Seam grouping logic for partial sort
+            if (vl->is_precise_seam() && vr->is_precise_seam()) {
+                bool vl_strong = vl->is_precise_seam_strong();
+                bool vr_strong = vr->is_precise_seam_strong();
+                if (vl_strong != vr_strong)
+                    return vl_strong;
+                return false; // preserve order within same group
+            }
+
             return vl_type < vr_type;
         });
 }
@@ -2171,6 +2221,56 @@ void ModelVolume::reset_extra_facets()
     this->seam_facets.reset();
     this->mmu_segmentation_facets.reset();
     this->fuzzy_skin_facets.reset();
+    // Texture-displacement paint data has no remap-across-topology-change support yet (see
+    // build_texture_displacement()'s documented limitation), so it must be dropped here rather
+    // than left referring to a mesh that no longer matches it.
+    for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+        this->texture_displacement_facet(i).reset();
+}
+
+// OrcaSlicer #13472 (Keep painting after cut), merge 1c0d0b89cc: save the painting of a model
+// part before its mesh is replaced, then remap it onto the new mesh by spatial lookup.
+std::optional<TriangleSelector::SavedPainting> ModelVolume::save_painting() const
+{
+    if (is_any_painted() && is_model_part() && !mesh().empty()) {
+        TriangleSelector::SavedPainting sp;
+        sp.mesh      = mesh();
+        sp.supported = supported_facets.get_data();
+        sp.seam      = seam_facets.get_data();
+        sp.mmu       = mmu_segmentation_facets.get_data();
+        sp.fuzzy     = fuzzy_skin_facets.get_data();
+        return sp;
+    }
+
+    return {};
+}
+
+void ModelVolume::restore_painting(const std::optional<TriangleSelector::SavedPainting>& saved, const bool keep_existing_paint)
+{
+    if (!keep_existing_paint) {
+        reset_extra_facets();
+    }
+
+    if (!saved) {
+        return;
+    }
+
+    auto remap_one = [&](const TriangleSelector::TriangleSplittingData& src_data,
+                         FacetsAnnotation& target_facets) {
+        if (src_data.bitstream.empty())
+            return;
+        auto result =
+            TriangleSelector::remap_painting(saved->mesh.its, src_data, mesh().its, Geometry::translation_transform(mesh().get_init_shift()),
+                                             keep_existing_paint ?
+                                                 std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{std::ref(target_facets.get_data())} :
+                                                 std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{});
+        if (!result.bitstream.empty())
+            target_facets.set_data(std::move(result));
+    };
+    remap_one(saved->supported, supported_facets);
+    remap_one(saved->seam,      seam_facets);
+    remap_one(saved->mmu,       mmu_segmentation_facets);
+    remap_one(saved->fuzzy,     fuzzy_skin_facets);
 }
 
 static void invalidate_translations(ModelObject* object, const ModelInstance* src_instance)
@@ -2689,7 +2789,8 @@ std::vector<int> ModelVolume::get_extruders() const
     if (m_type == ModelVolumeType::INVALID
         || m_type == ModelVolumeType::NEGATIVE_VOLUME
         || m_type == ModelVolumeType::SUPPORT_BLOCKER
-        || m_type == ModelVolumeType::SUPPORT_ENFORCER)
+        || m_type == ModelVolumeType::SUPPORT_ENFORCER
+        || this->is_precise_seam()) // Precise Seam is non-printing helper geometry
         return std::vector<int>();
 
     if (mmu_segmentation_facets.timestamp() != mmuseg_ts) {
@@ -2737,6 +2838,13 @@ void ModelVolume::update_extruder_count(size_t extruder_count)
             break;
         }
     }
+    // Orca #14103 (from BambuStudio STUDIO-15763): drop a per-part filament assignment that no longer
+    // exists after the filament count shrank (a switch to a printer with fewer filaments), so the part
+    // follows its object again and nothing downstream indexes per-filament vectors past their end.
+    // The caller (Plater::on_filaments_change) passes the total including mixed filaments, so a part
+    // on a mixed filament that still exists keeps it.
+    if (const ConfigOption *opt = this->config.option("extruder"); opt != nullptr && opt->getInt() > int(extruder_count))
+        this->config.erase("extruder");
 }
 
 void ModelVolume::update_extruder_count_when_delete_filament(size_t extruder_count, size_t filament_id, int replace_filament_id)
@@ -2903,6 +3011,19 @@ ModelVolumeType ModelVolume::type_from_string(const std::string &s)
 		return ModelVolumeType::SUPPORT_ENFORCER;
     if (s == "support_blocker")
 		return ModelVolumeType::SUPPORT_BLOCKER;
+    // Precise Seam types
+    if (s == "precise_seam_center")
+		return ModelVolumeType::PRECISE_SEAM_CENTER;
+    if (s == "precise_seam_left")
+		return ModelVolumeType::PRECISE_SEAM_LEFT;
+    if (s == "precise_seam_right")
+		return ModelVolumeType::PRECISE_SEAM_RIGHT;
+    if (s == "precise_seam_enforced")
+		return ModelVolumeType::PRECISE_SEAM_ENFORCED;
+    if (s == "precise_seam_blocked")
+		return ModelVolumeType::PRECISE_SEAM_BLOCKED;
+    if (s == "precise_seam_neutral")
+		return ModelVolumeType::PRECISE_SEAM_NEUTRAL;
     //assert(s == "0");
     // Default value if invalud type string received.
 	return ModelVolumeType::MODEL_PART;
@@ -2917,6 +3038,12 @@ std::string ModelVolume::type_to_string(const ModelVolumeType t)
 	case ModelVolumeType::PARAMETER_MODIFIER: return "modifier_part";
 	case ModelVolumeType::SUPPORT_ENFORCER:   return "support_enforcer";
 	case ModelVolumeType::SUPPORT_BLOCKER:    return "support_blocker";
+	case ModelVolumeType::PRECISE_SEAM_CENTER:   return "precise_seam_center";
+	case ModelVolumeType::PRECISE_SEAM_LEFT:     return "precise_seam_left";
+	case ModelVolumeType::PRECISE_SEAM_RIGHT:    return "precise_seam_right";
+	case ModelVolumeType::PRECISE_SEAM_ENFORCED: return "precise_seam_enforced";
+	case ModelVolumeType::PRECISE_SEAM_BLOCKED:  return "precise_seam_blocked";
+	case ModelVolumeType::PRECISE_SEAM_NEUTRAL:  return "precise_seam_neutral";
     default:
         assert(false);
         return "normal_part";
@@ -3024,6 +3151,11 @@ void ModelVolume::assign_new_unique_ids_recursive()
     seam_facets.set_new_unique_id();
     mmu_segmentation_facets.set_new_unique_id();
     fuzzy_skin_facets.set_new_unique_id();
+    // As set_new_unique_id() already does: the undo/redo stack stores FacetsAnnotation contents keyed
+    // by ObjectID, so a clone left sharing these ids with its source can be handed the source's mask
+    // on an undo - after which a paint mask and the mesh it was recorded against no longer match.
+    for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
+        texture_displacement_facet(i).set_new_unique_secondary_id(); // EdgeSlicer: see ObjectBase::SecondaryId
 }
 
 void ModelVolume::rotate(double angle, Axis axis)
@@ -3187,18 +3319,10 @@ void Model::setPrintSpeedTable(const DynamicPrintConfig& config, const PrintConf
     //auto print_config = print.config();
     //printSpeedMap.bed_poly.points = get_bed_shape(*(wxGetApp().plater()->config()));
     printSpeedMap.bed_poly.points = get_bed_shape(config);
-    Pointfs excluse_area_points = print_config.bed_exclude_area.values;
-    Polygons exclude_polys;
-    Polygon exclude_poly;
-    for (int i = 0; i < excluse_area_points.size(); i++) {
-        auto pt = excluse_area_points[i];
-        exclude_poly.points.emplace_back(scale_(pt.x()), scale_(pt.y()));
-        if (i % 4 == 3) {  // exclude areas are always rectangle
-            exclude_polys.push_back(exclude_poly);
-            exclude_poly.points.clear();
-        }
-    }
-    printSpeedMap.bed_poly = diff({ printSpeedMap.bed_poly }, exclude_polys)[0];
+    // Same reading of bed_exclude_area as validation and arrange (rectangles or one polygon).
+    const Polygons bed_left = diff({ printSpeedMap.bed_poly }, get_bed_excluded_area(print_config));
+    if (!bed_left.empty())
+        printSpeedMap.bed_poly = bed_left.front();
 }
 
 // find temperature of heatend and bed and matierial of an given extruder
@@ -3215,8 +3339,8 @@ void Model::setExtruderParams(const DynamicPrintConfig& config, int extruders_co
         if (config.has("filament_type")) {
             matName = config.opt_string("filament_type", i);
         }
-        if (config.has("nozzle_temperature")) {
-            endTemp = config.opt_int("nozzle_temperature", i);
+        if (const auto *nozzle_temp = config.option<ConfigOptionInts>("nozzle_temperature")) {
+            endTemp = get_value_at(config, *nozzle_temp, ConfigFlowDomain::Filament, i);
         }
 
         // FIXME: curr_bed_type is now a plate config rather than a global config.
@@ -3700,6 +3824,8 @@ double getadhesionCoeff(const ModelVolumePtrs objectVolumes)
 {
     double adhesionCoeff = 1;
     for (const ModelVolume* modelVolume : objectVolumes) {
+        if (modelVolume->is_precise_seam())
+            continue; // non-printing helper geometry
         if (Model::extruderParamsMap.find(modelVolume->extruder_id()) != Model::extruderParamsMap.end()) {
             if (Model::extruderParamsMap.at(modelVolume->extruder_id()).materialName == "PETG" ||
                 Model::extruderParamsMap.at(modelVolume->extruder_id()).materialName == "PCTG") {
@@ -3719,6 +3845,8 @@ double getTemperatureFromExtruder(const ModelVolumePtrs objectVolumes) {
 #if 1
     std::vector<size_t> extruders;
     for (const ModelVolume* modelVolume : objectVolumes) {
+        if (modelVolume->is_precise_seam())
+            continue; // non-printing helper geometry
         if (modelVolume->extruder_id() >= 0)
             extruders.push_back(modelVolume->extruder_id());
     }
@@ -3792,6 +3920,12 @@ void ModelInstance::get_arrange_polygon(void *ap, const Slic3r::DynamicPrintConf
         // id==0 means follow previous material, so need not be recorded
         if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
         if (op2 && (extruder_id = op2->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
+    } else if (auto stab = object->get_config_value<ConfigOptionEnum<StabilizerMode>>(config_global, "stabilizer_supports");
+               stab && stab->value != smOff) {
+        // Side stabilizers print with the support filament even with supports off.
+        auto op1 = object->get_config_value<ConfigOptionInt>(config_global, "support_filament");
+        int extruder_id;
+        if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
     }
 
     if (ret.extrude_ids.empty()) //the default extruder
@@ -3944,25 +4078,51 @@ void FacetsAnnotation::set_triangle_from_string(int triangle_id, const std::stri
 {
     assert(! str.empty());
     assert(m_data.triangles_to_split.empty() || m_data.triangles_to_split.back().triangle_idx < triangle_id);
+
+    auto hex_nibble = [](char ch, int &dec) -> bool {
+        if (ch >= '0' && ch <= '9') {
+            dec = int(ch - '0');
+            return true;
+        }
+        if (ch >= 'A' && ch <= 'F') {
+            dec = 10 + int(ch - 'A');
+            return true;
+        }
+        if (ch >= 'a' && ch <= 'f') {
+            dec = 10 + int(ch - 'a');
+            return true;
+        }
+        return false;
+    };
+
+    for (char ch : str) {
+        int dec = 0;
+        if (!hex_nibble(ch, dec)) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": dropping paint data of triangle " << triangle_id
+                                      << " with non-hex character";
+            return;
+        }
+    }
+
     m_data.triangles_to_split.emplace_back(triangle_id, int(m_data.bitstream.size()));
 
     const size_t bitstream_start_idx = m_data.bitstream.size();
     for (auto it = str.crbegin(); it != str.crend(); ++it) {
-        const char ch = *it;
         int dec = 0;
-        if (ch >= '0' && ch<='9')
-            dec = int(ch - '0');
-        else if (ch >='A' && ch <= 'F')
-            dec = 10 + int(ch - 'A');
-        else
-            assert(false);
+        const bool decoded = hex_nibble(*it, dec);
+        assert(decoded);
+        (void) decoded;
 
         // Convert to binary and append into code.
         for (int i = 0; i < 4; ++i)
             m_data.bitstream.insert(m_data.bitstream.end(), bool(dec & (1 << i)));
     }
 
-    m_data.update_used_states(bitstream_start_idx);
+    if (!m_data.update_used_states(bitstream_start_idx)) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": dropping malformed paint data of triangle " << triangle_id;
+        m_data.bitstream.resize(bitstream_start_idx);
+        m_data.triangles_to_split.pop_back();
+    }
 }
 
 bool FacetsAnnotation::equals(const FacetsAnnotation &other) const
@@ -4107,6 +4267,15 @@ bool model_custom_seam_data_changed(const ModelObject& mo, const ModelObject& mo
     return model_property_changed(mo, mo_new,
         [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
         [](const ModelVolume &mv_old, const ModelVolume &mv_new){ return mv_old.seam_facets.timestamp_matches(mv_new.seam_facets); });
+}
+
+bool model_precise_seam_config_changed(const ModelObject &mo, const ModelObject &mo_new)
+{
+    // Assumes the Precise Seam volume list is synchronized (ids, types, transforms, order).
+    // Config-only invalidation is future-proofing: PreciseSeam does not read helper config yet.
+    return model_property_changed(mo, mo_new,
+        [](const ModelVolumeType t) { return is_precise_seam(t); },
+        [](const ModelVolume &mv_old, const ModelVolume &mv_new) { return mv_old.config.timestamp_matches(mv_new.config); });
 }
 
 bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObject& mo_new)

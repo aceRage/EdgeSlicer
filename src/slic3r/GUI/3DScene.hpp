@@ -22,6 +22,12 @@
 #define HAS_GLSAFE
 #endif // NDEBUG
 
+// EDGE: EDGESLICER_GL_DEBUG=1 in the environment (Slic3r::GUI::OpenGLManager::gl_debug_enabled()).
+// Release builds then read glGetError() after every glsafe()/glcheck() and log the call site of each
+// error (no assert); off, a release glsafe() costs one flag test. Debug builds always check and assert.
+extern bool edge_gl_debug_calls;
+extern void glReportRecentCallImpl(const char *file_name, unsigned int line, const char *function_name);
+
 #ifdef HAS_GLSAFE
     extern void glAssertRecentCallImpl(const char *file_name, unsigned int line, const char *function_name);
     inline void glAssertRecentCall() { glAssertRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); }
@@ -29,8 +35,8 @@
     #define glcheck() do { glAssertRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #else // HAS_GLSAFE
     inline void glAssertRecentCall() { }
-    #define glsafe(cmd) cmd
-    #define glcheck()
+    #define glsafe(cmd) do { cmd; if (::edge_gl_debug_calls) ::glReportRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
+    #define glcheck() do { if (::edge_gl_debug_calls) ::glReportRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #endif // HAS_GLSAFE
 extern std::vector<Slic3r::ColorRGBA> get_extruders_colors();
 extern float                          FullyTransparentMaterialThreshold;
@@ -78,6 +84,13 @@ public:
     static ColorRGBA SUPPORT_ENFORCER_COL;
     static ColorRGBA SUPPORT_BLOCKER_COL;
     static ColorRGBA MODEL_HIDDEN_COL;
+    // Precise Seam modifier colours (60% alpha), as upstream Orca #12974.
+    static ColorRGBA PRECISE_SEAM_CENTER_COL;
+    static ColorRGBA PRECISE_SEAM_LEFT_COL;
+    static ColorRGBA PRECISE_SEAM_RIGHT_COL;
+    static ColorRGBA PRECISE_SEAM_ENFORCED_COL;
+    static ColorRGBA PRECISE_SEAM_NEUTRAL_COL;
+    static ColorRGBA PRECISE_SEAM_BLOCKED_COL;
 
     static void update_render_colors();
     static void load_render_colors();
@@ -501,7 +514,7 @@ public:
     GLVolume* new_toolpath_volume(const ColorRGBA& rgba);
     GLVolume* new_nontoolpath_volume(const ColorRGBA& rgba);
 
-    int get_selection_support_threshold_angle(bool&) const;
+    float get_selection_support_normal_z() const;
     // Render the volumes by OpenGL.
     //BBS: add outline drawing logic
     void render(ERenderType                           type,

@@ -1,4 +1,4 @@
-@REM Snapmaker_Orca build script for Windows
+@REM EdgeSlicer build script for Windows
 @echo off
 set WP=%CD%
 
@@ -48,6 +48,9 @@ echo "building deps.."
 
 echo on
 cmake ../ -G "Visual Studio 17 2022" -A x64 -DDESTDIR="%DEPS%" -DCMAKE_BUILD_TYPE=%build_type% -DDEP_DEBUG=%debug% -DORCA_INCLUDE_DEBUG_INFO=%debuginfo%
+@REM Stop on a failed configure. Carrying on would build the previous generation's solution,
+@REM which quietly regenerates from whatever source directory that cache recorded.
+if errorlevel 1 exit /b 1
 cmake --build . --config %build_type% --target deps -- -m
 if errorlevel 1 exit /b 1
 if not exist "%DEPS%\usr\local\lib\libcrypto.lib" goto openssl_failed
@@ -65,7 +68,7 @@ goto openssl_checked
 if "%1"=="deps" exit /b 0
 
 :slicer
-echo "building Snapmaker Orca..."
+echo "building EdgeSlicer..."
 cd %WP%
 mkdir %build_dir%
 cd %build_dir%
@@ -75,6 +78,8 @@ cd %build_dir%
 @REM They go before WIN10SDK_PATH, whose trailing backslash can swallow what follows it.
 set "PAYLOAD_FLAGS="
 if defined ULTRANET_BIN_DIR set "PAYLOAD_FLAGS=%PAYLOAD_FLAGS% -DULTRANET_BIN_DIR="%ULTRANET_BIN_DIR%""
+@REM Bambu's camera files (BambuSource.dll + live555.dll) for live view; not in this repo.
+if defined CAMERA_BIN_DIR set "PAYLOAD_FLAGS=%PAYLOAD_FLAGS% -DCAMERA_BIN_DIR="%CAMERA_BIN_DIR%""
 if defined FLASHNETWORK_BIN_DIR set "PAYLOAD_FLAGS=%PAYLOAD_FLAGS% -DFLASHNETWORK_BIN_DIR="%FLASHNETWORK_BIN_DIR%""
 if defined FFMPEG_BIN_DIR set "PAYLOAD_FLAGS=%PAYLOAD_FLAGS% -DFFMPEG_BIN_DIR="%FFMPEG_BIN_DIR%""
 

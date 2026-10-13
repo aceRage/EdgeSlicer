@@ -108,6 +108,8 @@ set(lisbslic3r_sources
     ColorSplitShell.cpp
     BuildVolume.cpp
     BuildVolume.hpp
+    ExtruderAreas.cpp
+    ExtruderAreas.hpp
     calib.cpp
     calib.hpp
     Circle.cpp
@@ -123,6 +125,8 @@ set(lisbslic3r_sources
     Config.hpp
     CustomGCode.cpp
     CustomGCode.hpp
+    CustomModels.cpp
+    CustomModels.hpp
     DataDirMigration.cpp
     DataDirMigration.hpp
     CutUtils.cpp
@@ -140,6 +144,23 @@ set(lisbslic3r_sources
     Emboss.cpp
     Emboss.hpp
     EmbossShape.hpp
+    EmbossBend.cpp
+    EmbossBend.hpp
+    EmbossBendSurface.cpp
+    EmbossBendSurface.hpp
+    InlineShapes.cpp
+    InlineShapes.hpp
+    InlineShapeTable.hpp
+    FontFallback.cpp
+    FontFallback.hpp
+    Barcode.cpp
+    Barcode.hpp
+    CodeEmboss.cpp
+    CodeEmboss.hpp
+    ImageTrace.cpp
+    ImageTrace.hpp
+    SimpleShape.cpp
+    SimpleShape.hpp
     enum_bitmask.hpp
     Execution/Execution.hpp
     Execution/ExecutionSeq.hpp
@@ -149,6 +170,12 @@ set(lisbslic3r_sources
     ExPolygonSerialize.hpp
     ExPolygonsIndex.cpp
     ExPolygonsIndex.hpp
+    CostEstimate.cpp
+    CostEstimate.hpp
+    CostOverrides.cpp
+    CostOverrides.hpp
+    CostPricing.cpp
+    CostPricing.hpp
     Extruder.cpp
     Extruder.hpp
     ExtrusionEntityCollection.cpp
@@ -169,6 +196,7 @@ set(lisbslic3r_sources
     Feature/Interlocking/VoxelUtils.hpp
     FileParserError.hpp
     AllowlistManager.cpp
+    AlignMath.hpp
     AllowlistManager.hpp
     FilamentColorLibrary.cpp
     FilamentColorLibrary.hpp
@@ -186,6 +214,8 @@ set(lisbslic3r_sources
     Fill/FillConcentric.hpp
     Fill/FillConcentricInternal.cpp
     Fill/FillConcentricInternal.hpp
+    FDMHollowing.cpp
+    FDMHollowing.hpp
     Fill/Fill.cpp
     Fill/FillCrossHatch.cpp
     Fill/FillCrossHatch.hpp
@@ -222,6 +252,8 @@ set(lisbslic3r_sources
     Format/3mf.hpp
     Format/AMF.cpp
     Format/AMF.hpp
+    Format/AssembleList.cpp
+    Format/AssembleList.hpp
     Format/bbs_3mf.cpp
     Format/bbs_3mf.hpp
     Format/BambuExport.cpp
@@ -240,6 +272,15 @@ set(lisbslic3r_sources
     Format/SL1.hpp
     Format/STEP.cpp
     Format/STEP.hpp
+    Format/STEPExport.cpp
+    Format/STEPExport.hpp
+    BRep/MeshToBRep.cpp
+    BRep/MeshToBRep.hpp
+    BRep/CadBody.cpp
+    BRep/CadBody.hpp
+    BRep/CadEdit.cpp
+    BRep/CadEdit.hpp
+    BRep/CadShape.hpp
     Format/STL.cpp
     Format/STL.hpp
     Format/svg.cpp
@@ -283,6 +324,10 @@ set(lisbslic3r_sources
     GCodeReader.hpp
     GCode/RetractWhenCrossingPerimeters.cpp
     GCode/RetractWhenCrossingPerimeters.hpp
+    GCode/TimelapsePosPicker.cpp
+    GCode/TimelapsePosPicker.hpp
+    GCode/PreciseSeam.cpp
+    GCode/PreciseSeam.hpp
     GCode/SeamPlacer.cpp
     GCode/SeamPlacer.hpp
     GCode/SeamAutoPaint.cpp
@@ -314,6 +359,7 @@ set(lisbslic3r_sources
     GCodeWriter.cpp
     GCodeWriter.hpp
     Geometry/Bicubic.hpp
+    Geometry/ArcWelder.hpp
     Geometry/Circle.cpp
     Geometry/Circle.hpp
     Geometry/ConvexHull.cpp
@@ -333,6 +379,8 @@ set(lisbslic3r_sources
     Geometry/VoronoiUtils.hpp
     Geometry/VoronoiVisualUtils.hpp
     Int128.hpp
+    InstanceLock.cpp
+    InstanceLock.hpp
     KDTreeIndirect.hpp
     Layer.cpp
     Layer.hpp
@@ -370,8 +418,12 @@ set(lisbslic3r_sources
     MixedFilamentCliGates.hpp
     BambuExtruderMap.cpp
     BambuExtruderMap.hpp
+    BambuFlowSupport.cpp
+    BambuFlowSupport.hpp
     BambuDualNozzleSync.cpp
     BambuDualNozzleSync.hpp
+    PlatePrintHistory.cpp
+    PlatePrintHistory.hpp
     BambuNozzleMappingRequest.cpp
     BambuNozzleMappingRequest.hpp
     MultiNozzleUtils.cpp
@@ -391,6 +443,8 @@ set(lisbslic3r_sources
     ModelArrange.hpp
     Model.cpp
     Model.hpp
+    PartMeshReplace.cpp
+    PartMeshReplace.hpp
     MTUtils.hpp
     MultiMaterialSegmentation.cpp
     MultiMaterialSegmentation.hpp
@@ -401,8 +455,12 @@ set(lisbslic3r_sources
     MutablePriorityQueue.hpp
     NormalUtils.cpp
     NormalUtils.hpp
+    NozzleSync.cpp
+    NozzleSync.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
+    SvgSplit.cpp
+    SvgSplit.hpp
     ObjColorMatch.cpp
     ObjColorMatch.hpp
     ObjColorUtils.hpp
@@ -443,9 +501,17 @@ set(lisbslic3r_sources
     PresetFlowVariant.hpp
     PrincipalComponents2D.cpp
     PrincipalComponents2D.hpp
+    PrinterModelSpecs.cpp
+    PrinterModelSpecs.hpp
+    FilamentPresetExport.cpp
+    FilamentPresetExport.hpp
+    ProcessPresetExport.cpp
+    ProcessPresetExport.hpp
     PrintApply.cpp
     PrintBase.cpp
+    MemoryGuardPolicy.hpp
     PrintBase.hpp
+    SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
     LayerTimeSpeedSmoothing.cpp
@@ -522,6 +588,12 @@ set(lisbslic3r_sources
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
     Support/SupportParameters.hpp
+    Support/Stabilizers.cpp
+    Support/Stabilizers.hpp
+    Support/StabilizerMesh.cpp
+    Support/StabilizerMesh.hpp
+    Support/StabilizerBake.cpp
+    Support/StabilizerBake.hpp
     Support/SupportSpotsGenerator.cpp
     Support/SupportSpotsGenerator.hpp
     Support/TreeModelVolumes.cpp
@@ -544,6 +616,32 @@ set(lisbslic3r_sources
     Tesselate.cpp
     Tesselate.hpp
     TextConfiguration.hpp
+    TextureDisplacement.cpp
+    TextureDisplacement.hpp
+    TextureDisplacementGuards.cpp
+    TextureDisplacementGuards.hpp
+    TextureBake/TextureBakeIndex.cpp
+    TextureBake/TextureBakeIndex.hpp
+    TextureBake/TextureBakeSubdivide.cpp
+    TextureBake/TextureBakeSubdivide.hpp
+    TextureBake/TextureBakeRegularize.cpp
+    TextureBake/TextureBakeRegularize.hpp
+    TextureBake/TextureBakeRelocate.cpp
+    TextureBake/TextureBakeRelocate.hpp
+    TextureBake/TextureBakeFlip.cpp
+    TextureBake/TextureBakeFlip.hpp
+    TextureBake/TextureBakeDebug.cpp
+    TextureBake/TextureBakeDebug.hpp
+    TextureBake/TextureBakeDisplace.cpp
+    TextureBake/TextureBakeDisplace.hpp
+    TextureBake/TextureBakeDecimate.cpp
+    TextureBake/TextureBakeDecimate.hpp
+    TextureBake/TextureBakeRepair.cpp
+    TextureBake/TextureBakeRepair.hpp
+    TextureBake/TextureBakePipeline.cpp
+    TextureBake/TextureBakePipeline.hpp
+    TextureBake/TextureBakeMesh.cpp
+    TextureBake/TextureBakeMesh.hpp
     Thread.cpp
     Thread.hpp
     Time.cpp
@@ -564,6 +662,8 @@ set(lisbslic3r_sources
     Utils.hpp
     UntrustedInput.cpp
     UntrustedInput.hpp
+    ModelBrowserRules.cpp
+    ModelBrowserRules.hpp
     VariableWidth.cpp
     VariableWidth.hpp
     Zipper.cpp
@@ -596,8 +696,13 @@ slic3r_unity_build(libslic3r SKIP
     SLA/SupportTreeMesher.cpp       # sphere()/Portion clash with a neighbour
     Support/SupportMaterial.cpp     # support_types_interface also defined in SupportCommon.cpp
     utils.cpp                       # needs <windows.h> without a neighbour's lean/extra macros
+    InstanceLock.cpp                # boost::interprocess file_lock pulls in <windows.h>; keep out of unity batches
     Format/bbs_3mf.cpp              # file-local tag/version constants also defined in Format/3mf.cpp
     Emboss.cpp                      # defines STB_TRUETYPE_IMPLEMENTATION before its include
+    FontFallback.cpp                # includes imstb_truetype.h without the implementation, keep away from Emboss.cpp
+    InlineShapes.cpp                # file-local helpers (fnv1a64, append_utf8, fail) with common names
+    CodeEmboss.cpp                  # file-local rectangle()/circle()/to_svg() helpers with common names
+    ImageTrace.cpp                  # using namespace image_trace_detail (to_svg(), luminance() ...)
     Format/GLTF.cpp                 # defines CGLTF_IMPLEMENTATION before its include
     FilamentGroup.cpp               # namespace-scope using namespace FilamentGroupUtils - FilamentInfo ambiguity
     Format/ZipperArchiveImport.cpp  # read_ini()/CONFIG_FNAME also in Format/SL1.cpp
@@ -613,6 +718,9 @@ slic3r_unity_build(libslic3r SKIP
     SLA/Pad.cpp                     # libnest2d headers clash with neighbours
     Support/TreeSupport.cpp         # libnest2d headers clash with neighbours
     Format/STEP.cpp                 # OCCT's Handle() macro breaks CGAL headers in neighbours
+    Format/STEPExport.cpp           # OCCT's Handle() macro breaks CGAL headers in neighbours
+    BRep/MeshToBRep.cpp             # OCCT's Handle() macro breaks CGAL headers in neighbours
+    BRep/CadEdit.cpp                # OCCT's Handle() macro breaks CGAL headers in neighbours
     Shape/TextShape.cpp             # OCCT's Handle() macro breaks CGAL headers in neighbours
     Geometry/VoronoiUtilsCgal.cpp   # CGAL must come before OCCT's Handle() macro (Model.hpp -> STEP.hpp)
     FlushVolCalc.cpp                # calls RGB2HSV() from libslic3r_gui; alone it is dropped by the linker in libslic3r_tests
@@ -668,7 +776,7 @@ target_include_directories(libslic3r PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_
 target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS})
 
 # Find the OCCT and related libraries
-set(OpenCASCADE_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/occt")
+set(OpenCASCADE_DIR "${OCCT_PREFIX}/lib/cmake/occt")
 find_package(OpenCASCADE REQUIRED)
 target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
 
@@ -689,6 +797,11 @@ set(OCCT_LIBS
     TKV3d
     TKService
     TKMesh
+    # ModelingAlgorithms (deps/OCCT/OCCT.cmake): B-rep fillet/chamfer, offset/shell, features.
+    TKFeat
+    TKOffset
+    TKFillet
+    TKBool
     TKBO
     TKPrim
     TKHLR

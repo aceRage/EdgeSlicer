@@ -1,4 +1,5 @@
 #include "GLGizmoBrimEars.hpp"
+#include "GizmoVolumeRefs.hpp"
 #include <glad/gl.h>
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -212,6 +213,19 @@ bool GLGizmoBrimEars::unproject_on_mesh2(const Vec2d &mouse_pos, std::pair<Vec3f
     Vec3f                normal_on_model {};
     double               closest_hit_distance = std::numeric_limits<double>::max();
 
+    // Never ray-cast through a pick item whose volume the canvas has deleted or replaced since the map
+    // was built (EDGESLICER-8): compare the cached pointers against the live volume list first.
+    {
+        const GizmoVolumeRefs::LiveVolumes<GLVolume, MeshRaycaster> live(m_parent.get_volumes().volumes,
+                                                                          [](const GLVolume &v) { return v.mesh_raycaster.get(); });
+        if (!GizmoVolumeRefs::stale_pick_keys(m_mesh_raycaster_map, live).empty()) {
+            reset_all_pick();
+            m_last_hit_volume = nullptr;
+            if (m_c->selection_info() && m_c->selection_info()->model_object())
+                register_single_mesh_pick();
+        }
+    }
+
     for (auto item : m_mesh_raycaster_map) {
         auto raycaster  = item.second->get_raycaster();
         auto& world_tran = item.second->get_transform();
@@ -261,11 +275,16 @@ bool GLGizmoBrimEars::unproject_on_mesh(const Vec2d &mouse_pos, std::pair<Vec3f,
 
 void GLGizmoBrimEars::data_changed(bool is_serializing)
 {
+    // The pick map points straight at GLVolume::mesh_raycaster of the volumes selected when it was
+    // built. data_changed() follows every reload_scene(), which may have deleted those volumes, so the
+    // map is always dropped here, also when there is no object to rebuild it for (EDGESLICER-8; the
+    // Measure gizmo had the same flaw).
+    reset_all_pick();
+    m_last_hit_volume = nullptr;
     if (!m_c->selection_info()) return;
 
     ModelObject *mo = m_c->selection_info()->model_object();
     if (mo) {
-        reset_all_pick();
         register_single_mesh_pick();
     }
 
@@ -881,6 +900,9 @@ void GLGizmoBrimEars::on_set_state()
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Brim ears edit");
         update_model_object();
         wxGetApp().plater()->leave_gizmos_stack();
+        // Forget the volumes this gizmo ray-cast against; they may be gone by the next open.
+        reset_all_pick();
+        m_last_hit_volume = nullptr;
         // wxGetApp().mainframe->update_slice_print_status(MainFrame::SlicePrintEventType::eEventSliceUpdate, true, true);
     }
     m_old_state = m_state;

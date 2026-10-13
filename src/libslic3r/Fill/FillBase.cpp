@@ -238,10 +238,8 @@ void Fill::_create_gap_fill(const Surface* surface, const FillParams& params, Ex
                 return p.length() < scale_(params.config->filter_out_gap_fill.value);
             }), polylines.end());
 
-            ExtrusionEntityCollection gap_fill;
-            variable_width(polylines, erGapFill, params.flow, gap_fill.entities);
-            auto gap = std::move(gap_fill.entities);
-            out->append(gap);
+            // Append in-place. out->append(lvalue) would clone every path and leak the originals.
+            variable_width(polylines, erGapFill, params.flow, out->entities);
         }
     }
 }
@@ -1708,6 +1706,12 @@ void Fill::connect_infill(Polylines &&infill_ordered, const std::vector<const Po
             size_t                    polyline_idx1  = get_and_update_merged_with(((cp1 - graph.map_infill_end_point_to_boundary.data()) / 2));
             size_t                    polyline_idx2  = get_and_update_merged_with(((cp2 - graph.map_infill_end_point_to_boundary.data()) / 2));
             const Points             &contour        = graph.boundary[cp1->contour_idx];
+
+            // Orca: If multiline infill is requested, skip connections that are too short.
+            if (params.multiline > 1 && arc.arc_length < scale_(spacing) * params.multiline) {
+                continue;
+            }
+
             const std::vector<double> &contour_params = graph.boundary_params[cp1->contour_idx];
             if (polyline_idx1 != polyline_idx2) {
                 Polyline &polyline1 = infill_ordered[polyline_idx1];
@@ -2454,9 +2458,11 @@ void Fill::connect_base_support(Polylines &&infill_ordered, const std::vector<co
 #endif // INFILL_DEBUG_OUTPUT
 
     const std::vector<SupportArcCost> arches = evaluate_support_arches(infill_ordered, graph, spacing, params);
-    static const double cost_low      = line_spacing * 1.3;
-    static const double cost_high     = line_spacing * 2.;
-    static const double cost_veryhigh = line_spacing * 3.;
+    // Must not be static: line_spacing varies per call (base vs interface fills differ),
+    // and a static here would fix these to whichever call ran first, order depending on thread count.
+    const double cost_low      = line_spacing * 1.3;
+    const double cost_high     = line_spacing * 2.;
+    const double cost_veryhigh = line_spacing * 3.;
 
     {
         std::vector<const SupportArcCost*> selected;
@@ -2713,7 +2719,7 @@ void multiline_fill(Polylines& polylines, const FillParams& params, float spacin
         const float center = (n_lines - 1) / 2.0f;
 
         for (int line = 0; line < n_lines; ++line) {
-            float offset = (static_cast<float>(line) - center) * spacing;
+            float offset = scale_((static_cast<float>(line) - center) * spacing);
 
             for (const Polyline& pl : polylines) {
                 const size_t n = pl.points.size();
@@ -2726,22 +2732,27 @@ void multiline_fill(Polylines& polylines, const FillParams& params, float spacin
                 new_points.reserve(n);
                 for (size_t i = 0; i < n; ++i) {
                     Vec2f tangent;
-                    if (i == 0)
-                        tangent = Vec2f(pl.points[1].x() - pl.points[0].x(), pl.points[1].y() - pl.points[0].y());
-                    else if (i == n - 1)
-                        tangent = Vec2f(pl.points[n - 1].x() - pl.points[n - 2].x(), pl.points[n - 1].y() - pl.points[n - 2].y());
-                    else
-                        tangent = Vec2f(pl.points[i + 1].x() - pl.points[i - 1].x(), pl.points[i + 1].y() - pl.points[i - 1].y());
-
-                    float len = std::hypot(tangent.x(), tangent.y());
-                    if (len == 0)
-                        len = 1.0f;
-                    tangent /= len;
+                    // For the first and last point, if the polyline is a
+                    // closed loop, get the tangent from the points on either
+                    // side of the join, otherwise just use the first or last
+                    // line.
+                    if (i == 0) {
+                        if (pl.points[0] == pl.points[n-1]) {
+                            tangent = (pl.points[1] - pl.points[n-2]).template cast<float>().normalized();
+                        } else {
+                            tangent = (pl.points[1] - pl.points[0]).template cast<float>().normalized();
+                        }
+                    } else if (i == n - 1) {
+                        if (pl.points[0] == pl.points[n-1]) {
+                            tangent = (pl.points[1] - pl.points[n-2]).template cast<float>().normalized();
+                        } else {
+                            tangent = (pl.points[n-1] - pl.points[n-2]).template cast<float>().normalized();
+                        }
+                    } else
+                        tangent = (pl.points[i+1] - pl.points[i-1]).template cast<float>().normalized();
                     Vec2f normal(-tangent.y(), tangent.x());
 
-                    Point p = pl.points[i];
-                    p.x() += scale_(normal.x() * offset);
-                    p.y() += scale_(normal.y() * offset);
+                    Point p = pl.points[i] + (normal * offset).template cast<coord_t>();
                     new_points.push_back(p);
                 }
 

@@ -2,6 +2,9 @@
 #define slic3r_GLShader_hpp_
 
 #include <array>
+#include <initializer_list>
+#include <utility>
+#include <vector>
 #include <string>
 #include <string_view>
 
@@ -36,6 +39,25 @@ private:
     std::vector<std::pair<std::string, int>> m_uniform_location_cache;
 
 public:
+    // An active sampler uniform of the linked program (see get_samplers()).
+    struct SamplerUniform
+    {
+        std::string  name;
+        unsigned int type{ 0 };     // GL_SAMPLER_2D, GL_SAMPLER_3D, GL_SAMPLER_BUFFER, ...
+        int          location{ -1 };
+    };
+
+private:
+    mutable bool                        m_samplers_listed{ false };
+    mutable std::vector<SamplerUniform> m_samplers;
+    // EDGE: (unit, texture target) of the samplers set_sampler_units() parked on their own units.
+    // start_using() binds OpenGLManager's 1x1 fallback texture there, so a draw that does not use
+    // the feature behind the sampler (gouraud's curved/drawn cut) never samples texture 0.
+    mutable std::vector<std::pair<int, unsigned int>> m_parked_units;
+
+    void bind_parked_fallback_textures() const;
+
+public:
     ~GLShaderProgram();
 
     bool init_from_files(const std::string& name, const ShaderFilenames& filenames, const std::initializer_list<std::string_view> &defines = {});
@@ -46,6 +68,25 @@ public:
 
     void start_using() const;
     void stop_using() const;
+
+    // Sets sampler uniforms to fixed texture units once, outside any draw. The program is bound
+    // for the duration and the previously bound program is restored. A uniform the linker
+    // removed (inactive) is skipped. From then on start_using() binds a complete 1x1 fallback
+    // texture to each of these units (of the sampler's type); the caller binds its own texture
+    // there after start_using() when the feature is on.
+    void set_sampler_units(std::initializer_list<std::pair<const char*, int>> units) const;
+    // The program's active sampler uniforms, listed once after linking (needs the context).
+    const std::vector<SamplerUniform>& get_samplers() const;
+    // The same for any linked program, e.g. one another library made (libvgcode). Not cached.
+    static std::vector<SamplerUniform> list_samplers(unsigned int program);
+    // GL_TEXTURE_2D / GL_TEXTURE_3D / GL_TEXTURE_BUFFER for the 2D / 3D / buffer sampler types (float,
+    // int, unsigned), 0 otherwise.
+    static unsigned int sampler_target(unsigned int sampler_type);
+    // Returns a description of every pair of active samplers of DIFFERENT types that read the same
+    // texture unit, empty if there is none. Such a program is invalid at draw time (GL spec:
+    // GL_INVALID_OPERATION at the next draw); Windows drivers tolerate it, macOS does not and
+    // skips the draw entirely.
+    std::string sampler_unit_conflicts() const;
 
     void set_uniform(const char* name, int value) const { set_uniform(get_uniform_location(name), value); }
     void set_uniform(const char* name, bool value) const { set_uniform(get_uniform_location(name), value); }

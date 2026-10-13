@@ -16,10 +16,12 @@
 #include <boost/thread/condition_variable.hpp>
 
 #include <deque>
+#include <functional>
 #include <set>
 
 class Button;
 class Label;
+class wxWebView;
 
 namespace Slic3r {
 
@@ -49,6 +51,15 @@ public:
     // AV-crashes wmp.dll on a stale hwnd. pause=true -> Stop(), false -> Play().
     void ultra_pause(bool pause);
 
+    // "New Bambu LiveView" (liveview_go2rtc, on by default): play Bambu LAN cameras through the
+    // hub's go2rtc in a web view instead of through Bambu's player. `make_view` creates the web view
+    // on first use (null if it cannot); `show_own(true)` puts it in the player's slot,
+    // `show_own(false)` gives the slot back. The setting is read at every Play, so turning it off
+    // (or on) needs no restart; off, or a printer the own view cannot play (no LAN address/code, no
+    // LAN stream), takes the existing Bambu-player path unchanged.
+    void SetOwnView(std::function<wxWebView *()> make_view, std::function<void(bool own)> show_own);
+    bool OwnViewBusy() const { return m_own_busy; }
+
 protected:
     void onStateChanged(wxMediaEvent & event);
 
@@ -71,11 +82,25 @@ private:
 
     static bool get_stream_url(std::string *url = nullptr);
 
+    // The own live view (see SetOwnView). try_play_own() returns false when the Bambu-player path
+    // should run instead (setting off, printer not playable this way, no web view).
+    bool try_play_own();
+    void own_ready(int seq, const std::string &machine, int port, int go2rtc_port, const std::string &secret,
+                   int status, const std::string &body);
+    void stop_own(wxString const &msg);
+
+    std::function<wxWebView *()> m_make_own_view;
+    wxWebView *               m_own_view = nullptr;
+    std::function<void(bool)> m_show_own;
+    bool                      m_own_busy = false; // starting or playing through go2rtc
+    int                       m_own_seq  = 0;     // drops a late answer after Stop or a printer switch
+
 private:
     static const wxMediaState MEDIASTATE_IDLE = (wxMediaState) 3;
-    static const wxMediaState MEDIASTATE_INITIALIZING = (wxMediaState) 4;
-    static const wxMediaState MEDIASTATE_LOADING = (wxMediaState) 5;
-    static const wxMediaState MEDIASTATE_BUFFERING = (wxMediaState) 6;
+    // inline const: 4-6 are outside wxMediaState's range, which clang 21 rejects in a constant expression
+    static inline const wxMediaState MEDIASTATE_INITIALIZING = static_cast<wxMediaState>(4);
+    static inline const wxMediaState MEDIASTATE_LOADING = static_cast<wxMediaState>(5);
+    static inline const wxMediaState MEDIASTATE_BUFFERING = static_cast<wxMediaState>(6);
 
     wxMediaCtrl2 * m_media_ctrl;
     wxMediaState m_last_state = MEDIASTATE_IDLE;

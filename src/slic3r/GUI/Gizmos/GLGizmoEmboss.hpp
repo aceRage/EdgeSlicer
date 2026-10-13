@@ -3,20 +3,26 @@
 
 #include "GLGizmoBase.hpp"
 #include "GLGizmoRotate.hpp"
+#include "EmbossTransformHandles.hpp"
 #include "slic3r/GUI/IconManager.hpp"
 #include "slic3r/GUI/SurfaceDrag.hpp"
 #include "slic3r/GUI/I18N.hpp" // TODO: not needed
 #include "slic3r/GUI/TextLines.hpp"
 #include "slic3r/Utils/RaycastManager.hpp"
 #include "slic3r/Utils/EmbossStyleManager.hpp"
+#include "EmbossInsert.hpp"
 
 #include <optional>
 #include <memory>
 #include <atomic>
 
 #include "libslic3r/Emboss.hpp"
+#include "libslic3r/EmbossBend.hpp"
+#include "libslic3r/EmbossBendSurface.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TextConfiguration.hpp"
+#include "libslic3r/FontFallback.hpp"
+#include "libslic3r/InlineShapes.hpp"
 
 #include <imgui/imgui.h>
 #include <glad/gl.h>
@@ -77,7 +83,11 @@ protected:
     void on_render_input_window(float x, float y, float bottom_limit) override;
     void on_set_state() override;
     void data_changed(bool is_serializing) override; // selection changed
-    void on_set_hover_id() override{ m_rotate_gizmo.set_hover_id(m_hover_id); }
+    void on_set_hover_id() override
+    {
+        m_rotate_gizmo.set_hover_id(m_hover_id == 0 ? 0 : -1);
+        m_handles.set_host_hover_id(m_hover_id);
+    }
     void on_enable_grabber(unsigned int id) override { m_rotate_gizmo.enable_grabber(); }
     void on_disable_grabber(unsigned int id) override { m_rotate_gizmo.disable_grabber(); }
     void on_start_dragging() override;
@@ -97,6 +107,7 @@ protected:
     std::string get_gizmo_entering_text() const override;
     std::string get_gizmo_leaving_text() const override;
     std::string get_action_snapshot_name() const override;
+    std::string get_tooltip() const override { return m_handles.get_tooltip(); }
 
 private:
     void volume_transformation_changing();
@@ -134,6 +145,36 @@ private:
     bool draw_italic_button();
     bool draw_bold_button();
     void draw_advanced();
+
+    // Curved text (in-plane arc of the whole text block)
+    void draw_curve();
+    // Live preview while a curve slider is dragged; with "Use surface" at most one cut at a time
+    void request_bend_preview();
+    // Curve + use surface + per glyph: every letter placed and oriented on the surface along the arc
+    bool is_curve_per_letter() const;
+    // Measure the current text (GUI thread, private glyph cache) to show the resolved bend
+    std::optional<Slic3r::Emboss::BendInput> measure_text_for_bend();
+    std::optional<Slic3r::Emboss::BendResult> calc_bend_result();
+    // Circle of a round flat face under the text, in text plane coordinates [mm].
+    // With "Use surface" on a curved target (dome, sphere) the round outline of the target seen along
+    // the projection direction; radius is then the part that is not too steep for the projection.
+    struct FaceCircle { Vec2d center; double radius; };
+    // face_center: centre of the face under the text (or of the object) when found
+    std::optional<FaceCircle> detect_face_circle(std::optional<Vec2d> *face_center = nullptr) const;
+    // Move the text so the arc centre lies on the centre of the face / object
+    bool center_arc_on_object();
+    // Matrix of the text plane (volume world matrix without 3mf fix)
+    Transform3d get_text_world_matrix() const;
+    void render_bend_overlay();
+    // Raycaster over the other parts of the object (the surface the text is projected on)
+    bool prepare_surface_raycast(RaycastManager::AllowVolumes &condition);
+    // Closest surface point along the line point + t * direction (world), normal in world
+    std::optional<Vec3d> project_on_surface(const Vec3d &point, const Vec3d &direction,
+                                            const RaycastManager::AllowVolumes &condition, Vec3d *normal = nullptr) const;
+    // Reference circle projected onto the surface, cached while nothing changes
+    void update_bend_surface_overlay(const Transform3d &text_tr, const Vec2d &center, double radius, double cross);
+    // Reference curve of the letter by letter placement, from the last job
+    void update_bend_letter_overlay();
 
     bool select_facename(const wxString& facename);
 
@@ -184,6 +225,20 @@ private:
     // Text to emboss
     std::string m_text; // Sequence of Unicode UTF8 symbols
 
+    // Inline shapes of m_text (placeholder code -> shape). The whole table of this editing session: the
+    // volume gets only the entries the text uses, so the text box's own undo can bring a shape back.
+    InlineShapeTable m_inline_shapes;
+    // "Insert" popup (shapes, symbols, user SVGs) and the caret it inserts at
+    EmbossInsert m_insert;
+    // Glyphs the text box font was built for (selected font / fallback font / shapes); rebuilt only when
+    // a character of the text is missing from it and the set differs from the last try
+    std::string m_imgui_glyph_key;
+    // text + table the split below was computed from
+    std::string m_glyph_split_key;
+    Slic3r::TextGlyphSplit m_glyph_split;
+    void update_glyph_split();
+    Emboss::StyleManager::ImGuiExtraGlyphs create_text_box_glyphs() const;
+
     // When true keep up vector otherwise relative rotation
     bool m_keep_up = true;
 
@@ -210,8 +265,26 @@ private:
     // Value is set only when dragging rotation to calculate actual angle
     std::optional<float> m_rotate_start_angle;
 
+    // EdgeSlicer: free 3D move / rotate handles (hover ids 1-5, the ring above is 0)
+    EmbossTransformHandles m_handles;
+    // A job the press on a handle cancelled; it runs again when the drag changes nothing
+    bool m_handles_cancelled_job = false;
+    // Projection of m_volume before a handle freed it from the surface; the next surface drag puts it back
+    std::optional<EmbossFreeTransform::Projection> m_detached_projection;
+    // Placement line of the tool window, measured again when the part moved
+    std::optional<EmbossFreeTransform::SurfaceProbe> m_placement_probe;
+    std::optional<Transform3d> m_placement_key;
+    void update_handles_visibility();
+    void on_handles_drag_finished(const EmbossTransformHandles::Result &result);
+    EmbossFreeTransform::Projection current_projection() const;
+    void set_projection(const EmbossFreeTransform::Projection &projection);
+    void draw_placement();
+
     // Keep data about dragging only during drag&drop
     std::optional<SurfaceDrag> m_surface_drag;
+    // The press that started m_surface_drag cancelled a job that was still making the volume.
+    // A release without any move then runs it again (a real move re-processes anyway).
+    bool m_surface_drag_cancelled_job = false;
 
     // Keep old scene triangle data in AABB trees, 
     // all the time it need actualize before use.
@@ -221,6 +294,31 @@ private:
     std::optional<float> m_scale_height;
     std::optional<float> m_scale_depth;
     void calculate_scale();
+
+    // Curved text: measured layout of m_text for the readout and the arc overlay (GUI thread only)
+    std::shared_ptr<Slic3r::Emboss::Glyphs>         m_bend_glyphs;
+    std::shared_ptr<const Slic3r::Emboss::FontFile> m_bend_font;
+    FontProp                                m_bend_prop;
+    std::string                             m_bend_text;
+    std::string                             m_bend_inline_key;
+    std::optional<Slic3r::Emboss::BendInput>        m_bend_input;
+    // last resolved bend, used by the overlay
+    std::optional<Slic3r::Emboss::BendResult>       m_bend_result;
+    // Undo snapshot is already taken for the running drag of a curve slider
+    bool                                    m_bend_drag_snapshot = false;
+    // A curve slider changed over a surface while the previous cut was still running
+    bool                                    m_bend_preview_pending = false;
+    // Overlay of the reference circle (unit circle in the text plane)
+    GLModel                                 m_bend_circle;
+    GLModel                                 m_bend_cross;
+    // Same projected onto the surface (world coordinates) with what it was made for
+    struct BendOverlayKey { Transform3d text_tr; Vec2d center; double radius; ObjectID volume_id; };
+    std::optional<BendOverlayKey>           m_bend_surface_key;
+    GLModel                                 m_bend_surface;
+    // Letter by letter: the job publishes its reference curve here (text coordinates)
+    std::shared_ptr<Slic3r::Emboss::SurfaceArcPreview> m_bend_surface_preview;
+    std::optional<Slic3r::Emboss::SurfaceArcPreview>   m_bend_letter_drawn;
+    GLModel                                            m_bend_letter;
 
     // drawing icons
     IconManager m_icon_manager;
