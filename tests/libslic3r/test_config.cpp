@@ -863,8 +863,8 @@ TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row
         CHECK(enum_choice_value_at_index(def, -1) == -1);
         CHECK(enum_choice_value_at_index(def, int(def.enum_values.size())) == -1);
     }
-    // The helper names 17 options; a typo there would silently drop one from the mapping.
-    CHECK(mapped == 17);
+    // The helper names 18 options (17 plus gcode_flavor); a typo there would silently drop one from the mapping.
+    CHECK(mapped == 18);
 
     SECTION("locked_*_infill_pattern: the first row is \"default\" (ipCount), not ipMonotonic")
     {
