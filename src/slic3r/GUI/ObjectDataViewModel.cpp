@@ -337,6 +337,8 @@ bool ObjectDataViewModelNode::SetValue(const wxVariant& variant, unsigned col)
         m_visibility_icon << variant;
         return true;
     case colName: {
+        if (variant.GetType() != wxT("DataViewBitmapText"))
+            return false;
         DataViewBitmapText data;
         data << variant;
         m_bmp = data.GetBitmap();
@@ -350,6 +352,8 @@ bool ObjectDataViewModelNode::SetValue(const wxVariant& variant, unsigned col)
         m_name = text;
         return true; }
     case colFilament: {
+        if (variant.GetType() != wxT("DataViewBitmapText"))
+            return false;
         DataViewBitmapText data;
         data << variant;
         m_extruder_bmp = data.GetBitmap();

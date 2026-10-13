@@ -197,6 +197,7 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     wxBoxSizer *bSizer_task_name = new wxBoxSizer(wxVERTICAL);
     wxBoxSizer *bSizer_task_name_hor = new wxBoxSizer(wxHORIZONTAL);
     wxPanel*    task_name_panel      = new wxPanel(parent);
+    task_name_panel->SetBackgroundColour(*wxWHITE);
 
     m_staticText_subtask_value = new wxStaticText(task_name_panel, wxID_ANY, _L("N/A"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT | wxST_ELLIPSIZE_END);
     m_staticText_subtask_value->SetMaxSize(wxSize(FromDIP(600), -1));
@@ -1099,6 +1100,42 @@ wxBoxSizer *StatusBasePanel::create_monitoring_page()
             toggle_builtin_camera();
         }
     });
+
+    // "New Bambu LiveView" (liveview_go2rtc, on by default): Bambu LAN cameras play through the hub's
+    // go2rtc in a web view instead of Bambu's BambuSource/live555 player. The web view is made on the
+    // first Play that uses it - never for someone who has the setting off, and the setting applies
+    // at the next Play without a restart. See tests/plan_own_camera_view.md.
+    m_media_play_ctrl->SetOwnView(
+        [this, sizer]() -> wxWebView * {
+            if (m_own_camera_view == nullptr) {
+                m_own_camera_view = WebView::CreateWebView(this, wxEmptyString);
+                if (m_own_camera_view == nullptr)
+                    return nullptr;
+                m_own_camera_view->EnableContextMenu(false);
+                m_own_camera_view->SetMinSize(wxSize(PAGE_MIN_WIDTH, FromDIP(288)));
+                m_own_camera_view->Hide();
+                // Right after the Bambu player, in the same slot.
+                int at = 0;
+                for (auto *item : sizer->GetChildren()) {
+                    ++at;
+                    if (item->GetWindow() == m_media_ctrl) break;
+                }
+                sizer->Insert(at, m_own_camera_view, 1, wxEXPAND | wxALL, 0);
+            }
+            return m_own_camera_view;
+        },
+        [this](bool own) {
+            if (m_own_camera_view == nullptr) return;
+            if (own) {
+                m_custom_camera_view->Hide();
+                m_media_ctrl->Hide();
+                m_own_camera_view->Show();
+            } else {
+                m_own_camera_view->Hide();
+                m_media_ctrl->Show();
+            }
+            Layout();
+        });
 
     sizer->Add(m_media_ctrl, 1, wxEXPAND | wxALL, 0);
     sizer->Add(m_custom_camera_view, 1, wxEXPAND | wxALL, 0);
@@ -4447,6 +4484,9 @@ void StatusBasePanel::toggle_custom_camera()
     const auto enabled = wxGetApp().app_config->get("camera", "enable_custom_source") == "true";
 
     if (enabled) {
+        // Spike: stop the own live view first (it hands the slot back to the Bambu player control,
+        // which is hidden right below), so a stream nobody can see does not keep the printer busy.
+        if (m_media_play_ctrl->OwnViewBusy()) m_media_play_ctrl->ultra_pause(true);
         m_custom_camera_view->Show();
         m_media_ctrl->Hide();
         m_media_play_ctrl->Hide();

@@ -31,6 +31,7 @@
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "SSWCP.hpp"
 #include "HomePanel.hpp"
+#include "ModelBrowserPanel.hpp"
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -1904,14 +1905,21 @@ wxWindow* PreferencesDialog::create_general_page()
     auto associate_url_prusaslicer = create_item_link_association(page, L"prusaslicer", "Printables.com");
     auto associate_url_bambustudio = create_item_link_association(page, L"bambustudio", "Makerworld.com");
     auto associate_url_cura        = create_item_link_association(page, L"cura", "Thingiverse.com");
-
-    auto title_model_browser = create_item_title(_L("Model browser"), page, _L("Model browser"));
-    auto item_model_browser  = create_item_checkbox(_L("Model browser (beta)"), page,
-                                                    _L("Adds Models to the Home tab: browse Printables, MakerWorld and Snapmaker Space inside "
-                                                       "EdgeSlicer. It is a separate browser with its own logins and no access to EdgeSlicer; "
-                                                       "model files you download there open here."),
-                                                    50, "model_browser_beta");
 #endif // _WIN32
+
+#if defined(_WIN32) || defined(__APPLE__)
+    // Home > Models (ModelBrowserPanel): Windows, and macOS versions that have what its isolation needs.
+    wxBoxSizer* title_model_browser = nullptr;
+    wxBoxSizer* item_model_browser  = nullptr;
+    if (model_browser_supported()) {
+        title_model_browser = create_item_title(_L("Model browser"), page, _L("Model browser"));
+        item_model_browser  = create_item_checkbox(_L("Model browser (beta)"), page,
+                                                   _L("Adds Models to the Home tab: browse Printables, MakerWorld and Snapmaker Space inside "
+                                                      "EdgeSlicer. It is a separate browser with its own logins and no access to EdgeSlicer; "
+                                                      "model files you download there open here."),
+                                                   50, "model_browser_beta");
+    }
+#endif
 
     // auto title_modelmall = create_item_title(_L("Online Models"), page, _L("Online Models"));
     // auto item_backup = create_item_switch(_L("Backup switch"), page, _L("Backup switch"), "units");
@@ -2073,9 +2081,13 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(associate_url_prusaslicer, 0, wxTOP, FromDIP(3));
     sizer_page->Add(associate_url_bambustudio, 0, wxTOP, FromDIP(3));
     sizer_page->Add(associate_url_cura, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(title_model_browser, 0, wxTOP | wxEXPAND, FromDIP(20));
-    sizer_page->Add(item_model_browser, 0, wxTOP, FromDIP(3));
 #endif // _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
+    if (title_model_browser != nullptr && item_model_browser != nullptr) {
+        sizer_page->Add(title_model_browser, 0, wxTOP | wxEXPAND, FromDIP(20));
+        sizer_page->Add(item_model_browser, 0, wxTOP, FromDIP(3));
+    }
+#endif
     // auto item_title_modelmall = sizer_page->Add(title_modelmall, 0, wxTOP | wxEXPAND, FromDIP(20));
     // auto item_item_modelmall = sizer_page->Add(item_modelmall, 0, wxTOP, FromDIP(3));
     // auto update_modelmall = [this, item_title_modelmall, item_item_modelmall] (wxEvent & e) {
@@ -2202,6 +2214,13 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("Connect to Bambu Lab printers (cloud login or LAN). The plug-in is downloaded from Bambu on first use; takes effect after restarting."), 50, "installed_networking");
     auto item_bambu_stealth = create_item_checkbox(_L("Stealth mode (no Bambu cloud telemetry)"), page,
         _L("Stops data transmission to Bambu's cloud services. Safe to enable for LAN-only use; disable it to sign in to a Bambu account."), 50, "stealth_mode");
+    // "New Bambu LiveView" (tests/plan_own_camera_view.md): on by default (AppConfig::set_defaults).
+    // Read at every Play, so it applies without a restart.
+    auto item_bambu_own_liveview = create_item_checkbox(_L("New Bambu LiveView"), page,
+        _L("Play Bambu printer cameras on the Device tab through EdgeSlicer's own camera relay (go2rtc, the one the phone uses) "
+           "instead of Bambu's camera files. Used for printers on the LAN with an access code; others keep the Bambu player. "
+           "Turn it off to use Bambu's camera files instead. Applies the next time you press Play; no restart needed."),
+        50, "liveview_go2rtc");
     // The "Use legacy network plugin" switch is gone: EdgeSlicer ships one network plug-in and
     // ignores the legacy_networking setting (GUI_App resets it at start-up).
 
@@ -2267,6 +2286,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(title_bambu, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_bambu_own_liveview, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_spoolman_enabled, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_spoolman_url, 0, wxTOP, FromDIP(3));

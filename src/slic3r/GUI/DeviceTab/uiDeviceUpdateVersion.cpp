@@ -8,6 +8,7 @@
 #include "uiDeviceUpdateVersion.h"
 
 #include "slic3r/GUI/I18N.hpp"
+#include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
 
 #include <wx/stattext.h>
@@ -25,6 +26,7 @@ uiDeviceUpdateVersion::uiDeviceUpdateVersion(wxWindow* parent,
                                              long style /*= wxTAB_TRAVERSAL*/)
      : wxPanel(parent, id, pos, size, style)
 {
+    SetBackgroundColour(*wxWHITE);
     CreateWidgets();
 }
 
@@ -100,4 +102,6 @@ void uiDeviceUpdateVersion::CreateWidgets()
     // Updating
     SetSizer(main_sizer);
     Layout();
+
+    wxGetApp().UpdateDarkUIWin(this);
 }

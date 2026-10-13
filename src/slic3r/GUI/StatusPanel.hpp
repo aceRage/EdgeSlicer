@@ -335,6 +335,9 @@ protected:
     ScalableButton *m_button_abort;
     Button *        m_button_clean;
     wxWebView *     m_custom_camera_view{nullptr};
+    // "New Bambu LiveView" (liveview_go2rtc): the go2rtc live view, made on the first Play that
+    // uses it (MediaPlayCtrl::SetOwnView). Stays null while the setting is off.
+    wxWebView *     m_own_camera_view{nullptr};
 
     wxStaticText *  m_text_tasklist_caption;
 

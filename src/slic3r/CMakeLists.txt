@@ -717,6 +717,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RecenterDialog.hpp
     GUI/ReleaseNote.cpp
     GUI/ReleaseNote.hpp
+    GUI/BindDetectGuard.hpp
     GUI/RemovableDriveManager.cpp
     GUI/RemovableDriveManager.hpp
     GUI/SavePresetDialog.cpp
@@ -966,6 +967,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/HubHandover.hpp
     Utils/HubQuit.hpp
     Utils/WebLoadRetry.hpp
+    Utils/DevicePageLoad.hpp
     Utils/HomeTabLogic.cpp
     Utils/HomeTabLogic.hpp
     Utils/ThemePack.cpp
@@ -1074,6 +1076,7 @@ if (APPLE)
             GUI/InstanceCheckMac.mm
             GUI/InstanceCheckMac.h
             GUI/GUI_UtilsMac.mm
+            GUI/ModelBrowserPanelMac.mm
             GUI/wxMediaCtrl2.mm
             GUI/wxMediaCtrl2.h
         )

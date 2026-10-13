@@ -1694,6 +1694,9 @@ void GUI_App::post_init()
         silent_login_timer->StartOnce(2000);
     }
 
+    // Startup is over at the next idle event (see the wxEVT_IDLE handler).
+    m_startup_settle_pending = true;
+
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
 //BBS: remove the single instance currently
 #ifdef _WIN32
@@ -3997,6 +4000,16 @@ bool GUI_App::on_init_inner()
 
         if (! plater_)
             return;
+
+        // The first idle event after post_init(): everything post_init() queued has run (wx sends
+        // idle events only once its own event queue is empty), so the GUI thread is free.
+        if (m_startup_settle_pending) {
+            m_startup_settle_pending = false;
+            m_startup_settled        = true;
+            BOOST_LOG_TRIVIAL(info) << "startup is over: the event queue post_init() filled has drained";
+            if (mainframe)
+                mainframe->on_startup_settled();
+        }
 
         // BBS
         //this->obj_manipul()->update_if_dirty();

@@ -133,11 +133,16 @@ void AppConfig::set_defaults()
             set_bool("associate_stl", false);
         if (get("associate_step").empty())
             set_bool("associate_step", false);
+#endif // _WIN32
+
+#if defined(_WIN32) || defined(__APPLE__)
         // Home > Models (the in-app model browser), beta: on by default while the owner tests it.
+        // Windows (WebView2) and macOS (WKWebView) only; Linux has no model browser. On macOS the
+        // OS version (12+) is checked later, by model_browser_supported(). An explicit "false" the
+        // user saved is not empty, so it stays.
         if (get("model_browser_beta").empty())
             set_bool("model_browser_beta", true);
-
-#endif // _WIN32
+#endif // _WIN32 || __APPLE__
 
         // remove old 'use_legacy_opengl' parameter from this config, if present
         if (!get("use_legacy_opengl").empty())
@@ -539,6 +544,14 @@ void AppConfig::set_defaults()
     // value still means "<datadir>/gcode_archive" for a config written by an older build.
     if (get("ultra_gcode_archive").empty()) {
         set_bool("ultra_gcode_archive", false);
+    }
+
+    // "New Bambu LiveView": the Device tab plays Bambu LAN cameras through the hub's go2rtc instead
+    // of Bambu's camera files. On by default for fresh installs and for upgrades (a config written
+    // by an older build has no key); a user who turned it off keeps "false". See
+    // tests/plan_own_camera_view.md.
+    if (get("liveview_go2rtc").empty()) {
+        set_bool("liveview_go2rtc", true);
     }
 
     if (get("ultra_gcode_archive_dir").empty()) {
