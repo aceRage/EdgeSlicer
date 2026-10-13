@@ -1269,7 +1269,13 @@ int CLI::run(int argc, char **argv)
         return CLI_INVALID_PARAMS;
     }
     BOOST_LOG_TRIVIAL(info) << "finished setup params, argc="<< argc << std::endl;
-    std::string temp_path = wxFileName::GetTempDir().utf8_str().data();
+    std::string temp_path = per_user_temp_dir(wxFileName::GetTempDir().utf8_str().data(), per_user_temp_id());
+    // Some consumers write into the temp root directly, so create it up front.
+    try {
+        boost::filesystem::create_directories(temp_path);
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(warning) << "failed to create per-user temp dir " << temp_path << ": " << ex.what();
+    }
     set_temporary_dir(temp_path);
 
     // Ultra rebrand: run the first-start data-dir copy against a scratch parent and exit.
