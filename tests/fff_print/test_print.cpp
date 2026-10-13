@@ -1310,7 +1310,7 @@ TEST_CASE("Elephant-foot compensation uses each object's own slice closing radiu
 
     Print print;
     Model model;
-    auto add_two_part_object = [&model](double x, double closing_radius) {
+    auto add_two_part_object = [&model, &print](double x, double closing_radius) {
         ModelObject *object = model.add_object();
         object->name        = "two_parts";
         TriangleMesh left   = make_cube(10., 10., 2.);
