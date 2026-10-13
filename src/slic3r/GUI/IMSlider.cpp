@@ -1491,10 +1491,11 @@ void IMSlider::on_mouse_wheel(wxMouseEvent& evt) {
         return;
     }
 
-    float wheel = 0.0f;
-    wheel = evt.GetWheelRotation() > 0 ? 1.0f : -1.0f;
+    float wheel = evt.GetWheelRotation();
+    // mac trackpads trigger this event with value 0 when right-clicking with two fingers
     if (wheel == 0.0f)
         return;
+    wheel = wheel > 0 ? 1.0f : -1.0f;
 
 #ifdef __WXOSX__
     if (wxGetKeyState(WXK_SHIFT)) {

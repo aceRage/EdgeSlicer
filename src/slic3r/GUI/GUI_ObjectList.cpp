@@ -471,11 +471,20 @@ void ObjectList::create_objects_ctrl()
 
     // column Extruder of the view control:
     BitmapChoiceRenderer* bmp_choice_renderer = new BitmapChoiceRenderer();
-    bmp_choice_renderer->set_can_create_editor_ctrl_function([this]() {
-        return m_objects_model->GetItemType(GetSelection()) & (itVolume | itLayer | itObject);
+    const auto get_filament_context_item = [this]() {
+#ifdef __WXOSX__
+        return m_filament_editor_item.IsOk() ? m_filament_editor_item : GetSelection();
+#else
+        return GetSelection();
+#endif
+    };
+    bmp_choice_renderer->set_can_create_editor_ctrl_function([this, get_filament_context_item]() {
+        const wxDataViewItem item = get_filament_context_item();
+        return m_objects_model->GetItemType(item) & (itVolume | itLayer | itObject);
     });
-    bmp_choice_renderer->set_default_extruder_idx([this]() {
-        return m_objects_model->GetDefaultExtruderIdx(GetSelection());
+    bmp_choice_renderer->set_default_extruder_idx([this, get_filament_context_item]() {
+        const wxDataViewItem item = get_filament_context_item();
+        return m_objects_model->GetDefaultExtruderIdx(item);
     });
     bmp_choice_renderer->set_has_default_extruder([this]() {
         return true;
@@ -1141,10 +1150,11 @@ void ObjectList::update_filament_in_config(const wxDataViewItem& item)
     if (m_prevent_update_filament_in_config)
         return;
 
+    ModelConfig* config = nullptr;
     const ItemType item_type = m_objects_model->GetItemType(item);
     if (item_type & itObject) {
         const int obj_idx = m_objects_model->GetIdByItem(item);
-        m_config = &(*m_objects)[obj_idx]->config;
+        config = &(*m_objects)[obj_idx]->config;
     }
     else {
         const int obj_idx = m_objects_model->GetIdByItem(m_objects_model->GetObject(item));
@@ -1153,14 +1163,16 @@ void ObjectList::update_filament_in_config(const wxDataViewItem& item)
         const int volume_id = m_objects_model->GetVolumeIdByItem(item);
         if (obj_idx < 0 || volume_id < 0)
             return;
-        m_config = &(*m_objects)[obj_idx]->volumes[volume_id]->config;
+        config = &(*m_objects)[obj_idx]->volumes[volume_id]->config;
         }
         else if (item_type & itLayer)
-            m_config = &get_item_config(item);
+            config = &get_item_config(item);
     }
 
-    if (!m_config)
+    if (!config)
         return;
+
+    m_config = config;
 
     take_snapshot("Change Filament");
 
@@ -7211,10 +7223,71 @@ void ObjectList::ItemValueChanged(wxDataViewEvent &event)
     }
 }
 
+#ifdef __WXOSX__
+bool ObjectList::is_live_model_item(wxDataViewItem item) const
+{
+    if (!item.IsOk() || !m_objects_model)
+        return false;
+
+    wxDataViewItemArray all_items;
+    m_objects_model->GetAllChildren(wxDataViewItem(nullptr), all_items);
+    for (const wxDataViewItem& live_item : all_items)
+        if (live_item.GetID() == item.GetID())
+            return true;
+
+    return false;
+}
+
+void ObjectList::start_filament_editor(wxDataViewItem item)
+{
+    if (m_starting_filament_editor || !is_live_model_item(item))
+        return;
+
+    const ItemType type = m_objects_model->GetItemType(item);
+    if (!(type & (itVolume | itLayer | itObject)))
+        return;
+
+    auto* column = GetColumn(colFilament);
+    if (!column)
+        return;
+
+    auto* custom_renderer = dynamic_cast<wxDataViewCustomRenderer*>(column->GetRenderer());
+    if (!custom_renderer || custom_renderer->GetEditorCtrl())
+        return;
+
+    m_starting_filament_editor = true;
+    m_filament_editor_item = item;
+    const bool started = custom_renderer->StartEditing(item, GetItemRect(item, column));
+    m_filament_editor_item = wxDataViewItem(nullptr);
+    m_starting_filament_editor = false;
+
+    if (!started)
+        return;
+
+    SetCustomRendererPtr(custom_renderer);
+    SetCustomRendererItem(item);
+}
+#endif // __WXOSX__
+
 void GUI::ObjectList::OnStartEditing(wxDataViewEvent &event)
 {
     auto col  = event.GetColumn();
     auto item = event.GetItem();
+#ifdef __WXOSX__
+    if (col == colFilament) {
+        if (m_starting_filament_editor)
+            return;
+
+        event.Veto();
+        CallAfter([this, item] {
+            if (!is_live_model_item(item))
+                return;
+            start_filament_editor(item);
+        });
+        return;
+    }
+#endif // __WXOSX__
+
     if (col == colName) {
         ObjectDataViewModelNode* node = (ObjectDataViewModelNode*)item.GetID();
         if (node->GetType() & itPlate) {
@@ -7285,6 +7358,12 @@ void ObjectList::OnEditingStarted(wxDataViewEvent &event)
         dynamic_cast<TabPrintModel*>(wxGetApp().get_model_tab(vol_idx >= 0))->reset_model_config();
         return;
     }
+#ifdef __WXOSX__
+    if (col == colFilament) {
+        start_filament_editor(item);
+        return;
+    }
+#endif // __WXOSX__
     if (col != colFilament && col != colName)
         return;
     auto column = GetColumn(col);
