@@ -4222,8 +4222,12 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
         config.sparse_infill_density.value = 0;
     else
         config.sparse_infill_density.value = std::min(config.sparse_infill_density.value, 100.);
-    if (config.fuzzy_skin.value != FuzzySkinType::None && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
-        config.fuzzy_skin.value = FuzzySkinType::None;
+    // A point distance of 0 divides every wall segment forever (infinite loop, then out of memory;
+    // Orca #11915 puts the minimum at 0.01). Switch fuzzy skin off for such a region, Disabled rather
+    // than None: painted fuzzy skin regions start from this config and turn None into All (#10312),
+    // which would bring the zero distance back.
+    if (config.fuzzy_skin.value != FuzzySkinType::Disabled_fuzzy && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
+        config.fuzzy_skin.value = FuzzySkinType::Disabled_fuzzy;
     return config;
 }
 
