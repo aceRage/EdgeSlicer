@@ -4758,8 +4758,14 @@ void GCodeProcessor::run_post_process()
         }
     };
 
+    // Orca #13741: the layer the export pass is in, for the temperature of a tool change's preheat.
+    // m_layer_id is the analysis pass's counter and holds the total layer count by now, so the
+    // first-layer temperature was never picked on a multi-layer print. 0 = before the first layer
+    // change (start G-code), 1 = the first layer; both take the first-layer temperature.
+    unsigned int current_layer_id = 0;
+
     // add lines M104 to exported gcode
-    auto process_line_T = [this, &export_lines](const std::string& gcode_line, const size_t g1_lines_counter, const ExportLines::Backtrace& backtrace) {
+    auto process_line_T = [this, &export_lines, &current_layer_id](const std::string& gcode_line, const size_t g1_lines_counter, const ExportLines::Backtrace& backtrace) {
         const std::string cmd = GCodeReader::GCodeLine::extract_cmd(gcode_line);
 
         int tool_number = -1;
@@ -4786,8 +4792,8 @@ void GCodeProcessor::run_post_process()
                 export_lines.insert_lines(
                     backtrace, cmd,
                     // line inserter
-                    [tool_number, this](unsigned int id, const std::vector<float>& time_diffs) {
-                        const int temperature = int(m_layer_id != 1 ? m_extruder_temps_config[tool_number] :
+                    [tool_number, this, &current_layer_id](unsigned int id, const std::vector<float>& time_diffs) {
+                        const int temperature = int(current_layer_id > 1 ? m_extruder_temps_config[tool_number] :
                                                                     m_extruder_temps_first_layer_config[tool_number]);
                         // Orca: M104.1 for XL printers, I can't find the documentation for this so I copied the C++ comments from
                         // Prusa-Firmware-Buddy here
@@ -4899,6 +4905,16 @@ void GCodeProcessor::run_post_process()
                 if (eol) {
                     ++line_id;
                     const unsigned int internal_g1_lines_counter = export_lines.update(gcode_line, line_id, g1_lines_counter);
+                    // Orca #13741: count the layer change tag (";" + tag + EOL; the text differs
+                    // between the BBL and the compatible tag sets).
+                    if (gcode_line.size() > 1 && gcode_line.front() == ';') {
+                        std::string_view tag_line(gcode_line);
+                        while (!tag_line.empty() && (tag_line.back() == '\n' || tag_line.back() == '\r'))
+                            tag_line.remove_suffix(1);
+                        tag_line.remove_prefix(1);
+                        if (tag_line == reserved_tag(ETags::Layer_Change))
+                            ++current_layer_id;
+                    }
                     // replace placeholder lines
                     bool processed = process_placeholders(gcode_line);
                     if (processed)

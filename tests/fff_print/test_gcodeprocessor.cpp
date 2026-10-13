@@ -331,3 +331,48 @@ TEST_CASE("Loaded manual tool change comments switch subsequent moves when enabl
         }
     }
 }
+
+// Orca #13741: the export pass picked the preheat temperature from m_layer_id, which by then holds
+// the analysis pass's total layer count, so a tool change on the first layer was preheated to the
+// other-layers temperature. It now follows the layer the export pass is in.
+TEST_CASE("Preheat before a first-layer tool change uses the first-layer temperature", "[GCodeProcessor][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionInts>("nozzle_temperature")->values               = {200, 200};
+    config.option<ConfigOptionInts>("nozzle_temperature_initial_layer")->values = {230, 230};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+    config.option<ConfigOptionFloat>("preheat_time")->value                  = 30.;
+    config.option<ConfigOptionBool>("ooze_prevention")->value                = true;
+    config.set_deserialize_strict({{"brim_type", "no_brim"},
+                                   {"skirt_loops", "0"},
+                                   {"layer_height", "0.2"},
+                                   {"initial_layer_print_height", "0.2"},
+                                   {"gcode_flavor", "marlin"}});
+
+    Print print;
+    Model model;
+    init_print({make_cube(20., 20., 2.), make_cube(20., 20., 2.)}, print, model, config, false);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[0]->config.set("extruder", 1);
+    model.objects[1]->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = false;
+    const std::string gcode = Test::gcode(print);
+
+    // "M104 S<temp> T1 ; preheat T1 time: ...", in G-code order.
+    std::vector<std::string> preheats;
+    for (size_t pos = gcode.find("; preheat T1"); pos != std::string::npos; pos = gcode.find("; preheat T1", pos + 1)) {
+        const size_t line_start = gcode.rfind('\n', pos) + 1;
+        preheats.emplace_back(gcode.substr(line_start, pos - line_start));
+    }
+    REQUIRE(preheats.size() >= 2);
+    CAPTURE(preheats);
+    // The first change to T1 is on the first layer; the last one is on a later layer.
+    CHECK(preheats.front().find("M104 S230 T1") == 0);
+    CHECK(preheats.back().find("M104 S200 T1") == 0);
+}
