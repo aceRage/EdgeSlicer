@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -76,13 +77,24 @@ struct PrinterState
     // seconds later. The rule waits a settle window for the code before it calls the stop a
     // failure (see FAIL_SETTLE_MS); a source that sends state and code together leaves this off.
     bool                               error_may_follow { false };
+    // `error_code` is an HMS item, not the printer's print_error: the printer said FAILED, has no
+    // print_error up yet, and is already showing an HMS fault (a stop raises 0500-0600-0002-0006 a
+    // few seconds before the "task was canceled" print_error, and the failure used to go out with
+    // that HMS code the moment it showed). That is not yet the reason, so the failure waits for
+    // the print_error exactly as if there were no code (error_may_follow); a code that IS the
+    // print_error leaves this off and is final.
+    bool                               error_is_hms { false };
 };
 
 // The print errors a Bambu printer raises when the PERSON stopped the print, not when something
 // went wrong: 0300400C "The task was canceled." (a cancel from the screen, Studio, the app or
 // Handy) and 0500400E "Job was cancelled." (the older firmware's spelling). Both come with
 // gcode_state FAILED, which is why a cancel used to be announced as a failure and then as an error.
-// `code` is the printer's print_error as hex8 ("0300400C"); separators and case do not matter.
+// `code` is the printer's print_error as hex8 ("0300400C"); separators and case do not matter. The
+// number itself is accepted too, as the decimal the MQTT push carries it in (50348044 for
+// 0300400C); a string that reads as both is taken as hex first.
+inline bool is_user_cancel_number(long long value) { return value == 0x0300400CLL || value == 0x0500400ELL; }
+
 inline bool is_user_cancel_code(const std::string& code)
 {
     std::string c;
@@ -91,7 +103,12 @@ inline bool is_user_cancel_code(const std::string& code)
         c.push_back((char) std::toupper((unsigned char) ch));
     }
     if (c.compare(0, 2, "0X") == 0) c.erase(0, 2);
-    return c == "0300400C" || c == "0500400E";
+    if (c == "0300400C" || c == "0500400E") return true;
+    // A bare decimal print_error. No real hex code reads as the decimal of a cancel code, so the
+    // two spellings cannot be confused.
+    if (!c.empty() && c.size() <= 10 && std::all_of(c.begin(), c.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+        return is_user_cancel_number((long long) std::strtoull(c.c_str(), nullptr, 10));
+    return false;
 }
 
 struct Snapshot
@@ -301,6 +318,11 @@ static constexpr long long FAIL_SETTLE_MS = 10000;
 // How long a code must be missing (while the printer is visible) before it counts as cleared, so
 // that its return is a new occurrence and announced again.
 static constexpr long long ERROR_CLEAR_MS = 60000;
+
+// How long after a cancel was announced a "failed" for the same print is still its tail and not a
+// second event: the printer flickers FAILED -> IDLE -> FAILED on a stop, and the second FAILED used
+// to go out two seconds after the "cancelled" (the X1C, 2026-10-10). A new print clears it.
+static constexpr long long CANCEL_TAIL_MS = 60000;
 
 // One line per raw-state change, for the hub log. `step` fills this so the caller can log it
 // without the rule touching a logger (it stays pure and testable).

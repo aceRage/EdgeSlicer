@@ -762,3 +762,38 @@ TEST_CASE("a phone opts in, hands over activity tokens, and opting out forgets t
 
     forget_device(json{ { "platform", "apns" }, { "token", token } }.dump());
 }
+
+// A print cancelled by hand on a Bambu printer is FAILED + print_error 0300400C. The activity
+// ends as Cancelled (dismissed at once, like any cancel) and not as Failed.
+TEST_CASE("a Bambu FAILED with the user-cancel print_error ends as Cancelled", "[LiveActivityPush]")
+{
+    const std::string cancel_code = "0300400C";
+    CHECK(classify("FAILED", false, true, cancel_code) == Phase::Cancelled);
+    CHECK(classify("FAILED", false, true, "0300_400C") == Phase::Cancelled);
+    CHECK(classify("FAILED", false, true, "50348044") == Phase::Cancelled);
+    CHECK(classify("FAILED", false, true, "0500400E") == Phase::Cancelled);
+    // Every other FAILED stays Failed, with or without a code.
+    CHECK(classify("FAILED", false, true, "05004046") == Phase::Failed);
+    CHECK(classify("FAILED", false, false) == Phase::Failed);
+    CHECK(classify("error", false, true, "error") == Phase::Failed);
+    // The code only matters on a FAILED: a printing printer with a stale cancel code is attention.
+    CHECK(classify("RUNNING", true, true, cancel_code) == Phase::Attention);
+
+    json row           = printing_row(40, 0, "FAILED");
+    row["printing"]    = false;
+    row["print_error"] = json{ { "code", cancel_code }, { "message", "The task was canceled." }, { "actions", json::array() } };
+    CHECK(content_for(row_of(row), T0).state == Phase::Cancelled);
+    Track          t = sent(registered(), printing_row(), T0);
+    const Row      r = row_of(row);
+    const Decision d = decide(t, &r, false, T0 + 5000);
+    CHECK(d.action == Action::End);
+    CHECK(d.content.state == Phase::Cancelled);
+    CHECK(d.dismissal_s == (T0 + 5000) / 1000); // a cancel goes at once
+
+    // A real failure, same row but another code, is still Failed and stays up ten minutes.
+    row["print_error"]["code"] = "05004046";
+    const Row      failed      = row_of(row);
+    const Decision df          = decide(t, &failed, false, T0 + 5000);
+    CHECK(df.content.state == Phase::Failed);
+    CHECK(df.dismissal_s == (T0 + 5000) / 1000 + 600);
+}

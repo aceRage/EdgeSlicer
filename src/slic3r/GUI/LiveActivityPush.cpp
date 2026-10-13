@@ -1,6 +1,7 @@
 // Hub-driven Live Activity updates: the rules and the payloads (see LiveActivityPush.hpp).
 // Pure and wx-free; AppPush.cpp does the sending.
 #include "LiveActivityPush.hpp"
+#include "RemoteEvents.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -140,9 +141,11 @@ Phase base_phase(const std::string& state, bool printing)
     return printing ? Phase::Printing : Phase::Idle;
 }
 
-Phase classify(const std::string& state, bool printing, bool has_error)
+Phase classify(const std::string& state, bool printing, bool has_error, const std::string& error_code)
 {
     const Phase p = base_phase(state, printing);
+    // Bambu reports a stop the person asked for as FAILED plus print_error 0300400C.
+    if (p == Phase::Failed && RemoteEvents::is_user_cancel_code(error_code)) return Phase::Cancelled;
     return has_error && is_active(p) ? Phase::Attention : p;
 }
 
@@ -187,7 +190,7 @@ Content content_for(const Row& r, long long now_ms)
 {
     Content c;
     const Phase base  = base_phase(r.state, r.printing);
-    c.state           = classify(r.state, r.printing, !r.error_code.empty());
+    c.state           = classify(r.state, r.printing, !r.error_code.empty(), r.error_code);
     const int pct     = r.percent < 0 ? -1 : std::min(100, std::max(0, r.percent));
     const bool counting = base == Phase::Printing || base == Phase::Preparing;
     const long long read_at = (now_ms - std::max(0LL, r.age_ms)) / 1000;

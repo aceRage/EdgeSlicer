@@ -68,7 +68,7 @@ const ROWS = [
       ext_spools: [{ ams_id: '254', side: '', exists: true, type: 'TPU', color: '#FFFFFF' }] },
     { id: '01P00A222222222', kind: 'bambu', name: 'P1S <img src=x onerror="window.__xss=1">', model: 'C12', online: true, connected: true,
       status: 'FAILED', print_status: 'FAILED', printing: false, percent: 10, task: 'Bracket', can_pause: false, can_resume: false, can_stop: true,
-      print_error: { code: '0300400C', message: 'The build plate is not placed.', actions: [] }, hms: { count: 1, message: 'Plate missing' },
+      print_error: { code: '03008003', message: 'The build plate is not placed.', actions: [] }, hms: { count: 1, message: 'Plate missing' },
       controls: { heaters: [{ id: 'bed', label: 'Bed', temp: 24, target: 0 }], fans: [] }, ams: [], ext_spools: [] },
     { id: 'sm:U1-0042', kind: 'snapmaker', name: 'U1 Lab', model: 'Snapmaker U1', url: 'http://192.168.1.20', ip: '192.168.1.20', via: 'lan',
       online: true, printing: false, status: 'paused', print_status: 'paused', percent: 77, left_time_s: 600, layer: 80, total_layers: 100,
@@ -280,11 +280,31 @@ async function main() {
         await evalJs(`document.getElementById('refresh').click(); 1`);
         await sleep(200);
         check('it stays dismissed across reads while the code is the same', !(await errShown()));
-        check('the dismissal is kept for the session', /0300400C/.test(await evalJs(`sessionStorage.getItem('edgeslicer_printers_dismissed') || ''`)));
+        check('the dismissal is kept for the session', /03008003/.test(await evalJs(`sessionStorage.getItem('edgeslicer_printers_dismissed') || ''`)));
         await evalJs(`window.__rows[1].print_error = { code: '0300400D', message: 'Another error.', actions: [] }; document.getElementById('refresh').click(); 1`);
         await sleep(200);
         check('a different error code shows again', await errShown());
-        await evalJs(`window.__rows[1].print_error = { code: '0300400C', message: 'The build plate is not placed.', actions: [] }; 1`);
+        await evalJs(`window.__rows[1].print_error = { code: '03008003', message: 'The build plate is not placed.', actions: [] }; 1`);
+
+        // ---- a print cancelled by hand reads Cancelled, a real failure still reads Error ---------
+        // Bambu reports the stop as FAILED + print_error 0300400C "The task was canceled." (the
+        // code as hex in any spelling, or as the decimal number). Nothing else changes.
+        const cardState = async () => JSON.parse(await evalJs(`(function(c){ return JSON.stringify({ pill: c.querySelector('.ppill').textContent,
+            err: !!c.querySelector('.perrt'), label: c.getAttribute('aria-label') }); })(document.querySelector('.pcard[data-printer-id="01P00A222222222"]'))`));
+        for (const code of ['0300400C', '0300_400C', '0x0300400c', '0500400E', 50348044]) {
+            await evalJs(`window.__rows[1].print_error = { code: ${JSON.stringify(code)}, message: 'The task was canceled.', actions: [] };
+                window.__rows[1].hms = { count: 0 }; document.getElementById('refresh').click(); 1`);
+            await sleep(200);
+            const cs = await cardState();
+            check('FAILED + cancel code ' + JSON.stringify(code) + ' reads Cancelled with no error box', cs.pill === 'Cancelled' && !cs.err && /Cancelled/.test(cs.label), JSON.stringify(cs));
+        }
+        await evalJs(`window.__rows[1].print_error = { code: '0300400D', message: 'A real error.', actions: [] }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const real = await cardState();
+        check('FAILED + another code still reads Error with its message', real.pill === 'Error' && real.err, JSON.stringify(real));
+        await evalJs(`window.__rows[1].print_error = { code: '03008003', message: 'The build plate is not placed.', actions: [] };
+            window.__rows[1].hms = { count: 1, message: 'Plate missing' }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
 
         // ---- Open Device page: hidden, but the page still shows a refusal -------------------------
         await evalJs(`window.__printerOpen({ id: '01P00A111111111', ok: false, error: 'Select a Bambu Lab printer preset' }); 1`);

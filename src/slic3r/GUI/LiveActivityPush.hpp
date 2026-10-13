@@ -67,7 +67,10 @@ bool        is_urgent(Phase p);
 // The printer's own status word, as the app reads it (ProgressSession.swift PrintPhase.base).
 Phase base_phase(const std::string& state, bool printing);
 // base_phase, with an error on a running or paused print raised to Attention.
-Phase classify(const std::string& state, bool printing, bool has_error);
+// A Bambu FAILED that carries the printer's user-cancel print_error (0300400C "The task was canceled.") is
+// the person's own stop and reads Cancelled; every other FAILED stays Failed. `error_code` is the row's
+// print_error code, when it has one.
+Phase classify(const std::string& state, bool printing, bool has_error, const std::string& error_code = std::string());
 
 // One printer as the hub's cache has it (HubServer::printers_json rows).
 struct Row
