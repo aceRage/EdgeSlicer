@@ -363,6 +363,8 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
     m_button_ams_setting_press = ScalableBitmap(this, "ams_setting_press", 24);
 
     m_button_ams_setting = new wxStaticBitmap(m_button_area, wxID_ANY, m_button_ams_setting_normal.bmp(), wxDefaultPosition, wxSize(FromDIP(24), FromDIP(24)));
+    m_button_ams_setting->SetMinSize(wxSize(FromDIP(24), FromDIP(24)));
+    m_button_ams_setting->SetMaxSize(wxSize(FromDIP(24), FromDIP(24)));
     m_button_ams_setting->SetBackgroundColour(m_amswin->GetBackgroundColour());
     m_button_ams_setting->SetToolTip(_L("AMS settings"));
     m_sizer_button_area->Insert(0, m_button_ams_setting, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));

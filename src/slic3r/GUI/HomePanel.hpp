@@ -36,7 +36,7 @@ class ModelBrowserPanel;
 // code that still talks to it: it is built only on demand - File > Start page, EVT_LOAD_URL - and
 // then shown in place of Home with a strip to go back.
 //
-// Models (Windows, Preferences > "Model browser (beta)") is the in-app model browser
+// Models (Windows and macOS 12+, Preferences > "Model browser (beta)") is the in-app model browser
 // (ModelBrowserPanel): a native panel shown in place of the page, with its own "Home" button back.
 // It is a separate, isolated browser; nothing of it runs in this page's web view.
 class HomePanel : public wxPanel
