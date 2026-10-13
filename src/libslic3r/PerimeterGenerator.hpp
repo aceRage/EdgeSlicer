@@ -2,6 +2,7 @@
 #define slic3r_PerimeterGenerator_hpp_
 
 #include "libslic3r.h"
+#include <optional>
 #include <vector>
 #include "Layer.hpp"
 #include "Flow.hpp"
@@ -21,6 +22,10 @@ struct FuzzySkinConfig
     int           noise_octaves;
     double        noise_persistence;
     FuzzySkinMode mode;
+    int           ripples_per_layer;
+    double        ripple_offset;
+    int           layers_between_ripple_offset;
+    int           layer_id;
     // Fuzzy skin over overhangs: hold the sampled points at their un-jittered position wherever the
     // wall is not carried by the layer below. Off by default; when it is off the fuzz functions take
     // their original code path verbatim (they early-return before any support work), which is what
@@ -39,6 +44,9 @@ struct FuzzySkinConfig
             && noise_octaves == r.noise_octaves
             && noise_persistence == r.noise_persistence
             && mode == r.mode
+            && ripples_per_layer == r.ripples_per_layer
+            && ripple_offset == r.ripple_offset
+            && layers_between_ripple_offset == r.layers_between_ripple_offset
             && skip_overhangs == r.skip_overhangs;
     }
 
@@ -59,6 +67,10 @@ template<> struct hash<Slic3r::FuzzySkinConfig>
         boost::hash_combine(seed, std::hash<double>{}(c.noise_scale));
         boost::hash_combine(seed, std::hash<int>{}(c.noise_octaves));
         boost::hash_combine(seed, std::hash<double>{}(c.noise_persistence));
+        boost::hash_combine(seed, std::hash<Slic3r::FuzzySkinMode>{}(c.mode));
+        boost::hash_combine(seed, std::hash<int>{}(c.ripples_per_layer));
+        boost::hash_combine(seed, std::hash<double>{}(c.ripple_offset));
+        boost::hash_combine(seed, std::hash<int>{}(c.layers_between_ripple_offset));
         boost::hash_combine(seed, std::hash<bool>{}(c.skip_overhangs));
         return seed;
     }
@@ -101,7 +113,10 @@ public:
 
     bool                                            has_fuzzy_skin = false;
     bool                                            has_fuzzy_hole = false;
-    std::unordered_map<FuzzySkinConfig, ExPolygons> regions_by_fuzzify;
+    // Preserve construction order so overlap precedence remains deterministic.
+    std::vector<std::pair<FuzzySkinConfig, ExPolygons>> regions_by_fuzzify;
+    // Area resting on the layer below, where fuzzy skin is allowed. Unset means no restriction.
+    std::optional<ExPolygons>                       fuzzy_supported_area;
 
     // Paint Depth: mirrors PrintObject::has_bounded_paint_depth() (Print.hpp) - a
     // painted object with a bounded (non-unlimited) claim treats its own paint-region
@@ -179,6 +194,8 @@ public:
     //BBS
     double      smaller_width_ext_mm3_per_mm()   const { return m_ext_mm3_per_mm_smaller_width; }
     Polygons    lower_slices_polygons() const { return m_lower_slices_polygons; }
+    // ORCA: the slices less the slivers the wall generator prints nothing for, so they never count as support.
+    ExPolygons  printable_slices(const ExPolygons &slices) const;
 
 private:
     std::vector<Polygons>     generate_lower_polygons_series(float width);

@@ -278,16 +278,14 @@ struct SurfaceFillParams
 
 	// Index of this entry in a linear vector.
     size_t 			idx = 0;
-	// infill speed settings
-	float			sparse_infill_speed = 0;
-	float			top_surface_speed = 0;
-	float			solid_infill_speed = 0;
+	// Infill speed setting for the effective extrusion role.
+	float role_speed = 0;
     // Ultra (over-support surfaces): the flow ratio and the speed an erBottomSurfaceOverSupport
     // fill will be extruded with. They are region keys, and two regions whose surfaces would
     // otherwise be filled identically are MERGED into one fill that is attributed to the first
     // region - GCode::extrude_infill then applies that one region's config to the lot. Naming
-    // them here keeps two parts with their own values apart, the way solid_infill_speed already
-    // does for internal solid infill. Zero for every other role, so nothing else changes.
+    // them here keeps two parts with their own values apart, the way role_speed already
+    // does for the other infill roles. Zero for every other role, so nothing else changes.
     float			over_support_flow  = 0;
     float			over_support_speed = 0;
 
@@ -348,9 +346,7 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(flow.nozzle_diameter());
 		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, bridge);
 		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, extrusion_role);
-		RETURN_COMPARE_NON_EQUAL(sparse_infill_speed);
-		RETURN_COMPARE_NON_EQUAL(top_surface_speed);
-		RETURN_COMPARE_NON_EQUAL(solid_infill_speed);
+		RETURN_COMPARE_NON_EQUAL(role_speed);
 		RETURN_COMPARE_NON_EQUAL(over_support_flow);
 		RETURN_COMPARE_NON_EQUAL(over_support_speed);
         RETURN_COMPARE_NON_EQUAL(lateral_lattice_angle_1);
@@ -382,9 +378,7 @@ struct SurfaceFillParams
 				this->anchor_length_max == rhs.anchor_length_max &&
 				this->flow 				== rhs.flow 			&&
 				this->extrusion_role	== rhs.extrusion_role	&&
-				this->sparse_infill_speed	== rhs.sparse_infill_speed &&
-				this->top_surface_speed		== rhs.top_surface_speed &&
-				this->solid_infill_speed	== rhs.solid_infill_speed &&
+				this->role_speed			== rhs.role_speed &&
 				this->over_support_flow		== rhs.over_support_flow &&
 				this->over_support_speed	== rhs.over_support_speed &&
                 this->lateral_lattice_angle_1		== rhs.lateral_lattice_angle_1 &&
@@ -1415,17 +1409,26 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 					//Orca: enable thick bridge based on config
 					layerm.bridging_flow(extrusion_role, is_thick_bridge) :
 					layerm.flow(extrusion_role, (surface.thickness == -1) ? layer.height : surface.thickness);
-				// record speed params
+				// record speed params: the speed GCode::_extrude will use for this role (flow variant
+				// slot of the fill's filament), so two regions with different speeds are never merged.
+                const PrintConfig  &print_config = layer.object()->print()->config();
+                const unsigned int  filament_id  = params.extruder > 0 ? params.extruder - 1 : 0;
+				params.role_speed = 0;
+                if (params.extrusion_role == erBridgeInfill)
+                    params.role_speed = float(get_value_at(print_config, region_config.bridge_speed, ConfigFlowDomain::Process, filament_id));
+                else if (params.extrusion_role == erInternalBridgeInfill) {
+                    // internal_bridge_speed is a FloatOrPercent vector over bridge_speed, resolved as GCode::_extrude does.
+                    const FloatOrPercent ib_fop  = get_value_at(print_config, region_config.internal_bridge_speed, ConfigFlowDomain::Process, filament_id);
+                    const double         ib_base = get_value_at(print_config, region_config.bridge_speed, ConfigFlowDomain::Process, filament_id);
+                    params.role_speed = float(ib_fop.percent ? ib_fop.value * 0.01 * ib_base : ib_fop.value);
+                } else if (params.extrusion_role == erInternalInfill)
+                    params.role_speed = float(get_value_at(print_config, region_config.sparse_infill_speed, ConfigFlowDomain::Process, filament_id));
+                else if (params.extrusion_role == erTopSolidInfill)
+                    params.role_speed = float(get_value_at(print_config, region_config.top_surface_speed, ConfigFlowDomain::Process, filament_id));
+                else if (params.extrusion_role == erSolidInfill)
+                    params.role_speed = float(get_value_at(print_config, region_config.internal_solid_infill_speed, ConfigFlowDomain::Process, filament_id));
                 if (!params.bridge) {
-                    const PrintConfig  &print_config = layer.object()->print()->config();
-                    const unsigned int  filament_id  = params.extruder > 0 ? params.extruder - 1 : 0;
-                    if (params.extrusion_role == erInternalInfill)
-                        params.sparse_infill_speed = get_value_at(print_config, region_config.sparse_infill_speed, ConfigFlowDomain::Process, filament_id);
-                    else if (params.extrusion_role == erTopSolidInfill) {
-                        params.top_surface_speed = get_value_at(print_config, region_config.top_surface_speed, ConfigFlowDomain::Process, filament_id);
-                    } else if (params.extrusion_role == erSolidInfill)
-                        params.solid_infill_speed = get_value_at(print_config, region_config.internal_solid_infill_speed, ConfigFlowDomain::Process, filament_id);
-                    else if (params.extrusion_role == erBottomSurfaceOverSupport) {
+                    if (params.extrusion_role == erBottomSurfaceOverSupport) {
                         // Ultra (over-support surfaces): the EFFECTIVE speed, so that a speed of 0
                         // ("match the outer wall") still tells two parts with different outer wall
                         // speeds apart. GCode::_extrude resolves the same way.
