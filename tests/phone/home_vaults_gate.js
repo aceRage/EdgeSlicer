@@ -129,10 +129,12 @@ async function main() {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'homevaults-'));
     const br = spawn(exe, ['--headless=new', '--remote-debugging-port=' + dbgPort, '--user-data-dir=' + profile,
         '--no-first-run', '--no-default-browser-check', '--disable-gpu', 'about:blank'], { stdio: 'ignore' });
+    let cdp = null;
     try {
         let ver;
-        for (let i = 0; i < 50 && !ver; i++) { try { ver = await (await fetch('http://127.0.0.1:' + dbgPort + '/json/version')).json(); } catch (e) { await sleep(200); } }
-        const cdp = new Cdp(ver.webSocketDebuggerUrl); await cdp.open();
+        for (let i = 0; i < 300 && !ver; i++) { try { ver = await (await fetch('http://127.0.0.1:' + dbgPort + '/json/version')).json(); } catch (e) { await sleep(200); } }
+        if (!ver) throw new Error('the headless browser did not start within 60 s');
+        cdp = new Cdp(ver.webSocketDebuggerUrl); await cdp.open();
         const { result: { targetId } } = await cdp.send('Target.createTarget', { url: 'about:blank' });
         const { result: { sessionId } } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
         const S = (m, p) => cdp.send(m, p, sessionId);
@@ -380,15 +382,17 @@ async function main() {
         await evalJs(`document.querySelector('.rail-item[data-section=vaults]').click(); 1`);
 
         // ---- 8. contrast ------------------------------------------------------------------------
-        // The text this section adds. The accent colours (primary buttons, the active rail item) are the
-        // whole page's and are not judged here.
+        // The text this section adds, with its primary buttons, active chips and the active rail item on
+        // the accent colours made for text (#478, folded in).
+        await evalJs(`[].find.call(document.querySelectorAll('#vault-filters .chip'), c => c.firstChild.textContent === 'DiskStation').click(); 1`);
+        check('a picked filter chip is active', (await evalJs(`document.querySelectorAll('#vault-filters .chip.active').length`)) === 1);
         await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
         const pairs = `(function(){
             function bgOf(n) { while (n) { var b = getComputedStyle(n).backgroundColor; if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b; n = n.parentElement; } return getComputedStyle(document.body).backgroundColor; }
             var out = [];
             ['#vault-list .conn .title', '#vault-list .conn .kind', '#vault-list .conn .line', '#vault-list .conn .line.warn', '#vault-list .conn .line.err',
-             '#vault-list .conn .btn:not(.primary)', '#vault-grid .card .name', '#vault-grid .card .sub', '#vault-grid .card .meta', '#vault-filters .chip:not(.active)',
-             '.choice b', '.choice span', '.choice .tag', '.dialog.chooser h2', '.dialog.chooser .hint']
+             '#vault-list .conn .btn', '#vault-add-btn', '.rail-item.active', '#vault-grid .card .name', '#vault-grid .card .sub', '#vault-grid .card .meta',
+             '#vault-filters .chip', '#vault-grid .badge', '.choice b', '.choice span', '.choice .tag', '.dialog.chooser h2', '.dialog.chooser .hint']
               .forEach(function(sel) { document.querySelectorAll(sel).forEach(function(n) { if (!n.offsetParent) return;
                   out.push({ sel: sel, fg: getComputedStyle(n).color, bg: bgOf(n) }); }); });
             return JSON.stringify(out); })()`;
@@ -410,6 +414,9 @@ async function main() {
         }
         check('no uncaught exception over the run', exceptions().length === 0, JSON.stringify(exceptions().map(e => e.params.exceptionDetails.text)));
     } finally {
+        // msedge.exe may hand the window to a broker and exit at once: close the browser itself over
+        // the protocol, so no headless browser is left behind.
+        if (cdp) { try { await Promise.race([cdp.send('Browser.close'), sleep(2000)]); } catch (e) {} }
         br.kill();
         await sleep(500);
         try { fs.rmSync(profile, { recursive: true, force: true }); } catch (e) {}
