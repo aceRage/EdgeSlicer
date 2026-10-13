@@ -235,3 +235,29 @@ TEST_CASE("Wizard finish is stored as true", "[AppConfig]")
     CHECK(config.get("firstguide", "finish") == "true");
     CHECK(config.get_bool("firstguide", "finish"));
 }
+
+TEST_CASE("New Bambu LiveView (liveview_go2rtc) is on for fresh installs and upgrades, off stays off", "[AppConfig]")
+{
+    SECTION("fresh install: no config file yet")
+    {
+        AppConfig config;
+        CHECK(config.get_bool("liveview_go2rtc"));
+    }
+    SECTION("upgrade: a config written by an older build has no key, and comes up on")
+    {
+        AppConfig   config;
+        std::string error = load_conf_content(config, make_temp_conf_path("liveview_upgrade"),
+                                              "{\"app\":{\"some_key\":\"some_value\"}}\n");
+        CHECK(error.empty());
+        CHECK(config.get_bool("liveview_go2rtc"));
+    }
+    SECTION("a user who turned it off keeps it off across a restart")
+    {
+        AppConfig   config;
+        std::string error = load_conf_content(config, make_temp_conf_path("liveview_off"),
+                                              "{\"app\":{\"liveview_go2rtc\":\"false\"}}\n");
+        CHECK(error.empty());
+        CHECK(config.get("liveview_go2rtc") == "false");
+        CHECK_FALSE(config.get_bool("liveview_go2rtc"));
+    }
+}

@@ -541,6 +541,14 @@ void AppConfig::set_defaults()
         set_bool("ultra_gcode_archive", false);
     }
 
+    // "New Bambu LiveView": the Device tab plays Bambu LAN cameras through the hub's go2rtc instead
+    // of Bambu's camera files. On by default for fresh installs and for upgrades (a config written
+    // by an older build has no key); a user who turned it off keeps "false". See
+    // tests/plan_own_camera_view.md.
+    if (get("liveview_go2rtc").empty()) {
+        set_bool("liveview_go2rtc", true);
+    }
+
     if (get("ultra_gcode_archive_dir").empty()) {
         set("ultra_gcode_archive_dir", (boost::filesystem::path(Slic3r::data_dir()) / "gcode_archive").string());
     }

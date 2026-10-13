@@ -2202,6 +2202,13 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("Connect to Bambu Lab printers (cloud login or LAN). The plug-in is downloaded from Bambu on first use; takes effect after restarting."), 50, "installed_networking");
     auto item_bambu_stealth = create_item_checkbox(_L("Stealth mode (no Bambu cloud telemetry)"), page,
         _L("Stops data transmission to Bambu's cloud services. Safe to enable for LAN-only use; disable it to sign in to a Bambu account."), 50, "stealth_mode");
+    // "New Bambu LiveView" (tests/plan_own_camera_view.md): on by default (AppConfig::set_defaults).
+    // Read at every Play, so it applies without a restart.
+    auto item_bambu_own_liveview = create_item_checkbox(_L("New Bambu LiveView"), page,
+        _L("Play Bambu printer cameras on the Device tab through EdgeSlicer's own camera relay (go2rtc, the one the phone uses) "
+           "instead of Bambu's camera files. Used for printers on the LAN with an access code; others keep the Bambu player. "
+           "Turn it off to use Bambu's camera files instead. Applies the next time you press Play; no restart needed."),
+        50, "liveview_go2rtc");
     // The "Use legacy network plugin" switch is gone: EdgeSlicer ships one network plug-in and
     // ignores the legacy_networking setting (GUI_App resets it at start-up).
 
@@ -2267,6 +2274,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(title_bambu, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_bambu_own_liveview, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_spoolman_enabled, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_spoolman_url, 0, wxTOP, FromDIP(3));
