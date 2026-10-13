@@ -15,12 +15,21 @@ TEST_CASE("home tab: sections", "[HomeTab]")
     CHECK(valid_section("history"));
     CHECK_FALSE(valid_section(""));
     CHECK(valid_section("library"));
-    CHECK(valid_section("vendors"));
+    CHECK(valid_section("vaults"));
     CHECK_FALSE(valid_section("hub"));
     CHECK_FALSE(valid_section("Recent"));
     CHECK(section_or_default("history") == "history");
     CHECK(section_or_default("") == "recent");
     CHECK(section_or_default("hub") == "recent");
+    CHECK(section_or_default("vaults") == "vaults");
+}
+
+TEST_CASE("home tab: Vendors is now Vaults", "[HomeTab]")
+{
+    // The page never asks for the old name; settings saved before the rename open Vaults.
+    CHECK_FALSE(valid_section("vendors"));
+    CHECK(section_or_default("vendors") == "vaults");
+    CHECK(section_or_default("Vendors") == "recent");
 }
 
 TEST_CASE("home tab: how an archived file opens again", "[HomeTab]")

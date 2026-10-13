@@ -591,7 +591,7 @@ void HomeVendors::delete_connector(const std::string& id)
     MessageDialog dlg(m_parent,
                       wxString::Format(_L("Remove the connector \"%s\"? Its saved credentials and the list it fetched are removed too."),
                                        wxString::FromUTF8(c->spec.name)),
-                      _L("Vendors"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
+                      _L("Vaults"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
     if (dlg.ShowModal() != wxID_YES)
         return;
     forget_secrets(c->spec);
@@ -742,7 +742,7 @@ void HomeVendors::confirm_import(const std::string& text, const std::string& ori
                           _L("This connector contains a credential (a key, token, password or secret value), so it was not imported.\n\n"
                              "Credentials are never part of a connector. Remove it from the JSON, import the connector, then set the "
                              "credentials with Credentials > Set."),
-                          _L("Vendors"), wxOK | wxICON_WARNING);
+                          _L("Vaults"), wxOK | wxICON_WARNING);
         dlg.ShowModal();
         return;
     }
@@ -1101,7 +1101,7 @@ void HomeVendors::download(const std::string& key, const std::string& sub_id, bo
         MessageDialog dlg(m_parent,
                           wxString::Format(_L("%s counts downloads against a limit. Download \"%s\"?"), wxString::FromUTF8(c->spec.name),
                                            wxString::FromUTF8(label)),
-                          _L("Vendors"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
+                          _L("Vaults"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
         if (dlg.ShowModal() != wxID_YES)
             return;
     }

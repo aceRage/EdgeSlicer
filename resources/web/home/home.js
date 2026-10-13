@@ -14,6 +14,9 @@
 //   library_progress {scanning, files}     a scan is running
 //   library_thumbs {images: {id: dataUri}} Library covers, asked for as cards scroll in
 //   library_plates {id, plates: [{index, name, image}]}  a 3MF's plates, for its detail view
+// The Vaults section shows the vendor connectors ("Model library API" vaults) and, as one card, the
+// Library's folders; its Add vault chooser leads to the connector editor, the connector import and
+// the Library's Add folder (tests/design_vaults_home_tab.md). A saved section "vendors" opens it.
 //   vendors {connectors: [...], items: [...]}  HomeVendors.cpp send_state(): connector specs (never
 //                                          a secret), and items keyed by opaque keys
 //   vendor_thumbs {images: {key: dataUri}} vendor thumbnails (PNG, JPEG, GIF or WebP)
@@ -33,7 +36,7 @@
     asked: new Set(),
     printer: '',
     search: '',
-    sort: { recent: 'newest', library: 'newest', history: 'newest', vendors: 'newest' },
+    sort: { recent: 'newest', library: 'newest', history: 'newest', vaults: 'newest' },
     lib: null,          // the last 'library' message
     libThumbs: {},
     libAsked: new Set(),
@@ -50,12 +53,12 @@
     venShown: [],
     venRendered: 0,
   };
-  const SECTIONS = ['recent', 'library', 'history', 'vendors'];
+  const SECTIONS = ['recent', 'library', 'history', 'vaults'];
   const SORTS = {
     recent: ['newest', 'oldest', 'name'],
     library: ['newest', 'oldest', 'added', 'name', 'size'],
     history: ['newest', 'oldest', 'name'],
-    vendors: ['newest', 'oldest', 'name'],
+    vaults: ['newest', 'oldest', 'name'],
   };
   const SORT_LABELS = { newest: ['sort_newest', 'Newest first'], oldest: ['sort_oldest', 'Oldest first'],
     added: ['sort_added', 'Recently added'], name: ['sort_name', 'Name'], size: ['sort_size', 'Largest first'] };
@@ -379,7 +382,7 @@
   function render() {
     if (state.section === 'history') renderHistory();
     else if (state.section === 'library') renderLibrary();
-    else if (state.section === 'vendors') renderVendors();
+    else if (state.section === 'vaults') renderVendors();
     else renderRecent();
   }
 
@@ -395,6 +398,7 @@
   }
 
   function showSection(section, persist) {
+    if (section === 'vendors') section = 'vaults'; // its name before it took in the vendor connectors
     if (SECTIONS.indexOf(section) < 0) section = 'recent';
     state.section = section;
     for (const b of document.querySelectorAll('.rail-item')) {
@@ -403,7 +407,7 @@
       b.setAttribute('aria-current', on ? 'page' : 'false');
     }
     for (const id of SECTIONS) $(id).hidden = section !== id;
-    $('title').textContent = t(section, { recent: 'Recent', library: 'Library', history: 'Print History', vendors: 'Vendors' }[section]);
+    $('title').textContent = t(section, { recent: 'Recent', library: 'Library', history: 'Print History', vaults: 'Vaults' }[section]);
     fillSort(section);
     $('refresh').classList.toggle('spin', section === 'library' && !!state.lib && state.lib.scanning);
     closeMenu();
@@ -466,6 +470,7 @@
       renderLibrary(keepScroll);
       if (!lib.scanning) stopSpin();
     }
+    if (state.section === 'vaults') renderVendors(true); // its folders card
     if (!$('folders').hidden) renderFolders();
   }
 
@@ -791,7 +796,7 @@
     state.venAsked = new Set(Object.keys(state.venThumbs));
     const keepScroll = state.ven !== null;
     state.ven = ven;
-    if (state.section === 'vendors') renderVendors(keepScroll);
+    if (state.section === 'vaults') renderVendors(keepScroll);
     if (!$('ven-editor').hidden && editor.id) renderEditorSlots();
     if (!$('ven-detail').hidden && detailKey) {
       const item = ven.items.find((i) => i.key === detailKey);
@@ -820,8 +825,46 @@
       .concat((i.subs || []).map((s) => s.name + ' ' + s.variant)), state.search);
   }
 
+  // The Library's folders, local or a mounted NAS share, as one vault card: they are managed in the Library.
+  function foldersCard(lib) {
+    const box = el('div', 'conn folders');
+    box.setAttribute('role', 'listitem');
+    const top = el('div', 'top');
+    top.appendChild(el('div', 'title', t('vault_folders', 'Folders and network shares')));
+    box.appendChild(top);
+    box.appendChild(el('div', 'kind', t('library', 'Library')));
+    box.appendChild(el('div', 'line', lib.folders.length + ' ' + t('folders_count', 'folders') + ' · ' + lib.items.length + ' ' + t('files', 'files')));
+    for (const f of lib.folders) if (f.scanned && !f.online) {
+      const d = el('div', 'line warn', leaf(f.path) + ': ' + t('offline', 'Not reachable, showing the files from the last scan'));
+      d.title = f.path;
+      box.appendChild(d);
+    }
+    const row = el('div', 'row');
+    const show = el('button', 'btn primary', t('show_in_library', 'Show in Library'));
+    show.type = 'button';
+    show.addEventListener('click', () => showSection('library', true));
+    row.appendChild(show);
+    const manage = el('button', 'btn', t('manage_folders', 'Manage folders'));
+    manage.type = 'button';
+    manage.addEventListener('click', openFolders);
+    row.appendChild(manage);
+    box.appendChild(row);
+    return box;
+  }
+
+  // ---- Add vault ----
+  function openAddVault() {
+    closeMenu();
+    $('vault-add').hidden = false;
+    $('vault-add-api').focus();
+  }
+  function closeAddVault() { $('vault-add').hidden = true; }
+  // Each choice closes the chooser and hands over to a flow that already exists.
+  function addVaultChoice(run) { return () => { closeAddVault(); run(); }; }
+
   function connectorCard(c) {
     const box = el('div', 'conn');
+    box.setAttribute('role', 'listitem');
     const top = el('div', 'top');
     const title = el('div', 'title', c.name);
     title.title = c.name + (c.vendor ? ' · ' + c.vendor : '');
@@ -844,6 +887,7 @@
     more.addEventListener('click', (e) => { e.stopPropagation(); if (menuFor === more) closeMenu(); else openMenu(more, menu); });
     top.appendChild(more);
     box.appendChild(top);
+    box.appendChild(el('div', 'kind', t('vault_api', 'Model library API')));
 
     const lines = [];
     if (c.syncing) lines.push(t('syncing', 'Fetching...'));
@@ -856,6 +900,12 @@
     if (c.downloads_limited) box.appendChild(el('div', 'line', t('limited_downloads', 'Downloads count against a limit')));
     const missing = (c.slots || []).filter((s) => !s.set);
     if (missing.length) box.appendChild(el('div', 'line warn', t('credentials', 'Credentials') + ': ' + missing.map((s) => s.label).join(', ') + ' ' + t('not_set', 'not set')));
+    else if ((c.slots || []).length) {
+      const where = c.secure ? t('saved_secure', 'saved in your system\'s credential store') : t('saved_session', 'kept until EdgeSlicer closes');
+      const l = el('div', 'line', t('credentials', 'Credentials') + ': ' + where);
+      l.title = l.textContent;
+      box.appendChild(l);
+    }
     if (c.full_next) box.appendChild(el('div', 'line warn', t('settings_changed', 'Settings changed: the next Fetch Changes reads every model again.')));
     if (c.last_error) { const e = el('div', 'line err', c.last_error); box.appendChild(e); }
 
@@ -969,11 +1019,12 @@
   }
 
   function renderVendors(keepScroll) {
-    const section = $('vendors');
+    const section = $('vaults');
     const scroll = keepScroll ? section.scrollTop : 0;
     const grid = $('vendors-grid'), empty = $('vendors-empty'), emptyText = $('vendors-empty-text');
     grid.textContent = '';
     $('ven-connectors').textContent = '';
+    $('ven-empty-add').hidden = true;
     if (venThumbObserver) venThumbObserver.disconnect();
     if (venMoreObserver) venMoreObserver.disconnect();
     state.venShown = [];
@@ -981,10 +1032,11 @@
     if (state.ven === null) { emptyText.textContent = t('loading', 'Loading...'); empty.hidden = false; return; }
     const ven = state.ven;
     for (const c of ven.connectors) $('ven-connectors').appendChild(connectorCard(c));
+    if (state.lib && state.lib.folders.length) $('ven-connectors').appendChild(foldersCard(state.lib));
     renderVendorFilters();
     $('ven-status').textContent = ven.connectors.length ? ven.items.length + ' ' + t('models', 'models') : '';
     $('ven-csv').disabled = !ven.items.length;
-    state.venShown = sortBy(ven.items.filter((i) => venMatchesExcept(i, '')), state.sort.vendors,
+    state.venShown = sortBy(ven.items.filter((i) => venMatchesExcept(i, '')), state.sort.vaults,
       (i) => i.name || '', (i) => isoSeconds(i.updated));
     if ('IntersectionObserver' in window) {
       venThumbObserver = new IntersectionObserver((entries) => {
@@ -1000,9 +1052,10 @@
     if (venMoreObserver) venMoreObserver.observe($('ven-more'));
     else while (state.venRendered < state.venShown.length) renderMoreVendors();
     empty.hidden = state.venShown.length > 0;
-    emptyText.textContent = !ven.connectors.length ? t('vendors_empty', 'Connect a vendor\'s API to browse the models you have access to.')
+    emptyText.textContent = !ven.connectors.length ? t('vaults_empty', 'Vaults are where you keep your models outside EdgeSlicer. Add one to browse it here and open models straight into a project.')
       : !ven.items.length ? t('vendor_no_items', 'Nothing fetched yet. Set the credentials, then Fetch Changes.')
         : t('no_match', 'Nothing matches your search.');
+    $('ven-empty-add').hidden = ven.connectors.length > 0;
   }
 
   // ---- item detail ----
@@ -1471,24 +1524,22 @@
   $('sort').addEventListener('change', () => { state.sort[state.section] = $('sort').value; render(); });
   $('refresh').addEventListener('click', () => {
     // Vendors' lists are metered: Refresh only redraws them; each connector has its own Fetch Changes.
-    if (state.section === 'vendors') { post('vendor_state'); return; }
+    if (state.section === 'vaults') { post('vendor_state'); return; }
     $('refresh').classList.add('spin'); post('home_refresh'); setTimeout(stopSpin, 3000);
   });
   $('new-project').addEventListener('click', () => post('project_new'));
   $('open-project').addEventListener('click', () => post('project_open'));
   $('history-settings').addEventListener('click', () => post('history_settings'));
   $('lib-manage').addEventListener('click', openFolders);
-  $('ven-add').addEventListener('click', () => openEditor(null));
-  $('ven-import').addEventListener('click', (e) => {
-    e.stopPropagation();
-    const btn = $('ven-import');
-    if (menuFor === btn) { closeMenu(); return; }
-    openMenu(btn, [
-      { label: t('import_file', 'From file...'), run: () => post('vendor_import', { source: 'file' }) },
-      { label: t('import_link', 'From link...'), run: () => post('vendor_import', { source: 'link' }) },
-      { label: t('import_paste', 'Paste JSON...'), run: () => post('vendor_import', { source: 'paste' }) },
-    ]);
-  });
+  $('ven-add').addEventListener('click', openAddVault);
+  $('ven-empty-add').addEventListener('click', openAddVault);
+  $('vault-add-api').addEventListener('click', addVaultChoice(() => openEditor(null)));
+  $('vault-import-file').addEventListener('click', addVaultChoice(() => post('vendor_import', { source: 'file' })));
+  $('vault-import-link').addEventListener('click', addVaultChoice(() => post('vendor_import', { source: 'link' })));
+  $('vault-import-paste').addEventListener('click', addVaultChoice(() => post('vendor_import', { source: 'paste' })));
+  $('vault-add-folder').addEventListener('click', addVaultChoice(() => post('library_add_folder')));
+  $('vault-add-cancel').addEventListener('click', closeAddVault);
+  $('vault-add').addEventListener('click', (e) => { if (e.target === $('vault-add')) closeAddVault(); });
   $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key) }));
   $('ven-detail-close').addEventListener('click', closeDetail);
   $('ven-detail').addEventListener('click', (e) => { if (e.target === $('ven-detail')) closeDetail(); });
@@ -1497,7 +1548,8 @@
   $('ven-editor-mode').addEventListener('click', toggleEditorMode);
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!$('ven-editor').hidden) closeEditor();
+    if (!$('vault-add').hidden) closeAddVault();
+    else if (!$('ven-editor').hidden) closeEditor();
     else if (!$('ven-detail').hidden) closeDetail();
     else if (!$('lib-detail').hidden) closeLibDetail();
   });

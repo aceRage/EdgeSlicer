@@ -109,9 +109,9 @@ HomePanel::~HomePanel()
 void HomePanel::open_connector_link(const std::string& url)
 {
     show_home();
-    wxGetApp().app_config->set(SECTION_KEY, "vendors");
+    wxGetApp().app_config->set(SECTION_KEY, "vaults");
     if (m_page_ready)
-        send({{"type", "show_section"}, {"section", "vendors"}});
+        send({{"type", "show_section"}, {"section", "vaults"}});
     ensure_vendors();
     m_vendors->import_from_link(url);
 }
@@ -538,7 +538,19 @@ void HomePanel::send_init()
     s["by"]                = _u8L("by");
     s["clear_filters"]     = _u8L("Clear filters");
     s["all"]               = _u8L("All");
-    s["vendors"]           = _u8L("Vendors");
+    s["vaults"]            = _u8L("Vaults");
+    s["add_vault"]         = _u8L("Add vault");
+    s["add_vault_hint"]    = _u8L("Where are the models you want to reach from EdgeSlicer?");
+    s["vault_api"]         = _u8L("Model library API");
+    s["vault_api_hint"]    = _u8L("A store or service that lists your models through a JSON API. You fill in its connector.");
+    s["vault_import"]      = _u8L("Import a shared vault");
+    s["vault_import_hint"] = _u8L("A connector someone shared as a file, a link or JSON text. It never holds credentials: you add your own.");
+    s["vault_folder"]      = _u8L("Folder or network share");
+    s["vault_folder_hint"] = _u8L("A folder on this computer, an external drive or a NAS share. Its models show in the Library.");
+    s["vault_folders"]     = _u8L("Folders and network shares");
+    s["folders_count"]     = _u8L("folders");
+    s["show_in_library"]   = _u8L("Show in Library");
+    s["vaults_empty"]      = _u8L("Vaults are where you keep your models outside EdgeSlicer: a model store's library, a NAS or cloud storage. Add one to browse it here and open models straight into a project.");
     s["connectors"]        = _u8L("Connectors");
     s["connector"]         = _u8L("Connector");
     s["add_connector"]     = _u8L("Add connector");
@@ -580,7 +592,6 @@ void HomePanel::send_init()
     s["variant"]           = _u8L("Variant");
     s["print_time"]        = _u8L("Time");
     s["size"]              = _u8L("Size");
-    s["vendors_empty"]     = _u8L("Connect a vendor's API to browse the models you have access to. EdgeSlicer includes no vendors: add a connector for yours, or import one someone shared.");
     s["vendor_no_items"]   = _u8L("Nothing fetched yet. Set the credentials, then Fetch Changes.");
     s["edit_json"]         = _u8L("Edit as JSON");
     s["edit_form"]         = _u8L("Edit as form");

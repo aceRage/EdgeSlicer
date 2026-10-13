@@ -17,13 +17,15 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6H2v14a2 2 0 0 0 2 2h14v-2H4zm16-4H8a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm0 14H8V4h12z"/></svg>
       <span data-i18n="library">Library</span>
     </button>
+    <!-- Vaults: where the user's own models live outside EdgeSlicer (vendor connectors, and later
+         cloud and NAS storage). It took over the Vendors section; see tests/design_vaults_home_tab.md. -->
+    <button class="rail-item" data-section="vaults" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" d="M4 3h16a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1h-1v1h-3v-1H8v1H5v-1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm1 2v13h14V5zm7 2a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM6 9h1v5H6z"/></svg>
+      <span data-i18n="vaults">Vaults</span>
+    </button>
     <button class="rail-item" data-section="history" type="button">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8H5a3 3 0 0 0-3 3v6h4v4h12v-4h4v-6a3 3 0 0 0-3-3zm-3 11H8v-5h8zm3-7a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-1-9H6v4h12z"/></svg>
       <span data-i18n="history">Print History</span>
-    </button>
-    <button class="rail-item" data-section="vendors" type="button">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 4H4v2h16zm1 10v-2l-1-5H4l-1 5v2h1v6h10v-6h4v6h2v-6zm-9 4H6v-4h6z"/></svg>
-      <span data-i18n="vendors">Vendors</span>
     </button>
     <!-- Models: the in-app model browser, a native panel the slicer shows in place of this page. -->
     <button class="rail-item" id="rail-models" data-action="models" type="button" hidden>
@@ -68,18 +70,20 @@
       </div>
     </section>
 
-    <section id="vendors" class="section" hidden>
+    <section id="vaults" class="section" hidden>
       <div class="lib-top">
         <div id="ven-status" class="status"></div>
         <button id="ven-csv" class="btn" type="button" data-i18n="export_csv">Export CSV</button>
-        <button id="ven-import" class="btn" type="button" data-i18n="import">Import</button>
-        <button id="ven-add" class="btn primary" type="button" data-i18n="add_connector">Add connector</button>
+        <button id="ven-add" class="btn primary" type="button" data-i18n="add_vault">Add vault</button>
       </div>
-      <div id="ven-connectors" class="connectors"></div>
+      <div id="ven-connectors" class="connectors" role="list"></div>
       <div id="ven-filters"></div>
       <div class="grid" id="vendors-grid"></div>
       <div id="ven-more" aria-hidden="true"></div>
-      <div class="empty" id="vendors-empty" hidden><p id="vendors-empty-text"></p></div>
+      <div class="empty" id="vendors-empty" hidden>
+        <p id="vendors-empty-text"></p>
+        <button id="ven-empty-add" class="btn primary" type="button" data-i18n="add_vault" hidden>Add vault</button>
+      </div>
     </section>
 
     <section id="history" class="section" hidden>
@@ -139,6 +143,33 @@
     </div>
     <div id="ven-detail-files"></div>
     <div class="dialog-actions"><span class="grow"></span><button id="ven-detail-close" class="btn primary" type="button" data-i18n="done">Done</button></div>
+  </div>
+</div>
+
+<div id="vault-add" class="overlay" hidden>
+  <div class="dialog chooser" role="dialog" aria-modal="true" aria-labelledby="vault-add-title">
+    <h2 id="vault-add-title" data-i18n="add_vault">Add vault</h2>
+    <p class="hint" data-i18n="add_vault_hint">Where are the models you want to reach from EdgeSlicer?</p>
+    <div class="choices">
+      <button id="vault-add-api" class="choice" type="button">
+        <b data-i18n="vault_api">Model library API</b>
+        <span data-i18n="vault_api_hint">A store or service that lists your models through a JSON API. You fill in its connector.</span>
+      </button>
+      <div class="choice" role="group" aria-labelledby="vault-add-import-title">
+        <b id="vault-add-import-title" data-i18n="vault_import">Import a shared vault</b>
+        <span data-i18n="vault_import_hint">A connector someone shared as a file, a link or JSON text. It never holds credentials: you add your own.</span>
+        <div class="choice-row">
+          <button id="vault-import-file" class="btn" type="button" data-i18n="import_file">From file...</button>
+          <button id="vault-import-link" class="btn" type="button" data-i18n="import_link">From link...</button>
+          <button id="vault-import-paste" class="btn" type="button" data-i18n="import_paste">Paste JSON...</button>
+        </div>
+      </div>
+      <button id="vault-add-folder" class="choice" type="button">
+        <b data-i18n="vault_folder">Folder or network share</b>
+        <span data-i18n="vault_folder_hint">A folder on this computer, an external drive or a NAS share. Its models show in the Library.</span>
+      </button>
+    </div>
+    <div class="dialog-actions"><span class="grow"></span><button id="vault-add-cancel" class="btn" type="button" data-i18n="cancel">Cancel</button></div>
   </div>
 </div>
 

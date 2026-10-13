@@ -17,9 +17,10 @@
 namespace Slic3r {
 namespace HomeTab {
 
-// The sections the page has: "recent", "library", "history" and "vendors".
+// The sections the page has: "recent", "library", "history" and "vaults".
 bool valid_section(const std::string& section);
-// `section` when it is one of them, else "recent".
+// `section` when it is one of them, "vaults" for "vendors" (what Vaults was called before it took in
+// the vendor connectors, still in older settings), else "recent".
 std::string section_or_default(const std::string& section);
 
 // How a file from the G-code archive is opened again on this PC: plain G-code goes to the preview,
