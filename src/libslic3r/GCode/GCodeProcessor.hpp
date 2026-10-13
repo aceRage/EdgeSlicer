@@ -888,6 +888,8 @@ inline bool is_bbl_special_tool_command(int tool_number)
         int m_delta_temperature;
         int m_preheat_steps;
         bool m_disable_m73;
+        // Orca #14663: printer_model, which picks the M6211 time model.
+        std::string m_printer_model;
 #if ENABLE_GCODE_VIEWER_STATISTICS
         std::chrono::time_point<std::chrono::high_resolution_clock> m_start_time;
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
@@ -1116,6 +1118,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
 
         // Unload the current filament into the MK3 MMU2 unit at the end of print.
         void process_M702(const GCodeReader::GCodeLine& line);
+
+        // Orca #14663: Elegoo Centauri Carbon / Carbon 2 filament change (ElegooGCodeProcessorHelper.cpp).
+        void process_M6211(const GCodeReader::GCodeLine& line);
+        void process_elegoo_M6211(const GCodeReader::GCodeLine& line);
 
         // Processes T line (Select Tool)
         void process_T(const GCodeReader::GCodeLine& line);

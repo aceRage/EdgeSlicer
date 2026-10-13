@@ -847,6 +847,7 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     m_parser.apply_config(config);
 
     m_flavor = config.gcode_flavor;
+    m_printer_model = config.printer_model.value;
 
     m_single_extruder_multi_material = config.single_extruder_multi_material;
 
@@ -1013,6 +1014,10 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     const ConfigOptionString* printer_settings_id = config.option<ConfigOptionString>("printer_settings_id");
     if (printer_settings_id != nullptr)
         m_result.settings_ids.printer = printer_settings_id->value;
+
+    // Orca #14663. A G-code without the key belongs to no Elegoo printer.
+    const ConfigOptionString* printer_model = config.option<ConfigOptionString>("printer_model");
+    m_printer_model = printer_model != nullptr ? printer_model->value : std::string();
 
     // BBS
     m_result.extruders_count = config.option<ConfigOptionFloats>("filament_diameter")->values.size();
@@ -1952,6 +1957,10 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
                 default:
                     break;
                 }
+                break;
+            case 5:
+                if (cmd[1] == '6' && cmd[2] == '2' && cmd[3] == '1' && cmd[4] == '1')
+                    process_M6211(line); // Orca #14663: Elegoo filament change
                 break;
             default:
                 break;
@@ -4095,6 +4104,13 @@ void GCodeProcessor::process_M702(const GCodeReader::GCodeLine& line)
         m_time_processor.extruder_unloaded = true;
         simulate_st_synchronize(get_filament_unload_time(m_extruder_id));
     }
+}
+
+void GCodeProcessor::process_M6211(const GCodeReader::GCodeLine& line)
+{
+    // Orca #14663: only the Elegoo firmware knows this command.
+    if (boost::algorithm::istarts_with(m_printer_model, "elegoo"))
+        process_elegoo_M6211(line);
 }
 
 void GCodeProcessor::process_T(const GCodeReader::GCodeLine& line)
