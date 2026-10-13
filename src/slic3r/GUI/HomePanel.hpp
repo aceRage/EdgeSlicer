@@ -63,6 +63,10 @@ public:
     void on_tab_changed(bool selected);
     void sys_color_changed();
 
+    // edgeslicer://connector?url=<https link>: shows Home > Vendors and starts "Import from link"
+    // with the address filled in (the user still confirms the address and then the connector).
+    void open_connector_link(const std::string& url);
+
 private:
     void ensure_browser();
     void notify_start_page(bool active);
@@ -83,6 +87,10 @@ private:
     void forget_recent(const std::string& path);
     void open_archived(const std::string& id);
     void open_archived_project(const std::string& id);
+    // A file Home > Vendors just saved (Download & Open): the same routes as the Library and the
+    // Print History, picked by the file's name (HomeTab::download_open_kind).
+    void open_downloaded(const std::string& path);
+    void ensure_vendors();
     void reveal_archived(const std::string& id);
     void delete_archived(const std::string& id);
 

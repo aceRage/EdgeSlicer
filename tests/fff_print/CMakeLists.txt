@@ -7,6 +7,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fill.cpp
 	test_flow.cpp
 	test_gcode.cpp
+	test_cooling.cpp
 	test_mass_limited_acceleration.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
@@ -35,9 +36,12 @@ add_executable(${_TEST_NAME}_tests
 	test_status_callback_race.cpp
 	test_modifier_effect.cpp
 	test_tree_support_determinism.cpp
+	test_tree_support.cpp
+	test_support_interface.cpp
 	test_stabilizers.cpp
 	test_stabilizer_bake.cpp
 	test_stabilizers_v2.cpp
+	test_stabilizers_without_supports.cpp
 	test_fdm_hollowing.cpp
 	test_extra_bridge_layer_determinism.cpp
 	test_bed_temperature.cpp

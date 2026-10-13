@@ -1278,6 +1278,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         //BBS: plater related structures
         bool m_is_bbl_3mf { false };
+        // True only when the Application metadata starts with "BambuStudio-".
+        // Edge also stamps its own and Snapmaker Orca 3MFs as From_BBS, so callers
+        // that want a genuine BambuStudio project must use this flag, not From_BBS.
+        bool m_is_bambu_studio_generator { false };
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
         PlateData* m_curr_plater;
@@ -1293,7 +1297,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         //BBS: add plate data related logic
         // add backup & restore logic
         bool load_model_from_file(const std::string& filename, Model& model, PlateDataPtrs& plate_data_list, std::vector<Preset*>& project_presets, DynamicPrintConfig& config,
-            ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn = nullptr, BBLProject *project = nullptr, int plate_id = 0);
+            ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn = nullptr, BBLProject *project = nullptr, int plate_id = 0, bool *is_bambu_studio = nullptr);
         bool get_thumbnail(const std::string &filename, std::string &data);
         bool load_gcode_3mf_from_stream(std::istream & data, Model& model, PlateDataPtrs& plate_data_list, DynamicPrintConfig& config, Semver& file_version);
         unsigned int version() const { return m_version; }
@@ -1455,7 +1459,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         bool _handle_start_relationship(const char** attributes, unsigned int num_attributes);
 
-        void _generate_current_object_list(std::vector<Component> &sub_objects, Id object_id, IdToCurrentObjectMap& current_objects);
+        bool _generate_current_object_list(std::vector<Component> &sub_objects, Id object_id, IdToCurrentObjectMap& current_objects);
         bool _generate_volumes_new(ModelObject& object, const std::vector<Component> &sub_objects, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions);
         //bool _generate_volumes(ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions);
 
@@ -1511,7 +1515,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     //BBS: add plate data related logic
         // add backup & restore logic
     bool _BBS_3MF_Importer::load_model_from_file(const std::string& filename, Model& model, PlateDataPtrs& plate_data_list, std::vector<Preset*>& project_presets, DynamicPrintConfig& config,
-        ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn, BBLProject *project, int plate_id)
+        ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn, BBLProject *project, int plate_id, bool *is_bambu_studio)
     {
         m_version = 0;
         m_fdm_supports_painting_version = 0;
@@ -1546,6 +1550,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_curr_instance.object_id = -1;
         m_curr_instance.instance_id = -1;
         m_curr_instance.identify_id = 0;
+        m_is_bambu_studio_generator = false;
         clear_errors();
 
         // restore
@@ -1569,6 +1574,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         bool result = _load_model_from_file(filename, model, plate_data_list, project_presets, config, config_substitutions, proFn, project, plate_id);
         is_bbl_3mf = m_is_bbl_3mf;
+        if (is_bambu_studio)
+            *is_bambu_studio = m_is_bambu_studio_generator;
         if (m_bambuslicer_generator_version)
             file_version = *m_bambuslicer_generator_version;
         // save for restore
@@ -2192,7 +2199,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         return false;
                     }
                     std::vector<Component> object_id_list;
-                    _generate_current_object_list(object_id_list, object.first, m_current_objects);
+                    if (!_generate_current_object_list(object_id_list, object.first, m_current_objects))
+                        return false;
 
                     ObjectMetadata::VolumeMetadataList volumes;
                     ObjectMetadata::VolumeMetadataList* volumes_ptr = nullptr;
@@ -2294,7 +2302,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }*/
 
             std::vector<Component> object_id_list;
-            _generate_current_object_list(object_id_list, object.first, m_current_objects);
+            if (!_generate_current_object_list(object_id_list, object.first, m_current_objects))
+                return false;
 
             ObjectMetadata::VolumeMetadataList volumes;
             ObjectMetadata::VolumeMetadataList* volumes_ptr = nullptr;
@@ -4678,6 +4687,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // SLIC3R_APP_KEY - Snapmaker_VERSION
             if (boost::starts_with(m_curr_characters, "BambuStudio-")) {
                 m_is_bbl_3mf = true;
+                m_is_bambu_studio_generator = true;
                 m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(12));
             }
             else if (boost::starts_with(m_curr_characters, std::string(SLIC3R_APP_NAME) + "-")) {
@@ -5638,11 +5648,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         return true;
     }
 
-    void _BBS_3MF_Importer::_generate_current_object_list(std::vector<Component> &sub_objects, Id object_id, IdToCurrentObjectMap &current_objects)
+    bool _BBS_3MF_Importer::_generate_current_object_list(std::vector<Component> &sub_objects, Id object_id, IdToCurrentObjectMap &current_objects)
     {
+        // A cycle in the component graph would expand forever, and an acyclic graph can still expand
+        // exponentially, so bound the number of component references queued. Checking before they are
+        // queued bounds the work list itself, whatever the fan-out. A valid file over the budget is
+        // rejected too, but the budget is way above the component references of any real object.
+        static constexpr size_t max_components = 100000;
+
         std::list<std::pair<Component, Transform3d>> id_list;
         id_list.push_back(std::make_pair(Component(object_id, Transform3d::Identity()), Transform3d::Identity()));
 
+        size_t num_components = 0;
         while (!id_list.empty())
         {
             auto current_item = id_list.front();
@@ -5652,6 +5669,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (current_object != current_objects.end()) {
                 //found one
                 if (!current_object->second.components.empty()) {
+                    num_components += current_object->second.components.size();
+                    if (num_components > max_components) {
+                        add_error("invalid 3mf: cyclic or too many component references");
+                        sub_objects.clear();
+                        return false;
+                    }
                     for (const Component &comp : current_object->second.components) {
                         id_list.push_back(std::pair(comp, current_item.second * comp.transform));
                     }
@@ -5663,6 +5686,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
             }
         }
+        return true;
     }
 
     bool _BBS_3MF_Importer::_generate_volumes_new(ModelObject& object, const std::vector<Component> &sub_objects, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions)
@@ -9564,6 +9588,9 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                         else if (values.size() < extruder_count)
                             values.resize(extruder_count, values.back());
                     };
+                    // The X2D's second extruder is a Bowden one: read the types off the variant list
+                    // rather than padding the dropped extruder_type default ("0 0" instead of Bambu's "0 1").
+                    extruder_types = slice_info_extruder_types(config, extruder_count);
                     fit_to_extruders(extruder_types);
                     fit_to_extruders(nozzle_volume_types);
                 }
@@ -10471,7 +10498,7 @@ private:
 
 //BBS: add plate data list related logic
 bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, PlateDataPtrs* plate_data_list, std::vector<Preset*>* project_presets,
-                    bool* is_bbl_3mf, Semver* file_version, Import3mfProgressFn proFn, LoadStrategy strategy, BBLProject *project, int plate_id)
+                    bool* is_bbl_3mf, Semver* file_version, Import3mfProgressFn proFn, LoadStrategy strategy, BBLProject *project, int plate_id, bool *is_bambu_studio)
 {
     if (path == nullptr || config == nullptr || model == nullptr)
         return false;
@@ -10479,7 +10506,7 @@ bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstituti
     // All import should use "C" locales for number formatting.
     CNumericLocalesSetter locales_setter;
     _BBS_3MF_Importer importer;
-    bool res = importer.load_model_from_file(path, *model, *plate_data_list, *project_presets, *config, *config_substitutions, strategy, *is_bbl_3mf, *file_version, proFn, project, plate_id);
+    bool res = importer.load_model_from_file(path, *model, *plate_data_list, *project_presets, *config, *config_substitutions, strategy, *is_bbl_3mf, *file_version, proFn, project, plate_id, is_bambu_studio);
     importer.log_errors();
     //BBS: remove legacy project logic currently
     //handle_legacy_project_loaded(importer.version(), *config);

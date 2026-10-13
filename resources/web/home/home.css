@@ -215,6 +215,7 @@ table.files { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.files th { text-align: left; color: var(--mute); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); }
 table.files td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 table.files .btn { height: 26px; padding: 0 10px; }
+table.files .btn + .btn { margin-left: 6px; }
 .dialog.editor { width: 820px; }
 #ven-editor-body { overflow-y: auto; flex: 1; min-height: 0; padding-right: 4px; }
 #ven-editor-json { flex: 1; min-height: 360px; font: 12px/1.45 ui-monospace, Consolas, monospace; background: var(--ctl);

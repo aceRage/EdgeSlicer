@@ -108,6 +108,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SimpleShapeDialog.hpp
     GUI/ImageTraceDialog.cpp
     GUI/ImageTraceDialog.hpp
+    GUI/SvgSplitDialog.cpp
+    GUI/SvgSplitDialog.hpp
     GUI/ConfigManipulation.cpp
     GUI/ConfigManipulation.hpp
     GUI/ConfigWizard.cpp
@@ -127,8 +129,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/DownloaderFileGet.cpp
     GUI/DownloaderFileGet.hpp
     GUI/Downloader.hpp
-    GUI/DownloadProgressDialog.cpp
-    GUI/DownloadProgressDialog.hpp
     GUI/DragCanvas.cpp
     GUI/DragCanvas.hpp
     GUI/EditGCodeDialog.cpp
@@ -204,6 +204,7 @@ set(SLIC3R_GUI_SOURCES
     #GUI/Gizmos/GLGizmoHollow.hpp
     GUI/Gizmos/GLGizmoMeasure.cpp
     GUI/Gizmos/GLGizmoMeasure.hpp
+    GUI/Gizmos/GizmoVolumeRefs.hpp
     GUI/Gizmos/GLGizmoMeshBoolean.cpp
     GUI/Gizmos/GLGizmoMeshBoolean.hpp
     GUI/Gizmos/GLGizmoMmuSegmentation.cpp
@@ -382,8 +383,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/TextureDisplacementPreviewJob.cpp
     GUI/Jobs/TextureDisplacementPreviewJob.hpp
     GUI/Jobs/ThreadSafeQueue.hpp
-    GUI/Jobs/UpgradeNetworkJob.cpp
-    GUI/Jobs/UpgradeNetworkJob.hpp
     GUI/Jobs/Worker.hpp
     GUI/KBShortcutsDialog.cpp
     GUI/KBShortcutsDialog.hpp
@@ -528,6 +527,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/FirstRequestGate.hpp
+    GUI/SsdpConnectType.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
@@ -564,6 +565,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
     GUI/HubEventDedupe.hpp
+    GUI/LoginTicketGate.hpp
     GUI/HubPushOwner.hpp
     GUI/RemoteNotify.cpp
     GUI/RemoteNotify.hpp
@@ -578,6 +580,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HostedProvider.cpp
     GUI/PushIds.cpp
     GUI/PushIds.hpp
+    GUI/LiveActivityPush.cpp
+    GUI/LiveActivityPush.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
     GUI/PrintHostDevicesDialog.cpp
@@ -713,6 +717,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RecenterDialog.hpp
     GUI/ReleaseNote.cpp
     GUI/ReleaseNote.hpp
+    GUI/BindDetectGuard.hpp
     GUI/RemovableDriveManager.cpp
     GUI/RemovableDriveManager.hpp
     GUI/SavePresetDialog.cpp
@@ -782,8 +787,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/UserNotification.hpp
     GUI/UVEditorCanvas.cpp
     GUI/UVEditorCanvas.hpp
-    GUI/WebDownPluginDlg.cpp
-    GUI/WebDownPluginDlg.hpp
     GUI/WebGuideDialog.cpp
     GUI/WebGuideDialog.hpp
     GUI/WebUserLoginDialog.cpp
@@ -963,6 +966,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintersMonitor.hpp
     Utils/HubHandover.hpp
     Utils/WebLoadRetry.hpp
+    Utils/DevicePageLoad.hpp
     Utils/HomeTabLogic.cpp
     Utils/HomeTabLogic.hpp
     Utils/ThemePack.cpp
@@ -979,10 +983,13 @@ set(SLIC3R_GUI_SOURCES
     Utils/MainThreadGate.hpp
     Utils/ServerLifetime.cpp
     Utils/ServerLifetime.hpp
+    Utils/LoopbackAcceptLoop.cpp
+    Utils/LoopbackAcceptLoop.hpp
     Utils/SnapmakerSilentLogin.cpp
     Utils/SnapmakerSilentLogin.hpp
     Utils/BambuSyncPolicy.cpp
     Utils/BambuSyncPolicy.hpp
+    Utils/PresetSyncPolicy.hpp
     Utils/AccountProviders.cpp
     Utils/AccountProviders.hpp
     Utils/json_diff.cpp
@@ -993,6 +1000,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/MKS.hpp
     Utils/NetworkAgent.cpp
     Utils/NetworkAgent.hpp
+    Utils/PluginLoadDiagnostics.cpp
+    Utils/PluginLoadDiagnostics.hpp
     Utils/Obico.cpp
     Utils/Obico.hpp
     Utils/OctoPrint.cpp
@@ -1005,6 +1014,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintHostDevices.hpp
     Utils/PrintHostDeviceStatus.cpp
     Utils/PrintHostDeviceStatus.hpp
+    Utils/MoonrakerProgress.cpp
+    Utils/MoonrakerProgress.hpp
     Utils/PrusaLinkStatus.cpp
     Utils/PrusaLinkStatus.hpp
     Utils/Process.cpp

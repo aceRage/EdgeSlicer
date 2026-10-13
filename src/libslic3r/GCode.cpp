@@ -434,6 +434,78 @@ static double outgoing_filament_retract_length_nc(const PrintConfig& config, int
     return opt.values[i];
 }
 
+// BBS: one filament's value of a nullable per-flow-variant filament option (filament_flush_temp,
+// filament_flush_volumetric_speed, filament_cooling_before_tower, ...): the slot get_config_idx picks
+// for the filament's Standard / High Flow column, as Bambu Studio's get_filament_config_index picks
+// the extruder-variant slot. A nil slot (Anycubic profiles say ["nil"]) reads as the option default.
+template<typename T, typename NullableVector>
+static T filament_variant_value(const ConfigBase& config, const NullableVector& opt, size_t filament_id, const char* key)
+{
+    const T fallback = T(static_cast<const NullableVector*>(print_config_def.get(key)->default_value.get())->values.front());
+    if (opt.values.empty())
+        return fallback;
+    size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, static_cast<unsigned int>(filament_id));
+    if (idx >= opt.values.size())
+        idx = 0; // ConfigOptionVector::get_at's fallback
+    if (opt.is_nil(idx))
+        return fallback;
+    const T value = T(opt.values[idx]);
+    if constexpr (std::is_floating_point<T>::value) {
+        if (std::isnan(value))
+            return fallback;
+    }
+    return value;
+}
+
+// BBS: the flush / pre-tower cooling placeholders of the BBL machine templates, one entry per
+// filament, as Bambu Studio builds them (GCode.cpp 1001-1026 for a toolchange through the wipe tower,
+// 8318-8337 for any other toolchange, 8061-8075 for the start G-code):
+//   flush_volumetric_speeds        filament_flush_volumetric_speed, 0 = filament_max_volumetric_speed
+//   flush_temperatures             filament_flush_temp (filament_flush_temp_fast in Fast prime-volume
+//                                  mode), 0 = the top of the recommended nozzle temperature range
+//   filament_cooling_before_tower  the drop below the print temperature before the tower
+//                                  (M620.15 C{new_filament_temp - ...}); nil = 0. The callers zero it
+//                                  where Bambu Studio does; the tower toolchange that keeps it also
+//                                  gets the tower's "Wipe tower reheat before wipe" M104
+struct BambuFlushPlaceholders
+{
+    std::vector<double> volumetric_speeds;
+    std::vector<int>    temperatures;
+    std::vector<double> cooling_before_tower;
+
+    void set(DynamicConfig& config) const
+    {
+        config.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(volumetric_speeds));
+        config.set_key_value("flush_temperatures", new ConfigOptionInts(temperatures));
+        config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloats(cooling_before_tower));
+    }
+};
+
+static BambuFlushPlaceholders bambu_flush_placeholders(const PrintConfig& config, bool tower_toolchange)
+{
+    BambuFlushPlaceholders out;
+    const size_t num_filaments  = flow_variant_filament_count(config);
+    const bool   use_fast_flush = config.prime_volume_mode.value == PrimeVolumeMode::pvmFast;
+    out.volumetric_speeds.reserve(num_filaments);
+    out.temperatures.reserve(num_filaments);
+    out.cooling_before_tower.reserve(num_filaments);
+    for (size_t i = 0; i < num_filaments; ++i) {
+        double speed = filament_variant_value<double>(config, config.filament_flush_volumetric_speed, i, "filament_flush_volumetric_speed");
+        if (speed == 0.)
+            speed = get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, static_cast<unsigned int>(i));
+        out.volumetric_speeds.push_back(speed);
+
+        int temp = use_fast_flush ? filament_variant_value<int>(config, config.filament_flush_temp_fast, i, "filament_flush_temp_fast") :
+                                    filament_variant_value<int>(config, config.filament_flush_temp, i, "filament_flush_temp");
+        if (temp == 0)
+            temp = config.nozzle_temperature_range_high.get_at(i);
+        out.temperatures.push_back(temp);
+
+        out.cooling_before_tower.push_back(filament_cooling_before_tower_at(config, static_cast<unsigned int>(i), tower_toolchange));
+    }
+    return out;
+}
+
 // Return true if tch_prefix is found in custom_gcode
 static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std::string& tch_prefix, unsigned next_extruder)
 {
@@ -944,25 +1016,18 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
                 config.set_key_value(key_value, new ConfigOptionFloat(0.f));
             }
         }
-        // Ultra: per-filament flush vectors for BBS 2.x change_filament templates (single-nozzle).
+        // BBS: flush speed / temperature and pre-tower cooling for the change_filament template
+        // (Bambu Studio GCode.cpp 1001-1026). Bambu cools nothing before the tower on the first layer
+        // or on a tower interface (contact) toolchange. The tower says which toolchanges it reheats
+        // (tcr.reheats_after_cooling: not its first layer, not an interface); only those may cool, so
+        // every M620.15 C below the print temperature is followed by the tower's
+        // "Wipe tower reheat before wipe" M104 back to it.
         {
             const FullPrintConfig &cfg = gcodegen.config();
-            const auto* ft_opt = cfg.option<ConfigOptionInts>("filament_flush_temp");
-            const auto* vs_opt = cfg.option<ConfigOptionFloats>("filament_flush_volumetric_speed");
-            const auto* rh_opt = cfg.option<ConfigOptionInts>("nozzle_temperature_range_high");
-            const size_t nf = flow_variant_filament_count(cfg);
-            std::vector<int> fts; std::vector<double> vss;
-            for (size_t i = 0; i < nf; ++i) {
-                double vs = (vs_opt && i < vs_opt->size()) ? vs_opt->get_at(int(i)) : 0.;
-                if (vs == 0.)
-                    vs = get_value_at(cfg, cfg.filament_max_volumetric_speed, ConfigFlowDomain::Filament, int(i));
-                vss.push_back(vs);
-                int ft = (ft_opt && i < ft_opt->size()) ? ft_opt->get_at(int(i)) : 0;
-                if (ft == 0 && rh_opt) ft = rh_opt->get_at(int(i));
-                fts.push_back(ft);
-            }
-            config.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(vss));
-            config.set_key_value("flush_temperatures", new ConfigOptionInts(fts));
+            BambuFlushPlaceholders flush = bambu_flush_placeholders(cfg, true);
+            if (gcodegen.m_layer_index == 0 || !tcr.reheats_after_cooling)
+                std::fill(flush.cooling_before_tower.begin(), flush.cooling_before_tower.end(), 0.);
+            flush.set(config);
         }
         // BBS: the extruder-change retraction pair must be published BEFORE the template is
         // expanded - change_filament_gcode is what reads it ({if long_retraction_when_ec} ...
@@ -2763,11 +2828,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_max_layer_z  = 0.f;
     m_last_width   = 0.f;
     m_is_role_based_fan_on.fill(false);
+    m_role_based_fan_marker_layer.fill(-1);
+    m_role_based_fan_marker_extruder.fill(-1);
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
     m_last_mm3_per_mm = 0.;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
-    m_fan_mover.release();
+    m_fan_mover.reset();
     m_layer_time_speed_smoothing.reset();
 
     m_writer.set_is_bbl_machine(is_bbl_printers);
@@ -2881,7 +2948,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     if (!has_BTT_thumbnail) {
         file.write_format("; HEADER_BLOCK_START\n");
         // Write information on the generator.
-        file.write_format("; generated by %s on %s\n", Slic3r::header_slic3r_generated().c_str(), Slic3r::Utils::local_timestamp().c_str());
+        file.write_format("; generated by %s on %s\n", Slic3r::header_gcode_producer().c_str(), Slic3r::Utils::local_timestamp().c_str());
         if (is_bbl_printers)
             file.write_format(";%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Estimated_Printing_Time_Placeholder).c_str());
         // BBS: total layer number
@@ -3476,21 +3543,27 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             min_vitrification = 0;
         this->placeholder_parser().set("min_vitrification_temperature", new ConfigOptionInt(min_vitrification));
 
-        const auto* flush_temp_opt = m_config.option<ConfigOptionInts>("filament_flush_temp");
-        const auto* flush_vspd_opt = m_config.option<ConfigOptionFloats>("filament_flush_volumetric_speed");
+        // BBS: flush placeholders of machine_start / machine_end (Bambu Studio GCode.cpp 8044-8075),
+        // and the per-filament values of the four keys themselves: they are stored per flow variant,
+        // so a template indexing them by filament (Prusa CORE One INDX:
+        // filament_flush_volumetric_speed[next_extruder]) must not see the packed vector.
         const size_t num_filaments = flow_variant_filament_count(m_config);
-        std::vector<int>    flush_temps;   flush_temps.reserve(num_filaments);
-        std::vector<double> flush_vspeeds; flush_vspeeds.reserve(num_filaments);
-        for (size_t i = 0; i < num_filaments; ++i) {
-            double vs = (flush_vspd_opt && i < flush_vspd_opt->size()) ? flush_vspd_opt->get_at(int(i)) : 0.;
-            if (vs == 0.) vs = get_value_at(m_config, m_config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, int(i));
-            flush_vspeeds.push_back(vs);
-            int ft = (flush_temp_opt && i < flush_temp_opt->size()) ? flush_temp_opt->get_at(int(i)) : 0;
-            if (ft == 0) ft = m_config.nozzle_temperature_range_high.get_at(int(i));
-            flush_temps.push_back(ft);
+        {
+            const BambuFlushPlaceholders flush = bambu_flush_placeholders(m_config, false);
+            this->placeholder_parser().set("flush_volumetric_speeds", new ConfigOptionFloats(flush.volumetric_speeds));
+            this->placeholder_parser().set("flush_temperatures", new ConfigOptionInts(flush.temperatures));
+            this->placeholder_parser().set("filament_cooling_before_tower", new ConfigOptionFloats(flush.cooling_before_tower));
+            std::vector<double> flush_speed_raw;
+            std::vector<int>    flush_temp_raw, flush_temp_fast_raw;
+            for (size_t i = 0; i < num_filaments; ++i) {
+                flush_speed_raw.push_back(filament_variant_value<double>(m_config, m_config.filament_flush_volumetric_speed, i, "filament_flush_volumetric_speed"));
+                flush_temp_raw.push_back(filament_variant_value<int>(m_config, m_config.filament_flush_temp, i, "filament_flush_temp"));
+                flush_temp_fast_raw.push_back(filament_variant_value<int>(m_config, m_config.filament_flush_temp_fast, i, "filament_flush_temp_fast"));
+            }
+            this->placeholder_parser().set("filament_flush_volumetric_speed", new ConfigOptionFloats(flush_speed_raw));
+            this->placeholder_parser().set("filament_flush_temp", new ConfigOptionInts(flush_temp_raw));
+            this->placeholder_parser().set("filament_flush_temp_fast", new ConfigOptionInts(flush_temp_fast_raw));
         }
-        this->placeholder_parser().set("flush_volumetric_speeds", new ConfigOptionFloats(flush_vspeeds));
-        this->placeholder_parser().set("flush_temperatures", new ConfigOptionInts(flush_temps));
         // Ultra: A2L time_lapse_gcode reads clear_to_x0 (BBS computes it per-layer via a
         // timelapse position-picker the fork lacks). Single-nozzle shim = always clear.
         this->placeholder_parser().set("clear_to_x0", new ConfigOptionBool(true));
@@ -4472,23 +4545,31 @@ struct PrecomputedLayer
 // code always had and it must stay that way, because the estimator measures each prepared layer against
 // the layer prepared before it: a region's first (Standard) enable_overhang_speed value, not "any
 // flow-variant column". Which layers get prepared decides which layer a later wall is compared with, so
-// a different rule would change the G-code. (The overhang fan needs no clause of its own: _extrude only
-// asks the estimator when overhang speed is on.)
-static bool prepares_overhang_estimator(const Layer &layer)
+// a different rule would change the G-code. Orca #14788: _extrude also asks the estimator when the overhang
+// fan can switch on (`overhang_fan`, see overhang_fan_enabled()), with the overhang slowdown off, so every
+// layer with extrusions is prepared then.
+static bool prepares_overhang_estimator(const Layer &layer, bool overhang_fan)
 {
     const LayerRegionPtrs &regions = layer.regions();
-    return std::any_of(regions.begin(), regions.end(), [](const LayerRegion *region) {
-        return region->has_extrusions() && region->region().config().enable_overhang_speed.values.front();
+    return std::any_of(regions.begin(), regions.end(), [overhang_fan](const LayerRegion *region) {
+        return region->has_extrusions() && (overhang_fan || region->region().config().enable_overhang_speed.values.front());
     });
+}
+
+// Orca #14788: whether the overhang fan can switch on for any filament, which makes _extrude measure the
+// overhangs of walls and bridges even with the overhang slowdown off.
+static bool overhang_fan_enabled(const PrintConfig &config, bool cooling_markers)
+{
+    return cooling_markers && any_enabled(config.enable_overhang_bridge_fan);
 }
 } // namespace
 
-std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vector<GCode::LayerToPrint> &layers)
+std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vector<GCode::LayerToPrint> &layers, bool overhang_fan)
 {
     std::vector<PrecomputedOverhangLayer> out;
     for (const GCode::LayerToPrint &layer : layers)
         if (layer.object_layer != nullptr && layer.object_layer->lower_layer != nullptr &&
-            prepares_overhang_estimator(*layer.object_layer)) {
+            prepares_overhang_estimator(*layer.object_layer, overhang_fan)) {
             const LayerRegionPtrs &regions = layer.object_layer->regions();
             // _extrude extrudes a region's walls with that region's config applied, so it reads that region's
             // slowdown value (for whichever filament prints): the curled-line tree is only read if some region
@@ -4504,7 +4585,7 @@ std::vector<PrecomputedOverhangLayer> precompute_overhang_layers(const std::vect
 namespace {
 // Hands out the index of each layer to process_layers(), then computes the layers' overhang data in parallel.
 template<typename LayersAt>
-static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bool nop_layer, LayersAt layers_at)
+static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bool nop_layer, bool overhang_fan, LayersAt layers_at)
 {
     return tbb::make_filter<void, PrecomputedLayer>(slic3r_tbb_filtermode::serial_in_order,
                [&next_index, layer_count, nop_layer](tbb::flow_control &fc) -> PrecomputedLayer {
@@ -4518,9 +4599,9 @@ static auto precomputed_layers_source(size_t &next_index, size_t layer_count, bo
                    return {};
                }) &
            tbb::make_filter<PrecomputedLayer, PrecomputedLayer>(slic3r_tbb_filtermode::parallel,
-               [layers_at](PrecomputedLayer layer) -> PrecomputedLayer {
+               [layers_at, overhang_fan](PrecomputedLayer layer) -> PrecomputedLayer {
                    if (layer.index != size_t(-1))
-                       layer.overhang_layers = precompute_overhang_layers(layers_at(layer.index));
+                       layer.overhang_layers = precompute_overhang_layers(layers_at(layer.index), overhang_fan);
                    return layer;
                });
 }
@@ -4539,6 +4620,7 @@ void GCode::process_layers(const Print&                                         
     // The pipeline is variable: The vase mode filter is optional.
     size_t     layer_to_print_idx = 0;
     const auto source             = precomputed_layers_source(layer_to_print_idx, layers_to_print.size(), m_pressure_equalizer != nullptr,
+        overhang_fan_enabled(print.config(), m_enable_cooling_markers),
         [&layers_to_print](size_t index) -> const std::vector<LayerToPrint> & { return layers_to_print[index].second; });
     const auto generator          = tbb::make_filter<PrecomputedLayer, LayerResult>(
         slic3r_tbb_filtermode::serial_in_order,
@@ -4662,6 +4744,7 @@ void GCode::process_layers(const Print&              print,
     // The pipeline is variable: The vase mode filter is optional.
     size_t     layer_to_print_idx = 0;
     const auto source             = precomputed_layers_source(layer_to_print_idx, layers_to_print.size(), m_pressure_equalizer != nullptr,
+        overhang_fan_enabled(print.config(), m_enable_cooling_markers),
         [&layers_to_print](size_t index) { return std::vector<LayerToPrint>{layers_to_print[index]}; });
     const auto generator =
         tbb::make_filter<PrecomputedLayer, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
@@ -6670,8 +6753,9 @@ LayerResult GCode::process_layer(const Print& print,
         return next_extruder;
     };
 
+    const bool overhang_fan = overhang_fan_enabled(m_config, m_enable_cooling_markers);
     for (const auto &layer_to_print : layers)
-        if (layer_to_print.object_layer && prepares_overhang_estimator(*layer_to_print.object_layer))
+        if (layer_to_print.object_layer && prepares_overhang_estimator(*layer_to_print.object_layer, overhang_fan))
             m_extrusion_quality_estimator.prepare_for_new_layer(layer_to_print.original_object, layer_to_print.object_layer);
 
     // Group extrusions by an extruder, then by an object, an island and a region.
@@ -9701,6 +9785,33 @@ static float overhang_fan_overlap_threshold(int overhang_fan_threshold)
     }
 }
 
+// Whether the overhang fan is on at a point of a path with `overlap` (the variable-speed branch of _extrude).
+//    { "0%", Overhang_threshold_none },
+//    { "10%", Overhang_threshold_1_4 },
+//    { "25%", Overhang_threshold_2_4 },
+//    { "50%", Overhang_threshold_3_4 },
+//    { "75%", Overhang_threshold_4_4 },
+//    { "95%", Overhang_threshold_bridge }
+static bool overhang_fan_on_at(int overhang_fan_threshold, float overlap, ExtrusionRole role)
+{
+    if (role == erBridgeInfill ||
+        role == erOverhangPerimeter) { // ORCA: Split out bridge infill to internal and external to apply separate fan settings
+        return true;
+    }
+    if (overhang_fan_threshold == Overhang_threshold_none)
+        return is_external_perimeter(role);
+    const float overlap_threshold = overhang_fan_overlap_threshold(overhang_fan_threshold);
+    return overlap_threshold >= 0.f && overlap <= overlap_threshold;
+}
+
+// Whether the overhang fan is on over a whole path for its role alone, whatever its overlap.
+static bool overhang_fan_on_for_role(int overhang_fan_threshold, ExtrusionRole role)
+{
+    // BBS: Overhang_threshold_none means Overhang_threshold_1_4 and forcing cooling for all external perimeter
+    return (overhang_fan_threshold == Overhang_threshold_none && is_external_perimeter(role)) ||
+           role == erBridgeInfill || role == erOverhangPerimeter;
+}
+
 std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_description, double speed)
 {
     std::string gcode;
@@ -10000,7 +10111,17 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             // initial_layer_speed / initial_layer_infill_speed is the culprit here
             // regardless of which role we are printing.
             // Orca (#14616): brim is attached to the first layer walls like a wall, not like infill.
-            const bool use_first_layer_speed = is_perimeter(path.role()) || path.role() == erBrim;
+            // EdgeSlicer divergence from Orca #13224: Support, Support interface and Support transition
+            // (the raft is made of support extrusions) follow Initial layer speed on the first layer, so a
+            // user can slow the first layer of supports and the raft base down with the one setting. Orca
+            // moved them to initial_layer_infill_speed. Raft layers above the base are not in this branch
+            // and keep their support / interface speeds. Support printed on the first object layer over a
+            // raft is extruded with m_object_layer_over_raft cleared (process_layer), so it never gets here
+            // and keeps its normal speed, as in Orca. Gap infill and the other infill roles still use
+            // initial_layer_infill_speed.
+            const bool use_first_layer_speed = is_perimeter(path.role()) || path.role() == erBrim ||
+                                               path.role() == erSupportMaterial || path.role() == erSupportMaterialInterface ||
+                                               path.role() == erSupportTransition;
             speed_setting = use_first_layer_speed ? "initial_layer_speed" : "initial_layer_infill_speed";
             speed         = use_first_layer_speed ? this->process_flow_value(m_config.initial_layer_speed) :
                                                     this->process_flow_value(m_config.initial_layer_infill_speed);
@@ -10080,6 +10201,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     }
 
     bool                        variable_speed = false;
+    // Orca #16297: the overhang fan is on along the whole path (a uniform fan state the constant-speed branch's
+    // path-wide marker can carry).
+    bool                        path_overhang_fan_active = false;
     std::vector<ProcessedPoint> new_points{};
 
     // Ultra (over-support walls): a wall over support is a perimeter for every other purpose, but
@@ -10088,7 +10212,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // whole feature. It is excluded here rather than dropped out of is_perimeter(), so seams,
     // travel/retraction and small-perimeter handling still see it as the wall it is.
     // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
-    if (this->process_flow_value(m_config.enable_overhang_speed) && !this->on_first_layer() && !this->object_layer_over_raft() &&
+    //
+    // Orca #14788: the overhang fan needs the overhang measured too, so walls and bridges are measured
+    // when either the overhang slowdown or the overhang fan is on.
+    const bool overhang_speed_on       = this->process_flow_value(m_config.enable_overhang_speed);
+    const bool overhang_fan_on         = EXTRUDER_CONFIG(enable_overhang_bridge_fan) && m_enable_cooling_markers;
+    const bool need_overhang_detection = overhang_speed_on || overhang_fan_on;
+    if (need_overhang_detection && !this->on_first_layer() && !this->object_layer_over_raft() &&
         path.role() != erOverSupportPerimeter &&
         (is_bridge(path.role()) || is_perimeter(path.role()))) {
         bool   is_external = is_external_perimeter(path.role());
@@ -10145,9 +10275,25 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
                                                                                   ref_speed, speed, slowdown_curled, fan_overlap_threshold);
         }
+        // Orca #14788: with the slowdown off the points only carry the overhang fan transitions, printed at the
+        // path's own speed.
+        if (!overhang_speed_on)
+            for (ProcessedPoint &point : new_points)
+                point.speed = speed;
         variable_speed = std::any_of(new_points.begin(), new_points.end(), [speed](const ProcessedPoint& p) {
             return fabs(double(p.speed) - speed) > 1;
         }); // Ignore small speed variations (under 1mm/sec)
+        // Orca #15158 / #16297: a uniform overhang fan state is set by the path-wide marker of the constant-speed
+        // branch (which keeps the path's arcs); only a fan transition within the path needs point-by-point
+        // moves, so CoolingBuffer can put the fan command between them.
+        if (overhang_fan_on && fan_overlap_threshold >= 0.f && !new_points.empty()) {
+            path_overhang_fan_active = new_points.front().overlap <= fan_overlap_threshold;
+            variable_speed = variable_speed ||
+                std::adjacent_find(new_points.begin(), new_points.end(),
+                                   [fan_overlap_threshold](const ProcessedPoint &previous, const ProcessedPoint &current) {
+                                       return (previous.overlap <= fan_overlap_threshold) != (current.overlap <= fan_overlap_threshold);
+                                   }) != new_points.end();
+        }
     }
 
     double F = speed * 60; // convert mm/sec to mm/min
@@ -10342,21 +10488,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     auto overhang_fan_threshold     = EXTRUDER_CONFIG(overhang_fan_threshold);
     auto enable_overhang_bridge_fan = EXTRUDER_CONFIG(enable_overhang_bridge_fan);
 
-    //    { "0%", Overhang_threshold_none },
-    //    { "10%", Overhang_threshold_1_4 },
-    //    { "25%", Overhang_threshold_2_4 },
-    //    { "50%", Overhang_threshold_3_4 },
-    //    { "75%", Overhang_threshold_4_4 },
-    //    { "95%", Overhang_threshold_bridge }
     auto check_overhang_fan = [&overhang_fan_threshold](float overlap, ExtrusionRole role) {
-        if (role == erBridgeInfill ||
-            role == erOverhangPerimeter) { // ORCA: Split out bridge infill to internal and external to apply separate fan settings
-            return true;
-        }
-        if (overhang_fan_threshold == Overhang_threshold_none)
-            return is_external_perimeter(role);
-        const float overlap_threshold = overhang_fan_overlap_threshold(overhang_fan_threshold);
-        return overlap_threshold >= 0.f && overlap <= overlap_threshold;
+        return overhang_fan_on_at(overhang_fan_threshold, overlap, role);
     };
 
     std::string comment;
@@ -10370,12 +10503,20 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     auto append_role_based_fan_marker = [this, &gcode](const ExtrusionRole role, const std::string_view& marker_prefix, const bool fan_on) {
         assert(m_enable_cooling_markers);
 
+        // EDGE: CoolingBuffer closes the role fan requests at a tool change (the new filament starts at its
+        // layer speed), so a region the new filament continues needs a fresh START too, as on a new layer.
+        const int extruder = m_writer.extruder() != nullptr ? int(m_writer.extruder()->id()) : -1;
         if (fan_on) {
-            if (!m_is_role_based_fan_on[role]) {
+            // Orca: CoolingBuffer consumes role fan markers per layer, so continuing
+            // role-based fan regions need a fresh START marker on each new layer.
+            if (!m_is_role_based_fan_on[role] || m_role_based_fan_marker_layer[role] != m_layer_index ||
+                m_role_based_fan_marker_extruder[role] != extruder) {
                 gcode += ";";
                 gcode += marker_prefix;
                 gcode += "_FAN_START\n";
                 m_is_role_based_fan_on[role] = true;
+                m_role_based_fan_marker_layer[role] = m_layer_index;
+                m_role_based_fan_marker_extruder[role] = extruder;
             }
         } else {
             if (m_is_role_based_fan_on[role]) {
@@ -10383,6 +10524,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 gcode += marker_prefix;
                 gcode += "_FAN_END\n";
                 m_is_role_based_fan_on[role] = false;
+                m_role_based_fan_marker_layer[role] = -1;
+                m_role_based_fan_marker_extruder[role] = -1;
             }
         }
     };
@@ -10443,12 +10586,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             if (m_enable_cooling_markers) {
                 if (enable_overhang_bridge_fan) {
                     // BBS: Overhang_threshold_none means Overhang_threshold_1_4 and forcing cooling for all external
-                    // perimeter
-                    append_role_based_fan_marker(
-                        erOverhangPerimeter, "_OVERHANG"sv,
-                        (overhang_fan_threshold == Overhang_threshold_none && is_external_perimeter(path.role())) ||
-                            (path.role() == erBridgeInfill ||
-                             path.role() == erOverhangPerimeter)); // ORCA: Add support for separate internal bridge fan speed control
+                    // perimeter. ORCA: bridges and overhang perimeters always (separate internal bridge fan below).
+                    // Orca #16297: or a path overhanging past the fan threshold all along.
+                    append_role_based_fan_marker(erOverhangPerimeter, "_OVERHANG"sv,
+                                                 path_overhang_fan_active ||
+                                                     overhang_fan_on_for_role(overhang_fan_threshold, path.role()));
 
                     // ORCA: Add support for separate internal bridge fan speed control
                     append_role_based_fan_marker(erInternalBridgeInfill, "_INTERNAL_BRIDGE"sv, path.role() == erInternalBridgeInfill);
@@ -11531,22 +11673,13 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     if (!change_filament_gcode.empty() && !(m_config.manual_filament_change.value && m_toolchange_count == 1)) {
         dyn_config.set_key_value("toolchange_z", new ConfigOptionFloat(print_z));
 
-        // Ultra: per-filament flush vectors for BBS 2.x change_filament templates (single-nozzle).
+        // BBS: flush speed / temperature for the change_filament template (Bambu Studio GCode.cpp
+        // 8318-8337). A toolchange that does not go through the BBL wipe tower never cools before the
+        // tower: Bambu publishes filament_cooling_before_tower as all zeros here.
         {
-            const auto* ft_opt = m_config.option<ConfigOptionInts>("filament_flush_temp");
-            const auto* vs_opt = m_config.option<ConfigOptionFloats>("filament_flush_volumetric_speed");
-            const size_t nf = flow_variant_filament_count(m_config);
-            std::vector<int> fts; std::vector<double> vss;
-            for (size_t i = 0; i < nf; ++i) {
-                double vs = (vs_opt && i < vs_opt->size()) ? vs_opt->get_at(int(i)) : 0.;
-                if (vs == 0.) vs = get_value_at(m_config, m_config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, int(i));
-                vss.push_back(vs);
-                int ft = (ft_opt && i < ft_opt->size()) ? ft_opt->get_at(int(i)) : 0;
-                if (ft == 0) ft = m_config.nozzle_temperature_range_high.get_at(int(i));
-                fts.push_back(ft);
-            }
-            dyn_config.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(vss));
-            dyn_config.set_key_value("flush_temperatures", new ConfigOptionInts(fts));
+            BambuFlushPlaceholders flush = bambu_flush_placeholders(m_config, false);
+            std::fill(flush.cooling_before_tower.begin(), flush.cooling_before_tower.end(), 0.);
+            flush.set(dyn_config);
         }
 
         // BBS: as above - the _ec pair has to be in the parser before the template reads it.

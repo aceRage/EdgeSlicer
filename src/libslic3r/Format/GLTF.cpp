@@ -75,7 +75,7 @@ constexpr size_t   MAX_TEXTURE_PIXELS = 64u * 1024 * 1024;     // and its decode
 std::string err_damaged() { return _L("This glTF file is damaged or incomplete."); }
 std::string err_draco()
 {
-    return _L("This file uses Draco mesh compression, which Snapmaker Orca cannot read yet. "
+    return _L("This file uses Draco mesh compression, which EdgeSlicer cannot read yet. "
               "Re-export it without Draco compression.");
 }
 
@@ -505,7 +505,7 @@ bool decode_meshopt_buffer_views(cgltf_data *data, std::string &message)
         decoded_total += (uint64_t) bv.size;
         if ((uint64_t) bv.size > MAX_GLTF_FILE || decoded_total > MAX_GLTF_FILE) {
             message = format(_L("This glTF file expands to more than %1% MB of mesh data, which "
-                                "Snapmaker Orca will not load."),
+                                "EdgeSlicer will not load."),
                              (unsigned long long) (MAX_GLTF_FILE / (1024 * 1024)));
             return false;
         }
@@ -789,7 +789,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
             return false;
         }
         if ((uint64_t) len > MAX_GLTF_FILE) {
-            message = format(_L("This file is %1% MB. Snapmaker Orca imports glTF files up to %2% MB."),
+            message = format(_L("This file is %1% MB. EdgeSlicer imports glTF files up to %2% MB."),
                              (unsigned long long) ((uint64_t) len / (1024 * 1024)),
                              (unsigned long long) (MAX_GLTF_FILE / (1024 * 1024)));
             return false;
@@ -861,7 +861,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
             std::string list;
             for (const std::string &n : unsupported)
                 list += (list.empty() ? "" : ", ") + n;
-            message = format(_L("This file needs the glTF extension \"%1%\", which Snapmaker Orca does not support."), list);
+            message = format(_L("This file needs the glTF extension \"%1%\", which EdgeSlicer does not support."), list);
             return false;
         }
     }
@@ -872,7 +872,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         for (cgltf_size i = 0; i < data->buffers_count; ++i) {
             declared += (uint64_t) data->buffers[i].size;
             if (declared > MAX_GLTF_FILE) {
-                message = format(_L("This glTF file declares more than %1% MB of mesh data, which Snapmaker Orca "
+                message = format(_L("This glTF file declares more than %1% MB of mesh data, which EdgeSlicer "
                                     "will not load."),
                                  (unsigned long long) (MAX_GLTF_FILE / (1024 * 1024)));
                 return false;
@@ -884,7 +884,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
             if (u.compare(0, 5, "data:") == 0)
                 continue;                       // decoded by cgltf, already capped above
             if (u.find("://") != std::string::npos) {
-                message = _L("This glTF file refers to mesh data on the network, which Snapmaker Orca will not fetch.");
+                message = _L("This glTF file refers to mesh data on the network, which EdgeSlicer will not fetch.");
                 return false;
             }
             if (!uri_is_safe_relative(u)) {
@@ -895,7 +895,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         const cgltf_result loaded = cgltf_load_buffers(&options, data, path);
         if (loaded != cgltf_result_success) {
             if (file_ctx.too_large)
-                message = format(_L("This glTF file refers to more than %1% MB of mesh data, which Snapmaker Orca "
+                message = format(_L("This glTF file refers to more than %1% MB of mesh data, which EdgeSlicer "
                                     "will not load."),
                                  (unsigned long long) (MAX_GLTF_FILE / (1024 * 1024)));
             else if (loaded == cgltf_result_file_not_found)
@@ -1094,14 +1094,14 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
 
         triangles_total += geo.its.indices.size();
         if (triangles_total > MAX_GLTF_TRIANGLES) {
-            message = format(_L("This glTF file has more than %1% million triangles, which Snapmaker Orca "
+            message = format(_L("This glTF file has more than %1% million triangles, which EdgeSlicer "
                                 "will not load."),
                              (unsigned long long) (MAX_GLTF_TRIANGLES / 1000000));
             return false;
         }
         if (parts.size() >= MAX_GLTF_VOLUMES) {
             info.skipped_nodes = items.size() - step;
-            message = format(_L("This glTF file has more than %1% parts, which Snapmaker Orca will not load."),
+            message = format(_L("This glTF file has more than %1% parts, which EdgeSlicer will not load."),
                              (unsigned long long) MAX_GLTF_VOLUMES);
             return false;
         }

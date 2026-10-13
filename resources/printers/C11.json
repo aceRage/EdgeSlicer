@@ -37,6 +37,7 @@
             "bed_temperature_limit": 100
         },
         "model_id": "C11",
+        "sn_prefix": "01S",
         "compatible_machine":["BL-P001", "BL-P002", "C12", "C13"],
         "printer_type": "C11",
         "ftp_folder" : "sdcard/",

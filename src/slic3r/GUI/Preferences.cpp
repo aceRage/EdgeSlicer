@@ -1336,12 +1336,11 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
 
         if (param == "installed_networking") {
             bool pbool = app_config->get_bool("installed_networking");
-            // Ultra (plug-in guards): with UltraNet installed there is nothing to download - the
-            // plug-in is already there, and this offer would replace it with Bambu's package.
-            if (pbool && GUI::wxGetApp().is_ultranet_plugin_installed()) {
-                BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Preferences checkbox offer suppressed)";
-            } else if (pbool) {
-                GUI::wxGetApp().CallAfter([] { GUI::wxGetApp().ShowDownNetPluginDlg(); });
+            // Turning the network plug-in on used to offer Bambu's download. EdgeSlicer never
+            // downloads it: with UltraNet installed this is silent, otherwise the user is told the
+            // plug-in is missing from this install.
+            if (pbool && GUI::wxGetApp().getAgent() == nullptr) {
+                GUI::wxGetApp().CallAfter([] { GUI::wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true); });
             }
             if (m_legacy_networking_ckeckbox != nullptr) { m_legacy_networking_ckeckbox->Enable(pbool); }
         }
@@ -1879,7 +1878,10 @@ wxWindow* PreferencesDialog::create_general_page()
         50, "warn_low_memory_slicing");
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     //auto title_network = create_item_title(_L("Network"), page, _L("Network"));
-    auto item_user_sync        = create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset");
+    // User presets are never synced with a cloud account (PresetSyncPolicy.hpp): no checkbox for it.
+    wxBoxSizer *item_user_sync = PresetSync::cloud_sync_enabled()
+        ? create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset")
+        : nullptr;
     auto item_system_sync        = create_item_checkbox(_L("Update built-in Presets automatically."), page, _L("System Sync"), 50, "sync_system_preset");
     auto item_save_presets = create_item_button(_L("Clear my choice on the unsaved presets."), _L("Clear"), page, L"", _L("Clear my choice on the unsaved presets."), []() {
         wxGetApp().app_config->set("save_preset_choise", "");
@@ -2046,7 +2048,8 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_warn_low_memory, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));
+    if (item_user_sync)
+        sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_system_sync, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_remember_printer_config, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_remember_print_action, 0, wxTOP, FromDIP(3));
@@ -2199,10 +2202,15 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("Connect to Bambu Lab printers (cloud login or LAN). The plug-in is downloaded from Bambu on first use; takes effect after restarting."), 50, "installed_networking");
     auto item_bambu_stealth = create_item_checkbox(_L("Stealth mode (no Bambu cloud telemetry)"), page,
         _L("Stops data transmission to Bambu's cloud services. Safe to enable for LAN-only use; disable it to sign in to a Bambu account."), 50, "stealth_mode");
-    // Ultra (plug-in guards): "legacy" only picks WHICH Bambu CDN build to download. With our own
-    // plug-in installed nothing is ever downloaded, so the switch has no effect - hide it.
-    auto item_bambu_legacy = create_item_checkbox(_L("Use legacy network plugin"), page,
-        _L("Use the older plug-in for printers on old Bambu firmware. Takes effect after restarting."), 50, "legacy_networking");
+    // "New Bambu LiveView" (tests/plan_own_camera_view.md): on by default (AppConfig::set_defaults).
+    // Read at every Play, so it applies without a restart.
+    auto item_bambu_own_liveview = create_item_checkbox(_L("New Bambu LiveView"), page,
+        _L("Play Bambu printer cameras on the Device tab through EdgeSlicer's own camera relay (go2rtc, the one the phone uses) "
+           "instead of Bambu's camera files. Used for printers on the LAN with an access code; others keep the Bambu player. "
+           "Turn it off to use Bambu's camera files instead. Applies the next time you press Play; no restart needed."),
+        50, "liveview_go2rtc");
+    // The "Use legacy network plugin" switch is gone: EdgeSlicer ships one network plug-in and
+    // ignores the legacy_networking setting (GUI_App resets it at start-up).
 
     auto title_spoolman = create_item_title(_L("Spool Manager"), page, _L("Spool Manager"));
     auto item_spoolman_enabled = create_item_checkbox(_L("Enable Spoolman integration"), page,
@@ -2266,13 +2274,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(title_bambu, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_bambu_legacy, 0, wxTOP, FromDIP(3));
-    // Ultra (plug-in guards): hidden after the Add so the sizer keeps no space for it. The switch
-    // only picks WHICH Bambu CDN build to download; with UltraNet installed nothing is downloaded.
-    if (wxGetApp().is_ultranet_plugin_installed()) {
-        sizer_page->Hide(item_bambu_legacy, true);
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Preferences legacy-plugin switch hidden)";
-    }
+    sizer_page->Add(item_bambu_own_liveview, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_spoolman_enabled, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_spoolman_url, 0, wxTOP, FromDIP(3));

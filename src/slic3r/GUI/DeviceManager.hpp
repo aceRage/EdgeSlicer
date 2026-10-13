@@ -18,6 +18,8 @@
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
+#include "FirstRequestGate.hpp"
+#include "SsdpConnectType.hpp"
 #include "AmsDrying.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
@@ -583,6 +585,38 @@ public:
     bool m_lan_session_up{false};
     void set_lan_session_up(bool up) { m_lan_session_up = up; }
     bool lan_session_up() const { return m_lan_session_up; }
+    // The first request after a selection (FirstRequestGate.hpp): a status request made while the
+    // session this selection started is still being dialled is held - the connected callback asks
+    // for the same report - and each connect logs one line when the session is up and one when the
+    // first status report lands, in milliseconds from the selection.
+    // Any other command published while the session is dialled waits in the gate (publish_json):
+    // it goes out as soon as the session is up (note_session_up, whichever event reports it), or is
+    // reported as not sent when the session fails, the hold runs out or a new selection replaces it.
+    FirstRequestGate::SelectionGate m_gate;
+    // A selection or a re-dial started. `session_already_up`: the session it needs is up (a cloud
+    // printer while the cloud session is connected).
+    void note_selected(bool session_already_up);
+    // The plug-in reported this printer's session up (`kind`: "LAN" / "cloud") - this also sends
+    // whatever was held for it - or failed / lost.
+    void note_session_up(const char* kind);
+    void note_session_down();
+    // The plug-in reported this printer's LAN dial failed. True: it is the selection's first
+    // refusal, held requests stay held and lan_reconnect_tick dials again at m_redial_at. False:
+    // the session is reported down (note_session_down).
+    bool note_dial_failed();
+    // connect() is dialling the printer: arms the gate when no selection did (FirstRequestGate.hpp
+    // SelectionGate::dial_started).
+    void note_dial_started();
+    // connect(..., session_up = true): the printer's LAN session is already up (a re-selection
+    // that keeps it). Does not arm the gate (SelectionGate::dial_on_live_session).
+    void note_dial_on_live_session();
+    bool m_redial_due { false };
+    std::chrono::steady_clock::time_point m_redial_at {};
+    // True (and logged) when the status request `what` is to be held back for the session.
+    bool hold_status_request(const char* what);
+    void note_status_received();
+    void report_not_sent(const FirstRequestGate::SelectionGate::Dropped& d);
+    void send_held(const std::vector<FirstRequestGate::HeldCommand>& held);
     // Ultra: whether a report carrying the AMS / external spools has been parsed in full for this
     // printer, and when DeviceManager::full_report_tick last asked it for one (see there).
     bool m_full_report_seen{false};
@@ -1014,7 +1048,9 @@ public:
     std::vector<HMSItem>    hms_list;
 
     /* machine mqtt apis */
-    int connect(bool is_anonymous = false, bool use_openssl = true);
+    // `session_up`: the LAN session to this printer is already up and this call only confirms it
+    // (the plug-in's connect_printer is idempotent); the first-request gate is not armed.
+    int connect(bool is_anonymous = false, bool use_openssl = true, bool session_up = false);
     int disconnect();
 
     json_diff print_json;
@@ -1265,8 +1301,16 @@ public:
     /*vi slot data*/
     AmsTray vt_tray;                        // virtual tray
     // Two-extruder machines report one external spool per extruder in print.vir_slot[] (ids 254 =
-    // deputy/left, 255 = main/right). Display only: vt_tray keeps driving the legacy paths.
+    // deputy/left, 255 = main/right). vt_tray keeps driving the one-extruder paths.
     std::vector<AmsTray> vir_slots;
+    // The external spool holders a two-extruder job can map filaments to: vir_slots, or, from a
+    // report without vir_slot[], vt_tray as the main extruder's (id 255) - BambuStudio's vt_slot.
+    // Empty on a one-extruder printer, whose send paths keep using vt_tray as they always did.
+    std::vector<AmsTray> external_spools() const;
+    // The external spool holder (ams id 254 / 255) as an AMS mapping candidate: tray_id = id = the
+    // holder's ams id, slot "0" (BambuStudio _parse_tray_info for EXT_SPOOL). False when the
+    // holder is not reported or holds no identified spool.
+    bool external_spool_mapping_info(int ext_ams_id, FilamentInfo& info) const;
     //std::vector<AmsTray> vt_trays;          // virtual tray for new
     AmsTray parse_vt_tray(json vtray);
     /*for parse new info*/
@@ -1360,6 +1404,10 @@ private:
     // One reconnect attempt against one LAN machine: the same three steps the Device tab's
     // set_selected_machine runs (disconnect, reset, connect, mark LAN-connected).
     void lan_reconnect_now(MachineObject* obj, const char* why);
+    // Whether the plug-in's cloud MQTT session is up, as its on_server_connected callback last
+    // reported (UltraNet opens it lazily, on the first subscribe or cloud selection). A cloud
+    // printer selected while it is still connecting holds its early status requests.
+    bool m_cloud_session_up{false};
 
     // The hidden hub-managed instance's round robin over its LAN printers (see the .cpp): which
     // printer currently holds the agent's single LAN session, and since when.
@@ -1397,6 +1445,10 @@ public:
     void reload_printer_settings();
 
     bool set_selected_machine(std::string dev_id,  bool need_disconnect = false);
+    // GUI_App's on_server_connected handler: the cloud session came up (code 0) or failed / was
+    // lost (anything else). A selected cloud printer waiting for it gets its "connected" line.
+    void on_cloud_session(int code);
+    bool cloud_session_up() const { return m_cloud_session_up; }
     MachineObject* get_selected_machine();
     void add_user_subscribe();
     void del_user_subscribe();
@@ -1413,6 +1465,21 @@ public:
 
     /* create machine or update machine properties */
     void on_machine_alive(std::string json_str);
+    // The connection type a printer keeps after an announcement (SsdpConnectType.hpp). `list` is
+    // "local" or "user", for the log line written whenever the outcome for that printer and list
+    // changes.
+    void apply_ssdp_connect_type(MachineObject* obj, const char* list, const std::string& announced,
+                                 const std::string& announced_bind, bool saved_lan, bool has_access_code, long long now_ms);
+    std::map<std::string, std::string>                     m_ssdp_outcome_logged; // "<dev_id>|<list>" -> last line
+    std::map<std::string, SsdpConnectType::LanMemory>      m_ssdp_lan_memory;     // dev_id -> what it announced lately
+    static long long                                       ssdp_now_ms();
+    // The printer announced "lan" within SsdpConnectType::LAN_MEMORY_MS.
+    bool lan_announced_recently(const std::string& dev_id) const;
+    // The printer picker's "Other Device" click (SelectMachinePop): which dialog to offer for `obj`.
+    // A printer that announced "lan" recently is offered the access-code dialog, never the cloud
+    // bind; if a run of non-"lan" announcements had already switched it, it is made "lan" again
+    // here so the access code can be entered. Logs the decision (never the access code).
+    SsdpConnectType::PickerOffer picker_offer_for(MachineObject* obj, const char* panel_list);
     MachineObject* insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code);
     /* disconnect all machine connections */
     void disconnect_all();
@@ -1451,6 +1518,10 @@ public:
     }
 
     static std::string parse_printer_type(std::string type_str);
+    // The printer_type a device is: parse_printer_type of its reported code, else the model its
+    // serial number's prefix names, else the reported code itself (possibly empty) so a message
+    // can name it. Use this wherever a device's printer_type is set.
+    static std::string identify_printer_type(const std::string& code, const std::string& dev_id);
     static std::string get_printer_display_name(std::string type_str);
     static std::string get_printer_thumbnail_img(std::string type_str);
     static std::string get_printer_ams_type(std::string type_str);

@@ -25,14 +25,26 @@ namespace BambuSendMapping {
 // then every filament is matched against every AMS, as before. Otherwise each side's filaments are
 // matched only against the AMS units that feed that side's physical extruder
 // (BambuExtruderMap::logical_to_physical over `physical_extruder_map`), and the result is sorted by
-// filament id. Returns MachineObject::ams_filament_mapping's code (0 = mapped, 1 = order mapping on
-// a printer without colour mapping, < 0 = nothing to map); the last non-zero side wins.
+// filament id. A side no AMS feeds is matched against that extruder's external spool holder
+// instead (tray 254/255, MachineObject::ams_filament_mapping). Returns
+// MachineObject::ams_filament_mapping's code (0 = mapped, 1 = order mapping on a printer without
+// colour mapping, < 0 = nothing to map); the last non-zero side wins.
 int auto_map(MachineObject* obj, const std::vector<FilamentInfo>& filaments, const std::vector<int>& filament_map,
              const std::vector<int>& physical_extruder_map, std::vector<FilamentInfo>& result);
 
+// A mapping entry that names a two-extruder printer's external spool holder: tray_id 254 / 255 and
+// the same ams_id (slot_id "0"), as BambuStudio's mapping makes it.
+bool is_external_spool(const FilamentInfo& f);
+
+// The job's use_ams once its mapping is known (BambuStudio SelectMachineDialog::on_send_print):
+// filaments from AMS slots and external spools -> true, from external spools only -> false. A
+// mapping without an external spool returns `current` (the dialog's AMS setting), so every job
+// that does not use an external spool sends exactly what it always did.
+bool use_ams(const std::vector<FilamentInfo>& result, bool current);
+
 // SelectMachineDialog::filaments_mapped_to_wrong_extruder: the 0-based filament ids whose mapped
-// tray sits in an AMS that feeds another extruder than the sliced one. External spools and unknown
-// units are not judged. Empty for a one-extruder job.
+// tray sits in an AMS, or an external spool holder, that feeds another extruder than the sliced
+// one. Unknown units are not judged. Empty for a one-extruder job.
 std::vector<int> wrong_extruder(MachineObject* obj, const std::vector<FilamentInfo>& result, const std::vector<int>& filament_map,
                                 const std::vector<int>& physical_extruder_map);
 

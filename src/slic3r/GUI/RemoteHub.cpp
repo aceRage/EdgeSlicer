@@ -18,6 +18,8 @@
 #include "slic3r/Utils/ServerLifetime.hpp"
 #include "slic3r/Utils/HubHandover.hpp"
 #include "slic3r/Utils/WinFirewall.hpp"
+#include "slic3r/Utils/TailscaleCli.hpp" // where the CLI lives per platform, and the POSIX way to run it
+#include "slic3r/Utils/HubPlatform.hpp"   // go2rtc/ffmpeg lookup, macOS/Linux firewall, port holder, route, keep-alive, child processes
 
 #include <boost/asio.hpp>
 #include <boost/beast/core/detail/base64.hpp>
@@ -38,7 +40,9 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <deque>
 #include <functional>
@@ -80,6 +84,7 @@
 #include <wx/init.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
+#include <wx/notifmsg.h>
 #include <wx/taskbar.h>
 #ifdef __APPLE__
 #include "slic3r/Utils/MacDarkMode.hpp" // mac_make_accessory_app, mac_activate_app
@@ -110,15 +115,17 @@ static const int         HUB_PORT           = 13640;
 static const char* const PLAYER_PAGE = "/stream.html";
 static const char* const PLAYER_JS[] = { "/video-stream.js", "/video-rtc.js" };
 static const char* const GO2RTC_WS   = "/api/ws";
+// ServerLifetime tag of a viewer tunnel on /api/ws: this prefix + the go2rtc stream name it plays.
+static const char GO2RTC_VIEWER_TAG[] = "go2rtc:";
 static const size_t      MAX_API_BODY       = 64 * 1024;
 static const uint64_t    MAX_UPLOAD         = 2ull * 1024 * 1024 * 1024;
 static const int         IDLE_EXIT_SECONDS  = 60;
 // How long shutdown() waits for connection and helper threads once it has shut their sockets.
 // Past it the server is left alive for them rather than destroyed underneath them.
 static const int         SHUTDOWN_DRAIN_MS  = 3000;
-// Where the remote-access card sends people who have no Tailscale yet, and where the one error
-// nobody can fix from this PC (tailnet-wide HTTPS certificates) is actually switched on.
-static const char* const TAILSCALE_DOWNLOAD_URL  = "https://tailscale.com/download/windows";
+// Where the remote-access card sends people who have no Tailscale yet (the download page for the
+// platform this hub runs on, TailscaleCli::download_url), and where the one error nobody can fix
+// from this PC (tailnet-wide HTTPS certificates) is actually switched on.
 static const char* const TAILSCALE_DNS_ADMIN_URL = "https://login.tailscale.com/admin/dns";
 // Request hygiene. The head cap is generous for a browser (cookies + a long referer) and small
 // enough that a dribbling client cannot grow the buffer. The connection caps leave room for a
@@ -462,6 +469,42 @@ static std::string default_route_ipv4_win()
 }
 #endif
 
+// Defined with the tailscale code below; declared here for the route lookup.
+static bool run_capture(const std::vector<std::string>& args, std::string& out, int& exit_code, int timeout_ms,
+                        bool* timed_out = nullptr, const std::function<bool(const std::string&)>& stop_early = nullptr);
+
+#ifndef _WIN32
+// The first address of the interface that carries the default route, like default_route_ipv4_win().
+// Linux reads /proc/net/route; macOS has no such file, so `route -n get default` is asked, at most
+// once every 10 seconds (lan_ips() is called when the link is rebuilt, not per request, but a laptop
+// changes networks and this keeps the cost bounded either way).
+static std::string default_route_ipv4_posix(const std::vector<HubAddresses::Adapter>& adapters)
+{
+    static std::mutex                                  mtx;
+    static std::chrono::steady_clock::time_point       at;
+    static std::string                                 cached_iface;
+    static bool                                        have = false;
+    std::string                                        iface;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (have && std::chrono::steady_clock::now() - at < std::chrono::seconds(10)) iface = cached_iface;
+        else {
+#  ifdef __linux__
+            iface = HubPlatform::default_iface_from_proc_net_route(HubPlatform::read_file_posix("/proc/net/route"));
+#  else
+            std::string out; int code = 0;
+            if (run_capture({ "/sbin/route", "-n", "get", "default" }, out, code, 3000) && code == 0)
+                iface = HubPlatform::default_iface_from_route_get(out);
+#  endif
+            cached_iface = iface;
+            at           = std::chrono::steady_clock::now();
+            have         = true;
+        }
+    }
+    return HubPlatform::preferred_ipv4_for_iface(adapters, iface);
+}
+#endif
+
 static std::vector<std::string> lan_ips()
 {
     // What a phone can actually be on the same network as: the Wi-Fi / Ethernet adapters (and the
@@ -472,6 +515,8 @@ static std::vector<std::string> lan_ips()
     std::string                              preferred;
 #ifdef _WIN32
     preferred = default_route_ipv4_win();
+#else
+    preferred = default_route_ipv4_posix(adapters);
 #endif
     std::vector<std::string> out    = HubAddresses::candidate_ips(adapters, preferred);
     const auto               usable = [&](const std::string& a) { return adapters.empty() || std::find(out.begin(), out.end(), a) != out.end(); };
@@ -630,7 +675,13 @@ static std::string process_image_path(long pid)
     if (!ok || n == 0) return std::string();
     return real_path_w(std::wstring(buf, n));
 #else
-    return std::string(); // an AppImage's image path is its mount, not the file a slicer launches: not comparable
+    // macOS proc_pidpath, Linux /proc/<pid>/exe (not inside an AppImage: its image path is the
+    // mount, not the file a slicer launches, so it is not comparable and stays empty).
+    std::string p = HubPlatform::process_image_path_posix(pid);
+    if (p.empty()) return p;
+    boost::system::error_code ec;
+    const fs::path            c = fs::canonical(fs::path(p), ec);
+    return ec ? p : c.string();
 #endif
 }
 
@@ -882,7 +933,7 @@ static void set_keepalive(tcp::socket& s, int idle_seconds)
     DWORD                out = 0;
     ::WSAIoctl(s.native_handle(), SIO_KEEPALIVE_VALS, &ka, sizeof(ka), nullptr, 0, &out, nullptr, nullptr);
 #else
-    (void) idle_seconds;
+    HubPlatform::set_tcp_keepalive_posix(s.native_handle(), idle_seconds);
 #endif
 }
 
@@ -1096,11 +1147,20 @@ static void pump(tcp::socket& from, tcp::socket& to)
 
 // Splice the client onto 127.0.0.1:<port>, replaying the (rewritten) request head first.
 // Works for plain responses and WebSocket upgrades alike.
-// Run a command to completion and capture what it prints (the tailscale CLI). Windows only for now.
-static bool run_capture(const std::vector<std::string>& args, std::string& out, int& exit_code, int timeout_ms)
+// Run a command to completion and capture what it prints (the tailscale CLI; on Windows also netstat
+// and friends). True when it ran to completion; false when it could not be started or had to be
+// killed for taking longer than `timeout_ms`. Off Windows this is TailscaleCli::run_capture_posix.
+//
+// `timed_out` (optional) is set when the false was a timeout rather than "could not start".
+// `stop_early` (optional) is shown all the output so far after every read; when it returns true the
+// command is killed at once (a `tailscale serve` that printed the admin-console link it is now
+// waiting on) and the call returns false with `timed_out` unset.
+static bool run_capture(const std::vector<std::string>& args, std::string& out, int& exit_code, int timeout_ms,
+                        bool* timed_out, const std::function<bool(const std::string&)>& stop_early)
 {
     out.clear();
     exit_code = -1;
+    if (timed_out) *timed_out = false;
 #ifdef _WIN32
     std::wstring cmd;
     for (const std::string& a : args) {
@@ -1122,14 +1182,27 @@ static bool run_capture(const std::vector<std::string>& args, std::string& out, 
     const BOOL ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi);
     ::CloseHandle(wr);
     if (!ok) { ::CloseHandle(rd); return false; }
+    std::atomic<bool> stopped { false };
     std::thread reader([&]() {
         char  b[4096];
         DWORD n = 0;
-        while (::ReadFile(rd, b, sizeof(b), &n, nullptr) && n > 0) out.append(b, n);
+        while (::ReadFile(rd, b, sizeof(b), &n, nullptr) && n > 0) {
+            out.append(b, n);
+            if (stop_early && !stopped && stop_early(out)) stopped = true;
+        }
     });
-    const DWORD w = ::WaitForSingleObject(pi.hProcess, (DWORD) timeout_ms);
+    DWORD w = WAIT_TIMEOUT;
+    if (!stop_early) {
+        w = ::WaitForSingleObject(pi.hProcess, (DWORD) timeout_ms);
+    } else {
+        const ULONGLONG deadline = ::GetTickCount64() + (ULONGLONG) timeout_ms;
+        do {
+            w = ::WaitForSingleObject(pi.hProcess, 50);
+        } while (w == WAIT_TIMEOUT && !stopped && ::GetTickCount64() < deadline);
+    }
     if (w != WAIT_OBJECT_0) ::TerminateProcess(pi.hProcess, 1);
     reader.join();
+    if (timed_out) *timed_out = w != WAIT_OBJECT_0 && !stopped;
     DWORD code = 1;
     ::GetExitCodeProcess(pi.hProcess, &code);
     exit_code = (int) code;
@@ -1138,8 +1211,7 @@ static bool run_capture(const std::vector<std::string>& args, std::string& out, 
     ::CloseHandle(rd);
     return w == WAIT_OBJECT_0;
 #else
-    (void) args; (void) timeout_ms;
-    return false;
+    return TailscaleCli::run_capture_posix(args, out, exit_code, timeout_ms, 1024 * 1024, timed_out, stop_early);
 #endif
 }
 
@@ -1151,12 +1223,13 @@ static std::string tailscale_exe()
     // that the remote-access paths can be exercised without a tailnet - and without this PC's
     // real Serve configuration being touched. Unset or empty falls through to the real locations.
     if (const char* over = std::getenv("SNORCA_TAILSCALE_EXE"); over && *over) return over;
-#ifdef _WIN32
-    const char*       pf = std::getenv("ProgramFiles");
-    const std::string p  = std::string(pf ? pf : "C:\\Program Files") + "\\Tailscale\\tailscale.exe";
-    if (fs::exists(p)) return p;
-#endif
-    return "tailscale"; // PATH
+    // The platform's known install locations (a GUI app on macOS gets a minimal PATH, so
+    // /Applications/Tailscale.app and Homebrew are named outright), then whatever PATH has.
+    const char* pf = std::getenv("ProgramFiles"); // Windows only; unset elsewhere
+    return TailscaleCli::pick_exe(TailscaleCli::current_platform(), pf ? pf : "", [](const std::string& p) {
+        boost::system::error_code ec;
+        return fs::exists(p, ec);
+    });
 }
 
 struct TailscaleState
@@ -1172,14 +1245,25 @@ struct TailscaleState
     long long   checked_at { 0 };
 };
 
+static const int TAILSCALE_STATUS_TIMEOUT_S = 15;
+
 static TailscaleState tailscale_query()
 {
     TailscaleState t;
     std::string    out;
     int            code = 0;
+    bool           timed_out = false;
     t.checked_at = (long long) std::time(nullptr);
-    if (!run_capture({ tailscale_exe(), "status", "--json" }, out, code, 15000)) {
-        t.error = "Tailscale is not installed on this PC";
+    if (!run_capture({ tailscale_exe(), "status", "--json" }, out, code, TAILSCALE_STATUS_TIMEOUT_S * 1000, &timed_out)) {
+        if (HubPlatform::classify_cli_run(false, timed_out) == HubPlatform::CliRun::TimedOut) {
+            // It started - it is installed - but did not answer in time (tailscaled wedged, the
+            // macOS app still launching). Not the same thing as missing, and not worth a download link.
+            t.installed = true;
+            t.backend   = TailscaleCli::BACKEND_NO_ANSWER;
+            t.error     = HubPlatform::cli_no_answer_message(TAILSCALE_STATUS_TIMEOUT_S);
+            return t;
+        }
+        t.error = std::string("Tailscale is not installed on ") + TailscaleCli::this_computer(TailscaleCli::current_platform());
         return t;
     }
     t.installed = true;
@@ -1200,7 +1284,9 @@ static TailscaleState tailscale_query()
         return t;
     }
     if (t.backend != "Running") {
-        t.error = t.backend == "NeedsLogin" ? "Tailscale is installed but not signed in on this PC" : "Tailscale is not running (" + t.backend + ")";
+        t.error = t.backend == "NeedsLogin" ?
+                      std::string("Tailscale is installed but not signed in on ") + TailscaleCli::this_computer(TailscaleCli::current_platform()) :
+                      "Tailscale is not running (" + t.backend + ")";
         return t;
     }
     if (run_capture({ tailscale_exe(), "serve", "status", "--json" }, out, code, 15000) && code == 0) {
@@ -1225,6 +1311,7 @@ const char* Testing::remote_access_state_name(Testing::RemoteAccessState st)
     case RemoteAccessState::NotInstalled: return "not_installed";
     case RemoteAccessState::NotSignedIn:  return "not_signed_in";
     case RemoteAccessState::NotRunning:   return "not_running";
+    case RemoteAccessState::NoAnswer:     return "no_answer";
     case RemoteAccessState::HttpsOff:     return "https_off";
     case RemoteAccessState::Serving:      return "serving";
     case RemoteAccessState::Ready:        return "ready";
@@ -1235,25 +1322,39 @@ const char* Testing::remote_access_state_name(Testing::RemoteAccessState st)
 Testing::RemoteAccessInfo Testing::classify_remote_access(bool installed, const std::string& backend, bool https,
                                                           bool serving, bool on, const std::string& error)
 {
+    return classify_remote_access(TailscaleCli::current_platform(), installed, backend, https, serving, on, error);
+}
+
+Testing::RemoteAccessInfo Testing::classify_remote_access(TailscaleCli::Platform platform, bool installed, const std::string& backend,
+                                                          bool https, bool serving, bool on, const std::string& error)
+{
     RemoteAccessInfo r;
     if (!installed) {
         r.state      = RemoteAccessState::NotInstalled;
-        r.message    = "Remote access uses Tailscale, a free private network between your PC and your phone. "
-                       "Install it on both and sign in with the same account.";
+        r.message    = std::string("Remote access uses Tailscale, a free private network between ") + TailscaleCli::your_computer(platform) +
+                       " and your phone. Install it on both and sign in with the same account.";
         r.action     = "Install Tailscale";
-        r.action_url = TAILSCALE_DOWNLOAD_URL;
+        r.action_url = TailscaleCli::download_url(platform);
+        return r;
+    }
+    if (backend == TailscaleCli::BACKEND_NO_ANSWER) {
+        r.state   = RemoteAccessState::NoAnswer;
+        r.message = HubPlatform::cli_no_answer_message(TAILSCALE_STATUS_TIMEOUT_S);
+        r.action  = "Try again";
         return r;
     }
     if (backend == "NeedsLogin" || backend == "Starting") {
         r.state   = RemoteAccessState::NotSignedIn;
-        r.message = "Tailscale is installed but not signed in on this PC. Open Tailscale from the system tray "
-                    "(or run `tailscale login`) and sign in with the same account as your phone, then try again.";
+        r.message = std::string("Tailscale is installed but not signed in on ") + TailscaleCli::this_computer(platform) +
+                    ". Open Tailscale from " + TailscaleCli::sign_in_place(platform) +
+                    " (or run `tailscale login`) and sign in with the same account as your phone, then try again.";
         r.action  = "Try again";
         return r;
     }
     if (backend != "Running") {
         r.state   = RemoteAccessState::NotRunning;
-        r.message = backend.empty() ? "Tailscale is not running on this PC." : "Tailscale is not running (" + backend + ").";
+        r.message = backend.empty() ? std::string("Tailscale is not running on ") + TailscaleCli::this_computer(platform) + "." :
+                                      "Tailscale is not running (" + backend + ").";
         r.action  = "Try again";
         return r;
     }
@@ -1505,6 +1606,130 @@ std::string Testing::camera_for_printer(const std::string& printer_id, const std
     return {};
 }
 
+// ---- the Device tab's own live view (spike) ------------------------------------------------
+// See RemoteHub.hpp. These mirror stream_center.html exactly, because sharing one go2rtc stream
+// with the phone depends on both sides arriving at the same name for the same camera.
+std::string Testing::js_encode_uri_component(const std::string& s)
+{
+    static const char* hx = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        // encodeURIComponent leaves A-Z a-z 0-9 - _ . ! ~ * ' ( ) as they are.
+        if (std::isalnum(c) || (c != 0 && std::strchr("-_.!~*'()", (char) c) != nullptr)) out += (char) c;
+        else { out += '%'; out += hx[c >> 4]; out += hx[c & 15]; }
+    }
+    return out;
+}
+
+std::string Testing::js_hash_str(const std::string& s)
+{
+    // FNV-1a 32 as hashStr() computes it (charCodeAt == the byte for ASCII), printed like
+    // Number.prototype.toString(16): lower case, no leading zeros.
+    uint32_t h = 0x811c9dc5u;
+    for (unsigned char c : s) { h ^= c; h *= 0x01000193u; }
+    std::ostringstream os;
+    os << std::hex << h;
+    return os.str();
+}
+
+Testing::OwnCameraStream Testing::own_camera_stream(const std::string& kind, const std::string& ip, const std::string& code, int relay_port)
+{
+    OwnCameraStream out;
+    // The same address and code rules BambuCamRelay applies, so nothing reaches go2rtc's config (it
+    // writes registered streams back into go2rtc.yaml) or a URL that the relay would refuse anyway.
+    if (ip.empty() || ip.size() > 253 ||
+        ip.find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.:-_") != std::string::npos)
+        return out;
+    if (code.empty() || code.size() > 32) return out;
+    for (unsigned char c : code)
+        if (c < 0x21 || c > 0x7e) return out;
+    if (kind == "rtsps" || kind == "rtsp") {
+        out.src  = kind == "rtsps" ? "rtspx://bblp:" + js_encode_uri_component(code) + "@" + ip + ":322/streaming/live/1"
+                                   : "rtsp://bblp:" + js_encode_uri_component(code) + "@" + ip + "/streaming/live/1";
+        out.name = "s" + js_hash_str(out.src);
+        out.mode = "mse";
+    } else if (kind == "local") {
+        if (relay_port <= 0 || relay_port > 65535) return out;
+        out.src  = "http://127.0.0.1:" + std::to_string(relay_port) + "/bambu?ip=" + js_encode_uri_component(ip) + "&code=" + js_encode_uri_component(code);
+        // Named by the camera, not by the relay's port: the port changes with every hub run.
+        out.name = "b" + js_hash_str("bambu6000|" + ip + "|" + code);
+        out.mode = "mjpeg";
+    }
+    return out;
+}
+
+// ---- go2rtc stream registration (see RemoteHub.hpp) ------------------------------------------
+bool Testing::parse_go2rtc_streams(const std::string& body, std::map<std::string, Go2rtcLiveStream>& out)
+{
+    json j;
+    try { j = json::parse(body); } catch (...) { return false; }
+    if (!j.is_object()) return false;
+    std::map<std::string, Go2rtcLiveStream> res;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        Go2rtcLiveStream s;
+        const json& v = it.value();
+        if (v.is_object() && v.contains("producers") && v["producers"].is_array() && !v["producers"].empty()) {
+            const json& p = v["producers"][0];
+            if (p.is_object()) {
+                if (p.contains("url") && p["url"].is_string()) s.url = p["url"].get<std::string>();
+                // An idle producer is just {"url": ...}; a connected one carries its connection's
+                // id, format, addresses and byte counters as well.
+                s.active = p.contains("id") || p.contains("remote_addr") || p.contains("format_name");
+            }
+        }
+        res[it.key()] = s;
+    }
+    out.swap(res);
+    return true;
+}
+
+Testing::StreamSyncPlan Testing::plan_stream_sync(const std::map<std::string, std::string>& desired,
+                                                  const std::map<std::string, std::string>& registered,
+                                                  const std::map<std::string, Go2rtcLiveStream>* live)
+{
+    StreamSyncPlan        plan;
+    std::set<std::string> replaced;
+    std::vector<std::pair<std::string, std::string>> unchanged; // looked at again for the variant rule
+    for (const auto& d : desired) {
+        const std::string& name = d.first;
+        const std::string& src  = d.second;
+        if (name.empty() || src.empty()) continue;
+        const auto r = registered.find(name);
+        if (live != nullptr && live->find(name) == live->end()) {
+            plan.add.emplace_back(name, src); // go2rtc does not have it (never sent, or a PUT that failed)
+        } else if (r != registered.end()) {
+            if (r->second == src) unchanged.emplace_back(name, src);
+            else { plan.replace.emplace_back(name, src); replaced.insert(name); }
+        } else if (live == nullptr) {
+            plan.add.emplace_back(name, src); // nothing known either way
+        } else {
+            const Go2rtcLiveStream& l = live->at(name);
+            if (l.active || l.url == src) plan.adopt.emplace_back(name, src);
+            else { plan.replace.emplace_back(name, src); replaced.insert(name); }
+        }
+    }
+    // A quality variant is go2rtc's ffmpeg reading the base stream through go2rtc itself, i.e. a
+    // viewer of the base stream object. Left alone it would keep the replaced object - and its
+    // connection to the camera - running.
+    for (const auto& u : unchanged) {
+        const std::string& src = u.second;
+        if (src.compare(0, 7, "ffmpeg:") != 0) continue;
+        const std::string base = src.substr(7, src.find('#') == std::string::npos ? std::string::npos : src.find('#') - 7);
+        if (replaced.count(base)) plan.replace.push_back(u);
+    }
+    for (const auto& r : registered)
+        if (desired.find(r.first) == desired.end()) plan.remove.push_back(r.first);
+    return plan;
+}
+
+std::map<std::string, std::string> Testing::merge_desired_streams(const std::map<std::string, std::string>& stream_tab,
+                                                                  const std::map<std::string, std::string>& live_view)
+{
+    std::map<std::string, std::string> out = stream_tab;
+    for (const auto& e : live_view) out.emplace(e.first, e.second); // never overrides a Stream-tab entry
+    return out;
+}
+
 static bool row_has_filament(const json& row)
 {
     if (row.contains("ams") && row["ams"].is_array())
@@ -1657,10 +1882,30 @@ static int free_loopback_port()
     } catch (...) { return 0; }
 }
 
+[[maybe_unused]] static bool path_exists(const std::string& p)
+{
+    boost::system::error_code ec;
+    return fs::exists(p, ec);
+}
+
 // Native separators: this path is shown to the user to paste into the firewall dialog.
+// Windows: the bundled go2rtc.exe, as ever. macOS / Linux: the bundled `go2rtc` if the package has
+// one (CI / build_release_macos.sh / CMake, GO2RTC_BIN_DIR), else a go2rtc in /opt/homebrew/bin,
+// /usr/local/bin or /usr/bin (nothing packages it for macOS, but a hand-installed one works), else PATH; with none of them the bundled path is returned so the "missing"
+// log line names where it was expected.
 static std::string go2rtc_exe_path()
 {
+#ifdef _WIN32
     return fs::path(resources_dir() + "/tools/go2rtc/go2rtc.exe").make_preferred().string();
+#else
+    const std::vector<std::string> cands = HubPlatform::go2rtc_candidates(TailscaleCli::current_platform(), resources_dir());
+    std::string                    found = HubPlatform::pick_first_existing(cands, path_exists);
+    if (found.empty()) {
+        const char* path_env = std::getenv("PATH");
+        found = TailscaleCli::resolve_executable("go2rtc", path_env ? path_env : "");
+    }
+    return found.empty() ? cands.front() : found;
+#endif
 }
 
 // ---- Stream quality variants -------------------------------------------------------------
@@ -1683,14 +1928,55 @@ static std::string go2rtc_exe_path()
 // a stream go2rtc cannot start is worse than an absent one, because the tile goes black instead of
 // falling back to the source. Independently of any of this, the Bambu MJPEG relay's frame-rate
 // knob (BambuCamRelay, ?fps=) needs no decoder at all and honours Medium/Low on its own.
+#ifndef _WIN32
+// macOS / Linux: the bundled ffmpeg (an LGPL build with libopenh264, the one the encoder template
+// below is written for), else a system one - Homebrew, /usr/local, /usr/bin, PATH - but only if it
+// can encode H.264: `ffmpeg -encoders` is asked once. On a Mac h264_videotoolbox (hardware) wins; a
+// system build otherwise normally has libx264 and not libopenh264, and then go2rtc's own built-in
+// template is the right one (see ffmpeg_h264_template_for_config()). An ffmpeg with none of them is
+// treated as no ffmpeg. Only the bundled build is ever shipped; a system ffmpeg is a fallback.
+struct FfmpegInfo
+{
+    std::string                path;
+    HubPlatform::H264Encoder   encoder { HubPlatform::H264Encoder::None };
+};
+static const FfmpegInfo& ffmpeg_info_posix()
+{
+    static const FfmpegInfo info = [] {
+        FfmpegInfo r;
+        const std::vector<std::string> cands = HubPlatform::ffmpeg_candidates(TailscaleCli::current_platform(), resources_dir());
+        if (path_exists(cands.front())) {
+            r.path    = cands.front();
+            r.encoder = HubPlatform::H264Encoder::OpenH264; // the bundled build; not probed
+            return r;
+        }
+        std::string found = HubPlatform::pick_first_existing(cands, path_exists);
+        if (found.empty()) {
+            const char* path_env = std::getenv("PATH");
+            found = TailscaleCli::resolve_executable("ffmpeg", path_env ? path_env : "");
+        }
+        if (found.empty()) return r;
+        std::string out; int code = 0;
+        if (run_capture({ found, "-hide_banner", "-encoders" }, out, code, 8000) && code == 0) {
+            const HubPlatform::H264Encoder enc = HubPlatform::choose_h264_encoder(out);
+            if (enc != HubPlatform::H264Encoder::None) { r.path = found; r.encoder = enc; }
+        }
+        return r;
+    }();
+    return info;
+}
+#endif
+
 static std::string ffmpeg_path()
 {
+#ifndef _WIN32
+    return ffmpeg_info_posix().path;
+#else
     // The bundled build first (installed by CMake beside go2rtc.exe), then PATH as the fallback
     // for a tree or platform that has none.
     const std::string beside = fs::path(resources_dir() + "/tools/go2rtc/ffmpeg.exe").make_preferred().string();
     boost::system::error_code ec;
     if (fs::exists(beside, ec)) return beside;
-#ifdef _WIN32
     std::string out; int code = 0;
     if (run_capture({ "where", "ffmpeg" }, out, code, 8000) && code == 0) {
         std::istringstream is(out); std::string line;
@@ -1699,8 +1985,25 @@ static std::string ffmpeg_path()
             if (!line.empty()) return line;
         }
     }
-#endif
     return "";
+#endif
+}
+
+// The `h264` template to write into go2rtc's config for the ffmpeg in use, "" to leave go2rtc's own
+// (libx264's) alone. The bundled / libopenh264 case, and all of Windows, is ffmpeg_h264_template()
+// below as ever; a system ffmpeg with VideoToolbox gets that explicit template; libx264 gets none.
+static std::string ffmpeg_h264_template();
+static std::string ffmpeg_h264_template_for_config()
+{
+#ifdef _WIN32
+    return ffmpeg_h264_template();
+#else
+    switch (ffmpeg_info_posix().encoder) {
+    case HubPlatform::H264Encoder::X264:         return std::string();
+    case HubPlatform::H264Encoder::VideoToolbox: return HubPlatform::h264_template_override(HubPlatform::H264Encoder::VideoToolbox);
+    default:                                     return ffmpeg_h264_template();
+    }
+#endif
 }
 // The variant suffixes the hub can actually register, in descending quality. Empty without an
 // ffmpeg: a stream go2rtc cannot start is worse than an absent one, because the tile would go
@@ -1881,10 +2184,38 @@ static std::string port_holder_description(int port)
     }
     return "pid " + std::to_string(pid);
 #else
-    (void) port;
-    return "";
+    // lsof (macOS has it; Linux often does), else on Linux the socket table in /proc.
+    HubPlatform::Listener l;
+    const std::string     lsof = HubPlatform::pick_first_existing({ "/usr/sbin/lsof", "/usr/bin/lsof", "/usr/local/bin/lsof" }, path_exists);
+    if (!lsof.empty()) {
+        std::string out; int code = 0;
+        if (run_capture({ lsof, "-nP", "-iTCP:" + std::to_string(port), "-sTCP:LISTEN", "-Fpc", "+c0" }, out, code, 8000))
+            l = HubPlatform::parse_lsof_listener(out);
+    }
+#  ifdef __linux__
+    if (l.pid <= 0) l = HubPlatform::find_listener_via_proc(port);
+#  endif
+    if (l.pid <= 0) return "";
+    return l.command.empty() ? "pid " + std::to_string(l.pid) : l.command + " (pid " + std::to_string(l.pid) + ")";
 #endif
 }
+
+#ifdef _WIN32
+static const char* const FIREWALL_NAME = "Windows Firewall";
+static const char* const GO2RTC_LABEL  = "go2rtc.exe";
+// How long a firewall answer is reused before the next page poll refreshes it. Unchanged on Windows.
+static const long long   FIREWALL_CACHE_S = 300;
+#else
+static const char* const GO2RTC_LABEL  = "go2rtc";
+// The page should notice a firewall switched on or an Allow clicked within seconds, and the macOS /
+// Linux reads are a few cheap commands, so the answer is reused for 30 s only.
+static const long long   FIREWALL_CACHE_S = 30;
+#  ifdef __APPLE__
+static const char* const FIREWALL_NAME = "macOS firewall";
+#  else
+static const char* const FIREWALL_NAME = "Firewall";
+#  endif
+#endif
 
 // What Windows Firewall thinks of go2rtc.exe. WebRTC media arrives inbound on the port above, so
 // without an allow rule for the profile the phone's network is on, the peer connection never
@@ -1915,6 +2246,69 @@ static std::string join_words(const std::vector<std::string>& v, const char* sep
     return out;
 }
 
+#ifndef _WIN32
+// macOS: the Application Firewall, read with socketfilterfw (read-only: --getglobalstate,
+// --getblockall, --getappblocked). Linux: ufw (/etc/ufw/ufw.conf) and firewalld (`firewall-cmd
+// --state`), neither of which needs root to read. Nothing here ever changes a firewall; the
+// instructions go to the user in the note (and, on Linux, the line they can run in `command`).
+static FirewallState firewall_query_posix(const std::string& exe, int port_lo, int port_hi, const std::string& label, bool udp)
+{
+    FirewallState fw;
+    fw.checked_at = (long long) std::time(nullptr);
+    HubPlatform::FirewallVerdict v;
+#  ifdef __APPLE__
+    // The macOS firewall lists applications by bundle, and go2rtc inside EdgeSlicer.app has no entry of
+    // its own (it inherits the app's), so a go2rtc in the bundle is judged, and named, as EdgeSlicer.
+    const std::string app        = HubPlatform::mac_app_bundle_of(exe);
+    const std::string shown_name = app != exe ? std::string("EdgeSlicer") : label;
+    const std::string sfw        = "/usr/libexec/ApplicationFirewall/socketfilterfw";
+    std::string       state_text, block_text, app_text, list_text, signed_text, sign_text;
+    int               code = 0;
+    const bool        ok   = path_exists(sfw) && run_capture({ sfw, "--getglobalstate" }, state_text, code, 5000) && code == 0;
+    HubPlatform::Tri  enabled = ok ? HubPlatform::parse_mac_fw_enabled(state_text) : HubPlatform::Tri::Unknown;
+    HubPlatform::Tri  block_all = HubPlatform::Tri::Unknown, app_blocked = HubPlatform::Tri::Unknown, signed_covered = HubPlatform::Tri::Unknown;
+    HubPlatform::AppListing listing = HubPlatform::AppListing::Unknown;
+    if (enabled == HubPlatform::Tri::Yes) {
+        run_capture({ sfw, "--getblockall" }, block_text, code, 5000); // State = 2 in --getglobalstate says the same
+        block_all = HubPlatform::parse_mac_fw_block_all(block_text, state_text);
+        if (run_capture({ sfw, "--getappblocked", app }, app_text, code, 5000) && code == 0)
+            app_blocked = HubPlatform::parse_mac_fw_app_blocked(app_text);
+        // "permitted" from --getappblocked is also what an app the firewall has never heard of gets, so
+        // the list itself is read; an app that is not on it is let in only by the signed-software rule.
+        if (run_capture({ sfw, "--listapps" }, list_text, code, 5000) && code == 0)
+            listing = HubPlatform::parse_mac_fw_listapps(list_text, app);
+        if (listing == HubPlatform::AppListing::NotListed) {
+            HubPlatform::Tri downloaded = HubPlatform::Tri::Unknown, dev_id = HubPlatform::Tri::Unknown;
+            if (run_capture({ sfw, "--getallowsigned" }, signed_text, code, 5000) && code == 0)
+                downloaded = HubPlatform::parse_mac_fw_allow_downloaded_signed(signed_text);
+            if (path_exists("/usr/bin/codesign") && run_capture({ "/usr/bin/codesign", "-dv", "--verbose=2", app }, sign_text, code, 5000))
+                dev_id = HubPlatform::parse_codesign_developer_id(sign_text);
+            signed_covered = (downloaded == HubPlatform::Tri::Yes && dev_id == HubPlatform::Tri::Yes) ? HubPlatform::Tri::Yes : HubPlatform::Tri::No;
+        }
+    }
+    v = HubPlatform::classify_mac_firewall(enabled, block_all, app_blocked, listing, signed_covered, shown_name);
+#  else
+    bool ufw_on = HubPlatform::ufw_conf_enabled(HubPlatform::read_file_posix("/etc/ufw/ufw.conf", 16384));
+    bool fwd_on = false;
+    {
+        const char* path_env = std::getenv("PATH");
+        std::string cmd = TailscaleCli::resolve_executable("firewall-cmd", (std::string(path_env ? path_env : "") + ":/usr/bin:/usr/sbin:/bin").c_str());
+        if (!cmd.empty()) {
+            std::string out; int code = 0;
+            if (run_capture({ cmd, "--state" }, out, code, 4000) && code == 0) fwd_on = HubPlatform::firewalld_running(out);
+        }
+    }
+    (void) exe;
+    v = HubPlatform::classify_linux_firewall(ufw_on, fwd_on, label, port_lo, port_hi, udp);
+#  endif
+    (void) port_lo; (void) port_hi; (void) udp; (void) exe;
+    fw.state   = v.state;
+    fw.note    = v.note;
+    fw.command = v.command;
+    return fw;
+}
+#endif
+
 // Windows Firewall through its COM API (slic3r/Utils/WinFirewall, shared with Help > Check
 // Windows Firewall) rather than netsh: property values are the same in every Windows display
 // language, while netsh's verbose output is localised and would have to be parsed by label. It
@@ -1923,7 +2317,8 @@ static std::string join_words(const std::vector<std::string>& v, const char* sep
 // `label` is the program name used in the sentences shown to the user ("go2rtc.exe", "EdgeSlicer.exe");
 // `netsh_hint` is the exact command they can paste into an elevated prompt to fix a "missing" or
 // "partial" state themselves - the hub only ever *looks* (the elevated fix is the dialog's job).
-static FirewallState firewall_query(const std::string& exe, int port, const std::string& label, const std::string& netsh_hint)
+static FirewallState firewall_query(const std::string& exe, int port, const std::string& label, const std::string& netsh_hint,
+                                    int port_hi = 0, bool udp = false)
 {
     FirewallState fw;
     fw.checked_at = (long long) std::time(nullptr);
@@ -1982,9 +2377,8 @@ static FirewallState firewall_query(const std::string& exe, int port, const std:
         fw.note  = "";
     }
 #else
-    (void) exe; (void) port; (void) netsh_hint;
-    fw.note    = "Direct connections need an inbound port open for " + label + ".";
-    fw.command = netsh_hint;
+    (void) netsh_hint; // a Windows command: never shown here
+    fw = firewall_query_posix(exe, port, port_hi > port ? port_hi : port, label, udp);
 #endif
     return fw;
 }
@@ -1995,7 +2389,8 @@ static FirewallState firewall_query_go2rtc(const std::string& exe, int port)
 {
     return firewall_query(exe, port, "go2rtc.exe",
         "netsh advfirewall firewall add rule name=\"go2rtc\" dir=in action=allow program=\"" + exe +
-        "\" protocol=TCP localport=" + std::to_string(port) + " profile=private,domain");
+        "\" protocol=TCP localport=" + std::to_string(port) + " profile=private,domain",
+        0, /*udp*/ true);
 }
 
 // The Host header must name this PC's loopback (a DNS-rebound name is not accepted).
@@ -2468,9 +2863,14 @@ private:
     void  handle_hub(tcp::socket& client, Request& r);
     void  handle_phone(tcp::socket& client, Request& r, const std::string& rest);
     void  start_go2rtc();
-    void  register_streams();
+    void  reap_go2rtc(); // macOS/Linux: collect an ended go2rtc (no-op on Windows)
+    void  register_streams();   // schedule a sync of go2rtc's streams with the Stream-tab list (one worker)
+    void  sync_streams_once();  // the worker's pass: Testing::plan_stream_sync() applied to go2rtc
+    std::map<std::string, std::string> desired_streams(); // name -> source for every Stream-tab camera + variants
+    bool  sleep_unless_stopping(int ms);
     std::string go2rtc_base_locked() const; // http://user:pass@127.0.0.1:port ("" while go2rtc is down); m_mutex held
     std::pair<int, std::string> onvif_discover(); // GET /api/onvif on go2rtc: {status, body}
+    std::pair<int, std::string> register_own_camera(const std::string& kind, const std::string& ip, const std::string& code); // spike: POST /hub/camera
     std::string state_for_phone();
     bool  lookup_host(const std::string& id, std::string& ip, std::string& code);
     std::string relay_h264_url(const std::string& id); // the U1 raw stream behind /relay/h264?id=, or ""
@@ -2521,6 +2921,16 @@ private:
     std::string                    m_last_login;                 // most recent remote visitor
     long long                      m_last_login_at { 0 };
     int                            m_go2rtc_port { 0 };
+    // What register_streams() has put into this go2rtc (name -> source). Only its single worker
+    // touches it; go2rtc lives exactly as long as this server, so it never goes stale.
+    std::map<std::string, std::string> m_registered_streams;
+    // Cameras the Device tab's live view asked for (POST /hub/camera), name -> source, for this
+    // go2rtc run. Part of what the sync wants (desired_streams), so a Stream-tab save never deletes
+    // or replaces one. Guarded by m_mutex. Idle streams cost nothing: go2rtc only connects to the
+    // printer while somebody watches.
+    std::map<std::string, std::string> m_own_streams;
+    std::atomic<bool>              m_streams_dirty { false };  // a Stream-tab save not synced yet
+    std::atomic<bool>              m_streams_worker { false }; // the sync worker is running
     int                            m_webrtc_port { 0 };          // go2rtc's WebRTC media port (0 = WebRTC off)
     FirewallState                  m_fw;                         // last firewall_query() (go2rtc/WebRTC)
     std::atomic<bool>              m_fw_busy { false };
@@ -2607,6 +3017,8 @@ json HubServer::info_json()
     v["go2rtc_exe"]   = go2rtc_exe_path();
     j["video"]       = v;
     j["alive"]       = true;
+    j["platform"]    = TailscaleCli::current_platform() == TailscaleCli::Platform::Windows ? "windows" :
+                       TailscaleCli::current_platform() == TailscaleCli::Platform::MacOS   ? "macos" : "linux";
     j["pid"]         = current_pid();
     j["port"]        = m_port;
     j["admin_port"]  = m_admin_port;
@@ -2644,9 +3056,13 @@ json HubServer::info_json()
         // The netsh line hub.html shows behind "Show command" if the user wants to allow this
         // build through the firewall rather than stop the other program - same port-range
         // convention as lan_firewall_state()'s hint below.
+#ifdef _WIN32
         note["command"] = "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow program=\"" +
                            current_exe() + "\" protocol=TCP localport=" + std::to_string(HUB_PORT) + "-" +
                            std::to_string(HUB_PORT + 19) + " profile=private,domain";
+#else
+        note["command"] = ""; // a Windows command; the page words the macOS / Linux advice itself
+#endif
         j["port_note"] = note;
     }
     // The phone/LAN listener's own firewall reachability, same shape as video.firewall/note above
@@ -3444,6 +3860,9 @@ json HubServer::summary_json()
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);
         p["instance"] = row.value("instance", 0);
+        // The opaque per-hub id a Live Activity push carries instead of the printer id (the alerts'
+        // thread-id), so the app can put a name to an activity the hub started by push.
+        p["push_id"]  = AppPush::push_id(id);
         // The camera that watches this printer, if any: its own id first, then a LAN camera on the
         // same address (Testing::camera_for_printer - see there for the fallback order).
         std::vector<Testing::CameraCandidate> cam_candidates;
@@ -3505,7 +3924,8 @@ json HubServer::pair_json(bool via_serve_https)
         j["token_version"] = m_token_version;
     }
     // "push_levels": /push/device takes priority_kinds / all_events / level_hint, and /push/test exists.
-    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels" });
+    // "live_activity": /push/activity and the live_activity field on /push/device (hub-driven updates).
+    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" });
     j["capabilities"] = j["features"];
     return j;
 }
@@ -3712,12 +4132,41 @@ void HubServer::accept_loop(std::shared_ptr<tcp::acceptor> acceptor, bool admin)
 
 void HubServer::start_go2rtc()
 {
-#ifdef _WIN32
     const std::string exe = go2rtc_exe_path();
     if (!fs::exists(exe)) {
+#ifdef _WIN32
         BOOST_LOG_TRIVIAL(error) << "RemoteHub: missing " << exe;
+#else
+        // Not a fault on macOS / Linux: the package may not bundle go2rtc and the machine may not
+        // have one. Camera video then goes through the hub's relayed stream only.
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: no go2rtc found (expected " << exe << ", /opt/homebrew/bin, /usr/local/bin, /usr/bin or PATH); camera video stays on the relayed stream";
+#endif
         return;
     }
+#ifndef _WIN32
+    // A hub that was killed outright leaves its go2rtc running (Windows has the kill-on-close job for
+    // that), holding the WebRTC port. go2rtc.pid names it; it is stopped only if that pid's
+    // executable really is this go2rtc (never a recycled pid) - and waited for, so the port pick
+    // below sees 8555 free again instead of drifting to 8556.
+    {
+        const std::string pid_file = (fs::path(hub_dir()) / "go2rtc.pid").string();
+        const long        stale    = std::atol(HubPlatform::read_file_posix(pid_file, 64).c_str());
+        boost::system::error_code cec;
+        const fs::path            real_exe    = fs::canonical(fs::path(exe), cec); // the image path the OS reports is the real one
+        const std::string         stale_image = stale > 1 ? HubPlatform::process_image_path_posix(stale) : std::string();
+        if (stale > 1 && stale != current_pid() && !cec && !stale_image.empty() && stale_image == real_exe.string()) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: stopping a go2rtc (pid " << stale << ") left by an earlier hub";
+            ::kill((pid_t) stale, SIGTERM);
+            for (int waited = 0; waited < 2000 && pid_alive(stale); waited += 50) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (pid_alive(stale)) {
+                ::kill((pid_t) stale, SIGKILL);
+                for (int waited = 0; waited < 500 && pid_alive(stale); waited += 50) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        boost::system::error_code ig;
+        fs::remove(pid_file, ig);
+    }
+#endif
     // A random loopback port and per-run credentials: nothing on this PC reaches go2rtc's API
     // except through the hub. local_auth makes go2rtc check them for loopback peers too, and
     // allow_paths leaves only the three routes the hub uses registered (go2rtc 1.9.14 then also
@@ -3795,10 +4244,12 @@ void HubServer::start_go2rtc()
         if (!ff.empty()) {
             std::string ffy = ff;
             for (auto& c : ffy) if (c == '\\') c = '/'; // YAML-safe, and ffmpeg accepts forward slashes
-            cfg << "ffmpeg:\n  bin: \"" << ffy << "\"\n"
-                << "  h264: \"" << ffmpeg_h264_template() << "\"\n";
+            cfg << "ffmpeg:\n  bin: \"" << ffy << "\"\n";
+            const std::string h264_tmpl = ffmpeg_h264_template_for_config();
+            if (!h264_tmpl.empty()) cfg << "  h264: \"" << h264_tmpl << "\"\n";
         }
     }
+#ifdef _WIN32
     if (!m_job) {
         HANDLE job = ::CreateJobObjectW(nullptr, nullptr);
         if (job) {
@@ -3809,6 +4260,21 @@ void HubServer::start_go2rtc()
         }
     }
     m_go2rtc_pid = spawn_process({ exe, "-config", cfg_path }, {}, true, m_job);
+#else
+    // macOS / Linux: a child we own (fork + exec, no shell), stopped and reaped by shutdown() and
+    // loop(). A leftover from an earlier hub was already stopped at the top of this function.
+    const std::string pid_file = (fs::path(hub_dir()) / "go2rtc.pid").string();
+    const std::string log_path = (fs::path(hub_dir()) / "go2rtc.log").string();
+    {
+        boost::system::error_code ig;
+        fs::remove(log_path, ig); // one run's output, not an ever-growing file
+    }
+    m_go2rtc_pid = HubPlatform::spawn_child_posix({ exe, "-config", cfg_path }, log_path);
+    if (m_go2rtc_pid > 0) {
+        boost::nowide::ofstream pf(pid_file, std::ios::trunc);
+        pf << m_go2rtc_pid << "\n";
+    }
+#endif
     if (m_go2rtc_pid <= 0) {
         BOOST_LOG_TRIVIAL(error) << "RemoteHub: failed to start go2rtc";
         return;
@@ -3824,6 +4290,24 @@ void HubServer::start_go2rtc()
                                                : "on via " + ff);
     }
     if (webrtc_port > 0) firewall_state(true); // one firewall read on a detached thread; result cached
+}
+
+// macOS / Linux: collect go2rtc if it has ended (crashed, or killed from outside) so it does not
+// sit as a zombie, and forget its pid so shutdown() never signals a number the OS has since reused.
+void HubServer::reap_go2rtc()
+{
+#ifndef _WIN32
+    long pid;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        pid = m_go2rtc_pid;
+    }
+    if (pid <= 0) return;
+    int code = 0;
+    if (!HubPlatform::reap_child_posix(pid, &code)) return;
+    BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc (pid " << pid << ") ended with status " << code << "; camera video through the hub is off until the hub restarts";
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_go2rtc_pid == pid) m_go2rtc_pid = 0;
 #endif
 }
 
@@ -3837,7 +4321,7 @@ FirewallState HubServer::firewall_state(bool refresh)
         port = m_webrtc_port;
         // Re-checked every few minutes so the hub page notices by itself once the user has
         // allowed go2rtc in the firewall (or removed the rule again).
-        if (!refresh && m_fw.checked_at && (long long) std::time(nullptr) - m_fw.checked_at < 300) return m_fw;
+        if (!refresh && m_fw.checked_at && (long long) std::time(nullptr) - m_fw.checked_at < FIREWALL_CACHE_S) return m_fw;
     }
     if (port > 0 && !m_fw_busy.exchange(true)) {
         const bool started = m_life.spawn([this, port]() {
@@ -3847,7 +4331,7 @@ FirewallState HubServer::firewall_state(bool refresh)
                 m_fw = fw;
             }
             if (fw.state != "allowed")
-                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for go2rtc.exe: " << fw.state << " (" << fw.note
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: " << FIREWALL_NAME << " for " << GO2RTC_LABEL << ": " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_fw_busy = false;
         });
@@ -3869,21 +4353,21 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
         std::lock_guard<std::mutex> lock(m_mutex);
         on   = m_phone && m_lan && m_port > 0;
         port = m_port;
-        if (!refresh && m_lan_fw.checked_at && (long long) std::time(nullptr) - m_lan_fw.checked_at < 300) return m_lan_fw;
+        if (!refresh && m_lan_fw.checked_at && (long long) std::time(nullptr) - m_lan_fw.checked_at < FIREWALL_CACHE_S) return m_lan_fw;
     }
     if (on && !m_lan_fw_busy.exchange(true)) {
         const bool started = m_life.spawn([this, port]() {
             const std::string exe = current_exe();
-            FirewallState      fw = firewall_query(exe, port, "EdgeSlicer.exe",
+            FirewallState      fw = firewall_query(exe, HUB_PORT, "EdgeSlicer.exe",
                 "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow program=\"" + exe +
                 "\" protocol=TCP localport=" + std::to_string(HUB_PORT) + "-" + std::to_string(HUB_PORT + 19) +
-                " profile=private,domain");
+                " profile=private,domain", HUB_PORT + 19);
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_lan_fw = fw;
             }
             if (fw.state != "allowed")
-                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: " << FIREWALL_NAME << " for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_lan_fw_busy = false;
         });
@@ -3893,72 +4377,190 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
     return m_lan_fw;
 }
 
+// Bring go2rtc's streams in line with the Stream-tab list. Called on start-up and on every
+// /hub/state post (every Stream-tab save, from any window), so it has to be a no-op for cameras
+// that did not change: go2rtc 1.9.14 turns a PUT of an existing name into a fresh stream object,
+// and the next viewer then opens a SECOND connection to the camera while the phone's is still
+// running - two RTSP sessions on a Bambu printer that allows very few (tests/plan_own_camera_view.md
+// finding 4). The work itself is Testing::plan_stream_sync(); this only schedules it.
+//
+// One worker at a time, on the hub's own lifetime: saves that arrive while it runs set the dirty
+// flag and are folded into one more pass, so two quick saves can never race each other into a
+// double PUT of the same name.
 void HubServer::register_streams()
 {
-    std::string state, base, secret;
+    m_streams_dirty = true;
+    if (m_streams_worker.exchange(true)) return; // the running worker picks it up
+    const bool started = m_life.spawn([this]() {
+        for (;;) {
+            while (m_streams_dirty.exchange(false) && !m_life.stopping()) sync_streams_once();
+            m_streams_worker = false;
+            // A save that landed between the last pass and the flag going down: take it, unless
+            // another worker already has.
+            if (!m_streams_dirty.load() || m_streams_worker.exchange(true)) return;
+        }
+    });
+    if (!started) m_streams_worker = false;
+}
+
+// The name -> source map register_streams() wants go2rtc to have, from the saved Stream-tab state.
+// Names are the ones the phone app, the Stream tab and the own live view (#448) already use:
+// rname (stream_center.html's 's' + hashStr(src)) for go2rtc cameras, u1_<id> for a U1 through
+// /relay/h264, and <name>_<q> for the quality variants.
+std::map<std::string, std::string> HubServer::desired_streams()
+{
+    std::string state, secret;
     int         port = 0;
+    std::map<std::string, std::string> own;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         state  = m_state;
-        base   = go2rtc_base_locked();
         secret = m_secret;
         port   = m_admin_port; // /relay/h264 lives on the control plane, never on the tunnelled listener
+        own    = m_own_streams;
     }
-    if (base.empty() || state.empty()) return;
+    std::map<std::string, std::string> want;
+    if (state.empty()) return Testing::merge_desired_streams(want, own);
     try {
         json j = json::parse(state);
         for (const auto& h : j.value("hosts", json::array())) {
             std::string name = h.value("rname", ""), src = h.value("rsrc", "");
             if (!u1_h264_url(h).empty() && port > 0) {
-                // The U1 raw stream, fetched by go2rtc from this hub (SPS-first), never from the printer directly.
+                // The U1 raw stream, fetched by go2rtc from this hub (SPS-first), never from the
+                // printer directly. Port and secret are fixed for this hub run - and so for this
+                // go2rtc, which lives exactly as long - so the source is stable across saves.
                 name = u1_stream_name(h.value("id", ""));
                 src  = "http://127.0.0.1:" + std::to_string(port) + "/relay/h264?id=" + encode_component(h.value("id", "")) + "&lt=" + secret;
             }
             if (name.empty() || src.empty()) continue;
-            // Http::put() is a file-upload PUT (its read callback dereferences the missing
-            // file and crashes); put2() is a plain PUT with no body, which is what go2rtc wants.
-            const std::string url = base + "/api/streams?name=" + name + "&src=" + percent_encode(src);
-            std::thread([url]() {
-                for (int attempt = 0; attempt < 3; ++attempt) {
-                    bool ok = false;
-                    Http::put2(url).timeout_connect(2).timeout_max(5).on_complete([&ok](std::string, unsigned) { ok = true; }).perform_sync();
-                    if (ok) return;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // go2rtc may still be starting
-                }
-            }).detach();
+            want[name] = src;
             // Quality variants beside the source stream, when an ffmpeg exists to make them (see
-            // quality_variants()). Each is a re-encode of the stream just registered, not a second
-            // connection to the printer, so the camera still sees one consumer. Registered lazily
-            // by go2rtc - the ffmpeg process only starts when a viewer actually opens the variant,
-            // so an unused _med/_low costs nothing.
-            for (const std::string& q : quality_variants()) {
-                const std::string vurl = base + "/api/streams?name=" + name + "_" + q +
-                                         "&src=" + percent_encode(variant_src(name, q));
-                std::thread([vurl]() {
-                    // A freshly started go2rtc answers its API before it will accept an *exec*
-                    // source: for the first ~5 s a PUT of an `ffmpeg:` (or `echo:`) stream comes
-                    // back `400 streams: source not supported`, while `rtsp:` is taken at once.
-                    // The source stream above therefore registers immediately and the variants
-                    // did not, which is exactly the window the hub registers in - so on a normal
-                    // start the variants were silently absent and every _med/_low tile went black.
-                    //
-                    // Twelve attempts at 1.5 s covers ~18 s, comfortably past that window (the
-                    // old three attempts covered 4.5 s and always fell inside it). A 400 lands in
-                    // on_error, not on_complete, so `ok` stays false and the loop does retry -
-                    // it simply ran out of attempts. Logged on final failure rather than failing
-                    // silently, because a missing variant is otherwise invisible until a viewer
-                    // opens the tile.
-                    for (int attempt = 0; attempt < 12; ++attempt) {
-                        bool ok = false;
-                        Http::put2(vurl).timeout_connect(2).timeout_max(5).on_complete([&ok](std::string, unsigned) { ok = true; }).perform_sync();
-                        if (ok) return;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-                    }
-                    BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc kept refusing a quality variant; it will fall back to the source stream";
-                }).detach();
-            }
+            // quality_variants()). Each is a re-encode of the stream registered above, not a second
+            // connection to the printer, so the camera still sees one consumer. Started lazily by
+            // go2rtc - the ffmpeg process only runs while a viewer has the variant open.
+            for (const std::string& q : quality_variants()) want[name + "_" + q] = variant_src(name, q);
         }
     } catch (...) {}
+    // P1/A1 (rkind "p1") cameras are not go2rtc streams here: the phone plays them through
+    // /r/<token>/bambu (BambuCamRelay) directly, so there is nothing to register for them.
+    // The Device tab's live view cameras (s<hash> RTSPS, b<hash> P1/A1 MJPEG) are wanted too, so a
+    // Stream-tab save never deletes or replaces one that is playing.
+    return Testing::merge_desired_streams(want, own);
+}
+
+void HubServer::sync_streams_once()
+{
+    std::string base;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        base = go2rtc_base_locked();
+    }
+    if (base.empty()) return;
+    const std::map<std::string, std::string> want = desired_streams();
+
+    // go2rtc's own list. It answers its API within a second or two of starting; until then keep
+    // asking (this is the start-up registration), and give up quietly if it never does - the next
+    // save tries again, and nothing was sent that could double a connection.
+    std::map<std::string, Testing::Go2rtcLiveStream> live;
+    bool have_live = false;
+    for (int attempt = 0; attempt < 12 && !have_live; ++attempt) {
+        if (attempt > 0 && !sleep_unless_stopping(1500)) return;
+        std::string body;
+        bool        ok = false;
+        Http::get(base + "/api/streams")
+            .timeout_connect(2).timeout_max(5)
+            .on_complete([&](std::string b, unsigned) { body = std::move(b); ok = true; })
+            .on_error([](std::string, std::string, unsigned) {})
+            .perform_sync();
+        have_live = ok && Testing::parse_go2rtc_streams(body, live);
+    }
+    if (!have_live) {
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc did not list its streams; camera registration waits for the next Stream-tab save";
+        return;
+    }
+
+    const Testing::StreamSyncPlan plan = Testing::plan_stream_sync(want, m_registered_streams, &live);
+    if (plan.add.empty() && plan.replace.empty() && plan.remove.empty() && plan.adopt.empty()) return; // the common case: a save that changed no camera
+
+    for (const auto& a : plan.adopt) m_registered_streams[a.first] = a.second;
+
+    // Names whose viewers are moved off an old stream object once the new one is in place.
+    std::set<std::string> kick;
+    auto del = [&base](const std::string& name) {
+        unsigned status = 0;
+        Http::del(base + "/api/streams?src=" + encode_component(name))
+            .timeout_connect(2).timeout_max(5)
+            .on_complete([&status](std::string, unsigned s) { status = s ? s : 200; })
+            .on_error([&status](std::string, std::string, unsigned s) { status = s; })
+            .perform_sync();
+        return status == 200 || status == 404; // 404: go2rtc no longer has it, which is the goal
+    };
+    for (const std::string& name : plan.remove) {
+        if (del(name)) m_registered_streams.erase(name);
+        kick.insert(name);
+    }
+
+    // PUTs (new and replaced), retried together in rounds. A freshly started go2rtc answers its
+    // API before it will accept an *exec* source: for the first ~5 s a PUT of an `ffmpeg:` stream
+    // comes back `400 streams: source not supported`, while `rtsp:`/`http:` is taken at once.
+    // Twelve rounds at 1.5 s cover ~18 s, past that window. A 400 lands in on_error, not
+    // on_complete, so it is retried; a PUT that never succeeds is not recorded as registered, so
+    // the next save tries it again.
+    std::vector<std::pair<std::string, std::string>> pending = plan.add;
+    for (const auto& r : plan.replace) {
+        // DELETE first: a PUT over an existing name leaves the old object (and its upstream
+        // connection) running for whoever is on it - exactly the doubled connection this avoids.
+        del(r.first);
+        m_registered_streams.erase(r.first);
+        kick.insert(r.first);
+        pending.push_back(r);
+    }
+    for (int round = 0; round < 12 && !pending.empty(); ++round) {
+        if (round > 0 && !sleep_unless_stopping(1500)) return;
+        if (m_streams_dirty.load()) break; // a newer save: start over from it rather than finish this one
+        std::vector<std::pair<std::string, std::string>> failed;
+        for (const auto& p : pending) {
+            // Http::put() is a file-upload PUT (its read callback dereferences the missing file
+            // and crashes); put2() is a plain PUT with no body, which is what go2rtc wants.
+            bool ok = false;
+            Http::put2(base + "/api/streams?name=" + p.first + "&src=" + percent_encode(p.second))
+                .timeout_connect(2).timeout_max(5)
+                .on_complete([&ok](std::string, unsigned) { ok = true; })
+                .on_error([](std::string, std::string, unsigned) {})
+                .perform_sync();
+            if (ok) m_registered_streams[p.first] = p.second;
+            else failed.push_back(p);
+        }
+        pending.swap(failed);
+    }
+    if (!pending.empty() && !m_streams_dirty.load())
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc refused " << pending.size() << " camera stream(s) (" << pending.front().first
+                                   << (pending.size() > 1 ? ", ..." : "") << "); a quality variant falls back to the source stream";
+
+    // End the hub's viewer tunnels (/api/ws) on the replaced and removed streams. That is what
+    // makes go2rtc close the old producer - and the old connection to the camera - instead of
+    // keeping it for as long as a phone stays on the page. The players reconnect by themselves
+    // and land on the new stream. Never logs a source: they carry access codes.
+    int ended = 0;
+    if (!kick.empty())
+        ended = m_life.shut_tagged([&kick](const std::string& tag) {
+            return tag.compare(0, sizeof(GO2RTC_VIEWER_TAG) - 1, GO2RTC_VIEWER_TAG) == 0 && kick.count(tag.substr(sizeof(GO2RTC_VIEWER_TAG) - 1)) > 0;
+        });
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: camera streams: " << plan.add.size() << " added, " << plan.replace.size() << " replaced, "
+                            << plan.remove.size() << " removed, " << plan.adopt.size() << " already in go2rtc; "
+                            << (want.size() - plan.add.size() - plan.replace.size() - plan.adopt.size()) << " unchanged left alone"
+                            << (ended ? ", " + std::to_string(ended) + " viewer tunnel(s) on replaced/removed streams ended" : std::string());
+}
+
+// Sleep in short slices so a hub that is shutting down does not wait out a retry delay. False
+// when the hub is stopping.
+bool HubServer::sleep_unless_stopping(int ms)
+{
+    for (int waited = 0; waited < ms; waited += 100) {
+        if (m_life.stopping()) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return !m_life.stopping();
 }
 
 std::string HubServer::go2rtc_base_locked() const
@@ -3985,6 +4587,63 @@ std::pair<int, std::string> HubServer::onvif_discover()
         .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? err : b; })
         .perform_sync();
     return { status == 0 ? 502 : status, body };
+}
+
+// "New Bambu LiveView": the Device tab's camera panel asks for a go2rtc stream for one Bambu
+// camera. The Stream tab's list (m_state, streams.json) is not touched, so the phone's wall and the
+// hub page stay exactly as they were.
+//
+// The stream goes through the same sync as the Stream tab's cameras (register_streams ->
+// plan_stream_sync), never a PUT of its own: the camera is added to m_own_streams, which
+// desired_streams() merges into what the sync wants. So a camera the Stream tab / phone already has
+// under the same s<hash> name is "unchanged" - nothing is sent and its viewers stay on their one
+// printer connection (a re-PUT would make go2rtc open a second one: tests/plan_own_camera_view.md
+// finding 4) - and a later Stream-tab save that drops that camera does not delete the stream the
+// Device tab is playing.
+std::pair<int, std::string> HubServer::register_own_camera(const std::string& kind, const std::string& ip, const std::string& code)
+{
+    std::string base;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        base = go2rtc_base_locked();
+    }
+    if (base.empty()) return { 503, json_error("the stream relay (go2rtc) is not running; see hub.log") };
+    const int relay = kind == "local" ? BambuCamRelay::get().port() : 0;
+    if (kind == "local" && relay == 0) return { 503, json_error("the Bambu camera relay is not running") };
+    const Testing::OwnCameraStream s = Testing::own_camera_stream(kind, ip, code, relay);
+    if (s.name.empty()) return { 400, json_error("unsupported camera type, address or access code") };
+
+    auto in_go2rtc = [&base, &s]() {
+        bool yes = false;
+        Http::get(base + "/api/streams?src=" + s.name)
+            .timeout_connect(2).timeout_max(5)
+            .on_complete([&yes](std::string, unsigned status) { yes = status == 200; })
+            .on_error([](std::string, std::string, unsigned) {})
+            .perform_sync();
+        return yes;
+    };
+    const bool existed = in_go2rtc();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_own_streams[s.name] = s.src;
+    }
+    register_streams(); // the sync worker: unchanged -> nothing sent; missing -> PUT once
+    bool ok = existed;
+    // Wait for the worker to have it in go2rtc (a cold go2rtc can take several seconds, and the
+    // worker retries a refused PUT in rounds). The client waits up to 20 s for this answer.
+    for (int waited = 0; !ok && waited < 15000 && !m_life.stopping(); waited += 250) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        ok = in_go2rtc();
+    }
+    // Never log the source: it carries the access code.
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: own live view stream " << s.name << " (" << kind << ", " << s.mode << ") "
+                            << (existed ? "already registered, reused" : ok ? "registered" : "could not be registered");
+    if (!ok) return { 502, json_error("go2rtc did not take the camera stream") };
+    json j;
+    j["name"]   = s.name;
+    j["mode"]   = s.mode;
+    j["reused"] = existed;
+    return { 200, j.dump() };
 }
 
 // The phone only sees ids, aliases, the source kind, go2rtc stream names and direct
@@ -4337,7 +4996,11 @@ json HubServer::remote_json_locked() const
     // The `tailscale funnel` line the card's advanced note shows verbatim. Documented, never run:
     // Funnel publishes the hub to the whole internet with only the path token in front of it, which
     // is a deliberate choice nobody should make by clicking a button (design section 3).
-    r["funnel_command"] = "tailscale funnel --bg --https=443 http://127.0.0.1:" + std::to_string(m_port);
+    // The CLI as it is typed in a terminal: the path that was found when that is not simply
+    // "tailscale" on PATH (a Mac without the app's "Install CLI" shim has no `tailscale` command).
+    const std::string ts_cli = HubPlatform::cli_for_terminal(TailscaleCli::current_platform(), tailscale_exe());
+    r["funnel_command"]     = ts_cli + " funnel --bg --https=443 http://127.0.0.1:" + std::to_string(m_port);
+    r["funnel_off_command"] = ts_cli + " funnel --https=443 off";
     return r;
 }
 
@@ -4360,8 +5023,23 @@ bool HubServer::set_remote(bool on, std::string& error)
             return false;
         }
         // The first run also fetches the certificate, which can take half a minute.
-        if (!run_capture({ tailscale_exe(), "serve", "--bg", "--https=443", "http://127.0.0.1:" + std::to_string(port) }, out, code, 90000) || code != 0) {
-            error = out.empty() ? "tailscale serve failed" : out.substr(0, 300);
+        // On a tailnet that never switched Serve (or HTTPS certificates) on, the CLI prints an
+        // admin-console link and waits for somebody to click it: stop at the link instead of sitting
+        // out the whole timeout, and say what to do.
+        HubPlatform::ServeEnable prompt;
+        bool                     timed_out = false;
+        const bool ran = run_capture({ tailscale_exe(), "serve", "--bg", "--https=443", "http://127.0.0.1:" + std::to_string(port) }, out, code, 90000,
+                                     &timed_out, [&prompt](const std::string& so_far) {
+                                         prompt = HubPlatform::detect_serve_needs_enabling(so_far);
+                                         return prompt.needed;
+                                     });
+        if (prompt.needed) {
+            error = HubPlatform::serve_enable_message(prompt.url);
+            return false;
+        }
+        if (!ran || code != 0) {
+            error = timed_out ? "tailscale serve did not finish within 90 seconds; check that Tailscale is running and try again" :
+                    out.empty() ? "tailscale serve failed" : out.substr(0, 300);
             return false;
         }
         t = remote_state(true);
@@ -4492,6 +5170,21 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
     } else if (r.path == "/hub/onvif" && r.method == "GET") {
         const auto res = onvif_discover();
         respond(client, res.first, res.first == 200 ? "application/json" : "text/plain; charset=utf-8", res.second);
+    } else if (r.path == "/hub/camera" && r.method == "POST") {
+        // Spike: the Device tab's own live view (see register_own_camera). JSON body
+        // {kind, ip, code}; the access code never travels in a URL.
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("request too large")); return; }
+        std::string kind, ip, code;
+        try {
+            const json j = json::parse(body);
+            kind = j.value("kind", std::string());
+            ip   = j.value("ip", std::string());
+            code = j.value("code", std::string());
+        } catch (...) { respond_json(client, 400, json_error("bad JSON")); return; }
+        const auto res = register_own_camera(kind, ip, code);
+        respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/qrcode.js" && r.method == "GET") {
         std::string js;
         if (serve_web_asset(client, "qrcode.js", js)) respond(client, 200, "application/javascript", js);
@@ -4976,6 +5669,16 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         respond_json(client, res.first, res.second);
         return;
     }
+    if (rest == "/push/activity" && (r.method == "POST" || r.method == "DELETE")) {
+        // Hub-driven Live Activity updates (opt-in): the app hands over an activity's push token,
+        // or says it ended one (AppPush::register_activity / forget_activity).
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 8 * 1024)) { respond_json(client, 413, json_error("that is too large")); return; }
+        const auto res = r.method == "POST" ? AppPush::register_activity(body) : AppPush::forget_activity(body);
+        respond_json(client, res.first, res.second);
+        return;
+    }
     if (rest == "/push/test" && r.method == "POST") {
         // The app's notification test lab: one test of a chosen kind to this device only, built
         // as a real event of that kind would be for it (AppPush::test_device). May wait up to
@@ -5010,7 +5713,9 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "DELETE"}, {"path", "/push/subscription"}, {"description", "body {endpoint} - this browser unsubscribed"} },
             { {"method", "POST"}, {"path", "/push/device"},        {"description", "the native app's APNs/FCM device token plus its own p256dh/auth; re-post it on every cold launch. Optional: priority_kinds [kind...] (sent at high priority), all_events (past the hub's filter; the phone decides), level_hint (APNs interruption-level on the priority kinds)"} },
             { {"method", "DELETE"}, {"path", "/push/device"},      {"description", "body {platform, token} - this device unpaired"} },
-            { {"method", "POST"}, {"path", "/push/test"},          {"description", "body {platform, token, kind, delay_s 0-30} - one test notification of that kind to this device only, sent as a real one would be; answers {ok, status, priority, ttl, interruption_level}"} }
+            { {"method", "POST"}, {"path", "/push/test"},          {"description", "body {platform, token, kind, delay_s 0-30} - one test notification of that kind to this device only, sent as a real one would be; answers {ok, status, priority, ttl, interruption_level}"} },
+            { {"method", "POST"}, {"path", "/push/activity"},      {"description", "hub-driven Live Activity updates (opt-in with live_activity {enabled, start_token, frequent} on /push/device): body {platform apns, token, printer (id or push_id), job, activity_token, started_at} - the push token of a Live Activity on this phone"} },
+            { {"method", "DELETE"}, {"path", "/push/activity"},    {"description", "body {platform, token, printer, dismissed} - that activity ended (dismissed: the person removed it)"} }
         });
         respond_json(client, 200, j.dump());
         return;
@@ -5216,6 +5921,9 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
         if (r.path == GO2RTC_WS) {
             if (!player_ok) { respond(client, 404, "text/plain", "not found"); return; }
             if (go2rtc_port == 0) { respond(client, 503, "text/plain", "stream relay is not running"); return; }
+            // Labelled with its stream, so register_streams() can move this viewer off a stream
+            // whose source it replaced or removed (and so let go2rtc close the old connection).
+            tracked.tag(GO2RTC_VIEWER_TAG + query_param(r.query, "src"));
             tunnel(client, go2rtc_port, force_close(go2rtc_head(r.head, auth)), r.pending);
             return;
         }
@@ -5468,6 +6176,7 @@ void HubServer::loop(bool idle_exit)
     while (!m_quit) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         flush_logs(); // the file sink buffers; keep hub.log readable while we run
+        reap_go2rtc();
         // A hub whose install folder was deleted under it (a scratch test copy that was removed)
         // would serve blank pages for days and be reused by the next slicer. Two stats every
         // SELF_CHECK_INTERVAL_S; when the executable or the web pages are gone on consecutive looks
@@ -5498,6 +6207,12 @@ void HubServer::loop(bool idle_exit)
         if (std::chrono::steady_clock::now() - printers_at >= std::chrono::milliseconds(PRINTERS_POLL_MS)) {
             printers_at = std::chrono::steady_clock::now();
             try { poll_printers(); } catch (...) {}
+            // Hub-driven Live Activity updates for the phones that turned them on: decided right
+            // after the poll, so a push carries the freshest row the hub has. The sends run on
+            // AppPush's own worker; this only queues them.
+            if (AppPush::live_activity_wanted()) {
+                try { AppPush::live_activity_tick(printers_json()); } catch (...) {}
+            }
         }
         // A phone subscribed, or the sender pruned one the push service said was gone. Saving
         // from here means the sender thread never has to reach back into HubServer.
@@ -5553,7 +6268,12 @@ bool HubServer::shutdown()
         BOOST_LOG_TRIVIAL(warning) << "RemoteHub: " << m_life.running() << " connection/helper thread(s) still running after "
                                    << SHUTDOWN_DRAIN_MS << " ms; the server is left in place for them";
 #ifndef _WIN32
-    if (m_go2rtc_pid > 0) ::kill((pid_t) m_go2rtc_pid, SIGTERM);
+    if (m_go2rtc_pid > 0) {
+        HubPlatform::terminate_child_posix(m_go2rtc_pid, 2000); // SIGTERM, then SIGKILL; reaped either way
+        m_go2rtc_pid = 0;
+        boost::system::error_code ig;
+        fs::remove(fs::path(hub_dir()) / "go2rtc.pid", ig);
+    }
 #endif
     // WebPush first: it only sets a flag, and it is that flag which lets a push waiting out a
     // retry backoff give up, so the join below does not have to wait for it.
@@ -5622,12 +6342,14 @@ public:
     // may be gone by then, which is why it is looked up again rather than captured.
     void balloon(const std::string& title, const std::string& text, const std::string& severity)
     {
-        wxTaskBarIcon* self = this;
+        HubTaskBarIcon* self = this; // the concrete type: show_notification() is ours, not wxTaskBarIcon's
         const wxString t = wxString::FromUTF8(title), b = wxString::FromUTF8(text);
         const int      flags = severity == "error" ? wxICON_ERROR : severity == "warning" ? wxICON_WARNING : wxICON_INFORMATION;
         wxTheApp->CallAfter([self, t, b, flags]() {
 #if defined(__WXMSW__) && wxUSE_TASKBARICON_BALLOONS
             self->ShowBalloon(t.IsEmpty() ? wxString("Edge Hub") : t, b, 10000, flags);
+#elif !defined(__WXMSW__) && wxUSE_NOTIFICATION_MESSAGE
+            self->show_notification(t, b, flags); // macOS notification centre / the desktop's notifier
 #else
             (void) self; (void) t; (void) b; (void) flags;
 #endif
@@ -5682,6 +6404,16 @@ public:
     }
 
 private:
+#if !defined(__WXMSW__) && wxUSE_NOTIFICATION_MESSAGE
+    // wx's portable notification. The last one is kept so it is not destroyed while it is still
+    // showing on platforms that tie its lifetime to the object; a newer one replaces it.
+    std::unique_ptr<wxNotificationMessage> m_note;
+    void show_notification(const wxString& title, const wxString& text, int flags)
+    {
+        m_note.reset(new wxNotificationMessage(title.IsEmpty() ? wxString("Edge Hub") : title, text, nullptr, flags));
+        m_note->Show(10);
+    }
+#endif
     void open_page()
     {
         // The hub page lives on the control plane, not on the listener a tunnel can front.
@@ -5997,6 +6729,27 @@ bool post_state(const std::string& state_json)
         .on_complete([&ok](std::string, unsigned status) { ok = status == 200; })
         .perform_sync();
     return ok;
+}
+
+std::pair<int, std::string> register_own_camera(const std::string& kind, const std::string& ip, const std::string& code)
+{
+    const HubFile hf = hub_file();
+    if (hf.admin_port == 0) return { 503, json_error("the hub is not running") };
+    json req;
+    req["kind"] = kind;
+    req["ip"]   = ip;
+    req["code"] = code;
+    int         status = 0;
+    std::string body;
+    Http::post("http://127.0.0.1:" + std::to_string(hf.admin_port) + "/hub/camera")
+        .timeout_connect(1).timeout_max(20) // a cold go2rtc can take several seconds to accept a stream
+        .header("Content-Type", "application/json")
+        .header("X-Hub-Secret", hf.secret)
+        .set_post_body(req.dump())
+        .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+        .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? json_error(err) : b; })
+        .perform_sync();
+    return { status == 0 ? 502 : status, body };
 }
 
 bool post_event(const std::string& event_json)

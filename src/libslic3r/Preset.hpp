@@ -1,6 +1,7 @@
 #ifndef slic3r_Preset_hpp_
 #define slic3r_Preset_hpp_
 
+#include <array>
 #include <deque>
 #include <set>
 #include <string>
@@ -65,6 +66,10 @@
 #define BBL_JSON_KEY_HOTEND_MODEL               "hotend_model"
 #define BBL_JSON_KEY_DEFAULT_MATERIALS          "default_materials"
 #define BBL_JSON_KEY_MODEL_ID                   "model_id"
+// Placement of the built-in Bambu plate art on the bed (Bambu Studio: PartPlateList::init_bed_type_info).
+#define BBL_JSON_KEY_BOTTOM_TEXTURE_END_NAME    "bottom_texture_end_name"
+#define BBL_JSON_KEY_BOTTOM_TEXTURE_RECT        "bottom_texture_rect"
+#define BBL_JSON_KEY_MIDDLE_TEXTURE_RECT        "middle_texture_rect"
 
 // Orca extension
 #define ORCA_JSON_KEY_RENAMED_FROM              "renamed_from"
@@ -126,6 +131,12 @@ public:
         std::string 			 	bed_model;
         std::string 				bed_texture;
         std::string                 hotend_model;
+        // Where a Bambu machine puts the per-bed-type plate art, in mm of the bed ("x,y,w,h"), and the
+        // suffix of its own bottom tab art ("n" -> bbl_bed_pte_bottom_n.svg). Empty when the machine
+        // uses the defaults. Only the X2D sets the rects today (and the P2S the suffix).
+        std::string                 bottom_texture_end_name;
+        std::string                 bottom_texture_rect;
+        std::string                 middle_texture_rect;
 
         PrinterVariant*       variant(const std::string &name) {
             for (auto &v : this->variants)
@@ -945,6 +956,10 @@ namespace PresetUtils {
     std::string system_printer_bed_model(const Preset& preset);
     std::string system_printer_bed_texture(const Preset& preset);
     std::string system_printer_hotend_model(const Preset& preset);
+    // A machine model's texture rect, "x,y,w,h" in mm of the bed (spaces allowed), as Bambu Studio reads
+    // bottom_texture_rect / middle_texture_rect. False (and `rect` untouched) unless there are exactly four
+    // numbers and the width and height are positive.
+    bool parse_bed_texture_rect(const std::string &str, std::array<float, 4> &rect);
 } // namespace PresetUtils
 
 

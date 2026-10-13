@@ -291,11 +291,17 @@ void MachineObjectPanel::on_mouse_left_up(wxMouseEvent &evt)
             wxGetApp().mainframe->jump_to_monitor(m_info->dev_id);
         }
     } else {
-        if (m_info && m_info->is_lan_mode_printer()) {
+        // "Other Device": a LAN printer gets the access-code dialog, anything else the cloud bind.
+        // A printer that announced "lan" recently is a LAN printer here even if a stray "cloud"
+        // announcement switched it (SsdpConnectType.hpp); the decision is logged.
+        DeviceManager* dev = wxGetApp().getDeviceManager();
+        const bool lan = m_info && (dev ? dev->picker_offer_for(m_info, "Other Device") == SsdpConnectType::PickerOffer::AccessCode
+                                        : m_info->is_lan_mode_printer());
+        if (lan) {
             wxCommandEvent event(EVT_CONNECT_LAN_PRINT);
             event.SetEventObject(this);
             wxPostEvent(this, event);
-        } else {
+        } else if (m_info) {
             wxCommandEvent event(EVT_BIND_MACHINE);
             event.SetEventObject(this);
             wxPostEvent(this, event);
@@ -516,6 +522,7 @@ void SelectMachinePopup::update_other_devices()
             op = m_other_list_machine_panel[i]->mPanel;
         } else {
             op = new MachineObjectPanel(m_scrolledWindow, wxID_ANY);
+            wire_panel(op);
             MachinePanel* mpanel = new MachinePanel();
             mpanel->mIndex = wxString::Format("%d", i);
             mpanel->mPanel = op;
@@ -552,26 +559,6 @@ void SelectMachinePopup::update_other_devices()
                 op->set_printer_state(IDLE);
             }
         }
-
-        op->Bind(EVT_CONNECT_LAN_PRINT, [this, mobj](wxCommandEvent &e) {
-            if (mobj) {
-                if (mobj->is_lan_mode_printer()) {
-                    ConnectPrinterDialog dlg(wxGetApp().mainframe, wxID_ANY, _L("Input access code"));
-                    dlg.set_machine_object(mobj);
-                    if (dlg.ShowModal() == wxID_OK) {
-                        wxGetApp().mainframe->jump_to_monitor(mobj->dev_id);
-                    }
-                }
-            }
-        });
-
-        op->Bind(EVT_BIND_MACHINE, [this, mobj](wxCommandEvent &e) {
-            BindMachineDialog dlg;
-            dlg.update_machine_info(mobj);
-            int dlg_result = wxID_CANCEL;
-            dlg_result     = dlg.ShowModal();
-            if (dlg_result == wxID_OK) { wxGetApp().mainframe->jump_to_monitor(mobj->dev_id); }
-        });
     }
 
     for (int j = i; j < m_other_list_machine_panel.size(); j++) {
@@ -686,6 +673,7 @@ void SelectMachinePopup::update_user_devices()
 #endif
         } else {
             op = new MachineObjectPanel(m_scrolledWindow, wxID_ANY);
+            wire_panel(op);
             MachinePanel* mpanel = new MachinePanel();
             mpanel->mIndex = wxString::Format("%d", i);
             mpanel->mPanel = op;
@@ -711,32 +699,9 @@ void SelectMachinePopup::update_user_devices()
                     op->set_printer_state(PrinterState::LOCK);
                 }
             }
-            op->Bind(EVT_UNBIND_MACHINE, [this, dev, mobj](wxCommandEvent& e) {
-                dev->set_selected_machine("");
-                if (mobj) {
-                    AppConfig* config = wxGetApp().app_config;
-                    if (config) {
-                        config->erase_local_machine(mobj->dev_id);
-                    }
-
-                    mobj->set_access_code("");
-                    mobj->erase_user_access_code();
-                }
-
-                MessageDialog msg_wingow(nullptr, _L("Log out successful."), "", wxAPPLY | wxOK);
-                if (msg_wingow.ShowModal() == wxOK) { return; }
-                });
         }
         else {
             op->show_printer_bind(true, PrinterBindState::ALLOW_UNBIND);
-            op->Bind(EVT_UNBIND_MACHINE, [this, mobj, dev](wxCommandEvent& e) {
-                // show_unbind_dialog
-                UnBindMachineDialog dlg;
-                dlg.update_machine_info(mobj);
-                if (dlg.ShowModal() == wxID_OK) {
-                    dev->set_selected_machine("");
-                }
-                });
 
             if (!mobj->is_online()) {
                 op->SetToolTip(_L("Offline"));
@@ -755,24 +720,6 @@ void SelectMachinePopup::update_user_devices()
                 }
             }
         }
-
-        op->Bind(EVT_CONNECT_LAN_PRINT, [this, mobj](wxCommandEvent &e) {
-            if (mobj) {
-                if (mobj->is_lan_mode_printer()) {
-                    ConnectPrinterDialog dlg(wxGetApp().mainframe, wxID_ANY, _L("Input access code"));
-                    dlg.set_machine_object(mobj);
-                    if (dlg.ShowModal() == wxID_OK) {
-                        wxGetApp().mainframe->jump_to_monitor(mobj->dev_id);
-                    }
-                }
-            }
-        });
-
-         op->Bind(EVT_EDIT_PRINT_NAME, [this, mobj](wxCommandEvent &e) {
-            EditDevNameDialog dlg;
-            dlg.set_machine_obj(mobj);
-            dlg.ShowModal();
-         });
     }
 
     for (int j = i; j < m_user_list_machine_panel.size(); j++) {
@@ -825,6 +772,83 @@ void SelectMachinePopup::start_ssdp(bool start)
 {
     return;
     //if (wxGetApp().getAgent()) { wxGetApp().getAgent()->start_discovery(true, start); }
+}
+
+namespace {
+// Clears a flag on scope exit, so a dialog that throws or returns early never leaves it set.
+struct PanelDialogOpenGuard
+{
+    bool& flag;
+    explicit PanelDialogOpenGuard(bool& f) : flag(f) { flag = true; }
+    ~PanelDialogOpenGuard() { flag = false; }
+};
+} // namespace
+
+void SelectMachinePopup::wire_panel(MachineObjectPanel *op)
+{
+    op->Bind(EVT_CONNECT_LAN_PRINT, [this, op](wxCommandEvent &) { on_panel_connect_lan(op->machine_info()); });
+    op->Bind(EVT_BIND_MACHINE, [this, op](wxCommandEvent &) { on_panel_bind(op->machine_info()); });
+    op->Bind(EVT_UNBIND_MACHINE, [this, op](wxCommandEvent &) { on_panel_unbind(op->machine_info()); });
+    op->Bind(EVT_EDIT_PRINT_NAME, [this, op](wxCommandEvent &) { on_panel_edit_name(op->machine_info()); });
+}
+
+void SelectMachinePopup::on_panel_connect_lan(MachineObject *mobj)
+{
+    if (!mobj || m_panel_dialog_open || !mobj->is_lan_mode_printer())
+        return;
+    PanelDialogOpenGuard open(m_panel_dialog_open);
+    ConnectPrinterDialog dlg(wxGetApp().mainframe, wxID_ANY, _L("Input access code"));
+    dlg.set_machine_object(mobj);
+    if (dlg.ShowModal() == wxID_OK) {
+        wxGetApp().mainframe->jump_to_monitor(mobj->dev_id);
+    }
+}
+
+void SelectMachinePopup::on_panel_bind(MachineObject *mobj)
+{
+    if (!mobj || m_panel_dialog_open)
+        return;
+    PanelDialogOpenGuard open(m_panel_dialog_open);
+    BindMachineDialog dlg;
+    dlg.update_machine_info(mobj);
+    if (dlg.ShowModal() == wxID_OK) { wxGetApp().mainframe->jump_to_monitor(mobj->dev_id); }
+}
+
+void SelectMachinePopup::on_panel_unbind(MachineObject *mobj)
+{
+    DeviceManager* dev = wxGetApp().getDeviceManager();
+    if (!mobj || !dev || m_panel_dialog_open)
+        return;
+    PanelDialogOpenGuard open(m_panel_dialog_open);
+    if (mobj->is_lan_mode_printer()) {
+        // A LAN printer: forget its access code ("log out" of the printer).
+        dev->set_selected_machine("");
+        AppConfig* config = wxGetApp().app_config;
+        if (config) {
+            config->erase_local_machine(mobj->dev_id);
+        }
+        mobj->set_access_code("");
+        mobj->erase_user_access_code();
+
+        MessageDialog msg_wingow(nullptr, _L("Log out successful."), "", wxAPPLY | wxOK);
+        msg_wingow.ShowModal();
+    } else {
+        UnBindMachineDialog dlg;
+        dlg.update_machine_info(mobj);
+        if (dlg.ShowModal() == wxID_OK) {
+            dev->set_selected_machine("");
+        }
+    }
+}
+
+void SelectMachinePopup::on_panel_edit_name(MachineObject *mobj)
+{
+    if (!mobj || m_panel_dialog_open)
+        return;
+    PanelDialogOpenGuard open(m_panel_dialog_open);
+    EditDevNameDialog dlg;
+    dlg.set_machine_obj(mobj);
+    dlg.ShowModal();
 }
 
 void SelectMachinePopup::OnLeftUp(wxMouseEvent &event)

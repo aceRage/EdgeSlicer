@@ -113,6 +113,14 @@ inline bool is_tailscale_adapter(const Adapter& a)
     return lower_ascii(a.name + " " + a.description).find("tailscale") != std::string::npos;
 }
 
+// macOS gives Tailscale an anonymous "utunN" interface (no "tailscale" in its name), so the tailnet
+// address range is what identifies it. Every other utun address (10.x, 192.168.x, fe80) is some
+// other VPN's and stays rejected by is_virtual_adapter().
+inline bool is_macos_tailscale_tunnel(const Adapter& a, const std::string& ip)
+{
+    return lower_ascii(a.name).compare(0, 4, "utun") == 0 && is_tailscale_range(ip);
+}
+
 // "lo", "lo0": the POSIX loopback names. Not a prefix test: Windows' "Local Area Connection" starts with "lo".
 inline bool is_posix_loopback_name(const std::string& n_lower)
 {
@@ -157,7 +165,7 @@ enum class Kind { Lan, Tailscale, Rejected };
 inline Kind classify(const Adapter& a, const std::string& ip)
 {
     if (a.loopback || !a.up || a.if_type == IF_LOOPBACK || is_unusable_v4(ip)) return Kind::Rejected;
-    if (is_tailscale_adapter(a)) return Kind::Tailscale;
+    if (is_tailscale_adapter(a) || is_macos_tailscale_tunnel(a, ip)) return Kind::Tailscale;
     if (a.if_type == IF_TUNNEL || a.if_type == IF_PPP) return Kind::Rejected;
     if (!is_lan_if_type(a.if_type) || is_virtual_adapter(a)) return Kind::Rejected;
     return Kind::Lan;

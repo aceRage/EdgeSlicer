@@ -35,6 +35,8 @@ add_executable(${_TEST_NAME}_tests
 	test_inline_text.cpp
 	test_simple_shape.cpp
 	test_image_trace.cpp
+	test_svg_split.cpp
+	test_svg_import.cpp
 	test_image_fill.cpp
 	test_image_row_transform.cpp
 	test_image_row_dialog.cpp
@@ -103,10 +105,12 @@ add_executable(${_TEST_NAME}_tests
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
+	test_process_preset_export.cpp
 	test_project_preset_switch.cpp
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
+	test_minimum_spanning_tree.cpp
 	test_gltf.cpp
 	test_obj_color_match.cpp
 	test_scale_to_volume.cpp

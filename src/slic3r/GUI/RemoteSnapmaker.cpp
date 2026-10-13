@@ -296,10 +296,12 @@ static void announce_connected()
     mf->m_print_enable = true;
     mf->update_slice_print_status(MainFrame::eEventPlateUpdate);
     // update_all_preset_comboboxes only loads the device page the first time (its is_sm_page
-    // latch), so ask for it here the way the Device page's own connect does.
+    // latch), so ask for it here the way a connect from another page does (need_reload): this
+    // connect did not come from the Device page, whose state is stale now. When the preset row
+    // just asked for it too, the view still loads it once (DevicePageLoad.hpp).
     if (mf->m_printer_view) {
         const wxString url = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
-        mf->load_printer_url(wxGetApp().get_international_url(url));
+        mf->load_printer_url(wxGetApp().get_international_url(url), "", /*reload*/ true);
     }
 }
 
@@ -425,7 +427,7 @@ static std::pair<int, std::string> connect_impl(const std::string& dev_id)
     std::string              model, device_name;
     std::vector<std::string> nozzles;
     std::shared_ptr<PrintHost> as_host = *host;
-    const bool answered = SSWCP::query_machine_info(as_host, model, nozzles, device_name, 10);
+    const bool answered = SSWCP::query_machine_info(as_host, model, nozzles, device_name, 10, 2);
     if (!answered || model.empty()) {
         std::string ig;
         engine->Disconnect(ig);

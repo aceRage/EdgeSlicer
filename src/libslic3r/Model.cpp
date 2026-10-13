@@ -432,7 +432,7 @@ Model Model::read_from_file(const std::string&                                  
 // BBS: backup & restore
 // Loading model from a file (3MF or AMF), not from a simple geometry file (STL or OBJ).
 Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, En3mfType& out_file_type, LoadStrategy options,
-        PlateDataPtrs* plate_data, std::vector<Preset*>* project_presets, Semver* file_version, Import3mfProgressFn proFn, BBLProject *project)
+        PlateDataPtrs* plate_data, std::vector<Preset*>* project_presets, Semver* file_version, Import3mfProgressFn proFn, BBLProject *project, bool *is_bambu_studio)
 {
     assert(config != nullptr);
     assert(config_substitutions != nullptr);
@@ -450,7 +450,7 @@ Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig
         } else {
             // BBS: add part plate related logic
             // BBS: backup & restore
-            result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, &is_bbl_3mf, file_version, proFn, options, project);
+            result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, &is_bbl_3mf, file_version, proFn, options, project, 0, is_bambu_studio);
         }
     }
     else if (boost::algorithm::iends_with(input_file, ".zip.amf"))
@@ -3920,6 +3920,12 @@ void ModelInstance::get_arrange_polygon(void *ap, const Slic3r::DynamicPrintConf
         // id==0 means follow previous material, so need not be recorded
         if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
         if (op2 && (extruder_id = op2->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
+    } else if (auto stab = object->get_config_value<ConfigOptionEnum<StabilizerMode>>(config_global, "stabilizer_supports");
+               stab && stab->value != smOff) {
+        // Side stabilizers print with the support filament even with supports off.
+        auto op1 = object->get_config_value<ConfigOptionInt>(config_global, "support_filament");
+        int extruder_id;
+        if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
     }
 
     if (ret.extrude_ids.empty()) //the default extruder
