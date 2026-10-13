@@ -136,6 +136,57 @@ bool is_blocked_host(const std::string &host_in)
     return false;
 }
 
+// ---- sub-resource blocking by content rules (macOS) ----------------------------------------------
+
+std::vector<std::string> content_rule_url_filters()
+{
+    // Scheme, then an optional user name / password (WebKit keeps it in the URL it matches; inner
+    // "@"s are percent-encoded, so "[^/]*@" cannot reach past the authority).
+    const std::string authority = "^[^:]+://([^/]*@)?";
+    // The end of the host: trailing dots ("localhost."), an optional port, then the "/" WebKit
+    // puts after the authority of every special-scheme URL. Requiring the "/" keeps a user name
+    // ("user:pw@host") from being read as a host and a port.
+    const std::string host_end = "\\.*(:[0-9]*)?/";
+
+    std::vector<std::string> filters;
+    filters.push_back("^file:");
+    filters.push_back(authority + "\\[");                        // IPv6 literal
+    filters.push_back(authority + "[0-9.]+(:[0-9]*)?/");         // IPv4 literal (any all-numeric host)
+    filters.push_back(authority + "[^./:@]+" + host_end);        // single-label host
+    // The local suffixes of untrusted::is_local_or_ip_host(), and Tailscale's ts.net.
+    for (const char *suffix : {"localhost", "local", "lan", "home.arpa", "internal", "intranet", "localdomain", "ts.net"}) {
+        std::string escaped;
+        for (const char *c = suffix; *c != '\0'; ++c) {
+            if (*c == '.')
+                escaped += "\\";
+            escaped += *c;
+        }
+        filters.push_back(authority + "([^/:@]*\\.)?" + escaped + host_end);
+    }
+    return filters;
+}
+
+std::string content_rule_list_json()
+{
+    std::string json = "[";
+    bool        first = true;
+    for (const std::string &filter : content_rule_url_filters()) {
+        // JSON string escaping: the filters contain backslashes, no quotes or control characters.
+        std::string escaped;
+        for (char c : filter) {
+            if (c == '\\' || c == '"')
+                escaped += '\\';
+            escaped += c;
+        }
+        if (!first)
+            json += ",";
+        first = false;
+        json += "{\"trigger\":{\"url-filter\":\"" + escaped + "\"},\"action\":{\"type\":\"block\"}}";
+    }
+    json += "]";
+    return json;
+}
+
 // ---- navigation ----------------------------------------------------------------------------------
 
 NavDecision decide_navigation(const std::string &url, const std::string &page_url, bool main_frame)
@@ -316,7 +367,11 @@ bool is_executable_file_name(const std::string &file_name)
                                        ".wsf", ".wsh",  ".hta",  ".lnk",  ".url",  ".reg",        ".jar", ".application", ".gadget",
                                        ".msc", ".scf",  ".inf",  ".iso",  ".img",  ".vhd",        ".vhdx", ".sh",  ".app", ".dmg",
                                        ".pkg", ".deb",  ".rpm",  ".appimage", ".run", ".py",      ".pyw", ".command", ".settingcontent-ms",
-                                       ".library-ms", ".search-ms", ".xll", ".xlam", ".docm", ".xlsm", ".pptm"};
+                                       ".library-ms", ".search-ms", ".xll", ".xlam", ".docm", ".xlsm", ".pptm",
+                                       // macOS: scripts, launchers and installable bundles a double-click runs or installs.
+                                       ".terminal", ".tool", ".workflow", ".action", ".scpt", ".scptd", ".applescript", ".osax",
+                                       ".prefpane", ".kext", ".mpkg", ".mobileconfig", ".webloc", ".fileloc", ".inetloc", ".dylib",
+                                       ".bundle", ".plugin", ".appex", ".xpc", ".zsh", ".bash", ".csh", ".ksh", ".pl", ".rb"};
     for (const char *e : exts)
         if (ends_with_ci(file_name, e))
             return true;

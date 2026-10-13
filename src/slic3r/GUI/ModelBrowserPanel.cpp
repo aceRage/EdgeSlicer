@@ -49,13 +49,20 @@ namespace GUI {
 namespace fs = boost::filesystem;
 using namespace Slic3r::modelbrowser;
 
-bool model_browser_enabled()
+#ifndef __APPLE__ // macOS: ModelBrowserPanelMac.mm (it asks the OS version)
+bool model_browser_supported()
 {
 #ifdef _WIN32
-    return wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool("model_browser_beta");
+    return true;
 #else
     return false;
 #endif
+}
+#endif
+
+bool model_browser_enabled()
+{
+    return model_browser_supported() && wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool("model_browser_beta");
 }
 
 #ifdef _WIN32
@@ -1324,7 +1331,7 @@ ModelBrowserPanel::Impl::~Impl()
     env.Reset();
 }
 
-#else // !_WIN32
+#elif !defined(__APPLE__) // Linux: no model browser (model_browser_supported() is false)
 
 struct ModelBrowserPanel::Impl
 {
@@ -1334,6 +1341,9 @@ struct ModelBrowserPanel::Impl
 #endif // _WIN32
 
 // ---------------------------------------------------------------------------------- panel ----
+
+// macOS: the panel's members are defined in ModelBrowserPanelMac.mm, next to its Impl.
+#ifndef __APPLE__
 
 ModelBrowserPanel::ModelBrowserPanel(wxWindow* parent, std::function<void()> on_leave)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL)
@@ -1380,6 +1390,8 @@ void ModelBrowserPanel::sys_color_changed()
     p->apply_theme_to_browser();
 #endif
 }
+
+#endif // !__APPLE__
 
 } // namespace GUI
 } // namespace Slic3r
