@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 
 #include "libslic3r/GCode.hpp"
@@ -346,4 +347,48 @@ TEST_CASE("Resonance avoidance moves outer wall speeds out of the band the neare
     // Upper half, but the filament cannot be pushed through at "max" (8 mm^3/s caps them at about 105 mm/s,
     // inside the upper half): down to "min" as before rather than over the volumetric limit.
     CHECK(outer_wall_feedrates(110., 8.) == std::set<int>{70 * 60});
+}
+
+// Orca #11491: bed_mesh_probe_count counts probe points, and n intervals of at most
+// bed_mesh_probe_distance need n + 1 of them. The count used to be one short, so the points of an
+// adaptive mesh were spaced wider than the distance asked for.
+TEST_CASE("Adaptive bed mesh probe points are no further apart than the probe distance", "[GCode][BedMesh]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"bed_mesh_probe_distance", "5x5"},
+        {"skirt_loops",             "0"},
+        {"brim_type",               "no_brim"},
+        {"gcode_flavor",            "marlin"},
+    });
+    config.set_key_value("machine_start_gcode",
+                         new ConfigOptionString("; MESH_SIZE {first_layer_print_size[0]} {first_layer_print_size[1]}\n"
+                                                "; PROBE_COUNT {bed_mesh_probe_count[0]} {bed_mesh_probe_count[1]}\n"));
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    const std::string gcode = Test::gcode(print);
+
+    const size_t size_pos  = gcode.find("; MESH_SIZE ");
+    const size_t count_pos = gcode.find("; PROBE_COUNT ");
+    REQUIRE(size_pos != std::string::npos);
+    REQUIRE(count_pos != std::string::npos);
+    double size_x = 0., size_y = 0.;
+    int    count_x = 0, count_y = 0;
+    {
+        std::istringstream in(gcode.substr(size_pos + 12, gcode.find('\n', size_pos) - size_pos - 12));
+        in >> size_x >> size_y;
+    }
+    {
+        std::istringstream in(gcode.substr(count_pos + 14, gcode.find('\n', count_pos) - count_pos - 14));
+        in >> count_x >> count_y;
+    }
+    CAPTURE(size_x, size_y, count_x, count_y);
+    REQUIRE(size_x > 15.);
+    REQUIRE(size_y > 15.);
+    // Spacing within the distance, and no more points than that needs.
+    CHECK(size_x / (count_x - 1) <= 5. + EPSILON);
+    CHECK(size_y / (count_y - 1) <= 5. + EPSILON);
+    CHECK(count_x == int(std::ceil(size_x / 5.)) + 1);
+    CHECK(count_y == int(std::ceil(size_y / 5.)) + 1);
 }
