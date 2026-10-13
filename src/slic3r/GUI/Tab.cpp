@@ -6357,7 +6357,11 @@ void TabPrinter::update_input_shaper_menu(GCodeFlavor flavor)
     const bool needs_reset = std::find(allowed.begin(), allowed.end(), current) == allowed.end();
     const InputShaperType desired = needs_reset ? allowed.front() : current;
 
-    if (needs_reset && current != desired) {
+    // Edge: only rewrite the stored type while the override is on. Upstream rewrote it whenever the
+    // page was shown, so merely opening Motion ability on a Marlin 2 printer (whose list has no
+    // Default) turned its "Default" into "ZV" and marked the preset modified. With the override off
+    // the type is never written; Marlin's M593 has no type either.
+    if (needs_reset && current != desired && m_config->opt_bool("input_shaping_emit")) {
         DynamicPrintConfig new_conf = *m_config;
         new_conf.set_key_value("input_shaping_type", new ConfigOptionEnum<InputShaperType>(desired));
         m_config_manipulation.apply(m_config, &new_conf);
