@@ -413,8 +413,12 @@ public:
 
     //BBS
     void        load_url(wxString url);
-    void        load_printer_url(wxString url, wxString apikey = "");
+    // Shows `url` in the Device tab's web view. `reload` loads it again even when the view shows
+    // it already (a connect made from another page); otherwise our own page is left as it is.
+    void        load_printer_url(wxString url, wxString apikey = "", bool reload = false);
     void        load_printer_url();
+    // GUI_App: startup is over, the Device tab may load its page now.
+    void        on_startup_settled();
     bool        is_printer_view() const;
     void        refresh_plugin_tips();
     void        RunScript(wxString js);
