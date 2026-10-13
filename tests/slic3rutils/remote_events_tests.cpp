@@ -801,3 +801,277 @@ TEST_CASE("[RemoteEvents] a Klipper cancel stays a cancel and a Klipper error st
     e.kind         = "snapmaker";
     CHECK(count_of(d.poll(e), "failed") == 1);
 }
+
+// ---- a stop that shows an HMS fault before its print_error ----
+//
+// 2026-10-09/10 on the owner's X1C and H2s: the HMS fault 0500-0600-0002-0006 is up a few seconds
+// before the print_error 0300400C "The task was canceled." arrives. The snapshot used to fill the
+// failure's code from the HMS item, which counted as "the reason", so the failure went out at
+// once as "failed" and the cancel followed as an "error". The HMS-only code does not end the wait.
+namespace {
+
+PrinterState failed_hms(const char* hms, const std::string& job = "bench.gcode")
+{
+    PrinterState p = with_code(failed_waiting(job), hms, "");
+    p.error_is_hms = true;
+    return p;
+}
+
+PrinterState failed_cancel(const std::string& job = "bench.gcode")
+{
+    // What snapshot_bambu builds once print_error is up: the code, and no wait.
+    return with_code(pr("failed", job, "FAILED"), "0300400C", "The task was canceled.");
+}
+
+} // namespace
+
+TEST_CASE("[RemoteEvents] the cancel code is recognised as the decimal number and as a number", "[RemoteEvents]")
+{
+    CHECK(is_user_cancel_code("50348044")); // 0x0300400C as the MQTT push carries it
+    CHECK(is_user_cancel_code(" 50348044 "));
+    CHECK(is_user_cancel_code("83902478")); // 0x0500400E
+    CHECK(is_user_cancel_code("0300_400c"));
+    CHECK(is_user_cancel_number(50348044));
+    CHECK(is_user_cancel_number(0x0500400E));
+    CHECK_FALSE(is_user_cancel_number(0));
+    CHECK_FALSE(is_user_cancel_number(50348045));
+    CHECK_FALSE(is_user_cancel_code("50348045"));
+    CHECK_FALSE(is_user_cancel_code("05004046")); // an all-digit hex code is still hex
+    CHECK_FALSE(is_user_cancel_code("12345678"));
+    CHECK_FALSE(is_user_cancel_code("0500060000020006")); // the HMS fault is not a cancel
+}
+
+TEST_CASE("[RemoteEvents] FAILED with an HMS fault first and the cancel code later is one cancelled", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    // The state arrives with only the HMS fault up: neither a failure nor an "error" yet.
+    CHECK(d.poll(failed_hms("0500060000020006"), 5000).empty());
+    CHECK(d.poll(failed_hms("0500060000020006"), 4000).empty());
+    // The print_error follows: a cancel, and it is the only event of the whole stop.
+    std::vector<Event> ev = d.poll(failed_cancel(), 1000);
+    REQUIRE(ev.size() == 1);
+    CHECK(ev[0].kind == "cancelled");
+    CHECK(ev[0].severity == "info");
+    CHECK(ev[0].job == "bench.gcode");
+    for (int i = 0; i < 4; ++i) CHECK(d.poll(failed_cancel(), 5000).empty());
+    // The HMS fault coming back later is not announced either: it is part of the same stop.
+    CHECK(d.poll(failed_hms("0500060000020006"), 5000).empty());
+}
+
+TEST_CASE("[RemoteEvents] FAILED with an HMS fault first and a real print_error later is one failure", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    CHECK(d.poll(failed_hms("0500060000020006"), 5000).empty());
+    std::vector<Event> ev = d.poll(with_code(pr("failed", "bench.gcode", "FAILED"), "05004046", "The nozzle is clogged."), 3000);
+    REQUIRE(ev.size() == 1);
+    CHECK(ev[0].kind == "failed");
+    CHECK(ev[0].code == "05004046");
+}
+
+TEST_CASE("[RemoteEvents] FAILED with only an HMS fault is a failure, carrying the fault, once the window is over", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    CHECK(d.poll(failed_hms("0500060000020006"), 5000).empty());
+    std::vector<Event> ev = d.poll(failed_hms("0500060000020006"), FAIL_SETTLE_MS);
+    REQUIRE(ev.size() == 1); // one thing happened: no extra "error" beside the failure
+    CHECK(ev[0].kind == "failed");
+    CHECK(ev[0].code == "0500060000020006");
+    CHECK(d.poll(failed_hms("0500060000020006"), 5000).empty());
+}
+
+TEST_CASE("[RemoteEvents] a FAILED that trails an announced cancel is not a second event", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    REQUIRE(count_of(d.poll(failed_cancel(), 5000), "cancelled") == 1);
+    // The printer flickers through idle and says FAILED again, with no code this time.
+    CHECK(d.poll(pr("idle", "", "IDLE"), 2000).empty());
+    CHECK(d.poll(failed_waiting(), 2000).empty());
+    CHECK(d.poll(failed_waiting(), FAIL_SETTLE_MS + 1000).empty());
+    // A new print is a new story: a real failure on it is announced.
+    d.poll(pr("idle", "", "IDLE"), 5000);
+    REQUIRE(count_of(d.poll(pr("printing", "next.gcode")), "started") == 1);
+    CHECK(d.poll(failed_waiting("next.gcode"), 5000).empty());
+    REQUIRE(count_of(d.poll(failed_waiting("next.gcode"), FAIL_SETTLE_MS), "failed") == 1);
+}
+
+// ---- how the job ended: "cancelled" outlives the printer's print_error ----
+//
+// 2026-10-13, the owner's iPhone: an H2D2 cancelled by hand read Cancelled on the first refresh and
+// Failed on the next, because the printer had dropped print_error 0300400C (dismissed on its screen,
+// or cleared by the firmware) and was left saying FAILED. The hub remembers the stop in JobMemory and
+// hands the answer out as the `ended` field of /summary and /api/printers (ended_of).
+namespace {
+
+std::string ended_now(const Driver& d, const PrinterState& p, const char* error_code = "")
+{
+    return ended_of(d.mem, p.id, p.state, p.job, p.job_id, error_code);
+}
+
+} // namespace
+
+TEST_CASE("[RemoteEvents] a cancel is remembered as ended=cancelled while the code is up", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    CHECK(ended_now(d, pr("printing")).empty());
+    REQUIRE(count_of(d.poll(failed_cancel(), 5000), "cancelled") == 1);
+    CHECK(ended_now(d, failed_cancel(), "0300400C") == "cancelled");
+}
+
+TEST_CASE("[RemoteEvents] ended=cancelled is kept after the printer clears the cancel code", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    REQUIRE(count_of(d.poll(failed_cancel(), 5000), "cancelled") == 1);
+    // The code is dismissed on the printer's screen: FAILED stays, print_error is gone.
+    PrinterState bare = pr("failed", "bench.gcode", "FAILED");
+    for (int i = 0; i < 20; ++i) {
+        d.poll(bare, 5000);
+        CHECK(ended_now(d, bare) == "cancelled"); // well past CANCEL_TAIL_MS as well
+    }
+    // And through an idle spell on the same job.
+    d.poll(pr("idle", "bench.gcode", "IDLE"), 5000);
+    CHECK(ended_now(d, pr("idle", "bench.gcode", "IDLE")) == "cancelled");
+    // Offline blinks do not forget it.
+    d.poll(offline(bare), 5000);
+    CHECK(ended_now(d, bare) == "cancelled");
+    d.poll(bare, 5000);
+    CHECK(ended_now(d, bare) == "cancelled");
+}
+
+TEST_CASE("[RemoteEvents] ended=cancelled is cleared by a new job", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    REQUIRE(count_of(d.poll(failed_cancel(), 5000), "cancelled") == 1);
+    PrinterState bare = pr("failed", "bench.gcode", "FAILED");
+    d.poll(bare, 5000);
+    REQUIRE(ended_now(d, bare) == "cancelled");
+
+    // The next print starts: preparing, then printing.
+    d.poll(pr("preparing", "next.gcode", "PREPARE"), 5000);
+    CHECK(ended_now(d, pr("preparing", "next.gcode", "PREPARE")).empty());
+    d.poll(pr("printing", "next.gcode", "RUNNING"), 5000);
+    CHECK(ended_now(d, pr("printing", "next.gcode", "RUNNING")).empty());
+    // It goes wrong without a code of its own: that is a failure and must read as one.
+    d.poll(failed_waiting("next.gcode"), 5000);
+    CHECK(ended_now(d, failed_waiting("next.gcode")).empty());
+    d.poll(failed_waiting("next.gcode"), FAIL_SETTLE_MS);
+    CHECK(ended_now(d, failed_waiting("next.gcode")).empty());
+    // The same file printed again is still a new job: busy again clears it.
+    d.poll(pr("idle", "", "IDLE"), 5000);
+    d.poll(pr("printing", "next.gcode", "RUNNING"), 5000);
+    CHECK(ended_now(d, pr("printing", "next.gcode", "RUNNING")).empty());
+}
+
+TEST_CASE("[RemoteEvents] ended=cancelled is cleared when the printer is on a different job without ever showing busy", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    PrinterState a = pr("printing");
+    a.job_id       = "1001";
+    REQUIRE(count_of(d.poll(a), "started") == 1);
+    PrinterState fa = failed_cancel();
+    fa.job_id       = "1001";
+    REQUIRE(count_of(d.poll(fa, 5000), "cancelled") == 1);
+    PrinterState bare = pr("failed", "bench.gcode", "FAILED");
+    bare.job_id       = "1001";
+    d.poll(bare, 5000);
+    CHECK(ended_now(d, bare) == "cancelled");
+    // Same file name, a different job id between two polls: another print.
+    PrinterState other = bare;
+    other.job_id       = "1002";
+    CHECK(ended_now(d, other).empty()); // the answer is right before the watcher has even polled it
+    d.poll(other, 5000);
+    CHECK(ended_now(d, other).empty());
+    CHECK(ended_now(d, bare).empty()); // and it stayed cleared
+}
+
+TEST_CASE("[RemoteEvents] ended=cancelled is cleared by a real error and a finish, and a real failure never sets it", "[RemoteEvents]")
+{
+    {
+        Driver d;
+        d.poll(pr("idle", ""));
+        REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+        REQUIRE(count_of(d.poll(failed_cancel(), 5000), "cancelled") == 1);
+        PrinterState real = with_code(pr("failed", "bench.gcode", "FAILED"), "05004046", "The nozzle is clogged.");
+        CHECK(ended_now(d, real, "05004046").empty()); // right away, before the next poll
+        d.poll(real, 5000);
+        CHECK(ended_now(d, pr("failed", "bench.gcode", "FAILED")).empty()); // and after the code drops too
+    }
+    {
+        Driver d;
+        d.poll(pr("idle", ""));
+        REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+        REQUIRE(count_of(d.poll(failed_cancel(), 5000), "cancelled") == 1);
+        d.poll(pr("finished", "bench.gcode", "FINISH"), 5000);
+        CHECK(ended_now(d, pr("finished", "bench.gcode", "FINISH")).empty());
+    }
+    {
+        // A print that really failed is not a cancel, however long it sits in FAILED.
+        Driver d;
+        d.poll(pr("idle", ""));
+        REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+        d.poll(with_code(pr("failed", "bench.gcode", "FAILED"), "05004046", "The nozzle is clogged."), 5000);
+        CHECK(ended_now(d, pr("failed", "bench.gcode", "FAILED"), "05004046").empty());
+        d.poll(pr("failed", "bench.gcode", "FAILED"), 5000);
+        CHECK(ended_now(d, pr("failed", "bench.gcode", "FAILED")).empty());
+    }
+}
+
+TEST_CASE("[RemoteEvents] a watcher that first sees the printer already stopped remembers the cancel", "[RemoteEvents]")
+{
+    Driver d;
+    // The very first poll: seeding only, no event - but the stop is known from this sight on.
+    CHECK(d.poll(failed_cancel()).empty());
+    PrinterState bare = pr("failed", "bench.gcode", "FAILED");
+    d.poll(bare, 5000);
+    CHECK(ended_now(d, bare) == "cancelled");
+    // Seen again after having been out of sight.
+    Driver e;
+    e.poll(offline(pr("failed", "bench.gcode", "FAILED")));
+    CHECK(e.poll(failed_cancel(), 5000).empty());
+    e.poll(bare, 5000);
+    CHECK(ended_now(e, bare) == "cancelled");
+}
+
+TEST_CASE("[RemoteEvents] ended is per printer and empty for one the watcher does not know", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing")), "started") == 1);
+    REQUIRE(count_of(d.poll(failed_cancel(), 5000), "cancelled") == 1);
+    PrinterState bare = pr("failed", "bench.gcode", "FAILED");
+    d.poll(bare, 5000);
+    CHECK(ended_of(d.mem, "P1", "failed", "bench.gcode", "", "") == "cancelled");
+    CHECK(ended_of(d.mem, "P2", "failed", "bench.gcode", "", "").empty());
+    // The printer's own FAILED + cancel code needs no memory at all.
+    CHECK(ended_of(d.mem, "P2", "failed", "bench.gcode", "", "50348044") == "cancelled");
+    CHECK(ended_of(d.mem, "P2", "failed", "bench.gcode", "", "0500400E") == "cancelled");
+    // A cancel code on a printer that is running again is a leftover, not a state.
+    CHECK(ended_of(d.mem, "P2", "printing", "bench.gcode", "", "0300400C").empty());
+    // A job-less FAILED (the name blanks after a stop) is still the stopped job.
+    CHECK(ended_of(d.mem, "P1", "failed", "", "", "") == "cancelled");
+}
+
+TEST_CASE("[RemoteEvents] a Klipper cancel is ended=cancelled until the next job", "[RemoteEvents]")
+{
+    Driver d;
+    d.poll(pr("idle", ""));
+    REQUIRE(count_of(d.poll(pr("printing", "part.gcode", "printing")), "started") == 1);
+    REQUIRE(count_of(d.poll(pr("cancelled", "part.gcode", "cancelled"), 5000), "cancelled") == 1);
+    CHECK(ended_now(d, pr("cancelled", "part.gcode", "cancelled")) == "cancelled");
+    d.poll(pr("printing", "next.gcode", "printing"), 5000);
+    CHECK(ended_now(d, pr("printing", "next.gcode", "printing")).empty());
+}
