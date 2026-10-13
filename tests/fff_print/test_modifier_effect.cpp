@@ -321,6 +321,7 @@ TEST_CASE("a modifier with its own bridge speed keeps its own bridge infill", "[
     REQUIRE(found_layer);
 
     // Both halves of the deck bridge, each in the region whose bridge speed it is printed with.
-    CHECK(bridge_length_by_speed[50.] > 50.);
-    CHECK(bridge_length_by_speed[20.] > 50.);
+    // Path lengths are in scaled units. Each half of the 20 x 10 mm span takes well over 50 mm of bridge lines.
+    CHECK(bridge_length_by_speed[50.] > scale_(50.));
+    CHECK(bridge_length_by_speed[20.] > scale_(50.));
 }
