@@ -9,16 +9,27 @@
 namespace Slic3r {
 namespace GUI {
 
-// Whether Home > Models is offered: Windows only in this phase, and Preferences > "Model browser
+// Whether this system can run the model browser: Windows (WebView2), and macOS 12 or later (WKWebView:
+// WKDownload, the media-capture permission decision; ModelBrowserPanelMac.mm). Never on Linux.
+bool model_browser_supported();
+
+// Whether Home > Models is offered: model_browser_supported(), and Preferences > "Model browser
 // (beta)" (app_config "model_browser_beta", on by default).
 bool model_browser_enabled();
 
 // Home > Models: a small web browser for the model sites (Printables, MakerWorld, Snapmaker Space).
 //
+// One interface, one Impl per system: WebView2 on Windows (ModelBrowserPanel.cpp), WKWebView on
+// macOS (ModelBrowserPanelMac.mm, which also defines this class's members there). Both carry out the
+// same security model with the same rules.
+//
 // Security model (see libslic3r/ModelBrowserRules.hpp for the rules, which are unit tested):
 //  - Its own WebView2 environment and user data folder (%LOCALAPPDATA%\<app>\ModelBrowser): its
 //    cookies, logins and cache never mix with the app's own web views (page server, hub, sign-in
 //    dialogs), and those views' cookies are never visible to the sites. Logins persist there.
+//    macOS 14+: its own persistent WKWebsiteDataStore (dataStoreForIdentifier:); macOS 12-13: a
+//    non-persistent store (isolated, but sign-ins last until EdgeSlicer quits) - never the default
+//    store the app's own web views share.
 //  - It is never made with WebView::CreateWebView and carries no script bridge: web messages and
 //    host objects are off, and the panel refuses to show a view in which they are not (asserted
 //    after the settings are applied).

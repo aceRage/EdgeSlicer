@@ -43,6 +43,22 @@ const Site *site_for_url(const std::string &url);
 // dot ("localhost.") is ignored. An empty host is blocked.
 bool is_blocked_host(const std::string &host);
 
+// ---- sub-resource blocking by content rules (macOS) ------------------------------------------------
+
+// WKWebView has no per-request hook like WebView2's WebResourceRequested, so on macOS the loads
+// is_blocked_host() refuses - sub-resources, fetch/XHR, WebSockets, frames and documents alike - are
+// blocked by a WKContentRuleList compiled from content_rule_list_json(). Its url-filters are regular
+// expressions in the subset WebKit's content blockers accept (no "|", no "{n}", no "\d"; "^" and "$"
+// only at the ends) and match URLs as WebKit canonicalizes them before matching: lower-case host,
+// IPv4 in dotted decimal (127.1, 0x7f.1 and 2130706433 become 127.0.0.1), an IPv6 host in brackets,
+// and a "/" after the authority of every http(s) / ws(s) URL. They block:
+//   file: URLs; any IPv6 literal; any host made of digits and dots; any single-label host; and
+//   localhost, local, lan, home.arpa, internal, intranet, localdomain, ts.net and their subdomains -
+// with or without a user name, a port or trailing dots. Unit tested against is_blocked_host().
+std::vector<std::string> content_rule_url_filters();
+// [{"trigger":{"url-filter":<filter>},"action":{"type":"block"}}, ...] for content_rule_url_filters().
+std::string content_rule_list_json();
+
 // ---- navigation ----------------------------------------------------------------------------------
 
 enum class NavAction {
@@ -134,7 +150,8 @@ struct DownloadDecision
     std::string    reason;
 };
 
-// Programs, scripts, shortcuts and installers (".exe", ".msi", ".bat", ".ps1", ".js", ".lnk", ...).
+// Programs, scripts, shortcuts and installers (".exe", ".msi", ".bat", ".ps1", ".js", ".lnk", ..., and the
+// macOS ones: ".app", ".dmg", ".pkg", ".command", ".scpt", ".workflow", ".webloc", ...).
 bool is_executable_file_name(const std::string &file_name);
 
 // A download the page started.
