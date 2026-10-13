@@ -6597,14 +6597,16 @@ void TabPrinter::toggle_options()
         toggle_option("min_resonance_avoidance_speed", resonance_avoidance);
         toggle_option("max_resonance_avoidance_speed", resonance_avoidance);
 
-        bool input_shaping_compatible = gcf_is_marlin_firmware || gcf_is_reprap_firmware;
+        // Edge: Klipper takes the override too (SET_INPUT_SHAPER, whatever emit_machine_limits_to_gcode says);
+        // Bambu printers never get it.
+        bool input_shaping_compatible = (gcf_is_marlin_firmware || gcf_is_reprap_firmware || gcf_is_klipper) && !is_BBL_printer;
 
         for (auto is : {"input_shaping_emit", "input_shaping_type", "input_shaping_freq_x", "input_shaping_freq_y",
                             "input_shaping_damp_x", "input_shaping_damp_y"})
                 toggle_line(is, input_shaping_compatible);
 
         if (input_shaping_compatible) {
-            bool emit_machine_limits_to_gcode = m_config->opt_bool("emit_machine_limits_to_gcode");
+            bool emit_machine_limits_to_gcode = gcf_is_klipper || m_config->opt_bool("emit_machine_limits_to_gcode");
             toggle_option("input_shaping_emit", emit_machine_limits_to_gcode);
             bool input_shaping_emit = emit_machine_limits_to_gcode && m_config->opt_bool("input_shaping_emit");
             toggle_option("input_shaping_type", input_shaping_emit);

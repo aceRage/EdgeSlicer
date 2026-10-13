@@ -5107,6 +5107,20 @@ static bool custom_gcode_sets_temperature(
 void GCode::print_machine_envelope(GCodeOutputStream& file, Print& print)
 {
     const auto flavor = print.config().gcode_flavor.value;
+
+    // Orca: Override input shaping values
+    // Edge: never for Bambu printers (Marlin legacy flavour, no M593), and for Klipper too (below).
+    const auto write_input_shaping = [&]() {
+        if (!print.config().input_shaping_emit.value || flavor == gcfMarlinLegacy || print.is_BBL_printer())
+            return;
+        const bool input_shaping_disable = print.config().input_shaping_type.value == InputShaperType::Disable;
+        file.write(writer().set_input_shaping('X', print.config().input_shaping_damp_x.value,
+            print.config().input_shaping_freq_x.value, print.config().opt_serialize("input_shaping_type")));
+        if (flavor != gcfRepRapFirmware && !input_shaping_disable) {
+            file.write(writer().set_input_shaping('Y', print.config().input_shaping_damp_y.value,
+                print.config().input_shaping_freq_y.value, ""));
+        }
+    };
     if ((flavor == gcfMarlinLegacy || flavor == gcfMarlinFirmware || flavor == gcfRepRapFirmware) &&
         print.config().emit_machine_limits_to_gcode.value == true) {
         int factor = flavor == gcfRepRapFirmware ? 60 : 1; // RRF M203 and M566 are in mm/min
@@ -5148,16 +5162,11 @@ void GCode::print_machine_envelope(GCodeOutputStream& file, Print& print)
         // New Marlin uses M205 J[mm] for junction deviation (only apply if it is > 0)
         file.write_format(writer().set_junction_deviation(config().machine_max_junction_deviation.values.front()).c_str());
 
-        // Orca: Override input shaping values
-        if (print.config().input_shaping_emit.value && flavor != gcfMarlinLegacy) {
-            const bool input_shaping_disable = print.config().input_shaping_type.value == InputShaperType::Disable;
-            file.write_format(writer().set_input_shaping('X', print.config().input_shaping_damp_x.value,
-                print.config().input_shaping_freq_x.value, print.config().opt_serialize("input_shaping_type")).c_str());
-            if (flavor != gcfRepRapFirmware && !input_shaping_disable) {
-                file.write_format(writer().set_input_shaping('Y', print.config().input_shaping_damp_y.value,
-                    print.config().input_shaping_freq_y.value, "").c_str());
-            }
-        }
+        write_input_shaping();
+    } else if (flavor == gcfKlipper) {
+        // Edge: Klipper ignores the machine limits, but takes the input shaping override
+        // (SET_INPUT_SHAPER) whenever it is on.
+        write_input_shaping();
     }
 }
 

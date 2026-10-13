@@ -20517,8 +20517,14 @@ void Plater::Calib_Cornering(const Calib_Params& params)
         print_config->set_key_value("default_jerk", new ConfigOptionFloats { 0 });
     }
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
-    printer_config->set_key_value("input_shaping_emit", new ConfigOptionBool{true});
-    printer_config->set_key_value("input_shaping_type", new ConfigOptionEnum<InputShaperType>(InputShaperType::Disable));
+    // Edge: Klipper takes the input shaping override too, but upstream never turned input shaping off
+    // for a Klipper cornering test, and SET_INPUT_SHAPER stays in force on the printer until a
+    // restart; leave the Klipper override as the user set it.
+    const auto cornering_flavor = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+    if (!(cornering_flavor && cornering_flavor->value == GCodeFlavor::gcfKlipper)) {
+        printer_config->set_key_value("input_shaping_emit", new ConfigOptionBool{true});
+        printer_config->set_key_value("input_shaping_type", new ConfigOptionEnum<InputShaperType>(InputShaperType::Disable));
+    }
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
