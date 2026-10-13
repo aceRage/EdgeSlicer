@@ -134,9 +134,11 @@ TEST_CASE("Float options compare with a tolerance (Orca #12478)", "[ConfigRange]
     const ConfigOption &b = ConfigOptionFloat(0.3);
     CHECK(a == b);
 
-    CHECK(ConfigOptionFloats({ 0.1 + 0.2, 1. }) == ConfigOptionFloats({ 0.3, 1. }));
-    CHECK_FALSE(ConfigOptionFloats({ 0.31, 1. }) == ConfigOptionFloats({ 0.3, 1. }));
-    CHECK(ConfigOptionPercents({ 50. + 1e-9 }) == ConfigOptionPercents({ 50. }));
+    // Vectors: upstream made only the nullable comparison tolerant; plain vectors stay exact.
+    CHECK(ConfigOptionFloatsNullable({ 0.1 + 0.2, 1. }) == ConfigOptionFloatsNullable({ 0.3, 1. }));
+    CHECK_FALSE(ConfigOptionFloatsNullable({ 0.31, 1. }) == ConfigOptionFloatsNullable({ 0.3, 1. }));
+    CHECK(ConfigOptionPercentsNullable({ 50. + 1e-9 }) == ConfigOptionPercentsNullable({ 50. }));
+    CHECK_FALSE(ConfigOptionFloats({ 0.1 + 0.2, 1. }) == ConfigOptionFloats({ 0.3, 1. }));
 
     // Nullable: nil equals nil, nil never equals a value.
     ConfigOptionFloatsNullable n1({ ConfigOptionFloatsNullable::nil_value(), 0.3 });
@@ -185,7 +187,8 @@ TEST_CASE("No shipped preset value is newly out of range with float bounds", "[C
             boost::nowide::ifstream ifs(it->path().string());
             nlohmann::json j = nlohmann::json::parse(ifs, nullptr, false);
             if (j.is_object() && j.contains("name") && j["name"].is_string())
-                by_name[j["name"].get<std::string>()] = std::move(j);
+                const std::string preset_name = j["name"].get<std::string>();
+                by_name[preset_name]          = std::move(j);
         }
         return by_name;
     };
