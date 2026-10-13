@@ -1262,6 +1262,8 @@ TEST_CASE("filament group dirty flag is set only on valid-to-invalid slice resul
     CHECK_FALSE(filament_group_dirty_on_invalidation(false, false));
     CHECK_FALSE(filament_group_dirty_on_invalidation(false, true));
     CHECK_FALSE(filament_group_dirty_on_invalidation(true, true));
+    // Snap #1000: a nozzle-volume change also dirties grouping in FlowTypeHelper,
+    // without waiting for this valid→invalid transition (it races a fast Slice).
 }
 
 TEST_CASE("filament group slice decision covers prompt, remote skip, and sync", "[Config][FilamentGroup]")
