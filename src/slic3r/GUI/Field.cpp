@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <regex>
+#include <cstdint>
 #include <wx/numformatter.h>
 #include <wx/tooltip.h>
 #include <wx/notebook.h>
@@ -1603,6 +1604,26 @@ void Choice::set_value(const boost::any& value, bool change_event)
     case coEnums: {
 		int val = boost::any_cast<int>(value);
 
+        // Orca: the input shaper list holds only the types the printer's G-code flavor supports
+        // (TabPrinter::update_input_shaper_menu); each row carries its enum value as client data.
+        // Default (0) has no client data, but it is always the first row when the flavor offers it.
+        if (m_opt_id == "input_shaping_type") {
+            const unsigned int count = field->GetCount();
+            int selection = -1;
+            for (unsigned int idx = 0; idx < count; ++idx) {
+                if (void* data = field->GetClientData(idx)) {
+                    if (static_cast<int>(reinterpret_cast<uintptr_t>(data)) == val) {
+                        selection = static_cast<int>(idx);
+                        break;
+                    }
+                }
+            }
+            if (selection < 0)
+                selection = (val >= 0 && val < static_cast<int>(count)) ? val : (count > 0 ? 0 : -1);
+            field->SetSelection(selection);
+            break;
+        }
+
         // Support ThirdPartyPrinter
         if (m_opt_id.compare("host_type") == 0 && val != 0 &&
 			m_opt.enum_values.size() > field->GetCount()) // for case, when PrusaLink isn't used as a HostType
@@ -1688,6 +1709,17 @@ boost::any& Choice::get_value()
     {
         if (m_opt.nullable && field->GetSelection() == -1)
             m_value = ConfigOptionEnumsGenericNullable::nil_value();
+        else if (m_opt_id == "input_shaping_type")
+        {
+            const int selection = field->GetSelection();
+            if (selection >= 0) {
+                if (void* data = field->GetClientData(selection))
+                    m_value = static_cast<int>(reinterpret_cast<uintptr_t>(data));
+                else
+                    m_value = selection;
+            } else
+                m_value = 0;
+        }
         else if (enum_choice_maps_by_key(m_opt_id))
         {
             // Selection can be invalid when the current value is not present in the rebuilt
