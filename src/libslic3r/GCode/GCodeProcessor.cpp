@@ -3531,6 +3531,11 @@ void GCodeProcessor::process_G29(const GCodeReader::GCodeLine& line)
 {
     //BBS: hardcode 260 seconds for G29
     //Todo: use a machine related setting when we have second kind of BBL printer
+    // EDGE (#14573): a wait with no motion queued behind it used to be dropped, which hid that this is a Bambu
+    // number. It is counted now, and a Marlin mesh bed leveling start G-code has five G29 lines (G29 P1, G29 P1 X..,
+    // G29 P3.2, G29 P3.13, G29 A): 1300 s on a print that does not take them. Only the Bambu printers have the 260 s.
+    if (!s_IsBBLPrinter)
+        return;
     const float value_s = 260.0;
     simulate_st_synchronize(value_s);
 }

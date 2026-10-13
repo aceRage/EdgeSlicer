@@ -28,11 +28,11 @@ constexpr size_t NORMAL = static_cast<size_t>(PrintEstimatedStatistics::ETimeMod
 
 // Writes `gcode` to a temporary file and runs the processor over it with `config` applied. The G-code has no
 // producer marker, so process_file() keeps the applied config.
-void run_processor(GCodeProcessor& proc, const FullPrintConfig& config, const char* gcode)
+void run_processor(GCodeProcessor& proc, const FullPrintConfig& config, const char* gcode, bool bbl_printer = true)
 {
     // reserved_tag() selects between two tag tables based on this shared static, and other tests in the binary
     // mutate it -- pin it so our "; FEATURE:" role tags are parsed deterministically regardless of test order.
-    GCodeProcessor::s_IsBBLPrinter = true;
+    GCodeProcessor::s_IsBBLPrinter = bbl_printer;
     const boost::filesystem::path path = boost::filesystem::temp_directory_path() /
         boost::filesystem::unique_path("edge_gcode_timing_%%%%%%%%.gcode");
     {
@@ -596,4 +596,46 @@ TEST_CASE("Timed waits of the machine end G-code are not part of the estimate", 
     REQUIRE(t_with > 0.0);
     // Without the marker both waits count (180 + 5 s).
     REQUIRE_THAT(t_without - t_with, WithinAbs(185.0, 1e-1));
+}
+
+// ---- G29 ----
+
+TEST_CASE("The fixed 260 s G29 time is only for Bambu printers", "[GCodeTiming][G29]")
+{
+    // G29 is Bambu's bed leveling time, hard-coded. A Marlin mesh bed leveling start G-code has five G29 lines; with
+    // #14573 a wait with no motion behind it is counted instead of dropped, which would have added 1300 s to a print
+    // that does not take them.
+    const char* with_g29 =
+        "G1 X10 Y0 Z0.2 F6000\n"
+        "G1 X20 Y0\n"
+        "G1 X30 Y0\n"
+        "G29\n"
+        "G29 P1\n"
+        "G1 X40 Y0\n"
+        "G1 X50 Y0\n";
+    const char* without_g29 =
+        "G1 X10 Y0 Z0.2 F6000\n"
+        "G1 X20 Y0\n"
+        "G1 X30 Y0\n"
+        "G1 X40 Y0\n"
+        "G1 X50 Y0\n";
+
+    struct RestoreBBL
+    {
+        bool value = GCodeProcessor::s_IsBBLPrinter;
+        ~RestoreBBL() { GCodeProcessor::s_IsBBLPrinter = value; }
+    } restore;
+
+    auto time_of = [](const char* gcode, bool bbl) {
+        GCodeProcessor proc;
+        run_processor(proc, make_config(0.0, 0.0, 0.0), gcode, bbl);
+        return double(proc.get_time(PrintEstimatedStatistics::ETimeMode::Normal));
+    };
+
+    SECTION("a Bambu printer takes 260 s per G29") {
+        REQUIRE_THAT(time_of(with_g29, true) - time_of(without_g29, true), WithinAbs(520.0, 1e-1));
+    }
+    SECTION("any other printer does not") {
+        REQUIRE_THAT(time_of(with_g29, false) - time_of(without_g29, false), WithinAbs(0.0, 1e-3));
+    }
 }
