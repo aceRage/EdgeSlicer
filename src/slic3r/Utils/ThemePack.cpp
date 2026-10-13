@@ -473,7 +473,8 @@ json home_css(const Spec& spec)
     };
     static const std::set<std::string> page_vars = {
         "--bg", "--rail", "--card", "--fg", "--mute", "--faint", "--line", "--ctl", "--ctl-line", "--hover",
-        "--thumb", "--accent", "--accent-fg", "--accent-soft", "--warn-bg", "--warn-fg", "--danger",
+        "--thumb", "--accent", "--accent-fg", "--accent-soft", "--accent-strong", "--accent-text",
+        "--warn-bg", "--warn-fg", "--danger",
     };
     json css = json::object();
     for (const auto& [var, role] : from_palette)
