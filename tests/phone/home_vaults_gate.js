@@ -98,10 +98,12 @@ async function main() {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'homevaults-'));
     const br = spawn(exe, ['--headless=new', '--remote-debugging-port=' + dbgPort, '--user-data-dir=' + profile,
         '--no-first-run', '--no-default-browser-check', '--disable-gpu', 'about:blank'], { stdio: 'ignore' });
+    let cdp = null;
     try {
         let ver;
-        for (let i = 0; i < 50 && !ver; i++) { try { ver = await (await fetch('http://127.0.0.1:' + dbgPort + '/json/version')).json(); } catch (e) { await sleep(200); } }
-        const cdp = new Cdp(ver.webSocketDebuggerUrl); await cdp.open();
+        for (let i = 0; i < 300 && !ver; i++) { try { ver = await (await fetch('http://127.0.0.1:' + dbgPort + '/json/version')).json(); } catch (e) { await sleep(200); } }
+        if (!ver) throw new Error('the headless browser did not start within 60 s');
+        cdp = new Cdp(ver.webSocketDebuggerUrl); await cdp.open();
         const { result: { targetId } } = await cdp.send('Target.createTarget', { url: 'about:blank' });
         const { result: { sessionId } } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
         const S = (m, p) => cdp.send(m, p, sessionId);
@@ -235,6 +237,9 @@ async function main() {
         }
         check('no uncaught exception over the run', exceptions().length === 0, JSON.stringify(exceptions().map(e => e.params.exceptionDetails.text)));
     } finally {
+        // msedge.exe may hand the window to a broker and exit at once: close the browser itself over
+        // the protocol, so no headless browser is left behind.
+        if (cdp) { try { await Promise.race([cdp.send('Browser.close'), sleep(2000)]); } catch (e) {} }
         br.kill();
         await sleep(500);
         try { fs.rmSync(profile, { recursive: true, force: true }); } catch (e) {}
