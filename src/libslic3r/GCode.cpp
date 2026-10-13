@@ -11017,10 +11017,20 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     } else {
         // Orca: a travel shorter than the retraction threshold that leads into an external perimeter keeps the outer wall
         // acceleration / jerk, so the nozzle does not decelerate to travel limits just before the visible wall starts.
-        const bool short_travel_to_outer_wall = role == erExternalPerimeter &&
-                                                travel.length() < scale_(EXTRUDER_CONFIG(retraction_minimum_travel));
+        // Orca #11975: the same for a short travel into an overhang wall, at the bridge acceleration that
+        // wall is printed with (and the outer wall jerk).
+        const bool is_short_travel                = travel.length() < scale_(EXTRUDER_CONFIG(retraction_minimum_travel));
+        const bool short_travel_to_outer_wall     = role == erExternalPerimeter && is_short_travel;
+        const bool short_travel_to_overhang_wall  = role == erOverhangPerimeter && is_short_travel;
         if (this->process_flow_value(m_config.default_acceleration) > 0) {
-            if (short_travel_to_outer_wall) {
+            if (short_travel_to_overhang_wall) {
+                const auto   bridge_fop = this->process_flow_value(m_config.bridge_acceleration);
+                const double bridge_acc = bridge_fop.percent ?
+                                              bridge_fop.value * 0.01 * this->process_flow_value(m_config.outer_wall_acceleration) :
+                                              bridge_fop.value;
+                if (bridge_acc > 0)
+                    acceleration_to_set = (unsigned int) floor(bridge_acc + 0.5);
+            } else if (short_travel_to_outer_wall) {
                 if (this->process_flow_value(m_config.outer_wall_acceleration) > 0)
                     acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.outer_wall_acceleration) + 0.5);
             } else {
@@ -11029,7 +11039,7 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             }
         }
         if (this->process_flow_value(m_config.default_jerk) > 0) {
-            if (short_travel_to_outer_wall) {
+            if (short_travel_to_outer_wall || short_travel_to_overhang_wall) {
                 if (this->process_flow_value(m_config.outer_wall_jerk) > 0)
                     jerk_to_set = this->process_flow_value(m_config.outer_wall_jerk);
             } else {
