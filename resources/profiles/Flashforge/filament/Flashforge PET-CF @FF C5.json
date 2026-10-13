@@ -64,7 +64,6 @@
     ],
     "inherits": "Generic PETG-CF @System",
     "instantiation": "true",
-    "is_custom_defined": "0",
     "name": "Flashforge PET-CF @FF C5",
     "nozzle_temperature": [
         "270"
@@ -108,5 +107,5 @@
     "textured_plate_temp_initial_layer": [
         "100"
     ],
-    "version": "2.3.0.3"
+    "type": "filament"
 }

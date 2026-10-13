@@ -127,6 +127,7 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(GCodeFlavor)
 static t_config_enum_values s_keys_map_FuzzySkinType {
     { "none",           int(FuzzySkinType::None) },
     { "external",       int(FuzzySkinType::External) },
+    { "hole",           int(FuzzySkinType::Hole) },
     { "all",            int(FuzzySkinType::All) },
     { "allwalls",       int(FuzzySkinType::AllWalls)}
 };
@@ -137,7 +138,8 @@ static t_config_enum_values s_keys_map_NoiseType {
     { "perlin",         int(NoiseType::Perlin) },
     { "billow",         int(NoiseType::Billow) },
     { "ridgedmulti",    int(NoiseType::RidgedMulti) },
-    { "voronoi",        int(NoiseType::Voronoi) }
+    { "voronoi",        int(NoiseType::Voronoi) }, 
+    { "ripple",         int(NoiseType::Ripple) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NoiseType)
 
@@ -3440,10 +3442,12 @@ void PrintConfigDef::init_fff_params()
     def->enum_keys_map = &ConfigOptionEnum<FuzzySkinType>::get_enum_values();
     def->enum_values.push_back("none");
     def->enum_values.push_back("external");
+    def->enum_values.push_back("hole");
     def->enum_values.push_back("all");
     def->enum_values.push_back("allwalls");
     def->enum_labels.push_back(L("None"));
     def->enum_labels.push_back(L("Contour"));
+    def->enum_labels.push_back(L("Hole"));
     def->enum_labels.push_back(L("Contour and hole"));
     def->enum_labels.push_back(L("All walls"));
     def->mode = comSimple;
@@ -3455,7 +3459,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("The width within which to jitter. It's advised to be below outer wall line width.");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
-    def->max = 1;
+    def->max = 2;
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionFloat(0.2));
 
@@ -3507,18 +3511,21 @@ void PrintConfigDef::init_fff_params()
                      "Perlin: Perlin noise, which gives a more consistent texture.\n"
                      "Billow: Similar to perlin noise, but clumpier.\n"
                      "Ridged Multifractal: Ridged noise with sharp, jagged features. Creates marble-like textures.\n"
-                     "Voronoi: Divides the surface into voronoi cells, and displaces each one by a random amount. Creates a patchwork texture.");
+                     "Voronoi: Divides the surface into voronoi cells, and displaces each one by a random amount. Creates a patchwork texture.\n"
+                     "Ripple: Uniform ripple pattern that ripples left and right of the original path. Repeating pattern, woven appearance.");
     def->enum_keys_map = &ConfigOptionEnum<NoiseType>::get_enum_values();
     def->enum_values.push_back("classic");
     def->enum_values.push_back("perlin");
     def->enum_values.push_back("billow");
     def->enum_values.push_back("ridgedmulti");
     def->enum_values.push_back("voronoi");
+    def->enum_values.push_back("ripple");
     def->enum_labels.push_back(L("Classic"));
     def->enum_labels.push_back(L("Perlin"));
     def->enum_labels.push_back(L("Billow"));
     def->enum_labels.push_back(L("Ridged Multifractal"));
     def->enum_labels.push_back(L("Voronoi"));
+    def->enum_labels.push_back(L("Ripple"));
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionEnum<NoiseType>(NoiseType::Classic));
 
@@ -3561,6 +3568,39 @@ void PrintConfigDef::init_fff_params()
                      "overhang.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("fuzzy_skin_ripples_per_layer", coInt);
+    def->label = L("Number of ripples per layer");
+    def->category = L("Others");
+    def->tooltip  = L("Controls how many full cycles of ripples will be added per layer.");
+    def->min = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(15));
+
+    def = this->add("fuzzy_skin_ripple_offset", coPercent);
+    def->label = L("Ripple offset");
+    def->category = L("Others");
+    def->tooltip = L("Shifts the ripple phase forward along the print path by the specified percentage of a wavelength each layer period.\n"
+                     "- 0% keeps every layer identical.\n"
+                     "- 50% shifts the pattern by half a wavelength, effectively inverting the phase.\n"
+                     "- 100% shifts the pattern by a full wavelength, returning to the original phase.\n\n"
+                     "The shift is applied once every number of layers set by Layers between ripple offset, so layers within the same group are printed identically.");
+    def->min = 0;
+    def->max = 100;
+    def->sidetext = ("%");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(50));
+
+    def = this->add("fuzzy_skin_layers_between_ripple_offset", coInt);
+    def->label = L("Layers between ripple offset");
+    def->category = L("Others");
+    def->tooltip = L("Specifies how many consecutive layers share the same ripple phase before the offset is applied.\n"
+                     "For example:\n"
+                     "- 1 = Layer 1 is printed with the base ripple pattern, then layer 2 is shifted by the configured offset, then layer 3 returns to the base pattern, and so on.\n"
+                     "- 3 = Layers 1 to 3 are printed with the base ripple pattern, then layers 4 to 6 are shifted by the configured offset, then layers 7 to 9 return to the base pattern, etc.");
+    def->min = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(1));
 
     def = this->add("filter_out_gap_fill", coFloat);
     def->label = L("Filter out tiny gaps");
@@ -3983,10 +4023,11 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("marlin");
     def->enum_values.push_back("klipper");
     def->enum_values.push_back("reprapfirmware");
-    //def->enum_values.push_back("repetier");
+    def->enum_values.push_back("repetier");
+    def->enum_values.push_back("marlin2");
+    //def->enum_values.push_back("reprap");
     //def->enum_values.push_back("teacup");
     //def->enum_values.push_back("makerware");
-    def->enum_values.push_back("marlin2");
     //def->enum_values.push_back("sailfish");
     //def->enum_values.push_back("mach3");
     //def->enum_values.push_back("machinekit");
@@ -3995,11 +4036,11 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back("Marlin(legacy)");
     def->enum_labels.push_back(L("Klipper"));
     def->enum_labels.push_back("RepRapFirmware");
+    def->enum_labels.push_back("Repetier");
+    def->enum_labels.push_back("Marlin 2");
     //def->enum_labels.push_back("RepRap/Sprinter");
-    //def->enum_labels.push_back("Repetier");
     //def->enum_labels.push_back("Teacup");
     //def->enum_labels.push_back("MakerWare (MakerBot)");
-    def->enum_labels.push_back("Marlin 2");
     //def->enum_labels.push_back("Sailfish (MakerBot)");
     //def->enum_labels.push_back("Mach3/LinuxCNC");
     //def->enum_labels.push_back("Machinekit");

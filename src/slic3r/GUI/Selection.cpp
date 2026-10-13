@@ -1210,6 +1210,20 @@ void Selection::translate(const Vec3d &displacement, TransformationType transfor
             if (v.is_wipe_tower) {//in world cs
                 int           plate_idx           = v.object_idx() - 1000;
                 BoundingBoxf3 plate_bbox          = wxGetApp().plater()->get_partplate_list().get_plate(plate_idx)->get_bounding_box();
+                {
+                    // Dual-nozzle printers (H2D / H2C / X2D): every nozzle purges into the tower, so keep it where
+                    // all of them reach (the strips only one nozzle reaches are off limits), like Bambu Studio.
+                    PartPlateList       &plate_list = wxGetApp().plater()->get_partplate_list();
+                    const ExtruderAreas &areas      = plate_list.get_extruder_areas();
+                    if (areas.multi() && areas.has_exclusive_regions() && !areas.shared.empty()) {
+                        const BoundingBox shared = get_extents(areas.shared);
+                        const Vec3d       origin = plate_list.get_plate(plate_idx)->get_origin();
+                        plate_bbox.min.x() = std::max(plate_bbox.min.x(), unscale<double>(shared.min.x()) + origin.x());
+                        plate_bbox.min.y() = std::max(plate_bbox.min.y(), unscale<double>(shared.min.y()) + origin.y());
+                        plate_bbox.max.x() = std::min(plate_bbox.max.x(), unscale<double>(shared.max.x()) + origin.x());
+                        plate_bbox.max.y() = std::min(plate_bbox.max.y(), unscale<double>(shared.max.y()) + origin.y());
+                    }
+                }
                 Vec3d         tower_size          = v.bounding_box().size();
                 Vec3d         tower_origin        = m_cache.volumes_data[i].get_volume_position();
                 Vec3d         actual_displacement = displacement;

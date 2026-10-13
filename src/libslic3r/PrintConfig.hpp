@@ -41,6 +41,7 @@ enum GCodeFlavor : unsigned char {
 enum class FuzzySkinType {
     None,
     External,
+    Hole,
     All,
     AllWalls,
 };
@@ -57,6 +58,7 @@ enum class NoiseType {
     Billow,
     RidgedMulti,
     Voronoi,
+    Ripple,
 };
 
 enum PrintHostType {
@@ -1593,6 +1595,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  fuzzy_skin_octaves))
     ((ConfigOptionFloat,                fuzzy_skin_persistence))
     ((ConfigOptionBool,                 fuzzy_skin_skip_overhangs))
+    ((ConfigOptionInt,                  fuzzy_skin_ripples_per_layer))
+    ((ConfigOptionPercent,              fuzzy_skin_ripple_offset))
+    ((ConfigOptionInt,                  fuzzy_skin_layers_between_ripple_offset))
     ((ConfigOptionFloats,                gap_infill_speed))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))

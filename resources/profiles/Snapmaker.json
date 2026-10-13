@@ -1,6 +1,6 @@
 {
   "name": "Snapmaker",
-  "version": "02.03.03.06",
+  "version": "02.03.03.08",
   "force_update": "0",
   "description": "Snapmaker configurations",
   "machine_model_list": [
@@ -1321,6 +1321,10 @@
       "sub_path": "filament/Generic PLA High Speed @U1 0.2 nozzle.json"
     },
     {
+      "name": "Generic PLA High Speed @U1 0.4 nozzle",
+      "sub_path": "filament/Generic PLA High Speed @U1 0.4 nozzle.json"
+    },
+    {
       "name": "Generic PLA High Speed @U1 0.6 nozzle",
       "sub_path": "filament/Generic PLA High Speed @U1 0.6 nozzle.json"
     },
@@ -1361,6 +1365,10 @@
       "sub_path": "filament/Generic PETG HF @U1 0.2 nozzle.json"
     },
     {
+      "name": "Generic PETG HF @U1 0.4 nozzle",
+      "sub_path": "filament/Generic PETG HF @U1 0.4 nozzle.json"
+    },
+    {
       "name": "Generic PETG HF @U1 0.6 nozzle",
       "sub_path": "filament/Generic PETG HF @U1 0.6 nozzle.json"
     },
@@ -1379,6 +1387,10 @@
     {
       "name": "Generic PETG-CF @U1 0.6 nozzle",
       "sub_path": "filament/Generic PETG-CF @U1 0.6 nozzle.json"
+    },
+    {
+      "name": "Generic PETG-CF @U1 0.4 nozzle",
+      "sub_path": "filament/Generic PETG-CF @U1 0.4 nozzle.json"
     },
     {
       "name": "Generic PETG-CF @U1 0.8 nozzle",
@@ -1463,6 +1475,10 @@
     {
       "name": "Snapmaker PETG HF @U1 0.2 nozzle",
       "sub_path": "filament/Snapmaker PETG HF @U1 0.2 nozzle.json"
+    },
+    {
+      "name": "Snapmaker PETG HF @U1 0.4 nozzle",
+      "sub_path": "filament/Snapmaker PETG HF @U1 0.4 nozzle.json"
     },
     {
       "name": "Snapmaker PETG HF @U1 0.6 nozzle",

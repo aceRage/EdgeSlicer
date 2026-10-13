@@ -17,10 +17,14 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -237,4 +241,87 @@ TEST_CASE("modifier outside the part's bounding box warns that it overlaps nothi
 
     // Nothing attached, so the part is all there is.
     CHECK(distinct_layer_regions(*object) == 1);
+}
+
+// Orca #13971: group_fills() merges the fill surfaces of regions whose fill parameters compare equal
+// and extrudes the lot with the first region's config. Bridges carried no speed in those parameters,
+// so the bridge infill of a modifier with its own bridge speed went into the part's bridge fill and was
+// printed at the part's speed. The modifier's half of the deck must keep its own bridge fill.
+TEST_CASE("a modifier with its own bridge speed keeps its own bridge infill", "[ModifierEffect][Bridge]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "bridge_speed",               "50" },
+        { "enable_support",             false },
+        { "sparse_infill_density",      "15%" },
+    });
+
+    // Two 5 mm piers 20 mm apart carrying a 30 x 20 x 1 mm deck at z = [5, 6]: the deck's first layer
+    // is a bridge across x = [5, 25] along its whole depth.
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name = "bridge_with_modifier";
+    object->add_volume(make_cube(5., 20., 5.), ModelVolumeType::MODEL_PART, false);
+    {
+        TriangleMesh pier = make_cube(5., 20., 5.);
+        pier.translate(25.f, 0.f, 0.f);
+        object->add_volume(std::move(pier), ModelVolumeType::MODEL_PART, false);
+        TriangleMesh deck = make_cube(30., 20., 1.);
+        deck.translate(0.f, 0.f, 5.f);
+        object->add_volume(std::move(deck), ModelVolumeType::MODEL_PART, false);
+    }
+    // The back half of the deck (y = [10, 20]) gets a slower bridge speed and nothing else.
+    {
+        TriangleMesh box = make_cube(30., 10., 3.);
+        box.translate(0.f, 10.f, 4.f);
+        ModelVolume *modifier = object->add_volume(std::move(box), ModelVolumeType::PARAMETER_MODIFIER, false);
+        modifier->name = "slow_bridge";
+        modifier->config.set_key_value("bridge_speed", new ConfigOptionFloats({ 20. }));
+    }
+    object->add_instance();
+    object->ensure_on_bed();
+
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    REQUIRE(! print.objects().empty());
+
+    // Bridge infill length on the deck's first layer, per bridge speed of the region that prints it.
+    std::map<double, double> bridge_length_by_speed;
+    const std::function<double(const ExtrusionEntity *)> bridge_length = [&bridge_length](const ExtrusionEntity *entity) -> double {
+        if (const auto *coll = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+            double len = 0.;
+            for (const ExtrusionEntity *child : coll->entities)
+                len += bridge_length(child);
+            return len;
+        }
+        if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity))
+            return path->role() == erBridgeInfill ? path->length() : 0.;
+        if (const auto *multi = dynamic_cast<const ExtrusionMultiPath *>(entity)) {
+            double len = 0.;
+            for (const ExtrusionPath &path : multi->paths)
+                if (path.role() == erBridgeInfill)
+                    len += path.length();
+            return len;
+        }
+        return 0.;
+    };
+    bool found_layer = false;
+    for (const Layer *layer : print.objects().front()->layers()) {
+        if (std::abs(layer->print_z - 5.2) > EPSILON)
+            continue;
+        found_layer = true;
+        for (const LayerRegion *region : layer->regions())
+            bridge_length_by_speed[region->region().config().bridge_speed.get_at(0)] += bridge_length(&region->fills);
+    }
+    REQUIRE(found_layer);
+
+    // Both halves of the deck bridge, each in the region whose bridge speed it is printed with.
+    // Path lengths are in scaled units. Each half of the 20 x 10 mm span takes well over 50 mm of bridge lines.
+    CHECK(bridge_length_by_speed[50.] > scale_(50.));
+    CHECK(bridge_length_by_speed[20.] > scale_(50.));
 }

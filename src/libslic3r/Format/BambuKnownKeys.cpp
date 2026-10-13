@@ -644,6 +644,8 @@ const std::vector<EnumTranslation> &generated_enum_translations()
         { "ensure_vertical_shell_thickness", "ensure_critical_only", "" },
         { "ensure_vertical_shell_thickness", "ensure_moderate", "" },
         { "ensure_vertical_shell_thickness", "ensure_all", "" },
+        { "fuzzy_skin", "hole", "" },
+        { "fuzzy_skin_noise_type", "ripple", "" },
         { "host_type", "prusaconnect", "" },
         { "host_type", "crealityprint", "" },
         { "host_type", "esp3d", "" },
