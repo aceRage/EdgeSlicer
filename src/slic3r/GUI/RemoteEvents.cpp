@@ -227,6 +227,58 @@ static bool start_is_new(JobMemory& jm, const std::string& job, const std::strin
     return true;
 }
 
+// ---- how the job ended (the "ended" field) ----
+
+// Is this the job the cancel ended? Ids decide where both sides have one; otherwise the name; with
+// neither to compare the answer is yes (a printer that blanks its job name after a stop is still
+// on the stopped job - a new print takes the printer out of FAILED/idle, which clears it anyway).
+static bool is_ended_job(const JobMemory& jm, const std::string& job, const std::string& job_id)
+{
+    if (real_job_id(job_id) && real_job_id(jm.ended_job_id)) return job_id == jm.ended_job_id;
+    if (!job.empty() && !jm.ended_job.empty()) return job_key(job) == job_key(jm.ended_job);
+    return true;
+}
+
+// Called for every poll in which the printer can be seen. `cancel_event` is true when this poll
+// produced a "cancelled" for it (the hold that resolves into a cancel included). The stop is also
+// recognised straight from the printer's own FAILED + user-cancel code, so a watcher that first
+// saw the printer already stopped, or whose cancel event was a seeding poll, still remembers it.
+static void track_end(JobMemory& jm, const PrinterState& cur, bool cancel_event)
+{
+    if (jm.ended_cancel) {
+        if (busy_state(cur.state) || cur.state == "finished")
+            jm.ended_cancel = false; // a new print, or one that ran to the end
+        else if (!is_ended_job(jm, cur.job, cur.job_id))
+            jm.ended_cancel = false; // another job without passing through a busy state
+        else if (cur.state == "failed" && !cur.error_code.empty() && !cur.error_is_hms && !is_user_cancel_code(cur.error_code))
+            jm.ended_cancel = false; // the printer now names a real error for it
+    }
+    const bool stopped = cancel_event || cur.state == "cancelled" || (cur.state == "failed" && is_user_cancel_code(cur.error_code));
+    if (!stopped) return;
+    if (!jm.ended_cancel) {
+        jm.ended_cancel = true;
+        jm.ended_job    = cur.job;
+        jm.ended_job_id = real_job_id(cur.job_id) ? cur.job_id : std::string();
+    } else {
+        // The same stop seen again: fill in what the first sight lacked.
+        if (jm.ended_job.empty()) jm.ended_job = cur.job;
+        if (jm.ended_job_id.empty() && real_job_id(cur.job_id)) jm.ended_job_id = cur.job_id;
+    }
+}
+
+std::string ended_of(const Memory& mem, const std::string& printer_id, const std::string& state, const std::string& job,
+                     const std::string& job_id, const std::string& error_code)
+{
+    if (busy_state(state) || state == "finished") return std::string();
+    // The printer says so itself right now: no memory needed.
+    if (state == "failed" && is_user_cancel_code(error_code)) return "cancelled";
+    auto it = mem.jobs.find(printer_id);
+    if (it == mem.jobs.end() || !it->second.ended_cancel) return std::string();
+    if (!is_ended_job(it->second, job, job_id)) return std::string();
+    if (state == "failed" && !error_code.empty()) return std::string(); // a different, real print_error
+    return "cancelled";
+}
+
 std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
 {
     return step(mem, now, cooldown_ms, nullptr);
@@ -301,9 +353,13 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
         // The job memory is deliberately NOT touched here: "I cannot see it" must leave what the
         // printer was last known to be doing exactly as it was, or a printer that blinks offline
         // and comes back mid-print announces its start a second time.
-        if (no_information(cur) || prev_it == mem.last.printers.end()) continue;
+        if (no_information(cur)) continue;
+        if (prev_it == mem.last.printers.end() || no_information(prev_it->second)) {
+            // Only seeding, no event - but how a stop ended is remembered from the first sight.
+            track_end(mem.jobs[kv.first], cur, false);
+            continue;
+        }
         const PrinterState& prev = prev_it->second;
-        if (no_information(prev)) continue;
 
         const std::string name = cur.name.empty() ? cur.id : cur.name;
         JobMemory&        jm   = mem.jobs[kv.first];
@@ -410,12 +466,16 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
         }
         // A stop is remembered as a cancel, whatever word the printer used for it (Bambu says
         // FAILED), so a failed that trails it is told from a print that really failed.
+        bool cancel_event = false;
         for (size_t i = out_before; i < out.size(); ++i)
             if (out[i].kind == "cancelled") {
                 jm.terminal    = "cancelled";
                 jm.terminal_at = now.at;
                 jm.announced   = false;
+                cancel_event   = true;
             }
+        // How the job ended, for the "ended" field: kept after the printer drops its print_error.
+        track_end(jm, cur, cancel_event);
     }
 
     // A printer that fails usually sets its error code in the same breath, and the failure event
@@ -868,6 +928,15 @@ json recent(int since)
     }
     out["watcher"] = w;
     return out;
+}
+
+std::string ended_bambu(const std::string& printer_id, const std::string& print_status, const std::string& job,
+                        const std::string& job_id, const std::string& error_code)
+{
+    // The watcher's memory lives under the same lock the worker steps it under. The caller is the
+    // GUI thread building a status row; the lock is held for a map lookup.
+    std::lock_guard<std::mutex> lock(s_mutex);
+    return ended_of(s_memory, printer_id, bambu_state(print_status), job, job_id, error_code);
 }
 
 void stop() { s_stop = true; }

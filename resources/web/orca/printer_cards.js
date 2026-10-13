@@ -48,7 +48,15 @@
         if (s === '0300400C' || s === '0500400E') return true;
         return /^[0-9]{1,10}$/.test(s) && (+s === 0x0300400C || +s === 0x0500400E);
     }
-    function cancelCodeOf(p) { return !!(p && p.print_error && isCancelCode(p.print_error.code)); }
+    // The hub also remembers how the job ended (RemoteEvents::ended_of): `ended: "cancelled"` stays
+    // on the row after the printer has dropped print_error (dismissed on its screen, or cleared by the
+    // firmware) and is left saying FAILED, so the card keeps reading Cancelled instead of turning
+    // into an Error a moment later. A row from an older hub carries no `ended` and the code decides.
+    function cancelCodeOf(p) {
+        if (!p) return false;
+        if (p.print_error && isCancelCode(p.print_error.code)) return true;
+        return str(p.ended).toLowerCase() === 'cancelled' && !(p.print_error && (p.print_error.code || p.print_error.message));
+    }
 
     function errorText(p) {
         if (cancelCodeOf(p)) return '';
@@ -310,7 +318,7 @@
         }
 
         var err = errorText(p);
-        if (!err && p.hms && p.hms.count > 0 && p.hms.message) err = str(p.hms.message);
+        if (!err && p.hms && p.hms.count > 0 && p.hms.message && !(/fail/i.test(str(p.print_status || p.status)) && cancelCodeOf(p))) err = str(p.hms.message);
         var ekey = errorKey(p);
         if (err && !(ekey && opts && opts.isDismissed && opts.isDismissed(ekey))) {
             var eb = el('div', 'perr');

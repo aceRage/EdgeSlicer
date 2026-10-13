@@ -272,6 +272,16 @@ struct JobMemory
     long long   started_at { 0 };    // when that went out (snapshot time)
     std::string terminal;       // finished | cancelled | failed, once one has been seen for it
     long long   terminal_at { 0 };
+    // The job's end was a stop the PERSON asked for (a cancel: FAILED + 0300400C / 0500400E, or a
+    // Klipper "cancelled"), and which job that was. This is what the "ended" field of /summary and
+    // /api/printers is read from: the printer drops its print_error a while after the stop (dismissed
+    // on its screen, or cleared by the firmware) and is left saying FAILED, which on its own reads as
+    // a failure. Kept while the printer stays FAILED / idle on the same job; cleared by a new job
+    // (id or name changes, or the printer is busy again) and by a genuine print_error. It sits beside
+    // `terminal` and is set from the same places - one memory of how the job ended, not a second tracker.
+    bool        ended_cancel { false };
+    std::string ended_job;
+    std::string ended_job_id;
 };
 
 // Everything the watcher carries from one poll to the next.
@@ -344,6 +354,21 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms 
 // Same rule, and additionally reports every raw-state change it saw, so the caller can put the
 // flap sources in the log with a timestamp. `step` above is this with the changes discarded.
 std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms, std::vector<RawChange>* raw_changes);
+
+// How the printer's current job ended, as the hub remembers it: "cancelled" when the stop was the
+// person's, "" when there is nothing to say (running, finished, failed for real, a different job,
+// or a printer the watcher has no memory of). `state` is the rule's normalised word (idle |
+// preparing | printing | paused | finished | failed | cancelled); `job` / `job_id` identify the job
+// the printer is on now and `error_code` is its print_error now ("" when none). A printer that is
+// FAILED with a user-cancel code right now is "cancelled" even before the watcher has polled it.
+// Pure over the memory; the live wrapper below reads the watcher's own.
+std::string ended_of(const Memory& mem, const std::string& printer_id, const std::string& state, const std::string& job,
+                     const std::string& job_id, const std::string& error_code);
+
+// The same, for a Bambu printer: `print_status` is its gcode_state as the status JSON carries it
+// (RUNNING | FAILED | IDLE ...). Reads the live watcher's memory.
+std::string ended_bambu(const std::string& printer_id, const std::string& print_status, const std::string& job,
+                        const std::string& job_id, const std::string& error_code);
 
 // ---- the live watcher ----
 // Called from RemoteAccess's one-second GUI heartbeat; polls at its own slower rate.

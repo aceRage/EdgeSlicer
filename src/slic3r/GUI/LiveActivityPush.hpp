@@ -69,8 +69,10 @@ Phase base_phase(const std::string& state, bool printing);
 // base_phase, with an error on a running or paused print raised to Attention.
 // A Bambu FAILED that carries the printer's user-cancel print_error (0300400C "The task was canceled.") is
 // the person's own stop and reads Cancelled; every other FAILED stays Failed. `error_code` is the row's
-// print_error code, when it has one.
-Phase classify(const std::string& state, bool printing, bool has_error, const std::string& error_code = std::string());
+// print_error code, when it has one. `ended` is the row's hub-derived "ended" field: "cancelled" keeps a
+// FAILED reading Cancelled after the printer has dropped its print_error.
+Phase classify(const std::string& state, bool printing, bool has_error, const std::string& error_code = std::string(),
+               const std::string& ended = std::string());
 
 // One printer as the hub's cache has it (HubServer::printers_json rows).
 struct Row
@@ -85,6 +87,7 @@ struct Row
     int         layer { -1 };
     int         total_layers { -1 };
     std::string error_code;          // "" when there is none
+    std::string ended;               // "cancelled" when the hub remembers the stop as the person's; else ""
     std::string job;                 // for the job key only; never sent anywhere
     long long   age_ms { 0 };        // how long ago the hub read it
 };

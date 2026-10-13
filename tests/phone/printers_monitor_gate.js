@@ -302,6 +302,32 @@ async function main() {
         await sleep(200);
         const real = await cardState();
         check('FAILED + another code still reads Error with its message', real.pill === 'Error' && real.err, JSON.stringify(real));
+
+        // ---- the hub's `ended` field: Cancelled outlives the printer's print_error ----------------
+        // The printer drops 0300400C a while after the stop (dismissed on its screen, or cleared by
+        // the firmware) and is left saying FAILED; the hub remembers the stop as ended: "cancelled".
+        await evalJs(`window.__rows[1].print_error = null; window.__rows[1].ended = 'cancelled';
+            window.__rows[1].hms = { count: 0 }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const endedNoCode = await cardState();
+        check('FAILED + ended=cancelled with the code gone reads Cancelled with no error box', endedNoCode.pill === 'Cancelled' && !endedNoCode.err && /Cancelled/.test(endedNoCode.label), JSON.stringify(endedNoCode));
+        await evalJs(`window.__rows[1].hms = { count: 1, message: 'Plate missing' }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const endedHms = await cardState();
+        check('a leftover HMS item does not turn a remembered cancel into an error box', endedHms.pill === 'Cancelled' && !endedHms.err, JSON.stringify(endedHms));
+        await evalJs(`window.__rows[1].print_error = { code: '0300400D', message: 'A real error.', actions: [] }; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const endedReal = await cardState();
+        check('ended=cancelled does not hide a different, real print_error', endedReal.pill === 'Error' && endedReal.err, JSON.stringify(endedReal));
+        await evalJs(`window.__rows[1].print_error = null; window.__rows[1].hms = { count: 0 }; delete window.__rows[1].ended; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const noEnded = await cardState();
+        check('FAILED with no code and no ended still reads Error (an older hub, or a real failure)', noEnded.pill === 'Error', JSON.stringify(noEnded));
+        await evalJs(`window.__rows[1].ended = 'cancelled'; window.__rows[1].status = window.__rows[1].print_status = 'RUNNING'; window.__rows[1].printing = true; document.getElementById('refresh').click(); 1`);
+        await sleep(200);
+        const endedRunning = await cardState();
+        check('a printer running again never reads Cancelled, whatever ended says', endedRunning.pill === 'Printing', JSON.stringify(endedRunning));
+        await evalJs(`delete window.__rows[1].ended; window.__rows[1].status = window.__rows[1].print_status = 'FAILED'; window.__rows[1].printing = false; 1`);
         await evalJs(`window.__rows[1].print_error = { code: '03008003', message: 'The build plate is not placed.', actions: [] };
             window.__rows[1].hms = { count: 1, message: 'Plate missing' }; document.getElementById('refresh').click(); 1`);
         await sleep(200);

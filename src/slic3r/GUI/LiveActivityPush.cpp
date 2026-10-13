@@ -141,11 +141,15 @@ Phase base_phase(const std::string& state, bool printing)
     return printing ? Phase::Printing : Phase::Idle;
 }
 
-Phase classify(const std::string& state, bool printing, bool has_error, const std::string& error_code)
+Phase classify(const std::string& state, bool printing, bool has_error, const std::string& error_code,
+               const std::string& ended)
 {
     const Phase p = base_phase(state, printing);
-    // Bambu reports a stop the person asked for as FAILED plus print_error 0300400C.
+    // Bambu reports a stop the person asked for as FAILED plus print_error 0300400C. The hub remembers it
+    // as ended == "cancelled", which outlives the code (the printer drops it a while after the stop) -
+    // unless the printer now names a different, real error.
     if (p == Phase::Failed && RemoteEvents::is_user_cancel_code(error_code)) return Phase::Cancelled;
+    if (p == Phase::Failed && lower_trim(ended) == "cancelled" && error_code.empty()) return Phase::Cancelled;
     return has_error && is_active(p) ? Phase::Attention : p;
 }
 
@@ -163,6 +167,7 @@ Row row_from_json(const json& row)
     r.layer        = int_of(row, "layer", -1);
     r.total_layers = int_of(row, "total_layers", -1);
     r.error_code   = error_code_of(row);
+    r.ended        = lower_trim(str_of(row, "ended"));
     r.job          = job_of(row);
     const int age  = int_of(row, "age_s", 0);
     r.age_ms       = age > 0 ? (long long) age * 1000 : 0;
@@ -190,7 +195,7 @@ Content content_for(const Row& r, long long now_ms)
 {
     Content c;
     const Phase base  = base_phase(r.state, r.printing);
-    c.state           = classify(r.state, r.printing, !r.error_code.empty(), r.error_code);
+    c.state           = classify(r.state, r.printing, !r.error_code.empty(), r.error_code, r.ended);
     const int pct     = r.percent < 0 ? -1 : std::min(100, std::max(0, r.percent));
     const bool counting = base == Phase::Printing || base == Phase::Preparing;
     const long long read_at = (now_ms - std::max(0LL, r.age_ms)) / 1000;
@@ -521,6 +526,8 @@ json progress_plaintext(const json& row, long long now_ms)
     }
     const std::string err = str_of(row, "error");
     if (!err.empty()) r["error"] = err.substr(0, 200);
+    // How the job ended: the app reads it so a stop keeps saying Cancelled once the printer drops its code.
+    if (lower_trim(str_of(row, "ended")) == "cancelled") r["ended"] = "cancelled";
 
     json p;
     p["kind"]       = "progress";
