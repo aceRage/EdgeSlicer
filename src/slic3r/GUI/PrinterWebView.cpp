@@ -17,6 +17,7 @@
 #include "libslic3r/PresetBundle.hpp"
 
 #include <algorithm>
+#include <chrono>
 
 #include <slic3r/GUI/Widgets/WebView.hpp>
 #include <wx/webview.h>
@@ -30,6 +31,27 @@ namespace pt = boost::property_tree;
 namespace Slic3r {
 namespace GUI {
 
+static int64_t device_page_now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// What the log calls a page: our own pages by their path and route (no host, no token); anybody
+// else's page (a print host's web UI, with its address) only by kind.
+static std::string device_page_name(const std::string& url)
+{
+    if (!WebLoadRetry::is_loopback_url(url))
+        return url.empty() ? std::string("(blank)") : std::string("a print host page");
+    const std::string page = WebLoadRetry::page_of(url);
+    const size_t      sep  = page.find("://");
+    const size_t      path = sep == std::string::npos ? std::string::npos : page.find('/', sep + 3);
+    std::string       name = path == std::string::npos ? page : page.substr(path);
+    const size_t      route = url.find("path=");
+    if (route != std::string::npos)
+        name += "?" + url.substr(route, url.find_first_of("&#", route) - route);
+    return name;
+}
+
 PrinterWebView::PrinterWebView(wxWindow *parent)
         : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
  {
@@ -38,13 +60,32 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
 
     wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
     auto     real_url = wxGetApp().get_international_url(url);
-    // CreateWebView still takes the Flutter URL. On macOS, WebViewWebKit holds it
-    // until the script-message handler is installed (SM #857/#865).
-    m_browser = WebView::CreateWebView(this, real_url);
+    // During startup the view is made blank and the Flutter page is held until startup is over
+    // (DevicePageLoad.hpp): booted now, its first requests would wait out the GUI thread's
+    // post-init work and time out. A view made later (recreate_GUI) loads it straight away.
+    // On macOS, WebViewWebKit holds a URL until the script-message handler is installed
+    // (SM #857/#865).
+    m_load_gate = DevicePageLoad::Gate(wxGetApp().startup_settled());
+    const bool load_now = m_load_gate.released();
+    m_browser = WebView::CreateWebView(this, load_now ? real_url : wxString());
     if (m_browser == nullptr) {
         wxLogError("Could not init m_browser");
         return;
     }
+    const std::string initial_url = real_url.ToUTF8().data();
+    if (load_now) {
+        m_load_gate.started(initial_url, device_page_now_ms());
+    } else {
+        m_load_gate.request(initial_url, std::string(), DevicePageLoad::Kind::Show, device_page_now_ms());
+        m_held_is_initial = true;
+        BOOST_LOG_TRIVIAL(info) << "[DevicePage] holding " << device_page_name(initial_url) << " until startup is over";
+    }
+    // Opening the tab before startup is over loads it at once.
+    Bind(wxEVT_SHOW, [this](wxShowEvent& evt) {
+        evt.Skip();
+        if (evt.IsShown())
+            release_startup_hold("the Device tab was opened");
+    });
 
     // Panel bind so WebViewWebKit's navigation gate (also on the webview) still sees LOADED/ERROR.
     Bind(wxEVT_WEBVIEW_ERROR, &PrinterWebView::OnError, this, m_browser->GetId());
@@ -92,10 +133,36 @@ PrinterWebView::~PrinterWebView()
 }
 
 
-void PrinterWebView::load_url(wxString& url, wxString apikey)
+void PrinterWebView::load_url(wxString& url, wxString apikey, DevicePageLoad::Kind kind)
 {
     if (m_browser == nullptr)
         return;
+    const std::string            u = url.ToUTF8().data();
+    const DevicePageLoad::Action a = m_load_gate.request(u, apikey.ToUTF8().data(), kind, device_page_now_ms());
+    if (a != DevicePageLoad::Action::Load) {
+        if (a == DevicePageLoad::Action::Hold)
+            m_held_is_initial = false;
+        BOOST_LOG_TRIVIAL(info) << "[DevicePage] " << DevicePageLoad::to_string(kind) << " " << device_page_name(u) << ": "
+                                << DevicePageLoad::to_string(a);
+        return;
+    }
+    navigate(url, apikey, true, kind);
+}
+
+void PrinterWebView::release_startup_hold(const char* why)
+{
+    if (m_browser == nullptr)
+        return;
+    DevicePageLoad::Request r;
+    if (!m_load_gate.release(r))
+        return;
+    BOOST_LOG_TRIVIAL(info) << "[DevicePage] " << why << ": loading " << device_page_name(r.url) << ", held since startup";
+    navigate(wxString::FromUTF8(r.url), wxString::FromUTF8(r.apikey), !m_held_is_initial, DevicePageLoad::Kind::Show);
+    m_held_is_initial = false;
+}
+
+void PrinterWebView::navigate(const wxString& url, const wxString& apikey, bool register_view, DevicePageLoad::Kind kind)
+{
     m_apikey = apikey;
     // A page asked for on purpose starts with a clean slate: no retry of whatever failed before.
     m_retry_timer.Stop();
@@ -103,14 +170,19 @@ void PrinterWebView::load_url(wxString& url, wxString apikey)
     m_retry_page.clear();
     m_retry_count = 0;
 
-    if (url.find("path=2") != std::string::npos) {
-        wxGetApp().fltviews().add_printer_view(this, url, apikey);
-    } else {
-        wxGetApp().fltviews().remove_printer_view(this);
+    if (register_view) {
+        if (url.find("path=2") != std::string::npos) {
+            wxGetApp().fltviews().add_printer_view(this, url, apikey);
+        } else {
+            wxGetApp().fltviews().remove_printer_view(this);
+        }
     }
 
     m_browser->Show();
     m_browser->LoadURL(url);
+    const std::string u = url.ToUTF8().data();
+    m_load_gate.started(u, device_page_now_ms());
+    BOOST_LOG_TRIVIAL(info) << "[DevicePage] " << DevicePageLoad::to_string(kind) << " " << device_page_name(u) << ": load";
 
     UpdateState();
 }
@@ -198,6 +270,7 @@ void PrinterWebView::load_picked_device()
 void PrinterWebView::reload()
 {
     m_browser->Reload();
+    m_load_gate.started(m_browser->GetCurrentURL().ToUTF8().data(), device_page_now_ms());
 }
 
 bool PrinterWebView::isSnapmakerPage()
@@ -344,6 +417,9 @@ void PrinterWebView::OnError(wxWebViewEvent &evt)
     facts.superseded     = !current.empty() && WebLoadRetry::page_of(current) != page;
     facts.retries_so_far = m_retry_count;
     const WebLoadRetry::Decision d = WebLoadRetry::decide(facts);
+    // A cancelled load was replaced by another one, which is the load that counts.
+    if (failure != WebLoadRetry::Failure::Cancelled)
+        m_load_gate.finished(url, false);
     // Never fatal: a page that does not load is not the application failing.
     const auto what = boost::format(":PrinterWebView error loading page %1% %2% %3% %4%") % evt.GetURL() % evt.GetTarget() % e % evt.GetString();
     if (d.retry) {
@@ -369,6 +445,7 @@ void PrinterWebView::OnRetryTimer(wxTimerEvent&)
         return;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": loading " << WebLoadRetry::page_of(m_retry_url) << " again";
     m_browser->LoadURL(wxString::FromUTF8(m_retry_url));
+    m_load_gate.started(m_retry_url, device_page_now_ms());
 }
 
 void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
@@ -378,6 +455,7 @@ void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
         return;
     if (evt.GetURL() != m_browser->GetCurrentURL())
         return;
+    m_load_gate.finished(evt.GetURL().ToUTF8().data(), true);
     if (WebLoadRetry::page_of(evt.GetURL().ToUTF8().data()) == m_retry_page) {
         if (m_retry_count > 0)
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << m_retry_page << " loaded after " << m_retry_count << " retr" << (m_retry_count == 1 ? "y" : "ies");

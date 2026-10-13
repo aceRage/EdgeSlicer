@@ -11,6 +11,8 @@
 #include <set>
 #include <stdexcept>
 
+#include <boost/log/trivial.hpp>
+
 namespace Slic3r {
 namespace Vendors {
 
@@ -1179,6 +1181,58 @@ static bool holds_credential(const json& j)
     return false;
 }
 
+std::string normalize_smart_quotes(const std::string& text)
+{
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        // Every typographic quote is E2 80 xx in UTF-8.
+        if (i + 2 < text.size() && (unsigned char) text[i] == 0xE2 && (unsigned char) text[i + 1] == 0x80) {
+            switch ((unsigned char) text[i + 2]) {
+            case 0x9C: // U+201C
+            case 0x9D: // U+201D
+            case 0x9E: // U+201E
+            case 0xB3: // U+2033
+                out += '"';
+                i += 2;
+                continue;
+            case 0x98: // U+2018
+            case 0x99: // U+2019
+            case 0xB2: // U+2032
+                out += '\'';
+                i += 2;
+                continue;
+            default: break;
+            }
+        }
+        out += text[i];
+    }
+    return out;
+}
+
+bool parse_json_lenient(const std::string& text, nlohmann::json& out, bool* smart_quotes_fixed)
+{
+    if (smart_quotes_fixed)
+        *smart_quotes_fixed = false;
+    try {
+        out = json::parse(text);
+        return true;
+    } catch (const std::exception&) {
+    }
+    const std::string plain = normalize_smart_quotes(text);
+    if (plain == text)
+        return false;
+    try {
+        out = json::parse(plain);
+    } catch (const std::exception&) {
+        return false;
+    }
+    if (smart_quotes_fixed)
+        *smart_quotes_fixed = true;
+    BOOST_LOG_TRIVIAL(info) << "Vendor connector import: the text only parsed once its smart quotes were corrected";
+    return true;
+}
+
 ImportResult import_check(const std::string& raw)
 {
     ImportResult r;
@@ -1195,9 +1249,7 @@ ImportResult import_check(const std::string& raw)
         return r;
     }
     json j;
-    try {
-        j = json::parse(text);
-    } catch (const std::exception&) {
+    if (!parse_json_lenient(text, j)) {
         r.error = "That is not valid JSON.";
         return r;
     }

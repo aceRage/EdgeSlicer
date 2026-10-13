@@ -33,7 +33,11 @@ const std::string& FanMover::process_gcode(const std::string& gcode, bool flush)
 
     if (flush) {
         while (!m_buffer.empty()) {
-            m_process_output += m_buffer.front().raw + "\n";
+            BufferData &front = m_buffer.front();
+            m_process_output += front.raw + "\n";
+            // Orca: Keep the emitted fan state in sync when flushing buffered fan commands.
+            if (front.fan_speed >= 0)
+                m_front_buffer_fan_speed = front.fan_speed;
             remove_from_buffer(m_buffer.begin());
         }
     }
@@ -117,7 +121,7 @@ void FanMover::_put_in_middle_G1(std::list<BufferData>::iterator item_to_split, 
         // doesn't really need to be split, print it before
         //will also print before if line_to_split.time == 0
         m_buffer.insert(item_to_split, line_to_write);
-    } else if (item_to_split->raw.size() > 2
+    } else if (!item_to_split->is_custom && item_to_split->raw.size() > 2
         && item_to_split->raw[0] == 'G' && item_to_split->raw[1] == '1' && item_to_split->raw[2] == ' ') {
         float percent = nb_sec_since_itemtosplit_start / item_to_split->time;
         BufferData before = *item_to_split;
@@ -166,15 +170,14 @@ void FanMover::_put_in_middle_G1(std::list<BufferData>::iterator item_to_split, 
 
 void FanMover::_print_in_middle_G1(BufferData& line_to_split, float nb_sec, const std::string &line_to_write) {
     if (nb_sec < line_to_split.time * 0.1) {
-        // doesn't really need to be split, print it after
-        m_process_output += line_to_split.raw + "\n";
+        // Doesn't need to be split: the insertion point is at the start.
         m_process_output += line_to_write + (line_to_write.back() == '\n'?"":"\n");
-    } else if (nb_sec > line_to_split.time * 0.9) {
-        // doesn't really need to be split, print it before
-        //will also print before if line_to_split.time == 0
-        m_process_output += line_to_write + (line_to_write.back() == '\n' ? "" : "\n");
         m_process_output += line_to_split.raw + "\n";
-    }else if(line_to_split.raw.size() > 2
+    } else if (nb_sec > line_to_split.time * 0.9) {
+        // Doesn't need to be split: the insertion point is at the end.
+        m_process_output += line_to_split.raw + "\n";
+        m_process_output += line_to_write + (line_to_write.back() == '\n' ? "" : "\n");
+    }else if(!line_to_split.is_custom && line_to_split.raw.size() > 2
         && line_to_split.raw[0] == 'G' && line_to_split.raw[1] == '1' && line_to_split.raw[2] == ' ') {
         float percent = nb_sec / line_to_split.time;
         std::string before = line_to_split.raw;
@@ -433,6 +436,8 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
 
     if (time >= 0) {
         BufferData& new_data = put_in_buffer(BufferData(line.raw(), time, fan_speed));
+        // EDGE (#170): tool change G-code is bracketed as custom G-code so that it is never split.
+        new_data.is_custom = m_is_custom_gcode;
         if (line.has(Axis::X)) {
             new_data.x = reader.x();
             new_data.dx = line.dist_X(reader);
@@ -487,6 +492,11 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
     if (time >= 0) {
         while (!m_buffer.empty() && (need_flush || m_buffer_time_size - m_buffer.front().time > nb_seconds_delay - EPSILON) ){
             BufferData& frontdata = m_buffer.front();
+            // A fan command repeating m_front_buffer_fan_speed is dropped here. EDGE note: that includes the
+            // deliberate repeat CoolingBuffer writes after ";_FORCE_RESUME_FAN_SPEED" (tool change G-code may have
+            // set the fan). It survives only because FanMover also reads the tool change G-code's own M106/M107;
+            // a template that sets the fan with a command FanMover cannot read (M106 P0, SET_FAN_SPEED, a
+            // firmware macro) gets the repeat dropped. FanMover is off in every shipped BBL / Snapmaker profile.
             if (frontdata.fan_speed < 0 || frontdata.fan_speed != m_front_buffer_fan_speed || frontdata.is_kickstart) {
                 if (frontdata.is_kickstart && frontdata.fan_speed < m_front_buffer_fan_speed) {
                     //you have to slow down! not kickstart! rewrite the fan speed.

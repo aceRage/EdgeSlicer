@@ -7098,6 +7098,11 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxGetApp().mainframe->m_print_enable = true;
                                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
 
+                                    // The Device page: shown if the view is on another page, and loaded
+                                    // again when the connect came from another page (need_reload), since
+                                    // the Device page's own state is stale then. The preset row above
+                                    // may have asked for it too; the view loads it once
+                                    // (DevicePageLoad.hpp).
                                     if (!wxGetApp().mainframe->m_printer_view->isSnapmakerPage()) {
                                         wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
                                         auto     real_url = wxGetApp().get_international_url(url);
@@ -7107,7 +7112,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                             wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
                                             auto     real_url = wxGetApp().get_international_url(url);
 
-                                            wxGetApp().mainframe->load_printer_url(real_url);
+                                            wxGetApp().mainframe->load_printer_url(real_url, "", /*reload*/ true);
                                         }
 
                                     }
