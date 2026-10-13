@@ -2721,6 +2721,15 @@ static wxMenu* generate_help_menu()
             canvas->set_as_dirty();
         });
 
+    // SPIKE (Option A, throwaway): capture does not go through on_select_preset.
+    append_menu_item(helpMenu, wxID_ANY,
+                     _L("SPIKE: Capture presets onto current plate") + "\tCtrl+Alt+Shift+P",
+                     _L("Store the active full_config() snapshot on this plate. Enable the per_plate_presets preference first."),
+                     [](wxCommandEvent&) {
+                         if (wxGetApp().plater())
+                             wxGetApp().plater()->spike_capture_current_plate_presets();
+                     });
+
     // Report a bug
     //append_menu_item(helpMenu, wxID_ANY, _L("Report Bug(TODO)"), _L("Report a bug of EdgeSlicer"),
     //    [](wxCommandEvent&) {

@@ -6,6 +6,7 @@
 #include <array>
 #include <thread>
 #include <mutex>
+#include <memory>
 
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -171,6 +172,10 @@ private:
     // BBS
     DynamicPrintConfig m_config;
 
+    // SPIKE (Option A, throwaway): resolved full_config() snapshot for this plate.
+    // Not serialized. Null means inherit the live project presets (today's path).
+    std::shared_ptr<const DynamicPrintConfig> m_spike_cfg;
+
     // SoftFever
     // part plate name
     std::string m_name;
@@ -253,6 +258,12 @@ public:
     void reset_skirt_start_angle();
 
     DynamicPrintConfig* config() { return &m_config; }
+
+    // SPIKE: per-plate resolved snapshot. Null = inherit live full_config().
+    std::shared_ptr<const DynamicPrintConfig> spike_cfg() const { return m_spike_cfg; }
+    bool                                      has_spike_cfg() const { return static_cast<bool>(m_spike_cfg); }
+    void set_spike_cfg(std::shared_ptr<const DynamicPrintConfig> cfg) { m_spike_cfg = std::move(cfg); }
+    void clear_spike_cfg() { m_spike_cfg.reset(); }
 
     // set print sequence per plate
     //bool print_seq_same_global = true;
@@ -792,6 +803,11 @@ public:
     //get a plate pointer by index
     PartPlate* get_plate(int index);
     const PartPlate* get_plate(int index) const;
+
+    // SPIKE: plate snapshot when the gate is on and the plate has one, else live full_config().
+    DynamicPrintConfig config_for_plate(int index) const;
+    DynamicPrintConfig config_for_current_plate() const;
+    bool               any_plate_has_spike_cfg() const;
 
     void get_height_limits(float& height_to_lid, float& height_to_rod)
     {

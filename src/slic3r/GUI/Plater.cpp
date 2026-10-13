@@ -14,6 +14,7 @@
 #include "libslic3r/BambuFlowSupport.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentConfigRemap.hpp"
+#include "libslic3r/PlatePresetSpike.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "common_func/common_func.hpp"
 
@@ -11911,10 +11912,14 @@ void Plater::priv::select_view_3D(const std::string& name, bool no_slice)
     else if (name == "Preview") {
         BOOST_LOG_TRIVIAL(info) << "select preview";
         //BBS update extruder params and speed table before slicing
-        const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
+        const Slic3r::DynamicPrintConfig config = q->get_partplate_list().config_for_current_plate();
         auto& print = q->get_partplate_list().get_current_fff_print();
         auto print_config = print.config();
         int numExtruders = wxGetApp().preset_bundle->filament_presets.size();
+        if (Slic3r::per_plate_presets_spike_enabled(wxGetApp().app_config)) {
+            if (const auto *fd = config.option<ConfigOptionFloats>("filament_diameter"))
+                numExtruders = int(fd->values.size());
+        }
 
         Model::setExtruderParams(config, numExtruders);
         Model::setPrintSpeedTable(config, print_config);
@@ -14312,7 +14317,7 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
         this->partplate_list.update_slice_context_to_current_plate(background_process);
         this->preview->update_gcode_result(partplate_list.get_current_slice_result());
     }
-    Print::ApplyStatus invalidated = background_process.apply(this->model, wxGetApp().preset_bundle->full_config());
+    Print::ApplyStatus invalidated = background_process.apply(this->model, this->partplate_list.config_for_current_plate());
     notify_filament_compatibility_after_apply();
 
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
@@ -16627,6 +16632,8 @@ static void notify_high_flow_standard_fallback(const Print *print, NotificationM
                                      format(_L("No High Flow values for %s: printed on a High Flow nozzle with its Standard values."), list));
 }
 
+static void apply_model_static_tables_for_current_plate(PartPlateList &plates);
+
 void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": enter, m_ignore_event %1%, status %2%")%m_ignore_event %evt.status();
@@ -16893,6 +16900,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
 
         q->Freeze();
         q->select_plate(m_cur_slice_plate);
+        apply_model_static_tables_for_current_plate(partplate_list);
         partplate_list.select_plate_view();
         int ret = q->start_next_slice();
         if (ret) {
@@ -16956,19 +16964,28 @@ void Plater::priv::on_action_open_project(SimpleEvent&)
     }
 }
 
+// SPIKE S6: Slice All / Preview read these statics once from the live bundle today.
+// When the gate is on, take them from the plate that is about to slice.
+static void apply_model_static_tables_for_current_plate(PartPlateList &plates)
+{
+    const DynamicPrintConfig config = plates.config_for_current_plate();
+    auto                     print_config = plates.get_current_fff_print().config();
+    int                      numExtruders = wxGetApp().preset_bundle->filament_presets.size();
+    if (Slic3r::per_plate_presets_spike_enabled(wxGetApp().app_config)) {
+        if (const auto *fd = config.option<ConfigOptionFloats>("filament_diameter"))
+            numExtruders = int(fd->values.size());
+    }
+    Model::setExtruderParams(config, numExtruders);
+    Model::setPrintSpeedTable(config, print_config);
+}
+
 //BBS: GUI refactor: slice plate
 void Plater::priv::on_action_slice_plate(SimpleEvent&)
 {
     if (q != nullptr) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received slice plate event\n" ;
         //BBS update extruder params and speed table before slicing
-        const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
-        auto& print = q->get_partplate_list().get_current_fff_print();
-        auto print_config = print.config();
-        int numExtruders = wxGetApp().preset_bundle->filament_presets.size();
-
-        Model::setExtruderParams(config, numExtruders);
-        Model::setPrintSpeedTable(config, print_config);
+        apply_model_static_tables_for_current_plate(q->get_partplate_list());
         m_slice_all = false;
 
         if (!q->confirm_filament_grouping_before_slice())
@@ -16995,13 +17012,7 @@ void Plater::priv::on_action_slice_all(SimpleEvent&)
     if (q != nullptr) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received slice project event\n" ;
         //BBS update extruder params and speed table before slicing
-        const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
-        auto& print = q->get_partplate_list().get_current_fff_print();
-        auto print_config = print.config();
-        int numExtruders = wxGetApp().preset_bundle->filament_presets.size();
-
-        Model::setExtruderParams(config, numExtruders);
-        Model::setPrintSpeedTable(config, print_config);
+        apply_model_static_tables_for_current_plate(q->get_partplate_list());
 
         if (!q->confirm_filament_grouping_before_slice()) {
             if (m_is_publishing) {
@@ -17024,6 +17035,7 @@ void Plater::priv::on_action_slice_all(SimpleEvent&)
         }
         //select plate
         q->select_plate(m_cur_slice_plate);
+        apply_model_static_tables_for_current_plate(q->get_partplate_list());
         bool slice_cancelled = !q->reslice();
         if (slice_cancelled) {
             m_slice_all = false;
@@ -18229,6 +18241,14 @@ void Plater::priv::set_bed_shape(const Pointfs& shape, const Pointfs& exclude_ar
         Vec3d max = bed.extended_bounding_box().max;
         Vec3d min = bed.extended_bounding_box().min;
         double z = config->opt_float("printable_height");
+
+        // SPIKE S7: once any plate has a snapshot, keep the shared grid (size it to the
+        // larger bed before capturing). Switching printers to capture the next plate
+        // must not reset_size(..., move_instances=true).
+        if (Slic3r::per_plate_presets_spike_enabled(wxGetApp().app_config) && partplate_list.any_plate_has_spike_cfg()) {
+            BOOST_LOG_TRIVIAL(info) << "spike: skip set_bed_shape grid resize; a plate already has a snapshot";
+            return;
+        }
 
         //Pointfs& exclude_areas = config->option<ConfigOptionPoints>("bed_exclude_area")->values;
         // Ultra: preserve object centering relative to the plate on a printer/bed-size switch
@@ -26256,6 +26276,42 @@ PartPlateList& Plater::get_partplate_list()
     return p->partplate_list;
 }
 
+void Plater::spike_capture_current_plate_presets()
+{
+    if (!Slic3r::per_plate_presets_spike_enabled(wxGetApp().app_config)) {
+        MessageDialog dlg(this,
+                          _L("Turn on Preferences → Develop mode → \"Per-plate printer and filament presets (experimental)\", "
+                             "or set EDGE_PLATE_PRESETS_SPIKE=1, then capture again."),
+                          _L("SPIKE: per-plate presets"), wxOK | wxICON_INFORMATION);
+        dlg.ShowModal();
+        return;
+    }
+
+    PartPlate *plate = p->partplate_list.get_curr_plate();
+    if (plate == nullptr)
+        return;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    auto       snapshot = std::make_shared<DynamicPrintConfig>(wxGetApp().preset_bundle->full_config());
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+
+    plate->set_spike_cfg(snapshot);
+
+    const std::string model = snapshot->opt_string("printer_model");
+    const std::string preset = snapshot->opt_string("printer_settings_id");
+    BOOST_LOG_TRIVIAL(info) << "spike T1 full_config() capture: " << ms << " ms on plate "
+                            << (p->partplate_list.get_curr_plate_index() + 1) << " printer_model=" << model
+                            << " printer_settings_id=" << preset;
+
+    wxString body = wxString::Format(
+        _L("Captured the active presets onto plate %d in %ld ms.\nPrinter: %s\nPreset: %s\n\n"
+           "This does not switch presets or invalidate other plates. Slice after capturing every plate."),
+        p->partplate_list.get_curr_plate_index() + 1, static_cast<long>(ms),
+        wxString::FromUTF8(model.c_str()), wxString::FromUTF8(preset.c_str()));
+    MessageDialog dlg(this, body, _L("SPIKE: per-plate presets"), wxOK | wxICON_INFORMATION);
+    dlg.ShowModal();
+}
+
 void Plater::apply_background_progress()
 {
     PartPlate* part_plate = p->partplate_list.get_curr_plate();
@@ -26325,8 +26381,8 @@ int Plater::select_plate(int plate_index, bool need_slice)
 
         part_plate->get_print(&print, &gcode_result, NULL);
 
-        //always apply the current plate's print
-        invalidated = p->background_process.apply(this->model(), wxGetApp().preset_bundle->full_config());
+        //always apply the current plate's print (SPIKE: plate snapshot when the gate is on)
+        invalidated = p->background_process.apply(this->model(), p->partplate_list.config_for_current_plate());
         p->notify_filament_compatibility_after_apply();
         bool model_fits, validate_err;
 
