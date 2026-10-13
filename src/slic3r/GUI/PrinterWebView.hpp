@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "../Utils/PrintHostDevices.hpp"
+#include "../Utils/DevicePageLoad.hpp"
 
 class wxChoice;
 class wxStaticText;
@@ -44,7 +45,14 @@ public:
     PrinterWebView(wxWindow *parent);
     virtual ~PrinterWebView();
 
-    void load_url(wxString& url, wxString apikey = "");
+    // Navigates the view. A Reload loads the page even when the view shows it already (only a
+    // second request while that very URL is loading is dropped); a Show leaves our own page alone
+    // when the view already shows it. Before startup is over every request is held and the last one
+    // is loaded by release_startup_hold() (DevicePageLoad.hpp).
+    void load_url(wxString& url, wxString apikey = "", DevicePageLoad::Kind kind = DevicePageLoad::Kind::Reload);
+    // Startup is over, or the tab is being opened: load whatever was asked for meanwhile. `why`
+    // goes to the log.
+    void release_startup_hold(const char* why);
     void UpdateState();
     void OnClose(wxCloseEvent& evt);
     void OnError(wxWebViewEvent& evt);
@@ -71,6 +79,8 @@ private:
     void load_picked_device();
     // A loopback page that failed to load comes back on this timer (WebLoadRetry.hpp).
     void OnRetryTimer(wxTimerEvent& evt);
+    // The actual navigation behind load_url() and release_startup_hold().
+    void navigate(const wxString& url, const wxString& apikey, bool register_view, DevicePageLoad::Kind kind);
 
     wxWebView* m_browser;
     long m_zoomFactor;
@@ -83,6 +93,11 @@ private:
     std::string   m_retry_url;      // the URL to load again when the timer fires
     std::string   m_retry_page;     // its page (no query), which the retry count belongs to
     int           m_retry_count { 0 };
+    // Startup hold and load-once bookkeeping (DevicePageLoad.hpp).
+    DevicePageLoad::Gate m_load_gate { true };
+    // The held load is the constructor's own page, which load_url() never registered with
+    // fltviews(); keep it that way when it is finally loaded.
+    bool          m_held_is_initial { false };
 
     // DECLARE_EVENT_TABLE()
 };

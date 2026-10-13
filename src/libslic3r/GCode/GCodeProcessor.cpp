@@ -387,7 +387,8 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
                             const float height = interpolate ? lerp(prev_move.height, curr_move.height, t) : curr_move.height;
                             // ORCA: Fix issue with flow rate changes being visualized incorrectly
                             const float mm3_per_mm = curr_move.mm3_per_mm;
-                            const float fan_speed = interpolate ? lerp(prev_move.fan_speed, curr_move.fan_speed, t) : curr_move.fan_speed;
+                            // Orca #15158: a fan change is a discrete command, so the move runs at its own fan speed.
+                            const float fan_speed = curr_move.fan_speed;
                             const float temperature = interpolate ? lerp(prev_move.temperature, curr_move.temperature, t) : curr_move.temperature;
                             actual_speed_moves.push_back({ block.move_id, position, block.trapezoid.cruise_feedrate, delta_extruder, feedrate,
                                                            width, height, mm3_per_mm, fan_speed, temperature });
