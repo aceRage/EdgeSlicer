@@ -1527,7 +1527,7 @@ void MainFrame::init_tabpanel() {
     Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent &evt) {
         wxString url = evt.GetString();
         wxString key = evt.GetAPIkey();
-        m_printer_view->load_url(url, key);
+        m_printer_view->load_url(url, key, evt.GetInt() ? DevicePageLoad::Kind::Reload : DevicePageLoad::Kind::Show);
     });
 
     m_printer_view->Hide();
@@ -1628,7 +1628,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
             Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent& evt) {
                 wxString url = evt.GetString();
                 wxString key = evt.GetAPIkey();
-                m_printer_view->load_url(url, key);
+                m_printer_view->load_url(url, key, evt.GetInt() ? DevicePageLoad::Kind::Reload : DevicePageLoad::Kind::Show);
             });
         }
         m_printer_view->Show(false);
@@ -4663,13 +4663,20 @@ void MainFrame::load_url(wxString url)
     wxQueueEvent(this, evt);
 }
 
-void MainFrame::load_printer_url(wxString url, wxString apikey)
+void MainFrame::load_printer_url(wxString url, wxString apikey, bool reload)
 {
     BOOST_LOG_TRIVIAL(trace) << "load_printer_url:" << url;
     auto evt = new LoadPrinterViewEvent(EVT_LOAD_PRINTER_URL, this->GetId());
     evt->SetString(url);
     evt->SetAPIkey(apikey);
+    evt->SetInt(reload ? 1 : 0);
     wxQueueEvent(this, evt);
+}
+
+void MainFrame::on_startup_settled()
+{
+    if (m_printer_view)
+        m_printer_view->release_startup_hold("startup is over");
 }
 
 void MainFrame::load_printer_url()
