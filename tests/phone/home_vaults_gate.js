@@ -206,13 +206,13 @@ async function main() {
         await evalJs(`document.querySelector('.rail-item[data-section=vaults]').click(); 1`);
 
         // ---- 7. contrast ------------------------------------------------------------------------
-        // The text this section adds. The accent colours (primary buttons, the active rail item) are the
-        // whole page's and are not judged here.
+        // The text this section adds, with its primary buttons and the active rail item on the accent
+        // colours made for text (#478, folded in).
         await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
         const pairs = `(function(){
             function bgOf(n) { while (n) { var b = getComputedStyle(n).backgroundColor; if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b; n = n.parentElement; } return getComputedStyle(document.body).backgroundColor; }
             var out = [];
-            ['#vault-list .conn .title', '#vault-list .conn .kind', '#vault-list .conn .line', '#vault-list .conn .line.warn', '#vault-list .conn .btn:not(.primary)',
+            ['#vault-list .conn .title', '#vault-list .conn .kind', '#vault-list .conn .line', '#vault-list .conn .line.warn', '#vault-list .conn .btn', '#vault-add-btn', '.rail-item.active',
              '.choice b', '.choice span', '.dialog.chooser h2', '.dialog.chooser .hint']
               .forEach(function(sel) { document.querySelectorAll(sel).forEach(function(n) { if (!n.offsetParent) return;
                   out.push({ sel: sel, fg: getComputedStyle(n).color, bg: bgOf(n) }); }); });
