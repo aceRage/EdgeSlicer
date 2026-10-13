@@ -797,3 +797,23 @@ TEST_CASE("a Bambu FAILED with the user-cancel print_error ends as Cancelled", "
     CHECK(df.content.state == Phase::Failed);
     CHECK(df.dismissal_s == (T0 + 5000) / 1000 + 600);
 }
+
+// The firmware drops print_error a while after a stop and is left saying FAILED. The hub remembers
+// the stop (`ended`: "cancelled") and the activity keeps reading Cancelled - until the printer
+// names a different, real error for it.
+TEST_CASE("a Bambu FAILED the hub remembers as cancelled ends as Cancelled once the code is gone", "[LiveActivityPush]")
+{
+    CHECK(classify("FAILED", false, false, "", "cancelled") == Phase::Cancelled);
+    CHECK(classify("FAILED", false, false, "", "Cancelled") == Phase::Cancelled);
+    CHECK(classify("FAILED", false, false, "", "") == Phase::Failed);
+    CHECK(classify("FAILED", false, true, "05004046", "cancelled") == Phase::Failed);
+    CHECK(classify("RUNNING", true, false, "", "cancelled") == Phase::Printing);
+
+    json row        = printing_row(40, 0, "FAILED");
+    row["printing"] = false;
+    row["ended"]    = "cancelled";
+    CHECK(row_of(row).ended == "cancelled");
+    CHECK(content_for(row_of(row), T0).state == Phase::Cancelled);
+    row.erase("ended");
+    CHECK(content_for(row_of(row), T0).state == Phase::Failed);
+}
