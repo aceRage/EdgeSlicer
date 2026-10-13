@@ -229,6 +229,7 @@ struct ModelBrowserPanel::Impl
     void show_notice(const wxString& text, NoticeKind kind, const wxString& action_label = wxString(), std::function<void()> action = nullptr);
     void apply_notice_colours();
     void hide_notice();
+    void show_passkey_note();
 
     void create_browser();
     void create_browser_with_rules() API_AVAILABLE(macos(12.0));
@@ -869,6 +870,19 @@ void ModelBrowserPanel::Impl::create_browser_with_rules()
     view.hidden = active ? NO : YES;
     update_nav_buttons();
     go_site(site_id);
+    show_passkey_note();
+}
+
+// WKWebView cannot do passkeys (that needs Apple entitlements this app cannot get), so tell the user
+// once, the first time the browser opens in this data folder, what to use instead.
+void ModelBrowserPanel::Impl::show_passkey_note()
+{
+    AppConfig* config = wxGetApp().app_config;
+    if (config == nullptr || config->get_bool("model_browser_passkey_note_shown"))
+        return;
+    config->set_bool("model_browser_passkey_note_shown", true);
+    show_notice(_L("Passkeys aren't available in the model browser on macOS; sign in with a password, an email code or Google/Apple."),
+                NoticeKind::Info);
 }
 
 // Reads back what a page could use to reach the app or this computer. Returns false unless the

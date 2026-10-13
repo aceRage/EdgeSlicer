@@ -1,8 +1,11 @@
 #include <catch2/catch.hpp>
 
+#include "libslic3r/AppConfig.hpp"
 #include "libslic3r/ModelBrowserRules.hpp"
 #include "libslic3r/UntrustedInput.hpp"
 
+#include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <nlohmann/json.hpp>
 
 #include <regex>
@@ -549,4 +552,78 @@ TEST_CASE("Model browser (macOS): WKDownload names and sizes are classified like
         CHECK(decide_download("https://files.printables.com/" + n, n, PRINTABLES_PAGE).action == DownloadAction::Import);
     for (const std::string &n : {"guide.pdf", "photo.heic", "notes.txt", "plate.gcode", "a.tar.gz"})
         CHECK(decide_download("https://files.printables.com/" + n, n, PRINTABLES_PAGE).action == DownloadAction::OfferSave);
+}
+
+// Home > Models is offered where model_browser_supported() is true (Windows, macOS 12+; never Linux)
+// and Preferences > "Model browser (beta)" is on. The key's default lives in AppConfig::set_defaults(),
+// which has no OS-version check, so it is on for Windows and macOS and absent elsewhere.
+TEST_CASE("Model browser: model_browser_beta is on by default on Windows and macOS only", "[ModelBrowser][AppConfig]")
+{
+#if defined(_WIN32) || defined(__APPLE__)
+    constexpr bool has_model_browser = true;
+#else
+    constexpr bool has_model_browser = false;
+#endif
+
+    SECTION("a fresh config")
+    {
+        AppConfig config;
+        CHECK(config.get_bool("model_browser_beta") == has_model_browser);
+        CHECK(config.get("model_browser_beta").empty() == !has_model_browser);
+    }
+
+    SECTION("reset() restores the default")
+    {
+        AppConfig config;
+        config.set_bool("model_browser_beta", false);
+        config.reset();
+        CHECK(config.get_bool("model_browser_beta") == has_model_browser);
+    }
+
+    SECTION("an explicit false the user saved stays false")
+    {
+        AppConfig config;
+        config.set_bool("model_browser_beta", false);
+        config.set_defaults();
+        CHECK(config.get("model_browser_beta") == "false");
+        CHECK_FALSE(config.get_bool("model_browser_beta"));
+    }
+
+    SECTION("an explicit true stays true")
+    {
+        AppConfig config;
+        config.set_bool("model_browser_beta", true);
+        config.set_defaults();
+        CHECK(config.get_bool("model_browser_beta"));
+    }
+
+    SECTION("a config file with an explicit false keeps it after load(); one without the key gets the default")
+    {
+        const boost::filesystem::path dir = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("model_browser_beta_%%%%-%%%%-%%%%");
+        boost::filesystem::create_directories(dir);
+        const std::string off  = (dir / "off.conf").string();
+        const std::string none = (dir / "none.conf").string();
+        {
+            boost::nowide::ofstream f(off, std::ios::binary);
+            f << "{\"app\":{\"model_browser_beta\":\"false\"}}\n";
+        }
+        {
+            boost::nowide::ofstream g(none, std::ios::binary);
+            g << "{\"app\":{\"some_key\":\"some_value\"}}\n";
+        }
+        AppConfig a;
+        a.set_loading_path(off);
+        CHECK(a.load().empty());
+        CHECK(a.get("model_browser_beta") == "false");
+        CHECK_FALSE(a.get_bool("model_browser_beta"));
+
+        AppConfig b;
+        b.set_loading_path(none);
+        CHECK(b.load().empty());
+        CHECK(b.get_bool("model_browser_beta") == has_model_browser);
+
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(dir, ec);
+    }
 }
