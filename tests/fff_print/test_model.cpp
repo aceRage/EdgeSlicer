@@ -1,10 +1,12 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include <boost/nowide/cstdio.hpp>
 #include <boost/filesystem.hpp>
@@ -182,4 +184,27 @@ TEST_CASE("get_extruders excludes Precise Seam helper volumes", "[Model][Precise
     plate_ids.erase(std::unique(plate_ids.begin(), plate_ids.end()), plate_ids.end());
     CHECK(std::find(plate_ids.begin(), plate_ids.end(), 3) == plate_ids.end());
     CHECK(std::find(plate_ids.begin(), plate_ids.end(), 4) == plate_ids.end());
+}
+
+TEST_CASE("An instance added from another's scale, rotation and mirror matches it", "[Model]")
+{
+    // Add instance and Fill bed copy an instance this way.
+    const int case_idx = GENERATE(0, 1);
+    Transform3d trafo = Transform3d::Identity();
+    if (case_idx == 0)
+        trafo.linear() = Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitZ()).toRotationMatrix() * Vec3d(-1., 1., 1.).asDiagonal();
+    else
+        trafo.linear() << 4.4408921e-16,   0.819152044,    0.573576436,
+                          1.0,            -4.4408921e-16, -1.11022302e-16,
+                         -5.55111512e-17, -0.573576436,    0.819152044;
+    CAPTURE(case_idx);
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10, 20, 30));
+    ModelInstance *original = object->add_instance();
+    original->set_transformation(Geometry::Transformation(trafo));
+    const ModelInstance *copy = object->add_instance(original->get_offset(), original->get_scaling_factor(),
+                                                     original->get_rotation(), original->get_mirror());
+    CHECK(copy->get_matrix().linear().isApprox(original->get_matrix().linear(), 1e-9));
 }

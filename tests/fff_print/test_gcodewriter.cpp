@@ -1,11 +1,15 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "libslic3r/Exception.hpp"
+#include "libslic3r/Geometry/ArcWelder.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -334,5 +338,269 @@ TEST_CASE("Klipper acceleration is capped by the X and Y limits too", "[GCodeWri
     SECTION("other flavours keep using only the extruding limit") {
         const std::string gcode = klipper_accel_line(gcfMarlinFirmware, 10000., 8700., 8700., 12000);
         CHECK(gcode.find("M204 P10000") != std::string::npos);
+    }
+}
+
+// Batch 2C: spiral lift (Orca #11430, #11468, #11556, #12564, #13634, #15118).
+namespace {
+
+struct SpiralLine
+{
+    std::string            cmd;
+    std::map<char, double> v;
+    bool has(char c) const { return v.count(c) != 0; }
+};
+
+std::vector<SpiralLine> parse_spiral_gcode(const std::string &gcode)
+{
+    std::vector<SpiralLine> out;
+    std::istringstream      in(gcode);
+    std::string             line;
+    while (std::getline(in, line)) {
+        const std::string  body = line.substr(0, line.find(';'));
+        std::istringstream words(body);
+        SpiralLine         l;
+        if (!(words >> l.cmd))
+            continue;
+        std::string w;
+        while (words >> w)
+            if (w.size() > 1 && std::isalpha((unsigned char) w[0]))
+                l.v[w[0]] = std::stod(w.substr(1));
+        out.push_back(std::move(l));
+    }
+    return out;
+}
+
+struct SpiralSetup
+{
+    bool                arc_fitting = false;
+    double              resolution  = 0.012;
+    Vec2d               plate_offset{0., 0.};
+    Vec2d               start{100., 100.}; // plate coordinates
+    Vec2d               target{150., 100.};
+    unsigned int        filament = 0;
+    Pointfs             bed      = {Vec2d(0, 0), Vec2d(200, 0), Vec2d(200, 200), Vec2d(0, 200)};
+    std::vector<Vec2ds> extruder_areas;
+    std::vector<int>    filament_map = {1, 1};
+};
+
+constexpr double spiral_z_hop   = 0.4;
+constexpr double spiral_layer_z = 0.2;
+
+// The writer's spiral radius for a 0.4 mm z-hop at the default 3 degree travel slope.
+double spiral_radius() { return spiral_z_hop / (2. * PI * std::atan(3. * PI / 180.)); }
+
+// Lift with LiftType::SpiralLift at `start`, then travel to `target` on the same layer.
+std::string spiral_lift_gcode(const SpiralSetup &s)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("enable_arc_fitting", new ConfigOptionBool(s.arc_fitting));
+    config.set_key_value("resolution", new ConfigOptionFloat(s.resolution));
+    config.set_key_value("z_hop", new ConfigOptionFloats{spiral_z_hop, spiral_z_hop});
+    config.set_key_value("travel_slope", new ConfigOptionFloats{3., 3.});
+    config.set_key_value("retract_lift_above", new ConfigOptionFloats{0., 0.});
+    config.set_key_value("retract_lift_below", new ConfigOptionFloats{0., 0.});
+    config.set_key_value("printable_area", new ConfigOptionPoints(s.bed));
+    config.set_key_value("extruder_printable_area", new ConfigOptionPointsGroups(s.extruder_areas));
+    config.set_key_value("filament_map", new ConfigOptionInts(s.filament_map));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    writer.set_extruders({0, 1});
+    writer.set_extruder(s.filament);
+    writer.set_xy_offset(s.plate_offset.x(), s.plate_offset.y());
+    // The writer keeps positions with the plate offset added and emits plate coordinates.
+    writer.set_position(Vec3d(s.start.x() + s.plate_offset.x(), s.start.y() + s.plate_offset.y(), spiral_layer_z));
+    writer.set_current_position_clear(true);
+
+    std::string gcode = writer.lift(LiftType::SpiralLift);
+    gcode += writer.travel_to_xyz(Vec3d(s.target.x() + s.plate_offset.x(), s.target.y() + s.plate_offset.y(), spiral_layer_z));
+    return gcode;
+}
+
+// The G1 points of an emulated spiral: XYZ moves without a feedrate (the travel after it carries one).
+std::vector<SpiralLine> spiral_points(const std::vector<SpiralLine> &lines)
+{
+    std::vector<SpiralLine> out;
+    for (const SpiralLine &l : lines)
+        if (l.cmd == "G1" && l.has('X') && l.has('Y') && l.has('Z') && !l.has('F'))
+            out.push_back(l);
+    return out;
+}
+
+size_t count_cmd(const std::vector<SpiralLine> &lines, const std::string &cmd)
+{
+    return size_t(std::count_if(lines.begin(), lines.end(), [&cmd](const SpiralLine &l) { return l.cmd == cmd; }));
+}
+
+size_t expected_spiral_segments(double radius, double resolution)
+{
+    return resolution > 0. ? std::clamp(Geometry::ArcWelder::arc_discretization_steps(radius, 2. * PI, resolution), size_t(8), size_t(128)) :
+                             size_t(128);
+}
+
+} // namespace
+
+TEST_CASE("Spiral lift without arc fitting is a circle of G1 moves in plate coordinates", "[GCodeWriter][SpiralLift]")
+{
+    // #11430: no G2/G3 when arc fitting is off. #11468: the points are in plate coordinates on every plate.
+    const Vec2d offsets[] = {Vec2d(0., 0.), Vec2d(-275.5, 12.25)};
+    for (const Vec2d &offset : offsets) {
+        DYNAMIC_SECTION("plate offset " << offset.x() << "," << offset.y()) {
+            SpiralSetup s;
+            s.plate_offset          = offset;
+            const std::string gcode = spiral_lift_gcode(s);
+            INFO(gcode);
+            const std::vector<SpiralLine> lines = parse_spiral_gcode(gcode);
+            CHECK(count_cmd(lines, "G2") == 0);
+            CHECK(count_cmd(lines, "G3") == 0);
+            CHECK(count_cmd(lines, "G17") == 0);
+
+            const double                  r      = spiral_radius();
+            const std::vector<SpiralLine> points = spiral_points(lines);
+            REQUIRE(points.size() == expected_spiral_segments(r, s.resolution));
+
+            // The travel goes along +X, so the centre is one radius to its left (+Y).
+            const Vec2d center = s.start + Vec2d(0., r);
+            double      last_z = spiral_layer_z;
+            for (const SpiralLine &p : points) {
+                CHECK_THAT((Vec2d(p.v.at('X'), p.v.at('Y')) - center).norm(), WithinAbs(r, 0.002));
+                CHECK(p.v.at('Z') > last_z);
+                last_z = p.v.at('Z');
+            }
+            CHECK_THAT(points.back().v.at('X'), WithinAbs(s.start.x(), 0.0015));
+            CHECK_THAT(points.back().v.at('Y'), WithinAbs(s.start.y(), 0.0015));
+            CHECK_THAT(points.back().v.at('Z'), WithinAbs(spiral_layer_z + spiral_z_hop, 0.0015));
+
+            // Then the travel itself, at the lifted height.
+            const SpiralLine &travel = lines.back();
+            CHECK(travel.cmd == "G1");
+            CHECK_THAT(travel.v.at('X'), WithinAbs(s.target.x(), 0.0015));
+            CHECK_THAT(travel.v.at('Y'), WithinAbs(s.target.y(), 0.0015));
+            CHECK_THAT(travel.v.at('Z'), WithinAbs(spiral_layer_z + spiral_z_hop, 0.0015));
+        }
+    }
+}
+
+TEST_CASE("Emulated spiral lift segments follow the slicing resolution", "[GCodeWriter][SpiralLift]")
+{
+    // #11556 / #12564 / #15118: no chord deviates from the arc by more than the resolution,
+    // 8 to 128 segments, and the upper bound for a resolution of 0.
+    const double resolutions[] = {0.012, 0.05, 0.001, 0.};
+    const double r             = spiral_radius();
+    for (const double resolution : resolutions) {
+        DYNAMIC_SECTION("resolution " << resolution) {
+            SpiralSetup s;
+            s.resolution                         = resolution;
+            const std::vector<SpiralLine> points = spiral_points(parse_spiral_gcode(spiral_lift_gcode(s)));
+            CHECK(points.size() == expected_spiral_segments(r, resolution));
+            CHECK(points.size() >= 8);
+            CHECK(points.size() <= 128);
+        }
+    }
+    // The profile resolution 0.012 mm gives 23 segments for this radius.
+    CHECK(expected_spiral_segments(r, 0.012) == 23);
+}
+
+TEST_CASE("Spiral lift with arc fitting is one G3 arc", "[GCodeWriter][SpiralLift]")
+{
+    SpiralSetup s;
+    s.arc_fitting           = true;
+    s.plate_offset          = Vec2d(-275.5, 12.25);
+    const std::string gcode = spiral_lift_gcode(s);
+    INFO(gcode);
+    const std::vector<SpiralLine> lines = parse_spiral_gcode(gcode);
+    CHECK(count_cmd(lines, "G17") == 1);
+    REQUIRE(count_cmd(lines, "G3") == 1);
+    CHECK(spiral_points(lines).empty());
+    const SpiralLine &arc = *std::find_if(lines.begin(), lines.end(), [](const SpiralLine &l) { return l.cmd == "G3"; });
+    CHECK_THAT(arc.v.at('Z'), WithinAbs(spiral_layer_z + spiral_z_hop, 0.0015));
+    CHECK_THAT(arc.v.at('I'), WithinAbs(0., 0.0015));
+    CHECK_THAT(arc.v.at('J'), WithinAbs(spiral_radius(), 0.0015));
+    CHECK(arc.v.at('P') == 1.);
+}
+
+TEST_CASE("A spiral lift that would leave the printable area is a normal lift", "[GCodeWriter][SpiralLift]")
+{
+    // #13634. The circle's centre is one radius to the left of the travel direction.
+    const double r = spiral_radius();
+    for (const bool arc_fitting : {false, true}) {
+        DYNAMIC_SECTION("arc fitting " << arc_fitting) {
+            SpiralSetup s;
+            s.arc_fitting = arc_fitting;
+            s.start       = Vec2d(0.5, 100.);
+
+            SECTION("centre outside the bed: normal lift") {
+                s.target                            = Vec2d(0.5, 150.); // +Y: the centre is at x = 0.5 - r < 0
+                const std::vector<SpiralLine> lines = parse_spiral_gcode(spiral_lift_gcode(s));
+                CHECK(count_cmd(lines, "G3") == 0);
+                CHECK(spiral_points(lines).empty());
+                REQUIRE(lines.size() == 2);
+                CHECK_FALSE(lines.front().has('X'));
+                CHECK_THAT(lines.front().v.at('Z'), WithinAbs(spiral_layer_z + spiral_z_hop, 0.0015));
+            }
+            SECTION("circle inside the bed: spiral") {
+                s.target                            = Vec2d(0.5, 50.); // -Y: the centre is at x = 0.5 + r, more than r from every edge
+                const std::vector<SpiralLine> lines = parse_spiral_gcode(spiral_lift_gcode(s));
+                if (arc_fitting)
+                    CHECK(count_cmd(lines, "G3") == 1);
+                else
+                    CHECK(spiral_points(lines).size() == expected_spiral_segments(r, s.resolution));
+            }
+            SECTION("circle crossing an edge: normal lift") {
+                s.start                             = Vec2d(100., 199.5);
+                s.target                            = Vec2d(150., 199.5); // +X: the centre is at y = 199.5 + r, beyond y = 200
+                const std::vector<SpiralLine> lines = parse_spiral_gcode(spiral_lift_gcode(s));
+                CHECK(count_cmd(lines, "G3") == 0);
+                CHECK(spiral_points(lines).empty());
+            }
+        }
+    }
+}
+
+TEST_CASE("The spiral lift uses the printable area of the extruder the filament prints from", "[GCodeWriter][SpiralLift]")
+{
+    // #13634 on a Bambu H2D-like bed: the left extruder reaches x 0..325, the right one 25..350.
+    // Our Extruder is a filament slot, so the extruder comes from filament_map (1-based).
+    SpiralSetup s;
+    s.arc_fitting    = true;
+    s.bed            = {Vec2d(0, 0), Vec2d(350, 0), Vec2d(350, 320), Vec2d(0, 320)};
+    s.extruder_areas = {Vec2ds{Vec2d(0, 0), Vec2d(325, 0), Vec2d(325, 320), Vec2d(0, 320)},
+                        Vec2ds{Vec2d(25, 0), Vec2d(350, 0), Vec2d(350, 320), Vec2d(25, 320)}};
+    s.start          = Vec2d(26., 100.);
+    s.target         = Vec2d(26., 150.); // +Y: the centre is at x = 26 - r, left of the right extruder's x = 25
+    REQUIRE(26. - spiral_radius() < 25.);
+
+    SECTION("filament on the left extruder: spiral") {
+        s.filament_map = {1, 2};
+        s.filament     = 0;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 1);
+    }
+    SECTION("filament on the right extruder: normal lift") {
+        s.filament_map = {1, 2};
+        s.filament     = 1;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
+    }
+    SECTION("first filament mapped to the right extruder: normal lift") {
+        s.filament_map = {2, 1};
+        s.filament     = 0;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
+    }
+    SECTION("no per-extruder areas: the bed decides") {
+        s.extruder_areas.clear();
+        s.filament_map = {1, 2};
+        s.filament     = 1;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 1);
+    }
+    SECTION("both areas merged into one group of eight points (older projects): split per extruder") {
+        s.extruder_areas = {Vec2ds{Vec2d(0, 0), Vec2d(325, 0), Vec2d(325, 320), Vec2d(0, 320),
+                                   Vec2d(25, 0), Vec2d(350, 0), Vec2d(350, 320), Vec2d(25, 320)}};
+        s.filament_map   = {1, 2};
+        s.filament       = 0;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 1);
+        s.filament = 1;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
     }
 }

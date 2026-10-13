@@ -489,6 +489,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
                 //For line move, there are same. For arc move, there are different.
                 Vec3f enter_direction;
                 Vec3f exit_direction;
+                // Orca: move direction over all four axes, unit length. Used by
+                // calc_vmax_junction_deviation(); see there for why E is normalized in.
+                Vec4f jd_unit_vec;
 
                 void reset();
             };
@@ -556,13 +559,39 @@ inline bool is_bbl_special_tool_command(int tool_number)
             //BBS: prepare stage time before print model, including start gcode time and mostly same with start gcode time
             float prepare_time;
 
+            // Orca (#14573): extra time (e.g. a filament-change delay) that can't be attributed to a
+            // matching block on this pass is buffered here and retried on a later pass, so it
+            // is never folded into an unrelated move. On the final pass no later pass remains,
+            // so any still-unmatched remainder is added to the machine total (never to a move
+            // vertex) instead of being dropped, keeping get_time() consistent with the
+            // filament-change statistics. Orca-only EOF hardening; BambuStudio drops it.
+            struct AdditionalTime
+            {
+                EMoveType type{ EMoveType::Noop };
+                float     time{ 0.0f };
+                // EDGE: the pre-cooling bookings (GCodeProcessor::m_booked_times) whose time this entry carries.
+                std::vector<size_t> bookings;
+            };
+            using AdditionalBuffer = std::vector<AdditionalTime>;
+            AdditionalBuffer m_additional_time_buffer;
+            // EDGE: where the booked times landed since the last read: (booking, g1 line id from which a
+            // move's elapsed time includes it). Read and cleared by GCodeProcessor::calculate_time().
+            std::vector<std::pair<size_t, unsigned int>> landed_bookings;
+
             void reset();
+
+            // Merge adjacent buffer entries that target the same move type.
+            static AdditionalBuffer merge_adjacent_additional_time_blocks(const AdditionalBuffer& buffer);
 
             // Plans the queued blocks, writes each processed block's time onto its move
             // (result.moves[block.move_id].time[mode]) and, for the Normal machine, collects the actual
             // speed profile. keep_last_n_blocks stay queued.
+            // additional_time is attributed to the first block matching target_move_type
+            // (EMoveType::Noop matches any block, i.e. the first processed block).
             void calculate_time(GCodeProcessorResult& result, PrintEstimatedStatistics::ETimeMode mode, bool collect_actual_speed_points,
-                                size_t keep_last_n_blocks = 0, float additional_time = 0.0f);
+                                size_t keep_last_n_blocks = 0, float additional_time = 0.0f,
+                                EMoveType target_move_type = EMoveType::Noop, bool is_final = false,
+                                size_t booking = static_cast<size_t>(-1));
         };
 
         struct TimeProcessor
@@ -800,12 +829,18 @@ inline bool is_bbl_special_tool_command(int tool_number)
         struct BookedTime
         {
             unsigned int line_id;      // the command's line
-            unsigned int first_g1_id;  // g1 line id the time was added to, (unsigned)-1 when it was dropped
+            // From this g1 line id on a move's elapsed time includes the time, (unsigned)-1 when it is not
+            // part of any move's time (not applied yet, or only added to the machine total at the end of the file).
+            unsigned int first_g1_id;
             float        time;
             bool         tool_change;
         };
         std::vector<BookedTime> m_booked_times;
         bool                    m_booking_tool_change{ false };
+        // Orca (403292cb63): the machine end G-code's timed M400 waits (air filtration, timelapse picture,
+        // sound) are post-print operations, not part of the print time. Set when the
+        // MACHINE_END_GCODE_START marker is parsed; process_M400() then skips the S / P delays.
+        bool                    m_skip_end_gcode_delays{ false };
 
         //BBS: x, y offset for gcode generated
         double          m_x_offset{ 0 };
@@ -1103,6 +1138,18 @@ inline bool is_bbl_special_tool_command(int tool_number)
         float minimum_travel_feedrate(PrintEstimatedStatistics::ETimeMode mode, float feedrate) const;
         float get_axis_max_feedrate(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
         float get_axis_max_acceleration(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
+        float get_axis_max_jerk_with_jd(PrintEstimatedStatistics::ETimeMode mode, Axis axis, float acceleration) const;
+        float get_axis_max_jerk_with_jd(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
+        // Orca: junction deviation for a block at the given acceleration, 0 for a classic jerk machine.
+        float get_junction_deviation(PrintEstimatedStatistics::ETimeMode mode, float acceleration) const;
+        // Orca: acceleration along the junction direction, clamped by the per axis limits.
+        float calc_junction_acceleration(const TimeBlock& block, const Vec4f& junction_unit_vec,
+                                         PrintEstimatedStatistics::ETimeMode mode) const;
+        // Orca: entry speed from the junction deviation model, which limits a corner by its angle alone
+        // and is therefore isotropic, unlike per axis jerk. Negative means classic jerk applies instead.
+        float calc_vmax_junction_deviation(const TimeBlock& block, const TimeMachine::State& prev,
+                                           const TimeMachine::State& curr, bool has_prev_move,
+                                           PrintEstimatedStatistics::ETimeMode mode) const;
         float get_axis_max_jerk(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
         Vec3f get_xyz_max_jerk(PrintEstimatedStatistics::ETimeMode mode) const;
         float get_retract_acceleration(PrintEstimatedStatistics::ETimeMode mode) const;
@@ -1119,10 +1166,12 @@ inline bool is_bbl_special_tool_command(int tool_number)
 
         // Runs every enabled time machine over its queued blocks (see TimeMachine::calculate_time()) and
         // inserts the collected actual-speed points into the move list.
-        void calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks = 0, float additional_time = 0.0f);
+        void calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks = 0, float additional_time = 0.0f,
+                            EMoveType target_move_type = EMoveType::Noop, bool is_final = false,
+                            size_t booking = static_cast<size_t>(-1));
 
         // Simulates firmware st_synchronize() call
-        void simulate_st_synchronize(float additional_time = 0.0f);
+        void simulate_st_synchronize(float additional_time = 0.0f, EMoveType target_move_type = EMoveType::Noop);
 
         void update_estimated_times_stats();
         //BBS:
