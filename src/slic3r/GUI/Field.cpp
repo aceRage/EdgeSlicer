@@ -538,7 +538,7 @@ void Field::get_value_by_opt_type(wxString& str, const bool check_value/* = true
     case coFloatOrPercent:
     case coFloatsOrPercents: {
         if ((m_opt.type == coFloatOrPercent || m_opt.type == coFloatsOrPercents) && !str.IsEmpty() &&
-            !(m_opt.nullable && str == m_na_value)) {
+            !(m_opt.nullable && (str == m_na_value || str == _(L("N/A"))))) { // Edge: same N/A test as the float branch
             bool update_control = false;
             wxString numeric_str = str;
             double val = 0.;
