@@ -3,6 +3,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -1842,5 +1843,69 @@ TEST_CASE("Seam metadata restores only recognized modes on compatible base types
         CHECK_FALSE(helper.config.has("extruder"));
         CHECK_FALSE(helper.config.has("sparse_infill_density"));
         CHECK_FALSE(helper.config.has("notes"));
+    }
+}
+
+// A relationship must name a part the package actually contains. The writer used to fall
+// back to /Metadata/plate_1.png whenever no cover image was set, so an export that wrote no
+// plate thumbnail still declared one -- a dangling relationship a strict OPC reader may reject.
+SCENARIO("thumbnail relationships are declared only for thumbnails that were written", "[3mf]")
+{
+    GIVEN("a project with one plate") {
+        prepare_3mf_temp_dir();
+
+        Model model;
+        const std::string src_file = std::string(TEST_DATA_DIR) + "/test_3mf/Prusa.stl";
+        REQUIRE(load_stl(src_file.c_str(), &model));
+        model.add_default_instances();
+
+        PlateData     plate;
+        plate.plate_index = 0;
+        PlateDataPtrs plates{ &plate };
+
+        auto store = [&](const std::string &path, std::vector<ThumbnailData *> thumbnails) {
+            DynamicPrintConfig cfg;
+            StoreParams        sp;
+            sp.path            = path.c_str();
+            sp.model           = &model;
+            sp.config          = &cfg;
+            sp.plate_data_list = plates;
+            sp.thumbnail_data  = std::move(thumbnails);
+            sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+            REQUIRE(store_bbs_3mf(sp));
+        };
+
+        WHEN("no thumbnail is rendered") {
+            const std::string path    = make_temp_3mf_path("rels_no_thumb.3mf");
+            const ScopeGuard  cleanup = remove_file_guard(path);
+            ThumbnailData     none; // left invalid: nothing was rendered
+            REQUIRE_FALSE(none.is_valid());
+            store(path, { &none });
+
+            THEN("the package declares no thumbnail relationship") {
+                const std::string rels = extract_zip_entry(path, "_rels/.rels");
+                CHECK(rels.find("3dmodel") != std::string::npos);
+                CHECK(rels.find("plate_1.png") == std::string::npos);
+                CHECK(rels.find("thumbnail") == std::string::npos);
+            }
+        }
+
+        WHEN("a plate thumbnail is rendered") {
+            const std::string path    = make_temp_3mf_path("rels_with_thumb.3mf");
+            const ScopeGuard  cleanup = remove_file_guard(path);
+            ThumbnailData     rendered;
+            rendered.set(128, 128);
+            REQUIRE(rendered.is_valid());
+            store(path, { &rendered });
+
+            THEN("the relationships name it, and the parts are in the package") {
+                const std::string rels = extract_zip_entry(path, "_rels/.rels");
+                CHECK(rels.find("/Metadata/plate_1.png") != std::string::npos);
+                CHECK(rels.find("/Metadata/plate_1_small.png") != std::string::npos);
+
+                CHECK_FALSE(extract_zip_entry(path, "Metadata/plate_1.png").empty());
+                CHECK_FALSE(extract_zip_entry(path, "Metadata/plate_1_small.png").empty());
+            }
+        }
     }
 }
