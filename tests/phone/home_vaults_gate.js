@@ -3,17 +3,17 @@
 // A plain Node http server (loopback, no dependencies) serves the real shipped page. Before the page
 // runs, a stand-in for the slicer is injected as window.wx - the script channel HomePanel.cpp listens
 // on - and records every message; the test answers through window.HomeApp.receive() the way
-// HomePanel / HomeVendors do. A headless Edge / Chrome is driven over the DevTools protocol (Node 22's
-// built-in WebSocket). No slicer, no network beyond loopback, nothing touches the desktop: the
-// "keyboard" is Input.dispatchKeyEvent into the headless page.
+// HomePanel does. A headless Edge / Chrome is driven over the DevTools protocol (Node 22's built-in
+// WebSocket). No slicer, no network beyond loopback, nothing touches the desktop: the "keyboard" is
+// Input.dispatchKeyEvent into the headless page.
 //
-// It checks: the page loads with no uncaught exception; the rail has Vaults (after Library) and no
-// Vendors; a saved section "vendors" and a show_section "vendors" both open Vaults; the empty state
-// and its Add vault button; the Add vault chooser (focus, each choice sends the existing command or
-// opens the connector editor, and closes; Escape and the backdrop close it); a connector card shows
-// its kind and its credential state (saved / not set); the folders card counts folders and files,
-// names an unreachable share, and leads to the Library and its folder manager; connector text is
-// never markup; Refresh on Vaults only asks for the state again; text contrast >= 4.5:1 in both themes.
+// It checks: the page loads with no uncaught exception; the rail is Recent, Library, Vendors, Vaults,
+// Print History; Vendors is untouched (its own section, Import and Add connector, a show_section
+// "vendors" still opens it); a saved section "vaults" opens Vaults; the empty state and its Add vault
+// button; the Add vault chooser (focus on the first choice, Folder or network share sends
+// library_add_folder and closes, Escape / Cancel / the backdrop close it, no vendor connector in it);
+// the folders card counts folders and files, names an unreachable share, and leads to the Library and
+// its folder manager; text contrast of what Vaults adds >= 4.5:1 in both themes.
 //
 // Run: node tests/phone/home_vaults_gate.js     (skips, exit 0, when no Chromium is found)
 // WEB_DIR=<dir> points it at another copy of the page. SHOT_DIR=<dir> saves screenshots there.
@@ -50,24 +50,11 @@ const SHIM = `(function(){ window.__sent = [];
     window.wx = { postMessage: function(m) { try { window.__sent.push(JSON.parse(m)); } catch (e) { window.__sent.push({ bad: m }); } } };
 })();`;
 
-// What HomeVendors::send_state() sends (display fields only, no secret).
-const CONNECTOR = {
-    id: 'cpl3d-1a2b', name: 'CPL3D', vendor: 'CPL3D', spec: { name: 'CPL3D', base_url: 'https://www.cpl3d.com' },
-    slots: [{ key: 'auth', label: 'API key', set: true }], secure: true, syncing: false, synced_at: 1760000000, count: 2,
-    last_error: '', full_next: false, quota: { used: '', limit: '', resets: '' }, downloads_limited: true,
-};
-const NOKEY = Object.assign({}, CONNECTOR, { id: 'shop-9', name: 'Shop <img src=x onerror="window.__xss=1">', vendor: '',
-    slots: [{ key: 'auth', label: 'API key', set: false }], synced_at: 0, count: 0 });
-const ITEMS = [
-    { key: 'k1', connector: 'cpl3d-1a2b', name: 'Bracket', designer: 'Ann', license: 'Commercial', description: '', tags: ['Tools'],
-      updated: '2026-10-01T10:00:00Z', has_thumb: false, has_page: true, can_download: true, subs: [] },
-    { key: 'k2', connector: 'cpl3d-1a2b', name: 'Hook', designer: '', license: '', description: '', tags: [], updated: '2026-10-02T10:00:00Z',
-      has_thumb: false, has_page: false, can_download: false, subs: [] },
-];
 const LIB = { type: 'library', hidden: 0, scanning: false, files_seen: 0, scanned_at: 1760000000,
     folders: [{ path: 'D:/Models', recursive: true, category: '', vendor: '', license: '', scanned: true, online: true, files: 3 },
               { path: '//diskstation/3d', recursive: true, category: '', vendor: '', license: '', scanned: true, online: false, files: 1 }],
     items: [1, 2, 3, 4].map(n => ({ id: 'f' + n, name: 'part' + n + '.stl', type: 'stl', root: 'D:/Models', rel_dir: '', mtime: 1760000000, size: 1000, added: 1760000000 })) };
+const NO_LIB = { type: 'library', hidden: 0, scanning: false, files_seen: 0, scanned_at: 1760000000, folders: [], items: [] };
 
 const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -147,106 +134,86 @@ async function main() {
         check('the page loads with no uncaught exception', exceptions().length === 0, JSON.stringify(exceptions().map(e => e.params.exceptionDetails.text)));
         check('it says home_ready', (await sent()).some(m => m.command === 'home_ready'));
         const rail = JSON.parse(await evalJs(`JSON.stringify([].map.call(document.querySelectorAll('.rail-item[data-section]'), b => b.dataset.section))`));
-        check('the rail: Recent, Library, Vaults, Print History (no Vendors)', JSON.stringify(rail) === JSON.stringify(['recent', 'library', 'vaults', 'history']), rail.join());
+        check('the rail: Recent, Library, Vendors, Vaults, Print History', JSON.stringify(rail) === JSON.stringify(['recent', 'library', 'vendors', 'vaults', 'history']), rail.join());
 
-        // ---- 2. a saved "vendors" opens Vaults ------------------------------------------------
-        await receive({ type: 'init', strings: {}, section: 'vendors', models: false });
+        // ---- 2. a saved "vaults" opens Vaults ---------------------------------------------------
+        await receive({ type: 'init', strings: {}, section: 'vaults', models: false });
         const open = JSON.parse(await evalJs(`JSON.stringify({ title: document.getElementById('title').textContent,
-            shown: !document.getElementById('vaults').hidden, cur: document.querySelector('.rail-item[data-section=vaults]').getAttribute('aria-current') })`));
-        check('a saved section "vendors" opens Vaults', open.title === 'Vaults' && open.shown && open.cur === 'page', JSON.stringify(open));
-        check('before the state arrives it says Loading', (await evalJs(`document.getElementById('vendors-empty-text').textContent`)) === 'Loading...');
+            shown: !document.getElementById('vaults').hidden, vendors: !document.getElementById('vendors').hidden,
+            cur: document.querySelector('.rail-item[data-section=vaults]').getAttribute('aria-current') })`));
+        check('a saved section "vaults" opens Vaults', open.title === 'Vaults' && open.shown && !open.vendors && open.cur === 'page', JSON.stringify(open));
+        check('before the Library state arrives it says Loading', (await evalJs(`document.getElementById('vaults-empty-text').textContent`)) === 'Loading...');
 
         // ---- 3. empty state --------------------------------------------------------------------
-        await receive({ type: 'vendors', connectors: [], items: [] });
-        const empty = JSON.parse(await evalJs(`JSON.stringify({ text: document.getElementById('vendors-empty-text').textContent,
-            btn: !document.getElementById('ven-empty-add').hidden, cards: document.querySelectorAll('#ven-connectors .conn').length,
-            csv: document.getElementById('ven-csv').disabled })`));
+        await receive(NO_LIB);
+        const empty = JSON.parse(await evalJs(`JSON.stringify({ text: document.getElementById('vaults-empty-text').textContent,
+            btn: !document.getElementById('vault-empty-add').hidden, cards: document.querySelectorAll('#vault-list .conn').length })`));
+        check('empty: the explanation, an Add vault button, no cards', /^Vaults are your own model storage/.test(empty.text) && empty.btn && empty.cards === 0, JSON.stringify(empty));
         await shot('vaults_empty');
-        check('empty: the explanation, an Add vault button, no cards, Export CSV off',
-              /^Vaults are where you keep your models/.test(empty.text) && empty.btn && empty.cards === 0 && empty.csv, JSON.stringify(empty));
 
         // ---- 4. the Add vault chooser ----------------------------------------------------------
         const chooserOpen = () => evalJs(`!document.getElementById('vault-add').hidden`);
-        await evalJs(`document.getElementById('ven-empty-add').click(); 1`);
+        await evalJs(`document.getElementById('vault-empty-add').click(); 1`);
         check('the empty state\'s Add vault opens the chooser', await chooserOpen());
-        check('the chooser has the focus on its first choice', (await evalJs('document.activeElement.id')) === 'vault-add-api');
+        check('the chooser has the focus on its first choice', (await evalJs('document.activeElement.id')) === 'vault-add-folder');
         await key('Escape');
         check('Escape closes it', !(await chooserOpen()));
-        await evalJs(`document.getElementById('ven-add').click(); 1`);
+        await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
         check('the header\'s Add vault opens it too', await chooserOpen());
         await evalJs(`document.getElementById('vault-add').click(); 1`);
         check('a click on the backdrop closes it', !(await chooserOpen()));
-        const choices = [['vault-import-file', { command: 'vendor_import', source: 'file' }],
-                         ['vault-import-link', { command: 'vendor_import', source: 'link' }],
-                         ['vault-import-paste', { command: 'vendor_import', source: 'paste' }],
-                         ['vault-add-folder', { command: 'library_add_folder' }]];
-        for (const [id, want] of choices) {
-            await evalJs(`document.getElementById('ven-add').click(); 1`);
-            await clearSent();
-            await evalJs(`document.getElementById('${id}').click(); 1`);
-            const s = await sent();
-            check(id + ' sends ' + JSON.stringify(want) + ' and closes', s.length === 1 && JSON.stringify(s[0]) === JSON.stringify(want) && !(await chooserOpen()), JSON.stringify(s));
-        }
-        await evalJs(`document.getElementById('ven-add').click(); 1`);
+        await evalJs(`document.getElementById('vault-add-btn').click(); document.getElementById('vault-add-cancel').click(); 1`);
+        check('Cancel closes it', !(await chooserOpen()));
+        await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
         await clearSent();
-        await evalJs(`document.getElementById('vault-add-api').focus(); 1`);
         await key('Enter');
         await sleep(50);
-        const ed = JSON.parse(await evalJs(`JSON.stringify({ chooser: !document.getElementById('vault-add').hidden, editor: !document.getElementById('ven-editor').hidden, sent: window.__sent.length })`));
-        check('Model library API (from the keyboard) opens the connector editor, sends nothing', !ed.chooser && ed.editor && ed.sent === 0, JSON.stringify(ed));
-        await evalJs(`document.getElementById('ven-editor-cancel').click(); 1`);
+        const fs1 = await sent();
+        check('Folder or network share (from the keyboard) sends library_add_folder and closes',
+              fs1.length === 1 && fs1[0].command === 'library_add_folder' && !(await chooserOpen()), JSON.stringify(fs1));
+        const connectorChoices = await evalJs(`document.querySelectorAll('#vault-add [id^=vault-import], #vault-add-api').length`);
+        check('the chooser offers no vendor connector (those stay in Vendors)', connectorChoices === 0, connectorChoices);
 
-        // ---- 5. vault cards ---------------------------------------------------------------------
-        await receive({ type: 'vendors', connectors: [CONNECTOR, NOKEY], items: ITEMS });
+        // ---- 5. the folders card -----------------------------------------------------------------
         await receive(LIB);
-        const cards = JSON.parse(await evalJs(`JSON.stringify([].map.call(document.querySelectorAll('#ven-connectors .conn'), c => ({
+        const cards = JSON.parse(await evalJs(`JSON.stringify([].map.call(document.querySelectorAll('#vault-list .conn'), c => ({
             title: c.querySelector('.title').textContent, kind: (c.querySelector('.kind') || {}).textContent,
             lines: [].map.call(c.querySelectorAll('.line'), l => l.textContent), warn: [].map.call(c.querySelectorAll('.line.warn'), l => l.textContent),
-            role: c.getAttribute('role'), imgs: c.querySelectorAll('img').length })))`));
-        await shot('vaults_cards');
-        check('three cards: two connectors, then the folders card', cards.length === 3 && cards[2].title === 'Folders and network shares', JSON.stringify(cards.map(c => c.title)));
-        check('cards are list items of a list', cards.every(c => c.role === 'listitem') && (await evalJs(`document.getElementById('ven-connectors').getAttribute('role')`)) === 'list');
-        check('a connector says its kind: Model library API', cards[0].kind === 'Model library API' && cards[1].kind === 'Model library API', cards[0].kind);
-        check('a connector with its key set says where it is kept', cards[0].lines.includes("Credentials: saved in your system's credential store"), cards[0].lines.join('|'));
-        check('a connector without its key says it is not set', cards[1].warn.some(w => /API key not set/.test(w)), cards[1].warn.join('|'));
-        check('connector text is text, never markup', cards[1].imgs === 0 && !(await evalJs('!!window.__xss')) && cards[1].title.indexOf('<img') > 0, cards[1].title);
-        check('the folders card counts folders and files', cards[2].lines[0] === '2 folders \u00b7 4 files' && cards[2].kind === 'Library', cards[2].lines.join('|'));
-        check('the folders card names the unreachable share', cards[2].warn.length === 1 && /^3d: Not reachable/.test(cards[2].warn[0]), cards[2].warn.join('|'));
-        const grid = JSON.parse(await evalJs(`JSON.stringify({ n: document.querySelectorAll('#vendors-grid .card').length, empty: document.getElementById('vendors-empty').hidden,
-            add: document.getElementById('ven-empty-add').hidden, csv: document.getElementById('ven-csv').disabled, status: document.getElementById('ven-status').textContent })`));
-        check('the items show, no empty state, Export CSV on', grid.n === 2 && grid.empty && grid.add && !grid.csv && grid.status === '2 models', JSON.stringify(grid));
-
+            role: c.getAttribute('role') })))`));
+        await shot('vaults_folders');
+        check('one card: Folders and network shares, a list item of a list', cards.length === 1 && cards[0].title === 'Folders and network shares' &&
+              cards[0].role === 'listitem' && (await evalJs(`document.getElementById('vault-list').getAttribute('role')`)) === 'list', JSON.stringify(cards));
+        check('the folders card counts folders and files', cards[0].lines[0] === '2 folders \u00b7 4 files' && cards[0].kind === 'Library', cards[0].lines.join('|'));
+        check('the folders card names the unreachable share', cards[0].warn.length === 1 && /^3d: Not reachable/.test(cards[0].warn[0]), cards[0].warn.join('|'));
+        check('no empty state once there is a card', await evalJs(`document.getElementById('vaults-empty').hidden`));
         await clearSent();
-        await evalJs(`document.querySelector('#ven-connectors .conn.folders .btn').click(); 1`);
+        await evalJs(`document.querySelector('#vault-list .conn.folders .btn').click(); 1`);
         const lib = JSON.parse(await evalJs(`JSON.stringify({ title: document.getElementById('title').textContent, sent: window.__sent })`));
         check('Show in Library opens the Library and remembers it', lib.title === 'Library' && lib.sent.some(m => m.command === 'home_section' && m.section === 'library'), JSON.stringify(lib));
         await evalJs(`document.querySelector('.rail-item[data-section=vaults]').click(); 1`);
         check('the rail saves the section as "vaults"', (await sent()).some(m => m.command === 'home_section' && m.section === 'vaults'));
-        await evalJs(`document.querySelectorAll('#ven-connectors .conn.folders .btn')[1].click(); 1`);
+        await evalJs(`document.querySelectorAll('#vault-list .conn.folders .btn')[1].click(); 1`);
         check('Manage folders opens the Library folder manager', !(await evalJs(`document.getElementById('folders').hidden`)));
         await evalJs(`document.getElementById('folders-done').click(); 1`);
 
-        // ---- 6. the slicer's show_section "vendors" (an edgeslicer://connector link) ------------
-        await evalJs(`document.querySelector('.rail-item[data-section=recent]').click(); 1`);
+        // ---- 6. Vendors is untouched -------------------------------------------------------------
         await clearSent();
         await receive({ type: 'show_section', section: 'vendors' });
-        check('show_section "vendors" opens Vaults and saves "vaults"', (await evalJs(`document.getElementById('title').textContent`)) === 'Vaults' &&
-              (await sent()).some(m => m.command === 'home_section' && m.section === 'vaults'));
+        const ven = JSON.parse(await evalJs(`JSON.stringify({ title: document.getElementById('title').textContent, shown: !document.getElementById('vendors').hidden,
+            imp: !!document.getElementById('ven-import'), add: (document.getElementById('ven-add') || {}).textContent })`));
+        check('show_section "vendors" still opens Vendors, with Import and Add connector', ven.title === 'Vendors' && ven.shown && ven.imp && ven.add === 'Add connector', JSON.stringify(ven));
+        check('and saves "vendors"', (await sent()).some(m => m.command === 'home_section' && m.section === 'vendors'));
+        await evalJs(`document.querySelector('.rail-item[data-section=vaults]').click(); 1`);
 
-        // ---- 7. Refresh on Vaults ---------------------------------------------------------------
-        await clearSent();
-        await evalJs(`document.getElementById('refresh').click(); 1`);
-        const rs = await sent();
-        check('Refresh on Vaults only asks for the state again (lists are metered)', rs.length === 1 && rs[0].command === 'vendor_state', JSON.stringify(rs));
-
-        // ---- 8. contrast ------------------------------------------------------------------------
+        // ---- 7. contrast ------------------------------------------------------------------------
         // The text this section adds. The accent colours (primary buttons, the active rail item) are the
         // whole page's and are not judged here.
-        await evalJs(`document.getElementById('ven-add').click(); 1`);
+        await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
         const pairs = `(function(){
             function bgOf(n) { while (n) { var b = getComputedStyle(n).backgroundColor; if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b; n = n.parentElement; } return getComputedStyle(document.body).backgroundColor; }
             var out = [];
-            ['.conn .title', '.conn .kind', '.conn .line', '.conn .line.warn', '.conn .btn:not(.primary)', '.choice b', '.choice span', '.dialog.chooser h2', '.dialog.chooser .hint', '#ven-status']
+            ['#vault-list .conn .title', '#vault-list .conn .kind', '#vault-list .conn .line', '#vault-list .conn .line.warn', '#vault-list .conn .btn:not(.primary)',
+             '.choice b', '.choice span', '.dialog.chooser h2', '.dialog.chooser .hint']
               .forEach(function(sel) { document.querySelectorAll(sel).forEach(function(n) { if (!n.offsetParent) return;
                   out.push({ sel: sel, fg: getComputedStyle(n).color, bg: bgOf(n) }); }); });
             return JSON.stringify(out); })()`;
