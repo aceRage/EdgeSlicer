@@ -691,7 +691,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 {
     PresetBundle *preset_bundle  = wxGetApp().preset_bundle;
 
-    auto gcflavor = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    const GCodeFlavor gcflavor = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+
+    // Orca: use booleans to avoid repeated comparisons with enum values
+    const bool gcf_is_marlin_firmware = gcflavor == GCodeFlavor::gcfMarlinFirmware;
+    const bool gcf_is_klipper = gcflavor == GCodeFlavor::gcfKlipper;
     const bool bSEMM = preset_bundle->printers.get_edited_preset().config.opt_bool("single_extruder_multi_material");
 
     auto process_flow_float = [config, flow_variant_index](const char *key, double fallback) {
@@ -814,12 +818,34 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         "top_surface_acceleration", "travel_acceleration", "bridge_acceleration", "sparse_infill_acceleration", "internal_solid_infill_acceleration"})
         toggle_field(el, have_default_acceleration);
 
-    bool have_default_jerk = process_flow_float("default_jerk", 0) > 0;
+    // Marlin 2 plans with the junction deviation once the printer's machine value is above zero: the
+    // junction deviation replaces the jerk settings, which go away.
+    const bool junction_deviation_enabled =
+        gcf_is_marlin_firmware &&
+        [&]() {
+            const auto *machine_jd = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("machine_max_junction_deviation");
+            return machine_jd && !machine_jd->values.empty() && machine_jd->values.front() > 0.0;
+        }();
 
-    for (auto el : { "outer_wall_jerk", "inner_wall_jerk", "initial_layer_jerk", "top_surface_jerk", "travel_jerk", "infill_jerk"})
-        toggle_field(el, have_default_jerk);
+    toggle_line("default_junction_deviation", gcf_is_marlin_firmware);
+    toggle_field("default_junction_deviation", junction_deviation_enabled);
+    toggle_field("default_jerk", !junction_deviation_enabled);
 
-    toggle_line("default_junction_deviation", gcflavor == gcfMarlinFirmware);
+    const std::initializer_list<const char*> jerk_options = {
+        "outer_wall_jerk", "inner_wall_jerk", "initial_layer_jerk",
+        "top_surface_jerk", "travel_jerk", "infill_jerk"
+    };
+
+    if (junction_deviation_enabled) {
+        for (auto el : jerk_options)
+            toggle_line(el, false);
+    } else {
+        const bool have_default_jerk = process_flow_float("default_jerk", 0) > 0;
+        for (auto el : jerk_options) {
+            toggle_line(el, true);
+            toggle_field(el, have_default_jerk);
+        }
+    }
 
     bool have_skirt = config->opt_int("skirt_loops") > 0;
     toggle_field("skirt_height", have_skirt && config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
@@ -1108,8 +1134,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("wipe_inward_distance", have_wipe_inward);
 
     for (auto el : {"accel_to_decel_enable", "accel_to_decel_factor"})
-        toggle_line(el, gcflavor == gcfKlipper);
-    if(gcflavor == gcfKlipper)
+        toggle_line(el, gcf_is_klipper);
+    if(gcf_is_klipper)
         toggle_field("accel_to_decel_factor", config->opt_bool("accel_to_decel_enable", 0));
 
     bool have_make_overhang_printable = config->opt_bool("make_overhang_printable");
