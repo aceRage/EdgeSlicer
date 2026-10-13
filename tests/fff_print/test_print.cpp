@@ -1221,3 +1221,54 @@ TEST_CASE("Adaptive layer height profile is bounded by the uncompensated object 
     CHECK(last_z <= uncompensated_height + 1e-6);
     CHECK(last_z > uncompensated_height - sp.max_layer_height - 1e-6);
 }
+
+// Orca #15734: a non-Bambu i3 printing by layer wrote time_lapse_gcode at the layer start and again
+// at the traditional timelapse spot later in the layer, two photos per layer. Every printer kind
+// gets it once per layer; the Bambu cases go through our BambuStudio timelapse port.
+TEST_CASE("Timelapse g-code is emitted once per layer for Bambu and non-Bambu printers", "[Print][Regression]")
+{
+    struct PrinterCase
+    {
+        const char *name;
+        const char *structure;
+        bool        is_bbl;
+    };
+    const PrinterCase cases[] = {
+        {"non-BBL undefined", "undefine", false},
+        {"non-BBL CoreXY", "corexy", false},
+        {"non-BBL i3", "i3", false},
+        {"non-BBL H-Bot", "hbot", false},
+        {"non-BBL Delta", "delta", false},
+        {"Bambu CoreXY", "corexy", true},
+        {"Bambu i3", "i3", true},
+    };
+    for (const PrinterCase &printer : cases) {
+        DYNAMIC_SECTION(printer.name)
+        {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({
+                {"initial_layer_print_height", 0.2},
+                {"layer_change_gcode", ";TEST_LAYER_CHANGE"},
+                {"layer_height", 0.2},
+                {"printer_structure", printer.structure},
+                {"spiral_mode", false},
+                {"time_lapse_gcode", "TIMELAPSE_TAKE_FRAME"},
+            });
+            Print print;
+            print.is_BBL_printer() = printer.is_bbl;
+            Model model;
+            init_print({TestMesh::cube_20x20x20}, print, model, config);
+            const std::string gcode = Slic3r::Test::gcode(print);
+
+            const auto count = [&gcode](const std::string &token) {
+                size_t occurrences = 0;
+                for (size_t pos = gcode.find(token); pos != std::string::npos; pos = gcode.find(token, pos + token.size()))
+                    ++occurrences;
+                return occurrences;
+            };
+            const size_t layer_changes = count("\n;TEST_LAYER_CHANGE\n");
+            REQUIRE(layer_changes > 0);
+            CHECK(count("\nTIMELAPSE_TAKE_FRAME\n") == layer_changes);
+        }
+    }
+}

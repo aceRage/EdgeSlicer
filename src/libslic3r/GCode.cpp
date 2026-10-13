@@ -6543,7 +6543,9 @@ LayerResult GCode::process_layer(const Print& print,
             }
         }
     } else {
-        if (!m_config.time_lapse_gcode.value.empty()) {
+        // Orca #15734: an i3 printing by layer takes its photo later in the layer (the traditional
+        // timelapse insertion below), so writing it here too took two photos per layer.
+        if (!need_insert_timelapse_gcode_for_traditional && !m_config.time_lapse_gcode.value.empty()) {
             DynamicConfig config;
             config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
             config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
