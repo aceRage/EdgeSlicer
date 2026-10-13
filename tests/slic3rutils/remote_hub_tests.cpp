@@ -641,6 +641,60 @@ TEST_CASE("merge_printer_row never overrides a row that reports filament of its 
     REQUIRE(nlohmann::json::parse(m.row)["ams"][0]["trays"][0]["type"] == "ABS");
 }
 
+// ---- the Device tab's own live view (spike, "liveview_go2rtc") ------------------------------
+// The names below were produced by stream_center.html's own hashStr()/encodeURIComponent() in
+// node, so a camera on the Stream tab / phone wall and the Device tab's live view of the same
+// printer are one go2rtc stream (one connection to the printer), not two.
+
+TEST_CASE("js_hash_str matches stream_center.html's hashStr", "[RemoteHub][own-camera]")
+{
+    REQUIRE(js_hash_str("") == "811c9dc5");
+    REQUIRE(js_hash_str("a") == "e40c292c");
+    // Number.toString(16) has no leading zeros, and neither may we.
+    REQUIRE(js_hash_str("x2") == "f630cef");
+}
+
+TEST_CASE("js_encode_uri_component matches encodeURIComponent", "[RemoteHub][own-camera]")
+{
+    REQUIRE(js_encode_uri_component("-_.!~*'()az09 %&/=?") == "-_.!~*'()az09%20%25%26%2F%3D%3F");
+}
+
+TEST_CASE("own_camera_stream names an RTSPS camera the way the Stream tab does", "[RemoteHub][own-camera]")
+{
+    const OwnCameraStream a = own_camera_stream("rtsps", "192.168.1.50", "12345678", 0);
+    REQUIRE(a.src == "rtspx://bblp:12345678@192.168.1.50:322/streaming/live/1");
+    REQUIRE(a.name == "se6b733ea");
+    REQUIRE(a.mode == "mse");
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "ab(c)d!*", 0).name == "sc1ebfb8f");
+    const OwnCameraStream b = own_camera_stream("rtsps", "printer.local", "a&c/d=", 0);
+    REQUIRE(b.src == "rtspx://bblp:a%26c%2Fd%3D@printer.local:322/streaming/live/1");
+    REQUIRE(b.name == "s268fa2e4");
+}
+
+TEST_CASE("own_camera_stream sends a P1/A1 camera through the hub's MJPEG relay", "[RemoteHub][own-camera]")
+{
+    const OwnCameraStream a = own_camera_stream("local", "10.0.0.9", "abc", 52540);
+    REQUIRE(a.src == "http://127.0.0.1:52540/bambu?ip=10.0.0.9&code=abc");
+    REQUIRE(a.mode == "mjpeg");
+    REQUIRE(a.name == "b4e7ecdb0");
+    // Named by the camera, not by the relay port, which changes with every hub run.
+    REQUIRE(own_camera_stream("local", "10.0.0.9", "abc", 60000).name == a.name);
+    // No relay, no stream.
+    REQUIRE(own_camera_stream("local", "10.0.0.9", "abc", 0).name.empty());
+}
+
+TEST_CASE("own_camera_stream refuses what BambuCamRelay would refuse", "[RemoteHub][own-camera]")
+{
+    REQUIRE(own_camera_stream("rtsps", "", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7/x", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7@evil", "12345678", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", std::string(33, 'a'), 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "abc def", 0).name.empty());
+    REQUIRE(own_camera_stream("rtsps", "10.0.0.7", "abc\ndef", 0).name.empty());
+    REQUIRE(own_camera_stream("tutk", "10.0.0.7", "12345678", 0).name.empty());
+}
+
 // ---- go2rtc stream registration (register_streams: plan_stream_sync, parse_go2rtc_streams) ----
 // go2rtc 1.9.14 opens a second connection to the camera when a stream that viewers are watching is
 // PUT again (tests/phone/go2rtc_share_probe.py), and the hub used to re-PUT every camera on every
@@ -836,4 +890,79 @@ TEST_CASE("entries without a name or a source are skipped", "[RemoteHub][go2rtc-
 {
     const LiveMap live;
     CHECK(nothing_to_do(plan_stream_sync({ { "", RTSPX }, { "s1", "" } }, {}, &live)));
+}
+
+// ---- the Device tab's live view and the Stream-tab sync (#448 x #450) ------------------------
+// The live view (POST /hub/camera) puts its camera into what the sync wants
+// (merge_desired_streams), never PUTs on its own. Same printer on the Device tab, the Stream tab
+// and the phone = one go2rtc stream, and a Stream-tab save can never delete or replace it.
+
+TEST_CASE("merge_desired_streams adds the live-view cameras and never overrides the Stream tab", "[RemoteHub][own-camera][go2rtc-sync]")
+{
+    const StreamMap tab  = { { "s1a2b3c4", RTSPX } };
+    const StreamMap own  = { { "s1a2b3c4", "rtspx://other" }, { "b4e7ecdb0", "http://127.0.0.1:52540/bambu?ip=10.0.0.9&code=abc" } };
+    const StreamMap want = merge_desired_streams(tab, own);
+    CHECK(want.size() == 2);
+    CHECK(want.at("s1a2b3c4") == RTSPX);
+    CHECK(want.at("b4e7ecdb0") == own.at("b4e7ecdb0"));
+    CHECK(merge_desired_streams({}, own).size() == 2);
+    CHECK(merge_desired_streams(tab, {}) == tab);
+}
+
+TEST_CASE("the live view asking for a camera the Stream tab already has sends nothing", "[RemoteHub][own-camera][go2rtc-sync]")
+{
+    // The phone is watching the Stream-tab camera; the Device tab presses Play on the same printer.
+    const OwnCameraStream cam = own_camera_stream("rtsps", "192.168.1.50", "12345678", 0);
+    REQUIRE(cam.src == RTSPX);
+    const StreamMap tab  = with_variants({ { cam.name, cam.src } });
+    const LiveMap   live = live_of(tab, true);
+    CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams(tab, { { cam.name, cam.src } }), tab, &live)));
+}
+
+TEST_CASE("a Stream-tab save that drops a camera the Device tab plays keeps its stream", "[RemoteHub][own-camera][go2rtc-sync]")
+{
+    const OwnCameraStream cam   = own_camera_stream("rtsps", "192.168.1.50", "12345678", 0);
+    const StreamMap       own   = { { cam.name, cam.src } };
+    const StreamMap       before = with_variants({ { cam.name, cam.src }, { "u1_u1", U1A } });
+    const StreamMap       after  = with_variants({ { "u1_u1", U1A } }); // the camera taken off the Stream tab
+    const LiveMap         live   = live_of(before, true);              // the Device tab is watching it
+
+    SECTION("without the live view in `desired` (#450 alone) the sync would delete it")
+    {
+        const StreamSyncPlan p = plan_stream_sync(after, before, &live);
+        CHECK(std::count(p.remove.begin(), p.remove.end(), cam.name) == 1);
+    }
+    SECTION("with it, the base stream is neither deleted nor replaced; only the Stream tab's variants go")
+    {
+        const StreamSyncPlan p = plan_stream_sync(merge_desired_streams(after, own), before, &live);
+        CHECK(std::count(p.remove.begin(), p.remove.end(), cam.name) == 0);
+        CHECK(names_of(p.replace).count(cam.name) == 0);
+        CHECK(p.add.empty());
+        CHECK(std::set<std::string>(p.remove.begin(), p.remove.end()) == std::set<std::string>{ cam.name + "_med", cam.name + "_low" });
+    }
+    SECTION("and a later Stream-tab save that adds it back is unchanged as well")
+    {
+        StreamMap registered = before;
+        registered.erase(cam.name + "_med");
+        registered.erase(cam.name + "_low");
+        const LiveMap now = live_of(registered, true); // the variants were deleted from go2rtc
+        const StreamSyncPlan p = plan_stream_sync(merge_desired_streams(before, own), registered, &now);
+        CHECK(names_of(p.replace).count(cam.name) == 0);
+        CHECK(std::count(p.remove.begin(), p.remove.end(), cam.name) == 0);
+        CHECK(names_of(p.add) == std::set<std::string>{ cam.name + "_med", cam.name + "_low" });
+    }
+}
+
+TEST_CASE("a P1/A1 live-view camera (b<hash>) is registered once and kept across Stream-tab saves", "[RemoteHub][own-camera][go2rtc-sync]")
+{
+    const OwnCameraStream cam = own_camera_stream("local", "10.0.0.9", "abc", 52540);
+    const StreamMap       own = { { cam.name, cam.src } };
+    const StreamMap       tab = { { "u1_u1", U1A } };
+    const LiveMap         empty;
+    const StreamSyncPlan  first = plan_stream_sync(merge_desired_streams(tab, own), tab, &empty);
+    CHECK(names_of(first.add).count(cam.name) == 1);
+    const StreamMap registered = merge_desired_streams(tab, own);
+    const LiveMap   live       = live_of(registered, true);
+    CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams(tab, own), registered, &live)));
+    CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams({}, own), merge_desired_streams({}, own), &live)));
 }

@@ -1,6 +1,7 @@
 #include "ReleaseNote.hpp"
 #include "RemoteAccess.hpp"
 #include "DeviceManager.hpp"
+#include "BindDetectGuard.hpp"
 #include "PrintErrorCommands.hpp"
 #include "I18N.hpp"
 
@@ -2207,6 +2208,22 @@ void InputIpAddressDialog::workerThreadFunc(std::string str_ip, std::string str_
         detectData.bind_state   = "free";
     }
 
+    // Auto-detect: never insert a printer without a serial number. A plug-in that reports success
+    // with an empty (or unusable) serial is a failed detection, and the dialog asks for the serial
+    // instead (manual entry, as macOS does). The result is normalised too (serial upper-cased, name
+    // defaulting to the serial, connect_type / bind_state lower-cased, empty ones taken as "lan" /
+    // "free"). Manual entry has its own checks (on_text: a 15-character serial and a name).
+    if (current_input_index == 0) {
+        const int raw = result;
+        result        = vet_bind_detect_result(result, detectData);
+        if (raw >= 0 && result < 0)
+            BOOST_LOG_TRIVIAL(warning) << "InputIpAddressDialog: bind_detect returned " << raw
+                                       << " without a usable serial number; asking for it instead";
+        else if (raw < 0)
+            BOOST_LOG_TRIVIAL(info) << "InputIpAddressDialog: bind_detect failed, code " << raw << " ("
+                                    << detectData.result_msg << ")";
+    }
+
     if (result < 0) {
         post_update_test_msg(wxEmptyString, true);
         if (result == -1) {
@@ -2245,11 +2262,14 @@ void InputIpAddressDialog::workerThreadFunc(std::string str_ip, std::string str_
         machine.printer_type = detectData.model_id;
         m_obj = dev->insert_local_device(machine, detectData.connect_type, detectData.bind_state, detectData.version, str_access_code);
 
-
-        if (m_obj) {
-            m_obj->set_user_access_code(str_access_code);
-            wxGetApp().getDeviceManager()->set_selected_machine(m_obj->dev_id, true);
+        if (!m_obj) {
+            post_update_test_msg(wxEmptyString, true);
+            post_update_test_msg(_L("Failed to connect to printer."), false);
+            return;
         }
+
+        m_obj->set_user_access_code(str_access_code);
+        wxGetApp().getDeviceManager()->set_selected_machine(m_obj->dev_id, true);
 
 
         closeCount = 1;
