@@ -58,7 +58,10 @@ std::vector<ExtendedPoint> estimate_points_properties(const POINTS              
                                                       // fan switches on; negative when the fan does not depend on overlap.
                                                       float                                   fan_overlap_threshold = -1.0f,
                                                       // Returns an input point's signed distance if already known, else nullptr.
-                                                      const KNOWN_DISTANCES                  &known_distance        = KNOWN_DISTANCES{})
+                                                      const KNOWN_DISTANCES                  &known_distance        = KNOWN_DISTANCES{},
+                                                      // Edge: false skips the interior sampling below whatever the other
+                                                      // arguments say (it is for walls; see estimate_extrusion_quality()).
+                                                      bool                                    sample_interior       = true)
 {
     bool   looped     = input_points.front() == input_points.back();
     std::function<size_t(size_t,size_t)> get_prev_index = [](size_t idx, size_t count) {
@@ -173,7 +176,8 @@ std::vector<ExtendedPoint> estimate_points_properties(const POINTS              
     // Skipped where there is nothing to find: min_distance <= 0 when no overhang can slow this path down, and
     // fan_overlap_threshold < 0 when no overhang switches the fan on. It also needs distance_to_speed to tell which of
     // the points it could add would change the G-code.
-    if (PREV_LAYER_BOUNDARY_OFFSET && ADD_INTERSECTIONS && distance_to_speed && (min_distance > 0 || fan_overlap_threshold >= 0.f)) {
+    if (PREV_LAYER_BOUNDARY_OFFSET && ADD_INTERSECTIONS && sample_interior && distance_to_speed &&
+        (min_distance > 0 || fan_overlap_threshold >= 0.f)) {
         // Probe at least this densely before treating matching samples as evidence that a span is uniform. The
         // segmentation pass below only splits lines of 2mm or more, and every pass here drops points closer
         // together than min_spacing, so finer discovery would not produce a more precise transition.
@@ -588,11 +592,9 @@ public:
         // Edge: interior sampling (Orca #14735) is for walls only. A bridge infill line is meant to cross open air
         // between its anchors at the bridge speed; probing its interior read that span as an overhang and slowed it
         // to the overhang speeds (with "slow down for curled perimeters" on, the last section is the 4/4 overhang
-        // speed: X1C bridges went from 50 to 10 mm/s). External bridge infill never switches the overhang fan by
-        // overlap (fan_overlap_threshold is negative for it), so -1 here turns the interior pass off for it altogether
-        // and leaves the passes after it exactly as before. (Internal bridges lie inside the lower layer's outline,
-        // so they read as supported anyway.)
-        const float interior_min_distance = is_perimeter(path.role()) ? smallest_distance_with_lower_speed : -1.f;
+        // speed: X1C bridges went from 50 to 10 mm/s). Bridge infill, external and internal, is estimated as before
+        // the interior pass existed; every pass after it is unchanged.
+        const bool sample_interior = is_perimeter(path.role());
 
         auto calculate_speed = [&speed_sections, &original_speed](float distance) {
             float final_speed;
@@ -642,10 +644,11 @@ public:
                                                                  prev_boundaries,
                                                                  path.width,
                                                                  -1,
-                                                                 interior_min_distance,
+                                                                 smallest_distance_with_lower_speed,
                                                                  effective_speed,
                                                                  fan_overlap_threshold,
-                                                                 known_distance);
+                                                                 known_distance,
+                                                                 sample_interior);
         const auto width_inv = 1.0f / path.width;
         std::vector<ProcessedPoint> processed_points;
         processed_points.reserve(extended_points.size());

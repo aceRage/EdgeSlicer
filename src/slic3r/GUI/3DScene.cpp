@@ -1042,7 +1042,9 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
     if (disable_cullface)
         glsafe(::glDisable(GL_CULL_FACE));
 
-    const float support_normal_z = get_selection_support_normal_z();
+    // Only the overhang (slope) view reads it; the shader ignores slope.normal_z while slope.actived is off, so
+    // the preset lookups (and, with angle 0 and normal supports, a full config build) run only for that view.
+    const float support_normal_z = m_slope.isGlobalActive ? get_selection_support_normal_z() : 0.f;
 
     // Cut gizmo, phase 2 fix: a GHOSTED half (0 < alpha < 1) has to blend, and it
     // has to stop writing depth - otherwise it would keep occluding the cut sheet
