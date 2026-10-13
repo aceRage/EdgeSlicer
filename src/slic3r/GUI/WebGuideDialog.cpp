@@ -893,14 +893,16 @@ bool GuideFrame::apply_config(AppConfig *app_config, PresetBundle *preset_bundle
     // When printers from the default bundle are also selected, keep @System
     // too since those printers need it.
     static const std::string system_suffix              = " @System";
-    auto                     it_default                 = enabled_vendors.find(PresetBundle::ORCA_DEFAULT_BUNDLE);
+    // Upstream calls this PresetBundle::ORCA_DEFAULT_BUNDLE; our bundle of generic printers is the "Custom" vendor.
+    static const std::string ORCA_DEFAULT_BUNDLE        = "Custom";
+    auto                     it_default                 = enabled_vendors.find(ORCA_DEFAULT_BUNDLE);
     bool                     has_default_bundle_printer = it_default != enabled_vendors.end() && !it_default->second.empty();
     bool                     has_filament_profiles      = m_ProfileJson.contains("filament");
 
     // Check if any non-default vendor has selected printers
     bool has_vendor_printer = false;
     for (const auto& [vendor, models] : enabled_vendors) {
-        if (vendor != PresetBundle::ORCA_DEFAULT_BUNDLE && !models.empty()) {
+        if (vendor != ORCA_DEFAULT_BUNDLE && !models.empty()) {
             has_vendor_printer = true;
             break;
         }
