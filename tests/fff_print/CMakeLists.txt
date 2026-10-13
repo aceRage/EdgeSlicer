@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	test_data.cpp
 	test_data.hpp
 	test_extrusion_entity.cpp
+	test_extrusion_processor.cpp
 	test_fill.cpp
 	test_flow.cpp
 	test_gcode.cpp
@@ -29,6 +30,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fuzzy_skin_overhangs.cpp
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
+	test_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
