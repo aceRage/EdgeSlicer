@@ -10199,9 +10199,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 speed = std::min(speed, filament_max_volumetric_speed / _mm3_per_mm);
             }
 
-            // if still in avoidance mode and under “max”, clamp to “min”
-            if (m_resonance_avoidance && speed <= m_config.max_resonance_avoidance_speed.value) {
-                speed = std::min(speed, m_config.min_resonance_avoidance_speed.value);
+            // Orca #11462: if still in avoidance mode and under "max", leave the band the nearer way:
+            // speeds in its lower half are clamped down to "min", speeds in its upper half go up to "max".
+            // EDGE: only when the filament's max volumetric speed allows "max"; else down to "min" as before.
+            if (m_resonance_avoidance && speed < m_config.max_resonance_avoidance_speed.value) {
+                const double ra_min = m_config.min_resonance_avoidance_speed.value;
+                const double ra_max = m_config.max_resonance_avoidance_speed.value;
+                const bool   max_within_volumetric_cap = filament_max_volumetric_speed <= 0 ||
+                                                       ra_max <= filament_max_volumetric_speed / _mm3_per_mm;
+                if (speed < ra_min + (ra_max - ra_min) / 2 || !max_within_volumetric_cap)
+                    speed = std::min(speed, ra_min);
+                else
+                    speed = ra_max;
             }
 
             // reset flag for next segment

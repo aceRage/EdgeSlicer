@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <memory>
+#include <set>
 #include <string>
 
 #include "libslic3r/GCode.hpp"
@@ -287,4 +288,62 @@ TEST_CASE("A G-code reader without a config uses the default one", "[GCodeReader
     GCodeReader reader;
     CHECK(reader.config().use_relative_e_distances.value == relative);
     CHECK(std::abs(second_move_extrusion(reader) - (relative ? 1.f : 0.f)) < 1e-6f);
+}
+
+// Orca #11462: an outer wall whose speed falls inside the resonance avoidance band leaves it the
+// nearer way: the lower half of the band is slowed down to "min", the upper half sped up to "max".
+// EDGE: the speed-up only happens when the filament's max volumetric speed allows "max".
+TEST_CASE("Resonance avoidance moves outer wall speeds out of the band the nearer way", "[GCode][ResonanceAvoidance]")
+{
+    // Feedrates (mm/min) of the outer wall extrusions above the first layers.
+    auto outer_wall_feedrates = [](double outer_wall_speed, double max_volumetric_speed) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"resonance_avoidance",           "1"},
+            {"min_resonance_avoidance_speed", "70"},
+            {"max_resonance_avoidance_speed", "120"},
+            {"outer_wall_speed",              std::to_string(outer_wall_speed)},
+            {"filament_max_volumetric_speed", std::to_string(max_volumetric_speed)},
+            {"slow_down_layer_time",          "0"},
+            {"slow_down_layers",              "0"},
+            {"skirt_loops",                   "0"},
+            {"brim_type",                     "no_brim"},
+            {"gcode_flavor",                  "marlin"},
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        print.is_BBL_printer() = false;
+        const std::string gcode = Test::gcode(print);
+
+        std::set<int> feedrates;
+        int           layer       = 0;
+        bool          outer_wall  = false;
+        double        feedrate    = 0.;
+        GCodeReader   reader;
+        reader.parse_buffer(gcode, [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+            const std::string &raw = line.raw();
+            if (raw.rfind(";LAYER_CHANGE", 0) == 0)
+                ++layer;
+            else if (raw.rfind(";TYPE:", 0) == 0)
+                outer_wall = raw.rfind(";TYPE:Outer wall", 0) == 0;
+            if (!line.cmd_is("G1"))
+                return;
+            if (line.has_f())
+                feedrate = line.f();
+            if (outer_wall && layer > 3 && line.has_e() && line.e() > 0. && (line.has_x() || line.has_y()))
+                feedrates.insert(int(std::lround(feedrate)));
+        });
+        return feedrates;
+    };
+
+    // Lower half of the band (70..95): down to "min".
+    CHECK(outer_wall_feedrates(80., 200.) == std::set<int>{70 * 60});
+    // Upper half (95..120): up to "max" (it used to be slowed down to "min" too).
+    CHECK(outer_wall_feedrates(110., 200.) == std::set<int>{120 * 60});
+    // Above the band: untouched.
+    CHECK(outer_wall_feedrates(130., 200.) == std::set<int>{130 * 60});
+    // Upper half, but the filament cannot be pushed through at "max" (8 mm^3/s caps them at about 105 mm/s,
+    // inside the upper half): down to "min" as before rather than over the volumetric limit.
+    CHECK(outer_wall_feedrates(110., 8.) == std::set<int>{70 * 60});
 }
