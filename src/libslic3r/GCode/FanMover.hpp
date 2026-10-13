@@ -19,6 +19,9 @@ public:
     float time;
     int16_t fan_speed;
     bool is_kickstart;
+    // EDGE (#170): the line comes from a "; custom gcode" ... "; custom gcode end" span (tool change G-code),
+    // which FanMover must never split.
+    bool is_custom = false;
     float x = 0, y = 0, z = 0, e = 0;
     float dx = 0, dy = 0, dz = 0, de = 0;
     BufferData(std::string line, float time = 0, int16_t fan_speed = 0, float is_kickstart = false) : raw(line), time(time), fan_speed(fan_speed), is_kickstart(is_kickstart){
