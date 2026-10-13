@@ -737,8 +737,9 @@ void HomeVaults::test(const std::string& id)
 
 void HomeVaults::download(const std::string& key, bool open_after)
 {
-    const auto [vault_id, file_id] = m_keys[key];
-    Vault* v = find(vault_id);
+    const std::string vault_id = m_keys[key].first;
+    const std::string file_id  = m_keys[key].second;
+    Vault*            v        = find(vault_id);
     if (v == nullptr)
         return;
     auto f = std::find_if(v->files.begin(), v->files.end(), [&](const Vaults::File& x) { return x.id == file_id; });

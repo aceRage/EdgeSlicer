@@ -123,7 +123,7 @@ TEST_CASE("vaults: a spec is checked and kept without secrets", "[Vaults]")
     SECTION("Azure: the container is in the address, the SAS never is")
     {
         CHECK_THROWS_WITH(spec_from_json({{"name", "A"}, {"kind", "azure_blob"}, {"url", "https://acct.blob.core.windows.net/models?sv=1&sig=x"}}),
-                          Catch::Contains("Set SAS link"));
+                          Catch::Matchers::Contains("Set SAS link"));
         CHECK_THROWS(spec_from_json({{"name", "A"}, {"kind", "azure_blob"}, {"url", "https://acct.blob.core.windows.net/"}}));
         const Spec a = spec_from_json({{"name", "A"}, {"kind", "azure_blob"}, {"url", "https://acct.blob.core.windows.net/models/"}});
         CHECK(a.url == "https://acct.blob.core.windows.net/models");
@@ -131,11 +131,11 @@ TEST_CASE("vaults: a spec is checked and kept without secrets", "[Vaults]")
     }
     SECTION("refused")
     {
-        CHECK_THROWS_WITH(spec_from_json({{"name", "X"}, {"kind", "ftp"}, {"url", "https://a.example"}}), Catch::Contains("Unknown kind"));
+        CHECK_THROWS_WITH(spec_from_json({{"name", "X"}, {"kind", "ftp"}, {"url", "https://a.example"}}), Catch::Matchers::Contains("Unknown kind"));
         CHECK_THROWS_WITH(spec_from_json({{"format", "edgeslicer-vault"}, {"version", 2}, {"name", "X"}, {"kind", "webdav"}, {"url", "https://a.example"}}),
-                          Catch::Contains("newer"));
-        CHECK_THROWS_WITH(spec_from_json({{"name", "X"}, {"kind", "webdav"}, {"url", "http://files.example.com/dav/"}}), Catch::Contains("local network"));
-        CHECK_THROWS_WITH(spec_from_json({{"name", "X"}, {"kind", "webdav"}, {"url", "https://me:pw@nas.example.com/"}}), Catch::Contains("credentials"));
+                          Catch::Matchers::Contains("newer"));
+        CHECK_THROWS_WITH(spec_from_json({{"name", "X"}, {"kind", "webdav"}, {"url", "http://files.example.com/dav/"}}), Catch::Matchers::Contains("local network"));
+        CHECK_THROWS_WITH(spec_from_json({{"name", "X"}, {"kind", "webdav"}, {"url", "https://me:pw@nas.example.com/"}}), Catch::Matchers::Contains("credentials"));
         CHECK_THROWS(spec_from_json({{"name", ""}, {"kind", "webdav"}, {"url", "https://a.example"}}));
         CHECK_THROWS(spec_from_json({{"name", "X"}, {"kind", "webdav"}, {"url", "https://a.example"}, {"auth", "digest"}}));
         CHECK_THROWS(spec_from_json({{"name", "X"}, {"kind", "webdav"}, {"url", "file:///C:/models"}}));
