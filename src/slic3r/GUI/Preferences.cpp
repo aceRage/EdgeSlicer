@@ -31,6 +31,7 @@
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "SSWCP.hpp"
 #include "HomePanel.hpp"
+#include "HomeVaults.hpp"
 #include "ModelBrowserPanel.hpp"
 
 #ifdef __WINDOWS__
@@ -782,6 +783,60 @@ wxWindow *PreferencesDialog::create_item_gcode_archive_dir(wxWindow *parent, wxS
     item_panel->Layout();
     item_panel->Enable(app_config->get_bool("ultra_gcode_archive"));
     m_gcode_archive_dir_item = item_panel;
+    return item_panel;
+}
+
+// Home > Vaults: where vault downloads go. Unset, it shows (and uses) the default, <Downloads>/EdgeSlicer
+// Vaults; a vault's own setting wins over this one.
+wxWindow *PreferencesDialog::create_item_vault_downloads_dir(wxWindow *parent, wxString tooltip)
+{
+    auto item_panel = new wxWindow(parent, wxID_ANY);
+    item_panel->SetBackgroundColour(*wxWHITE);
+    wxBoxSizer *sizer = new wxBoxSizer(wxHORIZONTAL);
+
+    sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    auto label = new wxStaticText(item_panel, wxID_ANY, _L("Vault downloads"));
+    label->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    label->SetFont(::Label::Body_13);
+    label->SetToolTip(tooltip);
+    label->Wrap(-1);
+
+    auto path_text = new wxStaticText(item_panel, wxID_ANY, wxString::FromUTF8(HomeVaults::downloads_dir()), wxDefaultPosition,
+                                      wxDefaultSize, wxST_ELLIPSIZE_END);
+    path_text->SetForegroundColour(DESIGN_GRAY600_COLOR);
+    path_text->SetFont(::Label::Body_13);
+    path_text->SetToolTip(tooltip);
+    path_text->Wrap(-1);
+
+    auto browse = new Button(item_panel, _L("Browse"));
+    browse->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+    browse->Bind(wxEVT_BUTTON, [this, path_text, item_panel](wxCommandEvent &e) {
+        wxDirDialog dialog(this, _L("Choose the folder for vault downloads"), wxString::FromUTF8(HomeVaults::downloads_dir()), wxDD_NEW_DIR_BUTTON);
+        if (dialog.ShowModal() == wxID_OK) {
+            app_config->set("vault_downloads_dir", std::string(dialog.GetPath().ToUTF8().data()));
+            app_config->save();
+            path_text->SetLabelText(dialog.GetPath());
+            item_panel->Layout();
+        }
+        e.Skip();
+    });
+    auto reset = new Button(item_panel, _L("Default"));
+    reset->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+    reset->SetToolTip(wxString::FromUTF8(HomeVaults::default_downloads_dir()));
+    reset->Bind(wxEVT_BUTTON, [this, path_text, item_panel](wxCommandEvent &e) {
+        app_config->set("vault_downloads_dir", "");
+        app_config->save();
+        path_text->SetLabelText(wxString::FromUTF8(HomeVaults::default_downloads_dir()));
+        item_panel->Layout();
+        e.Skip();
+    });
+
+    sizer->Add(label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    sizer->Add(path_text, 1, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(5));
+    sizer->Add(browse, 0, wxALL, FromDIP(5));
+    sizer->Add(reset, 0, wxALL, FromDIP(5));
+    item_panel->SetSizer(sizer);
+    item_panel->Layout();
     return item_panel;
 }
 
@@ -1950,6 +2005,9 @@ wxWindow* PreferencesDialog::create_general_page()
     //downloads
     auto title_downloads = create_item_title(_L("Downloads"), page, _L("Downloads"));
     auto item_downloads = create_item_downloads(page,50,"download_path");
+    auto item_vault_downloads = create_item_vault_downloads_dir(page,
+        _L("Where files you download from a vault on the Home tab go. A vault can have its own folder in its settings. "
+           "The folder is added to your Library the first time a file lands in it."));
 
     // "Export & Open in Bambu Studio" looks for an installed Bambu Studio automatically
     // (registry / file association / default path); this lets a user whose install it cannot
@@ -2111,6 +2169,7 @@ wxWindow* PreferencesDialog::create_general_page()
 
     sizer_page->Add(title_downloads, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_downloads, 0, wxEXPAND, FromDIP(3));
+    sizer_page->Add(item_vault_downloads, 0, wxEXPAND, FromDIP(3));
 
     sizer_page->Add(title_bambu_studio, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_studio_path, 0, wxTOP, FromDIP(3));

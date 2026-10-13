@@ -94,6 +94,9 @@
         <button id="vault-add-btn" class="btn primary" type="button" data-i18n="add_vault">Add vault</button>
       </div>
       <div id="vault-list" class="connectors" role="list"></div>
+      <div id="vault-filters"></div>
+      <div class="grid" id="vault-grid"></div>
+      <div id="vault-more" aria-hidden="true"></div>
       <div class="empty" id="vaults-empty" hidden>
         <p id="vaults-empty-text"></p>
         <button id="vault-empty-add" class="btn primary" type="button" data-i18n="add_vault">Add vault</button>
@@ -165,12 +168,38 @@
     <h2 id="vault-add-title" data-i18n="add_vault">Add vault</h2>
     <p class="hint" data-i18n="add_vault_hint">Where do you keep the models you want to reach from EdgeSlicer?</p>
     <div class="choices" id="vault-choices">
+      <div id="vault-builtins" class="choices"></div>
+      <button id="vault-add-webdav" class="choice" type="button">
+        <b data-i18n="vault_webdav">WebDAV server</b>
+        <span data-i18n="vault_webdav_hint">A folder on a NAS or server that speaks WebDAV: QNAP, Nextcloud, ownCloud, Apache, rclone...</span>
+      </button>
+      <button id="vault-add-azure" class="choice" type="button">
+        <b data-i18n="vault_azure">Azure Blob container</b>
+        <span data-i18n="vault_azure_hint">A container in Azure Storage, read with a SAS link that allows Read and List.</span>
+      </button>
+      <button id="vault-add-s3" class="choice" type="button">
+        <b data-i18n="vault_s3">S3-compatible bucket</b>
+        <span data-i18n="vault_s3_hint">AWS S3, Cloudflare R2, Backblaze B2, MinIO, Wasabi... read with an access key.</span>
+      </button>
       <button id="vault-add-folder" class="choice" type="button">
         <b data-i18n="vault_folder">Folder or network share</b>
         <span data-i18n="vault_folder_hint">A folder on this computer, an external drive or a NAS share mounted as a folder. Its models show in the Library.</span>
       </button>
     </div>
     <div class="dialog-actions"><span class="grow"></span><button id="vault-add-cancel" class="btn" type="button" data-i18n="cancel">Cancel</button></div>
+  </div>
+</div>
+
+<div id="vault-editor" class="overlay" hidden>
+  <div class="dialog editor" role="dialog" aria-modal="true" aria-labelledby="vault-editor-title">
+    <h2 id="vault-editor-title" data-i18n="vault_settings">Vault</h2>
+    <div id="vault-editor-error" class="notice" hidden></div>
+    <div id="vault-editor-body"></div>
+    <div class="dialog-actions">
+      <span class="grow"></span>
+      <button id="vault-editor-cancel" class="btn" type="button" data-i18n="cancel">Cancel</button>
+      <button id="vault-editor-save" class="btn primary" type="button" data-i18n="save">Save</button>
+    </div>
   </div>
 </div>
 

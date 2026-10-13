@@ -1119,6 +1119,14 @@ Http Http::patch(std::string url)
 	return http;
 }
 
+Http Http::custom(const std::string &method, std::string url)
+{
+	Http http{ std::move(url) };
+	// curl copies the string.
+	curl_easy_setopt(http.p->curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+	return http;
+}
+
 Http Http::del(std::string url)
 {
 	Http http{ std::move(url) };
