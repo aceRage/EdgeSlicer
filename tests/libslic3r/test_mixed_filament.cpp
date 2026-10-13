@@ -5551,6 +5551,29 @@ TEST_CASE("Dual-color primary drops invalid tokens and falls back on empty", "[M
 // must be dropped on load/grow so add-filament cannot resurrect them.
 // ============================================================================
 
+TEST_CASE("Automatic mixed colour match uses count-dependent ratio caps", "[MixedFilament][ColorMatch]")
+{
+    // Snap #1008: 15% floor on every participating component. Search passes the
+    // two-color cap (85%); three-color recipes then top out at 70% because the
+    // other two keep the floor. Recipes land in MixedFilamentManager.
+    CHECK(kMixedColorMatchMinComponentPercent == 15);
+    CHECK(kMixedColorMatchMaxPairComponentPercent == 85);
+    CHECK(kMixedColorMatchMaxMultiComponentPercent == 70);
+
+    CHECK(mixed_color_match_max_component_percent(0) == 85);
+    CHECK(mixed_color_match_max_component_percent(1) == 85);
+    CHECK(mixed_color_match_max_component_percent(2) == 85);
+    CHECK(mixed_color_match_max_component_percent(3) == 70);
+    CHECK(mixed_color_match_max_component_percent(4) == 70);
+
+    CHECK(100 - 1 * kMixedColorMatchMinComponentPercent == kMixedColorMatchMaxPairComponentPercent);
+    CHECK(100 - 2 * kMixedColorMatchMinComponentPercent == kMixedColorMatchMaxMultiComponentPercent);
+
+    // Advisory: a valid 85% two-color recipe is in range; 85% of a three-color is not.
+    CHECK(85 <= mixed_color_match_max_component_percent(2));
+    CHECK(85 > mixed_color_match_max_component_percent(3));
+}
+
 TEST_CASE("Mixed slot identity comes from MixedFilamentManager, not filament_is_mixed",
           "[MixedFilament][IncompleteMetadata]")
 {
