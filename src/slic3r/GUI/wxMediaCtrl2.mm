@@ -59,7 +59,11 @@ wxMediaCtrl2::wxMediaCtrl2(wxWindow * parent)
     imageView.layer.backgroundColor = color;
     CGColorRelease(color);
     imageView.wantsLayer = YES;
-    create_player();
+    // No create_player() here: that dlopens Bambu's camera module (libBambuSource + liblive555) as
+    // soon as the Device tab is built. The player is made by the first Load()/Play() - i.e. the
+    // first Play that takes the Bambu-player path - so with "New Bambu LiveView" playing through
+    // go2rtc, Bambu's files are never loaded. Everything else copes with no player yet: the
+    // destructor (a message to nil), Stop() (below), GetState() and GetVideoSize().
 }
 
 wxMediaCtrl2::~wxMediaCtrl2()
@@ -197,11 +201,10 @@ void wxMediaCtrl2::Play()
 void wxMediaCtrl2::Stop()
 {
 	if (!m_player) {
-		create_player();
-		if (!m_player) {
-			BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": create_player failed currently!";
-			return;
-		}
+		// Nothing was ever played, so there is nothing to stop - and stopping must not be what
+		// loads Bambu's camera module.
+		NotifyStopped();
+		return;
 	}
     BambuPlayer * player2 = (BambuPlayer *) m_player;
     [player2 close];
