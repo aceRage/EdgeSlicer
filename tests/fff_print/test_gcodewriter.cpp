@@ -594,4 +594,13 @@ TEST_CASE("The spiral lift uses the printable area of the extruder the filament 
         s.filament     = 1;
         CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 1);
     }
+    SECTION("both areas merged into one group of eight points (older projects): split per extruder") {
+        s.extruder_areas = {Vec2ds{Vec2d(0, 0), Vec2d(325, 0), Vec2d(325, 320), Vec2d(0, 320),
+                                   Vec2d(25, 0), Vec2d(350, 0), Vec2d(350, 320), Vec2d(25, 320)}};
+        s.filament_map   = {1, 2};
+        s.filament       = 0;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 1);
+        s.filament = 1;
+        CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
+    }
 }

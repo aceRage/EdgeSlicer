@@ -4,6 +4,7 @@
 #include "format.hpp"
 #include "LocalesUtils.hpp"
 #include "ClipperUtils.hpp"
+#include "ExtruderAreas.hpp"
 #include "Geometry/ArcWelder.hpp"
 #include "Line.hpp"
 #include <algorithm>
@@ -119,7 +120,9 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     if (print_config.printable_area.values.size() >= 3)
         m_bed_printable_area = to_scaled_polygon(print_config.printable_area.values);
 
-    const std::vector<Pointfs> &extruder_areas = print_config.extruder_printable_area.values;
+    // Edge: older saved projects carry both nozzles' areas as one group of eight points; split them
+    // back into two areas as the reach check and the plate overlay do (ExtruderAreas).
+    const std::vector<Pointfs> extruder_areas = split_merged_extruder_areas(print_config.extruder_printable_area.values);
     if (!extruder_areas.empty()) {
         m_extruder_printable_areas.resize(extruder_areas.size());
         for (size_t i = 0; i < extruder_areas.size(); ++i) {
