@@ -9,7 +9,9 @@
 #include <boost/filesystem.hpp>
 #include <boost/nowide/cstdio.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -1084,4 +1086,42 @@ TEST_CASE("per-user temp root is unchanged on Windows, isolated elsewhere", "[ut
     REQUIRE(root != base);
     REQUIRE_THAT(root, Catch::Matchers::StartsWith(base + "/edgeslicer_"));
 #endif
+}
+
+// Orca #15582: the Windows branch of copy_file() wrote "Error: " + errCode, which adds an integer
+// to a string literal (it indexes into the literal and runs off its end for any code above 7)
+// instead of appending the number.
+TEST_CASE("copy_file reports the OS error when the destination cannot be written", "[utils]")
+{
+    const boost::filesystem::path dir = boost::filesystem::temp_directory_path() /
+                                        boost::filesystem::unique_path("copy_err_%%%%%%%%");
+    boost::filesystem::create_directories(dir);
+    const boost::filesystem::path source = dir / "source.txt";
+    {
+        std::ofstream ofs(source.string(), std::ios::binary);
+        ofs << "orca";
+    }
+    REQUIRE(boost::filesystem::exists(source));
+
+    // A directory that was never created, so the copy fails on every platform.
+    const boost::filesystem::path destination = dir / "orca-missing-dir" / "copy.txt";
+    REQUIRE_FALSE(boost::filesystem::exists(destination.parent_path()));
+
+    std::string error_message;
+    const CopyFileResult result = copy_file(source.string(), destination.string(), error_message);
+    boost::system::error_code ec;
+    boost::filesystem::remove(source, ec);
+    boost::filesystem::remove(dir, ec);
+
+    REQUIRE(result == FAIL_COPY_FILE);
+    REQUIRE_FALSE(error_message.empty());
+
+#ifdef _WIN32
+    const std::string prefix = "Error: ";
+    REQUIRE(error_message.rfind(prefix, 0) == 0);
+
+    const std::string code = error_message.substr(prefix.size());
+    REQUIRE_FALSE(code.empty());
+    REQUIRE(std::all_of(code.begin(), code.end(), [](unsigned char c) { return std::isdigit(c) != 0; }));
+#endif // _WIN32
 }
