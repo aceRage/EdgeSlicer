@@ -585,6 +585,15 @@ public:
         if (!found)
             smallest_distance_with_lower_speed=-1.f;
 
+        // Edge: interior sampling (Orca #14735) is for walls only. A bridge infill line is meant to cross open air
+        // between its anchors at the bridge speed; probing its interior read that span as an overhang and slowed it
+        // to the overhang speeds (with "slow down for curled perimeters" on, the last section is the 4/4 overhang
+        // speed: X1C bridges went from 50 to 10 mm/s). External bridge infill never switches the overhang fan by
+        // overlap (fan_overlap_threshold is negative for it), so -1 here turns the interior pass off for it altogether
+        // and leaves the passes after it exactly as before. (Internal bridges lie inside the lower layer's outline,
+        // so they read as supported anyway.)
+        const float interior_min_distance = is_perimeter(path.role()) ? smallest_distance_with_lower_speed : -1.f;
+
         auto calculate_speed = [&speed_sections, &original_speed](float distance) {
             float final_speed;
             if (distance <= speed_sections.front().first) {
@@ -633,7 +642,7 @@ public:
                                                                  prev_boundaries,
                                                                  path.width,
                                                                  -1,
-                                                                 smallest_distance_with_lower_speed,
+                                                                 interior_min_distance,
                                                                  effective_speed,
                                                                  fan_overlap_threshold,
                                                                  known_distance);

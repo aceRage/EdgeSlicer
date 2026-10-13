@@ -289,9 +289,21 @@ DynamicPrintConfig caged_overhang_config(const char* wall_generator){
 
 std::string caged_overhang_gcode(const char* wall_generator)
 {
-    Print print;
-    Model model;
-    init_print(std::vector<TriangleMesh>{caged_overhang_mesh()}, print, model, caged_overhang_config(wall_generator), false);
+    // Not arranged: the filters below select walls by their G-code coordinates, which are the mesh's own
+    // (upstream calls its init_print with arrange = false; ours always arranges, so the object is set up here).
+    Print        print;
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "caged_overhang.stl";
+    object->add_volume(caged_overhang_mesh());
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.apply(caged_overhang_config(wall_generator));
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
     return gcode(print);
 }
 
@@ -440,4 +452,52 @@ TEST_CASE("A supported wall between overhanging corners is slowed no further tha
     // The corners do read an overhang, so there is a slowdown for sampling to have lengthened.
     REQUIRE(unsampled > 0.);
     REQUIRE(sampled <= unsampled);
+}
+
+// Edge: the interior sampling above is for walls. A bridge infill line crosses open air between its anchors by
+// design and is printed at the bridge speed; probing its interior read that span as an overhang and, with
+// "slow down for curled perimeters" on (the last speed section is then the 4/4 overhang speed), printed nearly
+// all of it at 10 mm/s. Its interior must be left alone, as before the interior pass existed.
+TEST_CASE("Bridge infill is not slowed to the overhang speeds along its span", "[ExtrusionProcessor][Regression]")
+{
+    const bool slowdown_curled = GENERATE(true, false);
+    INFO("slow down for curled perimeters: " << slowdown_curled);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"detect_overhang_wall", "1"},
+        {"enable_overhang_speed", "1"},
+        {"slowdown_for_curled_perimeters", slowdown_curled ? "1" : "0"},
+        {"overhang_1_4_speed", "0"},
+        {"overhang_2_4_speed", "50"},
+        {"overhang_3_4_speed", "30"},
+        {"overhang_4_4_speed", "10"},
+        {"bridge_speed", "50"},
+        {"filament_max_volumetric_speed", "40"},
+        {"slow_down_for_layer_cooling", "0"},
+        {"slow_down_layers", "0"},
+        {"enable_support", "0"},
+    });
+    // TestMesh::bridge: a 50x10mm deck on two 5mm-wide pillars, a 40mm span.
+    const std::string gcode_out = Slic3r::Test::slice({TestMesh::bridge}, config);
+
+    double bridge_length = 0., slow_length = 0.;
+    bool   bridge_infill = false;
+    GCodeReader parser;
+    parser.parse_buffer(gcode_out, [&](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            bridge_infill = comment.find("Bridge") != std::string_view::npos && comment.find("Internal") == std::string_view::npos;
+        if (bridge_infill && line.extruding(self) && line.dist_XY(self) > 0.) {
+            bridge_length += line.dist_XY(self);
+            if (line.new_F(self) <= 10. * MM_PER_MIN + EPSILON)
+                slow_length += line.dist_XY(self);
+        }
+    });
+    UNSCOPED_INFO("bridge infill " << bridge_length << " mm, at the 4/4 overhang speed " << slow_length << " mm");
+
+    REQUIRE(bridge_length > 100.);
+    CHECK(slow_length < 0.05 * bridge_length);
 }
