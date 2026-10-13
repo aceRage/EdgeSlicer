@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode_timing.cpp
 	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
+	test_input_shaping.cpp
 	test_image_row_preview.cpp
 	test_image_row_walls.cpp
 	test_model.cpp
