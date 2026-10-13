@@ -288,7 +288,8 @@ static void fuzzy_polyline_ripple(Points& poly, bool closed, const FuzzySkinConf
         const Vec2d  seg_unit   = seg / seg_len;
         const Vec2d  seg_perp   = perp(seg_unit);
         const double seg_end_mm = accum_mm + seg_len_mm;
-        const double first_s    = std::ceil(accum_mm / fill_step_mm) * fill_step_mm;
+        // Edge: an open run's first sample is one step in, not on its start point (the caller keeps that one).
+        const double first_s    = std::max(std::ceil(accum_mm / fill_step_mm) * fill_step_mm, closed ? 0. : fill_step_mm);
 
         for (double s = first_s; s < seg_end_mm; s += fill_step_mm) {
             const double t    = (s - accum_mm) / seg_len_mm;
@@ -306,6 +307,17 @@ static void fuzzy_polyline_ripple(Points& poly, bool closed, const FuzzySkinConf
 
     if (skip_overhangs && ! out.empty())
         ripple_blend_supported(base_points, offsets, *support, closed, [&out](size_t i, const Point& p) { out[i] = p; });
+
+    // Edge: an open run (a painted split; only the splitter passes one) comes back as its interior
+    // samples, and the caller puts the run's own first and last point back around them, as for the
+    // noise types. The padding below would make it backtrack to its next-to-last point, so it is for
+    // closed loops only. A run too short for a single sample keeps its own interior vertices.
+    if (! closed) {
+        if (out.empty())
+            out.assign(poly.begin() + 1, poly.end() - 1);
+        poly = std::move(out);
+        return;
+    }
 
     while (out.size() < 3)
         out.emplace_back(poly[poly.size() - 2]);
@@ -331,6 +343,8 @@ static void fuzzy_extrusion_line_ripple(Arachne::ExtrusionJunctions& ext_lines, 
     poly.reserve(ext_lines.size());
     for (const auto& j : ext_lines)
         poly.push_back(j.p);
+    // Closed when the first and last junction coincide, as in fuzzy_extrusion_line().
+    const bool closed = ext_lines.back().p == ext_lines.front().p;
 
     // Compute total length in mm.
     const size_t np           = poly.size();
@@ -366,7 +380,8 @@ static void fuzzy_extrusion_line_ripple(Arachne::ExtrusionJunctions& ext_lines, 
         const Vec2d  seg_unit   = seg / seg_len;
         const Vec2d  seg_perp   = perp(seg_unit);
         const double seg_end_mm = accum_mm + seg_len_mm;
-        const double first_s    = std::ceil(accum_mm / fill_step_mm) * fill_step_mm;
+        // Edge: an open line's first sample is one step in, not on its start point.
+        const double first_s    = std::max(std::ceil(accum_mm / fill_step_mm) * fill_step_mm, closed ? 0. : fill_step_mm);
 
         for (double s = first_s; s < seg_end_mm; s += fill_step_mm) {
             const double t    = (s - accum_mm) / seg_len_mm;
@@ -382,10 +397,21 @@ static void fuzzy_extrusion_line_ripple(Arachne::ExtrusionJunctions& ext_lines, 
         accum_mm = seg_end_mm;
     }
 
-    if (skip_overhangs && ! out.empty()) {
-        // Closed when the first and last junction coincide, as in fuzzy_extrusion_line().
-        const bool closed = ext_lines.back().p == ext_lines.front().p;
+    if (skip_overhangs && ! out.empty())
         ripple_blend_supported(base_points, offsets, *support, closed, [&out](size_t i, const Point& p) { out[i].p = p; });
+
+    // Edge: an open line keeps its own first and last junction around the samples. It is either a
+    // painted split, whose caller adds the ends again (the noise types also keep the first junction
+    // there), or a whole open wall (an odd Arachne wall, a classic thin wall), which has no caller to
+    // do it and would otherwise come out shorter. The padding below would make it backtrack to its
+    // next-to-last junction, so it is for closed loops only; with no sample the line stays as it is.
+    if (! closed) {
+        if (! out.empty()) {
+            out.insert(out.begin(), ext_lines.front());
+            out.push_back(ext_lines.back());
+            ext_lines = std::move(out);
+        }
+        return;
     }
 
     while (out.size() < 3) {
@@ -404,7 +430,8 @@ static void fuzzy_extrusion_line_ripple(Arachne::ExtrusionJunctions& ext_lines, 
 void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkinConfig& cfg, const Polygons* support)
 {
     if (cfg.noise_type == NoiseType::Ripple) {
-        if (poly.size() < 3)
+        // An open run (a painted split, a straight one included) needs only its two ends.
+        if (poly.size() < (closed ? 3u : 2u))
             return;
         fuzzy_polyline_ripple(poly, closed, cfg, support);
         return;
@@ -484,7 +511,8 @@ void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice
 {
 
     if (cfg.noise_type == NoiseType::Ripple) {
-        if (ext_lines.size() < 3)
+        // An open line (a straight thin wall, a painted split) needs only its two ends.
+        if (ext_lines.size() < (! ext_lines.empty() && ext_lines.front().p == ext_lines.back().p ? 3u : 2u))
             return;
         fuzzy_extrusion_line_ripple(ext_lines, cfg, support);
         return;
