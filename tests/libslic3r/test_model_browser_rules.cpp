@@ -1,8 +1,14 @@
 #include <catch2/catch.hpp>
 
+#include "libslic3r/AppConfig.hpp"
 #include "libslic3r/ModelBrowserRules.hpp"
 #include "libslic3r/UntrustedInput.hpp"
 
+#include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <nlohmann/json.hpp>
+
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -344,4 +350,280 @@ TEST_CASE("Model browser: percent-encoding round trip", "[ModelBrowser]")
     CHECK(percent_encode("aZ09-._~") == "aZ09-._~");
     CHECK(percent_encode("&") == "%26");
     CHECK(make_open_link("https://x.com/a.stl") == "edgeslicer://open?file=https%3A%2F%2Fx.com%2Fa.stl");
+}
+
+// ---- macOS (WKWebView) ----------------------------------------------------------------------------
+
+namespace {
+
+// The url-filters of content_rule_list_json(), read back from the JSON WebKit compiles.
+std::vector<std::string> content_rule_filters_from_json()
+{
+    const nlohmann::json rules = nlohmann::json::parse(content_rule_list_json());
+    std::vector<std::string> out;
+    REQUIRE(rules.is_array());
+    for (const nlohmann::json &rule : rules) {
+        REQUIRE(rule.is_object());
+        REQUIRE(rule.size() == 2);
+        REQUIRE(rule.at("action") == nlohmann::json({{"type", "block"}}));
+        const nlohmann::json &trigger = rule.at("trigger");
+        REQUIRE(trigger.is_object());
+        // No if-domain / load-type / resource-type: a rule applies to every load of every page.
+        REQUIRE(trigger.size() == 1);
+        out.push_back(trigger.at("url-filter").get<std::string>());
+    }
+    return out;
+}
+
+// What WebKit does with the rules: a case-insensitive regex search on the canonical URL.
+bool content_rules_block(const std::vector<std::regex> &rules, const std::string &url)
+{
+    for (const std::regex &r : rules)
+        if (std::regex_search(url, r))
+            return true;
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("Model browser (macOS): the content rules are in WebKit's regex subset", "[ModelBrowser]")
+{
+    const std::vector<std::string> filters = content_rule_filters_from_json();
+    CHECK(filters == content_rule_url_filters());
+    REQUIRE(filters.size() >= 12);
+    for (const std::string &f : filters) {
+        INFO(f);
+        CHECK_FALSE(f.empty());
+        // WebKit content blockers: no disjunction, no counted repetition, no class escapes or
+        // back-references, no lookaround; "^" / "$" only as the first / last character.
+        CHECK(f.find('|') == std::string::npos);
+        CHECK(f.find('{') == std::string::npos);
+        CHECK(f.find("(?") == std::string::npos);
+        for (const char *esc : {"\\d", "\\w", "\\s", "\\b", "\\D", "\\W", "\\S", "\\B", "\\1"})
+            CHECK(f.find(esc) == std::string::npos);
+        CHECK(f.front() == '^');
+        size_t pos = 1;
+        while ((pos = f.find('^', pos)) != std::string::npos) {
+            CHECK(f[pos - 1] == '[');
+            ++pos;
+        }
+        CHECK(f.find('$') == std::string::npos);
+        for (unsigned char c : f)
+            CHECK((c >= 0x20 && c < 0x7f));
+        // A valid ECMAScript regex (what the test below runs).
+        CHECK_NOTHROW(std::regex(f, std::regex::ECMAScript | std::regex::icase));
+    }
+}
+
+TEST_CASE("Model browser (macOS): the content rules block what is_blocked_host blocks", "[ModelBrowser]")
+{
+    std::vector<std::regex> rules;
+    for (const std::string &f : content_rule_filters_from_json())
+        rules.emplace_back(f, std::regex::ECMAScript | std::regex::icase);
+
+    // Hosts as WebKit writes them in the URL it matches (canonical form: lower case, IPv4 in dotted
+    // decimal - 127.1, 0x7f.1, 2130706433 and 0x7f000001 all reach the rules as 127.0.0.1 - and
+    // IPv6 compressed in brackets). Decimal shorthand is blocked in its raw form too.
+    const std::vector<std::string> hosts = {
+        // blocked
+        "localhost", "localhost.", "localhost..", "app.localhost", "a.b.localhost", "127.0.0.1", "127.1", "2130706433", "0.0.0.0",
+        "10.1.2.3", "172.16.0.1", "192.168.1.20", "169.254.1.1", "100.100.100.100", "8.8.8.8", "[::1]", "[::]",
+        "[::ffff:7f00:1]", "[fe80::1]", "[fd7a:115c:a1e0::1]", "printer", "printer.", "nas", "router", "nas.local", "nas.local.",
+        "local", "router.lan", "box.home.arpa", "home.arpa", "svc.internal", "wiki.intranet", "host.localdomain",
+        "localhost.localdomain", "machine.tail1234.ts.net", "ts.net", "my-pc.tail-scale.ts.net",
+        // allowed
+        "www.printables.com", "printables.com", "files.printables.com", "makerworld.com", "makerworld.com.cn",
+        "public-cdn.bblmw.com", "space.snapmaker.com", "accounts.google.com", "appleid.apple.com", "example.com",
+        "localhost.example.com", "local.example.com", "lan.example.com", "internal.example.org", "home.arpa.example.com",
+        "my-local.com", "locallan.com", "xlocal.com", "intranet-news.com", "ts.network.example", "nets.ts.network",
+        "1.2.3.4.example.com", "10.example.com", "example.com.", "a-b.c-d.co.uk", "xn--bcher-kva.example",
+    };
+    int blocked = 0, allowed = 0;
+    for (const std::string &h : hosts) {
+        const bool expected = is_blocked_host(h);
+        expected ? ++blocked : ++allowed;
+        // Every place a host shows up in a canonical URL: plain, with a port, a path and a query,
+        // WebSocket schemes, with a user name and password.
+        for (const std::string &url : {"https://" + h + "/", "http://" + h + ":13640/r/token/", "https://" + h + "/a/b.3mf?x=1#y",
+                                       "wss://" + h + "/socket", "ws://" + h + ":8080/", "http://user:pw@" + h + "/",
+                                       "https://user@" + h + ":443/x", "http://" + h + ":1/"}) {
+            INFO(url);
+            CHECK(content_rules_block(rules, url) == expected);
+        }
+    }
+    CHECK(blocked == 37);
+    CHECK(allowed == 26);
+
+    // A blocked host anywhere but the authority does not block the page.
+    for (const std::string &url : {"https://www.printables.com/x.local/", "https://www.printables.com/?u=http://127.0.0.1/",
+                                   "https://www.printables.com/@127.0.0.1/", "https://www.printables.com/#http://localhost/",
+                                   "https://www.printables.com/r/http://[::1]/", "https://makerworld.com/en/models/1-localhost",
+                                   "https://www.printables.com/user:pw@printer/"}) {
+        INFO(url);
+        CHECK_FALSE(content_rules_block(rules, url));
+    }
+    // A user name that looks like a host does not hide a blocked host, and does not block a site.
+    CHECK(content_rules_block(rules, "http://www.printables.com@127.0.0.1/"));
+    CHECK(content_rules_block(rules, "http://www.printables.com:443@localhost:13619/"));
+    CHECK_FALSE(content_rules_block(rules, "https://printer@www.printables.com/"));
+    CHECK_FALSE(content_rules_block(rules, "https://printer:1234@www.printables.com/"));
+    // Local files.
+    for (const std::string &url : {"file:///Users/me/Downloads/a.stl", "FILE:///etc/hosts", "file://localhost/Users/me/a.3mf"}) {
+        INFO(url);
+        CHECK(content_rules_block(rules, url));
+    }
+    // blob: and data: carry no host to reach (a blob is in-memory content of its own origin).
+    CHECK_FALSE(content_rules_block(rules, "blob:https://www.printables.com/2b7c-11"));
+    CHECK_FALSE(content_rules_block(rules, "data:image/png;base64,AAAA"));
+    CHECK_FALSE(content_rules_block(rules, "about:blank"));
+}
+
+TEST_CASE("Model browser (macOS): links to other programs never start one", "[ModelBrowser]")
+{
+    // decidePolicyForNavigationAction sees every navigation, main frame and frames alike, with any
+    // scheme; nothing but a web page (or an in-page blob/about/data frame) is ever allowed, and the
+    // "Open in" schemes become a link for the app's downloader.
+    const std::string file = "https://files.printables.com/media/prints/1/stls/2_benchy.stl";
+    const std::string mw   = "https://public-cdn.bblmw.com/makerworld/model/x.3mf?Signature=abc";
+    const std::vector<std::pair<std::string, std::string>> open_links = {
+        {"prusaslicer://open?file=" + percent_encode(file), "edgeslicer"},
+        {"orcaslicer://open?file=" + percent_encode(file), "edgeslicer"},
+        {"bambustudioopen://" + percent_encode(mw), "bambustudioopen"},
+        {"bambustudio://open?file=" + percent_encode(mw), "bambustudio"},
+        {"edgeslicer://open?file=" + percent_encode(file), "edgeslicer"},
+    };
+    for (const auto &[link, scheme] : open_links)
+        for (bool main_frame : {true, false}) {
+            INFO(link << (main_frame ? " (main frame)" : " (frame)"));
+            const NavDecision d = decide_navigation(link, MAKERWORLD_PAGE, main_frame);
+            REQUIRE(d.action == NavAction::OpenLink);
+            const untrusted::OpenLink parsed = untrusted::parse_open_link(d.open_link);
+            REQUIRE(parsed.ok);
+            CHECK(parsed.scheme == scheme);
+        }
+
+    // Everything else that would start a program on a Mac (or anywhere) is cancelled.
+    for (const std::string &scheme : {"mailto", "tel", "sms", "facetime", "facetime-audio", "imessage", "x-apple-helpviewer", "applescript",
+                                      "x-apple.systempreferences", "vnc", "smb", "afp", "nfs", "ssh", "telnet", "itms-services",
+                                      "itms-apps", "macappstore", "shortcuts", "x-man-page", "dict", "news", "help", "ibooks", "maps",
+                                      "music", "photos-redirect", "zoommtg", "slack", "steam", "vscode", "file", "javascript", "ftp",
+                                      "intent", "ms-settings", "cura", "x-callback-url", "open"}) {
+        for (const std::string &rest : {std::string("://open?file=") + percent_encode("https://cdn.example.org/a.exe"), std::string("://x"),
+                                        std::string(":x")}) {
+            const std::string url = scheme + rest;
+            for (bool main_frame : {true, false}) {
+                INFO(url << (main_frame ? " (main frame)" : " (frame)"));
+                const NavDecision d = decide_navigation(url, PRINTABLES_PAGE, main_frame);
+                CHECK(d.action == NavAction::Block);
+                CHECK_FALSE(d.reason.empty());
+            }
+        }
+    }
+    // Only web schemes (and in-page about:/blob:/data: frames) are ever loaded.
+    for (const std::string &url : {"https://www.printables.com/", "http://example.com/", "about:blank", "about:srcdoc",
+                                   "blob:https://makerworld.com/2b7c", "data:text/html,x"}) {
+        INFO(url);
+        CHECK(decide_navigation(url, PRINTABLES_PAGE, false).action == NavAction::Allow);
+    }
+}
+
+TEST_CASE("Model browser (macOS): WKDownload names and sizes are classified like WebView2's", "[ModelBrowser]")
+{
+    // WKDownloadDelegate hands over the response URL, WebKit's suggested file name (from
+    // Content-Disposition or the URL, never a path) and expectedContentLength (-1 when unknown).
+    CHECK(decide_download("https://files.printables.com/media/x/benchy.stl", "benchy.stl", PRINTABLES_PAGE, -1).action ==
+          DownloadAction::Import);
+    CHECK(decide_download("https://public-cdn.bblmw.com/x.3mf?Signature=a", "Benchy (1).3mf", MAKERWORLD_PAGE, 123456).file_name ==
+          "Benchy (1).3mf");
+    CHECK(decide_download("https://cdn.example.org/a.3mf", "a.3mf", "https://www.example.org/").action == DownloadAction::ImportAfterConfirm);
+    // A name with a separator keeps only its last component.
+    CHECK(decide_download("https://files.printables.com/x", "a/b/../c.stl", PRINTABLES_PAGE).file_name == "c.stl");
+    // macOS programs, scripts, installers and launchers are refused...
+    for (const std::string &n : {"Installer.app", "EdgeSlicer.dmg", "setup.pkg", "x.mpkg", "run.command", "x.sh", "x.zsh", "x.terminal",
+                                 "x.tool", "x.workflow", "x.scpt", "x.applescript", "x.webloc", "x.fileloc", "x.inetloc",
+                                 "x.mobileconfig", "x.prefpane", "x.kext", "x.dylib", "model.stl.command", "x.py", "x.pl", "x.rb",
+                                 "SETUP.PKG"}) {
+        INFO(n);
+        CHECK(is_executable_file_name(n));
+        CHECK(decide_download("https://files.printables.com/" + n, n, PRINTABLES_PAGE).action == DownloadAction::Refuse);
+    }
+    // ...model files and archives of them import, anything else is offered as a save.
+    for (const std::string &n : {"a.stl", "a.3mf", "a.step", "a.obj", "a.zip"})
+        CHECK(decide_download("https://files.printables.com/" + n, n, PRINTABLES_PAGE).action == DownloadAction::Import);
+    for (const std::string &n : {"guide.pdf", "photo.heic", "notes.txt", "plate.gcode", "a.tar.gz"})
+        CHECK(decide_download("https://files.printables.com/" + n, n, PRINTABLES_PAGE).action == DownloadAction::OfferSave);
+}
+
+// Home > Models is offered where model_browser_supported() is true (Windows, macOS 12+; never Linux)
+// and Preferences > "Model browser (beta)" is on. The key's default lives in AppConfig::set_defaults(),
+// which has no OS-version check, so it is on for Windows and macOS and absent elsewhere.
+TEST_CASE("Model browser: model_browser_beta is on by default on Windows and macOS only", "[ModelBrowser][AppConfig]")
+{
+#if defined(_WIN32) || defined(__APPLE__)
+    constexpr bool has_model_browser = true;
+#else
+    constexpr bool has_model_browser = false;
+#endif
+
+    SECTION("a fresh config")
+    {
+        AppConfig config;
+        CHECK(config.get_bool("model_browser_beta") == has_model_browser);
+        CHECK(config.get("model_browser_beta").empty() == !has_model_browser);
+    }
+
+    SECTION("reset() restores the default")
+    {
+        AppConfig config;
+        config.set_bool("model_browser_beta", false);
+        config.reset();
+        CHECK(config.get_bool("model_browser_beta") == has_model_browser);
+    }
+
+    SECTION("an explicit false the user saved stays false")
+    {
+        AppConfig config;
+        config.set_bool("model_browser_beta", false);
+        config.set_defaults();
+        CHECK(config.get("model_browser_beta") == "false");
+        CHECK_FALSE(config.get_bool("model_browser_beta"));
+    }
+
+    SECTION("an explicit true stays true")
+    {
+        AppConfig config;
+        config.set_bool("model_browser_beta", true);
+        config.set_defaults();
+        CHECK(config.get_bool("model_browser_beta"));
+    }
+
+    SECTION("a config file with an explicit false keeps it after load(); one without the key gets the default")
+    {
+        const boost::filesystem::path dir = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("model_browser_beta_%%%%-%%%%-%%%%");
+        boost::filesystem::create_directories(dir);
+        const std::string off  = (dir / "off.conf").string();
+        const std::string none = (dir / "none.conf").string();
+        {
+            boost::nowide::ofstream f(off, std::ios::binary);
+            f << "{\"app\":{\"model_browser_beta\":\"false\"}}\n";
+        }
+        {
+            boost::nowide::ofstream g(none, std::ios::binary);
+            g << "{\"app\":{\"some_key\":\"some_value\"}}\n";
+        }
+        AppConfig a;
+        a.set_loading_path(off);
+        CHECK(a.load().empty());
+        CHECK(a.get("model_browser_beta") == "false");
+        CHECK_FALSE(a.get_bool("model_browser_beta"));
+
+        AppConfig b;
+        b.set_loading_path(none);
+        CHECK(b.load().empty());
+        CHECK(b.get_bool("model_browser_beta") == has_model_browser);
+
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(dir, ec);
+    }
 }
