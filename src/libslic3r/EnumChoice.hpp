@@ -30,7 +30,10 @@ inline bool enum_choice_maps_by_key(const std::string &opt_key)
         opt_key == "locked_skin_infill_pattern" || opt_key == "locked_skeleton_infill_pattern" ||
         opt_key == "support_style" || opt_key == "curr_bed_type" ||
         // NozzleVolumeType skips 4: "E3D High Flow" is value 5 at row 4.
-        opt_key == "nozzle_volume_type" || opt_key == "default_nozzle_volume_type" || opt_key == "extruder_nozzle_volume_type";
+        opt_key == "nozzle_volume_type" || opt_key == "default_nozzle_volume_type" || opt_key == "extruder_nozzle_volume_type" ||
+        // GCodeFlavor keeps its numbering (it is stored by key in files, but the C++ values are not renumbered);
+        // the menu lists the supported flavors with Repetier after RepRapFirmware.
+        opt_key == "gcode_flavor";
 }
 
 // Row of the combo that shows the stored enum `value`: the position in def.enum_values of a key whose

@@ -2942,45 +2942,46 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             };
             std::string warning_key;
 
-            // check jerk
-            if (m_default_object_config.default_jerk.values.front() == 1 || m_default_object_config.outer_wall_jerk.values.front() == 1 ||
-                m_default_object_config.inner_wall_jerk.values.front() == 1) {
-               warning->string = L("Setting the jerk speed too low could lead to artifacts on curved surfaces");
-               if (m_default_object_config.outer_wall_jerk.values.front() == 1)
-                    warning_key = "outer_wall_jerk";
-               else if (m_default_object_config.inner_wall_jerk.values.front() == 1)
-                    warning_key = "inner_wall_jerk";
-               else
-                    warning_key = "default_jerk";
-
-               warning->opt_key = warning_key;
-            }
-
-            if (warning_key.empty() && m_default_object_config.default_jerk.values.front() > 0) {
-               std::vector<std::string> jerk_to_check = {"default_jerk",     "outer_wall_jerk",    "inner_wall_jerk", "infill_jerk",
-                                                         "top_surface_jerk", "initial_layer_jerk", "travel_jerk"};
-               const auto               max_jerk = std::min(m_config.machine_max_jerk_x.values[0], m_config.machine_max_jerk_y.values[0]);
-               warning_key.clear();
-               if (m_default_object_config.default_jerk.values.front() > 0)
-                    warning_key = check_motion_ability_object_setting(jerk_to_check, max_jerk);
-               if (!warning_key.empty()) {
-                    warning->string = L(
-                        "The jerk setting exceeds the printer's maximum jerk (machine_max_jerk_x/machine_max_jerk_y).\nOrca will "
-                        "automatically cap the jerk speed to ensure it doesn't surpass the printer's capabilities.\nYou can adjust the "
-                        "maximum jerk setting in your printer's configuration to get higher speeds.");
-                    warning->opt_key = warning_key;
-               }
-            }
-
-            // check  junction deviation
             const auto max_junction_deviation = m_config.machine_max_junction_deviation.values[0];
-            if (warning_key.empty() && m_default_object_config.default_junction_deviation.values.front() > max_junction_deviation) {
-                warning->string  = L( "Junction deviation setting exceeds the printer's maximum value "
-                                      "(machine_max_junction_deviation).\nOrca will "
-                                      "automatically cap the junction deviation to ensure it doesn't surpass the printer's "
-                                      "capabilities.\nYou can adjust the "
-                                      "machine_max_junction_deviation value in your printer's configuration to get higher limits.");
-                warning->opt_key = warning_key;
+            const bool ignore_jerk_validation = m_config.gcode_flavor == gcfMarlinFirmware && max_junction_deviation > 0;
+
+            // check jerk
+            if (!ignore_jerk_validation) {
+                if (m_default_object_config.default_jerk.values.front() == 1 || m_default_object_config.outer_wall_jerk.values.front() == 1 ||
+                    m_default_object_config.inner_wall_jerk.values.front() == 1) {
+                   warning->string = L("Setting the jerk speed too low could lead to artifacts on curved surfaces");
+                   if (m_default_object_config.outer_wall_jerk.values.front() == 1)
+                        warning_key = "outer_wall_jerk";
+                   else if (m_default_object_config.inner_wall_jerk.values.front() == 1)
+                        warning_key = "inner_wall_jerk";
+                   else
+                        warning_key = "default_jerk";
+
+                   warning->opt_key = warning_key;
+                }
+
+                if (warning_key.empty() && m_default_object_config.default_jerk.values.front() > 0) {
+                   std::vector<std::string> jerk_to_check = {"default_jerk",     "outer_wall_jerk",    "inner_wall_jerk", "infill_jerk",
+                                                             "top_surface_jerk", "initial_layer_jerk", "travel_jerk"};
+                   const auto               max_jerk = std::min(m_config.machine_max_jerk_x.values[0], m_config.machine_max_jerk_y.values[0]);
+                   warning_key.clear();
+                   if (m_default_object_config.default_jerk.values.front() > 0)
+                        warning_key = check_motion_ability_object_setting(jerk_to_check, max_jerk);
+                   if (!warning_key.empty()) {
+                        warning->string = L(
+                            "The jerk setting exceeds the printer's maximum jerk (machine_max_jerk_x/machine_max_jerk_y).\n"
+                            "Orca will automatically cap the jerk speed to ensure it doesn't surpass the printer's capabilities.\n"
+                            "You can adjust the maximum jerk setting in your printer's configuration to get higher speeds.");
+                        warning->opt_key = warning_key;
+                   }
+                }
+            }
+            // check junction deviation
+            else if (m_default_object_config.default_junction_deviation.values.front() > max_junction_deviation) {
+                warning->string  = L( "Junction deviation setting exceeds the printer's maximum value (machine_max_junction_deviation).\n"
+                                      "Orca will automatically cap the junction deviation to ensure it doesn't surpass the printer's capabilities.\n"
+                                      "You can adjust the machine_max_junction_deviation value in your printer's configuration to get higher limits.");
+                warning->opt_key = "default_junction_deviation";
             }
             
             // check acceleration
@@ -6678,6 +6679,24 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("plate_number", new ConfigOptionString(get_plate_number_formatted()));
     config.set_key_value("model_name", new ConfigOptionString(get_model_name()));
 
+    // the same type of filament contains multiple names, support exporting according to the filament name
+    auto full_print_config = this->full_print_config();
+    const ConfigOptionStrings* filament_settings_id = full_print_config.option<ConfigOptionStrings>("filament_settings_id");
+    std::string filament_name = "";
+    auto extruders = this->extruders(true);
+    if(!extruders.empty()) {
+        // first extruder is the default extruder
+        int extruder_id = extruders.front();
+        if(filament_settings_id->values.size() > extruder_id) {
+            filament_name = filament_settings_id->values[extruder_id];
+        }
+    }
+    size_t end_pos = filament_name.find_first_of("@");
+    if (end_pos != std::string::npos) {
+        filament_name = filament_name.substr(0, end_pos);
+    }
+    config.set_key_value("filament_name", new ConfigOptionString(filament_name));
+
     return this->PrintBase::output_filename(m_config.filename_format.value, ".gcode", filename_base, &config);
 }
 
@@ -6758,6 +6777,31 @@ void Print::export_gcode_from_previous_file(const std::string& file, GCodeProces
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ <<  boost::format(":  process the G-code file %1% successfully")%file.c_str();
+}
+
+void Print::reload_gcode_moves(GCodeProcessorResult* result) const
+{
+    GCodeProcessor processor;
+    GCodeProcessor::s_IsBBLPrinter = is_BBL_printer();
+    const Vec3d origin = this->get_plate_origin();
+    processor.set_xy_offset(origin(0), origin(1));
+    // Orca keeps nozzle_group_result on GCodeProcessorResult and re-seeds the
+    // processor from it; Edge stores grouping on Print instead, so the rest of
+    // `result` (including anything the preview does not re-read) is simply kept.
+    try {
+        processor.process_file(result->filename);
+    } catch (const std::exception& ex) {
+        // The edited file is what gets printed, so failing to preview it must not fail the slice.
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": cannot re-read the G-code file " << result->filename << ": " << ex.what();
+        std::lock_guard<std::mutex> lock(result->result_mutex);
+        result->lines_ends.clear();
+        return;
+    }
+
+    GCodeProcessorResult& reloaded = processor.result();
+    std::lock_guard<std::mutex> lock(result->result_mutex);
+    result->moves      = std::move(reloaded.moves);
+    result->lines_ends = std::move(reloaded.lines_ends);
 }
 
 std::tuple<float, float> Print::object_skirt_offset(double margin_height) const

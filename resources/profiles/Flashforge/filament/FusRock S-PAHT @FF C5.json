@@ -61,7 +61,6 @@
     ],
     "inherits": "Generic PA-CF @System",
     "instantiation": "true",
-    "is_custom_defined": "0",
     "name": "FusRock S-PAHT @FF C5",
     "nozzle_temperature_range_high": [
         "280"
@@ -81,5 +80,5 @@
     "textured_plate_temp_initial_layer": [
         "80"
     ],
-    "version": "2.3.0.3"
+    "type": "filament"
 }

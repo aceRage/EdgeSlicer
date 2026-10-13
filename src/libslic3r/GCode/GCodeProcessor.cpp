@@ -210,6 +210,7 @@ void GCodeProcessor::TimeMachine::State::reset()
     //BBS
     enter_direction = { 0.0f, 0.0f, 0.0f };
     exit_direction = { 0.0f, 0.0f, 0.0f };
+    jd_unit_vec = { 0.0f, 0.0f, 0.0f, 0.0f };
 }
 
 void GCodeProcessor::TimeMachine::CustomGCodeTime::reset()
@@ -238,6 +239,8 @@ void GCodeProcessor::TimeMachine::reset()
     g1_times_cache = std::vector<G1LinesCacheItem>();
     actual_speed_moves = std::vector<ActualSpeedMove>();
     prepare_time = 0.0f;
+    m_additional_time_buffer.clear();
+    landed_bookings.clear();
 }
 
 // Planner kernels in Marlin's form and order (reverse pass, then forward pass), from PrusaSlicer 2.8
@@ -325,13 +328,67 @@ static void recalculate_trapezoids(std::vector<GCodeProcessor::TimeBlock>& block
     }
 }
 
-void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, PrintEstimatedStatistics::ETimeMode mode,
-                                                 bool collect_actual_speed_points, size_t keep_last_n_blocks, float additional_time)
+GCodeProcessor::TimeMachine::AdditionalBuffer GCodeProcessor::TimeMachine::merge_adjacent_additional_time_blocks(const AdditionalBuffer& buffer)
 {
-    if (!enabled || blocks.size() < 2)
+    AdditionalBuffer merged;
+    if (buffer.empty())
+        return merged;
+
+    AdditionalTime current_block = buffer.front();
+    for (size_t idx = 1; idx < buffer.size(); ++idx) {
+        const AdditionalTime& next_block = buffer[idx];
+        if (current_block.type == next_block.type) {
+            current_block.time += next_block.time;
+            current_block.bookings.insert(current_block.bookings.end(), next_block.bookings.begin(), next_block.bookings.end());
+        } else {
+            merged.push_back(std::move(current_block));
+            current_block = next_block;
+        }
+    }
+    merged.push_back(std::move(current_block));
+    return merged;
+}
+
+void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, PrintEstimatedStatistics::ETimeMode mode,
+                                                 bool collect_actual_speed_points, size_t keep_last_n_blocks, float additional_time,
+                                                 EMoveType target_move_type, bool is_final, size_t booking)
+{
+    if (!enabled)
         return;
+    // Orca: on the finalization pass, drain extra time that is still buffered (e.g. a
+    // trailing filament change) even with fewer than two blocks queued -- no later pass
+    // exists to attribute it on. Every other pass keeps the original >= 2 requirement,
+    // and an empty buffer keeps today's early-return unchanged (no behavior change).
+    const bool drain_final = is_final && !m_additional_time_buffer.empty();
+    if (blocks.size() < 2 && !drain_final) {
+        // Not enough blocks to attribute the extra time to yet; buffer it so it is
+        // applied on a later pass instead of being dropped.
+        if (additional_time > 0.0f) {
+            AdditionalTime item;
+            item.type = target_move_type;
+            item.time = additional_time;
+            if (booking != static_cast<size_t>(-1))
+                item.bookings.push_back(booking);
+            m_additional_time_buffer.push_back(std::move(item));
+        }
+        return;
+    }
 
     assert(keep_last_n_blocks <= blocks.size());
+
+    // Merge any previously buffered extra time with this call's extra time. Each
+    // entry is applied, in order, to the first block matching its target move type
+    // (EMoveType::Noop matches any block).
+    AdditionalBuffer additional_buffer = m_additional_time_buffer;
+    if (additional_time > 0.0f) {
+        AdditionalTime item;
+        item.type = target_move_type;
+        item.time = additional_time;
+        if (booking != static_cast<size_t>(-1))
+            item.bookings.push_back(booking);
+        additional_buffer.push_back(std::move(item));
+    }
+    additional_buffer = merge_adjacent_additional_time_blocks(additional_buffer);
 
     // reverse_pass
     for (int i = static_cast<int>(blocks.size()) - 1; i > 0; --i) {
@@ -347,11 +404,21 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
 
     const size_t mode_id = static_cast<size_t>(mode);
     const size_t n_blocks_process = blocks.size() - keep_last_n_blocks;
+    size_t additional_buffer_idx = 0;
     for (size_t i = 0; i < n_blocks_process; ++i) {
         const TimeBlock& block = blocks[i];
         float block_time = block.time();
-        if (i == 0)
-            block_time += additional_time;
+        if (additional_buffer_idx < additional_buffer.size()) {
+            const AdditionalTime& additional = additional_buffer[additional_buffer_idx];
+            if (additional.type == EMoveType::Noop || additional.type == block.move_type) {
+                block_time += additional.time;
+                // EDGE: a tool change block carries the id of the move before it, the time shows from the next one on.
+                const unsigned int landed_g1_id = block.g1_line_id + (block.move_type == EMoveType::Tool_change ? 1 : 0);
+                for (size_t b : additional.bookings)
+                    landed_bookings.emplace_back(b, landed_g1_id);
+                ++additional_buffer_idx;
+            }
+        }
 
         time += double(block_time);
         // EDGE: += rather than upstream's =, so a move can never lose time it was given.
@@ -417,6 +484,28 @@ void GCodeProcessor::TimeMachine::calculate_time(GCodeProcessorResult& result, P
             [](const StopTime& t, unsigned int value) { return t.g1_line_id < value; });
         if (it_stop_time != stop_times.end() && it_stop_time->g1_line_id == block.g1_line_id)
             it_stop_time->elapsed_time = float(time);
+    }
+
+    // Carry forward any extra time that found no matching block this pass, so it
+    // is retried against the blocks of a later pass.
+    m_additional_time_buffer.clear();
+    if (additional_buffer_idx < additional_buffer.size()) {
+        if (is_final) {
+            // Orca EOF hardening: no later pass remains to attribute this remainder,
+            // so add it to the machine total (and the custom-gcode cache) instead of
+            // dropping it. Deliberately NOT attributed to any move vertex, so a stray
+            // filament-change delay can never leak into an extrusion role's time.
+            // (BambuStudio drops the remainder here.)
+            float leftover = 0.0f;
+            for (size_t i = additional_buffer_idx; i < additional_buffer.size(); ++i)
+                leftover += additional_buffer[i].time;
+            time += double(leftover);
+            gcode_time.cache += leftover;
+        } else {
+            m_additional_time_buffer.insert(m_additional_time_buffer.end(),
+                                            additional_buffer.begin() + additional_buffer_idx,
+                                            additional_buffer.end());
+        }
     }
 
     if (keep_last_n_blocks) {
@@ -1214,6 +1303,7 @@ void GCodeProcessor::reset()
 {
     m_booked_times.clear();
     m_booking_tool_change = false;
+    m_skip_end_gcode_delays = false;
     m_units = EUnits::Millimeters;
     m_global_positioning_type = EPositioningType::Absolute;
     m_e_local_positioning_type = EPositioningType::Absolute;
@@ -1409,7 +1499,9 @@ void GCodeProcessor::finalize(bool post_process)
     }
 
     // process the time blocks
-    calculate_time(m_result);
+    // Orca: final pass -- also drains any filament-change delay still buffered because
+    // calculate_time early-returns with fewer than two queued blocks (see TimeMachine::calculate_time).
+    calculate_time(m_result, 0, 0.0f, EMoveType::Noop, /*is_final=*/true);
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
         TimeMachine& machine = m_time_processor.machines[i];
         TimeMachine::CustomGCodeTime& gcode_time = machine.gcode_time;
@@ -1505,7 +1597,9 @@ void GCodeProcessor::fill_time_tables(const std::vector<GCodeProcessorResult::Mo
         if (!move.prepare_stage || move.type != EMoveType::Travel)
             moves_time[static_cast<size_t>(move.type)] += t;
         //BBS: don't calculate travel time into extrusion path, except travel inside start and end gcode.
-        const ExtrusionRole role = (move.type != EMoveType::Travel || move.extrusion_role == erCustom) ? move.extrusion_role : erNone;
+        // Orca #14573: a tool change's delay is not an extrusion role's time either (unless it is in the start / end G-code).
+        const ExtrusionRole role = ((move.type != EMoveType::Travel && move.type != EMoveType::Tool_change) || move.extrusion_role == erCustom) ?
+            move.extrusion_role : erNone;
         roles_time[static_cast<size_t>(role)] += t;
         if (move.layer_id >= layers_time.size())
             layers_time.resize(move.layer_id + 1, 0.0f);
@@ -2058,6 +2152,15 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         return;
     }
     
+    // Orca (403292cb63): end G-code marker. With #14573 a wait with no motion queued behind it is buffered and
+    // counted instead of dropped, so the end G-code's M400 S / P waits (air purification, timelapse, sound) would
+    // inflate the print time. They are post-print by definition: skip them from here on.
+    // GCode.cpp writes the marker for the printers that have a pre-cooling plan (H2D and the like).
+    if (comment == PreCooling::MachineEndGCodeStartMarker) {
+        m_skip_end_gcode_delays = true;
+        return;
+    }
+
     // Orca: Integrate filament consumption for purging performed to an external device and controlled via macros
     // (eg. Happy Hare) in the filament consumption stats.
     if (boost::starts_with(comment, GCodeProcessor::External_Purge_Tag)) {
@@ -2888,6 +2991,10 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
         if (!is_extrusion_only_move(delta_pos))
             curr.enter_direction = curr.enter_direction / norm;
         curr.exit_direction = curr.enter_direction;
+        curr.jd_unit_vec = Vec4f(static_cast<float>(delta_pos[X]),
+                                 static_cast<float>(delta_pos[Y]),
+                                 static_cast<float>(delta_pos[Z]),
+                                 static_cast<float>(delta_pos[E])).normalized();
 
         TimeBlock block;
         block.move_type = type;
@@ -2966,22 +3073,32 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
 
         block.acceleration = acceleration;
 
-        // calculates block exit feedrate
-        curr.safe_feedrate = block.feedrate_profile.cruise;
+        static const float PREVIOUS_FEEDRATE_THRESHOLD = 0.0001f;
+        const bool has_prev_move = !blocks.empty() && prev.feedrate > PREVIOUS_FEEDRATE_THRESHOLD;
 
-        for (unsigned char a = X; a <= E; ++a) {
-            float axis_max_jerk = get_axis_max_jerk(static_cast<PrintEstimatedStatistics::ETimeMode>(i), static_cast<Axis>(a));
-            if (curr.abs_axis_feedrate[a] > axis_max_jerk)
-                curr.safe_feedrate = std::min(curr.safe_feedrate, axis_max_jerk);
+        // Orca: junction deviation where the firmware uses it (Klipper always, Marlin 2 with M205 J).
+        // Negative leaves the classic jerk path below unchanged.
+        const float vmax_junction_jd = calc_vmax_junction_deviation(block, prev, curr, has_prev_move,
+                                                                    static_cast<PrintEstimatedStatistics::ETimeMode>(i));
+        const bool use_junction_deviation = vmax_junction_jd >= 0.0f;
+
+        // calculates block exit feedrate. Junction deviation has no per axis jerk floor, so a move is
+        // free to start from rest.
+        curr.safe_feedrate = use_junction_deviation ? 0.0f : block.feedrate_profile.cruise;
+
+        if (!use_junction_deviation) {
+            for (unsigned char a = X; a <= E; ++a) {
+                float axis_max_jerk = get_axis_max_jerk(static_cast<PrintEstimatedStatistics::ETimeMode>(i), static_cast<Axis>(a));
+                if (curr.abs_axis_feedrate[a] > axis_max_jerk)
+                    curr.safe_feedrate = std::min(curr.safe_feedrate, axis_max_jerk);
+            }
         }
 
         block.feedrate_profile.exit = curr.safe_feedrate;
 
-        static const float PREVIOUS_FEEDRATE_THRESHOLD = 0.0001f;
-
         // calculates block entry feedrate
-        float vmax_junction = curr.safe_feedrate;
-        if (!blocks.empty() && prev.feedrate > PREVIOUS_FEEDRATE_THRESHOLD) {
+        float vmax_junction = use_junction_deviation ? vmax_junction_jd : curr.safe_feedrate;
+        if (!use_junction_deviation && has_prev_move) {
             bool prev_speed_larger = prev.feedrate > block.feedrate_profile.cruise;
             float smaller_speed_factor = prev_speed_larger ? (block.feedrate_profile.cruise / prev.feedrate) : (prev.feedrate / block.feedrate_profile.cruise);
             // Pick the smaller of the nominal speeds. Higher speed shall not be achieved at the junction during coasting.
@@ -3414,24 +3531,39 @@ void GCodeProcessor::process_G29(const GCodeReader::GCodeLine& line)
 {
     //BBS: hardcode 260 seconds for G29
     //Todo: use a machine related setting when we have second kind of BBL printer
+    // EDGE (#14573): a wait with no motion queued behind it used to be dropped, which hid that this is a Bambu
+    // number. It is counted now, and a Marlin mesh bed leveling start G-code has five G29 lines (G29 P1, G29 P1 X..,
+    // G29 P3.2, G29 P3.13, G29 A): 1300 s on a print that does not take them. Only the Bambu printers have the 260 s.
+    if (!s_IsBBLPrinter)
+        return;
     const float value_s = 260.0;
     simulate_st_synchronize(value_s);
 }
 
 void GCodeProcessor::process_G10(const GCodeReader::GCodeLine& line)
 {
+    // Emulate G1 retract, decrement G1 count as it's will be incremented in process_G1, but it's fake G1
     GCodeReader::GCodeLine g10;
     g10.set(Axis::E, -this->m_parser.config().retraction_length.get_at(m_extruder_id));
     g10.set(Axis::F,  this->m_parser.config().retraction_speed.get_at(m_extruder_id) * 60);
+    //Orca: Firmware retract emulation must not change the modal G1 feedrate.
+    const float feedrate = m_feedrate;
+    --m_g1_line_id;
     process_G1(g10);
+    m_feedrate = feedrate;
 }
 
 void GCodeProcessor::process_G11(const GCodeReader::GCodeLine& line)
 {
+    // Emulate G1 unretract, decrement G1 count as it's will be incremented in process_G1, but it's fake G1
     GCodeReader::GCodeLine g11;
     g11.set(Axis::E, this->m_parser.config().retraction_length.get_at(m_extruder_id) + this->m_parser.config().retract_restart_extra.get_at(m_extruder_id));
     g11.set(Axis::F, this->m_parser.config().deretraction_speed.get_at(m_extruder_id) * 60);
+    // Orca: Firmware unretract emulation must not change the modal G1 feedrate.
+    const float feedrate = m_feedrate;
+    --m_g1_line_id;
     process_G1(g11);
+    m_feedrate = feedrate;
 }
 
 void GCodeProcessor::process_G20(const GCodeReader::GCodeLine& line)
@@ -3808,6 +3940,9 @@ void GCodeProcessor::process_M205(const GCodeReader::GCodeLine& line)
 
             if (line.has_value('T', value))
                 set_option_value(m_time_processor.machine_limits.machine_min_travel_rate, i, value);
+
+            if (line.has_value('J', value))
+                set_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, i, value);
         }
     }
 }
@@ -3878,6 +4013,9 @@ void GCodeProcessor::process_M400(const GCodeReader::GCodeLine& line)
     float value_p = 0.0;
     if (line.has_value('S', value_s) || line.has_value('P', value_p)) {
         value_s += value_p * 0.001;
+        // End G-code waits are post-print (see m_skip_end_gcode_delays).
+        if (m_skip_end_gcode_delays)
+            return;
         simulate_st_synchronize(value_s);
     }
 }
@@ -3977,6 +4115,7 @@ void GCodeProcessor::process_T(const std::string_view command)
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
         } else {
             unsigned char id = static_cast<unsigned char>(new_extruder);
+            bool tool_change_stored = false;
             if (m_extruder_id != id) {
                 if (id >= m_result.extruders_count)
                     BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
@@ -3997,13 +4136,41 @@ void GCodeProcessor::process_T(const std::string_view command)
                     m_time_processor.extruder_unloaded = false;
                     extra_time += get_filament_load_time(static_cast<size_t>(m_extruder_id));
                     extra_time += m_time_processor.machine_tool_change_time;
+
+                    // Orca #14573: store the tool-change move first, then attribute the filament-change delay to
+                    // it rather than to whichever motion block happens to be pending. This keeps the delay out of
+                    // the per-role feature-time distribution while still including it in the total and the
+                    // per-layer times.
+                    store_move_vertex(EMoveType::Tool_change);
+                    tool_change_stored = true;
+
+                    // Construct a zero-distance time block for the tool-change move on each enabled machine so
+                    // the synchronize below can land the delay on it. The synchronize flushes with
+                    // keep_last_n_blocks == 0; if fewer than two blocks are queued it buffers the delay instead,
+                    // and this block stays queued to receive it on a later pass.
+                    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
+                        TimeMachine& machine = m_time_processor.machines[i];
+                        if (!machine.enabled)
+                            continue;
+                        TimeBlock block;
+                        block.move_id             = static_cast<unsigned int>(m_result.moves.size()) - 1;
+                        block.move_type           = EMoveType::Tool_change;
+                        block.layer_id            = std::max<unsigned int>(1, m_layer_id);
+                        block.g1_line_id          = m_g1_line_id;
+                        block.flags.prepare_stage = m_processing_start_custom_gcode;
+                        block.distance            = 0.0f;
+                        block.calculate_trapezoid();
+                        machine.blocks.push_back(block);
+                    }
+
                     m_booking_tool_change = true;
-                    simulate_st_synchronize(extra_time);
+                    simulate_st_synchronize(extra_time, EMoveType::Tool_change);
                     m_booking_tool_change = false;
                 }
 
                 // store tool change move
-                store_move_vertex(EMoveType::Tool_change);
+                if (!tool_change_stored)
+                    store_move_vertex(EMoveType::Tool_change);
             }
         }
     }
@@ -5005,24 +5172,33 @@ void GCodeProcessor::store_move_vertex(EMoveType type, bool internal_only)
     move.temperature    = m_extruder_temps[m_extruder_id];
     {
         // EDGE (OrcaSlicer #11673 / #13169): preview-only pressure advance, acceleration and jerk.
-        // The jerk is the plain axis limit; upstream's Marlin junction-deviation jerk waits for batch 2F.
+        // On Marlin 2 with a junction deviation the jerk is the one the junction deviation corresponds to at the
+        // move's own acceleration (#13169's use_jd_jerk).
         constexpr auto normal_mode = PrintEstimatedStatistics::ETimeMode::Normal;
         const bool  has_x  = std::abs(m_end_position[X] - m_start_position[X]) > 0.0;
         const bool  has_y  = std::abs(m_end_position[Y] - m_start_position[Y]) > 0.0;
         const bool  has_z  = std::abs(m_end_position[Z] - m_start_position[Z]) > 0.0;
         const bool  has_e  = std::abs(m_end_position[E] - m_start_position[E]) > 0.0;
-        const float jerk_x = get_axis_max_jerk(normal_mode, X);
-        const float jerk_y = get_axis_max_jerk(normal_mode, Y);
+        const float move_acceleration = (type == EMoveType::Travel) ? get_travel_acceleration(normal_mode) :
+                                        ((type == EMoveType::Retract || type == EMoveType::Unretract) ? get_retract_acceleration(normal_mode) :
+                                                                                                       get_acceleration(normal_mode));
+        const float junction_deviation = get_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, static_cast<size_t>(normal_mode));
+        const bool  use_jd_jerk        = (m_flavor == gcfMarlinFirmware && junction_deviation > 0.0f);
+        const auto  axis_jerk_for_preview = [this, normal_mode, use_jd_jerk, move_acceleration](Axis axis) {
+            return use_jd_jerk ? get_axis_max_jerk_with_jd(normal_mode, axis, move_acceleration) : get_axis_max_jerk(normal_mode, axis);
+        };
+        const float jerk_x = axis_jerk_for_preview(X);
+        const float jerk_y = axis_jerk_for_preview(Y);
+        const float jerk_z = axis_jerk_for_preview(Z);
+        const float jerk_e = axis_jerk_for_preview(E);
         move.pressure_advance = m_pressure_advance;
-        move.acceleration     = (type == EMoveType::Travel) ? get_travel_acceleration(normal_mode) :
-                                ((type == EMoveType::Retract || type == EMoveType::Unretract) ? get_retract_acceleration(normal_mode) :
-                                                                                               get_acceleration(normal_mode));
-        move.jerk             = (has_e && !has_x && !has_y && !has_z) ? get_axis_max_jerk(normal_mode, E) :
-                                (has_z && !has_x && !has_y)           ? get_axis_max_jerk(normal_mode, Z) :
+        move.acceleration     = move_acceleration;
+        move.jerk             = (has_e && !has_x && !has_y && !has_z) ? jerk_e :
+                                (has_z && !has_x && !has_y)           ? jerk_z :
                                 (has_x && has_y)                      ? std::min(jerk_x, jerk_y) :
                                 has_x                                 ? jerk_x :
                                 has_y                                 ? jerk_y :
-                                has_z                                 ? get_axis_max_jerk(normal_mode, Z) :
+                                has_z                                 ? jerk_z :
                                                                         std::min(jerk_x, jerk_y);
     }
     move.layer_id       = std::max<unsigned int>(1, m_layer_id) - 1;
@@ -5092,23 +5268,160 @@ float GCodeProcessor::get_axis_max_acceleration(PrintEstimatedStatistics::ETimeM
     }
 }
 
+float GCodeProcessor::get_axis_max_jerk_with_jd(PrintEstimatedStatistics::ETimeMode mode, Axis axis, float acceleration) const
+{
+    if (axis != X && axis != Y && axis != Z && axis != E)
+        return 0.0f;
+
+    const size_t id = static_cast<size_t>(mode);
+    const float jd = get_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, id);
+    if (jd <= 0.0f)
+        return 0.0f;
+
+    const float axis_max_acc = get_axis_max_acceleration(mode, axis);
+    float effective_acc = acceleration;
+    if (effective_acc <= 0.0f)
+        effective_acc = get_acceleration(mode);
+    if (axis_max_acc > 0.0f)
+        effective_acc = effective_acc > 0.0f ? std::min(effective_acc, axis_max_acc) : axis_max_acc;
+    if (effective_acc <= 0.0f)
+        return 0.0f;
+
+    return std::sqrt(jd * effective_acc * 2.5f);
+}
+
+float GCodeProcessor::get_axis_max_jerk_with_jd(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const
+{
+    return get_axis_max_jerk_with_jd(mode, axis, get_acceleration(mode));
+}
+
+float GCodeProcessor::get_junction_deviation(PrintEstimatedStatistics::ETimeMode mode, float acceleration) const
+{
+    const size_t id = static_cast<size_t>(mode);
+
+    // Klipper has no classic jerk: jd = scv^2 * (sqrt(2) - 1) / max_accel
+    // (toolhead.py::_calc_junction_deviation). Passing the block acceleration back in makes it cancel
+    // in calc_vmax_junction_deviation(), leaving the identity v == scv at a 90 degree corner.
+    if (m_flavor == gcfKlipper) {
+        // machine_max_jerk_x holds the square corner velocity; process_SET_VELOCITY_LIMIT() writes it.
+        const float scv = get_option_value(m_time_processor.machine_limits.machine_max_jerk_x, id);
+        if (scv <= 0.0f || acceleration <= 0.0f)
+            return 0.0f;
+        return sqr(scv) * (std::sqrt(2.0f) - 1.0f) / acceleration;
+    }
+
+    // Marlin 2 plans with junction deviation only when M205 J > 0; classic jerk leaves it at 0.
+    if (m_flavor == gcfMarlinFirmware)
+        return get_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, id);
+
+    return 0.0f;
+}
+
+float GCodeProcessor::calc_junction_acceleration(const TimeBlock& block, const Vec4f& junction_unit_vec,
+                                                 PrintEstimatedStatistics::ETimeMode mode) const
+{
+    float junction_acceleration = block.acceleration;
+    for (unsigned char a = X; a <= E; ++a) {
+        if (junction_unit_vec[a] == 0.0f)
+            continue;
+        const float axis_max_acceleration = get_axis_max_acceleration(mode, static_cast<Axis>(a));
+        if (axis_max_acceleration > 0.0f)
+            junction_acceleration = std::min(junction_acceleration, std::abs(axis_max_acceleration / junction_unit_vec[a]));
+    }
+    return junction_acceleration;
+}
+
+// Ported from PrusaSlicer (src/libslic3r/GCode/GCodeProcessor.cpp).
+float GCodeProcessor::calc_vmax_junction_deviation(const TimeBlock& block, const TimeMachine::State& prev,
+                                                   const TimeMachine::State& curr, bool has_prev_move,
+                                                   PrintEstimatedStatistics::ETimeMode mode) const
+{
+    const float junction_deviation = get_junction_deviation(mode, block.acceleration);
+    if (junction_deviation <= 0.0f)
+        return -1.0f; // classic jerk machine, the caller keeps its own computation
+    if (!has_prev_move)
+        return 0.0f;  // starts from rest, the planner raises this on the reverse pass
+
+    // -1 for a straight continuation, +1 for a full reversal. Half angle identity, no acos()/sin().
+    // Both vectors are unit length over XYZE, so this really is a cosine: scaling by 1 / distance
+    // instead, as PrusaSlicer does, leaves an E term that makes extruding corners look straighter
+    // than they are. Marlin normalizes over XYZE for any extruding move (planner.cpp, esteps > 0)
+    // and Klipper keeps E out of the cosine entirely (toolhead.py::Move.calc_junction); both agree
+    // that the corner is planned by its geometry, and normalizing matches them to within 1e-5.
+    float junction_cos_theta = (-prev.jd_unit_vec).dot(curr.jd_unit_vec);
+    if (junction_cos_theta > 0.999999f)
+        return 0.0f; // the path doubles back, the machine has to stop
+    junction_cos_theta = std::max(junction_cos_theta, -0.999999f); // guards the division below
+
+    const float sin_theta_d2 = std::sqrt(0.5f * (1.0f - junction_cos_theta)); // always positive
+    const Vec4f junction_vec = curr.jd_unit_vec - prev.jd_unit_vec;
+    const float junction_vec_norm = junction_vec.norm();
+    const Vec4f junction_unit_vec = (junction_vec_norm > 0.0f) ? Vec4f(junction_vec / junction_vec_norm)
+                                                               : Vec4f(0.0f, 0.0f, 0.0f, 0.0f);
+    const float junction_acceleration = calc_junction_acceleration(block, junction_unit_vec, mode);
+
+    float vmax_junction_sqr = (junction_acceleration * junction_deviation * sin_theta_d2) / (1.0f - sin_theta_d2);
+
+    // Marlin's JD_HANDLE_SMALL_SEGMENTS: a short move through a shallow corner is treated as an arc and
+    // capped by the centripetal acceleration it needs. Klipper has no equivalent.
+    if (m_flavor != gcfKlipper && block.distance < 1.0f && junction_cos_theta < -0.7071067812f) {
+        // Fast acos(-t), max. error +-0.033rad. MinMax polynomial by W. Randolph Franklin:
+        // https://wrf.ecse.rpi.edu/Research/Short_Notes/arcsin/onlyelem.html
+        const float neg = junction_cos_theta < 0.0f ? -1.0f : 1.0f;
+        const float t = neg * junction_cos_theta;
+        const float asinx = 0.032843707f + t * (-1.451838349f + t * (29.66153956f + t * (-131.1123477f +
+                            t * (262.8130562f + t * (-242.7199627f + t * (84.31466202f))))));
+        const float junction_theta = float(0.5 * M_PI) + neg * asinx; // acos(-t), bottoms out at 0.033
+        vmax_junction_sqr = std::min(vmax_junction_sqr, (block.distance * junction_acceleration) / junction_theta);
+    }
+
+    // Never faster than either of the two moves the junction joins.
+    vmax_junction_sqr = std::min(vmax_junction_sqr, std::min(sqr(block.feedrate_profile.cruise), sqr(prev.feedrate)));
+    return std::sqrt(vmax_junction_sqr);
+}
+
 float GCodeProcessor::get_axis_max_jerk(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const
 {
+    const size_t id = static_cast<size_t>(mode);
+    const float jd = get_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, id);
+    if (m_flavor == gcfMarlinFirmware && jd > 0.0f) {
+        return get_axis_max_jerk_with_jd(mode, axis);
+    }
+
     switch (axis)
     {
-    case X: { return get_option_value(m_time_processor.machine_limits.machine_max_jerk_x, static_cast<size_t>(mode)); }
-    case Y: { return get_option_value(m_time_processor.machine_limits.machine_max_jerk_y, static_cast<size_t>(mode)); }
-    case Z: { return get_option_value(m_time_processor.machine_limits.machine_max_jerk_z, static_cast<size_t>(mode)); }
-    case E: { return get_option_value(m_time_processor.machine_limits.machine_max_jerk_e, static_cast<size_t>(mode)); }
+    case X: { return get_option_value(m_time_processor.machine_limits.machine_max_jerk_x, id); }
+    case Y: { return get_option_value(m_time_processor.machine_limits.machine_max_jerk_y, id); }
+    case Z: { return get_option_value(m_time_processor.machine_limits.machine_max_jerk_z, id); }
+    case E: { return get_option_value(m_time_processor.machine_limits.machine_max_jerk_e, id); }
     default: { return 0.0f; }
     }
 }
 
 Vec3f GCodeProcessor::get_xyz_max_jerk(PrintEstimatedStatistics::ETimeMode mode) const
 {
-    return Vec3f(get_option_value(m_time_processor.machine_limits.machine_max_jerk_x, static_cast<size_t>(mode)),
-        get_option_value(m_time_processor.machine_limits.machine_max_jerk_y, static_cast<size_t>(mode)),
-        get_option_value(m_time_processor.machine_limits.machine_max_jerk_z, static_cast<size_t>(mode)));
+    // Default values from config
+    const size_t id = static_cast<size_t>(mode);
+    float jx = 0.0f;
+    float jy = 0.0f;
+    float jz = 0.0f;
+    const float jd = get_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, id);
+
+    // Classic Jerk: Junction Deviation is only supported by Marlin firmware when using a JD value grater than 0.
+    if (m_flavor != gcfMarlinFirmware || jd <= 0.0f)
+    {
+        jx = get_option_value(m_time_processor.machine_limits.machine_max_jerk_x, id);
+        jy = get_option_value(m_time_processor.machine_limits.machine_max_jerk_y, id);
+        jz = get_option_value(m_time_processor.machine_limits.machine_max_jerk_z, id);
+    }
+    else
+    {
+        jx = get_axis_max_jerk_with_jd(mode, X);
+        jy = get_axis_max_jerk_with_jd(mode, Y);
+        jz = get_axis_max_jerk_with_jd(mode, Z);
+    }
+
+    return Vec3f(jx, jy, jz);
 }
 
 float GCodeProcessor::get_retract_acceleration(PrintEstimatedStatistics::ETimeMode mode) const
@@ -5213,29 +5526,36 @@ void GCodeProcessor::process_filaments(CustomGCode::Type code)
     }
 }
 
-void GCodeProcessor::simulate_st_synchronize(float additional_time)
+void GCodeProcessor::simulate_st_synchronize(float additional_time, EMoveType target_move_type)
 {
+    size_t booking = static_cast<size_t>(-1);
     if (additional_time > 0.f) {
-        // TimeMachine::calculate_time() adds additional_time to blocks.front(), or drops it when fewer
-        // than two blocks are queued. See m_booked_times.
-        const TimeMachine &normal = m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
-        m_booked_times.push_back({ m_line_id, (normal.enabled && normal.blocks.size() >= 2) ? normal.blocks.front().g1_line_id : (unsigned int) -1,
-                                   additional_time, m_booking_tool_change });
+        // TimeMachine::calculate_time() adds additional_time to the first block matching target_move_type, now or
+        // on a later pass, and reports where it landed. See m_booked_times.
+        booking = m_booked_times.size();
+        m_booked_times.push_back({ m_line_id, (unsigned int) -1, additional_time, m_booking_tool_change });
     }
-    calculate_time(m_result, 0, additional_time);
+    calculate_time(m_result, 0, additional_time, target_move_type, false, booking);
 }
 
-void GCodeProcessor::calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks, float additional_time)
+void GCodeProcessor::calculate_time(GCodeProcessorResult& result, size_t keep_last_n_blocks, float additional_time,
+                                    EMoveType target_move_type, bool is_final, size_t booking)
 {
     // calculate times
     std::vector<TimeMachine::ActualSpeedMove> actual_speed_moves;
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
         TimeMachine& machine = m_time_processor.machines[i];
         const PrintEstimatedStatistics::ETimeMode mode = static_cast<PrintEstimatedStatistics::ETimeMode>(i);
-        machine.calculate_time(result, mode, m_actual_speed_moves_enabled, keep_last_n_blocks, additional_time);
-        if (mode == PrintEstimatedStatistics::ETimeMode::Normal)
+        machine.calculate_time(result, mode, m_actual_speed_moves_enabled, keep_last_n_blocks, additional_time, target_move_type, is_final, booking);
+        if (mode == PrintEstimatedStatistics::ETimeMode::Normal) {
             actual_speed_moves = std::move(machine.actual_speed_moves);
+            // The pre-cooling bookings follow the Normal machine's times.
+            for (const auto& landed : machine.landed_bookings)
+                if (landed.first < m_booked_times.size())
+                    m_booked_times[landed.first].first_g1_id = landed.second;
+        }
         machine.actual_speed_moves.clear();
+        machine.landed_bookings.clear();
     }
 
     if (actual_speed_moves.empty())

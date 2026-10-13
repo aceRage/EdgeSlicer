@@ -1435,6 +1435,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "fuzzy_skin_scale"
             || opt_key == "fuzzy_skin_octaves"
             || opt_key == "fuzzy_skin_persistence"
+            || opt_key == "fuzzy_skin_ripples_per_layer"
+            || opt_key == "fuzzy_skin_ripple_offset"
+            || opt_key == "fuzzy_skin_layers_between_ripple_offset"
             || opt_key == "detect_overhang_wall"
             || opt_key == "unsupported_wall_last"
             || opt_key == "overhang_reverse"
@@ -2071,7 +2074,50 @@ void PrintObject::detect_surfaces_type()
                     // This would also skip generation of very short dual bridge layers (that are shorter than N perimeters), but these are unecessary as the bridge distance is
                     // We could reduce this slightly to account for innacurcies in the clipping operation.
                     // TODO: Monitor GitHub issues to check whether second bridge layers are ommited where they should be generated. If yes, reduce the filtering distance
-                    
+
+                    // ORCA: Same-layer-top guard.
+                    //
+                    // Collect every stTop polygon present at layer i+1 (this region) and
+                    // expand it by the same `offset_distance` used by the bridge filter
+                    // above. Note that `offset_distance` here is the full wall-band
+                    // distance for the region (external wall width + all configured
+                    // internal wall widths, i.e. external + (wall_loops - 1) × internal),
+                    // not a single perimeter width. Any candidate second-bridge area that
+                    // falls under this expanded mask will be subtracted out below.
+                    //
+                    // Why this exists: detect_surfaces_type() classifies a layer's "top"
+                    // surfaces as the geometry that is not covered by the layer above. Those
+                    // stTop regions often have small stInternal islands embedded in them.
+                    // The pre-existing wall-band filter (shrink_ex/offset_ex by
+                    // offset_distance) is supposed to throw those tiny islands away, but
+                    // its result is sensitive to Clipper's floating-point order of
+                    // operations: on macOS ARM the filter eats them, on Windows/Intel it
+                    // doesn't. Visible bridges then show up scattered across the printed
+                    // top surface.
+                    //
+                    // Expanding stTop by offset_distance and subtracting it from the
+                    // overlap makes the decision platform-independent: an island fully
+                    // surrounded by stTop disappears regardless of which Clipper happens
+                    // to be doing the math, while large stInternal regions away from the
+                    // top survive intact (the expansion only nibbles the wall-band depth
+                    // inward).
+                    //
+                    // Keep ExPolygons throughout so that any holes inside an stTop surface
+                    // are offset with the correct sign (positive offset shrinks holes /
+                    // grows the solid region). Using Polygons + expand() would treat the
+                    // contour and each hole as independent polygons and could distort the
+                    // mask.
+                    ExPolygons same_layer_top_expanded;
+                    {
+                        ExPolygons same_layer_top;
+                        for (const Surface &s : top_surfs) {
+                            if (s.surface_type == stTop)
+                                same_layer_top.push_back(s.expolygon);
+                        }
+                        if (! same_layer_top.empty())
+                            same_layer_top_expanded = offset_ex(same_layer_top, offset_distance);
+                    }
+
                     // For each surface in the layer above
                     for (const Surface &s_up : top_surfs) {
                         // Only reclassify stInternal polygons (i.e. what will become later solid and sparse infill)
@@ -2086,10 +2132,16 @@ void PrintObject::detect_surfaces_type()
                         // Filter out the resulting candidate bridges based on size. First perform a shrink operation...
                         // ...followed by an expand operation to bring them back to the original size (positive offset)
                         overlap = offset_ex(shrink_ex(overlap, offset_distance), offset_distance);
-                        
+
+                        // ORCA: subtract the expanded same-layer stTop mask (see comment above
+                        // the mask construction). Drops stInternal islands fully surrounded by
+                        // stTop at i+1 without affecting bridges that lie away from the top.
+                        if (! same_layer_top_expanded.empty() && ! overlap.empty())
+                            overlap = diff_ex(overlap, same_layer_top_expanded, ApplySafetyOffset::Yes);
+
                         // Now subtract the filtered new bridge layer from the remaining internal surfaces to create the new internal surface
                         ExPolygons remainder = diff_ex(p_up, overlap, ApplySafetyOffset::Yes);
-                        
+
                         // Remainder stays as stInternal
                         ExPolygons unified_remainder = union_safety_offset_ex(remainder);
                         for (auto &ex_remainder : unified_remainder) {
@@ -3661,8 +3713,11 @@ void PrintObject::bridge_over_infill()
         // stInternal / stInternalSolid surfaces and keeps every stInternalBridge surface, in order, so this is what a
         // serial run produces.
         std::vector<std::vector<Surfaces>> rewritten(this->layers().size());
+        // Guard against size_t underflow when the object has 0 or 1 layers — there is
+        // no "layer above" to receive an extra bridge, so the whole pass is a no-op.
+        const size_t last = (this->layers().size() < 2) ? 0 : this->layers().size() - 1;
         // Process layers in parallel up to second-to-last
-        tbb::parallel_for( tbb::blocked_range<size_t>(0, this->layers().size() - 1), [this, &rewritten](const tbb::blocked_range<size_t>& r) {
+        tbb::parallel_for( tbb::blocked_range<size_t>(0, last), [this, &rewritten](const tbb::blocked_range<size_t>& r) {
             for (size_t lidx = r.begin(); lidx < r.end(); ++lidx)
             {
                 Layer* layer = this->get_layer(lidx);
