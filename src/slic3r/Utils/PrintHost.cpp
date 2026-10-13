@@ -470,7 +470,7 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     if (archive_unload && archive_print) {
         GUI::SnapmakerLan::Device d;
         d.ip = the_job.printhost->get_host();
-        // "http://10.0.0.106:80/" and friends: SnapmakerLan wants the bare host and a port.
+        // "http://192.0.2.106:80/" and friends: SnapmakerLan wants the bare host and a port.
         {
             std::string h = d.ip;
             const size_t scheme = h.find("://");

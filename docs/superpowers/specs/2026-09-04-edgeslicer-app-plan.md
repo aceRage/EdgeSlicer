@@ -485,9 +485,9 @@ Five things. Every one follows a shape the hub already has, which is the point.
 #### N1. `GET /r/<token>/pair` - what the app is talking to
 
 ```json
-{ "name": "ACE-PC", "version": "2.3.1", "hub": "ultra1/1",
+{ "name": "WORKSHOP-PC", "version": "2.3.1", "hub": "ultra1/1",
   "urls": { "lan": "http://10.0.0.12:13640/r/<token>/",
-            "remote": "https://ace-pc.tail1234.ts.net/r/<token>/" },
+            "remote": "https://workshop-pc.tail1234.ts.net/r/<token>/" },
   "push": { "webpush": true, "apns": true, "fcm": false, "unified": true,
             "vapid": "<base64url 65-byte point>" },
   "features": ["events", "control", "send", "archive"] }
