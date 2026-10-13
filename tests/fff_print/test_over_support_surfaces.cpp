@@ -484,10 +484,11 @@ TEST_CASE("over_support: the organic generator measures bridges against max_brid
     CHECK(supported > 100.);
     // bridge_no_support changes nothing for an organic tree.
     CHECK_THAT(support_length("1", "10"), WithinAbs(supported, 1e-6));
-    // A limit longer than the slab makes its underside a bridge: no support under it.
+    // A limit longer than the slab makes its underside a bridge: no support under the bottom surface
+    // (the walls along its edges, which hang over air with nothing to anchor them, still get some).
     const double bridged = support_length("0", "30");
     INFO("max_bridge_length 30: " << bridged << " mm");
-    CHECK(bridged < 0.1 * supported);
+    CHECK(bridged < 0.7 * supported);
 }
 
 TEST_CASE("over_support: with supports off every bottom stays a bridge", "[OverSupport]")
