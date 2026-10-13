@@ -1,4 +1,4 @@
-# Windows build on the owner's self-hosted runner (devwin11).
+# Windows build on the owner's self-hosted runner (the Windows build VM).
 #
 # Why this exists: the hosted windows-2022 runner in build_all.yml rebuilds the whole
 # dependency tree (or restores a multi-GB cache) on every run. The self-hosted VM keeps a

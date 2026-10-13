@@ -288,11 +288,11 @@ the first seconds of picture.
 **ICE candidates offered** (unaltered through the tunnel, which is the thing the gate checks):
 
 ```
-udp 100.64.10.92        8556  typ host    <- Tailscale (what a phone on the tailnet uses)
-udp 10.0.0.131          8556  typ host    <- LAN       (what a phone on the home Wi-Fi uses)
+udp 100.64.10.20        8556  typ host    <- Tailscale (what a phone on the tailnet uses)
+udp 10.0.0.20          8556  typ host    <- LAN       (what a phone on the home Wi-Fi uses)
 tcp fd7a:115c:a1e0::…   8556  typ host    <- Tailscale IPv6, ICE-TCP
-tcp 100.64.10.92        8556  typ host    passive
-tcp 10.0.0.131          8556  typ host    passive
+tcp 100.64.10.20        8556  typ host    passive
+tcp 10.0.0.20          8556  typ host    passive
 udp 76.224.12.103      64976  typ srflx   <- STUN-discovered, ephemeral port
 ```
 

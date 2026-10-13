@@ -69,7 +69,7 @@ So EdgeSlicer ships it.
 `CMakeLists.txt` gained a `FLASHNETWORK_BIN_DIR` block beside the existing `ULTRANET_BIN_DIR` one:
 
 ```
--DFLASHNETWORK_BIN_DIR=C:/Users/acesa/AppData/Local/Temp/snorca_hubtest/flashnetwork_out/ship
+-DFLASHNETWORK_BIN_DIR=%TEMP%/snorca_hubtest/flashnetwork_out/ship
 ```
 
 It installs `FlashNetwork.dll` (and any `*.dll` beside it, should a future build need companions)
@@ -82,7 +82,7 @@ EdgeSlicer: no FLASHNETWORK_BIN_DIR - FlashForge LAN printing will be unavailabl
 and the package simply carries no FlashForge support — the same as before, but now said out loud.
 
 The DLL is kept **out of the repository**, staged at
-`C:\Users\acesa\AppData\Local\Temp\snorca_hubtest\flashnetwork_out\ship\FlashNetwork.dll`.
+`%TEMP%\snorca_hubtest\flashnetwork_out\ship\FlashNetwork.dll`.
 
 ### Licensing note
 

@@ -150,8 +150,8 @@ TEST_CASE("Crash-report scrubber: e-mail, addresses, host names", "[SentryScrub]
     require_gone(o1, {"alice", "example.co.uk", "1234567890"});
     CHECK(contains(o1, "<email>"));
 
-    const std::string o2 = scrub_for_crash_report("serve at https://devwin11-host.tail1234.ts.net:8443/phone and devwin11-host.tail1234.ts.net");
-    require_gone(o2, {"devwin11", "tail1234"});
+    const std::string o2 = scrub_for_crash_report("serve at https://build-vm11-host.tail1234.ts.net:8443/phone and build-vm11-host.tail1234.ts.net");
+    require_gone(o2, {"build-vm11", "tail1234"});
 
     const std::string o3 = scrub_for_crash_report("connect [fe80::1c2d:3e4f:5a6b:7c8d]:8883 then 2001:db8:85a3:0:0:8a2e:370:7334");
     require_gone(o3, {"fe80::1c2d", "2001:db8"});
