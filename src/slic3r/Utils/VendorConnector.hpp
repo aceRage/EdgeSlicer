@@ -139,6 +139,17 @@ struct ImportResult
 };
 ImportResult import_check(const std::string& text);
 
+// `text` with typographic quotes put back to the plain ones JSON needs: U+201C, U+201D, U+201E and
+// U+2033 become ", and U+2018, U+2019 and U+2032 become '. (macOS "smart quotes" does this to text
+// typed or pasted into a text box.) Everything else, including the rest of the UTF-8, is untouched.
+std::string normalize_smart_quotes(const std::string& text);
+
+// Parses `text` as JSON. Text that parses as it stands is never altered, because a connector's string
+// values may hold curly quotes on purpose. Only when it does not parse is it parsed again with
+// normalize_smart_quotes() applied; `smart_quotes_fixed` (if given) says whether that second try was
+// what worked, and one info line goes to the log when it was. false when neither try parses.
+bool parse_json_lenient(const std::string& text, nlohmann::json& out, bool* smart_quotes_fixed = nullptr);
+
 // A link a connector may be fetched from: https only, the default port, no user:password@, a host
 // NAME on the public internet (no localhost, no single-label or .local/.internal/.lan names, no IP
 // address in any spelling). `error` says why not. (A name that resolves to a private address is not
