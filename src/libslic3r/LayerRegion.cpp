@@ -226,9 +226,6 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     // as an interface consistently everywhere interface_shells is consulted.
     g.has_bounded_paint_depth = this->layer()->object()->has_bounded_paint_depth();
 
-    if (this->layer()->lower_layer != nullptr)
-        // Cummulative sum of polygons over all the regions.
-        g.lower_slices = &this->layer()->lower_layer->lslices;
     if (this->layer()->upper_layer != NULL)
         g.upper_slices = &this->layer()->upper_layer->lslices;
 
@@ -240,6 +237,13 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter);
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
+
+    // Cumulative sum of polygons over all the regions, less what the lower layer could not print.
+    ExPolygons lower_slices;
+    if (this->layer()->lower_layer != nullptr) {
+        lower_slices   = g.printable_slices(this->layer()->lower_layer->lslices);
+        g.lower_slices = &lower_slices;
+    }
 
     // Ultra (over-support walls): hand the generator the slice-time reconstruction of "there is
     // support under here" for this layer, the same way lower_slices is handed in. Null (and the

@@ -114,7 +114,7 @@ static const std::unordered_map<std::string, std::vector<std::string>> printer_m
                             "Elegoo Neptune 3 Max",    "Elegoo Neptune 4 Pro",    "Elegoo Neptune 4",        "Elegoo Neptune 4 Max",    "Elegoo Neptune 4 Plus",
                             "Elegoo OrangeStorm Giga"}},
      {"Flashforge",        {"Flashforge Adventurer 5M",       "Flashforge Adventurer 5M Pro",   "Flashforge AD5X",                "Flashforge Adventurer 3 Series", "Flashforge Adventurer 4 Series",
-                            "Flashforge Guider 3 Ultra",      "Flashforge Guider 2s"}},
+                            "Flashforge Guider 3 Ultra",      "Flashforge Guider 2s", "Flashforge Artemis"}},
      {"FLSun",             {"FLSun Q5",               "FLSun QQ-S Pro",         "FLSun Super Racer (SR)", "FLSun V400",             "FLSun T1",
                             "FLSun S1"}},
      {"FlyingBear",        {"FlyingBear Reborn3", "FlyingBear S1",      "FlyingBear Ghost 6"}},
@@ -2404,8 +2404,13 @@ bool CreatePrinterPresetDialog::load_system_and_user_presets_with_curr_model(Pre
         }
 
         try {
-            temp_preset_bundle.load_vendor_configs_from_json(preset_path, selected_vendor_id, PresetBundle::LoadConfigBundleAttribute::LoadSystem,
-                                                             ForwardCompatibilitySubstitutionRule::EnableSilent);
+            // Pass the app's preset bundle (which already holds OrcaFilamentLibrary) as the base
+            // bundle so vendor filaments that inherit OFL bases resolve via the existing
+            // cross-vendor inheritance path.
+            temp_preset_bundle.load_vendor_configs_from_json(preset_path, selected_vendor_id,
+                                                             PresetBundle::LoadConfigBundleAttribute::LoadSystem,
+                                                             ForwardCompatibilitySubstitutionRule::EnableSilent,
+                                                             wxGetApp().preset_bundle);
         } catch (...) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "load vendor fonfigs form json failed";
             MessageDialog dlg(this, _L("The printer model was not found, please reselect."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),

@@ -12,7 +12,9 @@
 #include "libslic3r/EnumChoice.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <regex>
+#include <cstdint>
 #include <wx/numformatter.h>
 #include <wx/tooltip.h>
 #include <wx/notebook.h>
@@ -101,6 +103,164 @@ ThumbnailErrors validate_thumbnails_string(wxString& str, const wxString& def_ex
     }
 
     return errors;
+}
+
+// Orca
+wxString get_formatted_tooltip_text(const ConfigOptionDef& opt, const t_config_option_key& id)
+{
+    wxString tooltip = _(opt.tooltip);
+
+    std::string parameter_name = id;
+    std::string opt_key = id;
+    int opt_idx = 0;
+
+    const size_t hash_pos = static_cast<std::string>(id).find("#");
+
+    if (hash_pos != std::string::npos) {
+        parameter_name.replace(hash_pos, 1, "[");
+        parameter_name += "]";
+
+        std::string temp_str = id;
+        boost::erase_head(temp_str, hash_pos + 1);
+        size_t orig_opt_idx = atoi(temp_str.c_str());
+        opt_idx = orig_opt_idx >= 0 ? orig_opt_idx : 0;
+
+        boost::erase_tail(opt_key, opt_key.size() - hash_pos);
+    }
+
+    tooltip += (tooltip.empty() ? "" : "\n\n") + _(L("parameter name")) + ": " + parameter_name;
+
+    // Orca: 
+    // We can't use Orca's default values as-is because they sometimes depend on other values. 
+    // Parent preset configuration values will be used instead.
+    // Edge: no bundle yet (early GUI), or a parent value whose type is not the definition's (the typed
+    // option<T>() lookups below would be null): no default line, as for an option the parent lacks.
+    const Preset*       print_parent_preset = wxGetApp().preset_bundle ? wxGetApp().preset_bundle->prints.get_selected_preset_parent() : nullptr;
+    const ConfigOption* parent_option       = print_parent_preset ? print_parent_preset->config.option(opt_key) : nullptr;
+    if (parent_option != nullptr && parent_option->type() == opt.type) {
+        const DynamicPrintConfig& parent_config = print_parent_preset->config;
+
+        wxString side_text = from_u8(opt.sidetext);
+
+        // Orca: a small hack for `layers` side text: adding a space before it for better looking text
+        if (opt.sidetext == L("layers"))
+            side_text = " " + _(side_text);
+
+        if (opt.type == coFloat || opt.type == coInt || opt.type == coPercent || opt.type == coFloatOrPercent || 
+            opt.type == coFloats || opt.type == coInts || opt.type == coPercents || opt.type == coFloatsOrPercents) {
+            double default_value = std::numeric_limits<double>::quiet_NaN();
+
+            if (opt.type == coFloat)
+                default_value = parent_config.option<ConfigOptionFloat>(opt_key)->value;
+            else if (opt.type == coFloats) {
+                if (opt.nullable) {
+                    auto opt_floats_nullable = parent_config.option<ConfigOptionFloatsNullable>(opt_key);
+                    if (!opt_floats_nullable->values.empty())
+                        default_value = opt_floats_nullable->get_at(opt_idx);
+                } else {
+                    auto opt_floats = parent_config.option<ConfigOptionFloats>(opt_key);
+                    if (!opt_floats->values.empty())
+                        default_value = opt_floats->get_at(opt_idx);
+                }
+            }
+            else if (opt.type == coInt)
+                default_value = parent_config.option<ConfigOptionInt>(opt_key)->value;
+            else if(opt.type == coInts) {
+                if (opt.nullable) {
+                    auto opt_ints_nullable = parent_config.option<ConfigOptionIntsNullable>(opt_key);
+                    if (!opt_ints_nullable->values.empty() && !opt_ints_nullable->is_nil(opt_idx))
+                        default_value = opt_ints_nullable->get_at(opt_idx);
+                } else {
+                    auto opt_ints = parent_config.option<ConfigOptionInts>(opt_key);
+                    if (!opt_ints->values.empty())
+                        default_value = opt_ints->get_at(opt_idx);
+                }
+            }
+            else if (opt.type == coPercent)
+                default_value = parent_config.option<ConfigOptionPercent>(opt_key)->value;
+            else if (opt.type == coPercents) {
+                if (opt.nullable) {
+                    auto opt_percents_nullable = parent_config.option<ConfigOptionPercentsNullable>(opt_key);
+                    if (!opt_percents_nullable->values.empty())
+                        default_value = opt_percents_nullable->get_at(opt_idx);
+                } else {
+                    auto opt_percents = parent_config.option<ConfigOptionPercents>(opt_key);
+                    if (!opt_percents->values.empty())
+                        default_value = opt_percents->get_at(opt_idx);
+                }
+            }
+            else if (opt.type == coFloatOrPercent || opt.type == coFloatsOrPercents) {
+                bool is_percent = false;
+                if (opt.type == coFloatOrPercent) {
+                    default_value = parent_config.option<ConfigOptionFloatOrPercent>(opt_key)->value;
+                    is_percent = parent_config.option<ConfigOptionFloatOrPercent>(opt_key)->percent;
+                } else if (opt.type == coFloatsOrPercents) {
+                    if (opt.nullable) {
+                        auto opt_floats_or_percents_nullable = parent_config.option<ConfigOptionFloatsOrPercentsNullable>(opt_key);
+                        if (!opt_floats_or_percents_nullable->values.empty()) {
+                            default_value = opt_floats_or_percents_nullable->get_at(opt_idx).value;
+                            is_percent    = opt_floats_or_percents_nullable->get_at(opt_idx).percent;
+                        }
+                    } else {
+                        auto opt_floats_or_percents = parent_config.option<ConfigOptionFloatsOrPercents>(opt_key);
+                        if (!opt_floats_or_percents->values.empty()) {
+                            default_value = opt_floats_or_percents->get_at(opt_idx).value;
+                            is_percent    = opt_floats_or_percents->get_at(opt_idx).percent;
+                        }
+                    }
+                }
+                
+                if (is_percent)
+                    side_text = "%";
+                else if (!side_text.empty()) {
+                    static std::string postfix = " or %";
+                    auto postfix_pos = side_text.find(postfix);
+                    if (postfix_pos != std::string::npos)
+                        side_text.erase(postfix_pos, postfix.length());
+                }
+            }
+
+            if (!std::isnan(default_value))
+                tooltip += "\n\n" + _(L("Default")) + ": " + _(double_to_string(default_value)) + _(side_text);
+
+            if (opt.min > -FLT_MAX && opt.max < FLT_MAX) {
+                tooltip += "\n" + _(L("Range")) + ": [" + 
+                    _(double_to_string(opt.min)) + _(side_text) + ", " + 
+                    _(double_to_string(opt.max)) + _(side_text) + "]";
+            }
+        } else if (opt.type == coBool || opt.type == coBools || opt.type == coString || opt.type == coStrings) {
+            std::string default_value = "";
+
+            if (opt.type == coString)
+                default_value = parent_config.option<ConfigOptionString>(opt_key)->value;
+            else if (opt.type == coStrings) {
+                auto opt_strings = parent_config.option<ConfigOptionStrings>(opt_key);
+
+                if (!opt_strings->values.empty())
+                    default_value = opt_strings->get_at(opt_idx);
+            }
+            else if (opt.type == coBool)
+                default_value = parent_config.option<ConfigOptionBool>(opt_key)->value != 0 ? "true" : "false";
+            else if (opt.type == coBools) {
+                if (opt.nullable) {
+                    auto opt_bools_nullable = parent_config.option<ConfigOptionBoolsNullable>(opt_key);
+                    if (!opt_bools_nullable->values.empty() && !opt_bools_nullable->is_nil(opt_idx))
+                        default_value = opt_bools_nullable->get_at(opt_idx) != 0 ? "true" : "false";
+                } else {
+                    auto opt_bools = parent_config.option<ConfigOptionBools>(opt_key);
+                    if (!opt_bools->values.empty())
+                        default_value = opt_bools->get_at(opt_idx) != 0 ? "true" : "false";
+                }
+            }
+
+            tooltip += "\n\n" + _(L("Default")) + ": " +
+                (default_value.empty() ? _(L("Empty string")) : _(default_value) + _(side_text));
+        }
+    }
+
+    edit_tooltip(tooltip);
+
+    return tooltip;
 }
 
 Field::~Field()
@@ -226,23 +386,9 @@ void Field::toggle(bool en) { en && !m_opt.readonly ? enable() : disable(); }
 
 wxString Field::get_tooltip_text(const wxString &default_string)
 {
-	wxString tooltip_text("");
-#ifdef NDEBUG
-	wxString tooltip = _(m_opt.tooltip);
-    ::edit_tooltip(tooltip);
+    wxString tooltip_text = get_formatted_tooltip_text(m_opt, m_opt_id);
 
-    std::string opt_id = m_opt_id;
-    auto hash_pos = opt_id.find("#");
-    if (hash_pos != std::string::npos) {
-        opt_id.replace(hash_pos, 1,"[");
-        opt_id += "]";
-    }
-
-	if (tooltip.length() > 0)
-        tooltip_text = tooltip + "\n" + 
-        _(L("parameter name")) + "\t: " + opt_id;
- #endif
-	return tooltip_text;
+    return tooltip_text.length() > 0 ? tooltip_text : default_string;
 }
 
 bool Field::is_matched(const std::string& string, const std::string& pattern)
@@ -254,9 +400,15 @@ bool Field::is_matched(const std::string& string, const std::string& pattern)
 void Field::get_value_by_opt_type(wxString& str, const bool check_value/* = true*/)
 {
 	switch (m_opt.type) {
+    case coInts:
     case coInt: {
         long val = 0;
-        if (!str.ToLong(&val)) {
+
+        bool is_na_value = m_opt.nullable && str == m_na_value;
+
+        if (is_na_value)
+            val = ConfigOptionIntsNullable::nil_value();
+        else if (!str.ToLong(&val)) {
             if (!check_value) {
                 m_value.clear();
                 break;
@@ -264,6 +416,27 @@ void Field::get_value_by_opt_type(wxString& str, const bool check_value/* = true
             show_error(m_parent, _(L("Invalid numeric.")));
             set_value(int(val), true);
         }
+
+        if (!m_opt.is_value_valid(double(val))) {
+            if (!check_value) {
+                m_value.clear();
+                break;
+            }
+
+            if (!is_na_value) {
+                // Orca: no need to check ranges for the nil value
+                show_error(m_parent, _L("Value is out of range."));
+
+                int min = static_cast<int>(m_opt.min);
+                int max = static_cast<int>(m_opt.max);
+
+                if (min > val) val = min;
+                if (val > max) val = max;
+
+                set_value(int(val), true);
+            }
+        }
+
         m_value = int(val);
         break;
     }
@@ -312,7 +485,7 @@ void Field::get_value_by_opt_type(wxString& str, const bool check_value/* = true
                 show_error(m_parent, _(L("Invalid numeric.")));
                 set_value(double_to_string(val), true);
             }
-            if (m_opt.min > val || val > m_opt.max)
+            if (!m_opt.is_value_valid(val))
             {
                 if (!check_value) {
                     m_value.clear();
@@ -350,7 +523,8 @@ void Field::get_value_by_opt_type(wxString& str, const bool check_value/* = true
                         }
                     }
                 }
-                else {
+                else if (!is_na_value) {
+                    // Orca: no need to check ranges for the nil value
                     show_error(m_parent, _L("Value is out of range."));
                     if (m_opt.min > val) val = m_opt.min;
                     if (val > m_opt.max) val = m_opt.max;
@@ -361,54 +535,98 @@ void Field::get_value_by_opt_type(wxString& str, const bool check_value/* = true
         m_value = val;
 		break; }
 	case coString:
-	case coStrings:
-    case coFloatsOrPercents:
-    case coFloatOrPercent: {
-        const bool is_float_or_percent = m_opt.type == coFloatOrPercent || m_opt.type == coFloatsOrPercents;
-        if (is_float_or_percent && !str.IsEmpty() && str.Last() != '%')
-        {
+    case coStrings:
+    case coFloatOrPercent:
+    case coFloatsOrPercents: {
+        if ((m_opt.type == coFloatOrPercent || m_opt.type == coFloatsOrPercents) && !str.IsEmpty() &&
+            !(m_opt.nullable && (str == m_na_value || str == _(L("N/A"))))) { // Edge: same N/A test as the float branch
+            bool update_control = false;
+            wxString numeric_str = str;
             double val = 0.;
+
             const char dec_sep = is_decimal_separator_point() ? '.' : ',';
             const char dec_sep_alt = dec_sep == '.' ? ',' : '.';
-            // Replace the first incorrect separator in decimal number.
-            if (str.Replace(dec_sep_alt, dec_sep, false) != 0)
-                set_value(str, false);
+            // Orca: normalize the decimal separator and optional unit before
+            // detecting the percentage suffix and parsing the numeric part.
+            update_control |= numeric_str.Replace(dec_sep_alt, dec_sep, false) != 0;
+            update_control |= numeric_str.Replace(" ", "", true) != 0;
+            const bool has_literal_unit = numeric_str.EndsWith("mm");
+            if (has_literal_unit) {
+                numeric_str.RemoveLast(2);
+                update_control = true;
+            }
+            bool is_percent = !numeric_str.IsEmpty() && numeric_str.Last() == '%';
+            if (is_percent)
+                numeric_str.RemoveLast();
 
-
-            // remove space and "mm" substring, if any exists
-            str.Replace(" ", "", true);
-            str.Replace("m", "", true);
-
-            if (!str.ToDouble(&val))
-            {
+            if ((has_literal_unit && is_percent) || !numeric_str.ToDouble(&val) || !std::isfinite(val)) {
                 if (!check_value) {
                     m_value.clear();
                     break;
                 }
                 show_error(m_parent, _L("Invalid numeric."));
-                set_value(double_to_string(val), true);
-            }
-            else if (((m_opt.sidetext.rfind("mm/s") != std::string::npos && val > m_opt.max) ||
-                     (m_opt.sidetext.rfind("mm ") != std::string::npos && val > /*1*/m_opt.max_literal)) &&
-                     (m_value.empty() || into_u8(str) != boost::any_cast<std::string>(m_value)))
-            {
-                if (!check_value) {
-                    m_value.clear();
-                    break;
+                numeric_str = double_to_string(std::clamp(0., double(m_opt.min), double(m_opt.max)));
+                is_percent = false;
+                update_control = true;
+            } else {
+                const bool looks_like_missing_percent = !is_percent && !has_literal_unit &&
+                    ((m_opt.sidetext.rfind("mm/s") != std::string::npos && val > m_opt.max) ||
+                     (m_opt.sidetext.rfind("mm ") != std::string::npos && val > m_opt.max_literal));
+                // Orca: validate explicit percentages and literal values before
+                // asking whether an otherwise valid literal was meant as a percentage.
+                const bool out_of_range = !m_opt.is_value_valid(val);
+                if (out_of_range) {
+                    if (!check_value) {
+                        m_value.clear();
+                        break;
+                    }
+                    show_error(m_parent, _L("Value is out of range."));
+                    val = std::clamp(val, double(m_opt.min), double(m_opt.max));
+                    // Orca: retain the inferred percent unit when clamping a
+                    // suspicious unitless value, so 2000 becomes 100%, not 100 mm.
+                    is_percent |= looks_like_missing_percent;
+                    numeric_str = double_to_string(val);
+                    update_control = true;
+                } else {
+                    const bool value_changed = m_value.empty() || into_u8(str) != boost::any_cast<std::string>(m_value);
+                    if (looks_like_missing_percent && value_changed) {
+                        if (!check_value) {
+                            m_value.clear();
+                            break;
+                        }
+
+                        const std::string sidetext = m_opt.sidetext.rfind("mm/s") != std::string::npos ? "mm/s" : "mm";
+                        const wxString stVal       = numeric_str;
+                        const wxString msg_text    = from_u8((boost::format(_utf8(L("Is it %s%% or %s %s?"))) %
+                                                              stVal % stVal % sidetext).str());
+                        WarningDialog dialog(m_parent, msg_text, _L("Parameter validation") + ": " + m_opt_id, wxYES | wxNO);
+                        dialog.SetButtonLabel(wxID_YES, stVal + _L("%"));
+                        dialog.SetButtonLabel(wxID_NO, stVal + " " + _L(sidetext));
+                        dialog.GetSizer()->SetSizeHints(&dialog);
+                        dialog.Fit();
+                        dialog.CenterOnParent();
+                        is_percent = dialog.ShowModal() == wxID_YES;
+                        update_control = true;
+                    }
                 }
 
-                const std::string sidetext = m_opt.sidetext.rfind("mm/s") != std::string::npos ? "mm/s" : "mm";
-                const wxString stVal = double_to_string(val, 2);
-                const wxString msg_text = from_u8((boost::format(_utf8(L("Is it %s%% or %s %s?\n"
-                    "YES for %s%%, \n"
-                    "NO for %s %s."))) % stVal % stVal % sidetext % stVal % stVal % sidetext).str());
-                WarningDialog dialog(m_parent, msg_text, _L("Parameter validation") + ": " + m_opt_id, wxYES | wxNO);
-                if ((val > 100) && dialog.ShowModal() == wxID_YES) {
-                    set_value(from_u8((boost::format("%s%%") % stVal).str()), false/*true*/);
-                    str += "%%";
+                // Orca: also enforce the literal limit after clamping an explicit mm input.
+                if (!is_percent && m_opt.sidetext.rfind("mm ") != std::string::npos && val > m_opt.max_literal) {
+                    if (!check_value) {
+                        m_value.clear();
+                        break;
+                    }
+                    if (!out_of_range)
+                        show_error(m_parent, _L("Value is out of range."));
+                    val = m_opt.max_literal;
+                    numeric_str = double_to_string(val);
+                    update_control = true;
                 }
-				else
-					set_value(stVal, false); // it's no needed but can be helpful, when inputted value contained "," instead of "."
+            }
+
+            if (update_control) {
+                str = numeric_str + (is_percent ? "%" : "");
+                set_value(str, true);
             }
         }
         if (m_opt.opt_key == "thumbnails") {
@@ -866,13 +1084,18 @@ bool TextCtrl::value_was_changed()
     case coInt:
         return boost::any_cast<int>(m_value) != boost::any_cast<int>(val);
     case coPercent:
-    case coPercents:
+    case coPercents: {
+        if (m_opt.nullable && std::isnan(boost::any_cast<double>(m_value)) &&
+                              std::isnan(boost::any_cast<double>(val)))
+            return false;
+        return boost::any_cast<double>(m_value) != boost::any_cast<double>(val);
+    }
     case coFloats:
     case coFloat: {
         if (m_opt.nullable && std::isnan(boost::any_cast<double>(m_value)) &&
                               std::isnan(boost::any_cast<double>(val)))
             return false;
-        return boost::any_cast<double>(m_value) != boost::any_cast<double>(val);
+        return !is_approx(boost::any_cast<double>(m_value), boost::any_cast<double>(val));
     }
     case coString:
     case coStrings:
@@ -1130,8 +1353,8 @@ void SpinCtrl::BUILD() {
 		break;
 	}
 
-    const int min_val = m_opt.min == INT_MIN ? 0 : m_opt.min;
-	const int max_val = m_opt.max < 2147483647 ? m_opt.max : 2147483647;
+    const int min_val = m_opt.min == -FLT_MAX ? 0 : (int)m_opt.min;
+	const int max_val = m_opt.max < FLT_MAX ? (int)m_opt.max : INT_MAX;
 
     static Builder<SpinInput> builder;
 	auto temp = builder.build(m_parent, "", "", wxDefaultPosition, size,
@@ -1187,27 +1410,7 @@ void SpinCtrl::BUILD() {
         if (!parsed || value < INT_MIN || value > INT_MAX)
             tmp_value = UNDEF_VALUE;
         else {
-            tmp_value = std::min(std::max((int)value, m_opt.min), m_opt.max);
-#ifdef __WXOSX__
-#ifdef UNDEFINED__WXOSX__ // BBS
-            // Forcibly set the input value for SpinControl, since the value
-            // inserted from the keyboard or clipboard is not updated under OSX
-            SpinInput* spin = static_cast<SpinInput*>(window);
-            spin->SetValue(tmp_value);
-            // But in SetValue() is executed m_text_ctrl->SelectAll(), so
-            // discard this selection and set insertion point to the end of string
-            // temp->GetText()->SetInsertionPointEnd();
-#endif
-#else
-            // update value for the control only if it was changed in respect to the Min/max values
-            if (tmp_value != (int)value) {
-                temp->SetValue(tmp_value);
-                // But after SetValue() cursor ison the first position
-                // so put it to the end of string
-                // int pos = std::to_string(tmp_value).length();
-                // temp->SetSelection(pos, pos);
-            }
-#endif
+            tmp_value = (int)value;
         }
 	}), temp->GetTextCtrl()->GetId());
 
@@ -1228,7 +1431,11 @@ void SpinCtrl::propagate_value()
             on_kill_focus();
 	} else {
         auto ctrl = dynamic_cast<SpinInput *>(window);
-        if (m_value.empty() 
+        tmp_value = std::min(std::max(tmp_value, ctrl->GetMin()), ctrl->GetMax());
+        if (ctrl->GetValue() != tmp_value)
+            ctrl->SetValue(tmp_value); // Clamp now when the user is done typing (kill focus / Enter / spin arrows)
+
+        if (m_value.empty()
             ? !ctrl->GetTextCtrl()->GetLabel().IsEmpty()
             : ctrl->GetValue() != boost::any_cast<int>(m_value))
             on_change_field();
@@ -1240,7 +1447,7 @@ void SpinCtrl::set_value(const boost::any& value, bool change_event) {
     m_disable_change_event = !change_event;
     m_value = value;
     if (value.empty()) { // BBS: null value
-        dynamic_cast<SpinInput*>(window)->SetValue(m_opt.min);
+        dynamic_cast<SpinInput*>(window)->SetValue(dynamic_cast<SpinInput*>(window)->GetMin());
         dynamic_cast<SpinInput*>(window)->GetTextCtrl()->SetValue("");
     }
     else {
@@ -1603,6 +1810,26 @@ void Choice::set_value(const boost::any& value, bool change_event)
     case coEnums: {
 		int val = boost::any_cast<int>(value);
 
+        // Orca: the input shaper list holds only the types the printer's G-code flavor supports
+        // (TabPrinter::update_input_shaper_menu); each row carries its enum value as client data.
+        // Default (0) has no client data, but it is always the first row when the flavor offers it.
+        if (m_opt_id == "input_shaping_type") {
+            const unsigned int count = field->GetCount();
+            int selection = -1;
+            for (unsigned int idx = 0; idx < count; ++idx) {
+                if (void* data = field->GetClientData(idx)) {
+                    if (static_cast<int>(reinterpret_cast<uintptr_t>(data)) == val) {
+                        selection = static_cast<int>(idx);
+                        break;
+                    }
+                }
+            }
+            if (selection < 0)
+                selection = (val >= 0 && val < static_cast<int>(count)) ? val : (count > 0 ? 0 : -1);
+            field->SetSelection(selection);
+            break;
+        }
+
         // Support ThirdPartyPrinter
         if (m_opt_id.compare("host_type") == 0 && val != 0 &&
 			m_opt.enum_values.size() > field->GetCount()) // for case, when PrusaLink isn't used as a HostType
@@ -1688,6 +1915,17 @@ boost::any& Choice::get_value()
     {
         if (m_opt.nullable && field->GetSelection() == -1)
             m_value = ConfigOptionEnumsGenericNullable::nil_value();
+        else if (m_opt_id == "input_shaping_type")
+        {
+            const int selection = field->GetSelection();
+            if (selection >= 0) {
+                if (void* data = field->GetClientData(selection))
+                    m_value = static_cast<int>(reinterpret_cast<uintptr_t>(data));
+                else
+                    m_value = selection;
+            } else
+                m_value = 0;
+        }
         else if (enum_choice_maps_by_key(m_opt_id))
         {
             // Selection can be invalid when the current value is not present in the rebuilt
@@ -2200,8 +2438,8 @@ boost::any& PointCtrl::get_value()
         show_error(m_parent, _L("Invalid numeric."));
 	}
 	else
-	if (m_opt.min > x || x > m_opt.max ||
-		m_opt.min > y || y > m_opt.max)
+	if (!m_opt.is_value_valid(x) ||
+		!m_opt.is_value_valid(y))
 	{
 		if (m_opt.min > x) x = m_opt.min;
 		if (x > m_opt.max) x = m_opt.max;
@@ -2260,8 +2498,8 @@ void SliderCtrl::BUILD()
 	auto temp = new wxBoxSizer(wxHORIZONTAL);
 
 	auto def_val = m_opt.get_default_value<ConfigOptionInt>()->value;
-	auto min = m_opt.min == INT_MIN ? 0 : m_opt.min;
-	auto max = m_opt.max == INT_MAX ? 100 : m_opt.max;
+	auto min = m_opt.min == -FLT_MAX ? 0   : (int)m_opt.min;
+	auto max = m_opt.max ==  FLT_MAX ? 100 : (int)m_opt.max; // Edge: upstream has INT_MAX here, which drops the option's own max
 
 	m_slider = new wxSlider(m_parent, wxID_ANY, def_val * m_scale,
 							min * m_scale, max * m_scale,

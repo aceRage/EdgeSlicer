@@ -2,10 +2,12 @@
 #include "../GUI/I18N.hpp"
 #include "../GUI/GUI_App.hpp"
 #include "../GUI/FlowTypeHelper.hpp"
+#include "../GUI/BambuSendDiagnosis.hpp"
 #include "../GUI/DeviceManager.hpp"
 #include "../GUI/Jobs/ProgressIndicator.hpp"
 #include "../GUI/PartPlate.hpp"
 #include "libslic3r/CutUtils.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
@@ -21,11 +23,24 @@ const float MIN_PA_K_VALUE = 0.0;
 const float MAX_PA_K_VALUE = 1.0;
 
 std::unique_ptr<Worker> CalibUtils::print_worker;
-wxString wxstr_temp_dir = fs::path(fs::temp_directory_path() / "calib").wstring();
-static const std::string temp_dir = wxstr_temp_dir.utf8_string();
-static const std::string temp_gcode_path = temp_dir + "/temp.gcode";
-static const std::string path            = temp_dir + "/test.3mf";
-static const std::string config_3mf_path = temp_dir + "/test_config.3mf";
+
+// ORCA: built lazily so temporary_dir() is read on first use, after set_temporary_dir() has run at
+//       startup (it isolates the temp root per user to avoid cross-user collisions).
+static const std::string& calib_temp_dir()
+{
+    static const std::string dir = [] {
+        std::string d = temporary_dir() + "/calib";
+        boost::system::error_code ec;
+        fs::create_directories(fs::path(d), ec);   // best effort; the writers report their own failures
+        return d;
+    }();
+    return dir;
+}
+static std::string calib_temp_file(const std::string& name) { return calib_temp_dir() + "/" + name; }
+
+static const std::string gcode_filename  = "temp.gcode";
+static const std::string model_filename  = "test.3mf";
+static const std::string config_filename = "test_config.3mf";
 
 static std::string MachineBedTypeString[7] = {
     "auto",
@@ -95,8 +110,8 @@ std::string get_calib_mode_name(CalibMode cali_mode, int stage)
         return "input_shaping_freq_calib_mode";
     case CalibMode::Calib_Input_shaping_damp:
         return "input_shaping_damp_calib_mode";
-    case CalibMode::Calib_Junction_Deviation:
-        return "junction_deviation_calib_mode";
+    case CalibMode::Calib_Cornering:
+        return "cornering_calib_mode";
     default:
         assert(false);
         return "";
@@ -230,8 +245,8 @@ CalibMode CalibUtils::get_calib_mode_by_name(const std::string name, int& cali_s
         return CalibMode::Calib_Input_shaping_freq;
     else if (name == "input_shaping_damp_calib_mode")
         return CalibMode::Calib_Input_shaping_damp;
-    else if (name == "junction_deviation_calib_mode")
-        return CalibMode::Calib_Junction_Deviation;
+    else if (name == "cornering_calib_mode" || name == "junction_deviation_calib_mode")
+        return CalibMode::Calib_Cornering;
     return CalibMode::Calib_None;
 }
 
@@ -1079,14 +1094,14 @@ bool CalibUtils::process_and_store_3mf(Model *model, const DynamicPrintConfig &f
     part_plate->update_slice_result_valid_state(true);
 
     gcode_result->reset();
-    fff_print->export_gcode(temp_gcode_path, gcode_result, nullptr);
+    fff_print->export_gcode(calib_temp_file(gcode_filename), gcode_result, nullptr);
 
     std::vector<ThumbnailData*> thumbnails;
     PlateDataPtrs plate_data_list;
     partplate_list.store_to_3mf_structure(plate_data_list, true, 0);
 
     for (auto plate_data : plate_data_list) {
-        plate_data->gcode_file      = temp_gcode_path;
+        plate_data->gcode_file      = calib_temp_file(gcode_filename);
         plate_data->is_sliced_valid = true;
         FilamentInfo& filament_info = plate_data->slice_filaments_info.front();
         filament_info.type          = full_config.opt_string("filament_type", 0);
@@ -1146,7 +1161,7 @@ bool CalibUtils::process_and_store_3mf(Model *model, const DynamicPrintConfig &f
     }
 
     StoreParams store_params;
-    store_params.path            = path.c_str();
+    store_params.path            = calib_temp_file(model_filename);
     store_params.model           = model;
     store_params.plate_data_list = plate_data_list;
     store_params.config = &new_print_config;
@@ -1162,7 +1177,7 @@ bool CalibUtils::process_and_store_3mf(Model *model, const DynamicPrintConfig &f
     bool success = Slic3r::store_bbs_3mf(store_params);
 
     store_params.strategy = SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithSliceInfo | SaveStrategy::SkipAuxiliary;
-    store_params.path = config_3mf_path.c_str();
+    store_params.path = calib_temp_file(config_filename);
     success           = Slic3r::store_bbs_3mf(store_params);
 
     release_PlateData_list(plate_data_list);
@@ -1251,9 +1266,9 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
     PrintPrepareData job_data;
     job_data.is_from_plater = false;
     job_data.plate_idx = 0;
-    job_data._3mf_config_path = config_3mf_path;
-    job_data._3mf_path = path;
-    job_data._temp_path = temp_dir;
+    job_data._3mf_config_path = calib_temp_file(config_filename);
+    job_data._3mf_path = calib_temp_file(model_filename);
+    job_data._temp_path = calib_temp_dir();
 
     PlateListData plate_data;
     plate_data.is_valid = true;
@@ -1273,7 +1288,8 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
     print_job->m_project_name = get_calib_mode_name(cali_mode, flow_ratio_mode);
     print_job->set_calibration_task(true);
 
-    print_job->has_sdcard = obj_->get_sdcard_state() == MachineObject::SdcardState::HAS_SDCARD_NORMAL;
+    print_job->sdcard_state = (int) obj_->get_sdcard_state();
+    print_job->has_sdcard   = bambu_storage_usable_for_lan(print_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));
     print_job->set_print_config(MachineBedTypeString[bed_type], true, false, false, false, true, 0, 0, 0);
     print_job->set_print_job_finished_event(wxGetApp().plater()->get_send_calibration_finished_event(), print_job->m_project_name);
 

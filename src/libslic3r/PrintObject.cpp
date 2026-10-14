@@ -781,6 +781,10 @@ void PrintObject::generate_support_material()
             this->_generate_support_material();
             m_print->throw_if_canceled();
         }
+        // Orca: the tree support collision/avoidance caches and support nodes are only used while this step runs
+        // (detect_overhangs() rebuilds them from scratch), so don't keep them resident until the next slice.
+        // Side stabilizers below do not read this cache.
+        this->clear_tree_support_preview_cache();
 
         // Side stabilizers (Support/Stabilizers.hpp) ride on whatever support layers exist - the
         // generator's above, or none: they do not depend on Enable supports. With supports off the
@@ -1435,6 +1439,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "fuzzy_skin_scale"
             || opt_key == "fuzzy_skin_octaves"
             || opt_key == "fuzzy_skin_persistence"
+            || opt_key == "fuzzy_skin_ripples_per_layer"
+            || opt_key == "fuzzy_skin_ripple_offset"
+            || opt_key == "fuzzy_skin_layers_between_ripple_offset"
             || opt_key == "detect_overhang_wall"
             || opt_key == "unsupported_wall_last"
             || opt_key == "overhang_reverse"
@@ -1623,23 +1630,25 @@ PrintObject::OverSupportSettings PrintObject::over_support_settings() const
     // Auto support types put support under every overhang they detect, and a bottom bridge is
     // an overhang by construction. Manual (painted) types only support what the user enforced.
     s.is_auto = is_auto(m_config.support_type.value);
-    // How a generator refuses to support a bridge is not the same in all three of them, and the
+    // How a generator refuses to support a bridge is not the same in both of them, and the
     // classifier has to follow each one or it will call a face "over support" that nothing will be
-    // under. Read off the three call sites:
+    // under. Read off the two call sites:
     //   normal(auto)          SupportMaterial.cpp - `if (bridge_no_support) remove_bridges_from_
     //                         contacts(...)`, which takes NO length and drops every bridge it can
     //                         detect. The feature stands down for the whole object.
-    //   tree(auto), organic   TreeSupport3D.cpp - the same length-less removal, same gate.
-    //                         TreeSupport::generate() hands organic trees to TreeSupport3D before
-    //                         detect_overhangs() runs, so the length rule never applies here. The
-    //                         default tree style resolves to organic (SupportParameters.hpp).
-    //   tree(auto), classic   TreeSupport.cpp - `if (max_bridge_length > 0) remove_bridges_from_
-    //                         contacts(..., max_bridge_length, ...)`: a bottom bridge shorter than
+    //   tree(auto), every     TreeSupport.cpp - `if (max_bridge_length > 0) remove_bridges_from_
+    //   style                 contacts(..., max_bridge_length, ...)`: a bottom bridge shorter than
     //                         max_bridge_length in BOTH directions, and a straight perimeter segment
     //                         anchored at both ends and that short, get no support and stay real
     //                         bridges; a longer one is supported. Not gated on bridge_no_support,
     //                         and max_bridge_length defaults to 10 mm, so a gate that demanded 0
-    //                         here switched the feature off on every classic tree profile.
+    //                         here switched the feature off on every tree profile. ORGANIC trees
+    //                         take the same path: TreeSupport3D's generate_support_areas() calls
+    //                         TreeSupport::detect_overhangs() (its own length-less generate_
+    //                         overhangs() is compiled out), so bridge_no_support never reached an
+    //                         organic tree. Orca #11295 made the GUI say so (max_bridge_length shown
+    //                         and bridge_no_support hidden for every tree style); before it, this
+    //                         classifier keyed organic trees on bridge_no_support.
     // s.bridgeable is that length, scaled; 0 means nothing is bridgeable.
     if (s.is_auto) {
         if (m_config.support_type.value == stNormalAuto) {
@@ -1647,13 +1656,8 @@ PrintObject::OverSupportSettings PrintObject::over_support_settings() const
         } else if (m_config.support_type.value == stTreeAuto) {
             s.is_auto &= (m_config.support_interface_top_layers.value > 0 &&
                           m_config.support_critical_regions_only.value == false);
-            const auto style = m_config.support_style.value;
-            if (style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid) {
-                if (m_config.max_bridge_length.value > 0)
-                    s.bridgeable = scale_(m_config.max_bridge_length.value);
-            } else {
-                s.is_auto &= ! m_config.bridge_no_support.value;
-            }
+            if (m_config.max_bridge_length.value > 0)
+                s.bridgeable = scale_(m_config.max_bridge_length.value);
         }
     }
     this->slice_support_annotations(s.enforcers, s.blockers);
@@ -2071,7 +2075,50 @@ void PrintObject::detect_surfaces_type()
                     // This would also skip generation of very short dual bridge layers (that are shorter than N perimeters), but these are unecessary as the bridge distance is
                     // We could reduce this slightly to account for innacurcies in the clipping operation.
                     // TODO: Monitor GitHub issues to check whether second bridge layers are ommited where they should be generated. If yes, reduce the filtering distance
-                    
+
+                    // ORCA: Same-layer-top guard.
+                    //
+                    // Collect every stTop polygon present at layer i+1 (this region) and
+                    // expand it by the same `offset_distance` used by the bridge filter
+                    // above. Note that `offset_distance` here is the full wall-band
+                    // distance for the region (external wall width + all configured
+                    // internal wall widths, i.e. external + (wall_loops - 1) × internal),
+                    // not a single perimeter width. Any candidate second-bridge area that
+                    // falls under this expanded mask will be subtracted out below.
+                    //
+                    // Why this exists: detect_surfaces_type() classifies a layer's "top"
+                    // surfaces as the geometry that is not covered by the layer above. Those
+                    // stTop regions often have small stInternal islands embedded in them.
+                    // The pre-existing wall-band filter (shrink_ex/offset_ex by
+                    // offset_distance) is supposed to throw those tiny islands away, but
+                    // its result is sensitive to Clipper's floating-point order of
+                    // operations: on macOS ARM the filter eats them, on Windows/Intel it
+                    // doesn't. Visible bridges then show up scattered across the printed
+                    // top surface.
+                    //
+                    // Expanding stTop by offset_distance and subtracting it from the
+                    // overlap makes the decision platform-independent: an island fully
+                    // surrounded by stTop disappears regardless of which Clipper happens
+                    // to be doing the math, while large stInternal regions away from the
+                    // top survive intact (the expansion only nibbles the wall-band depth
+                    // inward).
+                    //
+                    // Keep ExPolygons throughout so that any holes inside an stTop surface
+                    // are offset with the correct sign (positive offset shrinks holes /
+                    // grows the solid region). Using Polygons + expand() would treat the
+                    // contour and each hole as independent polygons and could distort the
+                    // mask.
+                    ExPolygons same_layer_top_expanded;
+                    {
+                        ExPolygons same_layer_top;
+                        for (const Surface &s : top_surfs) {
+                            if (s.surface_type == stTop)
+                                same_layer_top.push_back(s.expolygon);
+                        }
+                        if (! same_layer_top.empty())
+                            same_layer_top_expanded = offset_ex(same_layer_top, offset_distance);
+                    }
+
                     // For each surface in the layer above
                     for (const Surface &s_up : top_surfs) {
                         // Only reclassify stInternal polygons (i.e. what will become later solid and sparse infill)
@@ -2086,10 +2133,16 @@ void PrintObject::detect_surfaces_type()
                         // Filter out the resulting candidate bridges based on size. First perform a shrink operation...
                         // ...followed by an expand operation to bring them back to the original size (positive offset)
                         overlap = offset_ex(shrink_ex(overlap, offset_distance), offset_distance);
-                        
+
+                        // ORCA: subtract the expanded same-layer stTop mask (see comment above
+                        // the mask construction). Drops stInternal islands fully surrounded by
+                        // stTop at i+1 without affecting bridges that lie away from the top.
+                        if (! same_layer_top_expanded.empty() && ! overlap.empty())
+                            overlap = diff_ex(overlap, same_layer_top_expanded, ApplySafetyOffset::Yes);
+
                         // Now subtract the filtered new bridge layer from the remaining internal surfaces to create the new internal surface
                         ExPolygons remainder = diff_ex(p_up, overlap, ApplySafetyOffset::Yes);
-                        
+
                         // Remainder stays as stInternal
                         ExPolygons unified_remainder = union_safety_offset_ex(remainder);
                         for (auto &ex_remainder : unified_remainder) {
@@ -3661,8 +3714,11 @@ void PrintObject::bridge_over_infill()
         // stInternal / stInternalSolid surfaces and keeps every stInternalBridge surface, in order, so this is what a
         // serial run produces.
         std::vector<std::vector<Surfaces>> rewritten(this->layers().size());
+        // Guard against size_t underflow when the object has 0 or 1 layers — there is
+        // no "layer above" to receive an extra bridge, so the whole pass is a no-op.
+        const size_t last = (this->layers().size() < 2) ? 0 : this->layers().size() - 1;
         // Process layers in parallel up to second-to-last
-        tbb::parallel_for( tbb::blocked_range<size_t>(0, this->layers().size() - 1), [this, &rewritten](const tbb::blocked_range<size_t>& r) {
+        tbb::parallel_for( tbb::blocked_range<size_t>(0, last), [this, &rewritten](const tbb::blocked_range<size_t>& r) {
             for (size_t lidx = r.begin(); lidx < r.end(); ++lidx)
             {
                 Layer* layer = this->get_layer(lidx);
@@ -4167,8 +4223,12 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
         config.sparse_infill_density.value = 0;
     else
         config.sparse_infill_density.value = std::min(config.sparse_infill_density.value, 100.);
-    if (config.fuzzy_skin.value != FuzzySkinType::None && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
-        config.fuzzy_skin.value = FuzzySkinType::None;
+    // A point distance of 0 divides every wall segment forever (infinite loop, then out of memory;
+    // Orca #11915 puts the minimum at 0.01). Switch fuzzy skin off for such a region, Disabled rather
+    // than None: painted fuzzy skin regions start from this config and turn None into All (#10312),
+    // which would bring the zero distance back.
+    if (config.fuzzy_skin.value != FuzzySkinType::Disabled_fuzzy && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
+        config.fuzzy_skin.value = FuzzySkinType::Disabled_fuzzy;
     return config;
 }
 

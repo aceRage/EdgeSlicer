@@ -491,7 +491,22 @@ BoundingBoxf3 GLVolume::transformed_convex_hull_bounding_box(const Transform3d& 
 
 BoundingBoxf3 GLVolume::transformed_non_sinking_bounding_box(const Transform3d& trafo) const
 {
-    return GUI::wxGetApp().plater()->model().objects[object_idx()]->volumes[volume_idx()]->mesh().transformed_bounding_box(trafo, 0.0);
+    // Snapmaker #753: the plater, the object or the volume may already be gone while the GUI is torn down / recreated.
+    auto* plater = GUI::wxGetApp().plater();
+    if (!plater)
+        return bounding_box().transformed(trafo);
+
+    const auto& objects = plater->model().objects;
+    int         obj_idx = object_idx();
+    if (obj_idx < 0 || obj_idx >= (int) objects.size() || !objects[obj_idx])
+        return bounding_box().transformed(trafo);
+
+    const auto& volumes = objects[obj_idx]->volumes;
+    int         vol_idx = volume_idx();
+    if (vol_idx < 0 || vol_idx >= (int) volumes.size())
+        return bounding_box().transformed(trafo);
+
+    return volumes[vol_idx]->mesh().transformed_bounding_box(trafo, 0.0);
 }
 
 const BoundingBoxf3& GLVolume::transformed_non_sinking_bounding_box() const
@@ -959,12 +974,52 @@ GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs&                  vo
     return list;
 }
 
-int GLVolumeCollection::get_selection_support_threshold_angle(bool& enable_support) const
+// ORCA: Compute slope.normal_z for 3D overhang highlight directly from support settings.
+// If support_threshold_angle is 0, use tree fallback angle (30 deg) for tree supports,
+// and derive an equivalent angle from threshold overlap for normal supports.
+float GLVolumeCollection::get_selection_support_normal_z() const
 {
-    const DynamicPrintConfig& glb_cfg = GUI::wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    enable_support                    = glb_cfg.opt_bool("enable_support");
-    int support_threshold_angle       = glb_cfg.opt_int("support_threshold_angle");
-    return support_threshold_angle;
+    const DynamicPrintConfig& glb_cfg  = GUI::wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    const auto support_type            = glb_cfg.opt_enum<SupportType>("support_type");
+    const int  support_threshold_angle = glb_cfg.opt_int("support_threshold_angle");
+    double angle_rad;
+
+    if (support_threshold_angle > 0) {
+        // Match support generation: explicit threshold angles are treated as inclusive.
+        const int effective_support_threshold_angle = std::min(support_threshold_angle + 1, 89);
+        angle_rad = Geometry::deg2rad(static_cast<double>(effective_support_threshold_angle));
+    } else if (is_tree(support_type)) {
+        angle_rad = Geometry::deg2rad(30.0); // fallback value for tree supports
+    } else { // For normal supports, if the angle is set to 0, calculate normal_z from overlap.
+        // Only this branch needs the full config; building it on every render pass for nothing is not free.
+        const DynamicPrintConfig full_cfg = GUI::wxGetApp().preset_bundle->full_config();
+        const double layer_height        = full_cfg.opt_float("layer_height");
+        const auto*  nozzle_diameter_opt = full_cfg.option<ConfigOptionFloats>("nozzle_diameter");
+        const int    wall_filament       = full_cfg.opt_int("wall_filament");
+        const size_t nozzle_count        = nozzle_diameter_opt->values.size();
+        const size_t wall_extruder_idx   = (wall_filament > 0 && wall_filament <= static_cast<int>(nozzle_count))
+            ? static_cast<size_t>(wall_filament - 1)
+            : 0; // Invalid extruder index falls back to extruder 1.
+        
+        // Use wall extruder's nozzle diameter for better estimation of external perimeter width,
+        // which is more relevant to overhang printing than the default nozzle diameter.
+        const double nozzle_diameter = nozzle_diameter_opt->values[wall_extruder_idx];
+
+        double external_perimeter_width = full_cfg.get_abs_value("outer_wall_line_width", nozzle_diameter);
+        if (external_perimeter_width <= 0.0) {
+            external_perimeter_width = full_cfg.get_abs_value("line_width", nozzle_diameter);
+
+            if (external_perimeter_width <= 0.0)
+                external_perimeter_width = nozzle_diameter;
+        }
+
+        const double overlap_width      = full_cfg.get_abs_value("support_threshold_overlap", external_perimeter_width);
+        const double lower_layer_offset = std::max(0.0, external_perimeter_width - overlap_width);
+
+        angle_rad = lower_layer_offset <= EPSILON ? Geometry::deg2rad(89.0) : std::atan(layer_height / lower_layer_offset);
+    }
+
+    return static_cast<float>(-std::cos(std::clamp(angle_rad, 0.0, Geometry::deg2rad(89.0))));
 }
 
 // BBS: add outline drawing logic
@@ -1001,6 +1056,10 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
     glsafe(::glCullFace(GL_BACK));
     if (disable_cullface)
         glsafe(::glDisable(GL_CULL_FACE));
+
+    // Only the overhang (slope) view reads it; the shader ignores slope.normal_z while slope.actived is off, so
+    // the preset lookups (and, with angle 0 and normal supports, a full config build) run only for that view.
+    const float support_normal_z = m_slope.isGlobalActive ? get_selection_support_normal_z() : 0.f;
 
     // Cut gizmo, phase 2 fix: a GHOSTED half (0 < alpha < 1) has to blend, and it
     // has to stop writing depth - otherwise it would keep occluding the cut sheet
@@ -1149,17 +1208,12 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
             shader->set_uniform("print_volume.type", -1);
         }
 
-        bool enable_support;
-        int  support_threshold_angle = get_selection_support_threshold_angle(enable_support);
-
-        float normal_z = -::cos(Geometry::deg2rad((float) support_threshold_angle));
-
         shader->set_uniform("volume_world_matrix", volume.first->world_matrix());
         shader->set_uniform("slope.actived", m_slope.isGlobalActive && !volume.first->is_modifier && !volume.first->is_wipe_tower);
         shader->set_uniform("slope.volume_world_normal_matrix",
                             static_cast<Matrix3f>(
                                 volume.first->world_matrix().matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>()));
-        shader->set_uniform("slope.normal_z", normal_z);
+        shader->set_uniform("slope.normal_z", support_normal_z);
 
 #if ENABLE_ENVIRONMENT_MAP
         unsigned int environment_texture_id  = GUI::wxGetApp().plater()->get_environment_texture_id();
@@ -1223,7 +1277,7 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
 
 bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, ModelInstanceEPrintVolumeState* out_state) const
 {
-    if (GUI::wxGetApp().plater() == NULL) {
+    if (GUI::wxGetApp().plater() == NULL || GUI::wxGetApp().is_recreating_gui()) {
         if (out_state != nullptr)
             *out_state = ModelInstancePVS_Inside;
         return false;

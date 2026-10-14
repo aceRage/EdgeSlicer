@@ -117,7 +117,7 @@ Everything else in the brief matched the real API exactly (`Plater::TakeSnapshot
 ## Build
 
 ```
-cmd /c C:\Users\acesa\AppData\Local\Temp\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad\build_next_wt.bat
+cmd /c %TEMP%\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad\build_next_wt.bat
   (cmake --build . --config Release --target ALL_BUILD, from C:\Dev\SnapmakerOrcaNext\build)
 ```
 

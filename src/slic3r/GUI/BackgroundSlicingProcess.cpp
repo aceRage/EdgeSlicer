@@ -240,8 +240,13 @@ void BackgroundSlicingProcess::process_fff()
 		//BBS: add plate index into render params
 		m_temp_output_path = this->get_current_plate()->get_tmp_gcode_path();
 		m_fff_print->export_gcode(m_temp_output_path, m_gcode_result, [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
-		if(m_fff_print->is_BBL_printer())
-			run_post_process_scripts(m_temp_output_path, false, "File", m_temp_output_path, m_fff_print->full_print_config());
+		// BBL printers post-process the g-code in place here, in the file the G-code viewer maps, so
+		// the preview re-reads its moves and line offsets from the edited file. The rest of m_gcode_result
+		// is kept (Edge stores nozzle grouping on Print, not on GCodeProcessorResult).
+		if (m_fff_print->is_BBL_printer()) {
+			if (run_post_process_scripts(m_temp_output_path, false, "File", m_temp_output_path, m_fff_print->full_print_config()))
+				m_fff_print->reload_gcode_moves(m_gcode_result);
+		}
 
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": export gcode finished");
 	}
@@ -848,7 +853,11 @@ void BackgroundSlicingProcess::finalize_gcode()
 	switch (copy_ret_val) {
 	case CopyFileResult::SUCCESS: break; // no error
 	case CopyFileResult::FAIL_COPY_FILE:
-		throw Slic3r::ExportError(GUI::format(_L("Copying of the temporary G-code to the output G-code failed. Maybe the SD card is write locked?\nError message: %1%"), error_message));
+		throw Slic3r::ExportError(GUI::format(
+			m_export_path_on_removable_media ?
+				_L("Copying of the temporary G-code to the output G-code failed. Maybe the SD card is write locked?\nError message: %1%") :
+				_L("Copying of the temporary G-code to the output G-code failed.\nError message: %1%"),
+			error_message));
 		break;
 	case CopyFileResult::FAIL_FILES_DIFFERENT:
 		throw Slic3r::ExportError(GUI::format(_L("Copying of the temporary G-code to the output G-code failed. There might be problem with target device, please try exporting again or using different device. The corrupted output G-code is at %1%.tmp."), export_path));

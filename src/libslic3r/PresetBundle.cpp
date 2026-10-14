@@ -1174,6 +1174,11 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Preset type is unknown, not loading: " << name;
             return false;
         }
+        // The name becomes <preset dir>/<name>.json: a name such as "..\..\x" must not climb out of it (Orca #15608).
+        if (!untrusted::is_relative_name_within_root(name, fs::path(collection->m_dir_path))) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " Preset name escapes the preset directory, not loading: " << name;
+            return false;
+        }
         if (overwrite == 0) overwrite = 1;
         if (auto p = collection->find_preset(name, false)) {
             if (p->is_default || p->is_system) {
@@ -1194,7 +1199,7 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         if (inherits_config) {
             ConfigOptionString *option_str = dynamic_cast<ConfigOptionString *>(inherits_config);
             inherits_value                 = option_str->value;
-            inherit_preset                 = collection->find_preset(inherits_value, false, true);
+            inherit_preset                 = collection->find_preset2(inherits_value);
         }
         if (inherit_preset) {
             new_config = inherit_preset->config;
@@ -2204,6 +2209,31 @@ void PresetBundle::load_installed_sla_materials(AppConfig &config)
         preset.set_visible_from_appconfig(config);
 }
 
+// Snapmaker #876: parse a '|'-separated list of doubles (flush_volumes_matrix / flush_volumes_vector)
+// stored in an AppConfig printer setting. An empty string (written after a device filament sync,
+// Snapmaker issue #616) or a malformed token used to make boost::lexical_cast throw and abort the
+// whole preset load at startup. Empty and malformed tokens are skipped; returns true and fills
+// `out` only when at least one valid value was parsed, so the existing defaults stay otherwise.
+bool PresetBundle::parse_flush_volume_list(const std::string &src, std::vector<double> &out)
+{
+    out.clear();
+    if (src.empty())
+        return false;
+    std::vector<std::string> tokens;
+    boost::algorithm::split(tokens, src, boost::algorithm::is_any_of("|"));
+    out.reserve(tokens.size());
+    for (const std::string &tok : tokens) {
+        if (tok.empty())
+            continue;
+        try {
+            out.push_back(boost::lexical_cast<double>(tok));
+        } catch (const boost::bad_lexical_cast &) {
+            // Skip a malformed entry rather than aborting the entire load.
+        }
+    }
+    return !out.empty();
+}
+
 void PresetBundle::update_selections(AppConfig &config)
 {
     std::string initial_printer_profile_name    = printers.get_selected_preset_name();
@@ -2232,16 +2262,14 @@ void PresetBundle::update_selections(AppConfig &config)
                                                                     filament_presets.size());
     ApplyFilamentColors(project_config, filamentColors);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
-    std::vector<std::string> matrix;
-    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_matrix")) {
-        boost::algorithm::split(matrix, config.get_printer_setting(initial_printer_profile_name, "flush_volumes_matrix"), boost::algorithm::is_any_of("|"));
-        auto flush_volumes_matrix = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
-        project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = std::vector<double>(flush_volumes_matrix.begin(), flush_volumes_matrix.end());
+    std::vector<double> flush_values;
+    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_matrix") &&
+        parse_flush_volume_list(config.get_printer_setting(initial_printer_profile_name, "flush_volumes_matrix"), flush_values)) {
+        project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = flush_values;
     }
-    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_vector")) {
-        boost::algorithm::split(matrix, config.get_printer_setting(initial_printer_profile_name, "flush_volumes_vector"), boost::algorithm::is_any_of("|"));
-        auto flush_volumes_vector = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
-        project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values = std::vector<double>(flush_volumes_vector.begin(), flush_volumes_vector.end());
+    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_vector") &&
+        parse_flush_volume_list(config.get_printer_setting(initial_printer_profile_name, "flush_volumes_vector"), flush_values)) {
+        project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values = flush_values;
     }
     if (config.has("app", "flush_multiplier")) {
         std::string str_flush_multiplier = config.get("app", "flush_multiplier");
@@ -2387,16 +2415,14 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
                                                                     filament_presets.size());
     ApplyFilamentColors(project_config, filamentColors);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
-    std::vector<std::string> matrix;
-    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_matrix")) {
-        boost::algorithm::split(matrix, config.get_printer_setting(initial_printer_profile_name, "flush_volumes_matrix"), boost::algorithm::is_any_of("|"));
-        auto flush_volumes_matrix = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
-        project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = std::vector<double>(flush_volumes_matrix.begin(), flush_volumes_matrix.end());
+    std::vector<double> flush_values;
+    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_matrix") &&
+        parse_flush_volume_list(config.get_printer_setting(initial_printer_profile_name, "flush_volumes_matrix"), flush_values)) {
+        project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = flush_values;
     }
-    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_vector")) {
-        boost::algorithm::split(matrix, config.get_printer_setting(initial_printer_profile_name, "flush_volumes_vector"), boost::algorithm::is_any_of("|"));
-        auto flush_volumes_vector = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
-        project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values = std::vector<double>(flush_volumes_vector.begin(), flush_volumes_vector.end());
+    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_vector") &&
+        parse_flush_volume_list(config.get_printer_setting(initial_printer_profile_name, "flush_volumes_vector"), flush_values)) {
+        project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values = flush_values;
     }
     if (config.has("app", "flush_multiplier")) {
         std::string str_flush_multiplier = config.get("app", "flush_multiplier");
@@ -2458,6 +2484,15 @@ void PresetBundle::export_selections(AppConfig &config)
     config.clear_section("presets");
     auto printer_name = printers.get_selected_preset_name();
     config.set("presets", PRESET_PRINTER_NAME, printer_name);
+
+    // Don't persist settings for the built-in "Default Printer" placeholder —
+    // it's only the initial state before a real printer is loaded/selected.
+    // Also clean up any stale entry that other code paths (e.g. bed type change)
+    // may have created for "Default Printer".
+    if (printer_name == "Default Printer") {
+        config.clear_printer_settings("Default Printer");
+        return;
+    }
 
     config.clear_printer_settings(printer_name);
     config.set_printer_setting(printer_name, PRESET_PRINTER_NAME, printer_name);

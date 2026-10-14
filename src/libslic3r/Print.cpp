@@ -1983,6 +1983,110 @@ void Print::validate_compacted_wipe_tower_clearance() const
     }
 }
 
+// Estimated outline of the prime tower's first layer, brim included, in bed coordinates (the plate origin
+// is added, like for the objects). Empty when the plate prints no tower. Before the tower is generated this
+// is the same estimate the plater draws, so a check built on it can run while the plate is still being laid
+// out.
+static Polygons estimated_prime_tower_outline(const Print &print)
+{
+    const PrintConfig &config = print.config();
+    // Custom G-code tool changes (MultiAsSingle) build a real tower on a plate whose objects
+    // all use one filament, so they have to be counted or the hull below collapses to a point.
+    const int           filaments_count = int(print.extruders(true).size());
+    const int           plate_index     = print.get_plate_index();
+    const Vec3d         plate_origin    = print.get_plate_origin();
+    const float         x               = config.wipe_tower_x.get_at(plate_index) + plate_origin(0);
+    const float         y               = config.wipe_tower_y.get_at(plate_index) + plate_origin(1);
+    const float         a               = config.wipe_tower_rotation_angle.value;
+
+    // The estimate resolves the effective width (a rib wall squares the tower).
+    const WipeTowerData &wipe_tower_estimate = print.wipe_tower_data(filaments_count);
+    const float          width               = wipe_tower_estimate.width;
+    const float          depth               = wipe_tower_estimate.depth;
+    const float          brim_width          = wipe_tower_estimate.brim_width;
+
+    Polygons outline;
+    // No gate on "is there a tower": one that is not printed estimates to zero, so the hull
+    // is degenerate and every check passes. Re-deriving it here missed towers printed with
+    // no tool change to purge for (smooth timelapse / wrapping detection).
+    if (width > EPSILON && depth > EPSILON) {
+        Polygon wipe_tower_convex_hull = estimate_wipe_tower_first_layer_outline(config, resolve_wipe_tower_type(config), width, depth, wipe_tower_estimate.height);
+        if (brim_width > EPSILON) {
+            Polygons brimmed = offset(wipe_tower_convex_hull, float(scale_(brim_width)));
+            if (!brimmed.empty())
+                wipe_tower_convex_hull = brimmed.front();
+        }
+        wipe_tower_convex_hull.rotate(Geometry::deg2rad(a));
+        wipe_tower_convex_hull.translate(Point(scale_(x), scale_(y)));
+        outline.push_back(wipe_tower_convex_hull);
+    }
+    return outline;
+}
+
+// Dual-nozzle (H2D / H2C / X2D): every nozzle that prints on the prime tower must reach it. Which nozzles
+// those are depends on how the filaments are grouped. Before slicing that is only known when the user fixed
+// it (a manual map): the tower is then printed by exactly the nozzles the used filaments are mapped to, and
+// one that cannot reach the tower makes the G-code unprintable. With automatic grouping the nozzle is not
+// known yet, so before slicing only a warning is possible (see layered_print_cleareance_valid()); once the
+// grouping has run (`grouping_done`, from Print::process()) the map in the config is the final one and is
+// checked whatever the mode was. Returns an empty string for everything that cannot be affected: one nozzle,
+// no declared areas (the U1, the Creator 5), no tower, or nozzles that reach the same bed.
+static std::string prime_tower_reach_error(const Print &print, bool grouping_done = false)
+{
+    const ExtruderAreas areas = print.get_extruder_areas();
+    if (!areas.multi() || !areas.has_exclusive_regions())
+        return {};
+    const PrintConfig &config = print.config();
+    const FilamentMapMode mode = config.filament_map_mode.value;
+    if ((!grouping_done && mode != fmmManual && mode != fmmNozzleManual) || !print.has_wipe_tower())
+        return {};
+    // Print by object with several objects builds no tower.
+    if (config.print_sequence == PrintSequence::ByObject && print.objects().size() > 1)
+        return {};
+
+    const Polygons tower = estimated_prime_tower_outline(print);
+    if (tower.empty())
+        return {};
+
+    // Filaments (0-based) per nozzle (0-based) that print on the tower.
+    std::vector<std::vector<unsigned int>> filaments_of(areas.count());
+    const std::vector<int> &filament_map = grouping_done ? config.filament_map.values : print.filament_map_input();
+    for (unsigned int f : print.extruders(true)) {
+        if (f >= filament_map.size())
+            continue;
+        const int e = filament_map[f] - 1;
+        if (e >= 0 && e < int(areas.count()))
+            filaments_of[size_t(e)].push_back(f);
+    }
+
+    const Vec3d        origin = print.get_plate_origin();
+    const ExtruderAreas world = translate_extruder_areas(areas, Vec2d(origin(0), origin(1)));
+    // The tower outline is an estimate (no real layout yet), so allow a little slack at the edge of a nozzle's reach.
+    constexpr double slack_mm = 0.5;
+    std::string text;
+    for (size_t e = 0; e < areas.count(); ++e) {
+        if (filaments_of[e].empty())
+            continue;
+        if (footprint_within(tower, world.printable[e], slack_mm))
+            continue;
+        std::string filament_list;
+        for (size_t i = 0; i < filaments_of[e].size(); ++i)
+            filament_list += (i == 0 ? "" : ", ") + std::to_string(filaments_of[e][i] + 1);
+        const BoundingBox bb = get_extents(areas.printable[e]);
+        const std::string nozzle = areas.count() == 2 ? (e == 0 ? _u8L("left") : _u8L("right"))
+                                                      : Slic3r::format(_u8L("nozzle %1%"), e + 1);
+        if (!text.empty())
+            text += "\n";
+        text += Slic3r::format(_u8L("The prime tower is outside what the %1% nozzle can reach (X:%2$.0f-%3$.0f, Y:%4$.0f-%5$.0f), "
+                                    "and filament %6% (assigned to that nozzle) prints on the tower. "
+                                    "Move the prime tower toward the middle of the plate, or change the filament grouping."),
+                               nozzle, unscale<double>(bb.min.x()), unscale<double>(bb.max.x()), unscale<double>(bb.min.y()),
+                               unscale<double>(bb.max.y()), filament_list);
+    }
+    return text;
+}
+
+
 //BBS
 static StringObjectException layered_print_cleareance_valid(const Print &print, StringObjectException *warning)
 {
@@ -2041,60 +2145,23 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
 
     //BBS: add the wipe tower check logic
     const PrintConfig &       config   = print.config();
-    // Custom G-code tool changes (MultiAsSingle) build a real tower on a plate whose objects
-    // all use one filament, so they have to be counted or the hull below collapses to a point.
-    int                 filaments_count = print.extruders(true).size();
-    int                 plate_index = print.get_plate_index();
     const Vec3d         plate_origin = print.get_plate_origin();
-    float               x            = config.wipe_tower_x.get_at(plate_index) + plate_origin(0);
-    float               y            = config.wipe_tower_y.get_at(plate_index) + plate_origin(1);
-    float               a            = config.wipe_tower_rotation_angle.value;
-    //float               v            = config.wiping_volume.value;
-
-    // The estimate resolves the effective width (a rib wall squares the tower).
-    const WipeTowerData &wipe_tower_estimate = print.wipe_tower_data(filaments_count);
-    float                width               = wipe_tower_estimate.width;
-    float                depth               = wipe_tower_estimate.depth;
-    float                brim_width          = wipe_tower_estimate.brim_width;
-
-    Polygons convex_hulls_temp;
-    // No gate on "is there a tower": one that is not printed estimates to zero, so the hull
-    // is degenerate and every check passes. Re-deriving it here missed towers printed with
-    // no tool change to purge for (smooth timelapse / wrapping detection).
-    if (width > EPSILON && depth > EPSILON) {
-        Polygon wipe_tower_convex_hull = estimate_wipe_tower_first_layer_outline(config, resolve_wipe_tower_type(config), width, depth, wipe_tower_estimate.height);
-        if (brim_width > EPSILON) {
-            Polygons brimmed = offset(wipe_tower_convex_hull, float(scale_(brim_width)));
-            if (!brimmed.empty())
-                wipe_tower_convex_hull = brimmed.front();
-        }
-        wipe_tower_convex_hull.rotate(Geometry::deg2rad(a));
-        wipe_tower_convex_hull.translate(Point(scale_(x), scale_(y)));
-        convex_hulls_temp.push_back(wipe_tower_convex_hull);
-    }
+    const Polygons      convex_hulls_temp = estimated_prime_tower_outline(print);
     if (!intersection(convex_hulls_other, convex_hulls_temp).empty()) {
         if (warning) {
             warning->string += L("Prime Tower") + L(" is too close to others, and collisions may be caused.\n");
         }
     }
     // Dual-nozzle (H2D / H2C / X2D): every nozzle that changes filament purges into the tower, so it must sit
-    // where each of them reaches. Only a warning (the tower outline is an estimate), and only when the
-    // plate really uses both nozzles: a manual map that keeps every used filament on one nozzle is fine
-    // anywhere that nozzle reaches.
-    if (warning && !convex_hulls_temp.empty()) {
+    // where each of them reaches. With automatic filament grouping the nozzles are not known before slicing,
+    // so this is only a warning (the tower outline is an estimate too). A manual grouping names the nozzles,
+    // and prime_tower_reach_error() makes it an error for the ones that cannot reach the tower.
+    const FilamentMapMode map_mode = config.filament_map_mode.value;
+    if (warning && !convex_hulls_temp.empty() && map_mode != fmmManual && map_mode != fmmNozzleManual) {
         const ExtruderAreas areas = print.get_extruder_areas();
         if (areas.multi() && areas.has_exclusive_regions()) {
-            bool uses_several_nozzles = true;
-            const FilamentMapMode mode = config.filament_map_mode.value;
-            if (mode == fmmManual || mode == fmmNozzleManual) {
-                std::set<int> nozzles;
-                for (unsigned int f : print.extruders(true))
-                    if (f < print.filament_map_input().size())
-                        nozzles.insert(print.filament_map_input()[f]);
-                uses_several_nozzles = nozzles.size() > 1;
-            }
             const ExtruderAreas world = translate_extruder_areas(areas, Vec2d(plate_origin(0), plate_origin(1)));
-            if (uses_several_nozzles && !footprint_within(convex_hulls_temp, world.shared))
+            if (!footprint_within(convex_hulls_temp, world.shared))
                 warning->string += L("Prime Tower") + L(" is outside the area both nozzles can reach, so the nozzle that cannot reach it cannot purge into it. Move it into the middle of the plate.\n");
         }
     }
@@ -2311,6 +2378,10 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         std::string        reach_error = extruder_reach_error(*this, &offending);
         if (!reach_error.empty())
             return { reach_error, offending, "" };
+        // The prime tower is printed by the nozzles the used filaments are mapped to, so it has to be inside their reach too.
+        reach_error = prime_tower_reach_error(*this);
+        if (!reach_error.empty())
+            return { reach_error, nullptr, "" };
     }
 
     if (m_config.spiral_mode) {
@@ -2614,18 +2685,46 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 
                 // Prusa: Fixing crashes with invalid tip diameter or branch diameter
                 // https://github.com/prusa3d/PrusaSlicer/commit/96b3ae85013ac363cd1c3e98ec6b7938aeacf46d
-                if (is_tree(object->config().support_type.value) && (object->config().support_style == smsTreeOrganic ||
-                    // Orca: use organic as default
-                    object->config().support_style == smsDefault)) {
-                    float extrusion_width = std::min(
-                        support_material_flow(object).width(),
-                        support_material_interface_flow(object).width());
-                    if (object->config().tree_support_tip_diameter < extrusion_width - EPSILON)
-                        return { L("Organic support tree tip diameter must not be smaller than support material extrusion width."), object, "tree_support_tip_diameter" };
-                    if (object->config().tree_support_branch_diameter_organic < 2. * extrusion_width - EPSILON)
-                        return { L("Organic support branch diameter must not be smaller than 2x support material extrusion width."), object, "tree_support_branch_diameter_organic" };
-                    if (object->config().tree_support_branch_diameter_organic < object->config().tree_support_tip_diameter)
-                        return { L("Organic support branch diameter must not be smaller than support tree tip diameter."), object, "tree_support_branch_diameter_organic" };
+                if (is_tree(object->config().support_type.value)) {
+                    if (object->config().support_style == smsTreeOrganic ||
+                        // Orca: use organic as default
+                        object->config().support_style == smsDefault) {
+
+                        if (warning) {
+                            // Orca: check the support wall count and the base pattern
+                            if (object->config().tree_support_wall_count > 1 &&
+                                object->config().support_base_pattern != SupportMaterialPattern::smpNone &&
+                                object->config().support_base_pattern != SupportMaterialPattern::smpDefault) {
+                                warning->string = L("For Organic supports, two walls are supported only with the Hollow/Default base pattern.");
+                                warning->opt_key = "support_base_pattern";
+                            }
+
+                            // Orca: check if the Lightning base pattern selected
+                            if (object->config().support_base_pattern == SupportMaterialPattern::smpLightning) {
+                                warning->string = L(
+                                    "The Lightning base pattern is not supported by this support type; Rectilinear will be used instead.");
+                                warning->opt_key = "support_base_pattern";
+                            }
+                        }
+
+                        float extrusion_width = std::min(
+                            support_material_flow(object).width(),
+                            support_material_interface_flow(object).width());
+                        if (object->config().tree_support_tip_diameter < extrusion_width - EPSILON)
+                            return { L("Organic support tree tip diameter must not be smaller than support material extrusion width."), object, "tree_support_tip_diameter" };
+                        if (object->config().tree_support_branch_diameter_organic < 2. * extrusion_width - EPSILON)
+                            return { L("Organic support branch diameter must not be smaller than 2x support material extrusion width."), object, "tree_support_branch_diameter_organic" };
+                        if (object->config().tree_support_branch_diameter_organic < object->config().tree_support_tip_diameter)
+                            return { L("Organic support branch diameter must not be smaller than support tree tip diameter."), object, "tree_support_branch_diameter_organic" };
+                    }
+                } else if (object->config().support_base_pattern == SupportMaterialPattern::smpLightning && warning) {
+                    // Orca: check if the Lightning base pattern selected
+                    warning->string  = L("The Lightning base pattern is not supported by this support type; Rectilinear will be used instead.");
+                    warning->opt_key = "support_base_pattern";
+                } else if (object->config().support_base_pattern == SupportMaterialPattern::smpNone && warning) {
+                    // Orca: check if the Hollow base pattern selected
+                    warning->string  = L("The Hollow base pattern is not supported by this support type; Rectilinear will be used instead.");
+                    warning->opt_key = "support_base_pattern";
                 }
             }
 
@@ -2871,45 +2970,46 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             };
             std::string warning_key;
 
-            // check jerk
-            if (m_default_object_config.default_jerk.values.front() == 1 || m_default_object_config.outer_wall_jerk.values.front() == 1 ||
-                m_default_object_config.inner_wall_jerk.values.front() == 1) {
-               warning->string = L("Setting the jerk speed too low could lead to artifacts on curved surfaces");
-               if (m_default_object_config.outer_wall_jerk.values.front() == 1)
-                    warning_key = "outer_wall_jerk";
-               else if (m_default_object_config.inner_wall_jerk.values.front() == 1)
-                    warning_key = "inner_wall_jerk";
-               else
-                    warning_key = "default_jerk";
-
-               warning->opt_key = warning_key;
-            }
-
-            if (warning_key.empty() && m_default_object_config.default_jerk.values.front() > 0) {
-               std::vector<std::string> jerk_to_check = {"default_jerk",     "outer_wall_jerk",    "inner_wall_jerk", "infill_jerk",
-                                                         "top_surface_jerk", "initial_layer_jerk", "travel_jerk"};
-               const auto               max_jerk = std::min(m_config.machine_max_jerk_x.values[0], m_config.machine_max_jerk_y.values[0]);
-               warning_key.clear();
-               if (m_default_object_config.default_jerk.values.front() > 0)
-                    warning_key = check_motion_ability_object_setting(jerk_to_check, max_jerk);
-               if (!warning_key.empty()) {
-                    warning->string = L(
-                        "The jerk setting exceeds the printer's maximum jerk (machine_max_jerk_x/machine_max_jerk_y).\nOrca will "
-                        "automatically cap the jerk speed to ensure it doesn't surpass the printer's capabilities.\nYou can adjust the "
-                        "maximum jerk setting in your printer's configuration to get higher speeds.");
-                    warning->opt_key = warning_key;
-               }
-            }
-
-            // check  junction deviation
             const auto max_junction_deviation = m_config.machine_max_junction_deviation.values[0];
-            if (warning_key.empty() && m_default_object_config.default_junction_deviation.values.front() > max_junction_deviation) {
-                warning->string  = L( "Junction deviation setting exceeds the printer's maximum value "
-                                      "(machine_max_junction_deviation).\nOrca will "
-                                      "automatically cap the junction deviation to ensure it doesn't surpass the printer's "
-                                      "capabilities.\nYou can adjust the "
-                                      "machine_max_junction_deviation value in your printer's configuration to get higher limits.");
-                warning->opt_key = warning_key;
+            const bool ignore_jerk_validation = m_config.gcode_flavor == gcfMarlinFirmware && max_junction_deviation > 0;
+
+            // check jerk
+            if (!ignore_jerk_validation) {
+                if (m_default_object_config.default_jerk.values.front() == 1 || m_default_object_config.outer_wall_jerk.values.front() == 1 ||
+                    m_default_object_config.inner_wall_jerk.values.front() == 1) {
+                   warning->string = L("Setting the jerk speed too low could lead to artifacts on curved surfaces");
+                   if (m_default_object_config.outer_wall_jerk.values.front() == 1)
+                        warning_key = "outer_wall_jerk";
+                   else if (m_default_object_config.inner_wall_jerk.values.front() == 1)
+                        warning_key = "inner_wall_jerk";
+                   else
+                        warning_key = "default_jerk";
+
+                   warning->opt_key = warning_key;
+                }
+
+                if (warning_key.empty() && m_default_object_config.default_jerk.values.front() > 0) {
+                   std::vector<std::string> jerk_to_check = {"default_jerk",     "outer_wall_jerk",    "inner_wall_jerk", "infill_jerk",
+                                                             "top_surface_jerk", "initial_layer_jerk", "travel_jerk"};
+                   const auto               max_jerk = std::min(m_config.machine_max_jerk_x.values[0], m_config.machine_max_jerk_y.values[0]);
+                   warning_key.clear();
+                   if (m_default_object_config.default_jerk.values.front() > 0)
+                        warning_key = check_motion_ability_object_setting(jerk_to_check, max_jerk);
+                   if (!warning_key.empty()) {
+                        warning->string = L(
+                            "The jerk setting exceeds the printer's maximum jerk (machine_max_jerk_x/machine_max_jerk_y).\n"
+                            "Orca will automatically cap the jerk speed to ensure it doesn't surpass the printer's capabilities.\n"
+                            "You can adjust the maximum jerk setting in your printer's configuration to get higher speeds.");
+                        warning->opt_key = warning_key;
+                   }
+                }
+            }
+            // check junction deviation
+            else if (m_default_object_config.default_junction_deviation.values.front() > max_junction_deviation) {
+                warning->string  = L( "Junction deviation setting exceeds the printer's maximum value (machine_max_junction_deviation).\n"
+                                      "Orca will automatically cap the junction deviation to ensure it doesn't surpass the printer's capabilities.\n"
+                                      "You can adjust the machine_max_junction_deviation value in your printer's configuration to get higher limits.");
+                warning->opt_key = "default_junction_deviation";
             }
             
             // check acceleration
@@ -3194,6 +3294,14 @@ void  PrintObject::clear_shared_object()
 void  PrintObject::copy_layers_from_shared_object()
 {
     if (m_shared_object) {
+        // Orca: Print::process() calls this once per slice for each sharing object, after clear_shared_object() has
+        // emptied any earlier alias, so the vectors hold only layers this object sliced itself before it started sharing
+        // (or nothing). Free them here, as clear_support_layers() / clear_layers() would; those skip deletion while
+        // m_shared_object is set.
+        for (SupportLayer *layer : m_support_layers)
+            delete layer;
+        for (Layer *layer : m_layers)
+            delete layer;
         m_layers.clear();
         m_support_layers.clear();
 
@@ -5429,6 +5537,26 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             for (size_t idx = 0; idx < object_unprintables.size() && idx < geometric_unprintables.size(); ++idx)
                 geometric_unprintables[idx].insert(object_unprintables[idx].begin(), object_unprintables[idx].end());
         }
+        // The prime tower is printed on by every filament, so a nozzle that cannot reach the tower cannot print
+        // any of them. Telling the grouping keeps an automatic grouping off that nozzle (a project whose
+        // tower sits in a strip only one nozzle reaches would otherwise be grouped onto the other one). When
+        // no nozzle reaches the tower there is nothing to steer towards, and the warning/error says so.
+        if (this->has_wipe_tower()) {
+            const ExtruderAreas areas = this->get_extruder_areas();
+            const Polygons      tower = estimated_prime_tower_outline(*this);
+            if (areas.multi() && areas.has_exclusive_regions() && !tower.empty()) {
+                const Vec3d         origin = this->get_plate_origin();
+                const ExtruderAreas world  = translate_extruder_areas(areas, Vec2d(origin(0), origin(1)));
+                std::vector<bool>   reaches(areas.count());
+                for (size_t e = 0; e < areas.count(); ++e)
+                    reaches[e] = footprint_within(tower, world.printable[e], 0.5);
+                if (std::any_of(reaches.begin(), reaches.end(), [](bool r) { return r; }))
+                    for (size_t e = 0; e < reaches.size() && e < geometric_unprintables.size(); ++e)
+                        if (!reaches[e])
+                            for (unsigned int f : this->extruders(true))
+                                geometric_unprintables[e].insert(int(f));
+            }
+        }
         this->set_geometric_unprintable_filaments(geometric_unprintables);
     }
 
@@ -5452,6 +5580,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         // position, missing a fresh collision. The tower geometry (tool_changes) is stored in the local
         // frame and is position independent, so re-checking here with the current position is correct.
         this->validate_compacted_wipe_tower_clearance();
+        // The grouping has run: whatever nozzle each filament ended up on must reach the tower.
+        const std::string reach_error = prime_tower_reach_error(*this, true);
+        if (!reach_error.empty())
+            throw Slic3r::SlicingError(reach_error);
     }
     if (this->set_started(psSkirtBrim)) {
         this->set_status(70, L("Generating skirt & brim"));
@@ -6583,6 +6715,24 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("plate_number", new ConfigOptionString(get_plate_number_formatted()));
     config.set_key_value("model_name", new ConfigOptionString(get_model_name()));
 
+    // the same type of filament contains multiple names, support exporting according to the filament name
+    auto full_print_config = this->full_print_config();
+    const ConfigOptionStrings* filament_settings_id = full_print_config.option<ConfigOptionStrings>("filament_settings_id");
+    std::string filament_name = "";
+    auto extruders = this->extruders(true);
+    if(!extruders.empty()) {
+        // first extruder is the default extruder
+        int extruder_id = extruders.front();
+        if(filament_settings_id->values.size() > extruder_id) {
+            filament_name = filament_settings_id->values[extruder_id];
+        }
+    }
+    size_t end_pos = filament_name.find_first_of("@");
+    if (end_pos != std::string::npos) {
+        filament_name = filament_name.substr(0, end_pos);
+    }
+    config.set_key_value("filament_name", new ConfigOptionString(filament_name));
+
     return this->PrintBase::output_filename(m_config.filename_format.value, ".gcode", filename_base, &config);
 }
 
@@ -6663,6 +6813,31 @@ void Print::export_gcode_from_previous_file(const std::string& file, GCodeProces
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ <<  boost::format(":  process the G-code file %1% successfully")%file.c_str();
+}
+
+void Print::reload_gcode_moves(GCodeProcessorResult* result) const
+{
+    GCodeProcessor processor;
+    GCodeProcessor::s_IsBBLPrinter = is_BBL_printer();
+    const Vec3d origin = this->get_plate_origin();
+    processor.set_xy_offset(origin(0), origin(1));
+    // Orca keeps nozzle_group_result on GCodeProcessorResult and re-seeds the
+    // processor from it; Edge stores grouping on Print instead, so the rest of
+    // `result` (including anything the preview does not re-read) is simply kept.
+    try {
+        processor.process_file(result->filename);
+    } catch (const std::exception& ex) {
+        // The edited file is what gets printed, so failing to preview it must not fail the slice.
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": cannot re-read the G-code file " << result->filename << ": " << ex.what();
+        std::lock_guard<std::mutex> lock(result->result_mutex);
+        result->lines_ends.clear();
+        return;
+    }
+
+    GCodeProcessorResult& reloaded = processor.result();
+    std::lock_guard<std::mutex> lock(result->result_mutex);
+    result->moves      = std::move(reloaded.moves);
+    result->lines_ends = std::move(reloaded.lines_ends);
 }
 
 std::tuple<float, float> Print::object_skirt_offset(double margin_height) const

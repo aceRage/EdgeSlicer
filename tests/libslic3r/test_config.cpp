@@ -832,6 +832,42 @@ TEST_CASE("Enum options list their keys in the order of their values", "[Config]
     }
 }
 
+TEST_CASE("support_style lists its keys and labels in the order of their values", "[Config][ConfigDefs][Support]")
+{
+    // Orca #12164: SupportMaterialStyle had organic last while support_style lists it fourth, so any
+    // code that reads enum_labels[value] (the unsaved-changes dialog upstream) or picks
+    // enum_values[value] (the Style filters in Tab.cpp and SupportSetEditDialog.cpp) shifted every
+    // tree style by one. The enum now follows the list. The option stays key-mapped in
+    // enum_choice_maps_by_key() because those filters show a subset of the list.
+    const ConfigOptionDef *def = print_config_def.get("support_style");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->enum_keys_map != nullptr);
+    REQUIRE(def->enum_values.size() == def->enum_labels.size());
+    REQUIRE(def->enum_values.size() == def->enum_keys_map->size());
+    for (size_t i = 0; i < def->enum_values.size(); ++i) {
+        INFO("index " << i << ", key " << def->enum_values[i]);
+        CHECK(def->enum_keys_map->at(def->enum_values[i]) == int(i));
+    }
+    CHECK(def->enum_labels[smsTreeOrganic] == "Organic");
+    CHECK(def->enum_labels[smsTreeSlim] == "Tree Slim");
+    CHECK(def->enum_labels[smsTreeStrong] == "Tree Strong");
+    CHECK(def->enum_labels[smsTreeHybrid] == "Tree Hybrid");
+    CHECK(def->enum_labels[smsSnug] == "Snug");
+
+    // The tree subset the Style filters build by value picks exactly the tree keys.
+    std::set<std::string> tree_keys;
+    for (int v : { smsDefault, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeOrganic })
+        tree_keys.insert(def->enum_values[size_t(v)]);
+    CHECK(tree_keys == std::set<std::string>{ "default", "tree_slim", "tree_strong", "tree_hybrid", "organic" });
+
+    // Values are stored by key, so a saved style reads back as the same style.
+    for (const char *key : { "default", "grid", "snug", "organic", "tree_slim", "tree_strong", "tree_hybrid" }) {
+        ConfigOptionEnum<SupportMaterialStyle> opt;
+        REQUIRE(opt.deserialize(key));
+        CHECK(opt.serialize() == key);
+    }
+}
+
 TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row", "[Config][ConfigDefs]")
 {
     // Every option Field.cpp maps by key: each listed key is a known value, the row a pick stores
@@ -863,8 +899,8 @@ TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row
         CHECK(enum_choice_value_at_index(def, -1) == -1);
         CHECK(enum_choice_value_at_index(def, int(def.enum_values.size())) == -1);
     }
-    // The helper names 17 options; a typo there would silently drop one from the mapping.
-    CHECK(mapped == 17);
+    // The helper names 18 options (17 plus gcode_flavor); a typo there would silently drop one from the mapping.
+    CHECK(mapped == 18);
 
     SECTION("locked_*_infill_pattern: the first row is \"default\" (ipCount), not ipMonotonic")
     {
@@ -1511,4 +1547,37 @@ TEST_CASE("apply ignore_nonexistent is honoured when typed apply cannot run", "[
     REQUIRE_FALSE(object.apply_to(region));
     REQUIRE_NOTHROW(region.apply(object, true));
     REQUIRE_THROWS_AS(region.apply(object, false), UnknownOptionException);
+}
+
+TEST_CASE("G-code flavor menu lists Repetier and keeps the C++ enum values", "[Config][ConfigDefs]")
+{
+    // Orca #13126 puts Repetier in the printer's firmware menu. The enum itself must not be renumbered:
+    // values are stored by key in files, but the numbers are pinned here so a reorder is a conscious act.
+    CHECK(int(gcfMarlinLegacy) == 0);
+    CHECK(int(gcfKlipper) == 1);
+    CHECK(int(gcfRepRapFirmware) == 2);
+    CHECK(int(gcfMarlinFirmware) == 3);
+    CHECK(int(gcfRepRapSprinter) == 4);
+    CHECK(int(gcfRepetier) == 5);
+
+    const ConfigOptionDef *def = print_config_def.get("gcode_flavor");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->enum_values.size() == def->enum_labels.size());
+    CHECK(enum_choice_maps_by_key("gcode_flavor"));
+
+    const std::vector<std::string> expected{"marlin", "klipper", "reprapfirmware", "repetier", "marlin2"};
+    CHECK(def->enum_values == expected);
+    for (const std::string &key : expected) {
+        ConfigOptionEnum<GCodeFlavor> opt;
+        INFO("key " << key);
+        REQUIRE(opt.deserialize(key));
+        CHECK(opt.serialize() == key);
+    }
+    // The row a pick stores shows the same row again, and Repetier is stored as gcfRepetier.
+    const int repetier_row = enum_choice_index_of_value(*def, int(gcfRepetier));
+    REQUIRE(repetier_row >= 0);
+    CHECK(def->enum_values[size_t(repetier_row)] == "repetier");
+    CHECK(enum_choice_value_at_index(*def, repetier_row) == int(gcfRepetier));
+    // Marlin 2 moved down one row but keeps its value.
+    CHECK(enum_choice_value_at_index(*def, enum_choice_index_of_value(*def, int(gcfMarlinFirmware))) == int(gcfMarlinFirmware));
 }

@@ -165,7 +165,7 @@ redone before every send.)
 - `POST /server/files/upload`, multipart with `file` (plus `print=false` and `root=gcodes`), answers
   201 `{"action": "create_file", "item": {...}, "print_started": false}`;
   `GET /server/files/metadata?filename=` reads it back; `DELETE /server/files/gcodes/<name>` removes
-  it. Verified end to end against 10.0.0.108 with a comment-only file, then deleted.
+  it. Verified end to end against 192.0.2.108 with a comment-only file, then deleted.
 - `filament_detect` is the RFID spool reader: it is blank for third-party spools, so colours come
   from `print_task_config`, not from it.
 
@@ -433,12 +433,12 @@ for a U1 (four loaded toolheads, the real printer's own `print_task_config` shap
   mapping that leaves a filament out (400 each), an unknown printer (404);
 - the printer can be removed again.
 
-Against the user's own U1s, read-only: all three answer, 10.0.0.108 is listed with its four
+Against the user's own U1s, read-only: all three answer, 192.0.2.108 is listed with its four
 toolheads and colours, `login_required` is false, and the upload contract was proven once with a
 comment-only `snorca_phone_test.gcode` (201, `print_started: false`, metadata matched, deleted
 again). No print was started on a real printer. In a browser at 375x812 the Devices tab showed the
 two printers the Stream tab's cameras contributed with live state, temperatures and a swatch per
-toolhead, and the Send sheet's mapping step pre-filled itself from 10.0.0.106's real toolheads
+toolhead, and the Send sheet's mapping step pre-filled itself from 192.0.2.106's real toolheads
 (black, red, blue, purple).
 
 `test_phone_send.py` (31 checks) and the phase-0a security gate pass unchanged on the same build.

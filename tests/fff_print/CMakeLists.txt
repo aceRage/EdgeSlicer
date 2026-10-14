@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	test_data.cpp
 	test_data.hpp
 	test_extrusion_entity.cpp
+	test_extrusion_processor.cpp
 	test_fill.cpp
 	test_flow.cpp
 	test_gcode.cpp
@@ -13,8 +14,10 @@ add_executable(${_TEST_NAME}_tests
 	test_cost_overrides_slice.cpp
 	test_cost_pricing_slice.cpp
 	test_gcodeprocessor.cpp
+	test_gcode_timing.cpp
 	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
+	test_input_shaping.cpp
 	test_image_row_preview.cpp
 	test_image_row_walls.cpp
 	test_model.cpp
@@ -27,8 +30,10 @@ add_executable(${_TEST_NAME}_tests
 	test_support_groups.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
+	test_fuzzy_skin_zero_distance.cpp
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
+	test_perimeters.cpp
 	test_seam_position.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
@@ -38,6 +43,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tree_support_determinism.cpp
 	test_tree_support.cpp
 	test_support_interface.cpp
+	test_support_patterns.cpp
 	test_stabilizers.cpp
 	test_stabilizer_bake.cpp
 	test_stabilizers_v2.cpp
