@@ -51,7 +51,7 @@ the tests never claimed that band. The other Minors are documentation precision 
   `cl` line from `libslic3r_tests.tlog/CL.command.1.tlog` and linked with the exact `link` line
   against the SNAPSHOT `libslic3r.lib`, into `scratchpad/rev_b0b3/probe.exe`. Cross-validation:
   that exe reproduces `[paintdepth]` **92/1500** exactly. Output: `scratchpad/rev_b0b3/
-  probe_run.log` (scratchpad = `C:\Users\acesa\AppData\Local\Temp\claude\C--Dev\
+  probe_run.log` (scratchpad = `%TEMP%\claude\C--Dev\
   85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad`).
 
 ## One line per mandatory check

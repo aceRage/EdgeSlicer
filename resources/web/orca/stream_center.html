@@ -1676,7 +1676,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                 { key: 'found', label: 'Found cameras', type: 'select', options: [],
                   showIf: function(v, inputs) { return v.kind === 'ipcam' && inputs.found.options.length > 0; },
                   onChange: function(ctx) { if (ctx.get('found')) ctx.set('ip', ctx.get('found')); } },
-                { key: 'ip', label: 'IP address, hostname, or full stream URL (http/rtsp)', value: h.ip || '', placeholder: 'e.g. 10.0.0.106' },
+                { key: 'ip', label: 'IP address, hostname, or full stream URL (http/rtsp)', value: h.ip || '', placeholder: 'e.g. 192.168.1.50' },
                 { key: 'name', label: 'Camera name in wyze-bridge (leave empty for RTSP firmware)', value: h.name || '', placeholder: 'e.g. garage-cam',
                   showIf: function(v) { return v.kind === 'wyze'; } },
                 { key: 'user', label: 'Camera user name', value: h.user || '', placeholder: 'e.g. admin', showIf: isCam },
