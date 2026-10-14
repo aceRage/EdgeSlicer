@@ -317,7 +317,18 @@ void SendJob::process(Ctl &ctl)
                 use_diag        = true;
             }
         } else {
-            ctl.update_status(curr_percent, _u8L("An SD card needs to be inserted before sending to printer."));
+            // Say which: a missing card, one the printer flags as abnormal (Orca #10981), or a read-only one.
+            switch (bambu_storage_issue(this->sdcard_state, false)) {
+            case BambuStorageIssue::Abnormal:
+                ctl.update_status(curr_percent, _u8L("The storage in the printer is abnormal. Replace it with a normal storage, or turn on Preferences > Bambu Network > Allow Abnormal Storage, before sending to the printer."));
+                break;
+            case BambuStorageIssue::ReadOnly:
+                ctl.update_status(curr_percent, _u8L("The storage in the printer is read-only. Please replace it with a normal storage before sending to the printer."));
+                break;
+            default:
+                ctl.update_status(curr_percent, _u8L("An SD card needs to be inserted before sending to printer."));
+                break;
+            }
             return;
         }
     }

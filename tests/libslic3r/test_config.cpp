@@ -832,6 +832,42 @@ TEST_CASE("Enum options list their keys in the order of their values", "[Config]
     }
 }
 
+TEST_CASE("support_style lists its keys and labels in the order of their values", "[Config][ConfigDefs][Support]")
+{
+    // Orca #12164: SupportMaterialStyle had organic last while support_style lists it fourth, so any
+    // code that reads enum_labels[value] (the unsaved-changes dialog upstream) or picks
+    // enum_values[value] (the Style filters in Tab.cpp and SupportSetEditDialog.cpp) shifted every
+    // tree style by one. The enum now follows the list. The option stays key-mapped in
+    // enum_choice_maps_by_key() because those filters show a subset of the list.
+    const ConfigOptionDef *def = print_config_def.get("support_style");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->enum_keys_map != nullptr);
+    REQUIRE(def->enum_values.size() == def->enum_labels.size());
+    REQUIRE(def->enum_values.size() == def->enum_keys_map->size());
+    for (size_t i = 0; i < def->enum_values.size(); ++i) {
+        INFO("index " << i << ", key " << def->enum_values[i]);
+        CHECK(def->enum_keys_map->at(def->enum_values[i]) == int(i));
+    }
+    CHECK(def->enum_labels[smsTreeOrganic] == "Organic");
+    CHECK(def->enum_labels[smsTreeSlim] == "Tree Slim");
+    CHECK(def->enum_labels[smsTreeStrong] == "Tree Strong");
+    CHECK(def->enum_labels[smsTreeHybrid] == "Tree Hybrid");
+    CHECK(def->enum_labels[smsSnug] == "Snug");
+
+    // The tree subset the Style filters build by value picks exactly the tree keys.
+    std::set<std::string> tree_keys;
+    for (int v : { smsDefault, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeOrganic })
+        tree_keys.insert(def->enum_values[size_t(v)]);
+    CHECK(tree_keys == std::set<std::string>{ "default", "tree_slim", "tree_strong", "tree_hybrid", "organic" });
+
+    // Values are stored by key, so a saved style reads back as the same style.
+    for (const char *key : { "default", "grid", "snug", "organic", "tree_slim", "tree_strong", "tree_hybrid" }) {
+        ConfigOptionEnum<SupportMaterialStyle> opt;
+        REQUIRE(opt.deserialize(key));
+        CHECK(opt.serialize() == key);
+    }
+}
+
 TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row", "[Config][ConfigDefs]")
 {
     // Every option Field.cpp maps by key: each listed key is a known value, the row a pick stores
