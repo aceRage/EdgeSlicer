@@ -3068,3 +3068,76 @@ TEST_CASE("an AMF metadata tag without a type fails to load instead of crashing"
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+// Orca #15608: a preset name is appended to the preset directory, so it must not climb out of it.
+TEST_CASE("is_relative_name_within_root refuses names that leave the directory", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir  = fs::temp_directory_path() / fs::unique_path("edgeslicer_rel_name_%%%%%%%%");
+    const fs::path root = dir / "root";
+    fs::create_directories(root);
+
+    CHECK(is_relative_name_within_root("My preset", root));
+    CHECK(is_relative_name_within_root("Bob's 0.2 (draft) @U1", root));
+    CHECK(is_relative_name_within_root("sub/preset", root));
+    CHECK(is_relative_name_within_root("a..b", root));
+
+    CHECK_FALSE(is_relative_name_within_root("", root));
+    CHECK_FALSE(is_relative_name_within_root("..", root));
+    CHECK_FALSE(is_relative_name_within_root("../x", root));
+    CHECK_FALSE(is_relative_name_within_root("..\\x", root));
+    CHECK_FALSE(is_relative_name_within_root("a/../../x", root));
+    CHECK_FALSE(is_relative_name_within_root("a\\..\\..\\x", root));
+    CHECK_FALSE(is_relative_name_within_root("/etc/x", root));
+    CHECK_FALSE(is_relative_name_within_root("\\x", root));
+    CHECK_FALSE(is_relative_name_within_root("C:\\x", root));
+    CHECK_FALSE(is_relative_name_within_root("C:x", root));
+    CHECK_FALSE(is_relative_name_within_root(std::string("a\0b", 3), root));
+
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("Importing a preset JSON whose name climbs out of the preset directory is refused", "[Untrusted][ZipSlip][Preset]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_import_name_%%%%%%%%");
+    fs::create_directories(dir / "src");
+    const std::string saved_data_dir = data_dir();
+    set_data_dir((dir / "data").string());
+
+    PresetBundle bundle;
+    bundle.update_user_presets_directory("default");
+
+    auto write_json = [&](const std::string &file, const std::string &name) {
+        nlohmann::json j;
+        j["name"]              = name;
+        j["version"]           = "1.0.0.0";
+        j["print_settings_id"] = name;
+        boost::nowide::ofstream out((dir / "src" / file).string(), std::ios::binary);
+        out << j.dump();
+        return (dir / "src" / file).string();
+    };
+    auto do_import = [&](const std::string &path) {
+        std::vector<std::string> files{path};
+        bundle.import_presets(files, [](const std::string &) { return 1; }, ForwardCompatibilitySubstitutionRule::Disable);
+        return files;
+    };
+    auto any_file_named = [&](const std::string &needle) {
+        for (fs::recursive_directory_iterator it(dir), end; it != end; ++it)
+            if (it->path().filename().string().find(needle) != std::string::npos && it->path().parent_path().filename() != "src")
+                return true;
+        return false;
+    };
+
+    // Control: an ordinary name imports and lands in the user print folder.
+    CHECK(do_import(write_json("ok.json", "Import control")).size() == 1);
+    CHECK(any_file_named("Import control.json"));
+
+    // Four levels up from <data>/user/default/process is the scratch dir itself, so an escape would land inside it.
+    CHECK(do_import(write_json("up1.json", "../../../../name-escape-a")).empty());
+    CHECK(do_import(write_json("up2.json", "..\\..\\..\\..\\name-escape-b")).empty());
+    CHECK_FALSE(any_file_named("name-escape"));
+
+    set_data_dir(saved_data_dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}

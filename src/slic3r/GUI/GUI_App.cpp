@@ -3426,10 +3426,11 @@ bool GUI_App::on_init_inner()
         //update_label_colours_from_appconfig();
     }
     if (bool new_sys_menu_enabled = app_config->get("sys_menu_enabled") == "1";
-        init_sys_menu_enabled != new_sys_menu_enabled)
+        init_sys_menu_enabled != new_sys_menu_enabled) {
 #ifdef __WINDOWS__
         NppDarkMode::SetSystemMenuForApp(new_sys_menu_enabled);
 #endif
+    }
 #endif
 
     if (m_last_config_version) {
@@ -4029,6 +4030,12 @@ bool GUI_App::on_init_inner()
             this->mainframe->register_win32_callbacks();
 #endif
             this->post_init();
+
+#ifdef __APPLE__
+            for (const auto& url : m_pending_mac_open_urls)
+                start_download(into_u8(url));
+            m_pending_mac_open_urls.clear();
+#endif // __APPLE__
 
             update_publish_status();
             if (!m_pending_connector_link.empty()) {
@@ -8646,7 +8653,10 @@ void GUI_App::MacOpenURL(const wxString& url)
         return;
     }
     m_url_open_pending = true;
-    start_download(into_u8(url));
+    if (!m_post_initialized)
+        m_pending_mac_open_urls.push_back(url);
+    else
+        start_download(into_u8(url));
 }
 
 // wxWidgets override to get an event on open files.

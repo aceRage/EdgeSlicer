@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode_timing.cpp
 	test_gcodeprocessor_times.cpp
 	test_gcodewriter.cpp
+	test_input_shaping.cpp
 	test_image_row_preview.cpp
 	test_image_row_walls.cpp
 	test_model.cpp
@@ -29,6 +30,7 @@ add_executable(${_TEST_NAME}_tests
 	test_support_groups.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
+	test_fuzzy_skin_zero_distance.cpp
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
@@ -41,6 +43,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tree_support_determinism.cpp
 	test_tree_support.cpp
 	test_support_interface.cpp
+	test_support_patterns.cpp
 	test_stabilizers.cpp
 	test_stabilizer_bake.cpp
 	test_stabilizers_v2.cpp
