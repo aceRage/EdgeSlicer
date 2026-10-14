@@ -91,8 +91,9 @@ private:
     // advisories the user may still choose to proceed past (e.g. slot overflow).
     void display_error_advisory(const wxString& msg);
     // Manual-mode post-match ratio guard: after a match completes, scan every non-pure
-    // recipe for any component > kMaxComponentPercent and list ALL such over-threshold
-    // colors in the warning banner (gap doc case 13).
+    // recipe for any component above the count-dependent recommended cap (85% for
+    // two-color, 70% for three-color) and list ALL such over-threshold colors in
+    // the warning banner (gap doc case 13 / Snap #1008).
     void check_manual_recipe_ratio();
 
     void set_match_buttons_state(bool matching);
