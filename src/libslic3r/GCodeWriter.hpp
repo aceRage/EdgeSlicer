@@ -158,7 +158,12 @@ public:
     std::string unlift();
     const Vec3d& get_position() const { return m_pos; }
     Vec3d&       get_position() { return m_pos; }
-    void        set_position(const Vec3d& in) { m_pos = in; }
+    void        set_position(const Vec3d& in) { m_pos = in; m_has_deferred_z = false; }
+    // Snapmaker #993 (Edge adaptation): set the writer's Z to the new layer's `z` without emitting a
+    // move, as GCode::change_layer() does; the next travel carries the Z change. The Z the head is
+    // physically at is remembered until a Z move is emitted, so the machine_max_speed_z cap measures
+    // that travel from where the head really is. m_pos (and everything that reads it) is unchanged.
+    void        defer_z_move(double z);
     double      get_zhop() const { return m_lifted; }
 
     //BBS: set offset for gcode writer
@@ -215,6 +220,12 @@ public:
     double          m_max_jerk_z;
     double          m_max_jerk_e;
     double          m_max_junction_deviation;
+    // Snapmaker #993: normal-mode machine_max_speed_z in mm/s; 0 (or less) means no cap.
+    double          m_max_speed_z = 0.;
+    // Snapmaker #993 (Edge adaptation): see defer_z_move(). Valid while m_pos.z() is still m_deferred_to_z.
+    bool            m_has_deferred_z   = false;
+    double          m_deferred_from_z  = 0.;
+    double          m_deferred_to_z    = 0.;
 
     unsigned int  m_travel_acceleration;
     unsigned int  m_travel_jerk;
@@ -267,6 +278,17 @@ public:
         Print
     };
 
+    // Snapmaker #993: Z travel speed (travel_speed_z, or the active travel speed when it is 0), in mm/s.
+    double      z_travel_speed_uncapped() const;
+    // ... capped by machine_max_speed_z, for moves that only change Z.
+    double      z_travel_speed() const;
+    // Cap `speed` (mm/s) so a move of `length` mm that changes Z by `dz` mm keeps its Z component within
+    // machine_max_speed_z. Rounded down to the emitted feedrate precision, so formatting cannot exceed it.
+    double      cap_speed_for_z(double speed, double dz, double length) const;
+    // The same for a straight XYZ move, measured between the emitted (quantized) end points.
+    double      xyz_travel_speed(const Vec3d &from, const Vec3d &to, double speed) const;
+    // The Z the head is physically at: the pre-layer-change Z while a deferred layer change is pending.
+    double      physical_z() const { return (m_has_deferred_z && m_pos.z() == m_deferred_to_z) ? m_deferred_from_z : m_pos.z(); }
     std::string _travel_to_z(double z, const std::string &comment);
     std::string _spiral_travel_to_z(double z, const Vec2d &ij_offset, const std::string &comment);
     // Orca: printable area of the active extruder (per-extruder when configured, otherwise the bed). Null when unknown.
