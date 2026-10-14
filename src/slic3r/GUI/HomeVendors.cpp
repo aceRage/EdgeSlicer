@@ -504,7 +504,10 @@ bool HomeVendors::handle(const json& msg)
         if (find(id))
             copy_spec(id);
     } else if (command == "vendor_csv") {
-        export_csv(msg.contains("keys") ? msg["keys"] : json::array());
+        long long max = 0; // 0 = all rows in one file
+        if (msg.contains("max") && msg["max"].is_number_integer())
+            max = std::max<long long>(0, std::min<long long>(msg["max"].get<long long>(), Vendors::CSV_MAX_RECORDS_CAP));
+        export_csv(msg.contains("keys") ? msg["keys"] : json::array(), size_t(max));
     } else if (command == "vendor_thumbs") {
         std::vector<std::string> keys;
         if (msg.contains("keys") && msg["keys"].is_array())
@@ -906,39 +909,78 @@ void HomeVendors::copy_spec(const std::string& id)
         notice(_u8L("The clipboard could not be opened."), true);
 }
 
-void HomeVendors::export_csv(const json& keys)
+void HomeVendors::export_csv(const json& keys, size_t max_rows)
 {
     // What the page shows, in its order; grouped per connector for the CSV.
-    std::vector<std::pair<Connector*, std::vector<Vendors::Item>>> groups;
+    std::vector<Vendors::CsvGroup> groups;
+    std::vector<Connector*>        owners;
     if (keys.is_array())
         for (const json& k : keys) {
             Connector*           c = nullptr;
             const Vendors::Item* i = k.is_string() ? item_of(k.get<std::string>(), &c) : nullptr;
             if (i == nullptr)
                 continue;
-            if (groups.empty() || groups.back().first != c)
-                groups.push_back({c, {}});
-            groups.back().second.push_back(*i);
+            if (groups.empty() || owners.back() != c) {
+                groups.push_back({c->spec.name, c->spec.vendor, {}});
+                owners.push_back(c);
+            }
+            groups.back().items.push_back(*i);
         }
     if (groups.empty()) {
         notice(_u8L("There is nothing to export."), true);
         return;
     }
-    wxFileDialog dlg(m_parent, _L("Export the list as CSV"), wxEmptyString, "vendor-models.csv", "CSV (*.csv)|*.csv",
-                     wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    // The files first, so the number of them is known before the file dialog.
+    const std::vector<std::string> files = Vendors::to_csv_parts(groups, max_rows);
+    const bool                     split = files.size() > 1;
+    // One file: the dialog asks before replacing. Several: it would only see the name without a
+    // number, so the dialog does not ask and every numbered name is checked below.
+    wxFileDialog dlg(m_parent, split ? _L("Export the list as numbered CSV files") : _L("Export the list as CSV"), wxEmptyString,
+                     "vendor-models.csv", "CSV (*.csv)|*.csv", split ? wxFD_SAVE : (wxFD_SAVE | wxFD_OVERWRITE_PROMPT));
     if (dlg.ShowModal() != wxID_OK)
         return;
-    std::string csv;
-    for (const auto& [c, items] : groups) {
-        std::string part = Vendors::to_csv(c->spec.name, c->spec.vendor, items);
-        if (!csv.empty())
-            part = part.substr(part.find("\r\n") + 2); // one mark and header for the whole file
-        csv += part;
+    const std::string chosen = into_u8(dlg.GetPath());
+    std::vector<fs::path> targets;
+    for (size_t n = 0; n < files.size(); ++n)
+        targets.push_back(into_path(wxString::FromUTF8(Vendors::csv_part_path(chosen, n + 1, files.size()))));
+    if (split) {
+        std::vector<std::string> existing;
+        for (const fs::path& t : targets) {
+            boost::system::error_code ec;
+            if (fs::exists(t, ec))
+                existing.push_back(t.filename().string());
+        }
+        if (!existing.empty()) {
+            std::string list;
+            for (size_t n = 0; n < existing.size() && n < 5; ++n)
+                list += "\n" + existing[n];
+            if (existing.size() > 5)
+                list += "\n...";
+            MessageDialog sure(m_parent,
+                               wxString::Format(_L("%d of the %d files already exist and will be replaced:"), int(existing.size()),
+                                                int(files.size())) + wxString::FromUTF8(list),
+                               _L("Vendors"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
+            if (sure.ShowModal() != wxID_YES)
+                return;
+        }
     }
-    if (write_atomic(into_path(dlg.GetPath()), csv))
-        notice(_u8L("List exported."));
+    size_t written = 0;
+    for (size_t n = 0; n < files.size(); ++n) {
+        if (!write_atomic(targets[n], files[n])) {
+            notice(split ? into_u8(wxString::Format(_L("Could not write %s (%d of %d files were written)."),
+                                                    wxString::FromUTF8(targets[n].filename().string()), int(written), int(files.size())))
+                         : _u8L("The file could not be written."),
+                   true);
+            return;
+        }
+        ++written;
+    }
+    const int rows = int(Vendors::csv_row_count(groups));
+    if (split)
+        notice(into_u8(wxString::Format(_L("Exported %d records to %d files in %s."), rows, int(files.size()),
+                                        wxString::FromUTF8(targets[0].parent_path().string()))));
     else
-        notice(_u8L("The file could not be written."), true);
+        notice(_u8L("List exported."));
 }
 
 // ------------------------------------------------------------------------------ network ----

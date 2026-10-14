@@ -71,6 +71,11 @@
     <section id="vendors" class="section" hidden>
       <div class="lib-top">
         <div id="ven-status" class="status"></div>
+        <span id="ven-csv-opts" class="csv-opts">
+          <label for="ven-csv-max" id="ven-csv-max-label" data-i18n="csv_max">Max records per file</label>
+          <select id="ven-csv-max"></select>
+          <input id="ven-csv-custom" type="number" min="1" max="1000000" step="1" hidden>
+        </span>
         <button id="ven-csv" class="btn" type="button" data-i18n="export_csv">Export CSV</button>
         <button id="ven-import" class="btn" type="button" data-i18n="import">Import</button>
         <button id="ven-add" class="btn primary" type="button" data-i18n="add_connector">Add connector</button>
@@ -162,6 +167,7 @@
 <datalist id="dl-vendor"></datalist>
 <datalist id="dl-license"></datalist>
 
+<script src="csvmax.js"></script>
 <script src="home.js"></script>
 </body>
 </html>

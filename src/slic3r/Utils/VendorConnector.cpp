@@ -413,6 +413,10 @@ Spec spec_from_json(const json& j)
     for (const std::string* h : {&s.quota_used_header, &s.quota_limit_header, &s.quota_reset_header})
         if (!h->empty() && !is_token(*h))
             throw std::runtime_error("A quota header has a bad name.");
+
+    // Optional: how many CSV rows one exported file holds before the export splits (absent = no limit).
+    const json& csv = obj(j, "csv");
+    s.csv_max_records = int_of(csv, "max_records", 0, 1, CSV_MAX_RECORDS_CAP);
     return s;
 }
 
@@ -425,7 +429,7 @@ json spec_to_json(const Spec& s)
     list["paging"] = {{"type", s.paging}, {"param", s.page_param}, {"start", s.page_start}, {"size_param", s.size_param},
                       {"size", s.page_size}, {"has_more", s.has_more_path}, {"total", s.total_path}, {"cursor", s.cursor_path}};
     list["since"] = {{"param", s.since_param}, {"field", s.since_field}};
-    return {{"format", "edgeslicer-vendor-connector"},
+    json out = {{"format", "edgeslicer-vendor-connector"},
             {"version", 1},
             {"id", s.id},
             {"name", s.name},
@@ -439,6 +443,9 @@ json spec_to_json(const Spec& s)
             {"files", {{"path", s.subs_path}, {"fields", s.sub_fields}}},
             {"download", {{"path", s.download_path}, {"url_field", s.download_url_path}, {"direct_field", s.download_direct_field}, {"limited", s.downloads_limited}}},
             {"quota", {{"used", s.quota_used_header}, {"limit", s.quota_limit_header}, {"resets", s.quota_reset_header}}}};
+    if (s.csv_max_records > 0) // only when set, so templates without it stay as they were
+        out["csv"] = {{"max_records", s.csv_max_records}};
+    return out;
 }
 
 std::string make_id(const std::string& name, uint32_t random)
@@ -1069,20 +1076,32 @@ static std::string csv_cell(std::string v)
     return v;
 }
 
-std::string to_csv(const std::string& connector, const std::string& vendor, const std::vector<Item>& items)
+static const char* const CSV_BOM = "\xEF\xBB\xBF"; // a UTF-8 mark, so spreadsheets read names right
+
+static std::string csv_line(const std::vector<std::string>& cells)
 {
-    static const char* const header[] = {"connector", "vendor",    "item_id",   "name",       "designer", "license",
-                                         "tags",      "updated",   "page_url",  "thumbnail",  "file_id",  "file_name",
-                                         "variant",   "size_bytes", "plates",   "print_time", "colours"};
-    std::string out = "\xEF\xBB\xBF"; // a UTF-8 mark, so spreadsheets read names right
-    auto row = [&out](const std::vector<std::string>& cells) {
-        for (size_t i = 0; i < cells.size(); ++i) {
-            if (i) out += ',';
-            out += csv_cell(cells[i]);
-        }
-        out += "\r\n";
-    };
-    row(std::vector<std::string>(std::begin(header), std::end(header)));
+    std::string out;
+    for (size_t i = 0; i < cells.size(); ++i) {
+        if (i) out += ',';
+        out += csv_cell(cells[i]);
+    }
+    out += "\r\n";
+    return out;
+}
+
+static const std::vector<std::string>& csv_header()
+{
+    static const std::vector<std::string> header = {"connector", "vendor",    "item_id",   "name",       "designer", "license",
+                                                    "tags",      "updated",   "page_url",  "thumbnail",  "file_id",  "file_name",
+                                                    "variant",   "size_bytes", "plates",   "print_time", "colours"};
+    return header;
+}
+
+// The finished rows (one per file, one for an item without files) of the items, in order.
+static void csv_rows(const std::string& connector, const std::string& vendor, const std::vector<Item>& items,
+                     std::vector<std::string>& rows)
+{
+    const size_t columns = csv_header().size();
     for (const Item& i : items) {
         std::string tags;
         for (const std::string& t : i.tags)
@@ -1091,8 +1110,8 @@ std::string to_csv(const std::string& connector, const std::string& vendor, cons
                                                i.thumbnail};
         if (i.subs.empty()) {
             std::vector<std::string> cells = head;
-            cells.resize(std::size(header));
-            row(cells);
+            cells.resize(columns);
+            rows.push_back(csv_line(cells));
             continue;
         }
         for (const SubItem& s : i.subs) {
@@ -1103,10 +1122,58 @@ std::string to_csv(const std::string& connector, const std::string& vendor, cons
             cells.insert(cells.end(), {s.id, s.name, s.variant, s.size > 0 ? std::to_string(s.size) : std::string(),
                                        s.plates > 0 ? std::to_string(s.plates) : std::string(),
                                        s.print_time_s > 0 ? std::to_string(s.print_time_s) : s.print_time_text, colours});
-            row(cells);
+            rows.push_back(csv_line(cells));
         }
     }
+}
+
+std::string to_csv(const std::string& connector, const std::string& vendor, const std::vector<Item>& items)
+{
+    std::vector<std::string> rows;
+    csv_rows(connector, vendor, items, rows);
+    std::string out = CSV_BOM + csv_line(csv_header());
+    for (const std::string& r : rows)
+        out += r;
     return out;
+}
+
+size_t csv_row_count(const std::vector<CsvGroup>& groups)
+{
+    size_t n = 0;
+    for (const CsvGroup& g : groups)
+        for (const Item& i : g.items)
+            n += std::max<size_t>(1, i.subs.size());
+    return n;
+}
+
+std::vector<std::string> to_csv_parts(const std::vector<CsvGroup>& groups, size_t max_rows)
+{
+    std::vector<std::string> rows;
+    for (const CsvGroup& g : groups)
+        csv_rows(g.connector, g.vendor, g.items, rows);
+    // A row is finished text, so a cell with a comma, quote or line break is never cut.
+    const size_t per_file = (max_rows == 0 || max_rows >= rows.size()) ? std::max<size_t>(1, rows.size()) : max_rows;
+    const std::string head = CSV_BOM + csv_line(csv_header());
+    std::vector<std::string> files;
+    for (size_t from = 0; from < rows.size() || files.empty(); from += per_file) {
+        std::string out = head;
+        for (size_t k = from; k < rows.size() && k < from + per_file; ++k)
+            out += rows[k];
+        files.push_back(std::move(out));
+    }
+    return files;
+}
+
+std::string csv_part_path(const std::string& path, size_t index, size_t count)
+{
+    if (count <= 1)
+        return path;
+    const size_t slash = path.find_last_of("/\\");
+    const size_t dot   = path.find_last_of('.');
+    const bool   has_ext = dot != std::string::npos && dot > (slash == std::string::npos ? 0 : slash + 1) && dot + 1 < path.size();
+    const std::string base = has_ext ? path.substr(0, dot) : path;
+    const std::string ext  = has_ext ? path.substr(dot) : std::string(".csv");
+    return base + "_" + std::to_string(index) + ext;
 }
 
 // ------------------------------------------------------------------------------ import ----

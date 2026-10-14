@@ -549,6 +549,9 @@ void HomePanel::send_init()
     s["copy_json"]         = _u8L("Copy JSON");
     s["export"]            = _u8L("Export");
     s["export_csv"]        = _u8L("Export CSV");
+    s["csv_max"]           = _u8L("Max records per file");
+    s["csv_max_tip"]       = _u8L("More records than this are written as numbered files (name_1.csv, name_2.csv...)");
+    s["csv_custom"]        = _u8L("Custom...");
     s["edit"]              = _u8L("Edit");
     s["save"]              = _u8L("Save");
     s["cancel"]            = _u8L("Cancel");

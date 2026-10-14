@@ -83,7 +83,14 @@ struct Spec
     std::string quota_used_header;
     std::string quota_limit_header;
     std::string quota_reset_header;
+
+    // CSV export (optional): the most data rows one exported file holds; the export writes numbered
+    // files beyond it. 0 = not set. Template: "csv": {"max_records": 200}.
+    int csv_max_records { 0 };
 };
+
+// The largest max_records a template may carry.
+constexpr int CSV_MAX_RECORDS_CAP = 1000000;
 
 // A spec from JSON (a file the user imported, or app_config), checked: throws std::runtime_error
 // with a message for the user when it cannot be used. Unknown keys are ignored.
@@ -303,6 +310,23 @@ std::string download_file_name(const std::string& label, const std::string& url_
 // CSV of the items, one row per file (one row for an item without files): UTF-8, RFC 4180 quoting,
 // and a cell that a spreadsheet would run as a formula (= + - @ tab CR) prefixed with '.
 std::string to_csv(const std::string& connector, const std::string& vendor, const std::vector<Item>& items);
+
+// Items of one connector, for a CSV that covers several connectors.
+struct CsvGroup
+{
+    std::string       connector;
+    std::string       vendor;
+    std::vector<Item> items;
+};
+// The number of data rows the groups make (one per file of an item, one for an item without files).
+size_t csv_row_count(const std::vector<CsvGroup>& groups);
+// The groups as CSV files of at most `max_rows` data rows each (0 = no limit: exactly one file).
+// Every file has the mark and the header row, rows keep their order and are never cut, and each row
+// names its connector and vendor, so each file stands alone. Always returns at least one file.
+std::vector<std::string> to_csv_parts(const std::vector<CsvGroup>& groups, size_t max_rows);
+// The path of file `index` (1-based) out of `count`: the path itself when there is one file, else
+// "<name>_<index><extension>" ("vendor-models.csv" -> "vendor-models_2.csv"; ".csv" when it has none).
+std::string csv_part_path(const std::string& path, size_t index, size_t count);
 
 } // namespace Vendors
 } // namespace Slic3r

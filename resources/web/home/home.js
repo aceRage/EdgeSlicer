@@ -968,6 +968,65 @@
     state.venRendered = end;
   }
 
+  // ---- CSV export: max records per file ----
+  // Remembered per viewer: the last choice, and the choice made while exporting one connector alone.
+  const CSV_MAX_KEY = 'ven-csv-max';
+  function loadCsvMax() {
+    try {
+      const v = JSON.parse(localStorage.getItem(CSV_MAX_KEY) || '{}');
+      return { last: v && v.last !== undefined ? v.last : null, byId: v && typeof v.byId === 'object' && v.byId ? v.byId : {} };
+    } catch (e) { return { last: null, byId: {} }; }
+  }
+  function csvScope() {
+    const ids = [];
+    for (const i of state.venShown) if (ids.indexOf(i.connector) < 0) ids.push(i.connector);
+    return ids.map((id) => {
+      const c = connectorOf(id);
+      const csv = c && c.spec && c.spec.csv;
+      return { id: id, limit: csv ? CsvMax.clean(csv.max_records) : 0 };
+    });
+  }
+  function csvMaxValue() {
+    const sel = $('ven-csv-max');
+    return sel.value === 'custom' ? CsvMax.clean($('ven-csv-custom').value) : Number(sel.value) || 0;
+  }
+  function rememberCsvMax(n) {
+    const st = loadCsvMax();
+    st.last = n;
+    const scope = csvScope();
+    if (scope.length === 1) st.byId[scope[0].id] = n;
+    try { localStorage.setItem(CSV_MAX_KEY, JSON.stringify(st)); } catch (e) { /* private window: not remembered */ }
+  }
+  // Fill the control and select what the export should start with (see csvmax.js).
+  function fillCsvMax() {
+    const sel = $('ven-csv-max'), custom = $('ven-csv-custom');
+    const want = CsvMax.defaultMax(csvScope(), loadCsvMax());
+    sel.textContent = '';
+    for (const n of CsvMax.PRESETS) {
+      const o = el('option', '', n ? String(n) : t('all', 'All'));
+      o.value = String(n);
+      sel.appendChild(o);
+    }
+    const o = el('option', '', t('csv_custom', 'Custom...'));
+    o.value = 'custom';
+    sel.appendChild(o);
+    if (CsvMax.PRESETS.indexOf(want) >= 0) {
+      sel.value = String(want);
+      custom.hidden = true;
+    } else {
+      sel.value = 'custom';
+      custom.value = String(want);
+      custom.hidden = false;
+    }
+    sel.title = custom.title = t('csv_max_tip', 'More records than this are written as numbered files (name_1.csv, name_2.csv...)');
+    custom.setAttribute('aria-label', t('csv_max', 'Max records per file'));
+  }
+
+  // The control is refilled only when the set of connectors listed changes, so a choice the user
+  // just made is not reset by a re-render (a sync, a search).
+  let csvShownScope = '';
+  function csvScopeKey() { return csvScope().map((c) => c.id + ':' + c.limit).join('|'); }
+
   function renderVendors(keepScroll) {
     const section = $('vendors');
     const scroll = keepScroll ? section.scrollTop : 0;
@@ -986,6 +1045,9 @@
     $('ven-csv').disabled = !ven.items.length;
     state.venShown = sortBy(ven.items.filter((i) => venMatchesExcept(i, '')), state.sort.vendors,
       (i) => i.name || '', (i) => isoSeconds(i.updated));
+    $('ven-csv-opts').hidden = !ven.items.length;
+    if (!$('ven-csv-max').options.length || csvScopeKey() !== csvShownScope) fillCsvMax();
+    csvShownScope = csvScopeKey();
     if ('IntersectionObserver' in window) {
       venThumbObserver = new IntersectionObserver((entries) => {
         for (const e of entries) if (e.isIntersecting) { askVenThumb(e.target.dataset.id); venThumbObserver.unobserve(e.target); }
@@ -1127,6 +1189,9 @@
       { path: 'download.direct_field', label: 'Or: direct link field of a file' },
       { path: 'download.limited', label: 'Downloads count against a limit (ask first)', check: true },
     ] },
+    { group: 'CSV export (optional)', fields: [
+      { path: 'csv.max_records', label: 'Max records per file (blank = one file)', number: true, optional: true, hint: '200' },
+    ] },
     { group: 'Quota headers (optional)', fields: [
       { path: 'quota.used', label: 'Used', hint: 'X-Api-Calls-Used' },
       { path: 'quota.limit', label: 'Limit', hint: 'X-Api-Calls-Limit' },
@@ -1149,6 +1214,15 @@
     let cur = o;
     for (const k of ks.slice(0, -1)) { if (!cur[k] || typeof cur[k] !== 'object') cur[k] = {}; cur = cur[k]; }
     cur[ks[ks.length - 1]] = v;
+  }
+
+  // Remove an optional key (and its object once empty), so a cleared box leaves the template as it was.
+  function clearPath(o, path) {
+    const ks = path.split('.');
+    const parents = [o];
+    for (const k of ks.slice(0, -1)) { const next = parents[parents.length - 1][k]; if (!next || typeof next !== 'object') return; parents.push(next); }
+    delete parents[parents.length - 1][ks[ks.length - 1]];
+    for (let n = parents.length - 1; n > 0; --n) { if (Object.keys(parents[n]).length) break; delete parents[n - 1][ks[n - 1]]; }
   }
 
   function openEditor(c) {
@@ -1259,7 +1333,10 @@
           if (f.hint) input.placeholder = f.hint;
           if (f.list) input.setAttribute('list', f.list);
           input.spellcheck = false;
-          input.addEventListener('input', () => setPath(editor.spec, f.path, f.number ? Number(input.value) : input.value.trim()));
+          input.addEventListener('input', () => {
+            if (f.optional && input.value.trim() === '') { clearPath(editor.spec, f.path); return; }
+            setPath(editor.spec, f.path, f.number ? Number(input.value) : input.value.trim());
+          });
         }
         if (f.check) { l.appendChild(input); l.appendChild(el('span', '', f.label)); }
         else { l.appendChild(el('span', '', f.label)); l.appendChild(input); }
@@ -1489,7 +1566,20 @@
       { label: t('import_paste', 'Paste JSON...'), run: () => post('vendor_import', { source: 'paste' }) },
     ]);
   });
-  $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key) }));
+  $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key), max: csvMaxValue() }));
+  $('ven-csv-max').addEventListener('change', () => {
+    const sel = $('ven-csv-max');
+    if (sel.value === 'custom') {
+      const custom = $('ven-csv-custom');
+      custom.hidden = false;
+      if (!CsvMax.clean(custom.value)) custom.value = '';
+      custom.focus();
+    } else {
+      $('ven-csv-custom').hidden = true;
+      rememberCsvMax(Number(sel.value));
+    }
+  });
+  $('ven-csv-custom').addEventListener('change', () => rememberCsvMax(csvMaxValue()));
   $('ven-detail-close').addEventListener('click', closeDetail);
   $('ven-detail').addEventListener('click', (e) => { if (e.target === $('ven-detail')) closeDetail(); });
   $('ven-editor-cancel').addEventListener('click', closeEditor);

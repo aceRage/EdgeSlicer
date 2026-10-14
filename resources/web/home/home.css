@@ -141,6 +141,10 @@ button, input, select { font: inherit; color: inherit; }
 
 /* ---- library ---- */
 .lib-top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.csv-opts { display: inline-flex; align-items: center; gap: 6px; color: var(--mute); font-size: 12px; }
+.csv-opts select, .csv-opts input { height: 32px; background: var(--ctl); border: 1px solid var(--ctl-line); border-radius: 6px; padding: 0 8px; }
+.csv-opts input { width: 84px; }
+.csv-opts select:focus, .csv-opts input:focus { outline: none; border-color: var(--accent); }
 .status { flex: 1; color: var(--mute); font-size: 12px; min-width: 0; }
 .status button.link { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; margin-left: 6px; }
 .status button.link:hover { text-decoration: underline; }
