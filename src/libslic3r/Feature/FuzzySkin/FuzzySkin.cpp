@@ -723,7 +723,7 @@ bool should_fuzzify(const FuzzySkinConfig& config, const int layer_id, const siz
 {
     const auto fuzziy_type = config.type;
 
-    if (fuzziy_type == FuzzySkinType::None) {
+    if (fuzziy_type == FuzzySkinType::None || fuzziy_type == FuzzySkinType::Disabled_fuzzy) {
         return false;
     }
     if (!config.fuzzy_first_layer && layer_id <= 0) {
@@ -824,7 +824,7 @@ static bool fuzzy_skip_overhangs_wanted(const PerimeterGenerator& g)
     if (g.object_config != nullptr && g.layer_id <= g.object_config->raft_layers)
         return false;
     for (const auto& region : g.regions_by_fuzzify)
-        if (region.first.type != FuzzySkinType::None && region.first.skip_overhangs)
+        if (region.first.type != FuzzySkinType::None && region.first.type != FuzzySkinType::Disabled_fuzzy && region.first.skip_overhangs)
             return true;
     return false;
 }

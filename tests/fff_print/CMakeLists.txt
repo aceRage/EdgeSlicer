@@ -30,6 +30,7 @@ add_executable(${_TEST_NAME}_tests
 	test_support_groups.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
+	test_fuzzy_skin_zero_distance.cpp
 	test_offset_layers.cpp
 	test_overlap_carving.cpp
 	test_perimeters.cpp
