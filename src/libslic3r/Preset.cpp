@@ -1716,7 +1716,7 @@ Preset* PresetCollection::get_preset_differed_for_save(Preset& preset)
     std::string& inherits = preset.inherits();
     Preset* parent_preset = nullptr;
     if (!inherits.empty()) {
-        parent_preset = this->find_preset(inherits, false, true);
+        parent_preset = this->find_preset2(inherits, false);
     }
     if (parent_preset) {
         auto option_differs_from_default = [](const ConfigBase &cfg, const t_config_option_key &opt_key, const ConfigOption *opt) {
@@ -1773,7 +1773,7 @@ int PresetCollection::get_differed_values_to_update(Preset& preset, std::map<std
     std::string& inherit_preset = preset.inherits();
     Preset* parent_preset = nullptr;
     if (!inherit_preset.empty()) {
-        parent_preset = this->find_preset(inherit_preset, false, true);
+        parent_preset = this->find_preset2(inherit_preset, false);
     }
     if (parent_preset) {
         auto option_differs_from_default = [](const ConfigBase &cfg, const t_config_option_key &opt_key, const ConfigOption *opt) {
@@ -1873,7 +1873,11 @@ void PresetCollection::load_project_embedded_presets(std::vector<Preset*>& proje
                     inherits_value.replace(pos, 1, 1, '~');
                     option_str->value = inherits_value;
                 }*/
-                inherit_preset = this->find_preset(inherits_value, false, true);
+                // Ultra: also a parent renamed since the project was saved (renamed_from), as for user presets.
+                // Without it the preset was rebuilt on the default preset: every setting it did not change
+                // itself came back as the default, and the empty default printer list showed it on every printer.
+                // inherits keeps the old name, so the project still opens in a release that knows only that one.
+                inherit_preset = this->find_preset2(inherits_value, false);
             }
             const Preset& default_preset = this->default_preset_for(config);
             if (inherit_preset) {
@@ -2076,7 +2080,7 @@ void PresetCollection::save_user_presets(const std::string& dir_path, const std:
                 preset->save(nullptr);
                 continue;
             }
-            Preset* parent_preset = this->find_preset(inherits, false, true);
+            Preset* parent_preset = this->find_preset2(inherits, false);
             if (!parent_preset) {
                 ++m_errors;
                 BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(" can not find parent preset for %1% , inherits %2%")%preset->name %inherits;
@@ -2201,7 +2205,8 @@ bool PresetCollection::load_user_preset(std::string name, std::map<std::string, 
                 inherits_value.replace(pos, 1, 1, '~');
                 option_str->value = inherits_value;
             }*/
-            inherit_preset = this->find_preset(inherits_value, false, true);
+            // Ultra: also a parent renamed since (renamed_from), as for local user presets.
+            inherit_preset = this->find_preset2(inherits_value, false);
         }
         const Preset& default_preset = this->default_preset_for(cloud_config);
         if (inherit_preset) {
@@ -2722,7 +2727,7 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
         preset.filament_id = filament_id;
     else {
         if (!inherits.empty()) {
-            Preset *parent = this->find_preset(inherits, false, true);
+            Preset *parent = this->find_preset2(inherits, false);
             if (parent)
                 preset.filament_id = parent->filament_id;
         }
@@ -2996,7 +3001,7 @@ void PresetCollection::save_current_preset(const std::string &new_name, bool det
     //BBS: only save difference for user preset
     Preset* parent_preset = nullptr;
     if (!final_inherits.empty()) {
-        parent_preset = this->find_preset(final_inherits, false, true);
+        parent_preset = this->find_preset2(final_inherits, false);
         if (parent_preset && this->get_selected_preset().base_id.empty()) {
             this->get_selected_preset().base_id = parent_preset->setting_id;
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " base_id: " << parent_preset->setting_id;
@@ -3024,7 +3029,7 @@ void PresetCollection::set_project_preset_printers(Preset &preset, ProjectPreset
     // FollowParent only undoes "every printer": printers picked by hand on the Dependencies page stay.
     if (!Preset::fits_every_printer(preset.config))
         return;
-    Preset *parent = preset.inherits().empty() ? nullptr : this->find_preset(preset.inherits(), false, true);
+    Preset *parent = preset.inherits().empty() ? nullptr : this->find_preset2(preset.inherits(), false);
     if (parent == nullptr)
         return;
     if (const auto *parent_list = parent->config.option<ConfigOptionStrings>("compatible_printers"))

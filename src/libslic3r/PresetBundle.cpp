@@ -1302,7 +1302,9 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             preset.filament_id = key_values[BBL_JSON_KEY_FILAMENT_ID];
         preset.is_external = true;
         preset.version     = *version;
-        inherit_preset     = collection->find_preset(inherits_value, false, true); // pointer maybe wrong after insert, redo find
+        // Ultra: redone with the renamed_from lookup the first find used, else a preset on a renamed parent
+        // lost its base_id and was saved whole instead of as its difference.
+        inherit_preset     = collection->find_preset2(inherits_value, false); // pointer maybe wrong after insert, redo find
         if (inherit_preset) preset.base_id = inherit_preset->setting_id;
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << preset.name << " have filament_id: " << preset.filament_id << " and base_id: " << preset.base_id;
         Preset::normalize(preset.config);
@@ -3157,7 +3159,7 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
                 }
             }
             else if (!filament_inherits.empty())
-                filament_parent_preset =  const_cast<PresetBundle*>(this)->filaments.find_preset(filament_inherits, false, true);
+                filament_parent_preset =  const_cast<PresetBundle*>(this)->filaments.find_preset2(filament_inherits, false);
 
             if (filament_parent_preset) {
                 std::vector<std::string> dirty_options = cfg_rw.diff(filament_parent_preset->config);

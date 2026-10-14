@@ -315,3 +315,230 @@ TEST_CASE("The shipped legacy_compatible_printers.json has the shape the loader 
         CHECK_FALSE(printers.empty());
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Edge: a renamed parent is resolved on every path (user folder, project 3MF, save), while the preset keeps
+// the old parent name, as upstream's migration does, so an older release sharing the data folder (a test copy
+// beside the installed build) or opening the project still finds the parent it knows.
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+// A renamed system parent that differs from the default preset, so a preset rebuilt on the default shows.
+void add_renamed_parent(RenameTestFilaments &filaments)
+{
+    add_system_filament(filaments, k1_parent, { "Creality K1C 0.6 nozzle", "Creality K1C 0.8 nozzle" }, { k1_old_parent });
+    filaments.find_preset(k1_parent, false, true)->config.option<ConfigOptionFloats>("filament_flow_ratio", true)->values = { 0.95 };
+    filaments.update_map_system_profile_renamed();
+}
+
+double flow_ratio(const Preset &preset) { return preset.config.option<ConfigOptionFloats>("filament_flow_ratio")->values.front(); }
+int    nozzle_temperature(const Preset &preset) { return preset.config.option<ConfigOptionInts>("nozzle_temperature")->values.front(); }
+
+// A project-inside filament as the 3MF reader hands it over: only the keys it sets itself.
+std::unique_ptr<Preset> project_filament(const std::string &name, const std::string &inherits)
+{
+    auto preset = std::make_unique<Preset>(Preset::TYPE_FILAMENT, name, false);
+    preset->is_project_embedded = true;
+    preset->config.set_key_value("inherits", new ConfigOptionString(inherits));
+    preset->config.set_key_value("filament_settings_id", new ConfigOptionStrings({ name }));
+    preset->config.set_key_value("nozzle_temperature", new ConfigOptionInts({ 245 }));
+    return preset;
+}
+
+void load_project_filaments(PresetCollection &filaments, std::vector<Preset *> presets)
+{
+    PresetsConfigSubstitutions substitutions;
+    filaments.load_project_embedded_presets(presets, PRESET_FILAMENT_NAME, substitutions, ForwardCompatibilitySubstitutionRule::EnableSilent);
+}
+
+} // namespace
+
+TEST_CASE("A user filament on a renamed parent loads on the new parent", "[Preset][RenamedParent]")
+{
+    ScopedTemporaryDir  temp_dir;
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    const fs::path    file   = write_user_filament(temp_dir.path(), "My PETG", k1_old_parent, R"(,"nozzle_temperature":["245"])");
+    const std::string before = read_file(file);
+    load_user_filaments(filaments, temp_dir.path());
+
+    const Preset *preset = filaments.find_preset("My PETG", false, true);
+    REQUIRE(preset != nullptr);
+    CHECK(preset->inherits() == k1_old_parent);
+    REQUIRE(filaments.get_preset_parent(*preset) != nullptr);
+    CHECK(filaments.get_preset_parent(*preset)->name == k1_parent);
+    // Its own value, and everything else (printers included) from the renamed parent.
+    CHECK(nozzle_temperature(*preset) == 245);
+    CHECK(flow_ratio(*preset) == Approx(0.95));
+    CHECK(printers_of(*preset) == std::vector<std::string>{ "Creality K1C 0.6 nozzle", "Creality K1C 0.8 nozzle" });
+    // Loading writes nothing: an older release sharing the data folder still reads the old parent name.
+    CHECK(read_file(file) == before);
+}
+
+TEST_CASE("Saving a user filament on a renamed parent writes only its difference to that parent", "[Preset][RenamedParent]")
+{
+    ScopedTemporaryDir  temp_dir;
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    const fs::path file = write_user_filament(temp_dir.path(), "My PETG", k1_old_parent, R"(,"nozzle_temperature":["245"])");
+    load_user_filaments(filaments, temp_dir.path());
+    REQUIRE(filaments.select_preset_by_name("My PETG", true));
+    filaments.get_edited_preset().config.option<ConfigOptionInts>("nozzle_temperature")->values = { 250 };
+
+    filaments.save_current_preset("My PETG");
+
+    // Without the parent the whole config was written (save(nullptr)), freezing every inherited value.
+    const nlohmann::json j = nlohmann::json::parse(read_file(file));
+    CHECK(j.value("inherits", std::string()) == k1_old_parent);
+    CHECK(j.at("nozzle_temperature") == nlohmann::json::array({ "250" }));
+    CHECK_FALSE(j.contains("filament_flow_ratio"));
+    CHECK_FALSE(j.contains("compatible_printers"));
+}
+
+TEST_CASE("A project filament on a renamed parent loads on the new parent", "[Preset][RenamedParent][ProjectPreset]")
+{
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    std::unique_ptr<Preset> old_name = project_filament("Project PETG", k1_old_parent);
+    std::unique_ptr<Preset> new_name = project_filament("Project PETG 2", k1_parent);
+    load_project_filaments(filaments, { old_name.get(), new_name.get() });
+
+    for (const std::string name : { "Project PETG", "Project PETG 2" }) {
+        INFO(name);
+        const Preset *preset = filaments.find_preset(name, false, true);
+        REQUIRE(preset != nullptr);
+        CHECK(preset->is_project_embedded);
+        REQUIRE(filaments.get_preset_parent(*preset) != nullptr);
+        CHECK(filaments.get_preset_parent(*preset)->name == k1_parent);
+        CHECK(nozzle_temperature(*preset) == 245);
+        // Not rebuilt on the default preset: the parent's values and its printers, not every printer.
+        CHECK(flow_ratio(*preset) == Approx(0.95));
+        CHECK(printers_of(*preset) == std::vector<std::string>{ "Creality K1C 0.6 nozzle", "Creality K1C 0.8 nozzle" });
+    }
+    // The project's next save stores it as its difference to the renamed parent, under the name it came with.
+    Preset *saved = filaments.get_preset_differed_for_save(*filaments.find_preset("Project PETG", false, true));
+    REQUIRE(saved != nullptr);
+    CHECK(saved->config.opt_string("inherits") == k1_old_parent);
+    CHECK_FALSE(saved->config.has("filament_flow_ratio"));
+    delete saved;
+}
+
+TEST_CASE("A name nothing was renamed from still fails to load as before", "[Preset][RenamedParent]")
+{
+    ScopedTemporaryDir  temp_dir;
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    write_user_filament(temp_dir.path(), "Orphan PETG", "Some Vendor PETG @Gone");
+    load_user_filaments(filaments, temp_dir.path());
+    CHECK(filaments.find_preset("Orphan PETG", false, true) == nullptr);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The shipped renames: Panchroma PLA Stain -> Satin (#491) and the U1 renamed_from coverage (v2.4.0).
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+const std::string profiles_dir() { return (fs::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string(); }
+
+// A vendor bundle from this tree's resources/profiles (OrcaFilamentLibrary behind it), with the system maps the
+// app builds after loading (renamed_from, aliases).
+struct ShippedVendor
+{
+    ScopedTemporaryDir            scratch;
+    ScopedDataDir                 data{ scratch.path() };
+    std::unique_ptr<PresetBundle> library;
+    std::unique_ptr<PresetBundle> bundle;
+
+    explicit ShippedVendor(const std::string &vendor)
+    {
+        library = std::make_unique<PresetBundle>();
+        library->load_vendor_configs_from_json(profiles_dir(), PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                               ForwardCompatibilitySubstitutionRule::EnableSilent);
+        PresetBundle *target = library.get();
+        if (vendor != PresetBundle::ORCA_FILAMENT_LIBRARY) {
+            bundle = std::make_unique<PresetBundle>();
+            bundle->load_vendor_configs_from_json(profiles_dir(), vendor, PresetBundle::LoadSystem,
+                                                  ForwardCompatibilitySubstitutionRule::EnableSilent, library.get());
+            target = bundle.get();
+        }
+        // load_installed_printers() is the public entry that runs update_system_maps().
+        AppConfig app_config;
+        target->load_installed_printers(app_config);
+    }
+    PresetBundle &get() { return bundle ? *bundle : *library; }
+};
+
+} // namespace
+
+TEST_CASE("A filament made on Panchroma PLA Stain @System survives the rename to Satin", "[Preset][RenamedParent][Profiles]")
+{
+    // #491 renamed the library's "Panchroma PLA Stain @System" to "Panchroma PLA Satin @System" (renamed_from).
+    // The BBL vendor's own "Panchroma PLA Stain @BBL ..." presets kept their names.
+    ShippedVendor     shipped(PresetBundle::ORCA_FILAMENT_LIBRARY);
+    PresetCollection &filaments = shipped.get().filaments;
+    const std::string stain     = "Panchroma PLA Stain @System";
+    const std::string satin     = "Panchroma PLA Satin @System";
+    REQUIRE(filaments.find_preset(satin, false, true) != nullptr);
+    REQUIRE(filaments.find_preset(stain, false, true) == nullptr);
+
+    SECTION("in the user presets folder") {
+        // As 2.4.5.5 saved it: only its difference, against the name the parent had then.
+        ScopedTemporaryDir user;
+        write_user_filament(user.path(), "My Panchroma", stain, R"(,"nozzle_temperature":["225"])");
+        load_user_filaments(filaments, user.path());
+    }
+    SECTION("inside a project") {
+        std::unique_ptr<Preset> preset = project_filament("My Panchroma", stain);
+        preset->config.option<ConfigOptionInts>("nozzle_temperature")->values = { 225 };
+        load_project_filaments(filaments, { preset.get() });
+    }
+
+    const Preset *preset = filaments.find_preset("My Panchroma", false, true);
+    REQUIRE(preset != nullptr);
+    REQUIRE(filaments.get_preset_parent(*preset) != nullptr);
+    CHECK(filaments.get_preset_parent(*preset)->name == satin);
+    CHECK(preset->inherits() == stain);
+    CHECK(nozzle_temperature(*preset) == 225);
+    // The parent's own values, not the defaults.
+    CHECK(flow_ratio(*preset) == Approx(0.95));
+    CHECK(preset->config.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values.front() == Approx(16.));
+    CHECK(preset->config.option<ConfigOptionStrings>("filament_vendor")->values == std::vector<std::string>{ "Polymaker" });
+    // Like its parent, listed for every printer.
+    CHECK(printers_of(*preset) == printers_of(*filaments.find_preset(satin, false, true)));
+}
+
+TEST_CASE("Every renamed U1 filament takes over user presets made on each of its old names", "[Preset][RenamedParent][Profiles]")
+{
+    ShippedVendor     shipped(PresetBundle::SM_BUNDLE);
+    PresetCollection &filaments = shipped.get().filaments;
+
+    // Old name -> the preset that lists it in renamed_from. Only instantiated (selectable) presets enter the
+    // collection, and only those can be a user preset's parent. An old name some preset still carries
+    // resolves to that preset instead, so it is left out.
+    std::vector<std::pair<std::string, std::string>> renames;
+    for (const Preset &preset : filaments)
+        if (preset.is_system)
+            for (const std::string &old_name : preset.renamed_from)
+                if (filaments.find_preset(old_name, false, true) == nullptr) {
+                    // The loader's map: on a clash between two presets claiming one old name, the first one.
+                    const std::string *target = filaments.get_preset_name_renamed(old_name);
+                    REQUIRE(target != nullptr);
+                    renames.emplace_back(old_name, *target);
+                }
+    REQUIRE(renames.size() >= 5);
+
+    ScopedTemporaryDir user;
+    for (size_t i = 0; i < renames.size(); ++i)
+        write_user_filament(user.path(), "U1 user " + std::to_string(i), renames[i].first);
+    load_user_filaments(filaments, user.path());
+    for (size_t i = 0; i < renames.size(); ++i) {
+        INFO(renames[i].first << " -> " << renames[i].second);
+        const Preset *preset = filaments.find_preset("U1 user " + std::to_string(i), false, true);
+        REQUIRE(preset != nullptr);
+        REQUIRE(filaments.get_preset_parent(*preset) != nullptr);
+        CHECK(filaments.get_preset_parent(*preset)->name == renames[i].second);
+        CHECK(printers_of(*preset) == printers_of(*filaments.find_preset(renames[i].second, false, true)));
+    }
+}
