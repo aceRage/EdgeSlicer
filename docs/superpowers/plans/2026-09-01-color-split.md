@@ -54,7 +54,7 @@
 
 - [ ] **Step 1: Rebuild the worktree on the new branch (build gate)**
 
-Create `C:\Users\acesa\AppData\Local\Temp\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad\build_next_wt_tests.bat` if missing:
+Create `%TEMP%\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad\build_next_wt_tests.bat` if missing:
 
 ```bat
 @echo off

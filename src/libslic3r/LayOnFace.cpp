@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 namespace Slic3r {
@@ -14,14 +15,16 @@ namespace Slic3r {
 namespace {
 
 // Candidate faces of `ch`, a convex hull in object coordinates.
-std::vector<LayOnFacePlane> hull_planes(const TriangleMesh &ch, const Transform3d &inst_matrix)
+std::vector<LayOnFacePlane> hull_planes(const TriangleMesh &ch, const Transform3d &inst_matrix, const LayOnFaceFilter &filter)
 {
     std::vector<LayOnFacePlane> planes;
 
-    // Following constants are used for discarding too small polygons.
-    const float minimal_area = 5.f; // in square mm (world coordinates)
-    const float minimal_side = 1.f; // mm
-    const float minimal_angle = 1.f; // degree, initial value was 10, but cause bugs
+    // Following constants are used for discarding too small polygons (see LayOnFaceFilter; the defaults
+    // are the original 5 mm², 1 mm and 1 degree).
+    const float minimal_side  = filter.min_side;      // mm
+    const float minimal_angle = filter.min_angle_deg; // degree, initial value was 10, but cause bugs
+    // Faces under minimal_area are never offered. Between it and filter.min_area they only make up filter.min_count.
+    const float minimal_area  = filter.min_count > 0 ? std::min(filter.floor_area, filter.min_area) : filter.min_area; // in square mm (world coordinates)
 
     // Now we'll go through all the facets and append Points of facets sharing the same normal.
     // This part is still performed in mesh coordinate system.
@@ -140,6 +143,14 @@ std::vector<LayOnFacePlane> hull_planes(const TriangleMesh &ch, const Transform3
     }
 
     std::sort(planes.rbegin(), planes.rend(), [](const LayOnFacePlane& a, const LayOnFacePlane& b) { return a.area < b.area; });
+
+    if (minimal_area < filter.min_area) {
+        // Every face of filter.min_area or more stays, and the largest smaller ones make up filter.min_count.
+        size_t keep = 0;
+        while (keep < planes.size() && planes[keep].area >= filter.min_area)
+            ++keep;
+        planes.resize(std::max(keep, std::min(filter.min_count, planes.size())));
+    }
     return planes;
 }
 
@@ -153,19 +164,146 @@ TriangleMesh part_hull(const ModelVolume &volume)
 
 } // namespace
 
-std::vector<LayOnFacePlane> lay_on_face_planes(const ModelObject &object, const Transform3d &inst_matrix)
+LayOnFaceFilter LayOnFaceFilter::for_gizmo(double size_diagonal)
+{
+    LayOnFaceFilter filter;
+    filter.min_side   = float(std::min(1., 0.05 * size_diagonal));
+    filter.min_count  = 12;
+    filter.floor_area = float(std::min(double(filter.min_area), std::max(0.01, 1e-4 * size_diagonal * size_diagonal)));
+    return filter;
+}
+
+std::vector<LayOnFacePlane> lay_on_face_planes(const ModelObject &object, const Transform3d &inst_matrix, const LayOnFaceFilter &filter)
 {
     // An object can only rest on its convex hull, so candidate faces are taken from the hull of all model parts.
     TriangleMesh ch;
     for (const ModelVolume* vol : object.volumes)
         if (vol->type() == ModelVolumeType::MODEL_PART)
             ch.merge(part_hull(*vol));
-    return hull_planes(ch.convex_hull_3d(), inst_matrix);
+    return hull_planes(ch.convex_hull_3d(), inst_matrix, filter);
 }
 
-std::vector<LayOnFacePlane> lay_on_face_planes(const ModelVolume &volume, const Transform3d &inst_matrix)
+std::vector<LayOnFacePlane> lay_on_face_planes(const ModelVolume &volume, const Transform3d &inst_matrix, const LayOnFaceFilter &filter)
 {
-    return hull_planes(part_hull(volume).convex_hull_3d(), inst_matrix);
+    return hull_planes(part_hull(volume).convex_hull_3d(), inst_matrix, filter);
+}
+
+double lay_on_face_size_diagonal(const ModelObject &object, int volume_idx, const Transform3d &instance_matrix_no_offset)
+{
+    BoundingBoxf3 bb;
+    for (size_t i = 0; i < object.volumes.size(); ++i) {
+        const ModelVolume &vol = *object.volumes[i];
+        if (vol.is_model_part() && (volume_idx < 0 || int(i) == volume_idx))
+            bb.merge(vol.get_convex_hull().transformed_bounding_box(instance_matrix_no_offset * vol.get_matrix()));
+    }
+    return bb.defined ? bb.size().norm() : 0.;
+}
+
+namespace {
+
+// Twice the facet's area along its normal, in mesh coordinates.
+Vec3d facet_cross(const indexed_triangle_set &its, int facet)
+{
+    const Vec3i32 &t = its.indices[facet];
+    const Vec3d    a = its.vertices[t[0]].cast<double>();
+    return (its.vertices[t[1]].cast<double>() - a).cross(its.vertices[t[2]].cast<double>() - a);
+}
+
+// A facet whose normal can't be trusted: its corners are (nearly) on one line.
+bool facet_without_area(const indexed_triangle_set &its, int facet, const Vec3d &cross)
+{
+    const Vec3i32 &t  = its.indices[facet];
+    const Vec3d    a  = its.vertices[t[0]].cast<double>();
+    const Vec3d    b  = its.vertices[t[1]].cast<double>();
+    const Vec3d    c  = its.vertices[t[2]].cast<double>();
+    const double   e2 = std::max({ (b - a).squaredNorm(), (c - a).squaredNorm(), (c - b).squaredNorm() });
+    // |cross| <= longest edge² * sin(angle at a corner): a sine under 1e-6 is float noise on collinear corners.
+    return cross.norm() <= 1e-6 * e2;
+}
+
+} // namespace
+
+std::vector<int> grow_flat_face(const indexed_triangle_set &its, const std::vector<Vec3i32> &face_neighbors, int seed, double max_angle_deg)
+{
+    std::vector<int> facets;
+    if (seed < 0 || size_t(seed) >= its.indices.size() || face_neighbors.size() != its.indices.size())
+        return facets;
+
+    const Vec3d seed_cross = facet_cross(its, seed);
+    if (facet_without_area(its, seed, seed_cross))
+        return { seed }; // no direction to compare the neighbours with
+    const Vec3d  seed_normal = seed_cross.normalized();
+    const double min_cos     = std::cos(max_angle_deg * PI / 180.);
+
+    // Only the facets of this face and its rim are tested, so the cost follows the face rather than the mesh.
+    std::vector<bool> seen(its.indices.size(), false);
+    std::vector<int>  stack{ seed };
+    seen[seed] = true;
+    while (!stack.empty()) {
+        const int facet = stack.back();
+        stack.pop_back();
+        facets.emplace_back(facet);
+        for (int j = 0; j < 3; ++j) {
+            const int next = face_neighbors[facet][j];
+            if (next < 0 || size_t(next) >= its.indices.size() || seen[next])
+                continue;
+            seen[next] = true; // decided once: the test is against the seed, so the way there doesn't matter
+            const Vec3d cross = facet_cross(its, next);
+            if (facet_without_area(its, next, cross) || cross.dot(seed_normal) >= min_cos * cross.norm())
+                stack.emplace_back(next);
+        }
+    }
+    return facets;
+}
+
+Vec3d flat_face_normal(const indexed_triangle_set &its, const std::vector<int> &facets)
+{
+    // The cross product's length is twice the facet's area, so summing them weights by area.
+    Vec3d sum = Vec3d::Zero();
+    for (int facet : facets)
+        if (facet >= 0 && size_t(facet) < its.indices.size())
+            sum += facet_cross(its, facet);
+    const double len = sum.norm();
+    return len > 0. ? Vec3d(sum / len) : Vec3d::Zero();
+}
+
+Vec3d mesh_normal_to_object(const Transform3d &volume_matrix, const Vec3d &mesh_normal)
+{
+    const Vec3d  n   = volume_matrix.matrix().block<3, 3>(0, 0).inverse().transpose() * mesh_normal;
+    const double len = n.norm();
+    return len > 0. ? Vec3d(n / len) : Vec3d::Zero();
+}
+
+std::vector<Vec3d> lay_on_face_hull_points(const ModelObject &object, int volume_idx)
+{
+    std::vector<Vec3d> points;
+    for (size_t i = 0; i < object.volumes.size(); ++i) {
+        const ModelVolume &vol = *object.volumes[i];
+        if (!vol.is_model_part() || (volume_idx >= 0 && int(i) != volume_idx))
+            continue;
+        const Transform3d matrix = vol.get_matrix();
+        for (const Vec3f &v : vol.get_convex_hull().its.vertices)
+            points.emplace_back(matrix * v.cast<double>());
+    }
+    return points;
+}
+
+double lay_on_face_recess_depth(const std::vector<Vec3d> &hull_points, const std::vector<Vec3d> &face_points, const Vec3d &normal,
+                                const Transform3d &instance_matrix_no_offset)
+{
+    if (hull_points.empty() || face_points.empty() || normal.isZero())
+        return 0.;
+    const Vec3d n = normal.normalized();
+    // How far the hull and the face reach along the normal: a face of the hull reaches as far as the hull does.
+    double hull_reach = std::numeric_limits<double>::lowest();
+    for (const Vec3d &p : hull_points)
+        hull_reach = std::max(hull_reach, p.dot(n));
+    double face_reach = std::numeric_limits<double>::lowest();
+    for (const Vec3d &p : face_points)
+        face_reach = std::max(face_reach, p.dot(n));
+    // A plane x.n = c in object coordinates is y.(I^-T n) = c at printed size, so distances along n divide by |I^-T n|.
+    const double scale = (instance_matrix_no_offset.matrix().block<3, 3>(0, 0).inverse().transpose() * n).norm();
+    return scale > 0. ? std::max(0., (hull_reach - face_reach) / scale) : 0.;
 }
 
 int find_largest_plane(const std::vector<LayOnFacePlane> &planes)
@@ -248,8 +386,9 @@ Transform3d lay_part_on_face_matrix(const ModelVolume &volume, const Transform3d
     // Pivot about the part's center so it turns in place instead of swinging around the object origin.
     const Vec3d       center      = volume.get_convex_hull().transformed_bounding_box(volume_matrix).center();
     const Transform3d turned      = Geometry::translation_transform(center) * rotation * Geometry::translation_transform(-center) * volume_matrix;
-    // The picked face is a face of the part's convex hull pointing straight down now, so it lies at the part's lowest
-    // world z. Slide the part along world Z until that is the bed (z = 0), which leaves its XY position alone. The slide
+    // The picked face points straight down now. A face of the part's convex hull lies at the part's lowest world z; a
+    // recessed one (picked under the cursor) sits above it while the part rests on its outer points. Either way, slide
+    // the part along world Z until its lowest point is on the bed (z = 0), which leaves its XY position alone. The slide
     // is worked out in object coordinates through the instance's linear part, so any rotation, mirror or scale of the
     // instance is respected.
     const double      face_z      = volume.get_convex_hull().transformed_bounding_box(instance_matrix * turned).min.z();

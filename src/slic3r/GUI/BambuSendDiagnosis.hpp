@@ -26,6 +26,23 @@ enum class BambuLanSkip {
 
 BambuLanSkip bambu_lan_skip_reason(bool has_ip, bool cloud_print_only, bool has_sdcard, bool has_access_code);
 
+// What is wrong with the printer's storage for a LAN upload, from MachineObject::SdcardState
+// (0 none, 1 normal, 2 abnormal, 3 read-only). Abnormal storage is accepted when the user turned
+// "Allow Abnormal Storage" on (Orca #10981): some printers flag good cards as abnormal after a
+// power cut or a cancelled print, and refused every LAN send until the card was reformatted.
+enum class BambuStorageIssue {
+    None,     // usable
+    Missing,  // no storage inserted
+    Abnormal, // the printer flags the storage as abnormal and the user did not allow it
+    ReadOnly, // read-only storage can never take an upload
+    Unknown,  // a state this code does not know
+};
+
+BambuStorageIssue bambu_storage_issue(int sdcard_state, bool allow_abnormal);
+
+// True when bambu_storage_issue() is None: the value PrintJob/SendJob::has_sdcard carries.
+bool bambu_storage_usable_for_lan(int sdcard_state, bool allow_abnormal);
+
 // "no_ip", "low_version", "no_sdcard", "no_password", or "" for None - the params.comments values.
 const char* bambu_lan_skip_tag(BambuLanSkip skip);
 
