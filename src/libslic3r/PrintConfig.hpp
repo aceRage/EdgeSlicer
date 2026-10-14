@@ -1508,6 +1508,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              initial_layer_acceleration))
     ((ConfigOptionFloatsOrPercents,     bridge_acceleration))
     ((ConfigOptionFloats,              travel_acceleration))
+    // Snapmaker #937 / #980: first-layer travel override; 0 keeps the initial layer acceleration.
+    ((ConfigOptionFloatOrPercent,      first_layer_travel_acceleration))
     ((ConfigOptionFloatsOrPercents,     sparse_infill_acceleration))
     ((ConfigOptionFloatsOrPercents,     internal_solid_infill_acceleration))
 
@@ -1518,6 +1520,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              top_surface_jerk))
     ((ConfigOptionFloats,              initial_layer_jerk))
     ((ConfigOptionFloats,              travel_jerk))
+    ((ConfigOptionFloatOrPercent,      first_layer_travel_jerk))
     ((ConfigOptionBool,               precise_z_height))
     ((ConfigOptionFloats,              default_junction_deviation))
         

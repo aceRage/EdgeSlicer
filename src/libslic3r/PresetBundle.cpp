@@ -4954,7 +4954,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     // Motion settings whose meaning depends on the firmware (Marlin jerk / junction deviation,
     // Klipper square-corner velocity and accel_to_decel). Accelerations and speeds DO carry.
     "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk", "travel_jerk",
-    "default_junction_deviation", "accel_to_decel_enable", "accel_to_decel_factor",
+    "first_layer_travel_jerk", "default_junction_deviation", "accel_to_decel_enable", "accel_to_decel_factor",
     // Internal switch set by the flow-rate calibration, not a user setting.
     "calib_flowrate_topinfill_special_order",
 };

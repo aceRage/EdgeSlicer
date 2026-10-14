@@ -815,7 +815,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool have_default_acceleration = process_flow_float("default_acceleration", 0) > 0;
 
     for (auto el : {"outer_wall_acceleration", "inner_wall_acceleration", "initial_layer_acceleration",
-        "top_surface_acceleration", "travel_acceleration", "bridge_acceleration", "sparse_infill_acceleration", "internal_solid_infill_acceleration"})
+        "first_layer_travel_acceleration", "top_surface_acceleration", "travel_acceleration", "bridge_acceleration", "sparse_infill_acceleration", "internal_solid_infill_acceleration"})
         toggle_field(el, have_default_acceleration);
 
     // Marlin 2 plans with the junction deviation once the printer's machine value is above zero: the
@@ -833,7 +833,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     const std::initializer_list<const char*> jerk_options = {
         "outer_wall_jerk", "inner_wall_jerk", "initial_layer_jerk",
-        "top_surface_jerk", "travel_jerk", "infill_jerk"
+        "first_layer_travel_jerk", "top_surface_jerk", "travel_jerk", "infill_jerk"
     };
 
     if (junction_deviation_enabled) {
