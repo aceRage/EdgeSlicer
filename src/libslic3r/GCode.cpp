@@ -2932,6 +2932,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     m_enable_cooling_markers = true;
     this->apply_print_config(print.config());
+    // Orca a2a9f95b6b: m_config is a FullPrintConfig, but only the print config was applied so far, so its
+    // object and region options still held the hard-coded defaults. Region options read below (small area
+    // infill flow compensation) never saw the process preset's value.
+    m_config.apply(print.default_object_config());
+    m_config.apply(print.default_region_config());
 
     // m_volumetric_speed = DoExport::autospeed_volumetric_limit(print);
     print.throw_if_canceled();
@@ -8058,6 +8063,7 @@ LayerResult GCode::process_layer(const Print& print,
                     layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
                     instance_to_print.print_object.slicing_parameters().raft_layers() == layer_to_print.object_layer->id();
 
+                m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
@@ -8486,6 +8492,7 @@ LayerResult GCode::process_layer(const Print& print,
             // extrusion). Without this, support_interface_speed/accel etc. resolve from
             // whatever object's config m_config last saw (a previous object on this layer,
             // or a previous layer's object), not this partition's own object.
+            m_config.apply(print.default_region_config());
             m_config.apply(obj.config(), true);
             m_layer                  = ltp.support_layer;
             m_object_layer_over_raft = false;
@@ -8698,6 +8705,8 @@ LayerResult GCode::process_layer(const Print& print,
                 bool object_layer_over_raft = layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
                                               instance_to_print.print_object.slicing_parameters().raft_layers() ==
                                                   layer_to_print.object_layer->id();
+                // Orca a2a9f95b6b: don't carry the previous object's region options into this one.
+                m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
