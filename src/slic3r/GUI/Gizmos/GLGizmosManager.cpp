@@ -407,7 +407,10 @@ void GLGizmosManager::refresh_on_off_state()
 
 void GLGizmosManager::reset_all_states()
 {
-    if (! m_enabled || m_serializing)
+    // The restore/new-project event can run before deferred OpenGL resource
+    // loading has populated the gizmo list.  There is nothing to reset until
+    // initialization completes.
+    if (! m_enabled || m_serializing || m_gizmos.empty())
         return;
 
     const EType current = get_current_type();
@@ -422,6 +425,9 @@ void GLGizmosManager::reset_all_states()
 
 bool GLGizmosManager::open_gizmo(EType type)
 {
+    if (m_gizmos.empty())
+        return false;
+
     int idx = static_cast<int>(type);
 
     // re-open same type cause closing
@@ -1480,10 +1486,12 @@ void GLGizmosManager::update_hover_state(const EType &type)
 
 bool GLGizmosManager::activate_gizmo(EType type)
 {
-    assert(!m_gizmos.empty());
-
     // already activated
-    if (m_current == type) return true;
+    if (m_current == type)
+        return true;
+
+    if (m_gizmos.empty())
+        return false;
 
     if (m_current != Undefined) {
         // clean up previous gizmo
