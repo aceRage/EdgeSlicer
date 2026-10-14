@@ -172,3 +172,38 @@ SCENARIO("Flow: Flow math for bridges", "[Flow]") {
         }
     }
 }
+
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/GCode/SmallAreaInfillFlowCompensator.hpp"
+
+// Orca #11716: the small-area infill flow model is interpolated with PCHIP, which stays monotone between the
+// model points where the old cubic spline could overshoot, and a model whose factors do not strictly increase is
+// rejected instead of being silently ignored.
+TEST_CASE("Small-area flow compensation follows its model without overshoot", "[Flow][SmallAreaFlow][Orca11716]")
+{
+    using Catch::Matchers::WithinAbs;
+    GCodeConfig config;
+    config.small_area_infill_flow_compensation_model.values = {
+        "0,0", "0.2,0.4444", "0.4,0.6145", "0.6,0.7059", "0.8,0.7619", "1.5,0.8571", "2,0.8889", "3,0.9231", "5,0.9520", "10,1" };
+    SmallAreaInfillFlowCompensator compensator(config);
+
+    // The model points themselves.
+    CHECK_THAT(compensator.modify_flow(0.4, 1., erSolidInfill), WithinAbs(0.6145, 1e-6));
+    CHECK_THAT(compensator.modify_flow(3., 1., erTopSolidInfill), WithinAbs(0.9231, 1e-6));
+    // Monotone and inside [0, 1] all the way, with no overshoot past the next point.
+    double previous = 0.;
+    for (int i = 1; i < 1000; ++i) {
+        const double length = 0.01 * i;
+        const double factor = compensator.modify_flow(length, 1., erSolidInfill);
+        INFO("length " << length);
+        REQUIRE(factor >= previous);
+        REQUIRE(factor <= 1.);
+        previous = factor;
+    }
+    // Lines past the last point and other roles keep their flow.
+    CHECK(compensator.modify_flow(20., 1., erSolidInfill) == 1.);
+    CHECK(compensator.modify_flow(1., 1., erInternalInfill) == 1.);
+
+    config.small_area_infill_flow_compensation_model.values = { "0,0", "1,0.5", "2,0.5", "10,1" };
+    CHECK_THROWS_AS(SmallAreaInfillFlowCompensator(config), Slic3r::InvalidArgument);
+}

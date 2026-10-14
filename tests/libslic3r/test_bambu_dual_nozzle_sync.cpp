@@ -34,13 +34,13 @@ PrinterNozzle nozzle(int pos, const char *dia = "0.4", NozzleVolumeType v = nvtS
     return n;
 }
 
-// The owner's H2C ("3DPO", 2026-09-23): a one-slot AMS HT on the left, two four-slot AMS on the
+// A dual-nozzle H2C ("Workshop H2C", 2026-09-23): a one-slot AMS HT on the left, two four-slot AMS on the
 // right, 0.4 standard nozzles on both extruders and five more in the right extruder's rack.
 PrinterState h2c_state()
 {
     PrinterState s;
-    s.dev_id                = "31B8AK5C0900288";
-    s.dev_name              = "3DPO";
+    s.dev_id                = "31B00C000000001";
+    s.dev_name              = "Workshop H2C";
     s.printer_type          = "O1C2";
     s.has_report            = true;
     s.physical_extruder_map = H2_MAP;
@@ -57,7 +57,7 @@ PrinterState h2c_state()
 PrinterState h2d_state()
 {
     PrinterState s;
-    s.dev_id                = "0948AD561201535";
+    s.dev_id                = "0948AD000000001";
     s.printer_type          = "O1D";
     s.has_report            = true;
     s.physical_extruder_map = H2_MAP;
@@ -291,7 +291,7 @@ TEST_CASE("Confirmation is remembered until something relevant changes", "[DualN
     CHECK(needs_confirmation(c, off, used, map) == ConfirmReason::None);
 
     PrinterState other = s;
-    other.dev_id = "0948AD561201535";
+    other.dev_id = "0948AD000000001";
     CHECK(needs_confirmation(c, other, used, map) == ConfirmReason::PrinterChanged);
 
     PrinterState swapped = s;

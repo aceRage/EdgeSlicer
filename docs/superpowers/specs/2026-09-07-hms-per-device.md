@@ -5,7 +5,7 @@
 On 2026-09-06 the user's H2C (serial `31B...`, model `O1C2`) stopped a print and reported HMS
 `05004046`. The hub notification, and the Devices card behind it, said
 
-> 3DPO reported error 05004046
+> Workshop H2C reported error 05004046
 
 and nothing else. The printer's own sentence for that code is
 
@@ -82,7 +82,7 @@ The three places the fork turns a code into text, all through the same two entry
 * **(c) notifications** - there is no separate lookup. `RemoteEvents::step` builds the sentence
   from `PrinterState::error_text` alone: `cur.error_text.empty() ? name + " reported error " +
   cur.error_code + "." : name + ": " + cur.error_text` (`RemoteEvents.cpp:129-134`). The user's
-  "3DPO reported error 05004046" is that first branch, verbatim. Web Push and APNs carry the same
+  "Workshop H2C reported error 05004046" is that first branch, verbatim. Web Push and APNs carry the same
   `Event::body`, so fixing `error_text` fixes every one of them at once.
 
 So the fork had no per-device table, no way to name one, no file to read, and a notification text
