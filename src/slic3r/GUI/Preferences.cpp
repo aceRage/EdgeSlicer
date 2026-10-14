@@ -2221,6 +2221,8 @@ wxWindow* PreferencesDialog::create_ultra_page()
            "instead of Bambu's camera files. Used for printers on the LAN with an access code; others keep the Bambu player. "
            "Turn it off to use Bambu's camera files instead. Applies the next time you press Play; no restart needed."),
         50, "liveview_go2rtc");
+    auto item_bambu_abnormal_storage = create_item_checkbox(_L("Allow Abnormal Storage"), page,
+        _L("This allows the use of Storage that is marked as abnormal by the Printer.\nUse at your own risk, can cause issues!"), 50, "allow_abnormal_storage");
     // The "Use legacy network plugin" switch is gone: EdgeSlicer ships one network plug-in and
     // ignores the legacy_networking setting (GUI_App resets it at start-up).
 
@@ -2287,6 +2289,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_own_liveview, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_bambu_abnormal_storage, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_spoolman, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_spoolman_enabled, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_spoolman_url, 0, wxTOP, FromDIP(3));
