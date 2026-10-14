@@ -611,6 +611,15 @@ TEST_CASE("The spiral lift uses the printable area of the extruder the filament 
 // spiral lift is slowed only as far as its Z component needs.
 namespace {
 
+// GCodeWriter::full_gcode_comment is a process-wide static (true by default, set per export), so
+// these exact-string cases switch it off and put it back, whatever ran before them.
+struct NoFullComments
+{
+    bool saved = GCodeWriter::full_gcode_comment;
+    NoFullComments() { GCodeWriter::full_gcode_comment = false; }
+    ~NoFullComments() { GCodeWriter::full_gcode_comment = saved; }
+};
+
 void setup_z_speed_writer(GCodeWriter &writer, double travel_speed, double travel_speed_z, double max_speed_z,
                           bool arc_fitting = false, double z_hop = 1.5)
 {
@@ -681,6 +690,7 @@ std::string without_feedrates(const std::string &gcode)
 
 TEST_CASE("Z travel respects the machine Z speed limit", "[GCodeWriter][ZSpeed]")
 {
+    NoFullComments no_comments;
     struct SpeedCase
     {
         double      travel_speed;
@@ -728,6 +738,7 @@ TEST_CASE("Z travel respects the machine Z speed limit", "[GCodeWriter][ZSpeed]"
 
 TEST_CASE("Z travel keeps the first-layer travel speed and follows a changed limit", "[GCodeWriter][ZSpeed]")
 {
+    NoFullComments no_comments;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_key_value("travel_speed", new ConfigOptionFloats{100.});
     config.set_key_value("travel_speed_z", new ConfigOptionFloat(0.));
@@ -755,6 +766,7 @@ TEST_CASE("Z travel keeps the first-layer travel speed and follows a changed lim
 
 TEST_CASE("Combined XYZ travel limits its Z velocity without slowing shallow moves", "[GCodeWriter][ZSpeed]")
 {
+    NoFullComments no_comments;
     GCodeWriter writer;
     setup_z_speed_writer(writer, 100., 0., 40.);
     writer.set_current_position_clear(true);
@@ -777,6 +789,7 @@ TEST_CASE("Combined XYZ travel limits its Z velocity without slowing shallow mov
 
 TEST_CASE("Each Z-hop segment respects the Z velocity limit", "[GCodeWriter][ZSpeed]")
 {
+    NoFullComments no_comments;
     for (LiftType type : {LiftType::NormalLift, LiftType::LazyLift, LiftType::SpiralLift}) {
         for (double distance : {0.5, 10., 120.}) {
             CAPTURE(int(type), distance);
@@ -806,6 +819,7 @@ TEST_CASE("Each Z-hop segment respects the Z velocity limit", "[GCodeWriter][ZSp
 TEST_CASE("A deferred layer change caps its travel from the previous layer's Z and keeps the hop height",
           "[GCodeWriter][ZSpeed]")
 {
+    NoFullComments no_comments;
     GCodeWriter writer;
     setup_z_speed_writer(writer, 100., 0., 40., false, 0.4);
 
@@ -847,6 +861,7 @@ TEST_CASE("A deferred layer change caps its travel from the previous layer's Z a
 
 TEST_CASE("A spiral lift at a layer change keeps its path and caps only its Z component", "[GCodeWriter][ZSpeed][SpiralLift]")
 {
+    NoFullComments no_comments;
     // U1-like: 500 mm/s travel, 20 mm/s Z limit, 0.4 mm z-hop, 3 degree slope.
     auto spiral_at_layer_change = [](bool arc_fitting, bool deferred) {
         GCodeWriter writer;
