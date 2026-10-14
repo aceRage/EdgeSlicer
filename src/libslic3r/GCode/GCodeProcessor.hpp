@@ -821,7 +821,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
         bool m_flushing;
         bool m_wipe_tower;
         float m_remaining_volume;
-        bool m_manual_filament_change;
+        bool m_manual_filament_change{ false };
         // BBS pre-cooling: where the time estimator booked each synchronising wait (a tool change, G4,
         // ...). calculate_time() adds that time to the OLDEST block still in the planner queue, which
         // can be a few hundred moves before the command; plan_pre_cooling() moves it back onto its line.
