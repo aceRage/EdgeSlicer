@@ -213,11 +213,11 @@ of the same name) never becomes a file-system problem.
   "mode": "print",
 
   "printer": {
-    "id": "sm:8110025111600047BIY2",
+    "id": "sm:811002500000000001AA",
     "kind": "snapmaker",
     "name": "U1 (workshop)",
     "model": "Snapmaker U1",
-    "address": "10.0.0.108:80",
+    "address": "192.0.2.108:80",
     "host_type": null
   },
 
@@ -264,7 +264,7 @@ of the same name) never becomes a file-system problem.
   "outcome": { "state": "finished", "at": 1757009876000, "source": "events" },
 
   "pinned": false,
-  "sent": [ { "at": 1757001753000, "printer": "sm:8110025111600047BIY2", "mode": "print" } ]
+  "sent": [ { "at": 1757001753000, "printer": "sm:811002500000000001AA", "mode": "print" } ]
 }
 ```
 

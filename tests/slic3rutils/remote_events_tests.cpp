@@ -904,7 +904,7 @@ TEST_CASE("[RemoteEvents] a FAILED that trails an announced cancel is not a seco
 
 // ---- how the job ended: "cancelled" outlives the printer's print_error ----
 //
-// 2026-10-13, the owner's iPhone: an H2D2 cancelled by hand read Cancelled on the first refresh and
+// 2026-10-13, the owner's iPhone: a Garage H2D cancelled by hand read Cancelled on the first refresh and
 // Failed on the next, because the printer had dropped print_error 0300400C (dismissed on its screen,
 // or cleared by the firmware) and was left saying FAILED. The hub remembers the stop in JobMemory and
 // hands the answer out as the `ended` field of /summary and /api/printers (ended_of).
