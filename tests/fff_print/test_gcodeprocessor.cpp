@@ -5,11 +5,13 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_data.hpp"
 
 #include <algorithm>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -105,6 +107,44 @@ TEST_CASE("GCodeProcessorResult move assignment transfers members the copy assig
     REQUIRE(dst.moves.size() == 1);
 }
 
+// Orca #16065: moves and lines_ends grow with the print, so reset() gives the memory back
+// (capacity 0) instead of keeping it reserved until the next slice.
+TEST_CASE("GCodeProcessorResult reset frees the moves and line ends memory", "[GCodeProcessor]")
+{
+    GCodeProcessorResult result;
+    result.moves.resize(4096);
+    result.lines_ends.assign(4096, 7);
+    result.filename = "export.gcode";
+    REQUIRE(result.moves.capacity() >= 4096);
+    REQUIRE(result.lines_ends.capacity() >= 4096);
+
+    result.reset();
+    CHECK(result.moves.empty());
+    CHECK(result.lines_ends.empty());
+    CHECK(result.moves.capacity() == 0);
+    CHECK(result.lines_ends.capacity() == 0);
+}
+
+TEST_CASE("GCodeProcessorResult move assignment after reset keeps the filament sequences", "[GCodeProcessor]")
+{
+    GCodeProcessorResult src;
+    src.filament_change_sequence = { 0, 1, 0 };
+    src.nozzle_change_sequence   = { 1, 0 };
+    src.extruder_colors          = { "#FF8000", "#0080FF" };
+    src.moves.resize(8);
+    src.lines_ends.assign(8, 3);
+
+    GCodeProcessorResult dst;
+    dst.moves.resize(4096);
+    dst.reset();
+    dst = std::move(src);
+    CHECK(dst.filament_change_sequence == std::vector<unsigned int>({ 0, 1, 0 }));
+    CHECK(dst.nozzle_change_sequence == std::vector<unsigned int>({ 1, 0 }));
+    CHECK(dst.extruder_colors == std::vector<std::string>({ "#FF8000", "#0080FF" }));
+    CHECK(dst.moves.size() == 8);
+    CHECK(dst.lines_ends.size() == 8);
+}
+
 TEST_CASE("GCodeProcessorResult copy assignment keeps the source and carries the full member set", "[GCodeProcessor]")
 {
     GCodeProcessorResult src;
@@ -177,4 +217,99 @@ TEST_CASE("post-process lines_ends match newline offsets", "[GCodeProcessor]")
 
     SECTION("BySize") { run_case(make_config(false), false); }
     SECTION("ByTime") { run_case(make_config(true), true); }
+}
+
+TEST_CASE("Reloaded moves name their lines in G-code a script rewrote in place", "[GCodeProcessor]")
+{
+    Print print;
+    Model model;
+    Test::init_print({TestMesh::cube_20x20x20}, print, model);
+    GCodeProcessorResult result;
+    const std::string    gcode          = Test::gcode(print, result);
+    const auto           exported_moves = result.moves;
+    const auto           exported_lines_ends = result.lines_ends;
+
+    // A script that prepends one comment and, writing in text mode on Windows, turns every LF into CRLF.
+    const std::string prepended = ";EDITED\r\n";
+    std::string       edited    = prepended;
+    for (const char c : gcode) {
+        if (c == '\n')
+            edited += '\r';
+        edited += c;
+    }
+    const boost::filesystem::path temp = Test::scratch_path();
+    save_string_file(temp, edited);
+    result.filename = temp.string();
+    print.reload_gcode_moves(&result);
+
+    std::vector<size_t> newline_ends;
+    for (size_t i = edited.find('\n'); i != std::string::npos; i = edited.find('\n', i + 1))
+        newline_ends.push_back(i + 1);
+    CHECK(result.lines_ends == newline_ends);
+
+    // A fresh re-parse of the file is not move-for-move identical to the export: it starts with its own
+    // initial Noop move (gcode_id 0), and it splits some start-up moves such as the start G-code's
+    // "G1 Z5 F5000 ; lift nozzle" into several travel segments. So the contract checked here is what the
+    // Preview relies on: every exported move is still present, at the same position, and the line it names
+    // in the rewritten file (one further down than before) holds the same G-code as the line it named at export.
+    REQUIRE(result.moves.size() >= exported_moves.size());
+
+    const auto line_text = [](const std::string &text, const std::vector<size_t> &ends, unsigned int id) {
+        REQUIRE(id >= 1);
+        REQUIRE(id <= ends.size());
+        const size_t begin = id == 1 ? 0 : ends[id - 2];
+        std::string  line  = text.substr(begin, ends[id - 1] - begin);
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+            line.pop_back();
+        return line;
+    };
+
+    std::unordered_multimap<unsigned int, const GCodeProcessorResult::MoveVertex *> reloaded_by_line;
+    for (const auto &reloaded : result.moves)
+        reloaded_by_line.emplace(reloaded.gcode_id, &reloaded);
+
+    size_t                                      checked = 0;
+    std::vector<std::pair<size_t, std::string>> failures;
+    for (size_t i = 0; i < exported_moves.size(); ++i) {
+        const auto &exported = exported_moves[i];
+        if (exported.gcode_id == 0) // Moves not tied to a line (the initial Noop).
+            continue;
+        ++checked;
+        const std::string wanted = line_text(gcode, exported_lines_ends, exported.gcode_id);
+        bool              found  = false;
+        const auto candidates = reloaded_by_line.equal_range(exported.gcode_id + 1);
+        for (auto it = candidates.first; it != candidates.second && !found; ++it)
+            found = (it->second->position - exported.position).norm() <= 1e-3f &&
+                    line_text(edited, result.lines_ends, it->second->gcode_id) == wanted;
+        if (!found && failures.size() < 5)
+            failures.emplace_back(i, wanted);
+    }
+    for (const auto &failure : failures)
+        INFO("exported move " << failure.first << " (" << failure.second << ") has no matching reloaded move");
+    CHECK(checked > 100);
+    CHECK(failures.empty());
+    // Only the re-parse's extra start-up segments may be added, not a second copy of the print.
+    CHECK(result.moves.size() < exported_moves.size() + 20);
+}
+
+TEST_CASE("Rewritten G-code that cannot be re-read keeps the moves and hides the G-code window", "[GCodeProcessor]")
+{
+    Print print;
+    Model model;
+    Test::init_print({TestMesh::cube_20x20x20}, print, model);
+    GCodeProcessorResult result;
+    const std::string    gcode          = Test::gcode(print, result);
+    const auto           exported_moves = result.moves;
+
+    // A script that strips the trailing config block, which the G-code reader needs.
+    const size_t config_block = gcode.find("; CONFIG_BLOCK_START");
+    REQUIRE(config_block != std::string::npos);
+    const boost::filesystem::path temp = Test::scratch_path();
+    save_string_file(temp, gcode.substr(0, config_block));
+    result.filename = temp.string();
+    print.reload_gcode_moves(&result);
+
+    CHECK(result.lines_ends.empty());
+    REQUIRE(result.moves.size() == exported_moves.size());
+    CHECK(result.moves.back().gcode_id == exported_moves.back().gcode_id);
 }

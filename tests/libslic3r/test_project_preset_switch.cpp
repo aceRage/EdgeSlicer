@@ -256,3 +256,52 @@ TEST_CASE("A project filament that states its own printers keeps deciding for it
 
     CHECK(bundle.filaments.find_preset(slot_name, false)->is_compatible);
 }
+
+// Orca #16331: a multi-toolhead project saved without filament_self_index (the config is loaded
+// over the full defaults, so the key arrives as the one-entry default) must still load every
+// filament. Upstream fixed this in its per-variant loader; ours has no filament_self_index
+// plumbing in load_config_file_config, so this is a regression test, not a fix.
+TEST_CASE("A multi-toolhead project saved without filament self indices loads every filament",
+          "[Preset][Bundle][ProjectPreset]")
+{
+    const std::vector<std::string> colors = { "#FF0000", "#000000", "#FFFFFF", "#FFFF00" };
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.opt<ConfigOptionStrings>("filament_colour")->values = colors;
+    config.opt<ConfigOptionFloats>("nozzle_diameter")->values = std::vector<double>(colors.size(), 0.4);
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+    // What an old project reads back as: the key absent from the file leaves the default entry.
+    REQUIRE(config.opt<ConfigOptionInts>("filament_self_index")->values == std::vector<int>{ 1 });
+    Preset::normalize(config);
+
+    PresetBundle bundle;
+    REQUIRE_NOTHROW(bundle.load_config_model("test.3mf", std::move(config)));
+    CHECK(bundle.filament_presets.size() == colors.size());
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == colors);
+}
+
+// The same for a Snapmaker U1 project: four toolheads, four filaments of different types, saved
+// by a build that wrote no filament_self_index / filament_extruder_variant.
+TEST_CASE("A four-filament U1 project without filament self indices keeps each filament slot",
+          "[Preset][Bundle][ProjectPreset]")
+{
+    const std::vector<std::string> colors = { "#FF0000", "#00FF00", "#0000FF", "#FFFF00" };
+    const std::vector<std::string> types  = { "PLA", "PETG", "ABS", "TPU" };
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.opt<ConfigOptionStrings>("filament_colour")->values = colors;
+    config.opt<ConfigOptionStrings>("filament_type")->values   = types;
+    config.opt<ConfigOptionFloats>("nozzle_diameter")->values  = std::vector<double>(colors.size(), 0.4);
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+    config.erase("filament_self_index");
+    Preset::normalize(config);
+
+    PresetBundle bundle;
+    REQUIRE_NOTHROW(bundle.load_config_model("u1_project.3mf", std::move(config)));
+    REQUIRE(bundle.filament_presets.size() == colors.size());
+    REQUIRE(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == colors);
+    for (size_t i = 0; i < colors.size(); ++i) {
+        INFO("filament slot " << i);
+        const Preset *preset = bundle.filaments.find_preset(bundle.filament_presets[i], false);
+        REQUIRE(preset != nullptr);
+        CHECK(preset->config.opt_string("filament_type", 0u) == types[i]);
+    }
+}

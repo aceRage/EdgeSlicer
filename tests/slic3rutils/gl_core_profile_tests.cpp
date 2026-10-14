@@ -739,6 +739,17 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
             const auto centre = OffscreenTarget::pixel(big / 2, big / 2);
             CHECK(int(centre[0]) + int(centre[1]) + int(centre[2]) == 0);
 
+            // The instanced segment draw above uses 16-bit indices (Orca #16389; GL_UNSIGNED_BYTE
+            // misdrew on GCN 1/2 drivers): it came out lit with a clean GL error flag.
+            // reset() hands the print-sized CPU memory back (Orca #16065) and the viewer loads again.
+            const size_t cpu_before_reset = viewer.get_used_cpu_memory();
+            viewer.reset();
+            CHECK(viewer.get_used_cpu_memory() < cpu_before_reset);
+            CHECK(drain_gl_errors() == GL_NO_ERROR);
+            viewer.load(libvgcode::convert(result, { "#FF8000" }, {}, viewer));
+            CHECK(viewer.get_layers_zs().size() == 2);
+            CHECK(drain_gl_errors() == GL_NO_ERROR);
+
             gl_test_trace("libvgcode: shutdown");
             viewer.shutdown();
             gl_test_trace("libvgcode: shut down");

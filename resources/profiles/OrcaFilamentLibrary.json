@@ -1,6 +1,6 @@
 {
     "name": "OrcaFilamentLibrary",
-    "version": "02.04.00.20",
+    "version": "02.04.00.21",
     "force_update": "0",
     "description": "Orca Filament Library",
     "filament_list": [
@@ -877,12 +877,12 @@
             "sub_path": "filament/Polymaker/Panchroma PLA Silk @System.json"
         },
         {
-            "name": "Panchroma PLA Stain @base",
-            "sub_path": "filament/Polymaker/Panchroma PLA Stain @base.json"
+            "name": "Panchroma PLA Satin @base",
+            "sub_path": "filament/Polymaker/Panchroma PLA Satin @base.json"
         },
         {
-            "name": "Panchroma PLA Stain @System",
-            "sub_path": "filament/Polymaker/Panchroma PLA Stain @System.json"
+            "name": "Panchroma PLA Satin @System",
+            "sub_path": "filament/Polymaker/Panchroma PLA Satin @System.json"
         },
         {
             "name": "Panchroma PLA Starlight @base",
@@ -3807,6 +3807,82 @@
         {
             "name": "COEX PLA+Silk @System",
             "sub_path": "filament/COEX/COEX PLA+Silk @System.json"
+        },
+        {
+            "name": "Bambu PETG Matte @base",
+            "sub_path": "filament/Bambu/Bambu PETG Matte @base.json"
+        },
+        {
+            "name": "Bambu PETG Matte @System",
+            "sub_path": "filament/Bambu/Bambu PETG Matte @System.json"
+        },
+        {
+            "name": "Bambu PLA Lite @base",
+            "sub_path": "filament/Bambu/Bambu PLA Lite @base.json"
+        },
+        {
+            "name": "Bambu PLA Lite @System",
+            "sub_path": "filament/Bambu/Bambu PLA Lite @System.json"
+        },
+        {
+            "name": "Bambu PLA Pure @base",
+            "sub_path": "filament/Bambu/Bambu PLA Pure @base.json"
+        },
+        {
+            "name": "Bambu PLA Pure @System",
+            "sub_path": "filament/Bambu/Bambu PLA Pure @System.json"
+        },
+        {
+            "name": "Bambu PLA Tough+ @base",
+            "sub_path": "filament/Bambu/Bambu PLA Tough+ @base.json"
+        },
+        {
+            "name": "Bambu PLA Tough+ @System",
+            "sub_path": "filament/Bambu/Bambu PLA Tough+ @System.json"
+        },
+        {
+            "name": "Bambu PLA Translucent @base",
+            "sub_path": "filament/Bambu/Bambu PLA Translucent @base.json"
+        },
+        {
+            "name": "Bambu PLA Translucent @System",
+            "sub_path": "filament/Bambu/Bambu PLA Translucent @System.json"
+        },
+        {
+            "name": "Bambu TPU 85A @base",
+            "sub_path": "filament/Bambu/Bambu TPU 85A @base.json"
+        },
+        {
+            "name": "Bambu TPU 85A @System",
+            "sub_path": "filament/Bambu/Bambu TPU 85A @System.json"
+        },
+        {
+            "name": "Bambu TPU 90A @base",
+            "sub_path": "filament/Bambu/Bambu TPU 90A @base.json"
+        },
+        {
+            "name": "Bambu TPU 90A @System",
+            "sub_path": "filament/Bambu/Bambu TPU 90A @System.json"
+        },
+        {
+            "name": "Bambu TPU for AMS @base",
+            "sub_path": "filament/Bambu/Bambu TPU for AMS @base.json"
+        },
+        {
+            "name": "Bambu TPU for AMS @System",
+            "sub_path": "filament/Bambu/Bambu TPU for AMS @System.json"
+        },
+        {
+            "name": "Generic PETG-CF @base",
+            "sub_path": "filament/Generic PETG-CF @base.json"
+        },
+        {
+            "name": "Generic PETG-CF @BBL base",
+            "sub_path": "filament/addnorth/BBL/Generic PETG-CF @BBL base.json"
+        },
+        {
+            "name": "addnorth PETG-CF Rigid X",
+            "sub_path": "filament/addnorth/BBL/addnorth PETG-CF Rigid X.json"
         }
     ],
     "process_list": [],
