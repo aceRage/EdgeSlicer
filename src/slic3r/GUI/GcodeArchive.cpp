@@ -640,10 +640,10 @@ static bool word_is_address(std::string w)
     if (host.empty()) return false;
     if (is_ipv4(host)) return true;
     if (host.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-_") != std::string::npos) return false;
-    if (host.find('.') == std::string::npos) return false; // a plain word ("H2D2", "3DPO")
+    if (host.find('.') == std::string::npos) return false; // a plain word ("XJ9Q", "HD2-X")
     if (SnapmakerLan::is_cloud_host(host)) return true;
     // A dotted host name: two dots or more and a top-level label of letters only
-    // ("reaper.tail2dff02.ts.net"), or one of the names a LAN hands out ("u1.local").
+    // ("example-host.tail1234.ts.net"), or one of the names a LAN hands out ("u1.local").
     const size_t last = host.rfind('.');
     const std::string tld = host.substr(last + 1);
     for (const char* lan : { "local", "lan", "home", "internal", "arpa" })

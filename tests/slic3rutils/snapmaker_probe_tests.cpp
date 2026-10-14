@@ -3,7 +3,7 @@
 // probe reports while a printer answers normally, slowly, not at all, and again.
 //
 // Background (2026-09-25): the owner's U1 cards read "offline · a1pr8yczi3n0se.iot.us-west-1.
-// amazonaws.com" or "offline · 10.0.0.106" while the printers answered on the LAN. The Device tab
+// amazonaws.com" or "offline · 192.0.2.106" while the printers answered on the LAN. The Device tab
 // records the Snapmaker cloud's MQTT broker as a cloud-bound printer's "ip"; the LAN list took it
 // as the printer's address, stored it next to the real one under the same serial number, and the
 // two entries shared one status slot - so the broker's failed probe was served as the LAN card's
@@ -120,8 +120,8 @@ static const char* BROKER_CN = "a1su7rk2r6cmbq.ats.iot.cn-north-1.amazonaws.com.
 
 TEST_CASE("host_of strips scheme, port, path and brackets", "[SnapmakerProbe]")
 {
-    CHECK(host_of("10.0.0.106") == "10.0.0.106");
-    CHECK(host_of("http://10.0.0.106:7125/server/info") == "10.0.0.106");
+    CHECK(host_of("192.0.2.106") == "192.0.2.106");
+    CHECK(host_of("http://192.0.2.106:7125/server/info") == "192.0.2.106");
     CHECK(host_of(std::string(BROKER) + ":8883") == BROKER);
     CHECK(host_of(std::string("mqtts://") + BROKER + ":8883") == BROKER);
     CHECK(host_of("[fe80::1]:80") == "fe80::1");
@@ -140,7 +140,7 @@ TEST_CASE("the Snapmaker cloud's endpoints are recognised, LAN addresses are not
     CHECK(is_cloud_host("api.snapmaker.com"));
     CHECK(is_cloud_host("something.aliyuncs.com"));
 
-    CHECK_FALSE(is_cloud_host("10.0.0.106"));
+    CHECK_FALSE(is_cloud_host("192.0.2.106"));
     CHECK_FALSE(is_cloud_host("u1.local"));
     CHECK_FALSE(is_cloud_host("U1"));
     CHECK_FALSE(is_cloud_host("notamazonaws.com")); // a label boundary, not a substring
@@ -149,7 +149,7 @@ TEST_CASE("the Snapmaker cloud's endpoints are recognised, LAN addresses are not
 
 TEST_CASE("which addresses are LAN addresses", "[SnapmakerProbe]")
 {
-    CHECK(is_lan_host("10.0.0.106"));
+    CHECK(is_lan_host("192.0.2.106"));
     CHECK(is_lan_host("127.0.0.1"));
     CHECK(is_lan_host("u1.local"));
     CHECK(is_lan_host("u1.home.example")); // typed in by hand: accepted, only the cloud is refused
@@ -159,7 +159,7 @@ TEST_CASE("which addresses are LAN addresses", "[SnapmakerProbe]")
     CHECK_FALSE(is_lan_host("not an address"));
 
     // The Device tab's record is only trusted with a plainly local address.
-    CHECK(is_local_address("10.0.0.106"));
+    CHECK(is_local_address("192.0.2.106"));
     CHECK(is_local_address("192.168.1.20"));
     CHECK(is_local_address("u1.local"));
     CHECK(is_local_address("U1"));
@@ -184,25 +184,25 @@ static Device dev(const std::string& id, const std::string& name, const std::str
 TEST_CASE("the owner's stored list: the broker entry goes, one card per printer stays", "[SnapmakerProbe]")
 {
     // hub/snapmaker_lan.json as it was on 2026-09-25 (serial numbers replaced).
-    const std::vector<Device> raw = { dev("SN-U2", "U2", BROKER, "streams"), dev("SN-U1", "U1", "10.0.0.108", "streams"),
-                                      dev("SN-U3", "U3", "10.0.0.162", "streams"), dev("SN-U2", "U2", "10.0.0.106", "streams") };
+    const std::vector<Device> raw = { dev("SN-U2", "U2", BROKER, "streams"), dev("SN-U1", "U1", "192.0.2.108", "streams"),
+                                      dev("SN-U3", "U3", "192.0.2.162", "streams"), dev("SN-U2", "U2", "192.0.2.106", "streams") };
     const std::vector<Device> list = sanitize(raw);
     REQUIRE(list.size() == 3);
     for (const Device& d : list) CHECK_FALSE(is_cloud_host(d.ip));
     const auto u2 = std::find_if(list.begin(), list.end(), [](const Device& d) { return d.id == "SN-U2"; });
     REQUIRE(u2 != list.end());
-    CHECK(u2->ip == "10.0.0.106");
+    CHECK(u2->ip == "192.0.2.106");
 }
 
 TEST_CASE("merge_device never lets the cloud broker replace or become an address", "[SnapmakerProbe]")
 {
-    std::vector<Device> list = { dev("SN-U2", "U2", "10.0.0.106") };
+    std::vector<Device> list = { dev("SN-U2", "U2", "192.0.2.106") };
 
     SECTION("the Device tab's cloud record of a known printer")
     {
         CHECK_FALSE(merge_device(list, dev("SN-U2", "U2", BROKER, "device_tab")));
         REQUIRE(list.size() == 1);
-        CHECK(list[0].ip == "10.0.0.106");
+        CHECK(list[0].ip == "192.0.2.106");
     }
     SECTION("a printer known only through the cloud")
     {
@@ -211,30 +211,30 @@ TEST_CASE("merge_device never lets the cloud broker replace or become an address
     }
     SECTION("a printer that moved to another address moves (DHCP)")
     {
-        CHECK(merge_device(list, dev("SN-U2", "", "10.0.0.120", "discovery")));
+        CHECK(merge_device(list, dev("SN-U2", "", "192.0.2.120", "discovery")));
         REQUIRE(list.size() == 1);
-        CHECK(list[0].ip == "10.0.0.120");
+        CHECK(list[0].ip == "192.0.2.120");
         CHECK(list[0].name == "U2");           // an empty name does not erase the known one
         CHECK(list[0].added_by == "discovery"); // how it first arrived is how it stays
     }
     SECTION("a printer first seen without its serial number gets it, and stays one entry")
     {
-        std::vector<Device> l2 = { dev("10.0.0.106", "U2", "10.0.0.106"), dev("SN-U2", "U2", "10.0.0.99") };
-        CHECK(merge_device(l2, dev("SN-U2", "U2", "10.0.0.106")));
+        std::vector<Device> l2 = { dev("192.0.2.106", "U2", "192.0.2.106"), dev("SN-U2", "U2", "10.0.0.99") };
+        CHECK(merge_device(l2, dev("SN-U2", "U2", "192.0.2.106")));
         REQUIRE(l2.size() == 1);
         CHECK(l2[0].id == "SN-U2");
-        CHECK(l2[0].ip == "10.0.0.106");
+        CHECK(l2[0].ip == "192.0.2.106");
     }
     SECTION("a new LAN printer is added")
     {
-        CHECK(merge_device(list, dev("SN-U3", "U3", "10.0.0.162")));
+        CHECK(merge_device(list, dev("SN-U3", "U3", "192.0.2.162")));
         CHECK(list.size() == 2);
     }
 }
 
 TEST_CASE("sanitize drops a placeholder entry once the address has its serial number", "[SnapmakerProbe]")
 {
-    const std::vector<Device> list = sanitize({ dev("10.0.0.106", "10.0.0.106", "10.0.0.106"), dev("SN-U2", "U2", "10.0.0.106") });
+    const std::vector<Device> list = sanitize({ dev("192.0.2.106", "192.0.2.106", "192.0.2.106"), dev("SN-U2", "U2", "192.0.2.106") });
     REQUIRE(list.size() == 1);
     CHECK(list[0].id == "SN-U2");
 }

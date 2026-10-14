@@ -31,7 +31,7 @@ json ev(const std::string& kind, long long instance, long long time, const std::
     e["kind"]     = kind;
     e["instance"] = instance;
     e["time"]     = time;
-    e["printer"]  = { { "id", "01P00A000000001" }, { "name", "3DPO" }, { "kind", "bambu" } };
+    e["printer"]  = { { "id", "01P00A000000001" }, { "name", "Workshop H2C" }, { "kind", "bambu" } };
     if (!job.empty()) e["job"] = job;
     if (!code.empty()) e["code"] = code;
     if (!job_id.empty()) e["job_id"] = job_id;
