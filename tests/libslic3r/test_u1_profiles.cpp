@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/PlaceholderParser.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -490,4 +491,87 @@ TEST_CASE("Every U1 filament that fits the 0.4 or 0.6 machine also fits the mixe
         CHECK(std::find(v.begin(), v.end(), "Snapmaker U1 (0.4+0.6 nozzle)") != v.end());
     }
     CHECK(checked > 100);
+}
+
+TEST_CASE("U1 toolchange lift is absolute and capped by object, relative by layer", "[Preset][U1]")
+{
+    // Snap #958 / D-09a–c: 20261003 templates on all five U1 machines, including Edge's
+    // 0.4+0.6. End G-code keeps filament_volume_type metadata. By-layer lift feed is F600.
+    const char *names[] = {
+        "Snapmaker U1 (0.2 nozzle)",
+        "Snapmaker U1 (0.4 nozzle)",
+        "Snapmaker U1 (0.6 nozzle)",
+        "Snapmaker U1 (0.8 nozzle)",
+        "Snapmaker U1 (0.4+0.6 nozzle)",
+    };
+
+    auto render_change = [](const Preset &preset, const char *sequence, double max_layer_z) {
+        PlaceholderParser parser;
+        parser.apply_config(preset.config);
+        parser.set("print_sequence", sequence);
+        parser.set("previous_extruder", 0);
+        parser.set("next_extruder", 1);
+        parser.set("layer_num", 10);
+        parser.set("max_layer_z", max_layer_z);
+        parser.set("max_print_height", 270);
+        parser.set("z_offset", 0.0);
+        parser.set("initial_tool", 0);
+        parser.set("initial_extruder", 0);
+        parser.set("position", new ConfigOptionFloats({0., 0., 14.}));
+        parser.set("temperature", new ConfigOptionInts({200, 200, 200, 200}));
+        parser.set("first_layer_temperature", new ConfigOptionInts({210, 210, 210, 210}));
+        parser.set("filament_type", std::vector<std::string>{"PLA", "PLA", "PLA", "PLA"});
+        if (!parser.option("travel_speed"))
+            parser.set("travel_speed", 200.0);
+        DynamicConfig outputs;
+        const auto *tmpl = preset.config.option<ConfigOptionString>("change_filament_gcode");
+        REQUIRE(tmpl != nullptr);
+        return parser.process(tmpl->value, 0, nullptr, &outputs, nullptr);
+    };
+
+    auto render_end = [](const Preset &preset, double max_layer_z) {
+        PlaceholderParser parser;
+        parser.apply_config(preset.config);
+        parser.set("print_sequence", "by object");
+        parser.set("layer_num", 10);
+        parser.set("max_layer_z", max_layer_z);
+        parser.set("max_print_height", 270);
+        parser.set("z_offset", 0.0);
+        const auto *tmpl = preset.config.option<ConfigOptionString>("machine_end_gcode");
+        REQUIRE(tmpl != nullptr);
+        return parser.process(tmpl->value);
+    };
+
+    for (const char *name : names) {
+        const Preset *preset = tree().bundle->printers.find_preset(name, false);
+        REQUIRE(preset != nullptr);
+        INFO(name);
+        const auto *change = preset->config.option<ConfigOptionString>("change_filament_gcode");
+        const auto *end    = preset->config.option<ConfigOptionString>("machine_end_gcode");
+        REQUIRE(change != nullptr);
+        REQUIRE(end != nullptr);
+        CHECK(change->value.find("20261003") != std::string::npos);
+        CHECK(end->value.find("20261003") != std::string::npos);
+        CHECK(end->value.find("filament_volume_type = {filament_volume_type_list}") != std::string::npos);
+        CHECK(change->value.find("G90\nG1 Z\" + move_z + \" F600") != std::string::npos);
+        CHECK(change->value.find("G91\nG1 Z\" + move_z + \" F600\nG90") != std::string::npos);
+        CHECK(change->value.find("move_z = max_print_height;") != std::string::npos);
+        CHECK(end->value.find("local move_z = 0.0;") != std::string::npos);
+        CHECK(change->value.find("F1800") == std::string::npos);
+        CHECK(end->value.find("max_layer_z+2") == std::string::npos);
+
+        const std::string by_object = render_change(*preset, "by object", 25.12);
+        CHECK(by_object.find("G90\nG1 Z27.12 F600") != std::string::npos);
+        CHECK(by_object.find("G91\nG1 Z") == std::string::npos);
+
+        const std::string by_layer = render_change(*preset, "by layer", 25.12);
+        CHECK(by_layer.find("G91\nG1 Z1.5 F600\nG90") != std::string::npos);
+
+        const std::string capped = render_change(*preset, "by object", 269.0);
+        CHECK(capped.find("G1 Z270 F600") != std::string::npos);
+
+        const std::string end_g = render_end(*preset, 25.12);
+        CHECK(end_g.find("G1 Z27.12 F600") != std::string::npos);
+        CHECK(end_g.find("G1 Z27 F600") == std::string::npos);
+    }
 }
