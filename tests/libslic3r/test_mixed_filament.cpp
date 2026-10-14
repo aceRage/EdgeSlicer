@@ -5544,13 +5544,6 @@ TEST_CASE("Dual-color primary drops invalid tokens and falls back on empty", "[M
     CHECK(FilamentColor::FromColors({}, FilamentColorMode::Segment).PrimaryColor("#26A69A") == "#26A69A");
 }
 
-// ============================================================================
-// Orca #15728 adapt — incomplete mixed_filament_definitions vs physical slots.
-// Edge stores mixed rows in MixedFilamentManager, not filament_is_mixed arrays.
-// Slot count is filament_colour; orphan tails that name IDs beyond that count
-// must be dropped on load/grow so add-filament cannot resurrect them.
-// ============================================================================
-
 TEST_CASE("Automatic mixed colour match uses count-dependent ratio caps", "[MixedFilament][ColorMatch]")
 {
     // Snap #1008: 15% floor on every participating component. Search passes the
@@ -5573,6 +5566,13 @@ TEST_CASE("Automatic mixed colour match uses count-dependent ratio caps", "[Mixe
     CHECK(85 <= mixed_color_match_max_component_percent(2));
     CHECK(85 > mixed_color_match_max_component_percent(3));
 }
+
+// ============================================================================
+// Orca #15728 adapt — incomplete mixed_filament_definitions vs physical slots.
+// Edge stores mixed rows in MixedFilamentManager, not filament_is_mixed arrays.
+// Slot count is filament_colour; orphan tails that name IDs beyond that count
+// must be dropped on load/grow so add-filament cannot resurrect them.
+// ============================================================================
 
 TEST_CASE("Mixed slot identity comes from MixedFilamentManager, not filament_is_mixed",
           "[MixedFilament][IncompleteMetadata]")
