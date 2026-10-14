@@ -33,7 +33,7 @@ import subprocess
 import sys
 
 T = os.path.dirname(os.path.abspath(__file__))
-HUB = r"C:\Users\acesa\AppData\Local\Temp\snorca_hubtest"
+HUB = os.environ.get("SNORCA_HUBTEST_DIR") or os.path.join(os.environ.get("TEMP", "."), "snorca_hubtest")
 SRC_DD = os.path.join(HUB, "dd_lan")
 WORK = os.path.join(T, "bar_b_speed_work")
 

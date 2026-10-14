@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Build: `C:\Users\acesa\AppData\Local\Temp\claude\C--Dev\67c5db31-fac5-4c54-8520-420f5e315bcc\scratchpad\build_snorca.bat slicer` (full app) — do NOT run while another build is running (a parallel session shares this checkout; check `Get-Process cl,link,MSBuild` first).
+- Build: `%TEMP%\claude\C--Dev\67c5db31-fac5-4c54-8520-420f5e315bcc\scratchpad\build_snorca.bat slicer` (full app) — do NOT run while another build is running (a parallel session shares this checkout; check `Get-Process cl,link,MSBuild` first).
 - Tests: `cmake --build build --config Release --target libslic3r_tests` then run `build\tests\libslic3r\Release\libslic3r_tests.exe "[slice_compare]"`.
 - Commit ONLY the files this plan names (explicit `git add <paths>` — never `git add -A`; a parallel session has unrelated edits in `src/ultranet/`).
 - Namespace: `Slic3r::SliceCompare`. New files use 4-space indent, `#pragma once` — hmm, existing libslic3r headers use `#ifndef` guards; use `#ifndef slic3r_SliceCompare_*_hpp_` guards to match.

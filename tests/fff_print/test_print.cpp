@@ -1272,3 +1272,165 @@ TEST_CASE("Timelapse g-code is emitted once per layer for Bambu and non-Bambu pr
         }
     }
 }
+
+// Orca #16066: two copies of one object share a single slice. A copy that sliced itself and then becomes identical
+// to an earlier object frees its own layers when it takes the shared layers over (they used to leak). Upstream's
+// test watches the hand-over through a slicing-pipeline hook we do not have; this one checks the hand-over and
+// that later re-slices neither free the shared layers twice nor keep stale aliases.
+TEST_CASE("An object that starts sharing another object's slices takes the shared layers over", "[Print][Regression][Orca16066]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",               "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "raft_layers",                "1" },   // each object gets support layers of its own
+        { "sparse_infill_density",      "20%" }, // object_a's override below differs from this
+    });
+
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    ModelObject *object_a = model.objects.front();
+    // add_object() gives the copy extruder 1, and objects only share slices when their configs match.
+    object_a->config.set_key_value("extruder", new ConfigOptionInt(1));
+    ModelObject *object_b = model.add_object(*object_a); // shares object_a's mesh
+    for (ModelInstance *instance : object_b->instances)
+        instance->set_offset(instance->get_offset() + Vec3d(40., 0., 0.));
+    // A per-object override makes the objects differ, so each slices itself.
+    object_a->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(40));
+
+    print.apply(model, config);
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    PrintObject *print_b = print.get_object(1);
+    REQUIRE(print_b->model_object()->id() == object_b->id());
+    REQUIRE(print_b->get_shared_object() == nullptr);
+    REQUIRE(!print_b->layers().empty());
+    REQUIRE(!print_b->support_layers().empty());
+    const size_t own_layer_count         = print_b->layers().size();
+    const size_t own_support_layer_count = print_b->support_layers().size();
+
+    // Without the override the objects are identical again: print_b takes print_a's layers over.
+    object_a->config.erase("sparse_infill_density");
+    print.apply(model, config);
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    PrintObject *print_a = print.get_object(0);
+    CHECK(print.objects()[1] == print_b);
+    CHECK(print_b->get_shared_object() == print_a);
+    REQUIRE(!print_a->layers().empty());
+    CHECK(print_b->layers() == print_a->layers());
+    CHECK(print_b->support_layers() == print_a->support_layers());
+    CHECK(print_b->layers().size() == own_layer_count);
+    CHECK(print_b->support_layers().size() == own_support_layer_count);
+
+    // Slicing again while still shared drops the aliases and takes them over again.
+    print.process();
+    CHECK(print_b->get_shared_object() == print.get_object(0));
+    CHECK(print_b->layers() == print.get_object(0)->layers());
+
+    // Making them differ again: print_b slices itself once more, into layers of its own.
+    object_a->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(40));
+    print.apply(model, config);
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    print_b = print.get_object(1);
+    CHECK(print_b->get_shared_object() == nullptr);
+    REQUIRE(print_b->layers().size() == own_layer_count);
+    CHECK(print_b->layers().front() != print.get_object(0)->layers().front());
+}
+
+// Orca #16066: elephant-foot compensation on a layer with more than one region closes the merged layer with
+// 1.5 x slice_closing_radius. The value used to sit in a function-local static, so the first object sliced in the
+// process fixed it for every later one. Two otherwise identical objects with different closing radii must now
+// compensate differently: two parts 1 mm apart are closed into one island by the 1 mm radius (so the facing
+// edges are not shrunk) but not by the 0.049 mm one.
+TEST_CASE("Elephant-foot compensation uses each object's own slice closing radius", "[Print][Slicing][Orca16066]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height",                     "0.2" },
+        { "initial_layer_print_height",       "0.2" },
+        { "elefant_foot_compensation",        "0.3" },
+        { "elefant_foot_compensation_layers", "1" },
+        { "raft_layers",                      "0" },
+        { "enable_support",                   "0" },
+        { "brim_type",                        "no_brim" },
+        { "skirt_loops",                      "0" },
+    });
+
+    Print print;
+    Model model;
+    auto add_two_part_object = [&model, &print](double x, double closing_radius) {
+        ModelObject *object = model.add_object();
+        object->name        = "two_parts";
+        TriangleMesh left   = make_cube(10., 10., 2.);
+        TriangleMesh right  = make_cube(10., 10., 2.);
+        right.translate(11.f, 0.f, 0.f); // 1 mm gap
+        object->add_volume(std::move(left));
+        ModelVolume *right_volume = object->add_volume(std::move(right));
+        // A second region: the right part prints with a different infill density.
+        right_volume->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(40));
+        object->config.set_key_value("slice_closing_radius", new ConfigOptionFloat(closing_radius));
+        object->add_instance()->set_offset(Vec3d(x, 50., 0.));
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    };
+    add_two_part_object(30., 0.049);
+    add_two_part_object(90., 1.0);
+
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    const PrintObject *small_radius = print.objects()[0];
+    const PrintObject *large_radius = print.objects()[1];
+    REQUIRE(small_radius->get_shared_object() == nullptr);
+    REQUIRE(large_radius->get_shared_object() == nullptr);
+    REQUIRE(small_radius->layers().size() > 1);
+    REQUIRE(large_radius->layers().size() > 1);
+    REQUIRE(small_radius->layers().front()->regions().size() == 2);
+
+    const double first_small = area(small_radius->layers().front()->lslices);
+    const double first_large = area(large_radius->layers().front()->lslices);
+    // Above the compensated layer both objects are the same.
+    CHECK_THAT(area(large_radius->layers()[1]->lslices), Catch::Matchers::WithinRel(area(small_radius->layers()[1]->lslices), 1e-6));
+    // On the first layer the 1 mm radius keeps the gap-facing edges, so its first layer is larger.
+    CHECK(first_large > first_small * 1.01);
+}
+
+// Orca #16066: tree supports dropped the support layers above the topmost overhang without freeing them, and
+// the support step kept its collision/avoidance cache until the next slice. Slicing the same tree-supported
+// object twice must give the same support layers, none of them empty-height leftovers.
+TEST_CASE("Tree supports re-slice to the same support layers", "[Print][TreeSupport][Orca16066]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_support",             "1" },
+        { "support_type",               "tree(auto)" },
+        { "support_style",              "tree_hybrid" },
+        { "support_top_z_distance",     "0.2" },
+        { "layer_height",               "0.2" },
+        { "initial_layer_print_height", "0.2" },
+    });
+    Print print;
+    Model model;
+    init_print({TestMesh::overhang}, print, model, config);
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const size_t first_count = print.objects().front()->support_layers().size();
+    REQUIRE(first_count > 0);
+    for (const SupportLayer *layer : print.objects().front()->support_layers())
+        CHECK(layer->height >= EPSILON);
+
+    // Invalidate the support step and slice again in the same process.
+    config.set_deserialize_strict({ { "support_top_z_distance", "0.24" } });
+    print.apply(model, config);
+    print.process();
+    config.set_deserialize_strict({ { "support_top_z_distance", "0.2" } });
+    print.apply(model, config);
+    print.process();
+    CHECK(print.objects().front()->support_layers().size() == first_count);
+    for (const SupportLayer *layer : print.objects().front()->support_layers())
+        CHECK(layer->height >= EPSILON);
+}

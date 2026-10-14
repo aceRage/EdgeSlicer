@@ -718,8 +718,9 @@ void GCodeProcessorResult::reset() {
     //BBS: add mutex for protection of gcode result
     lock();
 
-    moves.clear();
-    lines_ends.clear();
+    // moves and lines_ends grow with the print: free them, as no reset result reuses the capacity.
+    clear_and_shrink(moves);
+    clear_and_shrink(lines_ends);
     printable_area = Pointfs();
     //BBS: add bed exclude area
     bed_exclude_area = Pointfs();
