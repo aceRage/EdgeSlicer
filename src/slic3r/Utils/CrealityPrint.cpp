@@ -127,19 +127,21 @@ bool CrealityPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, 
     }
 
     bool res = true;
-    auto url = make_url("upload/" + safe_filename(upload_filename.string()));
+    const auto safe_upload_filename = safe_filename(upload_filename.string());
+    // Only encode the URL path segment; keep the multipart filename and start-print path as the stored filename.
+    auto url = make_url("upload/" + Http::url_encode(safe_upload_filename));
 
     auto  http = Http::post(url); // std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.form_add("path", upload_parent_path.string())
-        .form_add_file("file", upload_data.source_path.string(), upload_filename.string())
+        .form_add_file("file", upload_data.source_path.string(), safe_upload_filename)
 
         .on_complete([&](std::string body, unsigned status) {
             BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: File uploaded: HTTP %2%: %3%") % name % status % body;
 
             if (upload_data.post_action == PrintHostPostUploadAction::StartPrint) {
-                start_print(safe_filename(upload_filename.string()));
+                start_print(safe_upload_filename);
             }
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
@@ -222,11 +224,18 @@ void CrealityPrint::start_print(const std::string &filename) const
         
         ws.write(net::buffer(to_string(j2)));
 
+        // K1-family firmware closes the WebSocket right after accepting the
+        // start command, so a blocking read here surfaces a benign
+        // "End of file [asio.misc:2]" even though the print already started
+        // (the command is delivered by write()). Read best-effort, ignore errors.
         beast::flat_buffer buffer;
+        beast::error_code  read_ec;
+        ws.read(buffer, read_ec);
 
-        ws.read(buffer);
-
-        ws.close(websocket::close_code::normal);
+        // Same reason: the printer may have already closed the connection. A close
+        // error here is not a failure - the start command was sent above.
+        beast::error_code close_ec;
+        ws.close(websocket::close_code::normal, close_ec);
     } catch(std::exception const& e) {
         std::cerr << "Error: " << e.what() << std::endl;
     }
