@@ -5112,13 +5112,14 @@ static const std::vector<PrintCarryConflict> &print_carry_conflicts()
               return tree ? !(style == smsDefault || style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid || style == smsTreeOrganic)
                           : !(style == smsDefault || style == smsGrid || style == smsSnug);
           } },
-        { "spiral vase prerequisites", { "spiral_mode" },
+        { "spiral vase prerequisites", { "spiral_mode", "stabilizer_supports" },
           [](const DynamicPrintConfig &c, const DynamicPrintConfig *) {
               if (!print_carry_bool(c, "spiral_mode"))
                   return false;
               return !(print_carry_int(c, "wall_loops") == 1 && print_carry_int(c, "top_shell_layers") == 0 && print_carry_float(c, "sparse_infill_density") == 0 &&
                        !print_carry_bool(c, "enable_support") && print_carry_int(c, "enforce_support_layers") == 0 && !print_carry_bool(c, "detect_thin_wall") &&
-                       !print_carry_bool(c, "overhang_reverse") && print_carry_int(c, "wall_direction") == int(WallDirection::Auto) &&
+                       !print_carry_bool(c, "overhang_reverse") && print_carry_int(c, "stabilizer_supports") == int(smOff) &&
+                       print_carry_int(c, "wall_direction") == int(WallDirection::Auto) &&
                        print_carry_int(c, "timelapse_type") == int(TimelapseType::tlTraditional));
           } },
         { "alternate extra wall with vertical shell thickness All", { "alternate_extra_wall", "ensure_vertical_shell_thickness" },
