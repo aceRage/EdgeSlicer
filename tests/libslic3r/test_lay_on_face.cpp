@@ -3,6 +3,9 @@
 #include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/Model.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
@@ -203,6 +206,7 @@ TEST_CASE("Faces are selected in object coordinates whatever the instance rotati
 
 TEST_CASE("A part too small to rest on offers no faces", "[LayOnFace]")
 {
+    // The CLI --ground-* options keep the strict default limits.
     Model model;
     CHECK(instance_planes(add_box_object(model, { 2, 2, 2 })).empty()); // every face is 4 mm², under the 5 mm² minimum
 }
@@ -375,4 +379,399 @@ TEST_CASE("A part's face ends up pointing down whatever the instance rotation an
         CHECK(new_linear.isUnitary(1e-9));
         check_on_bed(object);
     }
+}
+
+namespace {
+
+// The faces the Lay on face gizmo offers: its looser limits, scaled to the printed size.
+std::vector<LayOnFacePlane> gizmo_planes(const ModelObject &object, int volume_idx = -1)
+{
+    const Transform3d     matrix = object.instances.front()->get_matrix_no_offset();
+    const LayOnFaceFilter filter = LayOnFaceFilter::for_gizmo(lay_on_face_size_diagonal(object, volume_idx, matrix));
+    return volume_idx >= 0 ? lay_on_face_planes(*object.volumes[volume_idx], matrix, filter) : lay_on_face_planes(object, matrix, filter);
+}
+
+} // namespace
+
+TEST_CASE("The gizmo's limits offer faces on tiny and scaled-down parts", "[LayOnFace]")
+{
+    Model model;
+    SECTION("a 2 mm cube") {
+        ModelObject &cube = add_box_object(model, { 2, 2, 2 });
+        const std::vector<LayOnFacePlane> planes = gizmo_planes(cube);
+        REQUIRE(planes.size() == 6);
+        for (const LayOnFacePlane &plane : planes)
+            CHECK_THAT(plane.area, WithinAbs(4., 1e-3));
+    }
+    SECTION("a 10 mm cube scaled to 20%") {
+        ModelObject &cube = add_box_object(model, { 10, 10, 10 });
+        cube.instances.front()->set_scaling_factor({ 0.2, 0.2, 0.2 });
+        CHECK(instance_planes(cube).empty()); // 4 mm² faces at printed size: nothing with the CLI limits
+        const std::vector<LayOnFacePlane> planes = gizmo_planes(cube);
+        REQUIRE(planes.size() == 6);
+        for (const LayOnFacePlane &plane : planes)
+            CHECK_THAT(plane.area, WithinAbs(4., 1e-3)); // measured at printed size
+    }
+    SECTION("a 0.5 mm cube") {
+        ModelObject &cube = add_box_object(model, { 0.5, 0.5, 0.5 });
+        const std::vector<LayOnFacePlane> planes = gizmo_planes(cube);
+        REQUIRE(planes.size() == 6);
+        for (const LayOnFacePlane &plane : planes)
+            CHECK_THAT(plane.area, WithinAbs(0.25, 1e-4));
+    }
+    SECTION("a tiny cube is laid on one of its faces") {
+        ModelObject &cube = add_box_object(model, { 2, 1, 0.5 });
+        cube.instances.front()->set_rotation({ 0.4, 0.3, 0.2 });
+        cube.instances.front()->set_offset({ 0, 0, 20 });
+        const std::vector<LayOnFacePlane> planes = gizmo_planes(cube);
+        REQUIRE(planes.size() == 6);
+        lay_on_face(cube, 0, planes[find_largest_plane(planes)].normal);
+        // Flat on a 2 x 1 face. It keeps some turn about Z, so only the height is exact.
+        CHECK_THAT(cube.instance_bounding_box(0).size().z(), WithinAbs(0.5, 1e-6));
+        check_on_bed(cube);
+    }
+}
+
+TEST_CASE("The gizmo offers the 12 largest hull faces of a small curved part", "[LayOnFace]")
+{
+    Model        model;
+    ModelObject *ball = model.add_object();
+    ball->add_volume(TriangleMesh(its_make_sphere(5., PI / 10.)), ModelVolumeType::MODEL_PART, false);
+    ball->add_instance();
+
+    CHECK(instance_planes(*ball).empty()); // every hull facet is under 5 mm²
+    const std::vector<LayOnFacePlane> planes = gizmo_planes(*ball);
+    REQUIRE(planes.size() == 12);
+    for (size_t i = 0; i < planes.size(); ++i) {
+        CHECK(planes[i].area > 0.01f);
+        CHECK(planes[i].area < 5.f);
+        if (i > 0)
+            CHECK(planes[i].area <= planes[i - 1].area); // largest first
+    }
+}
+
+TEST_CASE("The gizmo's limits keep every face the CLI offers, largest first", "[LayOnFace]")
+{
+    Model model;
+    SECTION("a 50 mm cube") {
+        ModelObject &cube = add_box_object(model, { 50, 50, 50 });
+        CHECK(instance_planes(cube).size() == 6);
+        CHECK(gizmo_planes(cube).size() == 6);
+    }
+    SECTION("a ribbed plate") {
+        ModelObject                      &plate = add_ribbed_plate(model);
+        const std::vector<LayOnFacePlane> cli   = instance_planes(plate);
+        const std::vector<LayOnFacePlane> gizmo = gizmo_planes(plate);
+        REQUIRE_FALSE(cli.empty());
+        REQUIRE(gizmo.size() >= cli.size());
+        // The CLI's faces come first (faces of equal area may swap places), and any extra ones are smaller.
+        for (size_t i = 0; i < cli.size(); ++i) {
+            CHECK(gizmo[i].area >= 5.f);
+            const bool found = std::any_of(gizmo.begin(), gizmo.begin() + cli.size(), [&cli, i](const LayOnFacePlane &plane) {
+                return plane.normal.isApprox(cli[i].normal, 1e-9) && std::abs(plane.area - cli[i].area) < 1e-4;
+            });
+            CHECK(found);
+        }
+        for (size_t i = cli.size(); i < gizmo.size(); ++i)
+            CHECK(gizmo[i].area < 5.f);
+    }
+}
+
+TEST_CASE("The gizmo's limits scale with the printed size", "[LayOnFace]")
+{
+    const LayOnFaceFilter cli = LayOnFaceFilter();
+    CHECK(cli.min_count == 0);
+    CHECK(cli.min_area == 5.f);
+    CHECK(cli.min_side == 1.f);
+
+    const LayOnFaceFilter tiny = LayOnFaceFilter::for_gizmo(2. * std::sqrt(3.)); // a 2 mm cube
+    CHECK(tiny.min_count == 12);
+    CHECK_THAT(tiny.floor_area, WithinAbs(0.01, 1e-6));
+    CHECK_THAT(tiny.min_side, WithinAbs(0.1 * std::sqrt(3.), 1e-6));
+
+    const LayOnFaceFilter large = LayOnFaceFilter::for_gizmo(1000.);
+    CHECK(large.min_side == 1.f);
+    CHECK(large.floor_area == 5.f); // never above the preferred minimum
+}
+
+namespace {
+
+// A flat 4 x 4 grid of 10 mm cells in the XY plane, two facets per cell, all facing +Z.
+indexed_triangle_set flat_grid()
+{
+    indexed_triangle_set its;
+    for (int j = 0; j <= 4; ++j)
+        for (int i = 0; i <= 4; ++i)
+            its.vertices.emplace_back(Vec3f(10.f * i, 10.f * j, 0.f));
+    auto vertex = [](int i, int j) { return 5 * j + i; };
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i) {
+            its.indices.emplace_back(vertex(i, j), vertex(i + 1, j), vertex(i + 1, j + 1));
+            its.indices.emplace_back(vertex(i, j), vertex(i + 1, j + 1), vertex(i, j + 1));
+        }
+    return its;
+}
+
+int facet_facing(const indexed_triangle_set &its, const Vec3d &direction)
+{
+    for (size_t i = 0; i < its.indices.size(); ++i)
+        if (its_face_normal(its, int(i)).cast<double>().dot(direction) > 1. - 1e-6)
+            return int(i);
+    return -1;
+}
+
+std::vector<Vec3d> face_points(const indexed_triangle_set &its, const std::vector<int> &facets, const Transform3d &matrix = Transform3d::Identity())
+{
+    std::vector<Vec3d> points;
+    for (int facet : facets)
+        for (int i = 0; i < 3; ++i)
+            points.emplace_back(matrix * its.vertices[its.indices[facet][i]].cast<double>());
+    return points;
+}
+
+} // namespace
+
+TEST_CASE("A flat face grows over its facets and stops at its edges", "[LayOnFace]")
+{
+    SECTION("a box face is its two facets") {
+        const indexed_triangle_set its       = its_make_cube(10, 20, 30);
+        const std::vector<Vec3i32> neighbors = its_face_neighbors(its);
+        for (int seed = 0; seed < int(its.indices.size()); ++seed) {
+            const std::vector<int> face = grow_flat_face(its, neighbors, seed);
+            REQUIRE(face.size() == 2);
+            CHECK(face.front() == seed);
+            CHECK(its_face_normal(its, face[0]).isApprox(its_face_normal(its, face[1]), 1e-6f));
+        }
+    }
+    SECTION("a cylinder") {
+        // 20 steps round (the angle a hair over 18 degrees so rounding can't make it 21).
+        const indexed_triangle_set its       = its_make_cylinder(5., 10., 2. * PI / 20. * (1. + 1e-9));
+        const std::vector<Vec3i32> neighbors = its_face_neighbors(its);
+        // Each fan-triangulated cap of 20 facets is one face.
+        for (const Vec3d &direction : { Vec3d(-Vec3d::UnitZ()), Vec3d(Vec3d::UnitZ()) }) {
+            const int cap = facet_facing(its, direction);
+            REQUIRE(cap >= 0);
+            const std::vector<int> face = grow_flat_face(its, neighbors, cap);
+            CHECK(face.size() == 20);
+            CHECK(flat_face_normal(its, face).isApprox(direction, 1e-9));
+        }
+        // A side facet is its quad: the next quads turn by 18 degrees, and it doesn't creep round the curve.
+        int side = -1;
+        for (size_t i = 0; i < its.indices.size() && side < 0; ++i)
+            if (std::abs(its_face_normal(its, int(i)).z()) < 1e-6f)
+                side = int(i);
+        REQUIRE(side >= 0);
+        CHECK(grow_flat_face(its, neighbors, side).size() == 2);
+        CHECK(grow_flat_face(its, neighbors, side, 10.).size() == 2);
+    }
+    SECTION("noise within the tolerance stays in the face") {
+        indexed_triangle_set its = flat_grid();
+        // Lift the middle vertex so the six facets around it tilt by 0.2 to 0.29 degrees.
+        const int middle = 12;
+        its.vertices[middle].z() = float(10. * std::tan(0.2 * PI / 180.));
+        const int around = int(std::count_if(its.indices.begin(), its.indices.end(), [middle](const Vec3i32 &t) {
+            return t[0] == middle || t[1] == middle || t[2] == middle;
+        }));
+        REQUIRE(around == 6);
+        const std::vector<Vec3i32> neighbors = its_face_neighbors(its);
+        CHECK(grow_flat_face(its, neighbors, 0, 0.5).size() == its.indices.size());
+        CHECK(grow_flat_face(its, neighbors, 0, 0.1).size() == its.indices.size() - around);
+    }
+    SECTION("a seed out of range gives nothing") {
+        const indexed_triangle_set its = its_make_cube(1, 1, 1);
+        CHECK(grow_flat_face(its, its_face_neighbors(its), -1).empty());
+        CHECK(grow_flat_face(its, its_face_neighbors(its), int(its.indices.size())).empty());
+    }
+}
+
+TEST_CASE("A flat face's normal is the plane's, however it is triangulated", "[LayOnFace]")
+{
+    // An irregular convex polygon, fan-triangulated from one corner into facets of very different shapes, then tilted.
+    indexed_triangle_set its;
+    const double angles[] = { 0., 0.5, 1.7, 2.2, 3.9, 4.6, 5.5 };
+    for (double a : angles)
+        its.vertices.emplace_back(Vec3f(float(10. * std::cos(a)), float(10. * std::sin(a)), 0.f));
+    for (int i = 1; i + 1 < 7; ++i)
+        its.indices.emplace_back(0, i, i + 1);
+    const Transform3d tilt = Geometry::rotation_transform({ 0.7, -0.4, 1.1 }) * Geometry::translation_transform({ 3., -2., 5. });
+    for (Vec3f &v : its.vertices)
+        v = (tilt * v.cast<double>()).cast<float>();
+
+    const std::vector<int> face = grow_flat_face(its, its_face_neighbors(its), 3);
+    REQUIRE(face.size() == 5);
+    const Vec3d expected = (tilt.linear() * Vec3d::UnitZ()).normalized();
+    const Vec3d normal   = flat_face_normal(its, face);
+    CHECK_THAT(normal.dot(expected), WithinAbs(1., 1e-9));
+}
+
+TEST_CASE("A mesh normal maps to object coordinates through the inverse transpose", "[LayOnFace]")
+{
+    const indexed_triangle_set its = its_make_cube(10, 20, 30);
+    const Transform3d volume = Geometry::translation_transform({ 5., -7., 2. }) * Geometry::rotation_transform({ 0.3, 0.9, -0.5 }) *
+                               Geometry::scale_transform({ 1., 3., 0.5 });
+    const Transform3d mirrored = volume * Geometry::scale_transform({ -1., 1., 1. });
+    for (const Transform3d &matrix : { volume, mirrored })
+        for (size_t f = 0; f < its.indices.size(); ++f) {
+            const Vec3d mesh_normal = its_face_normal(its, int(f)).cast<double>();
+            const Vec3d n           = mesh_normal_to_object(matrix, mesh_normal);
+            CHECK_THAT(n.norm(), WithinAbs(1., 1e-12));
+            // Perpendicular to the transformed facet, and outward (the side the mesh normal points to).
+            const std::vector<Vec3d> p = face_points(its, { int(f) }, matrix);
+            CHECK(std::abs(n.dot((p[1] - p[0]).normalized())) < 1e-9);
+            CHECK(std::abs(n.dot((p[2] - p[0]).normalized())) < 1e-9);
+            CHECK(n.dot(matrix.linear() * mesh_normal) > 0.);
+        }
+    CHECK(mesh_normal_to_object(volume, Vec3d::Zero()).isZero());
+}
+
+namespace {
+
+// The world matrix of a part: what the scene's raycaster places it with.
+Transform3d part_world(const ModelObject &object, size_t volume_idx)
+{
+    return object.instances.front()->get_matrix() * object.volumes[volume_idx]->get_matrix();
+}
+
+// Lays the object (or only the part) on the face around `seed` of part `volume_idx`, as Face under cursor does,
+// then checks that face ends up flat on the bed, pointing straight down.
+void lay_on_picked_face(ModelObject &object, size_t volume_idx, int seed, bool part_only)
+{
+    const indexed_triangle_set &its  = object.volumes[volume_idx]->mesh().its;
+    const std::vector<int>      face = grow_flat_face(its, its_face_neighbors(its), seed);
+    REQUIRE_FALSE(face.empty());
+    const Vec3d mesh_normal   = flat_face_normal(its, face);
+    const Vec3d object_normal = mesh_normal_to_object(object.volumes[volume_idx]->get_matrix(), mesh_normal);
+
+    if (part_only)
+        lay_part_on_face(object, 0, volume_idx, object_normal);
+    else
+        lay_on_face(object, 0, object_normal);
+
+    const Transform3d world        = part_world(object, volume_idx);
+    const Vec3d       world_normal = (world.linear().inverse().transpose() * mesh_normal).normalized();
+    CHECK_THAT(world_normal.z(), WithinAbs(-1., 1e-9));
+    // Flat: every corner of the face at the same height, and on the hull face of a box that is the bed.
+    for (const Vec3d &p : face_points(its, face, world))
+        CHECK_THAT(p.z(), WithinAbs(0., 1e-6));
+    check_on_bed(object);
+}
+
+} // namespace
+
+TEST_CASE("A face picked under the cursor ends up down on the bed whatever the instance and part transformation", "[LayOnFace]")
+{
+    Model        model;
+    ModelObject &object = add_box_object(model, { 10, 20, 30 });
+    // The part is turned and moved inside the object, and the instance is turned, mirrored and scaled unevenly.
+    object.volumes[0]->set_transformation(Geometry::Transformation(Geometry::translation_transform({ 3., 4., 5. }) *
+                                                                    Geometry::rotation_transform({ 0.2, -0.6, 0.4 })));
+    object.instances.front()->set_rotation({ 0.5, 0.3, 1.2 });
+    object.instances.front()->set_mirror({ -1., 1., 1. });
+    object.instances.front()->set_scaling_factor({ 1.5, 0.75, 2. });
+    object.instances.front()->set_offset({ 10., 20., 40. });
+
+    const int facets = int(object.volumes[0]->mesh().its.indices.size());
+    for (int seed = 0; seed < facets; ++seed) {
+        DYNAMIC_SECTION("facet " << seed) {
+            lay_on_picked_face(object, 0, seed, false);
+        }
+    }
+}
+
+TEST_CASE("A face of one part picked under the cursor turns only that part", "[LayOnFace]")
+{
+    Model        model;
+    ModelObject &object = add_plate_with_tilted_block(model);
+    object.instances.front()->set_rotation({ 0., 0., PI / 3. }); // square to the bed, so the plate still rests on it
+    object.instances.front()->set_mirror({ -1., 1., 1. });
+    object.instances.front()->set_scaling_factor({ 1.5, 0.75, 2. });
+    drop_object_to_bed(object);
+    const Transform3d plate_before = object.volumes[0]->get_matrix();
+
+    const int facets = int(object.volumes[1]->mesh().its.indices.size());
+    for (int seed = 0; seed < facets; seed += 2) {
+        DYNAMIC_SECTION("facet " << seed) {
+            const indexed_triangle_set &its  = object.volumes[1]->mesh().its;
+            const std::vector<int>      face = grow_flat_face(its, its_face_neighbors(its), seed);
+            const Vec3d mesh_normal = flat_face_normal(its, face);
+            lay_part_on_face(object, 0, 1, mesh_normal_to_object(object.volumes[1]->get_matrix(), mesh_normal));
+            const Vec3d world_normal = (part_world(object, 1).linear().inverse().transpose() * mesh_normal).normalized();
+            CHECK_THAT(world_normal.z(), WithinAbs(-1., 1e-9));
+            CHECK(object.volumes[0]->get_matrix().isApprox(plate_before, 1e-9));
+            check_on_bed(object);
+        }
+    }
+}
+
+namespace {
+
+// An L bracket: a 30 x 10 x 2 base and a 2 x 10 x 20 upright standing on its end at x = 0.
+ModelObject &add_l_bracket(Model &model)
+{
+    ModelObject *object = model.add_object();
+    add_box(*object, { 30, 10, 2 });
+    add_box(*object, { 2, 10, 20 }, { 0, 0, 2 });
+    object->add_instance();
+    return *object;
+}
+
+// The face of part `volume_idx` facing `direction` (object coordinates; the parts are untransformed here).
+std::vector<Vec3d> face_of(const ModelObject &object, size_t volume_idx, const Vec3d &direction)
+{
+    const indexed_triangle_set &its  = object.volumes[volume_idx]->mesh().its;
+    const int                   seed = facet_facing(its, direction);
+    REQUIRE(seed >= 0);
+    return face_points(its, grow_flat_face(its, its_face_neighbors(its), seed));
+}
+
+double recess(const ModelObject &object, size_t volume_idx, const Vec3d &direction, int hull_of = -1)
+{
+    return lay_on_face_recess_depth(lay_on_face_hull_points(object, hull_of), face_of(object, volume_idx, direction), direction,
+                                    object.instances.front()->get_matrix_no_offset());
+}
+
+} // namespace
+
+TEST_CASE("Recessed faces are told apart from the faces an object rests on", "[LayOnFace]")
+{
+    Model        model;
+    ModelObject &bracket = add_l_bracket(model);
+
+    SECTION("plain instance") {
+        CHECK_THAT(recess(bracket, 1, Vec3d::UnitX()), WithinAbs(28., 1e-4));  // inside of the upright: the base reaches x = 30
+        CHECK_THAT(recess(bracket, 0, Vec3d::UnitZ()), WithinAbs(20., 1e-4));  // top of the base: the upright reaches z = 22
+        CHECK_THAT(recess(bracket, 1, -Vec3d::UnitX()), WithinAbs(0., 1e-6)); // back of the upright
+        CHECK_THAT(recess(bracket, 0, -Vec3d::UnitZ()), WithinAbs(0., 1e-6)); // bottom
+        CHECK_THAT(recess(bracket, 1, Vec3d::UnitZ()), WithinAbs(0., 1e-6));  // top of the upright
+        // Measured against one part only, a part's own faces are all on its hull.
+        CHECK_THAT(recess(bracket, 1, Vec3d::UnitX(), 1), WithinAbs(0., 1e-6));
+        CHECK(lay_on_face_hull_points(bracket, 1).size() < lay_on_face_hull_points(bracket, -1).size());
+    }
+    SECTION("depths are at printed size, mirrored or not") {
+        bracket.instances.front()->set_scaling_factor({ 1.5, 1., 2. });
+        bracket.instances.front()->set_mirror({ -1., 1., 1. });
+        bracket.instances.front()->set_rotation({ 0.3, 0.2, 0.1 });
+        CHECK_THAT(recess(bracket, 1, Vec3d::UnitX()), WithinAbs(42., 1e-4));
+        CHECK_THAT(recess(bracket, 0, Vec3d::UnitZ()), WithinAbs(40., 1e-4));
+        CHECK_THAT(recess(bracket, 1, -Vec3d::UnitX()), WithinAbs(0., 1e-6));
+    }
+}
+
+TEST_CASE("Laid on a recessed face, the object rests on its rim with the face down above the bed", "[LayOnFace]")
+{
+    Model        model;
+    ModelObject &bracket = add_l_bracket(model);
+    bracket.instances.front()->set_scaling_factor({ 1., 1., 2. });
+    const double depth = recess(bracket, 0, Vec3d::UnitZ());
+    REQUIRE_THAT(depth, WithinAbs(40., 1e-4));
+
+    lay_on_face(bracket, 0, Vec3d::UnitZ()); // the top of the base, a face the object can't rest on
+    check_on_bed(bracket);
+    const indexed_triangle_set &its  = bracket.volumes[0]->mesh().its;
+    const int                   seed = facet_facing(its, Vec3d::UnitZ());
+    const std::vector<int>      face = grow_flat_face(its, its_face_neighbors(its), seed);
+    const Vec3d world_normal = (part_world(bracket, 0).linear().inverse().transpose() * flat_face_normal(its, face)).normalized();
+    CHECK_THAT(world_normal.z(), WithinAbs(-1., 1e-9));
+    for (const Vec3d &p : face_points(its, face, part_world(bracket, 0)))
+        CHECK_THAT(p.z(), WithinAbs(depth, 1e-4));
 }

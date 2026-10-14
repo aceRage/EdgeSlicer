@@ -781,6 +781,10 @@ void PrintObject::generate_support_material()
             this->_generate_support_material();
             m_print->throw_if_canceled();
         }
+        // Orca: the tree support collision/avoidance caches and support nodes are only used while this step runs
+        // (detect_overhangs() rebuilds them from scratch), so don't keep them resident until the next slice.
+        // Side stabilizers below do not read this cache.
+        this->clear_tree_support_preview_cache();
 
         // Side stabilizers (Support/Stabilizers.hpp) ride on whatever support layers exist - the
         // generator's above, or none: they do not depend on Enable supports. With supports off the

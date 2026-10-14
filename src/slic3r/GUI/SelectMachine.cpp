@@ -10,6 +10,7 @@
 #include "libslic3r/BambuNozzleMappingRequest.hpp"
 #include "DualNozzleState.hpp"
 #include "BambuSendMapping.hpp"
+#include "BambuSendDiagnosis.hpp"
 #include <chrono>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GUI.hpp"
@@ -2573,7 +2574,8 @@ void SelectMachineDialog::on_send_print()
     // No PA-value switch in this fork: automatic extruder calibration (1), per the payload docs.
     m_print_job->extruder_cali_manual_mode = 1;
 
-    m_print_job->has_sdcard = obj_->get_sdcard_state() == MachineObject::SdcardState::HAS_SDCARD_NORMAL;
+    m_print_job->sdcard_state = (int) obj_->get_sdcard_state();
+    m_print_job->has_sdcard   = bambu_storage_usable_for_lan(m_print_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));
 
 
     bool timelapse_option = select_timelapse->IsShown() ? m_checkbox_list["timelapse"]->GetValue() : true;
