@@ -38,6 +38,7 @@
 #include <mutex>
 #include <stack>
 #include <unordered_map>
+#include <vector>
 //#define BBL_HAS_FIRST_PAGE          1
 #define STUDIO_INACTIVE_TIMEOUT     15*60*1000
 #define LOG_FILES_MAX_NUM           30
@@ -265,6 +266,11 @@ private:
     // post_init must not start a blank project in that case, or it discards the model the
     // URL is in the middle of loading.
     bool            m_url_open_pending { false };
+#ifdef __APPLE__
+    // Model URLs that arrived before post_init(). Drain after post_init() so the
+    // download starts on a fully built GUI (Snap #997 / d29a199d3ef5094f864371acf9b2bee5c4b19511).
+    std::vector<wxString> m_pending_mac_open_urls;
+#endif // __APPLE__
     std::string     m_pending_connector_link;
     bool            m_app_conf_exists{ false };
     EAppMode        m_app_mode{ EAppMode::Editor };

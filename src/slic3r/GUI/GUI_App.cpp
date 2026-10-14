@@ -4033,6 +4033,12 @@ bool GUI_App::on_init_inner()
 #endif
             this->post_init();
 
+#ifdef __APPLE__
+            for (const auto& url : m_pending_mac_open_urls)
+                start_download(into_u8(url));
+            m_pending_mac_open_urls.clear();
+#endif // __APPLE__
+
             update_publish_status();
             if (!m_pending_connector_link.empty()) {
                 const std::string link = std::move(m_pending_connector_link);
@@ -8717,7 +8723,10 @@ void GUI_App::MacOpenURL(const wxString& url)
         return;
     }
     m_url_open_pending = true;
-    start_download(into_u8(url));
+    if (!m_post_initialized)
+        m_pending_mac_open_urls.push_back(url);
+    else
+        start_download(into_u8(url));
 }
 
 // wxWidgets override to get an event on open files.
