@@ -22,8 +22,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <functional>
+#include <thread>
 
 using namespace Slic3r;
 
@@ -1844,6 +1847,84 @@ TEST_CASE("Seam metadata restores only recognized modes on compatible base types
         CHECK_FALSE(helper.config.has("sparse_infill_density"));
         CHECK_FALSE(helper.config.has("notes"));
     }
+}
+
+namespace {
+
+// Poll until pred() holds or the deadline passes; avoids flaky fixed sleeps.
+template<typename Pred>
+bool wait_until(Pred pred, int timeout_ms)
+{
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred())
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
+// Records callback invocations; the backup worker thread calls these too,
+// so state lives in atomics.
+struct BackupCallbackRecorder
+{
+    std::atomic<int> calls{0};
+    std::atomic<int> last_action{-1};
+    std::atomic<bool> saw_backup_response{false};
+    std::function<void(int)> fn()
+    {
+        return [this](int action) {
+            last_action.store(action);
+            if (action == 1)
+                saw_backup_response.store(true);
+            calls.fetch_add(1);
+        };
+    }
+};
+
+} // namespace
+
+// Reproduces the missed-notification stall from the shutdown race:
+// a task queued while the callback is null loses its only
+// m_ui_tasks.size()==1 notification, and after a fresh callback is
+// installed the queue can never be drained again (EVT_BACKUP_POST never
+// fires). set_post_callback must re-announce pending tasks on install.
+TEST_CASE("backup ui-task notification survives null-callback window", "[3mf][bbs-backup]")
+{
+    BackupCallbackRecorder cb0, cb1;
+    set_backup_interval(0);
+
+    struct ClearBackupCallback
+    {
+        ~ClearBackupCallback() { set_backup_callback(nullptr); }
+    } clear_on_exit;
+
+    // Healthy cycle: task queued + announced (action 0), then consumed the
+    // way the GUI does it; consumption triggers the backup response (action 1).
+    set_backup_callback(cb0.fn());
+    backup_soon();
+    REQUIRE(wait_until([&] { return cb0.calls.load() > 0; }, 5000));
+    REQUIRE(cb0.last_action.load() == 0);
+    // The manager is a process-wide singleton: ui tasks left by earlier test
+    // cases make the first announcement arrive before the worker has queued
+    // our Backup task. Keep consuming (as the GUI does) until the backup
+    // response (action 1) shows up, rather than assuming exactly one pass.
+    REQUIRE(wait_until([&] {
+        run_backup_ui_tasks();
+        return cb0.saw_backup_response.load();
+    }, 5000));
+
+    // MainFrame::shutdown(): callback goes null. A task landing in the queue
+    // in this window gets no notification (previously: crash, now: silence).
+    set_backup_callback(nullptr);
+    backup_soon();
+    std::this_thread::sleep_for(std::chrono::seconds(2)); // let the worker queue it
+
+    // New MainFrame installs a fresh callback: pending tasks must be
+    // re-announced, otherwise backup stalls until process exit.
+    set_backup_callback(cb1.fn());
+    REQUIRE(wait_until([&] { return cb1.calls.load() > 0; }, 5000));
+    REQUIRE(cb1.last_action.load() == 0);
 }
 
 // Orca #16306: a relationship must name a part the package actually contains. The writer used to
