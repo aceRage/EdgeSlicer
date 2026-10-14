@@ -186,9 +186,10 @@ TEST_CASE("No shipped preset value is newly out of range with float bounds", "[C
                 continue;
             boost::nowide::ifstream ifs(it->path().string());
             nlohmann::json j = nlohmann::json::parse(ifs, nullptr, false);
-            if (j.is_object() && j.contains("name") && j["name"].is_string())
+            if (j.is_object() && j.contains("name") && j["name"].is_string()) {
                 const std::string preset_name = j["name"].get<std::string>();
                 by_name[preset_name]          = std::move(j);
+            }
         }
         return by_name;
     };
