@@ -56,7 +56,14 @@
     return seen.length === 1 ? seen[0] : last;
   }
 
-  var api = { CAP: CAP, PRESETS: PRESETS, ROWS: ROWS, clean: clean, defaultMax: defaultMax, cleanRows: cleanRows, defaultRows: defaultRows };
+  // "Per model · 200 per file" / "Per file · all in one file", for the button's tooltip.
+  //   words: {model, file, all, per}  the translated pieces
+  function summarize(rows, max, words) {
+    var m = clean(max);
+    return (rows === 'file' ? words.file : words.model) + ' \u00b7 ' + (m > 0 ? m + ' ' + words.per : words.all);
+  }
+
+  var api = { summarize: summarize, CAP: CAP, PRESETS: PRESETS, ROWS: ROWS, clean: clean, defaultMax: defaultMax, cleanRows: cleanRows, defaultRows: defaultRows };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.CsvMax = api;
 })(typeof window !== 'undefined' ? window : this);

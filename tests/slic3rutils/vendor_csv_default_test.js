@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('assert');
 const path = require('path');
-const { defaultMax, defaultRows, cleanRows, clean, PRESETS, CAP } = require(path.join(__dirname, '..', '..', 'resources', 'web', 'home', 'csvmax.js'));
+const { defaultMax, defaultRows, cleanRows, summarize, clean, PRESETS, CAP } = require(path.join(__dirname, '..', '..', 'resources', 'web', 'home', 'csvmax.js'));
 
 const A = { id: 'a', limit: 200 };
 const B = { id: 'b', limit: 0 };
@@ -66,5 +66,12 @@ assert.strictEqual(defaultRows([R('a', ''), R('b', '')], { rowsLast: 'file', row
 assert.strictEqual(cleanRows('file'), 'file');
 assert.strictEqual(cleanRows('Model'), '');
 assert.strictEqual(cleanRows(null), '');
+
+// ---- the one-line summary in the buttons' tooltips ----
+const W = { model: 'Per model', file: 'Per file', all: 'all in one file', per: 'per file' };
+assert.strictEqual(summarize('model', 200, W), 'Per model · 200 per file');
+assert.strictEqual(summarize('file', 0, W), 'Per file · all in one file');
+assert.strictEqual(summarize('bogus', '500', W), 'Per model · 500 per file'); // unknown rows -> model
+assert.strictEqual(summarize('model', -3, W), 'Per model · all in one file');
 
 console.log('PASS vendor_csv_default_test');
