@@ -7571,9 +7571,6 @@ void ObjectList::on_plate_selected(int plate_index)
     // Thumbnail / programmatic plate picks leave the mouse outside the list, so
     // wxEVT_DATAVIEW_SELECTION_CHANGED returns before part_selection_changed().
     // Refresh plate settings from PartPlate::config() explicitly (Snap #1007).
-    // Compatible with draft PR #421: that spike snapshots printer/filament
-    // full_config() on the plate; this path only reloads per-plate process
-    // overrides (print sequence, skirt start) and does not call on_select_preset.
     part_selection_changed();
 }
 
