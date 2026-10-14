@@ -1,6 +1,6 @@
 {
     "name": "Prusa",
-    "version": "02.04.00.18",
+    "version": "02.04.00.19",
     "force_update": "0",
     "description": "Prusa configurations",
     "machine_model_list": [
@@ -3023,6 +3023,66 @@
         {
             "name": "Prusament PLA @Prusa CORE One INDX",
             "sub_path": "filament/Prusament PLA @Prusa CORE One INDX.json"
+        },
+        {
+            "name": "Generic ABS @Prusa MK4 MMU3",
+            "sub_path": "filament/Generic ABS @Prusa MK4 MMU3.json"
+        },
+        {
+            "name": "Generic ASA @Prusa MK4 MMU3",
+            "sub_path": "filament/Generic ASA @Prusa MK4 MMU3.json"
+        },
+        {
+            "name": "Generic PC @Prusa MK4 MMU3",
+            "sub_path": "filament/Generic PC @Prusa MK4 MMU3.json"
+        },
+        {
+            "name": "Generic PETG @Prusa MK4 MMU3",
+            "sub_path": "filament/Generic PETG @Prusa MK4 MMU3.json"
+        },
+        {
+            "name": "Generic PLA @Prusa MK4 MMU3",
+            "sub_path": "filament/Generic PLA @Prusa MK4 MMU3.json"
+        },
+        {
+            "name": "Prusament ASA @MK4 MMU3",
+            "sub_path": "filament/Prusament ASA @MK4 MMU3.json"
+        },
+        {
+            "name": "Prusament PC Blend @MK4 MMU3",
+            "sub_path": "filament/Prusament PC Blend @MK4 MMU3.json"
+        },
+        {
+            "name": "Prusament PETG @MK4 MMU3",
+            "sub_path": "filament/Prusament PETG @MK4 MMU3.json"
+        },
+        {
+            "name": "Prusament PLA @MK4 MMU3",
+            "sub_path": "filament/Prusament PLA @MK4 MMU3.json"
+        },
+        {
+            "name": "Prusament rPLA @MK4 MMU3",
+            "sub_path": "filament/Prusament rPLA @MK4 MMU3.json"
+        },
+        {
+            "name": "fdm_filament_template_indx",
+            "sub_path": "filament/fdm_filament_template_indx.json"
+        },
+        {
+            "name": "fdm_filament_template_nextruder_pet",
+            "sub_path": "filament/fdm_filament_template_nextruder_pet.json"
+        },
+        {
+            "name": "fdm_filament_template_nextruder_pet_hf",
+            "sub_path": "filament/fdm_filament_template_nextruder_pet_hf.json"
+        },
+        {
+            "name": "fdm_filament_template_nextruder_pla",
+            "sub_path": "filament/fdm_filament_template_nextruder_pla.json"
+        },
+        {
+            "name": "fdm_filament_template_nextruder_pla_hf",
+            "sub_path": "filament/fdm_filament_template_nextruder_pla_hf.json"
         }
     ],
     "machine_list": [

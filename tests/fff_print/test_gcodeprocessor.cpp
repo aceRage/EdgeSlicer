@@ -107,6 +107,44 @@ TEST_CASE("GCodeProcessorResult move assignment transfers members the copy assig
     REQUIRE(dst.moves.size() == 1);
 }
 
+// Orca #16065: moves and lines_ends grow with the print, so reset() gives the memory back
+// (capacity 0) instead of keeping it reserved until the next slice.
+TEST_CASE("GCodeProcessorResult reset frees the moves and line ends memory", "[GCodeProcessor]")
+{
+    GCodeProcessorResult result;
+    result.moves.resize(4096);
+    result.lines_ends.assign(4096, 7);
+    result.filename = "export.gcode";
+    REQUIRE(result.moves.capacity() >= 4096);
+    REQUIRE(result.lines_ends.capacity() >= 4096);
+
+    result.reset();
+    CHECK(result.moves.empty());
+    CHECK(result.lines_ends.empty());
+    CHECK(result.moves.capacity() == 0);
+    CHECK(result.lines_ends.capacity() == 0);
+}
+
+TEST_CASE("GCodeProcessorResult move assignment after reset keeps the filament sequences", "[GCodeProcessor]")
+{
+    GCodeProcessorResult src;
+    src.filament_change_sequence = { 0, 1, 0 };
+    src.nozzle_change_sequence   = { 1, 0 };
+    src.extruder_colors          = { "#FF8000", "#0080FF" };
+    src.moves.resize(8);
+    src.lines_ends.assign(8, 3);
+
+    GCodeProcessorResult dst;
+    dst.moves.resize(4096);
+    dst.reset();
+    dst = std::move(src);
+    CHECK(dst.filament_change_sequence == std::vector<unsigned int>({ 0, 1, 0 }));
+    CHECK(dst.nozzle_change_sequence == std::vector<unsigned int>({ 1, 0 }));
+    CHECK(dst.extruder_colors == std::vector<std::string>({ "#FF8000", "#0080FF" }));
+    CHECK(dst.moves.size() == 8);
+    CHECK(dst.lines_ends.size() == 8);
+}
+
 TEST_CASE("GCodeProcessorResult copy assignment keeps the source and carries the full member set", "[GCodeProcessor]")
 {
     GCodeProcessorResult src;
