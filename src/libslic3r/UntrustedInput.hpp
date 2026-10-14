@@ -237,6 +237,11 @@ std::string archive_entry_leaf(const std::string &normalized);
 // not followed, so a dest-file symlink can be replaced rather than written through.
 bool is_path_within_root(const boost::filesystem::path &root, const boost::filesystem::path &candidate);
 
+// For a name that will be appended to `root` (a preset name becoming <dir>/<name>.json): true if
+// it is non-empty, relative (no leading '/' or '\\', no drive prefix), has no ".." component
+// split on either separator, and root / rel_name still resolves inside root (Orca #15608).
+bool is_relative_name_within_root(const std::string &rel_name, const boost::filesystem::path &root);
+
 // expat's XML_GetBuffer / XML_ParseBuffer take an int length. An archive entry larger than
 // INT_MAX cannot be handed to those APIs without truncating the size (Orca #15958).
 inline bool xml_entry_size_ok(std::uint64_t uncomp_size)
