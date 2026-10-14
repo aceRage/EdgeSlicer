@@ -9925,6 +9925,15 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
         wxGetApp().preset_bundle->printers.get_edited_preset().config.option("nozzle_diameter"));
     size_t new_nozzle_count = nozzle_diameter ? nozzle_diameter->values.size() : 1;
 
+    // Snapmaker #769: record focus before DeleteAllPages destroys the focused control, and keep the
+    // notebook from repainting page by page while it is rebuilt (this now also runs after every printer
+    // preset switch, not only after the sidebar nozzle picker).
+    bool focus_was_in_notebook = false;
+    if (wxWindow* focus = wxWindow::FindFocus())
+        focus_was_in_notebook = p->m_nozzle_notebook->IsDescendant(focus);
+
+    wxWindowUpdateLocker noUpdates(p->m_nozzle_notebook);
+
     // Clear existing pages and controls
     p->m_nozzle_notebook->DeleteAllPages();
     p->m_nozzle_diameter_lists.clear();
@@ -10049,7 +10058,7 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
             diam_str = from_u8(pv_opt->value);
         }
         
-        diameter_combo->SetValue(diam_str + "mm");
+        diameter_combo->SetValue(diam_str.empty() ? wxString() : diam_str + "mm");
 
         p->m_nozzle_diameter_lists.push_back(diameter_combo);
 
@@ -10117,7 +10126,8 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
 
     if (switch_machine) {
         p->combo_printer->SetFocus();
-    } else {
+    } else if (focus_was_in_notebook) {
+        // The focused control was destroyed by the rebuild.
         p->combo_printer->GetParent()->SetFocus();
     }
 }

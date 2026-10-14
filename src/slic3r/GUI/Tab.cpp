@@ -7106,6 +7106,21 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 
         // Trigger the on_presets_changed event to apply cached config for dependent tabs
         on_presets_changed();
+
+        // Snapmaker #769: refresh the sidebar nozzle UI after a printer preset switch. Entries that do not
+        // go through the sidebar (Machine Settings combo, preset deletion, UnsavedChangesDialog transfer,
+        // physical printer linkage) only reach Tab::select_preset. FFF only: SLA has no nozzle_diameter.
+        if (m_type == Preset::TYPE_PRINTER && m_presets->get_edited_preset().printer_technology() == ptFFF) {
+            // plater_ can dangle during recreate_GUI teardown, so check it and hold the sidebar weakly:
+            // a destroyed Sidebar (shutdown or GUI recreation) yields null.
+            if (Plater* plater = wxGetApp().plater()) {
+                wxWeakRef<Sidebar> weak_sidebar = &plater->sidebar();
+                wxTheApp->CallAfter([weak_sidebar]() {
+                    if (Sidebar* sidebar = weak_sidebar.get())
+                        sidebar->update_nozzle_settings();
+                });
+            }
+        }
     }
 
     // Ultra: one short notification per switch for everything that was carried over.
