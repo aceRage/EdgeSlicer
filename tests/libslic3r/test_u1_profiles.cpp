@@ -527,3 +527,33 @@ TEST_CASE("Loading selections with empty flush volumes does not throw and keeps 
     CHECK_NOTHROW(t.bundle->update_selections(config));
     CHECK(t.bundle->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values == std::vector<double>{ 0., 10., 20., 0. });
 }
+
+// Snapmaker #759 + #920: the U1 has no Cool Steel Plate (btSuperTack). It stays available only
+// through support_multi_bed_types (the "ex" list), and the start G-code never branches on it.
+TEST_CASE("The U1 plate list has three plates and no Cool Steel Plate", "[Preset][U1][BedType]")
+{
+    const ConfigOptionDef *def = print_config_def.get("curr_bed_type");
+    REQUIRE(def != nullptr);
+
+    CHECK(def->enum_values_u1 == std::vector<std::string>{ "Textured PEI Plate", "High Temp Plate", "Graphic Effect Plate" });
+    REQUIRE(def->enum_labels_u1.size() == def->enum_values_u1.size());
+    for (const std::string &label : def->enum_labels_u1)
+        CHECK(label != "Cool Steel Plate");
+
+    const auto &ex = def->enum_values_ex;
+    CHECK(std::find(ex.begin(), ex.end(), "Supertack Plate") != ex.end());
+    CHECK(def->enum_values_ex.size() == def->enum_labels_ex.size());
+}
+
+TEST_CASE("The U1 start G-code does not branch on the Cool Steel Plate", "[Preset][U1][BedType]")
+{
+    SnapmakerTree &t = tree();
+    for (const char *name : { "Snapmaker U1 (0.4 nozzle)", "Snapmaker U1 (0.2 nozzle)", "Snapmaker U1 (0.6 nozzle)", "Snapmaker U1 (0.8 nozzle)" }) {
+        const Preset *printer = t.bundle->printers.find_preset(name, false);
+        REQUIRE(printer != nullptr);
+        const std::string &start = printer->config.opt_string("machine_start_gcode");
+        INFO(name);
+        CHECK(start.find("Supertack") == std::string::npos);
+        CHECK(start.find("Cool Steel") == std::string::npos);
+    }
+}
