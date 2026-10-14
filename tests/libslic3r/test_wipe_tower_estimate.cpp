@@ -4,6 +4,7 @@
 #include "libslic3r/GCode/WipeTower2.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include <cmath>
@@ -120,6 +121,43 @@ TEST_CASE("Type1 sizes the tower from each filament's own prime volume", "[WipeT
     const WipeTowerFootprint rib = estimate(config, 2, 0.21, 5., WipeTowerType::Type1);
     CHECK_THAT(rib.width, WithinAbs(rib.depth, 1e-9));
     CHECK_THAT(rib.depth, WithinAbs(WipeTower::estimate_rib_tower_bbox_side({{30.f, 0}, {45.f, 0}}, 35.f, 0.21f, 0.4f, 1.5f, 8.f, 0.f, 5.f), 1e-4));
+}
+
+TEST_CASE("A mixed slot is purged as its physical components", "[WipeTowerEstimate]") {
+    // Slots 4 and 5 are the first two auto C(N,2) pairs (1+2 and 1+3). Every layer
+    // prints one component per mixed slot, so a plate using all five slots purges
+    // the three physical filaments and nothing more. Edge has no filament_is_mixed;
+    // virtual ids are those past filament_diameter.size() (Orca #16435).
+    const WipeTowerType type   = GENERATE(WipeTowerType::Type1, WipeTowerType::Type2);
+    DynamicPrintConfig  config = make_config();
+    config.set_key_value("filament_prime_volume", new ConfigOptionFloats({100., 100., 100.}));
+    config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts({0, 0, 0}));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({1.75, 1.75, 1.75}));
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"#FF0000", "#00FF00", "#0000FF"}));
+    const double physical = estimate(config, 3, 0.2, 5., type).depth;
+    REQUIRE(physical > estimate(config, 2, 0.2, 5., type).depth);
+    CHECK_THAT(estimate(config, 5, 0.2, 5., type).depth, WithinAbs(physical, 1e-9));
+    // The same five ids as physical slots (no virtual tail) is the oversized
+    // estimate that refused positions the printed tower fits.
+    DynamicPrintConfig unmixed = config;
+    unmixed.set_key_value("filament_prime_volume", new ConfigOptionFloats({100., 100., 100., 100., 100.}));
+    unmixed.set_key_value("filament_adhesiveness_category", new ConfigOptionInts({0, 0, 0, 0, 0}));
+    unmixed.set_key_value("filament_diameter", new ConfigOptionFloats({1.75, 1.75, 1.75, 1.75, 1.75}));
+    unmixed.set_key_value("filament_colour",
+                         new ConfigOptionStrings({"#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF"}));
+    CHECK(estimate(unmixed, 5, 0.2, 5., type).depth > physical);
+    // Mixed slots alone still purge their components, and a single one already changes tools.
+    CHECK_THAT(estimate_wipe_tower_footprint(config, type, {3, 4}, 0.2, 5.).depth, WithinAbs(physical, 1e-9));
+    CHECK_THAT(estimate_wipe_tower_footprint(config, type, {3}, 0.2, 5.).depth,
+               WithinAbs(estimate(config, 2, 0.2, 5., type).depth, 1e-9));
+    // A custom mixed_filament_definitions row is expanded through MixedFilamentManager
+    // the same way: 1+3 is two physical filaments.
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 3, 50, {"#FF0000", "#00FF00", "#0000FF"});
+    DynamicPrintConfig custom = config;
+    custom.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+    CHECK_THAT(estimate_wipe_tower_footprint(custom, type, {3}, 0.2, 5.).depth,
+               WithinAbs(estimate(config, 2, 0.2, 5., type).depth, 1e-9));
 }
 
 // OPEN ISSUE (see docs/superpowers/specs/2026-09-09-fff-print-tests.md): the CHECK

@@ -6,6 +6,7 @@
 #include "../BoundingBox.hpp"
 #include "../ClipperUtils.hpp"
 #include "../Config.hpp"
+#include "../MixedFilament.hpp"
 #include "../PrintConfig.hpp"
 #include "../libslic3r.h"
 
@@ -51,10 +52,51 @@ Polygon estimate_wipe_tower_first_layer_outline(const ConfigBase &config, WipeTo
     return WipeTower2::cone_base_polygon(width, depth, height, cone ? cone_angle->getFloat() : 0.);
 }
 
-WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeTowerType tower_type, const std::vector<unsigned int> &filament_ids, double layer_height, double max_object_height)
+// A mixed slot is virtual: the tool ordering resolves it to one of its physical
+// components on every layer, so the tower only ever purges those. Print::extruders
+// already expands; CLI / PartPlate callers that still pass the virtual id do not.
+// Edge has no filament_is_mixed array. Virtual ids are those past the physical
+// count (filament_diameter / filament_colour). Existing estimate tests keep a
+// one-element filament_diameter and pass several physical ids; those stay as-is.
+static void expand_mixed_slot_ids(const ConfigBase &config, std::vector<unsigned int> &filament_ids)
+{
+    const auto *diam_opt  = dynamic_cast<const ConfigOptionFloats *>(option_of(config, "filament_diameter"));
+    const auto *color_opt = dynamic_cast<const ConfigOptionStrings *>(option_of(config, "filament_colour"));
+    const size_t num_physical = diam_opt != nullptr && !diam_opt->values.empty() ? diam_opt->values.size() :
+                                (color_opt != nullptr ? color_opt->values.size() : 0);
+    if (num_physical < 2)
+        return;
+    bool has_virtual = false;
+    for (unsigned int id : filament_ids)
+        if (id >= num_physical) {
+            has_virtual = true;
+            break;
+        }
+    if (!has_virtual)
+        return;
+
+    std::vector<std::string> colors;
+    if (color_opt != nullptr)
+        colors = color_opt->values;
+    colors.resize(num_physical, colors.empty() ? std::string("#26A69A") : colors.back());
+
+    MixedFilamentManager mgr;
+    mgr.auto_generate(colors);
+    if (const auto *mixed_defs = dynamic_cast<const ConfigOptionString *>(option_of(config, "mixed_filament_definitions"));
+        mixed_defs != nullptr && !mixed_defs->value.empty())
+        mgr.load_custom_entries(mixed_defs->value, colors);
+    mgr.expand_0based_extruder_ids(filament_ids, num_physical);
+}
+
+WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeTowerType tower_type, const std::vector<unsigned int> &filament_slots, double layer_height, double max_object_height)
 {
     WipeTowerFootprint footprint;
     footprint.height = max_object_height;
+    // Validation passes the slots as Print::extruders() lists them (already expanded).
+    // The GUI and some CLI placement paths still pass the virtual mixed id, which
+    // repeating the expansion here leaves unchanged (Orca #16435).
+    std::vector<unsigned int> filament_ids = filament_slots;
+    expand_mixed_slot_ids(config, filament_ids);
     const size_t filaments_cnt = filament_ids.size();
     if (filaments_cnt == 0 || layer_height < EPSILON)
         return footprint;
