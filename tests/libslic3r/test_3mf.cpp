@@ -16,9 +16,14 @@
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/file_status.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/system/error_code.hpp>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1996,3 +2001,59 @@ SCENARIO("thumbnail relationships are declared only for thumbnails that were wri
         }
     }
 }
+
+// has_restore_data() runs from the queued EVT_RESTORE_PROJECT handler, whose try starts after
+// the call, so a filesystem_error from probing the stored backup path aborts the application.
+// The realistic trigger is an absolute path from another user's config whose home is not
+// searchable, so the parent, not the backup directory, is what blocks.
+#ifndef _WIN32
+TEST_CASE("has_restore_data reports no restore data for a path it cannot probe", "[3mf]")
+{
+    if (::geteuid() == 0) {
+        SUCCEED("root ignores the directory permissions this test depends on");
+        return;
+    }
+
+    const boost::filesystem::path outer = boost::filesystem::temp_directory_path() /
+        boost::filesystem::unique_path("edge_restore_%%%%%%%%");
+    const boost::filesystem::path backup = outer / "backup";
+    REQUIRE(boost::filesystem::create_directories(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+    std::ofstream((backup / "origin.txt").string()) << "project.3mf";
+
+    // Control: while the path is readable the session is found, so the false below really is
+    // the probe failing and not a mis-built fixture.
+    std::string readable = backup.string(), origin;
+    REQUIRE(has_restore_data(readable, origin));
+    REQUIRE(readable == (backup / ".3mf").string());
+    REQUIRE(origin == "project.3mf");
+
+    // Puts the permissions back before the temp directory is removed, and does so even if an
+    // assertion below throws.
+    struct Searchable
+    {
+        boost::filesystem::path dir;
+        ~Searchable()
+        {
+            boost::system::error_code ec;
+            boost::filesystem::permissions(dir, boost::filesystem::owner_all, ec);
+            boost::filesystem::remove_all(dir, ec);
+        }
+    } restore{outer};
+
+    // Non-throwing here too: a filesystem that refuses the mode change has to reach the skip
+    // below rather than fail the test. The probe then still succeeds, which is that same case.
+    boost::system::error_code probe_ec;
+    boost::filesystem::permissions(outer, boost::filesystem::no_perms, probe_ec);
+    if (boost::filesystem::exists(backup / ".3mf", probe_ec) || !probe_ec) {
+        SUCCEED("the backup path could not be made unprobeable here");
+        return;
+    }
+
+    std::string unprobeable = backup.string(), origin2;
+    bool        has         = true;
+    REQUIRE_NOTHROW(has = has_restore_data(unprobeable, origin2));
+    CHECK_FALSE(has);
+    CHECK(unprobeable == backup.string()); // not rewritten to the .3mf it could not confirm
+}
+#endif // _WIN32

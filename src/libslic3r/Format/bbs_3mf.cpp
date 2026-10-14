@@ -10669,7 +10669,10 @@ bool has_restore_data(std::string & path, std::string& origin)
         origin = "<lock>";
         return false;
     }
-    if (boost::filesystem::exists(path + "/lock.txt")) {
+    // ORCA: non-throwing probes; ec is deliberately unread, a backup path that cannot be
+    //       probed is treated as having no restore data rather than aborting the application.
+    boost::system::error_code ec;
+    if (boost::filesystem::exists(path + "/lock.txt", ec)) {
         std::string pid;
         load_string_file(path + "/lock.txt", pid);
         try {
@@ -10684,10 +10687,10 @@ bool has_restore_data(std::string & path, std::string& origin)
         }
     }
     std::string file3mf = path + "/.3mf";
-    if (!boost::filesystem::exists(file3mf))
+    if (!boost::filesystem::exists(file3mf, ec))
         return false;
     try {
-        if (boost::filesystem::exists(path + "/origin.txt"))
+        if (boost::filesystem::exists(path + "/origin.txt", ec))
             load_string_file(path + "/origin.txt", origin);
     }
     catch (...) {
