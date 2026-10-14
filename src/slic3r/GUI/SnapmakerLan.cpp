@@ -591,7 +591,7 @@ bool Presence::observe(bool answered, long long now)
 // address's history, and two list entries can never read each other's answer. (They could: the
 // cloud broker and the LAN address of one U1 were stored under the same serial number, the two
 // cards shared one slot, and the broker's failed probe was served as the LAN card's state - U2
-// "offline · 10.0.0.106" while it answered on that address, 2026-09-25.)
+// "offline · 192.0.2.106" while it answered on that address, 2026-09-25.)
 struct Cached
 {
     Status                st;          // what the cards show: the last good reading while online

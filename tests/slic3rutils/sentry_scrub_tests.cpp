@@ -38,11 +38,11 @@ TEST_CASE("Crash-report scrubber: Bambu LAN MQTT and camera", "[SentryScrub]")
     CHECK(contains(out2, "device/<serial>/report"));
     CHECK(contains(out2, "rc=-3"));
 
-    const std::string line3 = R"(on_message: {"print":{"command":"push_status","sn":"00M09A350100123",)"
+    const std::string line3 = R"(on_message: {"print":{"command":"push_status","sn":"00M00A000000002",)"
                               R"("ipcam":{"rtsp_url":"rtsps://bblp:87654321@192.168.1.23:322/streaming/live/1"},)"
                               R"("net":{"info":[{"ip":3232235799,"mask":16777215}]},"wifi_signal":"-45dBm"}})";
     const std::string out3 = scrub_for_crash_report(line3);
-    require_gone(out3, {"00M09A350100123", "87654321", "192.168.1.23", "3232235799"});
+    require_gone(out3, {"00M00A000000002", "87654321", "192.168.1.23", "3232235799"});
     CHECK(contains(out3, "push_status"));
     CHECK(contains(out3, "-45dBm"));
 
@@ -150,8 +150,8 @@ TEST_CASE("Crash-report scrubber: e-mail, addresses, host names", "[SentryScrub]
     require_gone(o1, {"alice", "example.co.uk", "1234567890"});
     CHECK(contains(o1, "<email>"));
 
-    const std::string o2 = scrub_for_crash_report("serve at https://devwin11-lance.tail2dff02.ts.net:8443/phone and devwin11-lance.tail2dff02.ts.net");
-    require_gone(o2, {"devwin11", "tail2dff02"});
+    const std::string o2 = scrub_for_crash_report("serve at https://build-vm11-host.tail1234.ts.net:8443/phone and build-vm11-host.tail1234.ts.net");
+    require_gone(o2, {"build-vm11", "tail1234"});
 
     const std::string o3 = scrub_for_crash_report("connect [fe80::1c2d:3e4f:5a6b:7c8d]:8883 then 2001:db8:85a3:0:0:8a2e:370:7334");
     require_gone(o3, {"fe80::1c2d", "2001:db8"});

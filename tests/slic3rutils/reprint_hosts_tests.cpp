@@ -64,24 +64,24 @@ TEST_CASE("a print-host device is a print host, not a Bambu printer", "[ReprintH
 {
     CHECK(RemoteSend::printer_kind_of("ph:3f2a9c") == "printhost");
     CHECK(RemoteSend::printer_kind_of("host") == "printhost");
-    CHECK(RemoteSend::printer_kind_of("sm:8110025111600047BIY2") == "snapmaker");
+    CHECK(RemoteSend::printer_kind_of("sm:811002500000000001AA") == "snapmaker");
     CHECK(RemoteSend::printer_kind_of("connect") == "connect");
-    CHECK(RemoteSend::printer_kind_of("0938AC571101137") == "bambu");
+    CHECK(RemoteSend::printer_kind_of("0938AC000000001") == "bambu");
 }
 
 TEST_CASE("the Device tab's connection address finds the printer's LAN card", "[ReprintHosts]")
 {
-    const std::vector<SnapmakerLan::Device> list = { lan("SN-U1", "10.0.0.108"), lan("SN-U2", "10.0.0.106"),
+    const std::vector<SnapmakerLan::Device> list = { lan("SN-U1", "192.0.2.108"), lan("SN-U2", "192.0.2.106"),
                                                      lan("SN-U3", "U3.local") };
     SnapmakerLan::Device out;
     SECTION("an IP with the MQTT port")
     {
-        REQUIRE(SnapmakerLan::match_host(list, "10.0.0.106:1884", out));
+        REQUIRE(SnapmakerLan::match_host(list, "192.0.2.106:1884", out));
         CHECK(out.id == "SN-U2");
     }
     SECTION("a URL")
     {
-        REQUIRE(SnapmakerLan::match_host(list, "mqtt://10.0.0.108:8883", out));
+        REQUIRE(SnapmakerLan::match_host(list, "mqtt://192.0.2.108:8883", out));
         CHECK(out.id == "SN-U1");
     }
     SECTION("a host name, in any case")
