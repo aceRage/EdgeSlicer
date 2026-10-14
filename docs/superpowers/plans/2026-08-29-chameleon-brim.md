@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Repo: `C:\Dev\SnapmakerOrcaSupports` (worktree, branch `feat/color-matched-supports`). NEVER touch `C:\Dev\SnapmakerOrca` (parallel sessions).
-- Build: `C:\Users\acesa\AppData\Local\Temp\claude\C--Dev\2e201e48-473f-4a73-881b-80bbcd86e8cc\scratchpad\build_supports_wt.bat` (full), or `cmake --build build --config Release --target libslic3r_tests` from repo root for tests. Run: `build\tests\libslic3r\Release\libslic3r_tests.exe "[chameleon]"`.
+- Build: `%TEMP%\claude\C--Dev\2e201e48-473f-4a73-881b-80bbcd86e8cc\scratchpad\build_supports_wt.bat` (full), or `cmake --build build --config Release --target libslic3r_tests` from repo root for tests. Run: `build\tests\libslic3r\Release\libslic3r_tests.exe "[chameleon]"`.
 - BEFORE any build: PowerShell `Get-Process cl,link,MSBuild -ErrorAction SilentlyContinue`; if busy wait 60s and re-check (other sessions build the sibling checkout).
 - **The spike code must be removed first (Task 0)** — no `SPIKE_SPLIT_BRIM` may remain when feature work lands.
 - Constants (spec, verbatim): wall/brim sample spacing 0.8 mm; grid cell 2 mm; k=3 inverse-square vote; tie-break when top-two scores differ < 30% or nearest distances differ < 0.3 mm → larger layer-0 object area, then lower extruder id; runs < 2 mm absorbed; guard cap 4 runs per object brim.

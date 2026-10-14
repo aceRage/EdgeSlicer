@@ -84,13 +84,13 @@
     "Slope Lift"
   ],
   "graphic_effect_plate_temp": [
-    "65"
+    "70"
   ],
   "graphic_effect_plate_temp_initial_layer": [
-    "65"
+    "70"
   ],
   "hot_plate_temp_initial_layer": [
-    "65"
+    "70"
   ],
   "nozzle_temperature": [
     "240"
@@ -102,10 +102,10 @@
     "7"
   ],
   "textured_plate_temp": [
-    "65"
+    "70"
   ],
   "textured_plate_temp_initial_layer": [
-    "65"
+    "70"
   ],
   "filament_type": [
     "PVA"
@@ -145,7 +145,7 @@
     "Snapmaker"
   ],
   "hot_plate_temp": [
-    "65"
+    "70"
   ],
   "pellet_flow_coefficient": [
     "0.4157"

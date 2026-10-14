@@ -37,10 +37,10 @@ std::vector<Adapter> owner_pc()
         make("vEthernet (Default Switch)", "Hyper-V Virtual Ethernet Adapter", IF_ETHERNET, true, { "172.27.96.1" }),
         make("NordLynx", "NordLynx Tunnel", 53, false, { "169.254.5.254", "10.5.0.2" }),
         make("Local Area Connection* 10", "Microsoft Wi-Fi Direct Virtual Adapter #2", IF_IEEE80211, false, { "169.254.189.137" }),
-        make("Tailscale", "Tailscale Tunnel", 53, true, { "100.78.10.92" }),
+        make("Tailscale", "Tailscale Tunnel", 53, true, { "100.64.10.20" }),
         make("NGI VPN", "NGI VPN", IF_PPP, true, { "10.255.233.248" }),
         make("Ethernet", "Intel(R) Ethernet Controller (3) I225-V", IF_ETHERNET, false, { "169.254.196.236" }),
-        make("Wi-Fi", "Intel(R) Wi-Fi 6E AX210 160MHz", IF_IEEE80211, true, { "10.0.0.131" }, /*gateway*/ true),
+        make("Wi-Fi", "Intel(R) Wi-Fi 6E AX210 160MHz", IF_IEEE80211, true, { "10.0.0.20" }, /*gateway*/ true),
         make("Loopback Pseudo-Interface 1", "Software Loopback Interface 1", IF_LOOPBACK, true, { "127.0.0.1" }),
     };
 }
@@ -49,8 +49,8 @@ std::vector<Adapter> owner_pc()
 
 TEST_CASE("the owner's PC advertises its Wi-Fi address and the Tailscale one, nothing virtual", "[HubAddresses]")
 {
-    const std::vector<std::string> ips = candidate_ips(owner_pc(), "10.0.0.131");
-    REQUIRE(ips == std::vector<std::string>{ "10.0.0.131", "100.78.10.92" });
+    const std::vector<std::string> ips = candidate_ips(owner_pc(), "10.0.0.20");
+    REQUIRE(ips == std::vector<std::string>{ "10.0.0.20", "100.64.10.20" });
 }
 
 TEST_CASE("WSL, Hyper-V, Docker, VirtualBox and VMware adapters are never candidates", "[HubAddresses]")
@@ -102,24 +102,24 @@ TEST_CASE("an adapter called Local Area Connection is not mistaken for a loopbac
 TEST_CASE("candidates are ordered: default route, other private LAN addresses, other LAN, Tailscale", "[HubAddresses]")
 {
     const std::vector<Adapter> adapters = {
-        make("Tailscale", "Tailscale Tunnel", 53, true, { "100.78.10.92" }),
+        make("Tailscale", "Tailscale Tunnel", 53, true, { "100.64.10.20" }),
         make("Wi-Fi", "Intel(R) Wi-Fi", IF_IEEE80211, true, { "192.168.1.9" }),
         make("Ethernet", "Intel(R) Ethernet", IF_GIGABIT, true, { "203.0.113.7", "10.0.0.4" }, true),
     };
     // The Ethernet address carries the default route, so it leads even though Wi-Fi is listed first.
     REQUIRE(candidate_ips(adapters, "10.0.0.4") ==
-            std::vector<std::string>{ "10.0.0.4", "192.168.1.9", "203.0.113.7", "100.78.10.92" });
+            std::vector<std::string>{ "10.0.0.4", "192.168.1.9", "203.0.113.7", "100.64.10.20" });
     // Without a known default route: private LAN addresses first, in system order, then the rest.
-    REQUIRE(candidate_ips(adapters) == std::vector<std::string>{ "192.168.1.9", "10.0.0.4", "203.0.113.7", "100.78.10.92" });
+    REQUIRE(candidate_ips(adapters) == std::vector<std::string>{ "192.168.1.9", "10.0.0.4", "203.0.113.7", "100.64.10.20" });
 }
 
 TEST_CASE("Tailscale is last even when it holds the default route (an exit node)", "[HubAddresses]")
 {
     const std::vector<Adapter> adapters = {
-        make("Tailscale", "Tailscale Tunnel", 53, true, { "100.78.10.92" }, true),
-        make("Wi-Fi", "Intel(R) Wi-Fi", IF_IEEE80211, true, { "10.0.0.131" }),
+        make("Tailscale", "Tailscale Tunnel", 53, true, { "100.64.10.20" }, true),
+        make("Wi-Fi", "Intel(R) Wi-Fi", IF_IEEE80211, true, { "10.0.0.20" }),
     };
-    REQUIRE(candidate_ips(adapters, "100.78.10.92") == std::vector<std::string>{ "10.0.0.131", "100.78.10.92" });
+    REQUIRE(candidate_ips(adapters, "100.64.10.20") == std::vector<std::string>{ "10.0.0.20", "100.64.10.20" });
 }
 
 TEST_CASE("duplicates across adapters drop", "[HubAddresses]")
@@ -165,12 +165,12 @@ TEST_CASE("Linux: docker0, br-*, veth*, virbr* and friends are skipped, real NIC
         posix("cni0", { "10.244.0.1" }),
         posix("wg0", { "10.7.0.2" }),
         posix("tun0", { "10.8.0.6" }),
-        posix("tailscale0", { "100.78.10.92" }),
+        posix("tailscale0", { "100.64.10.20" }),
         posix("eth0", { "192.168.1.30" }),
         posix("wlan0", { "192.168.1.31" }, /*up*/ false),
         posix("enp3s0", { "10.0.0.8" }),
     };
-    REQUIRE(candidate_ips(adapters) == std::vector<std::string>{ "192.168.1.30", "10.0.0.8", "100.78.10.92" });
+    REQUIRE(candidate_ips(adapters) == std::vector<std::string>{ "192.168.1.30", "10.0.0.8", "100.64.10.20" });
 }
 
 TEST_CASE("macOS-style names: utun / awdl / bridge are skipped", "[HubAddresses]")
@@ -189,14 +189,14 @@ TEST_CASE("macOS: Tailscale's anonymous utun interface is the tailnet adapter, o
 {
     const std::vector<Adapter> adapters = {
         posix("lo0", { "127.0.0.1" }),
-        posix("utun3", { "100.78.10.92" }),   // Tailscale: tailnet range
+        posix("utun3", { "100.64.10.20" }),   // Tailscale: tailnet range
         posix("utun4", { "10.9.0.2" }),       // some other VPN
         posix("utun5", { "100.10.0.2" }),     // outside 100.64.0.0/10: not a tailnet address
         posix("en0", { "192.168.1.5" }),
     };
-    REQUIRE(candidate_ips(adapters) == std::vector<std::string>{ "192.168.1.5", "100.78.10.92" });
+    REQUIRE(candidate_ips(adapters) == std::vector<std::string>{ "192.168.1.5", "100.64.10.20" });
     // And it is the tailnet kind, so Serve drops it like any other raw tailnet address.
-    REQUIRE(classify(adapters[1], "100.78.10.92") == Kind::Tailscale);
+    REQUIRE(classify(adapters[1], "100.64.10.20") == Kind::Tailscale);
     REQUIRE(classify(adapters[2], "10.9.0.2") == Kind::Rejected);
     REQUIRE(classify(adapters[3], "100.10.0.2") == Kind::Rejected);
 }
@@ -205,13 +205,13 @@ TEST_CASE("macOS: Tailscale's anonymous utun interface is the tailnet adapter, o
 
 TEST_CASE("with Tailscale Serve publishing the hub the raw tailnet address is dropped", "[HubAddresses]")
 {
-    const std::vector<std::string> ips = { "10.0.0.131", "100.78.10.92" };
-    REQUIRE(advertised_ips(ips, /*serve_https_available*/ true) == std::vector<std::string>{ "10.0.0.131" });
+    const std::vector<std::string> ips = { "10.0.0.20", "100.64.10.20" };
+    REQUIRE(advertised_ips(ips, /*serve_https_available*/ true) == std::vector<std::string>{ "10.0.0.20" });
 }
 
 TEST_CASE("without Serve the tailnet address stays, after the LAN ones", "[HubAddresses]")
 {
-    const std::vector<std::string> ips = { "10.0.0.131", "100.78.10.92" };
+    const std::vector<std::string> ips = { "10.0.0.20", "100.64.10.20" };
     REQUIRE(advertised_ips(ips, false) == ips);
 }
 
@@ -219,7 +219,7 @@ TEST_CASE("only the 100.64.0.0/10 range counts as a tailnet address", "[HubAddre
 {
     REQUIRE_FALSE(is_tailscale_range("100.63.255.255"));
     REQUIRE(is_tailscale_range("100.64.0.0"));
-    REQUIRE(is_tailscale_range("100.78.10.92"));
+    REQUIRE(is_tailscale_range("100.64.10.20"));
     REQUIRE(is_tailscale_range("100.127.255.255"));
     REQUIRE_FALSE(is_tailscale_range("100.128.0.1"));
     REQUIRE_FALSE(is_tailscale_range("10.100.64.1"));
@@ -231,7 +231,7 @@ TEST_CASE("a /pair answered through Serve carries no bare hosts", "[HubAddresses
     // The app would join each to https://<scanned host>:443 - candidates that cannot answer. The
     // same list is kept for a request on the LAN listener, where it is joined to the working
     // scheme and port.
-    const std::vector<std::string> ips = { "10.0.0.131" };
+    const std::vector<std::string> ips = { "10.0.0.20" };
     REQUIRE(ips_for_pair(ips, /*via serve https*/ true).empty());
     REQUIRE(ips_for_pair(ips, false) == ips);
 }
@@ -239,10 +239,10 @@ TEST_CASE("a /pair answered through Serve carries no bare hosts", "[HubAddresses
 TEST_CASE("the whole story for the owner's PC with Serve on", "[HubAddresses]")
 {
     // What the iPhone log should have shown: no 172.x / 10.255.x virtual-adapter candidates, no
-    // https://100.78.10.92, and nothing bare-host-derived from the Serve origin at all.
-    const std::vector<std::string> lan = candidate_ips(owner_pc(), "10.0.0.131");
+    // https://100.64.10.20, and nothing bare-host-derived from the Serve origin at all.
+    const std::vector<std::string> lan = candidate_ips(owner_pc(), "10.0.0.20");
     const std::vector<std::string> ips = advertised_ips(lan, true);
-    REQUIRE(ips == std::vector<std::string>{ "10.0.0.131" });
+    REQUIRE(ips == std::vector<std::string>{ "10.0.0.20" });
     REQUIRE(ips_for_pair(ips, true).empty());
-    REQUIRE(ips_for_pair(ips, false) == std::vector<std::string>{ "10.0.0.131" });
+    REQUIRE(ips_for_pair(ips, false) == std::vector<std::string>{ "10.0.0.20" });
 }

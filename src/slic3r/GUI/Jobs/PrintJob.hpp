@@ -84,6 +84,9 @@ public:
     bool        task_layer_inspect;
     bool        cloud_print_only { false };
     bool        has_sdcard { false };
+    // MachineObject::SdcardState of the printer's storage (0 none, 1 normal, 2 abnormal, 3 read-only);
+    // only used to say why has_sdcard is false.
+    int         sdcard_state { 0 };
     bool        task_use_ams { true };
 
     int         auto_bed_leveling{0};
