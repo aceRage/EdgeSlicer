@@ -2,6 +2,7 @@
 
 #include "BambuReprint.hpp"
 #include "BambuSendMapping.hpp"
+#include "BambuSendDiagnosis.hpp"
 #include "BitmapCache.hpp"
 #include "DeviceManager.hpp"
 #include "GUI_App.hpp"
@@ -427,7 +428,8 @@ static std::pair<int, std::string> prepare_bambu(const Request& req, PartPlate* 
     ps.filename        = jd._3mf_path.string();
     ps.config_filename = jd._3mf_config_path.string();
     ps.plate_index     = req.plate + 1;
-    const bool        has_sdcard = obj->get_sdcard_state() == MachineObject::SdcardState::HAS_SDCARD_NORMAL;
+    // Same rule as the send dialogs: storage the printer flags as abnormal counts when the user allowed it (Orca #10981).
+    const bool        has_sdcard = bambu_storage_usable_for_lan((int) obj->get_sdcard_state(), wxGetApp().app_config->get_bool("allow_abnormal_storage"));
     const std::string name       = print_name_for(plater, plate);
 
     if (req.mode == "print") {
