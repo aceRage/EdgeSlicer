@@ -574,6 +574,8 @@ public:
     // `enabled`: empty when nothing was added, otherwise default_printer_variant(enabled) (the first
     // newly added variant would be the smallest nozzle, "0.2", when only 0.4 was enabled before).
     static std::string          variant_to_activate(const std::set<std::string> &previous, const std::set<std::string> &enabled);
+    // Snapmaker #876: tolerant parser for the '|'-separated flush volume lists kept in AppConfig printer settings.
+    static bool                 parse_flush_volume_list(const std::string &src, std::vector<double> &out);
     static const char* SM_DEFAULT_FILAMENT;
     static const char *ORCA_FILAMENT_LIBRARY;
 
