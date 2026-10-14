@@ -276,6 +276,25 @@ TEST_CASE("Rewritten G-code that cannot be re-read keeps the moves and hides the
     CHECK(result.moves.back().gcode_id == exported_moves.back().gcode_id);
 }
 
+namespace {
+// The trailing config block of an exported G-code, from a full config with two filaments plus the
+// given values. ConfigBase::load_from_gcode_file() refuses a block of fewer than 80 values.
+std::string two_filament_config_block(std::initializer_list<ConfigBase::SetDeserializeItem> items)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00"};
+    config.set_deserialize_strict(items);
+    std::string block = "; CONFIG_BLOCK_START\n";
+    for (const std::string &key : config.keys())
+        block += "; " + key + " = " + config.opt_serialize(key) + "\n";
+    block += "; CONFIG_BLOCK_END\n";
+    return block;
+}
+} // namespace
+
 // Orca #15379: a G-code opened in the viewer gets its config from the file (the DynamicPrintConfig
 // overload of apply_config), which never read manual_filament_change, so the MANUAL_TOOL_CHANGE
 // comments of a manual-filament-change print did not switch the preview colour.
@@ -297,13 +316,9 @@ TEST_CASE("Loaded manual tool change comments switch subsequent moves when enabl
                                 "; MANUAL_TOOL_CHANGE T1\n"
                                 "G1 X30\nG1 X40 E1\nG1 X50\nG1 X60 E1\n";
             // The block process_file() loads, as the standalone viewer does.
-            gcode += "; CONFIG_BLOCK_START\n"
-                     "; gcode_flavor = marlin\n"
-                     "; filament_diameter = 1.75,1.75\n"
-                     "; filament_colour = #FF0000;#00FF00\n"
-                     "; filament_type = PLA;PETG\n";
-            gcode += std::string("; manual_filament_change = ") + (manual_filament_change ? "1" : "0") + "\n";
-            gcode += "; CONFIG_BLOCK_END\n";
+            gcode += two_filament_config_block({{"gcode_flavor", "marlin"},
+                                                {"filament_type", "PLA;PETG"},
+                                                {"manual_filament_change", manual_filament_change}});
             save_string_file(temp, gcode);
 
             GCodeProcessor processor;
@@ -398,16 +413,12 @@ TEST_CASE("Elegoo M6211 filament changes are timed and their purge is counted", 
                             // change_filament_gcode: swap to filament 2 and purge 100 mm of it.
                             "M6211 T1 L100 M300 N300 Q220 R240 S220\nT1\n"
                             "G1 X10 Y60 E2 F1800\nG1 X10 Y10 E2\n";
-        gcode += "; CONFIG_BLOCK_START\n"
-                 "; gcode_flavor = klipper\n"
-                 "; printer_model = " + printer_model + "\n"
-                 "; filament_diameter = 1.75,1.75\n"
-                 "; filament_colour = #FF0000;#00FF00\n"
-                 "; nozzle_volume = 10\n"
-                 "; machine_load_filament_time = 0\n"
-                 "; machine_unload_filament_time = 0\n"
-                 "; machine_tool_change_time = 0\n"
-                 "; CONFIG_BLOCK_END\n";
+        gcode += two_filament_config_block({{"gcode_flavor", "klipper"},
+                                            {"printer_model", printer_model},
+                                            {"nozzle_volume", 10},
+                                            {"machine_load_filament_time", 0},
+                                            {"machine_unload_filament_time", 0},
+                                            {"machine_tool_change_time", 0}});
         save_string_file(temp, gcode);
         GCodeProcessor processor;
         processor.process_file(temp.string());
