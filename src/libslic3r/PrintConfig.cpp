@@ -3455,7 +3455,9 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("All walls"));
     def->enum_labels.push_back(L("Disabled"));
     def->mode = comSimple;
-    def->set_default_value(new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::Disabled_fuzzy));
+    // Edge: keep None (allow paint) as the default; upstream #10312 defaults to Disabled, which
+    // would ignore painted fuzzy skin on system presets that do not set fuzzy_skin.
+    def->set_default_value(new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::None));
 
     def = this->add("fuzzy_skin_thickness", coFloat);
     def->label = L("Fuzzy skin thickness");

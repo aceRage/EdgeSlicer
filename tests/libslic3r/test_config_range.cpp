@@ -152,11 +152,13 @@ TEST_CASE("Float options compare with a tolerance (Orca #12478)", "[ConfigRange]
     CHECK(FloatOrPercent{ 0.1 + 0.2, true } == FloatOrPercent{ 0.3, true });
 }
 
-TEST_CASE("Fuzzy skin has a Disabled state, the default (Orca #10312)", "[ConfigRange][FuzzySkin]")
+TEST_CASE("Fuzzy skin has a Disabled state; the default stays None (Orca #10312, Edge default)", "[ConfigRange][FuzzySkin]")
 {
+    // Edge keeps None (allow paint) as the default so painted fuzzy skin keeps working on
+    // system presets that do not set fuzzy_skin (BBL, U1, Voron). Upstream defaults to Disabled.
     const ConfigOptionDef &fz = range_def_of("fuzzy_skin");
     REQUIRE(fz.default_value);
-    CHECK(fz.default_value->getInt() == int(FuzzySkinType::Disabled_fuzzy));
+    CHECK(fz.default_value->getInt() == int(FuzzySkinType::None));
 
     ConfigOptionEnum<FuzzySkinType> opt;
     REQUIRE(opt.deserialize("disabled_fuzzy"));
