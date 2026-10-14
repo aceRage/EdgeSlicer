@@ -1199,7 +1199,7 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         if (inherits_config) {
             ConfigOptionString *option_str = dynamic_cast<ConfigOptionString *>(inherits_config);
             inherits_value                 = option_str->value;
-            inherit_preset                 = collection->find_preset(inherits_value, false, true);
+            inherit_preset                 = collection->find_preset2(inherits_value);
         }
         if (inherit_preset) {
             new_config = inherit_preset->config;
@@ -2463,6 +2463,15 @@ void PresetBundle::export_selections(AppConfig &config)
     config.clear_section("presets");
     auto printer_name = printers.get_selected_preset_name();
     config.set("presets", PRESET_PRINTER_NAME, printer_name);
+
+    // Don't persist settings for the built-in "Default Printer" placeholder —
+    // it's only the initial state before a real printer is loaded/selected.
+    // Also clean up any stale entry that other code paths (e.g. bed type change)
+    // may have created for "Default Printer".
+    if (printer_name == "Default Printer") {
+        config.clear_printer_settings("Default Printer");
+        return;
+    }
 
     config.clear_printer_settings(printer_name);
     config.set_printer_setting(printer_name, PRESET_PRINTER_NAME, printer_name);

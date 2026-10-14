@@ -7,6 +7,7 @@
 #include "HMS.hpp"
 #include "PrintErrorCommands.hpp"
 #include "RemoteAccess.hpp"
+#include "RemoteEvents.hpp"
 #include "SnapmakerLan.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/Http.hpp"
@@ -1240,6 +1241,16 @@ void describe_bambu(MachineObject* m, json& p)
         p["print_error"] = print_error_json(m);
     else
         p["print_error"] = nullptr;
+    // How the job ended, as the hub remembers it: "cancelled" for a stop the person asked for, and
+    // it stays that way after the printer drops print_error (dismissed on its screen, or cleared by
+    // the firmware) and is left saying FAILED. Absent when there is nothing to say; a client that
+    // has never heard of it falls back to the print_error code as before.
+    {
+        char code[16] = "";
+        if (m->print_error != 0) std::snprintf(code, sizeof(code), "%08X", (unsigned) m->print_error);
+        const std::string ended = RemoteEvents::ended_bambu(m->dev_id, m->print_status, m->subtask_name, m->job_id_, code);
+        if (!ended.empty()) p["ended"] = ended;
+    }
     // The HMS summary: how many the printer is reporting and what the first one says, so a card can
     // show "why" without a second request.
     json hms = json::object();

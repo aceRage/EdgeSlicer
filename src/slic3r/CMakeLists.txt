@@ -965,6 +965,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintersMonitor.cpp
     Utils/PrintersMonitor.hpp
     Utils/HubHandover.hpp
+    Utils/HubQuit.hpp
     Utils/WebLoadRetry.hpp
     Utils/DevicePageLoad.hpp
     Utils/HomeTabLogic.cpp
@@ -1075,6 +1076,7 @@ if (APPLE)
             GUI/InstanceCheckMac.mm
             GUI/InstanceCheckMac.h
             GUI/GUI_UtilsMac.mm
+            GUI/ModelBrowserPanelMac.mm
             GUI/wxMediaCtrl2.mm
             GUI/wxMediaCtrl2.h
         )
