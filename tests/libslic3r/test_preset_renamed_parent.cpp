@@ -435,7 +435,8 @@ TEST_CASE("A name nothing was renamed from still fails to load as before", "[Pre
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// The shipped renames: Panchroma PLA Stain -> Satin (#491) and the U1 renamed_from coverage (v2.4.0).
+// The shipped renames: Panchroma PLA Stain -> Satin (#491 for @System, this PR for the BBL vendor's stale
+// "Stain @BBL ..." copies) and the U1 renamed_from coverage (v2.4.0).
 // ---------------------------------------------------------------------------------------------------------------
 
 namespace {
@@ -475,7 +476,6 @@ struct ShippedVendor
 TEST_CASE("A filament made on Panchroma PLA Stain @System survives the rename to Satin", "[Preset][RenamedParent][Profiles]")
 {
     // #491 renamed the library's "Panchroma PLA Stain @System" to "Panchroma PLA Satin @System" (renamed_from).
-    // The BBL vendor's own "Panchroma PLA Stain @BBL ..." presets kept their names.
     ShippedVendor     shipped(PresetBundle::ORCA_FILAMENT_LIBRARY);
     PresetCollection &filaments = shipped.get().filaments;
     const std::string stain     = "Panchroma PLA Stain @System";
@@ -507,6 +507,54 @@ TEST_CASE("A filament made on Panchroma PLA Stain @System survives the rename to
     CHECK(preset->config.option<ConfigOptionStrings>("filament_vendor")->values == std::vector<std::string>{ "Polymaker" });
     // Like its parent, listed for every printer.
     CHECK(printers_of(*preset) == printers_of(*filaments.find_preset(satin, false, true)));
+}
+
+TEST_CASE("A filament made on a BBL Panchroma PLA Stain preset moves to the library's Satin preset",
+          "[Preset][RenamedParent][Profiles]")
+{
+    // The BBL vendor shipped stale "Panchroma PLA Stain @BBL A1/A1M/P1P/X1/X1C" copies next to the library's
+    // "Panchroma PLA Satin @BBL ..." presets, which already list the Stain names in renamed_from. They are gone:
+    // a preset made on one now takes the library preset of the right name, with its values.
+    ShippedVendor     shipped(PresetBundle::ORCA_FILAMENT_LIBRARY);
+    PresetCollection &filaments = shipped.get().filaments;
+    const std::string stain     = "Panchroma PLA Stain @BBL A1";
+    const std::string satin     = "Panchroma PLA Satin @BBL A1";
+    REQUIRE(filaments.find_preset(satin, false, true) != nullptr);
+
+    SECTION("in the user presets folder") {
+        ScopedTemporaryDir user;
+        write_user_filament(user.path(), "My A1 Panchroma", stain, R"(,"nozzle_temperature":["225"])");
+        load_user_filaments(filaments, user.path());
+    }
+    SECTION("inside a project") {
+        std::unique_ptr<Preset> preset = project_filament("My A1 Panchroma", stain);
+        preset->config.option<ConfigOptionInts>("nozzle_temperature")->values = { 225 };
+        load_project_filaments(filaments, { preset.get() });
+    }
+
+    const Preset *preset = filaments.find_preset("My A1 Panchroma", false, true);
+    REQUIRE(preset != nullptr);
+    REQUIRE(filaments.get_preset_parent(*preset) != nullptr);
+    CHECK(filaments.get_preset_parent(*preset)->name == satin);
+    CHECK(nozzle_temperature(*preset) == 225);
+    CHECK(preset->config.option<ConfigOptionInts>("cool_plate_temp")->values.front() == 60);
+    CHECK(preset->config.option<ConfigOptionStrings>("filament_vendor")->values == std::vector<std::string>{ "Polymaker" });
+    CHECK(printers_of(*preset) == std::vector<std::string>{ "Bambu Lab A1 0.4 nozzle", "Bambu Lab A1 0.6 nozzle", "Bambu Lab A1 0.8 nozzle" });
+}
+
+TEST_CASE("No shipped vendor still has a Panchroma PLA Stain preset", "[Preset][RenamedParent][Profiles]")
+{
+    // The typo lives on only in renamed_from. The vendor index lists every preset the app loads.
+    for (const auto &entry : fs::directory_iterator(fs::path(profiles_dir()))) {
+        if (entry.path().extension() != ".json")
+            continue;
+        INFO(entry.path().filename().string());
+        const nlohmann::json index = nlohmann::json::parse(read_file(entry.path()), nullptr, false);
+        if (!index.is_object() || !index.contains("filament_list"))
+            continue;
+        for (const auto &item : index.at("filament_list"))
+            CHECK(item.value("name", std::string()).find("Panchroma PLA Stain") == std::string::npos);
+    }
 }
 
 TEST_CASE("Every renamed U1 filament takes over user presets made on each of its old names", "[Preset][RenamedParent][Profiles]")
