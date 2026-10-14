@@ -4,6 +4,7 @@
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
@@ -1842,5 +1843,75 @@ TEST_CASE("Seam metadata restores only recognized modes on compatible base types
         CHECK_FALSE(helper.config.has("extruder"));
         CHECK_FALSE(helper.config.has("sparse_infill_density"));
         CHECK_FALSE(helper.config.has("notes"));
+    }
+}
+
+// Orca #16306: a relationship must name a part the package actually contains. The writer used to
+// fall back to /Metadata/plate_1.png whenever no cover image was set, so an export that wrote no
+// plate thumbnail still declared one -- a dangling relationship a strict OPC reader may reject.
+SCENARIO("thumbnail relationships are declared only for thumbnails that were written", "[3mf][thumbnail]")
+{
+    GIVEN("a project with one plate") {
+        const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+        boost::filesystem::create_directories(tmp_root);
+        Slic3r::set_temporary_dir(tmp_root.string());
+
+        Model model;
+        build_multi_object_model(model);
+
+        DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+        for (const std::string& key : store_config.keys())
+            if (const ConfigOption* opt = store_config.option(key); opt != nullptr && opt->type() == coEnums) {
+                store_config.erase(key);
+                store_config.option(key, true);
+            }
+
+        PlateData plate;
+        plate.plate_index = 0;
+
+        auto store = [&](const std::string& path, ThumbnailData* thumbnail) {
+            StoreParams sp;
+            sp.path            = path.c_str();
+            sp.model           = &model;
+            sp.config          = &store_config;
+            sp.plate_data_list = { &plate };
+            sp.thumbnail_data  = { thumbnail };
+            sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+            return store_bbs_3mf(sp);
+        };
+
+        WHEN("no thumbnail is rendered") {
+            const std::string test_file = (tmp_root / "rels_no_thumbnail.3mf").string();
+            ThumbnailData     none;   // left invalid: nothing was rendered
+            REQUIRE_FALSE(none.is_valid());
+            REQUIRE(store(test_file, &none));
+
+            THEN("the package declares no thumbnail relationship") {
+                const std::string rels = extract_zip_entry(test_file, "_rels/.rels");
+                CHECK(rels.find("3dmodel") != std::string::npos);        // the model is still declared
+                CHECK(rels.find("plate_1.png") == std::string::npos);
+                CHECK(rels.find("plate_1_small.png") == std::string::npos);
+                CHECK(rels.find("thumbnail") == std::string::npos);
+            }
+            boost::filesystem::remove(test_file);
+        }
+
+        WHEN("a plate thumbnail is rendered") {
+            const std::string test_file = (tmp_root / "rels_with_thumbnail.3mf").string();
+            ThumbnailData     rendered;
+            rendered.set(16, 16);
+            rendered.pixels.assign(16 * 16 * 4, static_cast<unsigned char>(0xff));
+            REQUIRE(rendered.is_valid());
+            REQUIRE(store(test_file, &rendered));
+
+            THEN("the relationships name it, and the parts are in the package") {
+                const std::string rels = extract_zip_entry(test_file, "_rels/.rels");
+                CHECK(rels.find("/Metadata/plate_1.png") != std::string::npos);
+                CHECK(rels.find("/Metadata/plate_1_small.png") != std::string::npos);
+                CHECK_FALSE(extract_zip_entry(test_file, "Metadata/plate_1.png").empty());
+                CHECK_FALSE(extract_zip_entry(test_file, "Metadata/plate_1_small.png").empty());
+            }
+            boost::filesystem::remove(test_file);
+        }
     }
 }
