@@ -507,7 +507,10 @@ bool HomeVendors::handle(const json& msg)
         long long max = 0; // 0 = all rows in one file
         if (msg.contains("max") && msg["max"].is_number_integer())
             max = std::max<long long>(0, std::min<long long>(msg["max"].get<long long>(), Vendors::CSV_MAX_RECORDS_CAP));
-        export_csv(msg.contains("keys") ? msg["keys"] : json::array(), size_t(max));
+        Vendors::CsvRows rows = Vendors::CsvRows::Model; // one row per model unless the page says "file"
+        if (msg.contains("rows") && msg["rows"].is_string())
+            Vendors::csv_rows_from_name(msg["rows"].get<std::string>(), rows);
+        export_csv(msg.contains("keys") ? msg["keys"] : json::array(), size_t(max), rows);
     } else if (command == "vendor_thumbs") {
         std::vector<std::string> keys;
         if (msg.contains("keys") && msg["keys"].is_array())
@@ -909,7 +912,7 @@ void HomeVendors::copy_spec(const std::string& id)
         notice(_u8L("The clipboard could not be opened."), true);
 }
 
-void HomeVendors::export_csv(const json& keys, size_t max_rows)
+void HomeVendors::export_csv(const json& keys, size_t max_rows, Vendors::CsvRows rows_mode)
 {
     // What the page shows, in its order; grouped per connector for the CSV.
     std::vector<Vendors::CsvGroup> groups;
@@ -931,7 +934,7 @@ void HomeVendors::export_csv(const json& keys, size_t max_rows)
         return;
     }
     // The files first, so the number of them is known before the file dialog.
-    const std::vector<std::string> files = Vendors::to_csv_parts(groups, max_rows);
+    const std::vector<std::string> files = Vendors::to_csv_parts(groups, max_rows, rows_mode);
     const bool                     split = files.size() > 1;
     // One file: the dialog asks before replacing. Several: it would only see the name without a
     // number, so the dialog does not ask and every numbered name is checked below.
@@ -975,10 +978,13 @@ void HomeVendors::export_csv(const json& keys, size_t max_rows)
         }
         ++written;
     }
-    const int rows = int(Vendors::csv_row_count(groups));
-    if (split)
-        notice(into_u8(wxString::Format(_L("Exported %d records to %d files in %s."), rows, int(files.size()),
-                                        wxString::FromUTF8(targets[0].parent_path().string()))));
+    const int rows = int(Vendors::csv_row_count(groups, rows_mode));
+    if (split) {
+        const wxString folder = wxString::FromUTF8(targets[0].parent_path().string());
+        notice(into_u8(rows_mode == Vendors::CsvRows::Model
+                           ? wxString::Format(_L("Exported %d models to %d files in %s."), rows, int(files.size()), folder)
+                           : wxString::Format(_L("Exported %d file rows to %d files in %s."), rows, int(files.size()), folder)));
+    }
     else
         notice(_u8L("List exported."));
 }

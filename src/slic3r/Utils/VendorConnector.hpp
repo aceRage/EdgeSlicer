@@ -87,6 +87,9 @@ struct Spec
     // CSV export (optional): the most data rows one exported file holds; the export writes numbered
     // files beyond it. 0 = not set. Template: "csv": {"max_records": 200}.
     int csv_max_records { 0 };
+    // CSV export (optional): "model" (one row per model) or "file" (one row per file); "" = not set.
+    // Template: "csv": {"rows": "model"}.
+    std::string csv_rows;
 };
 
 // The largest max_records a template may carry.
@@ -318,12 +321,21 @@ struct CsvGroup
     std::string       vendor;
     std::vector<Item> items;
 };
-// The number of data rows the groups make (one per file of an item, one for an item without files).
-size_t csv_row_count(const std::vector<CsvGroup>& groups);
+// What one CSV row is. File: one per file of a model (one for a model without files), exactly the
+// columns of to_csv. Model: one per model, with the file columns folded into file_count,
+// file_names ("; " between the names) and total_size_bytes.
+enum class CsvRows { File, Model };
+// "file" / "model", and back ("" or anything else: false, `out` untouched).
+const char* csv_rows_name(CsvRows rows);
+bool        csv_rows_from_name(const std::string& name, CsvRows& out);
+// The number of data rows the groups make in that mode.
+size_t csv_row_count(const std::vector<CsvGroup>& groups, CsvRows rows = CsvRows::File);
 // The groups as CSV files of at most `max_rows` data rows each (0 = no limit: exactly one file).
+// A row is a record of the chosen mode, so in Model mode a model is never split over two files.
 // Every file has the mark and the header row, rows keep their order and are never cut, and each row
 // names its connector and vendor, so each file stands alone. Always returns at least one file.
-std::vector<std::string> to_csv_parts(const std::vector<CsvGroup>& groups, size_t max_rows);
+// File mode with no limit is byte-identical to to_csv (one group).
+std::vector<std::string> to_csv_parts(const std::vector<CsvGroup>& groups, size_t max_rows, CsvRows rows = CsvRows::File);
 // The path of file `index` (1-based) out of `count`: the path itself when there is one file, else
 // "<name>_<index><extension>" ("vendor-models.csv" -> "vendor-models_2.csv"; ".csv" when it has none).
 std::string csv_part_path(const std::string& path, size_t index, size_t count);

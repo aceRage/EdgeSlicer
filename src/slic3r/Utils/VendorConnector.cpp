@@ -417,6 +417,12 @@ Spec spec_from_json(const json& j)
     // Optional: how many CSV rows one exported file holds before the export splits (absent = no limit).
     const json& csv = obj(j, "csv");
     s.csv_max_records = int_of(csv, "max_records", 0, 1, CSV_MAX_RECORDS_CAP);
+    if (csv.contains("rows")) {
+        CsvRows rows;
+        if (!csv.at("rows").is_string() || !csv_rows_from_name(csv.at("rows").get<std::string>(), rows))
+            throw std::runtime_error("\"rows\" must be \"model\" or \"file\".");
+        s.csv_rows = csv_rows_name(rows);
+    }
     return s;
 }
 
@@ -443,8 +449,11 @@ json spec_to_json(const Spec& s)
             {"files", {{"path", s.subs_path}, {"fields", s.sub_fields}}},
             {"download", {{"path", s.download_path}, {"url_field", s.download_url_path}, {"direct_field", s.download_direct_field}, {"limited", s.downloads_limited}}},
             {"quota", {{"used", s.quota_used_header}, {"limit", s.quota_limit_header}, {"resets", s.quota_reset_header}}}};
-    if (s.csv_max_records > 0) // only when set, so templates without it stay as they were
-        out["csv"] = {{"max_records", s.csv_max_records}};
+    // Only what is set, so templates without these stay as they were.
+    if (s.csv_max_records > 0)
+        out["csv"]["max_records"] = s.csv_max_records;
+    if (!s.csv_rows.empty())
+        out["csv"]["rows"] = s.csv_rows;
     return out;
 }
 
@@ -1097,17 +1106,49 @@ static const std::vector<std::string>& csv_header()
     return header;
 }
 
+// One row per model: the model columns, then how many files it has, their names and their sizes added up.
+static const std::vector<std::string>& csv_model_header()
+{
+    static const std::vector<std::string> header = {"connector", "vendor",    "item_id",   "name",       "designer",  "license",
+                                                    "tags",      "updated",   "page_url",  "thumbnail",  "file_count", "file_names",
+                                                    "total_size_bytes"};
+    return header;
+}
+
+// The model columns that both modes start with.
+static std::vector<std::string> csv_item_head(const std::string& connector, const std::string& vendor, const Item& i)
+{
+    std::string tags;
+    for (const std::string& t : i.tags)
+        tags += (tags.empty() ? "" : "; ") + t;
+    return {connector, vendor, i.id, i.name, i.designer, i.license, tags, i.updated, i.page_url, i.thumbnail};
+}
+
+static void csv_model_rows(const std::string& connector, const std::string& vendor, const std::vector<Item>& items,
+                           std::vector<std::string>& rows)
+{
+    for (const Item& i : items) {
+        std::string names;
+        long long   total = 0;
+        for (const SubItem& s : i.subs) {
+            const std::string& n = !s.name.empty() ? s.name : (!s.variant.empty() ? s.variant : s.id);
+            names += (names.empty() ? "" : "; ") + n;
+            if (s.size > 0)
+                total += s.size;
+        }
+        std::vector<std::string> cells = csv_item_head(connector, vendor, i);
+        cells.insert(cells.end(), {std::to_string(i.subs.size()), names, total > 0 ? std::to_string(total) : std::string()});
+        rows.push_back(csv_line(cells));
+    }
+}
+
 // The finished rows (one per file, one for an item without files) of the items, in order.
 static void csv_rows(const std::string& connector, const std::string& vendor, const std::vector<Item>& items,
                      std::vector<std::string>& rows)
 {
     const size_t columns = csv_header().size();
     for (const Item& i : items) {
-        std::string tags;
-        for (const std::string& t : i.tags)
-            tags += (tags.empty() ? "" : "; ") + t;
-        const std::vector<std::string> head = {connector, vendor, i.id, i.name, i.designer, i.license, tags, i.updated, i.page_url,
-                                               i.thumbnail};
+        const std::vector<std::string> head = csv_item_head(connector, vendor, i);
         if (i.subs.empty()) {
             std::vector<std::string> cells = head;
             cells.resize(columns);
@@ -1137,23 +1178,43 @@ std::string to_csv(const std::string& connector, const std::string& vendor, cons
     return out;
 }
 
-size_t csv_row_count(const std::vector<CsvGroup>& groups)
+const char* csv_rows_name(CsvRows rows)
+{
+    return rows == CsvRows::Model ? "model" : "file";
+}
+
+bool csv_rows_from_name(const std::string& name, CsvRows& out)
+{
+    if (name == "model")
+        out = CsvRows::Model;
+    else if (name == "file")
+        out = CsvRows::File;
+    else
+        return false;
+    return true;
+}
+
+size_t csv_row_count(const std::vector<CsvGroup>& groups, CsvRows rows)
 {
     size_t n = 0;
     for (const CsvGroup& g : groups)
         for (const Item& i : g.items)
-            n += std::max<size_t>(1, i.subs.size());
+            n += rows == CsvRows::Model ? 1 : std::max<size_t>(1, i.subs.size());
     return n;
 }
 
-std::vector<std::string> to_csv_parts(const std::vector<CsvGroup>& groups, size_t max_rows)
+std::vector<std::string> to_csv_parts(const std::vector<CsvGroup>& groups, size_t max_rows, CsvRows mode)
 {
     std::vector<std::string> rows;
-    for (const CsvGroup& g : groups)
-        csv_rows(g.connector, g.vendor, g.items, rows);
+    for (const CsvGroup& g : groups) {
+        if (mode == CsvRows::Model)
+            csv_model_rows(g.connector, g.vendor, g.items, rows);
+        else
+            csv_rows(g.connector, g.vendor, g.items, rows);
+    }
     // A row is finished text, so a cell with a comma, quote or line break is never cut.
     const size_t per_file = (max_rows == 0 || max_rows >= rows.size()) ? std::max<size_t>(1, rows.size()) : max_rows;
-    const std::string head = CSV_BOM + csv_line(csv_header());
+    const std::string head = CSV_BOM + csv_line(mode == CsvRows::Model ? csv_model_header() : csv_header());
     std::vector<std::string> files;
     for (size_t from = 0; from < rows.size() || files.empty(); from += per_file) {
         std::string out = head;

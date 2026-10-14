@@ -974,8 +974,10 @@
   function loadCsvMax() {
     try {
       const v = JSON.parse(localStorage.getItem(CSV_MAX_KEY) || '{}');
-      return { last: v && v.last !== undefined ? v.last : null, byId: v && typeof v.byId === 'object' && v.byId ? v.byId : {} };
-    } catch (e) { return { last: null, byId: {} }; }
+      const obj = (x) => (x && typeof x === 'object' ? x : {});
+      return { last: v && v.last !== undefined ? v.last : null, byId: obj(v && v.byId),
+               rowsLast: v && v.rowsLast ? v.rowsLast : null, rowsById: obj(v && v.rowsById) };
+    } catch (e) { return { last: null, byId: {}, rowsLast: null, rowsById: {} }; }
   }
   function csvScope() {
     const ids = [];
@@ -983,24 +985,45 @@
     return ids.map((id) => {
       const c = connectorOf(id);
       const csv = c && c.spec && c.spec.csv;
-      return { id: id, limit: csv ? CsvMax.clean(csv.max_records) : 0 };
+      return { id: id, limit: csv ? CsvMax.clean(csv.max_records) : 0, rows: csv ? CsvMax.cleanRows(csv.rows) : '' };
     });
   }
   function csvMaxValue() {
     const sel = $('ven-csv-max');
     return sel.value === 'custom' ? CsvMax.clean($('ven-csv-custom').value) : Number(sel.value) || 0;
   }
+  function saveCsvChoice(st) {
+    try { localStorage.setItem(CSV_MAX_KEY, JSON.stringify(st)); } catch (e) { /* private window: not remembered */ }
+  }
   function rememberCsvMax(n) {
     const st = loadCsvMax();
     st.last = n;
     const scope = csvScope();
     if (scope.length === 1) st.byId[scope[0].id] = n;
-    try { localStorage.setItem(CSV_MAX_KEY, JSON.stringify(st)); } catch (e) { /* private window: not remembered */ }
+    saveCsvChoice(st);
+  }
+  function csvRowsValue() { return CsvMax.cleanRows($('ven-csv-rows').value) || 'model'; }
+  function rememberCsvRows(v) {
+    const st = loadCsvMax();
+    st.rowsLast = v;
+    const scope = csvScope();
+    if (scope.length === 1) st.rowsById[scope[0].id] = v;
+    saveCsvChoice(st);
   }
   // Fill the control and select what the export should start with (see csvmax.js).
   function fillCsvMax() {
     const sel = $('ven-csv-max'), custom = $('ven-csv-custom');
-    const want = CsvMax.defaultMax(csvScope(), loadCsvMax());
+    const stored = loadCsvMax();
+    const want = CsvMax.defaultMax(csvScope(), stored);
+    const rowsSel = $('ven-csv-rows');
+    rowsSel.textContent = '';
+    for (const [value, key, fallback] of [['model', 'csv_rows_model', 'One row per model'], ['file', 'csv_rows_file', 'One row per file']]) {
+      const o = el('option', '', t(key, fallback));
+      o.value = value;
+      rowsSel.appendChild(o);
+    }
+    rowsSel.value = CsvMax.defaultRows(csvScope(), stored);
+    rowsSel.title = t('csv_rows_tip', 'One row per model: file names and sizes are folded into file_count, file_names and total_size_bytes. One row per file: a row for each file of a model.');
     sel.textContent = '';
     for (const n of CsvMax.PRESETS) {
       const o = el('option', '', n ? String(n) : t('all', 'All'));
@@ -1025,7 +1048,7 @@
   // The control is refilled only when the set of connectors listed changes, so a choice the user
   // just made is not reset by a re-render (a sync, a search).
   let csvShownScope = '';
-  function csvScopeKey() { return csvScope().map((c) => c.id + ':' + c.limit).join('|'); }
+  function csvScopeKey() { return csvScope().map((c) => c.id + ':' + c.limit + ':' + c.rows).join('|'); }
 
   function renderVendors(keepScroll) {
     const section = $('vendors');
@@ -1190,6 +1213,7 @@
       { path: 'download.limited', label: 'Downloads count against a limit (ask first)', check: true },
     ] },
     { group: 'CSV export (optional)', fields: [
+      { path: 'csv.rows', label: 'Rows', optional: true, options: [['', 'Not set (per model)'], ['model', 'One row per model'], ['file', 'One row per file']] },
       { path: 'csv.max_records', label: 'Max records per file (blank = one file)', number: true, optional: true, hint: '200' },
     ] },
     { group: 'Quota headers (optional)', fields: [
@@ -1313,7 +1337,9 @@
           input = el('select');
           for (const [value, label] of f.options) { const op = el('option', '', label); op.value = value; input.appendChild(op); }
           input.value = v || f.options[0][0];
-          input.addEventListener('change', () => setPath(editor.spec, f.path, input.value));
+          input.addEventListener('change', () => {
+            if (f.optional && input.value === '') clearPath(editor.spec, f.path); else setPath(editor.spec, f.path, input.value);
+          });
         } else if (f.check) {
           input = el('input'); input.type = 'checkbox'; input.checked = !!v;
           input.addEventListener('change', () => setPath(editor.spec, f.path, input.checked));
@@ -1566,7 +1592,8 @@
       { label: t('import_paste', 'Paste JSON...'), run: () => post('vendor_import', { source: 'paste' }) },
     ]);
   });
-  $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key), max: csvMaxValue() }));
+  $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key), max: csvMaxValue(), rows: csvRowsValue() }));
+  $('ven-csv-rows').addEventListener('change', () => rememberCsvRows(csvRowsValue()));
   $('ven-csv-max').addEventListener('change', () => {
     const sel = $('ven-csv-max');
     if (sel.value === 'custom') {

@@ -1,4 +1,4 @@
-// The "Max records per file" choice of the Vendors page's CSV export. No page code here, so
+// The "Max records per file" and "Rows" choices of the Vendors page's CSV export. No page code here, so
 // tests/slic3rutils/vendor_csv_default_test.js can run it in plain node.
 (function (root) {
   'use strict';
@@ -34,7 +34,29 @@
     return last;
   }
 
-  var api = { CAP: CAP, PRESETS: PRESETS, clean: clean, defaultMax: defaultMax };
+  // What one CSV row is: 'model' (the default) or 'file'. Anything else is '' (not set).
+  var ROWS = ['model', 'file'];
+  function cleanRows(v) { return v === 'model' || v === 'file' ? v : ''; }
+
+  // The rows choice the export starts with; the same sources as defaultMax:
+  //   shown:  [{id, rows}] the connector's own csv.rows ('' = none)
+  //   stored: {rowsLast: the user's last choice, rowsById: {connectorId: the user's choice for it}}
+  // The user's choice for a connector beats its own setting. When the connectors listed agree on one
+  // value that is it; when none sets one, or they disagree, the last choice, else 'model'.
+  function defaultRows(shown, stored) {
+    var st = stored || {};
+    var byId = st.rowsById || {};
+    var last = cleanRows(st.rowsLast) || 'model';
+    var seen = [];
+    for (var k = 0; k < (shown || []).length; ++k) {
+      var c = shown[k];
+      var own = Object.prototype.hasOwnProperty.call(byId, c.id) ? cleanRows(byId[c.id]) : cleanRows(c.rows);
+      if (own && seen.indexOf(own) < 0) seen.push(own);
+    }
+    return seen.length === 1 ? seen[0] : last;
+  }
+
+  var api = { CAP: CAP, PRESETS: PRESETS, ROWS: ROWS, clean: clean, defaultMax: defaultMax, cleanRows: cleanRows, defaultRows: defaultRows };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.CsvMax = api;
 })(typeof window !== 'undefined' ? window : this);

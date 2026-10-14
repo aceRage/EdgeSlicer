@@ -552,6 +552,10 @@ void HomePanel::send_init()
     s["csv_max"]           = _u8L("Max records per file");
     s["csv_max_tip"]       = _u8L("More records than this are written as numbered files (name_1.csv, name_2.csv...)");
     s["csv_custom"]        = _u8L("Custom...");
+    s["csv_rows"]          = _u8L("Rows");
+    s["csv_rows_model"]    = _u8L("One row per model");
+    s["csv_rows_file"]     = _u8L("One row per file");
+    s["csv_rows_tip"]      = _u8L("One row per model: file names and sizes are folded into file_count, file_names and total_size_bytes. One row per file: a row for each file of a model.");
     s["edit"]              = _u8L("Edit");
     s["save"]              = _u8L("Save");
     s["cancel"]            = _u8L("Cancel");

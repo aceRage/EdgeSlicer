@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('assert');
 const path = require('path');
-const { defaultMax, clean, PRESETS, CAP } = require(path.join(__dirname, '..', '..', 'resources', 'web', 'home', 'csvmax.js'));
+const { defaultMax, defaultRows, cleanRows, clean, PRESETS, CAP } = require(path.join(__dirname, '..', '..', 'resources', 'web', 'home', 'csvmax.js'));
 
 const A = { id: 'a', limit: 200 };
 const B = { id: 'b', limit: 0 };
@@ -47,5 +47,24 @@ assert.strictEqual(clean(2.9), 2);
 assert.strictEqual(clean(null), 0);
 assert.strictEqual(clean(CAP + 10), CAP);
 assert.deepStrictEqual(PRESETS, [0, 100, 200, 500, 1000]);
+
+// ---- rows: one row per model (the default) or per file ----
+const R = (id, rows) => ({ id: id, rows: rows });
+assert.strictEqual(defaultRows([R('a', '')], undefined), 'model');
+assert.strictEqual(defaultRows([], { rowsLast: null, rowsById: {} }), 'model');
+assert.strictEqual(defaultRows([R('a', 'file')], { rowsLast: null, rowsById: {} }), 'file');   // the connector's own setting
+assert.strictEqual(defaultRows([R('a', 'file')], { rowsLast: 'model', rowsById: {} }), 'file'); // beats the last choice
+assert.strictEqual(defaultRows([R('a', 'file')], { rowsLast: 'file', rowsById: { a: 'model' } }), 'model'); // the user's own choice wins
+assert.strictEqual(defaultRows([R('a', '')], { rowsLast: 'file', rowsById: {} }), 'file');      // last choice
+assert.strictEqual(defaultRows([R('a', '')], { rowsLast: 'bogus', rowsById: { a: 'x' } }), 'model');
+// several connectors: agree -> that value; none set -> last; disagree -> last
+assert.strictEqual(defaultRows([R('a', 'file'), R('b', 'file')], { rowsLast: 'model', rowsById: {} }), 'file');
+assert.strictEqual(defaultRows([R('a', 'file'), R('b', '')], { rowsLast: 'model', rowsById: {} }), 'file');
+assert.strictEqual(defaultRows([R('a', 'file'), R('b', 'model')], { rowsLast: 'file', rowsById: {} }), 'file');
+assert.strictEqual(defaultRows([R('a', 'file'), R('b', 'model')], { rowsLast: null, rowsById: {} }), 'model');
+assert.strictEqual(defaultRows([R('a', ''), R('b', '')], { rowsLast: 'file', rowsById: {} }), 'file');
+assert.strictEqual(cleanRows('file'), 'file');
+assert.strictEqual(cleanRows('Model'), '');
+assert.strictEqual(cleanRows(null), '');
 
 console.log('PASS vendor_csv_default_test');

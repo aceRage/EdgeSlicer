@@ -79,7 +79,8 @@ private:
     void export_spec(const std::string& id);
     void copy_spec(const std::string& id);
     // max_rows: data rows per file (0 = all in one file); more rows write numbered files.
-    void export_csv(const nlohmann::json& keys, size_t max_rows);
+    // rows_mode: one row per model or per file of a model.
+    void export_csv(const nlohmann::json& keys, size_t max_rows, Vendors::CsvRows rows_mode);
     void send_thumbnails(const std::vector<std::string>& keys);
     void download(const std::string& key, const std::string& sub_id, bool open_after);
     void notice(const std::string& text, bool error = false);
