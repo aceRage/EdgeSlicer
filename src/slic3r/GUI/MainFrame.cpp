@@ -67,6 +67,9 @@
 #include <string>
 #include <vector>
 #include <ctime>
+#include <chrono>
+#include <wx/choicdlg.h>
+#include <boost/format.hpp>
 
 #include "GUI_App.hpp"
 #include "CostsDialog.hpp"
@@ -82,6 +85,7 @@
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
 #include "NetworkTestDialog.hpp"
+#include "SnapmakerLan.hpp"
 #include "FirewallCheckDialog.hpp"
 #include "BambuSetupNoticeDialog.hpp"
 #include "ConfigWizard.hpp"
@@ -2725,9 +2729,49 @@ static const wxString sep = " - ";
 static const wxString sep = "\t";
 #endif
 
+// DIAGNOSTIC (branch diag/u1-direct-upload-timing, not for merge): upload the current plate's G-code
+// to a LAN Snapmaker with our own libcurl code and time it, to set against the bundled web panel's
+// upload. Uploads only (print=false), never starts a print; leaves "edge_upload_timing_test.gcode".
+static void diag_u1_upload_timing()
+{
+    const auto devs = SnapmakerLan::devices();
+    if (devs.empty()) { wxMessageBox("No Snapmaker printer in the LAN list.", "U1 upload timing"); return; }
+    size_t pick = 0;
+    if (devs.size() > 1) {
+        wxArrayString names;
+        for (const auto& d : devs) names.Add(wxString::FromUTF8(d.name + "  " + d.ip));
+        const int i = wxGetSingleChoiceIndex("Upload to which printer?", "U1 upload timing", names);
+        if (i < 0) return;
+        pick = (size_t) i;
+    }
+    std::string path = wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_tmp_gcode_path();
+    if (!boost::filesystem::is_regular_file(path)) {
+        wxMessageBox("Slice the plate first: this uploads its G-code.", "U1 upload timing");
+        return;
+    }
+    const SnapmakerLan::Device d = devs[pick];
+    std::thread([d, path]() {
+        using clk = std::chrono::steady_clock;
+        const auto t0 = clk::now();
+        double t_sent = -1;
+        std::string err;
+        const bool ok = SnapmakerLan::upload(d, path, "edge_upload_timing_test.gcode", [&](int pct) {
+            if (pct >= 100 && t_sent < 0) t_sent = std::chrono::duration<double>(clk::now() - t0).count();
+        }, err);
+        const double total = std::chrono::duration<double>(clk::now() - t0).count();
+        const double mb = (double) boost::filesystem::file_size(path) / 1e6;
+        const std::string msg = (boost::format("%1$.2f MB: %2% in %3$.1f s (%4$.2f MB/s); last byte sent at %5$.1f s, printer answered %6$.1f s later%7%") %
+            mb % (ok ? "uploaded" : "FAILED") % total % (mb / total) % t_sent % (total - t_sent) % (ok ? "" : (" - " + err))).str();
+        BOOST_LOG_TRIVIAL(info) << "[u1-upload-timing] " << msg;
+        wxGetApp().CallAfter([msg]() { wxMessageBox(wxString::FromUTF8(msg), "U1 upload timing (direct, libcurl)"); });
+    }).detach();
+}
+
 static wxMenu* generate_help_menu()
 {
     wxMenu* helpMenu = new wxMenu();
+    append_menu_item(helpMenu, wxID_ANY, "Diagnostic: U1 upload timing (direct)...", "Upload the sliced plate to a LAN Snapmaker and time it",
+                     [](wxCommandEvent&) { diag_u1_upload_timing(); });
 
     // shortcut key
     append_menu_item(helpMenu, wxID_ANY, _L("Keyboard Shortcuts") + sep + "&?", _L("Show the list of the keyboard shortcuts"),
