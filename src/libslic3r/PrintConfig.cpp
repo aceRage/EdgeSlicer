@@ -253,10 +253,10 @@ static t_config_enum_values s_keys_map_SupportMaterialStyle {
     { "default",        smsDefault },
     { "grid",           smsGrid },
     { "snug",           smsSnug },
+    { "organic",        smsTreeOrganic },
     { "tree_slim",      smsTreeSlim },
     { "tree_strong",    smsTreeStrong },
-    { "tree_hybrid",    smsTreeHybrid },
-    { "organic",        smsTreeOrganic }
+    { "tree_hybrid",    smsTreeHybrid }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialStyle)
 
@@ -7038,7 +7038,12 @@ void PrintConfigDef::init_fff_params()
     def = this->add("support_base_pattern", coEnum);
     def->label = L("Base pattern");
     def->category = L("Support");
-    def->tooltip = L("Line pattern of support.");
+    def->tooltip = L("Line pattern of support.\n\n"
+                     "The Default option for Tree supports is Hollow, which means no base pattern. "
+                     "For other support types, the Default option is the Rectilinear pattern.\n\n"
+                     "NOTE: For Organic supports, the two walls are supported only with the Hollow/Default base pattern. "
+                     "The Lightning base pattern is supported only by Tree Slim/Strong/Hybrid supports. "
+                     "For the other support types, the Rectilinear will be used instead of Lightning.");
     def->enum_keys_map = &ConfigOptionEnum<SupportMaterialPattern>::get_enum_values();
     def->enum_values.push_back("default");
     def->enum_values.push_back("rectilinear");

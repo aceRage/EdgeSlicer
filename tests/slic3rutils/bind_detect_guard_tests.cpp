@@ -96,7 +96,7 @@ TEST_CASE("bind_detect: a detected printer is normalised", "[BindDetectGuard]")
 TEST_CASE("bind_detect: what counts as a usable serial", "[BindDetectGuard]")
 {
     CHECK(is_usable_serial("01P00A123456789"));
-    CHECK(is_usable_serial("00M09A350100123"));
+    CHECK(is_usable_serial("00M00A000000002"));
     CHECK_FALSE(is_usable_serial(""));
     CHECK_FALSE(is_usable_serial("SN_FAKE_0001"));
     CHECK_FALSE(is_usable_serial(std::string(65, 'A')));

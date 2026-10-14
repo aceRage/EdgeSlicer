@@ -268,3 +268,33 @@ TEST_CASE("The log folder is shown as %APPDATA% when it lives there", "[BambuSen
     CHECK(bambu_log_dir_for_display("D:\\Portable\\EdgeSlicer\\data", "C:\\Users\\ann\\AppData\\Roaming") ==
           "D:\\Portable\\EdgeSlicer\\data\\log");
 }
+
+// Orca #10981: "Allow Abnormal Storage". The state numbers are MachineObject::SdcardState.
+TEST_CASE("Abnormal storage is usable for a LAN send only when the user allowed it", "[BambuSendDiagnosis][Storage]")
+{
+    using Slic3r::GUI::BambuStorageIssue;
+    using Slic3r::GUI::bambu_storage_issue;
+    using Slic3r::GUI::bambu_storage_usable_for_lan;
+
+    CHECK(bambu_storage_issue(0, false) == BambuStorageIssue::Missing);
+    CHECK(bambu_storage_issue(0, true) == BambuStorageIssue::Missing);
+    CHECK(bambu_storage_issue(1, false) == BambuStorageIssue::None);
+    CHECK(bambu_storage_issue(1, true) == BambuStorageIssue::None);
+    CHECK(bambu_storage_issue(2, false) == BambuStorageIssue::Abnormal);
+    CHECK(bambu_storage_issue(2, true) == BambuStorageIssue::None);
+    // Read-only storage can never take an upload, whatever the setting.
+    CHECK(bambu_storage_issue(3, false) == BambuStorageIssue::ReadOnly);
+    CHECK(bambu_storage_issue(3, true) == BambuStorageIssue::ReadOnly);
+    CHECK(bambu_storage_issue(4, true) == BambuStorageIssue::Unknown);
+    CHECK(bambu_storage_issue(-1, true) == BambuStorageIssue::Unknown);
+
+    CHECK(bambu_storage_usable_for_lan(1, false));
+    CHECK_FALSE(bambu_storage_usable_for_lan(2, false));
+    CHECK(bambu_storage_usable_for_lan(2, true));
+    CHECK_FALSE(bambu_storage_usable_for_lan(3, true));
+    CHECK_FALSE(bambu_storage_usable_for_lan(0, true));
+
+    // The default (setting off) keeps the old behaviour exactly: only a normal card passes.
+    for (int state = -1; state <= 4; ++state)
+        CHECK(bambu_storage_usable_for_lan(state, false) == (state == 1));
+}

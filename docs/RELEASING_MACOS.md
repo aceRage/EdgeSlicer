@@ -68,7 +68,7 @@ security find-identity -v -p codesigning
 prints a line such as
 
 ```
-1) 1234ABCD... "Developer ID Application: Ace Savell (57H3947FW2)"
+1) 1234ABCD... "Developer ID Application: <your Developer ID name> (57H3947FW2)"
 ```
 
 The quoted part, exactly, is the `MACOS_CERTIFICATE_ID` secret. The workflow checks it against the

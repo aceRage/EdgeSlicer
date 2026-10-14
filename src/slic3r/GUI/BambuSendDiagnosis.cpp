@@ -60,6 +60,23 @@ BambuLanSkip bambu_lan_skip_reason(bool has_ip, bool cloud_print_only, bool has_
     return BambuLanSkip::None;
 }
 
+BambuStorageIssue bambu_storage_issue(int sdcard_state, bool allow_abnormal)
+{
+    switch (sdcard_state) {
+    case 0: return BambuStorageIssue::Missing;
+    case 1: return BambuStorageIssue::None;
+    case 2: return allow_abnormal ? BambuStorageIssue::None : BambuStorageIssue::Abnormal;
+    case 3: return BambuStorageIssue::ReadOnly;
+    default: break;
+    }
+    return BambuStorageIssue::Unknown;
+}
+
+bool bambu_storage_usable_for_lan(int sdcard_state, bool allow_abnormal)
+{
+    return bambu_storage_issue(sdcard_state, allow_abnormal) == BambuStorageIssue::None;
+}
+
 const char* bambu_lan_skip_tag(BambuLanSkip skip)
 {
     switch (skip) {
