@@ -12,12 +12,12 @@ using namespace Slic3r;
 // such key and must still load; everything else about the stored shape stays as it was.
 
 namespace {
-const char *OLD_DEVICE = R"({
+const char *OLD_DEVICE = R"json({
     "ip": "192.168.1.50", "dev_id": "SN123", "dev_name": "Bench U1", "model_name": "Snapmaker U1",
     "preset_name": "Snapmaker U1 (0.4 nozzle)", "connected": true, "img": "", "nozzle_sizes": ["0.4", "0.6"],
     "sn": "SN123", "protocol": 3, "api_key": "", "user": "", "password": "", "ca": "", "cert": "", "key": "",
     "clientId": "", "port": 1884, "link_mode": "lan", "userid": "", "id": ""
-})";
+})json";
 } // namespace
 
 TEST_CASE("A device stored before nozzle_volume_type existed still loads", "[AppConfig][DeviceInfo]")
