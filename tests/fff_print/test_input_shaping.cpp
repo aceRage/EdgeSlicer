@@ -143,8 +143,7 @@ TEST_CASE("Machine input shaping override at the start of the print", "[InputSha
         CHECK(lines[1] == "M593 Y F35.00 D0.150");
         // With the machine envelope, before the first layer.
         CHECK(g.find("M593 X") > g.find("M201 X"));
-        CHECK(g.find("M593 X") < g.find("
-G1 "));
+        CHECK(g.find("M593 X") < g.find("\nG1 "));
     }
     SECTION("Marlin 2 without machine limits in the G-code: nothing") {
         CHECK(input_shaping_lines(slice_cube(printer_config("marlin2", {{"input_shaping_emit", "1"},
@@ -174,8 +173,7 @@ G1 "));
             CHECK(lines[1] == "SET_INPUT_SHAPER SHAPER_FREQ_Y=44.00 DAMPING_RATIO_Y=0.120");
             // Klipper still gets no machine limits.
             CHECK(lines_starting_with(g, "M201").empty());
-            CHECK(g.find("SET_INPUT_SHAPER") < g.find("
-G1 "));
+            CHECK(g.find("SET_INPUT_SHAPER") < g.find("\nG1 "));
         }
     }
     SECTION("Klipper (Edge), Disable") {
