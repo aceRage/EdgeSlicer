@@ -7567,6 +7567,11 @@ void ObjectList::on_plate_selected(int plate_index)
 
     UnselectAll();
     Select(item);
+
+    // Thumbnail / programmatic plate picks leave the mouse outside the list, so
+    // wxEVT_DATAVIEW_SELECTION_CHANGED returns before part_selection_changed().
+    // Refresh plate settings from PartPlate::config() explicitly (Snap #1007).
+    part_selection_changed();
 }
 
 //BBS: notify partplate the instance added/updated

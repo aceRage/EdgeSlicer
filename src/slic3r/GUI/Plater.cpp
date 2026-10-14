@@ -3891,6 +3891,28 @@ void Sidebar::remove_unused_filament_combos(const size_t current_extruder_count)
     }
 }
 
+// Snapmaker #759/#920: the U1 has no Cool Steel Plate (btSuperTack) unless support_multi_bed_types is on.
+// A project saved with it falls back to Textured PEI (global bed type) or "same as global" (per plate).
+static bool u1_has_no_cool_steel_plate()
+{
+    const auto &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const auto *printer_model_opt = cfg.option<ConfigOptionString>("printer_model");
+    if (printer_model_opt == nullptr)
+        return false;
+    const bool is_u1 = boost::icontains(printer_model_opt->value, "Snapmaker") && boost::icontains(printer_model_opt->value, "U1");
+    const auto *multi_opt = cfg.option<ConfigOptionBool>("support_multi_bed_types");
+    return is_u1 && !(multi_opt != nullptr && multi_opt->value);
+}
+
+static void reset_u1_unsupported_plate_bed_types(PartPlateList &plate_list)
+{
+    if (!u1_has_no_cool_steel_plate())
+        return;
+    for (PartPlate *plate : plate_list.get_plate_list())
+        if (plate != nullptr && plate->get_bed_type(false) == btSuperTack)
+            plate->set_bed_type(btDefault);
+}
+
 void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
 {
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
@@ -4131,7 +4153,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             
             // Orca: Update proj_config directly to avoid callback context issues
             if (is_snapmaker_u1 && !support_multi_bed_types) {
-                if (bed_type_to_use != btPTE && bed_type_to_use != btPEI && bed_type_to_use != btGESP && bed_type_to_use != btSuperTack) {
+                if (bed_type_to_use != btPTE && bed_type_to_use != btPEI && bed_type_to_use != btGESP) {
                     bed_type_to_use = btPTE;
                     wxGetApp().app_config->set("curr_bed_type", std::to_string(int(bed_type_to_use)));
                     wxGetApp().app_config->set_printer_setting(printer_name, "curr_bed_type", std::to_string(int(bed_type_to_use)));
@@ -4144,7 +4166,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
         } else {
             if (is_snapmaker_u1 && !support_multi_bed_types) {
                 BedType curr = wxGetApp().preset_bundle->project_config.opt_enum<BedType>("curr_bed_type");
-                if (curr != btPTE && curr != btPEI && curr != btGESP && curr != btSuperTack) {
+                if (curr != btPTE && curr != btPEI && curr != btGESP) {
                     wxGetApp().preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(btPTE));
                     m_bed_type_list->SetSelection(0);
                 } else
@@ -9454,9 +9476,24 @@ void Sidebar::add_custom_filament(wxColour new_col) {
 
 void Sidebar::on_bed_type_change(BedType bed_type)
 {
+    if (m_bed_type_list == nullptr)
+        return;
     // btDefault option is not included in global bed type setting
     int sel_idx = (int)bed_type - 1;
-    if (m_bed_type_list != nullptr)
+    // The list can be a printer-specific subset (the U1 has 3 plates), so look the plate up by key.
+    const ConfigOptionDef *bed_type_def = print_config_def.get("curr_bed_type");
+    if (bed_type_def != nullptr && bed_type_def->enum_keys_map != nullptr && !m_bed_type_combo_enum_values.empty()) {
+        sel_idx = -1;
+        for (const auto &kv : *bed_type_def->enum_keys_map) {
+            if (kv.second != int(bed_type))
+                continue;
+            for (size_t i = 0; i < m_bed_type_combo_enum_values.size(); ++i)
+                if (m_bed_type_combo_enum_values[i] == kv.first)
+                    sel_idx = int(i);
+            break;
+        }
+    }
+    if (sel_idx >= 0 && sel_idx < int(m_bed_type_list->GetCount()))
         m_bed_type_list->SetSelection(sel_idx);
 }
 
@@ -9888,6 +9925,15 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
         wxGetApp().preset_bundle->printers.get_edited_preset().config.option("nozzle_diameter"));
     size_t new_nozzle_count = nozzle_diameter ? nozzle_diameter->values.size() : 1;
 
+    // Snapmaker #769: record focus before DeleteAllPages destroys the focused control, and keep the
+    // notebook from repainting page by page while it is rebuilt (this now also runs after every printer
+    // preset switch, not only after the sidebar nozzle picker).
+    bool focus_was_in_notebook = false;
+    if (wxWindow* focus = wxWindow::FindFocus())
+        focus_was_in_notebook = p->m_nozzle_notebook->IsDescendant(focus);
+
+    wxWindowUpdateLocker noUpdates(p->m_nozzle_notebook);
+
     // Clear existing pages and controls
     p->m_nozzle_notebook->DeleteAllPages();
     p->m_nozzle_diameter_lists.clear();
@@ -10012,7 +10058,7 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
             diam_str = from_u8(pv_opt->value);
         }
         
-        diameter_combo->SetValue(diam_str + "mm");
+        diameter_combo->SetValue(diam_str.empty() ? wxString() : diam_str + "mm");
 
         p->m_nozzle_diameter_lists.push_back(diameter_combo);
 
@@ -10080,7 +10126,8 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
 
     if (switch_machine) {
         p->combo_printer->SetFocus();
-    } else {
+    } else if (focus_was_in_notebook) {
+        // The focused control was destroyed by the rebuild.
         p->combo_printer->GetParent()->SetFocus();
     }
 }
@@ -12580,6 +12627,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 partplate_list.reset_size(current_width + Bed3D::Axes::DefaultTipRadius, current_depth + Bed3D::Axes::DefaultTipRadius, current_height, false);
                             }
                             partplate_list.load_from_3mf_structure(plate_data);
+                            reset_u1_unsupported_plate_bed_types(partplate_list);
                             partplate_list.update_slice_context_to_current_plate(background_process);
                             this->preview->update_gcode_result(partplate_list.get_current_slice_result());
                             release_PlateData_list(plate_data);
@@ -12735,6 +12783,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             ConfigOption* bed_type_opt = preset_bundle->project_config.option("curr_bed_type");
                             if (bed_type_opt != nullptr) {
                                 BedType bed_type = (BedType)bed_type_opt->getInt();
+                                if (bed_type == btSuperTack && u1_has_no_cool_steel_plate()) {
+                                    bed_type = btPTE;
+                                    preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
+                                }
                                 // update app config for bed type
                                 bool is_bbl_preset = preset_bundle->is_bbl_vendor();
                                 if (is_bbl_preset) {
@@ -12997,6 +13049,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                 if (plate_data.size() > 0) {
                     partplate_list.load_from_3mf_structure(plate_data);
+                    reset_u1_unsupported_plate_bed_types(partplate_list);
                     partplate_list.update_slice_context_to_current_plate(background_process);
                     this->preview->update_gcode_result(partplate_list.get_current_slice_result());
                     release_PlateData_list(plate_data);
@@ -16469,6 +16522,11 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
 void Plater::priv::on_slicing_completed(wxCommandEvent & evt)
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": event_type %1%, string %2%") % evt.GetEventType() % evt.GetString();
+
+    // Snapmaker #753: a slice finishing while the GUI is being recreated (language / theme change) must not touch the half-built UI.
+    if (GUI::wxGetApp().is_recreating_gui())
+        return;
+
     //BBS: add slice project logic
     if (m_slice_all && (m_cur_slice_plate < (partplate_list.get_plate_count() - 1))) {
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format("slicing all, finished plate %1%, will continue next.")%m_cur_slice_plate;
