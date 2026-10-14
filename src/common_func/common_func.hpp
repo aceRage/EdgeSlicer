@@ -84,7 +84,8 @@ namespace common
 
 	std::string get_pc_name();
 
-	std::string get_flutter_version();
+	// version.json of the bundled web pages (resources/web/flutter_web/version.json)
+	std::string get_flutter_version(const std::string& version_json_path);
 
 	std::string get_profile_version();
 

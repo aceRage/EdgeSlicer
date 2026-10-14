@@ -1,5 +1,7 @@
 #include <catch2/catch.hpp>
 
+#include "common_func/common_func.hpp"
+
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
@@ -106,3 +108,15 @@ TEST_CASE("the web panel's dark pictures are shipped", "[FlutterWeb]")
     for (const char* name : {"deviceNotConnected_dark.png", "controlDefault_dark.png", "printtaskDefault_dark.png"})
         CHECK(fs::exists(images / name));
 }
+
+#ifdef _WIN32
+// The version the log and the about text report is the one of the bundled pages, which the page server
+// serves; the data dir's old copy (%APPDATA%/EdgeSlicer/web/flutter_web) is not read.
+TEST_CASE("the reported web panel version is the bundled one", "[FlutterWeb]")
+{
+    const std::string v = common::get_flutter_version((bundle_dir() / "version.json").string());
+    CHECK(v.find("flutter_version: 2.3.40") == 0);
+    CHECK(v.find("build_number: 20260930162817") != std::string::npos);
+    CHECK(common::get_flutter_version((bundle_dir() / "no_such_version.json").string()).empty());
+}
+#endif
