@@ -7,6 +7,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -17,6 +18,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Slic3r;
@@ -88,6 +90,46 @@ constexpr double UNLOAD = 5.0;
 
 // This tree's process_T() starts on extruder 0 and charges nothing for T0 at the start, so the tests switch to
 // T1 first (empty extruder: load time only) and back to T0 (unload + load).
+
+TEST_CASE("G29 preparation time is added only once on Bambu printers", "[GCodeTiming][Regression]")
+{
+    // Orca #15274: firmware may split one bed-leveling sequence across several G29 lines.
+    // Edge #14573 already keeps the 260 s off non-BBL machines (Marlin mesh start G-code has five
+    // G29s). This only once-counts the Bambu estimate.
+    const FullPrintConfig config = make_config(0.0, 0.0, 0.0);
+    auto estimate = [&config](bool is_bbl_printer, const char *commands) {
+        const auto  mode  = PrintEstimatedStatistics::ETimeMode::Normal;
+        std::string gcode = is_bbl_printer ? "; FEATURE: Custom\n" : ";TYPE:Custom\n";
+        gcode += "G1 X10 Y10 Z0.2 F600\nG1 X20 Y10 F600\n";
+        gcode += commands;
+        gcode += "G1 X20 Y20 F600\nG1 X10 Y20 F600\n";
+
+        const bool previous_is_bbl_printer = GCodeProcessor::s_IsBBLPrinter;
+        const ScopeGuard restore_flag([previous_is_bbl_printer] {
+            GCodeProcessor::s_IsBBLPrinter = previous_is_bbl_printer;
+        });
+        GCodeProcessor processor;
+        run_processor(processor, config, gcode.c_str(), is_bbl_printer);
+        return std::make_pair(processor.get_time(mode), processor.get_prepare_time(mode));
+    };
+
+    const auto [baseline_nb, baseline_nb_prep] = estimate(false, "G4 S0\n");
+    const auto [one_nb, one_nb_prep]           = estimate(false, "G29\n");
+    const auto [repeated_nb, repeated_nb_prep] = estimate(false,
+        "G29 P9 X10 Y-4 W32 H4\nG29 P1\nG29 P1 X0 Y0 W50 H20 C\nG29 P3.2\nG29 P3.13\nG29 A\n");
+    REQUIRE_THAT(one_nb, WithinAbs(baseline_nb, 1e-2));
+    REQUIRE_THAT(repeated_nb, WithinAbs(baseline_nb, 1e-2));
+    REQUIRE_THAT(one_nb_prep, WithinAbs(baseline_nb_prep, 1e-2));
+    REQUIRE_THAT(repeated_nb_prep, WithinAbs(baseline_nb_prep, 1e-2));
+
+    const auto [baseline_bbl, baseline_bbl_prep]     = estimate(true, "G4 S0\n");
+    const auto [one_bbl, one_bbl_prep]               = estimate(true, "G29\n");
+    const auto [repeated_bbl, repeated_bbl_prep]     = estimate(true, "G29\nG29\n");
+    REQUIRE_THAT(one_bbl - baseline_bbl, WithinAbs(260.0, 1e-2));
+    REQUIRE_THAT(one_bbl_prep - baseline_bbl_prep, WithinAbs(260.0, 1e-2));
+    REQUIRE_THAT(repeated_bbl, WithinAbs(one_bbl, 1e-2));
+    REQUIRE_THAT(repeated_bbl_prep, WithinAbs(one_bbl_prep, 1e-2));
+}
 
 TEST_CASE("Filament-change time is attributed to tool-change moves, not extrusion roles", "[GCodeTiming]")
 {
