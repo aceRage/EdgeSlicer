@@ -1870,10 +1870,13 @@ struct BackupCallbackRecorder
 {
     std::atomic<int> calls{0};
     std::atomic<int> last_action{-1};
+    std::atomic<bool> saw_backup_response{false};
     std::function<void(int)> fn()
     {
         return [this](int action) {
             last_action.store(action);
+            if (action == 1)
+                saw_backup_response.store(true);
             calls.fetch_add(1);
         };
     }
@@ -1902,9 +1905,14 @@ TEST_CASE("backup ui-task notification survives null-callback window", "[3mf][bb
     backup_soon();
     REQUIRE(wait_until([&] { return cb0.calls.load() > 0; }, 5000));
     REQUIRE(cb0.last_action.load() == 0);
-    run_backup_ui_tasks();
-    REQUIRE(cb0.calls.load() == 2);
-    REQUIRE(cb0.last_action.load() == 1);
+    // The manager is a process-wide singleton: ui tasks left by earlier test
+    // cases make the first announcement arrive before the worker has queued
+    // our Backup task. Keep consuming (as the GUI does) until the backup
+    // response (action 1) shows up, rather than assuming exactly one pass.
+    REQUIRE(wait_until([&] {
+        run_backup_ui_tasks();
+        return cb0.saw_backup_response.load();
+    }, 5000));
 
     // MainFrame::shutdown(): callback goes null. A task landing in the queue
     // in this window gets no notification (previously: crash, now: silence).
