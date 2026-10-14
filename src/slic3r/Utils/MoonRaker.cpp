@@ -780,9 +780,14 @@ bool Moonraker::validate_version_text(const boost::optional<std::string>& versio
 // Set authentication headers for HTTP requests
 void Moonraker::set_auth(Http& http) const
 {
-    auto& wcp_loger = GUI::WCP_Logger::getInstance();    
+    auto& wcp_loger = GUI::WCP_Logger::getInstance();
+    // Orca #15550: send X-Api-Key only when the preset has a key. An empty header
+    // (or a dummy one) is rejected as Invalid API Key by Moonraker's trusted-client
+    // auth; omitting it lets [authorization] trusted_clients accept the request.
+    // U1 filament sync and the phone API both go through this PrintHost path.
     wcp_loger.add_log("Setting auth header, API key length: " + std::to_string(m_apikey.length()), false, "", "Moonraker_Mqtt", "info");
-    http.header("X-Api-Key", m_apikey);
+    if (!m_apikey.empty())
+        http.header("X-Api-Key", m_apikey);
 
     if (!m_cafile.empty()) {        
         wcp_loger.add_log("Setting CA file: " + m_cafile, false, "", "Moonraker_Mqtt", "info");
