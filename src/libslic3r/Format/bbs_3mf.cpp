@@ -10167,8 +10167,21 @@ public:
     }
 
     void set_post_callback(std::function<void(int)> c) {
-        boost::lock_guard lock(m_mutex);
-        m_post_callback = c;
+        // serialize the swap with in-flight invocation in operator()()
+        {
+            boost::lock_guard post_lock(m_post_callback_mutex);
+            m_post_callback = c;
+        }
+        // catch-up: a task queued while the callback was null never got its
+        // size()==1 notification; re-announce pending tasks to the fresh callback,
+        // or EVT_BACKUP_POST would never fire again (backup stalls until exit).
+        // post_lock is released first so lock order stays m_mutex -> m_post_callback_mutex
+        // (worker's order) with no hold-and-wait overlap.
+        if (c) {
+            boost::lock_guard lock(m_mutex);
+            if (!m_ui_tasks.empty())
+                c(0);
+        }
     }
 
     void run_ui_tasks() {
@@ -10462,14 +10475,17 @@ public:
                     continue;
             }
             m_tasks.pop_front();
-            auto callback = m_post_callback;
             lock.unlock();
             process_task(t);
             lock.lock();
             if (t.type > None) {
                 m_ui_tasks.push_back(t);
-                if (m_ui_tasks.size() == 1 && callback)
-                    callback(0);
+                if (m_ui_tasks.size() == 1) {
+                    // re-read under lock: shutdown may swap in nullptr during process_task()
+                    boost::lock_guard post_lock(m_post_callback_mutex);
+                    if (m_post_callback)
+                        m_post_callback(0);
+                }
             }
         }
     }
@@ -10514,6 +10530,8 @@ private:
     bool m_other_changes = false; // visit only in main thread
     bool m_other_changes_backup = false; // visit only in main thread
     std::vector<std::pair<ModelObject*, size_t>> m_gaurd_objects;
+    // serializes m_post_callback swap vs worker invocation; lock order: m_mutex -> m_post_callback_mutex
+    boost::mutex m_post_callback_mutex;
     boost::thread m_thread;
 };
 
