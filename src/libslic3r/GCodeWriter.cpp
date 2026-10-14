@@ -756,6 +756,21 @@ double GCodeWriter::xyz_travel_speed(const Vec3d &from, const Vec3d &to, double 
     return this->cap_speed_for_z(speed, delta.z(), delta.norm());
 }
 
+// Snapmaker #993 (Edge): after an XY-then-Z travel from an unknown position (after a tool change or
+// custom G-code) the next lines are often the wipe tower's or custom G-code, which may move without an
+// F word of their own and so inherit the last feedrate. Leave the feedrate they inherited before the
+// cap active, rather than the capped Z one. Nothing is written when the cap did not lower the speed.
+std::string GCodeWriter::restore_uncapped_z_feedrate() const
+{
+    const double uncapped = this->z_travel_speed_uncapped();
+    if (!(this->z_travel_speed() < uncapped))
+        return std::string();
+    GCodeG1Formatter w;
+    this->seed_formatter_guard(w);
+    w.emit_f(uncapped * 60.0);
+    return w.string();
+}
+
 void GCodeWriter::defer_z_move(double z)
 {
     // Consecutive deferrals without a Z move in between keep the Z the head is really at.
@@ -884,7 +899,7 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
                 this->seed_formatter_guard(w0);
                 w0.emit_f(travel_speed * 60.0);
                 w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
-                xy_z_move = w0.string() + _travel_to_z(target.z(), comment);
+                xy_z_move = w0.string() + _travel_to_z(target.z(), comment) + this->restore_uncapped_z_feedrate();
             }
         }
         m_pos = dest_point;
@@ -920,7 +935,7 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         this->seed_formatter_guard(w);
         w.emit_f(this->active_travel_speed() * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
-        out_string = w.string() + _travel_to_z(point_on_plate.z(), comment);
+        out_string = w.string() + _travel_to_z(point_on_plate.z(), comment) + this->restore_uncapped_z_feedrate();
     } else {
         GCodeG1Formatter w;
         w.emit_xyz(point_on_plate);

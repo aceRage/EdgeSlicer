@@ -697,13 +697,14 @@ TEST_CASE("Z travel respects the machine Z speed limit", "[GCodeWriter][ZSpeed]"
         double      travel_speed_z;
         double      max_speed_z;
         std::string feedrate;
+        std::string restored; // the feedrate left active after an unknown-position travel, when capped
     };
     const SpeedCase cases[] = {
-        {100., 0., 40., " F2400"},  // travel speed capped
-        {30., 0., 40., " F1800"},   // below the limit: unchanged
-        {100., 70., 40., " F2400"}, // travel_speed_z capped
-        {100., 20., 40., " F1200"}, // travel_speed_z below the limit: unchanged
-        {100., 0., 0., " F6000"},   // no limit: unchanged
+        {100., 0., 40., " F2400", "G1 F6000\n"}, // travel speed capped
+        {30., 0., 40., " F1800", ""},            // below the limit: unchanged
+        {100., 70., 40., " F2400", "G1 F4200\n"}, // travel_speed_z capped
+        {100., 20., 40., " F1200", ""},          // travel_speed_z below the limit: unchanged
+        {100., 0., 0., " F6000", ""},            // no limit: unchanged
     };
     for (const SpeedCase &c : cases) {
         CAPTURE(c.travel_speed, c.travel_speed_z, c.max_speed_z);
@@ -732,7 +733,9 @@ TEST_CASE("Z travel respects the machine Z speed limit", "[GCodeWriter][ZSpeed]"
 
         // Unknown position: XY first, then Z.
         writer.set_current_position_clear(false);
-        CHECK(writer.travel_to_xyz(Vec3d(120., 100., 7.)).find("G1 Z7" + c.feedrate + "\n") != std::string::npos);
+        // Edge: the follower (wipe tower or custom G-code without F words) keeps the feedrate it had before.
+        CHECK(writer.travel_to_xyz(Vec3d(120., 100., 7.)) ==
+              "G1 X120 Y100 F" + std::to_string(int(c.travel_speed * 60.)) + "\nG1 Z7" + c.feedrate + "\n" + c.restored);
     }
 }
 

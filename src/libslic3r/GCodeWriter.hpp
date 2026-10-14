@@ -287,6 +287,8 @@ public:
     double      cap_speed_for_z(double speed, double dz, double length) const;
     // The same for a straight XYZ move, measured between the emitted (quantized) end points.
     double      xyz_travel_speed(const Vec3d &from, const Vec3d &to, double speed) const;
+    // "G1 F<uncapped Z travel speed>" when the cap lowered it, else empty (see the .cpp).
+    std::string restore_uncapped_z_feedrate() const;
     // The Z the head is physically at: the pre-layer-change Z while a deferred layer change is pending.
     double      physical_z() const { return (m_has_deferred_z && m_pos.z() == m_deferred_to_z) ? m_deferred_from_z : m_pos.z(); }
     std::string _travel_to_z(double z, const std::string &comment);
