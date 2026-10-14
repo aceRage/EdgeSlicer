@@ -437,17 +437,18 @@ TEST_CASE("vaults: SigV4 matches AWS's published examples", "[Vaults][S3]")
 TEST_CASE("vaults: S3 lists a bucket with continuation tokens, signed", "[Vaults][S3]")
 {
     Server srv;
-    srv.add("GET https://minio.lan:9000/models/?list-type=2&max-keys=1000&prefix=3d%2F", 200,
+    srv.add("GET http://minio.lan:9000/models/?list-type=2&max-keys=1000&prefix=3d%2F", 200,
             "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><IsTruncated>true</IsTruncated>"
             "<Contents><Key>3d/benchy.3mf</Key><LastModified>2026-10-13T08:00:00.000Z</LastModified><ETag>&quot;abc&quot;</ETag><Size>5000</Size></Contents>"
             "<Contents><Key>3d/a/b/c/d/e/f/g/too-deep.stl</Key><Size>1</Size></Contents>"
             "<NextContinuationToken>1/2+3=</NextContinuationToken></ListBucketResult>");
-    srv.add("GET https://minio.lan:9000/models/?continuation-token=1%2F2%2B3%3D&list-type=2&max-keys=1000&prefix=3d%2F", 200,
+    srv.add("GET http://minio.lan:9000/models/?continuation-token=1%2F2%2B3%3D&list-type=2&max-keys=1000&prefix=3d%2F", 200,
             "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>3d/parts/gear.step</Key><Size>42</Size></Contents></ListBucketResult>");
     const Spec spec = spec_from_json({{"name", "MinIO"}, {"kind", "s3"}, {"url", "http://minio.lan:9000"}, {"bucket", "models"}, {"prefix", "3d/"}});
     const Secrets     secrets {{"access_key_id", "AKIDEXAMPLE"}, {"secret_access_key", "SECRETEXAMPLE"}};
     std::atomic<bool> cancel { false };
     const Listing     l = make_provider(spec)->list(secrets, srv.fn(), cancel, NOW);
+    INFO(l.error);
     REQUIRE(l.ok);
     REQUIRE(l.files.size() == 2);
     CHECK(l.files[0].id == "3d/benchy.3mf");
