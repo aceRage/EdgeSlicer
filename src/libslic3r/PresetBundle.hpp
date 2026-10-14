@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <array>
 #include <vector>
@@ -233,6 +234,30 @@ public:
     PresetsConfigSubstitutions load_project_embedded_presets(std::vector<Preset*> project_presets, ForwardCompatibilitySubstitutionRule substitution_rule);
     std::vector<Preset*> get_current_project_embedded_presets();
     void reset_project_embedded_presets();
+
+    // What importing a file's settings replaces, so that an import which fails part-way, or whose
+    // file is then rejected, can be undone without copying every preset.
+    struct Selection
+    {
+        struct Collection
+        {
+            std::string        selected;
+            DynamicPrintConfig edited;
+            // The baseline saved_is_dirty() compares against, which feeds the project dirty state.
+            DynamicPrintConfig saved;
+            // By index: an import only inserts project-embedded presets, which a restore drops first.
+            std::vector<bool>  visible;
+        };
+        Collection               prints, filaments, printers;
+        std::vector<std::string> filament_presets;
+        DynamicPrintConfig       project_config;
+        // Edge: mixed (virtual) filaments live on MixedFilamentManager, not a filament_is_mixed array.
+        MixedFilamentManager     mixed_filaments;
+    };
+    // Nothing while project-embedded presets exist: a restore drops them, which would lose a loaded project's presets.
+    std::optional<Selection> selection() const;
+    void                     restore_selection(const Selection &selection);
+
     // Ultra: the project presets in use (printer, process, filament slots) that `printer_name`
     // cannot use, i.e. that switching to that printer would deselect and hide. Filament presets
     // the loader made up for a slot that matched no preset ("<name>(<file>.3mf)") do not count.
@@ -245,6 +270,21 @@ public:
 
     // Export selections (current print, current filaments, current printer) into config.ini
     void            export_selections(AppConfig &config);
+
+    // While one lives, export_selections() writes nothing, so a selection only shown for a while (the
+    // settings of a G-code being previewed) is not remembered as the user's. It also covers the
+    // exports the GUI makes on its own while refreshing.
+    class SelectionExportBlocker
+    {
+    public:
+        explicit SelectionExportBlocker(PresetBundle &bundle) : m_bundle(bundle) { ++m_bundle.m_selection_export_blockers; }
+        ~SelectionExportBlocker() { --m_bundle.m_selection_export_blockers; }
+        SelectionExportBlocker(const SelectionExportBlocker &) = delete;
+        SelectionExportBlocker &operator=(const SelectionExportBlocker &) = delete;
+
+    private:
+        PresetBundle &m_bundle;
+    };
 
     // BBS
     void            set_num_filaments(unsigned int n, std::string new_col = "");
@@ -349,6 +389,11 @@ public:
     // In the future the configuration will likely be read from an AMF file as well.
     // If the file is loaded successfully, its print / filament / printer profiles will be activated.
     ConfigSubstitutions         load_config_file(const std::string &path, ForwardCompatibilitySubstitutionRule compatibility_rule);
+
+    // The settings an OrcaSlicer / EdgeSlicer G-code was sliced with, from its config block, ready for load_config_model().
+    // Throws when the file carries no such block (another slicer, or the block was left out).
+    DynamicPrintConfig          config_from_gcode(const std::string &path, ForwardCompatibilitySubstitutionRule compatibility_rule,
+                                                  ConfigSubstitutions &substitutions) const;
 
     // Ultra: called with every config read from a file the user imports - preset JSON files and
     // bundles (import_presets) and the config block of a G-code file (load_config_file) - before it
@@ -609,6 +654,8 @@ private:
     bool validation_mode = false;
     std::string vendor_to_validate = ""; 
     int m_errors = 0;
+    // The live SelectionExportBlockers.
+    int m_selection_export_blockers = 0;
     std::vector<unsigned int> m_last_filament_id_remap;
 
     // Optional progress hook; see set_progress_callback(). Null unless a GUI set one.

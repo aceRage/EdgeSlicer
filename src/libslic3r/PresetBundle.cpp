@@ -14,6 +14,7 @@
 #include "common_func/common_func.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -2479,6 +2480,8 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
 //BBS: change directories by design
 void PresetBundle::export_selections(AppConfig &config)
 {
+    if (m_selection_export_blockers > 0)
+        return;
 	assert(this->printers.get_edited_preset().printer_technology() != ptFFF || filament_presets.size() >= 1);
 	//assert(this->printers.get_edited_preset().printer_technology() != ptFFF || filament_presets.size() > 1 || filaments.get_selected_preset_name() == filament_presets.front());
     config.clear_section("presets");
@@ -3290,14 +3293,12 @@ DynamicPrintConfig PresetBundle::full_sla_config() const
 ConfigSubstitutions PresetBundle::load_config_file(const std::string &path, ForwardCompatibilitySubstitutionRule compatibility_rule)
 {
 	if (is_gcode_file(path)) {
-		DynamicPrintConfig config;
         //BBS: add config related logs
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" enter, gcodefile %1%, compatibility_rule %2%")%path %compatibility_rule;
-		config.apply(FullPrintConfig::defaults());
-        ConfigSubstitutions config_substitutions = config.load_from_gcode_file(path, compatibility_rule);
+        ConfigSubstitutions config_substitutions;
+        DynamicPrintConfig  config = config_from_gcode(path, compatibility_rule, config_substitutions);
         if (untrusted_config_filter)
             untrusted_config_filter(path, config);
-        Preset::normalize(config);
 		load_config_file_config(path, true, std::move(config));
 		return config_substitutions;
 	}
@@ -3307,6 +3308,79 @@ ConfigSubstitutions PresetBundle::load_config_file(const std::string &path, Forw
     throw Slic3r::RuntimeError(std::string("Unknown configuration file: ") + path);
     
     return ConfigSubstitutions{};
+}
+
+DynamicPrintConfig PresetBundle::config_from_gcode(const std::string &path, ForwardCompatibilitySubstitutionRule compatibility_rule,
+                                                   ConfigSubstitutions &substitutions) const
+{
+    DynamicPrintConfig config;
+    config.apply(FullPrintConfig::defaults());
+    // The config block leaves a few project settings out (filament_colour_type, prime_volume_mode,
+    // flush_multiplier_fast); those keep this bundle's values rather than falling back to the defaults.
+    config.apply(this->project_config);
+    const DynamicPrintConfig base = config;
+    substitutions = config.load_from_gcode_file(path, compatibility_rule);
+    // An empty list of choices sets nothing: G-code written by a tool rather than from presets leaves per-extruder
+    // lists such as nozzle_volume_type empty, and the settings tabs expect a choice per extruder. An empty text
+    // list, such as filament_multi_colour, is a value of its own and stays.
+    for (const std::string &key : config.keys())
+        if (const ConfigOption *opt = config.option(key); opt->type() == coEnums && static_cast<const ConfigOptionVectorBase *>(opt)->size() == 0)
+            if (const ConfigOption *below = base.option(key); below != nullptr && static_cast<const ConfigOptionVectorBase *>(below)->size() > 0)
+                config.set_key_value(key, below->clone());
+    Preset::normalize(config);
+    // The block holds flush_volumes_matrix already multiplied by the multiplier the slice used, so a
+    // multiplier of 1 keeps the purge volumes the file was sliced with. G-code from before 2.3.2 held the
+    // plain matrix and loses a multiplier other than 1.
+    for (const char *key : { "flush_multiplier", "flush_multiplier_fast" })
+        if (auto *multiplier = config.option<ConfigOptionFloats>(key))
+            std::fill(multiplier->values.begin(), multiplier->values.end(), 1.);
+    return config;
+}
+
+std::optional<PresetBundle::Selection> PresetBundle::selection() const
+{
+    auto capture = [](const PresetCollection &presets, Selection::Collection &out) {
+        if (std::any_of(presets.m_presets.begin(), presets.m_presets.end(), [](const Preset &preset) { return preset.is_project_embedded; }))
+            return false;
+        out.selected = presets.get_selected_preset_name();
+        out.edited   = presets.get_edited_preset().config;
+        out.saved    = presets.m_saved_preset.config;
+        out.visible.reserve(presets.m_presets.size());
+        for (const Preset &preset : presets.m_presets)
+            out.visible.push_back(preset.is_visible);
+        return true;
+    };
+    Selection selection;
+    if (!capture(this->prints, selection.prints) || !capture(this->filaments, selection.filaments) || !capture(this->printers, selection.printers))
+        return std::nullopt;
+    selection.filament_presets = this->filament_presets;
+    selection.project_config   = this->project_config;
+    selection.mixed_filaments  = this->mixed_filaments;
+    return selection;
+}
+
+void PresetBundle::restore_selection(const Selection &selection)
+{
+    auto restore = [](PresetCollection &presets, const Selection::Collection &saved) {
+        presets.reset_project_embedded_presets();
+        // Before selecting: select_preset_by_name() passes over a hidden preset.
+        assert(presets.m_presets.size() == saved.visible.size());
+        for (size_t i = 0; i < std::min(presets.m_presets.size(), saved.visible.size()); ++i)
+            presets.m_presets[i].is_visible = saved.visible[i];
+        presets.select_preset_by_name(saved.selected, true);
+        presets.m_saved_preset.config      = saved.saved;
+        presets.get_edited_preset().config = saved.edited;
+        presets.update_dirty();
+    };
+    restore(this->printers, selection.printers);
+    restore(this->prints, selection.prints);
+    restore(this->filaments, selection.filaments);
+    this->update_compatible(PresetSelectCompatibleType::Never);
+    this->update_multi_material_filament_presets();
+    // Last, as update_multi_material_filament_presets() resizes filament_presets and the flush data in project_config.
+    this->filament_presets = selection.filament_presets;
+    this->project_config   = selection.project_config;
+    this->mixed_filaments  = selection.mixed_filaments;
 }
 
 // Load a config file from a boost property_tree. This is a private method called from load_config_file.
