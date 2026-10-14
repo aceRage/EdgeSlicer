@@ -129,7 +129,8 @@ static t_config_enum_values s_keys_map_FuzzySkinType {
     { "external",       int(FuzzySkinType::External) },
     { "hole",           int(FuzzySkinType::Hole) },
     { "all",            int(FuzzySkinType::All) },
-    { "allwalls",       int(FuzzySkinType::AllWalls)}
+    { "allwalls",       int(FuzzySkinType::AllWalls)},
+    { "disabled_fuzzy", int(FuzzySkinType::Disabled_fuzzy)}
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinType)
 
@@ -1188,15 +1189,13 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.emplace_back(L("Textured PEI Plate"));
     def->enum_labels.emplace_back(L("Textured Cool Plate"));
     def->enum_labels.emplace_back(L("Cool Plate (SuperTack)"));
-    // U1 only 4
+    // U1 only 3 (Snapmaker #759: Cool Steel Plate is not a real U1 plate; it only shows with support_multi_bed_types)
     def->enum_values_u1.emplace_back("Textured PEI Plate");
     def->enum_values_u1.emplace_back("High Temp Plate");
     def->enum_values_u1.emplace_back("Graphic Effect Plate");
-    def->enum_values_u1.emplace_back("Supertack Plate");
     def->enum_labels_u1.emplace_back(L("Textured PEI Plate"));
     def->enum_labels_u1.emplace_back(L("Smooth PEI Plate"));
     def->enum_labels_u1.emplace_back(L("Graphic Effect Plate"));
-    def->enum_labels_u1.emplace_back(L("Cool Steel Plate"));
     // U1 use 7 when open support_multi_bed_types
     def->enum_values_ex.emplace_back("Cool Plate");
     def->enum_values_ex.emplace_back("Engineering Plate");
@@ -2333,9 +2332,9 @@ void PrintConfigDef::init_fff_params()
                      "You may be able to tune this value to get a nice flat surface if there is slight overflow or underflow."
                      "\n\nThe final object flow ratio is this value multiplied by the filament flow ratio.");
     def->mode = comAdvanced;
-    def->max = 2;
-    def->min = 0.01;
-    def->set_default_value(new ConfigOptionFloat(1));
+    def->max = 2.f;
+    def->min = 0.01f;
+    def->set_default_value(new ConfigOptionFloat(1.f));
 
     def = this->add("enable_pressure_advance", coBools);
     def->label = L("Enable pressure advance");
@@ -3262,6 +3261,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Marlin Firmware Junction Deviation (replaces the traditional XY Jerk setting).");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
+    def->max = 0.5f; // Orca #11915: Marlin junction deviation tops out well below 0.5 mm
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 0 });
 
@@ -3445,12 +3445,16 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("hole");
     def->enum_values.push_back("all");
     def->enum_values.push_back("allwalls");
-    def->enum_labels.push_back(L("None"));
+    def->enum_values.push_back("disabled_fuzzy");
+    def->enum_labels.push_back(L("None (allow paint)"));
     def->enum_labels.push_back(L("Contour"));
     def->enum_labels.push_back(L("Hole"));
     def->enum_labels.push_back(L("Contour and hole"));
     def->enum_labels.push_back(L("All walls"));
+    def->enum_labels.push_back(L("Disabled"));
     def->mode = comSimple;
+    // Edge: keep None (allow paint) as the default; upstream #10312 defaults to Disabled, which
+    // would ignore painted fuzzy skin on system presets that do not set fuzzy_skin.
     def->set_default_value(new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::None));
 
     def = this->add("fuzzy_skin_thickness", coFloat);
@@ -3468,8 +3472,8 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Others");
     def->tooltip = L("The average distance between the random points introduced on each line segment.");
     def->sidetext = "mm";	// milimeters, don't need translation
-    def->min = 0;
-    def->max = 5;
+    def->min = 0.01f; // point distance cannot be 0! Otherwise we get infinite loop + OOM due to infinite line division.
+    def->max = 5.f;
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionFloat(0.3));
 
@@ -3552,7 +3556,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Fuzzy skin noise persistence");
     def->category = L("Others");
     def->tooltip = L("The decay rate for higher octaves of the coherent noise. Lower values will result in smoother noise.");
-    def->min = 0.01;
+    def->min = 0.01f;
     def->max = 1;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.5));
@@ -5017,6 +5021,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Maximum junction deviation (M205 J, only apply if JD > 0 for Marlin Firmware)");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
+    def->max = 0.5f; // Orca #11915: Marlin junction deviation tops out well below 0.5 mm
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats{0. ,0. });
 
@@ -10690,13 +10695,13 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         case coFloatOrPercent:
         {
             auto *fopt = static_cast<const ConfigOptionFloat*>(opt);
-            out_of_range = fopt->value < optdef->min || fopt->value > optdef->max;
+            out_of_range = !optdef->is_value_valid(fopt->value);
             break;
         }
         case coFloats:
         case coPercents:
             for (double v : static_cast<const ConfigOptionVector<double>*>(opt)->values)
-                if (v < optdef->min || v > optdef->max) {
+                if (!optdef->is_value_valid(v)) {
                     out_of_range = true;
                     break;
                 }
@@ -10704,12 +10709,12 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         case coInt:
         {
             auto *iopt = static_cast<const ConfigOptionInt*>(opt);
-            out_of_range = iopt->value < optdef->min || iopt->value > optdef->max;
+            out_of_range = !optdef->is_value_valid(iopt->value);
             break;
         }
         case coInts:
             for (int v : static_cast<const ConfigOptionVector<int>*>(opt)->values)
-                if (v < optdef->min || v > optdef->max) {
+                if (!optdef->is_value_valid(v)) {
                     out_of_range = true;
                     break;
                 }

@@ -207,3 +207,66 @@ TEST_CASE("Small-area flow compensation follows its model without overshoot", "[
     config.small_area_infill_flow_compensation_model.values = { "0,0", "1,0.5", "2,0.5", "10,1" };
     CHECK_THROWS_AS(SmallAreaInfillFlowCompensator(config), Slic3r::InvalidArgument);
 }
+
+// Orca a2a9f95b6b: the G-code export decided whether to build the small-area compensator from m_config before
+// any object or region config had been applied to it, so small_area_infill_flow_compensation (a region option)
+// always read its hard-coded default (off). Turning it on in the process preset changed nothing.
+namespace {
+struct SafcExtrusion
+{
+    double      solid_infill = 0.; // top, bottom and internal solid infill: what the compensator may reduce
+    double      other        = 0.; // everything else: walls, sparse infill, skirt
+    std::string moves;             // every non-comment line, to compare two slices move for move
+};
+
+SafcExtrusion safc_extrusion(const std::string& gcode, const DynamicPrintConfig& config)
+{
+    SafcExtrusion out;
+    bool          solid = false;
+    GCodeReader   parser;
+    parser.apply_config(config);
+    parser.parse_buffer(gcode, [&out, &solid](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string_view comment = line.comment();
+        if (comment.rfind("TYPE:", 0) == 0)
+            solid = comment == "TYPE:Top surface" || comment == "TYPE:Bottom surface" || comment == "TYPE:Internal solid infill";
+        if (!line.raw().empty() && line.raw().front() != ';')
+            out.moves += line.raw() + "\n";
+        if (line.extruding(self))
+            (solid ? out.solid_infill : out.other) += line.dist_E(self);
+    });
+    return out;
+}
+} // namespace
+
+TEST_CASE("Small-area flow compensation applies when the process enables it", "[Flow][SmallAreaFlow][OrcaA2a9f95b6b]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // The compensator only touches the line-based solid patterns.
+    config.set_deserialize_strict({
+        {"top_surface_pattern", "monotonic"},
+        {"bottom_surface_pattern", "monotonic"},
+        {"internal_solid_infill_pattern", "monotonic"},
+        {"sparse_infill_density", "15%"},
+    });
+    // A small block: its solid infill lines are all shorter than the 10 mm end of the default model.
+    const TriangleMesh block = make_cube(8., 8., 3.);
+
+    config.set_deserialize_strict({{"small_area_infill_flow_compensation", "0"}});
+    const SafcExtrusion off = safc_extrusion(Test::slice({block}, config), config);
+
+    // Off: the model is not used at all, so a different model slices move for move the same.
+    DynamicPrintConfig other_model = config;
+    other_model.option<ConfigOptionStrings>("small_area_infill_flow_compensation_model")->values = {"0,0", "5,0.5", "20,1"};
+    const SafcExtrusion off_other_model = safc_extrusion(Test::slice({block}, other_model), other_model);
+    CHECK(off_other_model.moves == off.moves);
+
+    config.set_deserialize_strict({{"small_area_infill_flow_compensation", "1"}});
+    const SafcExtrusion on = safc_extrusion(Test::slice({block}, config), config);
+
+    REQUIRE(off.solid_infill > 0.);
+    INFO("solid infill E off " << off.solid_infill << ", on " << on.solid_infill);
+    // On: the short solid infill lines are under-extruded relative to off ...
+    CHECK(on.solid_infill < off.solid_infill * 0.99);
+    // ... and nothing else moves.
+    CHECK(on.other == Approx(off.other).epsilon(1e-9));
+}

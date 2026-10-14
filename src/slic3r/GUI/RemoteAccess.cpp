@@ -24,7 +24,9 @@
 #include "IMSlider.hpp"
 #include <cmath>
 #include <set>
+#include <cfloat>
 #include <climits>
+#include <cmath>
 #include "libslic3r/FilamentColorLibrary.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
@@ -2098,8 +2100,15 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_settings()
                         jo["unit"]    = _(def.sidetext).ToUTF8().data();
                         jo["mode"]    = mode_name(def.mode);
                         jo["readonly"] = def.readonly || opt.readonly;
-                        if (def.min != INT_MIN) jo["min"] = def.min;
-                        if (def.max != INT_MAX) jo["max"] = def.max;
+                        // ConfigOptionDef min/max are floats since Orca #11915 (unset = -/+FLT_MAX). Send whole
+                        // numbers as integers and the rest rounded, so 0.01f goes out as 0.01, not 0.0099999998.
+                        auto limit_json = [](float v) -> nlohmann::json {
+                            const double d = std::round(double(v) * 1e6) / 1e6;
+                            if (d == std::floor(d) && std::abs(d) < 1e15) return (long long) d;
+                            return d;
+                        };
+                        if (def.min > -FLT_MAX) jo["min"] = limit_json(def.min);
+                        if (def.max < FLT_MAX) jo["max"] = limit_json(def.max);
                         if (!def.enum_values.empty()) {
                             jo["enum"] = nlohmann::json::array();
                             for (size_t e = 0; e < def.enum_values.size(); ++e) {

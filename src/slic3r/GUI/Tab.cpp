@@ -2999,6 +2999,7 @@ void TabPrint::build()
         optgroup = page->new_optgroup(L("Raft"), L"param_raft");
         optgroup->append_single_option_line("raft_layers", "support_settings_raft");
         optgroup->append_single_option_line("raft_contact_distance", "support_settings_raft");
+        optgroup->append_single_option_line("raft_expansion", "support_settings_raft");
 
         optgroup = page->new_optgroup(L("Support filament"), L"param_support_filament");
         optgroup->append_single_option_line("support_filament", "support_settings_filament#base");
@@ -4550,6 +4551,8 @@ PageShp TabFilament::add_filament_overrides_page()
                         }
                     }
                 }
+                // Orca #11517: let the CheckBox widget's own handler run too, so its image follows the click.
+                evt.Skip();
             }, check_box->GetId());
 
             m_overrides_options[opt_key] = check_box;
@@ -5175,9 +5178,9 @@ void TabFilament::toggle_options()
             supertack_line->label_tooltip = _L("Bed temperature when this plate is installed. A value of 0 means the filament does not support printing on this plate.");
         }
         if (is_snapmaker_u1 && !support_multi_bed_types) {
-            // U1 default show 4 plates
-            toggle_line("supertack_plate_temp_initial_layer", true);
-            toggle_line("supertack_plate_temp", true);
+            // U1 default show 3 plates; Cool Steel Plate only appears with support_multi_bed_types
+            toggle_line("supertack_plate_temp_initial_layer", false);
+            toggle_line("supertack_plate_temp", false);
             toggle_line("cool_plate_temp_initial_layer", false);
             toggle_line("cool_plate_temp", false);
             toggle_line("textured_cool_plate_temp_initial_layer", false);
@@ -7106,6 +7109,21 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 
         // Trigger the on_presets_changed event to apply cached config for dependent tabs
         on_presets_changed();
+
+        // Snapmaker #769: refresh the sidebar nozzle UI after a printer preset switch. Entries that do not
+        // go through the sidebar (Machine Settings combo, preset deletion, UnsavedChangesDialog transfer,
+        // physical printer linkage) only reach Tab::select_preset. FFF only: SLA has no nozzle_diameter.
+        if (m_type == Preset::TYPE_PRINTER && m_presets->get_edited_preset().printer_technology() == ptFFF) {
+            // plater_ can dangle during recreate_GUI teardown, so check it and hold the sidebar weakly:
+            // a destroyed Sidebar (shutdown or GUI recreation) yields null.
+            if (Plater* plater = wxGetApp().plater()) {
+                wxWeakRef<Sidebar> weak_sidebar = &plater->sidebar();
+                wxTheApp->CallAfter([weak_sidebar]() {
+                    if (Sidebar* sidebar = weak_sidebar.get())
+                        sidebar->update_nozzle_settings();
+                });
+            }
+        }
     }
 
     // Ultra: one short notification per switch for everything that was carried over.
