@@ -3250,6 +3250,20 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 300 });
 
+    // Snapmaker #937 (with the #980 fix): first-layer travel acceleration. Upstream defaults to 100%
+    // (of the travel acceleration) and treats 0 as "firmware default"; EdgeSlicer defaults to 0 and
+    // treats 0 as "use the initial layer acceleration", which is what first-layer travels always used,
+    // so existing presets and projects slice exactly as before.
+    def = this->add("first_layer_travel_acceleration", coFloatOrPercent);
+    def->label = L("First layer travel");
+    def->tooltip = L("Acceleration of travel moves on the first layer. If expressed as a percentage (e.g. 50%), it is "
+                     "calculated over the travel acceleration. 0 means first layer travels use the initial layer acceleration.");
+    def->sidetext = L("mm/s² or %");
+    def->ratio_over = "travel_acceleration";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
+
     def = this->add("accel_to_decel_enable", coBools);
     def->label = L("Enable accel_to_decel");
     def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically.");
@@ -3329,6 +3343,17 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 12 });
+
+    // Snapmaker #937 / #980; 0 keeps the initial layer jerk (see first_layer_travel_acceleration).
+    def = this->add("first_layer_travel_jerk", coFloatOrPercent);
+    def->label = L("First layer travel");
+    def->tooltip = L("Jerk of travel moves on the first layer. If expressed as a percentage (e.g. 50%), it is "
+                     "calculated over the travel jerk. 0 means first layer travels use the initial layer jerk.");
+    def->sidetext = L("mm/s or %");
+    def->ratio_over = "travel_jerk";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
 
     def = this->add("initial_layer_line_width", coFloatOrPercent);
     def->label = L("Initial layer");
