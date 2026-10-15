@@ -598,23 +598,28 @@ TEST_CASE("U1 local-first end to end: a printer that refuses LAN is retried on t
     ctl(m, "/lan/up");
     ctl(m, "/pairing/mode?m=error");
     Timing t   = fast_timing();
-    t.retry_ms = { 3000, 8000 };
+    t.retry_ms = { 9000, 20000 };
     const int checks_before = stat_of(m, "pairing", "confirm_lan_status");
 
     Page first = open_page(m, "U1E2ENOLAN", "orca-e2e-refused", "cloud-e2e-r0", t);
     REQUIRE(wait_until([&] { return stat_of(m, "pairing", "confirm_lan_status") == checks_before + 1; }, 10000));
+    const auto refused_at = std::chrono::steady_clock::now();
     close_page(first);
     // The page reconnects (a new cloud session, a new route) several times within the back-off:
-    // none of them asks the printer again before the 3 s are up.
-    for (int i = 0; i < 4; ++i) {
+    // none of them asks the printer again before the 9 s are up.
+    for (int i = 0; i < 3; ++i) { // each open + close of a page takes about 2 s (disconnects)
         Page again = open_page(m, "U1E2ENOLAN", "orca-e2e-refused", "cloud-e2e-r" + std::to_string(i + 1), t);
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         close_page(again);
     }
+    const long long loop_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - refused_at).count();
+    INFO("reconnect loop took " << loop_ms << " ms");
+    REQUIRE(loop_ms < 9000);
     CHECK(stat_of(m, "pairing", "confirm_lan_status") == checks_before + 1);
     // After the back-off one more check, and still on the cloud.
     Page last = open_page(m, "U1E2ENOLAN", "orca-e2e-refused", "cloud-e2e-r9", t);
-    CHECK(wait_until([&] { return stat_of(m, "pairing", "confirm_lan_status") == checks_before + 2; }, 6000));
+    CHECK(wait_until([&] { return stat_of(m, "pairing", "confirm_lan_status") == checks_before + 2; }, 14000));
     CHECK_FALSE(last.route->on_lan());
     CHECK(last.approvals() == 0); // an "error" answer is not a reason to prompt
     REQUIRE(last.ask(161));
