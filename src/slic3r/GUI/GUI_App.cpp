@@ -1214,7 +1214,9 @@ void GUI_App::log_version_info()
     BOOST_LOG_TRIVIAL(warning) << "[Version] EdgeSlicer: " << EDGESLICER_FULL_VERSION
                                << ", Build: " << SLIC3R_VERSION;
 
-    std::string flutter_ver = common::get_flutter_version();
+    const std::string bundled_flutter_version_json =
+        (boost::filesystem::path(resources_dir()) / "web" / "flutter_web" / "version.json").string();
+    std::string flutter_ver = common::get_flutter_version(bundled_flutter_version_json);
     BOOST_LOG_TRIVIAL(warning) << "[Version] Orca Web: " << (flutter_ver.empty() ? "N/A" : flutter_ver);
 
     std::string profile_ver = common::get_profile_version();
@@ -1752,7 +1754,9 @@ GUI_App::GUI_App()
     m_page_http_server.start();
     profiler.mark("m_page_http_server.start");
     repoint_saved_device_covers();
-    BOOST_LOG_TRIVIAL(info) << "[Flutter] Version:" << common::get_flutter_version();
+    BOOST_LOG_TRIVIAL(info) << "[Flutter] Version:"
+                            << common::get_flutter_version(
+                                   (boost::filesystem::path(resources_dir()) / "web" / "flutter_web" / "version.json").string());
     BOOST_LOG_TRIVIAL(info) << "[Profile] Version:" << common::get_profile_version();
     flush_logs();
     m_fltviews.set_app(this);
