@@ -150,6 +150,9 @@ TEST_CASE("the web panel still speaks what the U1 local-first route relies on", 
     // The cloud endpoint's topic defaults (getOrcaWanEndpoint): if(x==null)x="/request" and so on.
     for (const char* topic : { "request", "response", "status", "notification" }) {
         INFO(topic);
-        CHECK(std::regex_search(js, std::regex(std::string(R"(==null\)[A-Za-z0-9_$]+="/)") + topic + "\"")));
+        // Built outside CHECK: MSVC cannot stringize a raw string literal inside a macro.
+        const std::regex fallback(std::string("==null\\)[A-Za-z0-9_$]+=\"/") + topic + "\"");
+        const bool       found = std::regex_search(js, fallback);
+        CHECK(found);
     }
 }

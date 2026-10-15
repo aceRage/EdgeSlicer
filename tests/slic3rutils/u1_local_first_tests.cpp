@@ -102,7 +102,8 @@ TEST_CASE("U1 local-first: the printer's LAN address from machine.system_info", 
     CHECK(std::find(ips.begin(), ips.end(), "10.0.0.7") != ips.end());
     // Just the result works too; anything else gives nothing.
     CHECK(lan_ipv4_from_system_info(answer["result"]).size() == 2);
-    CHECK(lan_ipv4_from_system_info(json::parse(R"({"result": {"system_info": {}}})")).empty());
+    const json empty_info = { { "result", { { "system_info", json::object() } } } };
+    CHECK(lan_ipv4_from_system_info(empty_info).empty());
     CHECK(lan_ipv4_from_system_info(json("text")).empty());
 
     CHECK(is_private_ipv4("172.16.0.1"));
@@ -149,12 +150,18 @@ TEST_CASE("U1 local-first: when the LAN session counts as gone", "[U1LocalFirst]
 
 TEST_CASE("U1 local-first: reading the printer's pairing answers", "[U1LocalFirst]")
 {
-    CHECK(parse_auth_answer(json::parse(R"({"state": "success", "ca": "a", "cert": "b", "key": "c"})")) == AuthAnswer::Success);
+    // (No raw string literals inside CHECK: MSVC cannot stringize them in a macro.)
+    const json success   = { { "state", "success" }, { "ca", "a" }, { "cert", "b" }, { "key", "c" } };
+    const json half      = { { "state", "success" }, { "ca", "a" } };
+    const json unauth    = { { "state", "unauthorized" } };
+    const json asking    = { { "state", "authorizing" } };
+    const json not_lan   = { { "state", "error" }, { "message", "not LAN" } };
+    CHECK(parse_auth_answer(success) == AuthAnswer::Success);
     // "success" without the certificate cannot be used.
-    CHECK(parse_auth_answer(json::parse(R"({"state": "success", "ca": "a"})")) == AuthAnswer::NotAvailable);
-    CHECK(parse_auth_answer(json::parse(R"({"state": "unauthorized"})")) == AuthAnswer::Unauthorized);
-    CHECK(parse_auth_answer(json::parse(R"({"state": "authorizing"})")) == AuthAnswer::Authorizing);
-    CHECK(parse_auth_answer(json::parse(R"({"state": "error", "message": "not LAN"})")) == AuthAnswer::NotAvailable);
+    CHECK(parse_auth_answer(half) == AuthAnswer::NotAvailable);
+    CHECK(parse_auth_answer(unauth) == AuthAnswer::Unauthorized);
+    CHECK(parse_auth_answer(asking) == AuthAnswer::Authorizing);
+    CHECK(parse_auth_answer(not_lan) == AuthAnswer::NotAvailable);
     CHECK(parse_auth_answer(json(nullptr)) == AuthAnswer::NoAnswer);
 }
 
