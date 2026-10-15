@@ -3196,3 +3196,23 @@ TEST_CASE("A malformed zipped AMF entry with a long name fails to load cleanly",
     REQUIRE_NOTHROW(loaded = load_amf(path.string().c_str(), &config, &ctxt, &model, &use_inches));
     CHECK_FALSE(loaded);
 }
+
+// ---- Bambu 04de87fc2: OBJ UV indices near the int limits ----------------------------------------
+//
+// Upstream rejects such a file because its get_uv() bound check, (uv_idx + 1) * 2, overflowed for an
+// index near 2^30. This tree already bounds the index against the pair count before multiplying and
+// rebases negative indices by pairs (4338b78266, Orca #15948 OBJ part); it keeps loading the face and
+// falls back to (0,0), as the cases above pin. These cover the overflow-sized indices themselves.
+TEST_CASE("A vt index at the int limits loads and the UV falls back to (0,0)", "[obj][untrusted]")
+{
+    for (const char *face : { "f 1/1073741824 3/1 2/1", "f 1/1073741825 3/1 2/1", "f 1/2147483647 3/1 2/1", "f 1/-2147483647 3/1 2/1",
+                              "f 1/-3 3/1 2/1" }) {
+        INFO(face);
+        const LoadedObj loaded = load_textured_tetrahedron(face);
+        REQUIRE(loaded.ok);
+        CHECK(loaded.mesh.facets_count() == 4);
+        REQUIRE(loaded.info.uvs.size() == 4);
+        check_uv(loaded.info.uvs.front()[0], 0.f, 0.f);
+        check_uv(loaded.info.uvs.front()[1], 0.25f, 0.5f);
+    }
+}
