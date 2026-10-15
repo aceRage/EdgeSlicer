@@ -590,3 +590,60 @@ TEST_CASE("Every renamed U1 filament takes over user presets made on each of its
         CHECK(printers_of(*preset) == printers_of(*filaments.find_preset(renames[i].second, false, true)));
     }
 }
+
+// Orca #7071 / #15173: "Detach from parent" in the Save preset dialog. A detached preset keeps every value
+// and has no parent, so the renamed-parent lookups and the filament preset migration leave it alone.
+TEST_CASE("A detached copy of a system filament keeps every value and has no parent", "[Preset][RenamedParent][Detach]")
+{
+    ScopedTemporaryDir  temp_dir;
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    fs::create_directories(temp_dir.path() / PRESET_FILAMENT_NAME);
+    load_user_filaments(filaments, temp_dir.path());
+    REQUIRE(filaments.select_preset_by_name(k1_parent, true));
+    filaments.get_edited_preset().config.option<ConfigOptionInts>("nozzle_temperature")->values = { 250 };
+
+    filaments.save_current_preset("My detached PETG", /*detach*/ true);
+
+    const Preset *preset = filaments.find_preset("My detached PETG", false, true);
+    REQUIRE(preset != nullptr);
+    CHECK_FALSE(preset->is_system);
+    CHECK(preset->inherits().empty());
+    CHECK(preset->renamed_from.empty());
+    CHECK(filaments.get_preset_parent(*preset) == nullptr);
+    CHECK(nozzle_temperature(*preset) == 250);
+    CHECK(flow_ratio(*preset) == Approx(0.95));
+
+    // The whole config is in the file, not a difference to a parent.
+    const nlohmann::json j = nlohmann::json::parse(read_file(temp_dir.path() / PRESET_FILAMENT_NAME / "My detached PETG.json"));
+    CHECK(j.value("inherits", std::string()).empty());
+    CHECK(j.at("nozzle_temperature") == nlohmann::json::array({ "250" }));
+    CHECK(j.contains("filament_flow_ratio"));
+
+    // The migration only looks at presets with a parent.
+    CHECK(filaments.legacy_user_filament_presets({ { k1_parent, { "Creality K1C 0.4 nozzle" } },
+                                                   { k1_old_parent, { "Creality K1C 0.4 nozzle" } } }).empty());
+}
+
+TEST_CASE("Detaching a user filament on a renamed parent drops the parent and keeps its values", "[Preset][RenamedParent][Detach]")
+{
+    ScopedTemporaryDir  temp_dir;
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    const fs::path file = write_user_filament(temp_dir.path(), "My PETG", k1_old_parent, R"(,"nozzle_temperature":["245"])");
+    load_user_filaments(filaments, temp_dir.path());
+    REQUIRE(filaments.select_preset_by_name("My PETG", true));
+
+    filaments.save_current_preset("My PETG", /*detach*/ true);
+
+    const Preset *preset = filaments.find_preset("My PETG", false, true);
+    REQUIRE(preset != nullptr);
+    CHECK(preset->inherits().empty());
+    CHECK(filaments.get_preset_parent(*preset) == nullptr);
+    CHECK(nozzle_temperature(*preset) == 245);
+    CHECK(flow_ratio(*preset) == Approx(0.95));
+    const nlohmann::json j = nlohmann::json::parse(read_file(file));
+    CHECK(j.value("inherits", std::string()).empty());
+    CHECK(j.contains("filament_flow_ratio"));
+    CHECK(filaments.legacy_user_filament_presets({ { k1_old_parent, { "Creality K1C 0.4 nozzle" } } }).empty());
+}
