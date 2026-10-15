@@ -47,6 +47,7 @@
 #include "Tab.hpp"
 #include "format.hpp"
 #include "slic3r/GUI/GUI.hpp"
+#include "SwitchTiming.hpp" // DIAGNOSTIC (diag/printer-switch-timing)
 #include <imgui/imgui_internal.h>
 #include <wx/dcgraph.h>
 using boost::optional;
@@ -745,6 +746,7 @@ void PartPlate::render_logo(bool bottom, bool render_cali)
 		//GLTexture* temp_texture = const_cast<GLTexture*>(&m_temp_texture);
 
 		if (m_partplate_list->m_logo_texture.get_id() == 0 || m_partplate_list->m_logo_texture.get_source() != m_partplate_list->m_logo_texture_filename) {
+			SWITCH_TIMING("PartPlate::render_logo: load third-party logo texture");
 			m_partplate_list->m_logo_texture.reset();
 
 			if (boost::algorithm::iends_with(m_partplate_list->m_logo_texture_filename, ".svg")) {
@@ -6421,6 +6423,7 @@ void PartPlateList::load_bedtype_textures()
 {
 	if (PartPlateList::is_load_bedtype_textures) return;
 
+	SWITCH_TIMING("PartPlateList::load_bedtype_textures (rasterise all bed-type SVGs)");
 	init_bed_type_info();
 	GLint max_tex_size = OpenGLManager::get_gl_info().get_max_tex_size();
 	GLint logo_tex_size = (max_tex_size < 2048) ? max_tex_size : 2048;
@@ -6454,6 +6457,7 @@ void PartPlateList::load_cali_textures()
 {
 	if (PartPlateList::is_load_cali_texture) return;
 
+	SWITCH_TIMING("PartPlateList::load_cali_textures");
 	init_cali_texture_info();
 	GLint max_tex_size = OpenGLManager::get_gl_info().get_max_tex_size();
 	GLint logo_tex_size = (max_tex_size < 2048) ? max_tex_size : 2048;

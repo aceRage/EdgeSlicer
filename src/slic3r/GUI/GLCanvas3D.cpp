@@ -68,6 +68,7 @@
 #include "libslic3r/SLAPrint.hpp"
 
 #include "wxExtensions.hpp"
+#include "SwitchTiming.hpp" // DIAGNOSTIC (diag/printer-switch-timing)
 
 #include <tbb/parallel_for.h>
 #include <tbb/spin_mutex.h>
@@ -3305,6 +3306,8 @@ void GLCanvas3D::render(bool only_init)
     m_in_render = true;
     Slic3r::ScopeGuard in_render_guard([this]() { m_in_render = false; });
     (void)in_render_guard;
+    switch_timing::FrameScope switch_timing_frame(m_canvas_type == ECanvasType::CanvasView3D ? "3D" :
+                                                  m_canvas_type == ECanvasType::CanvasPreview ? "preview" : "other");
 
     if (m_canvas == nullptr)
         return;
