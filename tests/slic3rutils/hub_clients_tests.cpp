@@ -19,7 +19,7 @@ TEST_CASE("scope names parse and print", "[RemoteHub][clients]")
     REQUIRE(parse_scopes("Print + CONTROL") == (SCOPE_PRINT | SCOPE_CONTROL));
     REQUIRE(parse_scopes("full") == SCOPE_FULL);
     REQUIRE(parse_scopes("admin,root") == SCOPE_NONE);
-    REQUIRE(parse_scopes(nlohmann::json::array({ "camera", "nonsense", 7 })) == SCOPE_CAMERA);
+    REQUIRE(parse_scope_list(nlohmann::json::array({ "camera", "nonsense", 7 })) == SCOPE_CAMERA);
     REQUIRE(scope_names(SCOPE_STATUS | SCOPE_PRINT) == std::vector<std::string>{ "status", "print" });
     REQUIRE(scope_names(SCOPE_FULL).size() == 4);
 }
