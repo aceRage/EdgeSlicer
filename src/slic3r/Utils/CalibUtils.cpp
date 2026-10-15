@@ -16,6 +16,9 @@
 #include "slic3r/GUI/Jobs/PlaterWorker.hpp"
 #include "../GUI/MsgDialog.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/path.hpp>
+
 
 namespace Slic3r {
 namespace GUI {
@@ -357,8 +360,15 @@ static void read_model_from_file(const std::string& input_file, Model& model)
         &is_bbl_3mf, &file_version, nullptr, nullptr, nullptr, plate_to_slice);
 
     model.add_default_instances();
-    for (auto object : model.objects)
-        object->ensure_on_bed();
+
+    // Orca #13252: centre mesh models (STL, STEP, ...) on their origin; project files keep their placement.
+    const std::string extension       = boost::filesystem::path(input_file).extension().string();
+    const bool        is_project_file = boost::iequals(extension, ".3mf") || boost::iequals(extension, ".amf");
+    for (auto object : model.objects) {
+        if (!is_project_file)
+            object->center_around_origin(false);
+        object->ensure_on_bed(is_project_file);
+    }
 }
 
 std::array<Vec3d, 4> get_cut_plane_points(const BoundingBoxf3 &bbox, const double &cut_height)
