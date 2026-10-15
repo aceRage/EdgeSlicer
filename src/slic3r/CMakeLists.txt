@@ -504,6 +504,11 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrinterCloudAuthDialog.hpp
     GUI/Printer/PrinterFileSystem.cpp
     GUI/Printer/PrinterFileSystem.h
+    GUI/Printer/IFileGridModel.h
+    GUI/Printer/RemoteFileGridModel.cpp
+    GUI/Printer/RemoteFileGridModel.h
+    GUI/PrinterStoragePanel.cpp
+    GUI/PrinterStoragePanel.hpp
     GUI/PrinterWebView.cpp
     GUI/PrinterWebView.hpp
     GUI/StreamPanel.cpp
@@ -1025,6 +1030,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintHostDeviceStatus.hpp
     Utils/MoonrakerProgress.cpp
     Utils/MoonrakerProgress.hpp
+    Utils/PrinterStorage.cpp
+    Utils/PrinterStorage.hpp
     Utils/PrusaLinkStatus.cpp
     Utils/PrusaLinkStatus.hpp
     Utils/Process.cpp

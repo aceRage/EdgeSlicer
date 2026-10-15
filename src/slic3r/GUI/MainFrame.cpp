@@ -2621,6 +2621,8 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
         m_project->msw_rescale();
     if(m_monitor)
         m_monitor->msw_rescale();
+    if (m_printer_view)
+        m_printer_view->msw_rescale();
     if(m_multi_machine)
         m_multi_machine->msw_rescale();
     if(m_calibration)
@@ -2694,6 +2696,8 @@ void MainFrame::on_sys_color_changed()
     wxGetApp().plater()->sys_color_changed();
     if(m_monitor)
         m_monitor->on_sys_color_changed();
+    if (m_printer_view)
+        m_printer_view->sys_color_changed(); // its Storage tab
     if(m_calibration)
         m_calibration->on_sys_color_changed();
     // update Tabs

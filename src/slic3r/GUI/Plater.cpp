@@ -4030,8 +4030,14 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             }
 
             p_mainframe->load_printer_url(url, apikey);
-            if (p_mainframe->m_printer_view)
+            if (p_mainframe->m_printer_view) {
                 p_mainframe->m_printer_view->set_devices(ph_model_key, ph_devices, ph_pick);
+                // The Storage tab shows the files of the printer the page is on (Orca #16156 part A).
+                if (ph_picked && !ph_picked->address.empty())
+                    p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id);
+                else
+                    p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host");
+            }
             is_sm_page = false;
 
             // Honors remember_print_action when the current printer still offers that action.
@@ -4044,8 +4050,15 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
 
             // The device picker belongs to the print-host row only: coming back from an Elegoo to a
             // U1 must not leave the Elegoo's devices listed above the Snapmaker page.
-            if (p_mainframe->m_printer_view)
+            if (p_mainframe->m_printer_view) {
                 p_mainframe->m_printer_view->set_devices(std::string(), {}, std::string());
+                // A U1's Storage tab lists the Snapmaker printers this PC knows on the LAN (Moonraker
+                // over HTTP, as SnapmakerLan reaches them); a page that is not a print host's has none.
+                if (is_snapmaker_u1)
+                    p_mainframe->m_printer_view->set_storage_source(PrinterStoragePanel::snapmaker_source());
+                else if (!takes_printhost_row)
+                    p_mainframe->m_printer_view->set_storage_source(PrinterStoragePanel::Source());
+            }
 
             if (is_snapmaker_u1) {
 
