@@ -3419,8 +3419,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         auto probe_dist_x  = std::max(1., m_config.bed_mesh_probe_distance.value.x());
         auto probe_dist_y  = std::max(1., m_config.bed_mesh_probe_distance.value.y());
-        int  probe_count_x = std::max(3, (int) std::ceil(mesh_bbox.size().x() / probe_dist_x));
-        int  probe_count_y = std::max(3, (int) std::ceil(mesh_bbox.size().y() / probe_dist_y));
+        // Orca #11491: points, not intervals: n intervals of at most probe_dist need n + 1 points.
+        int  probe_count_x = std::max(3, (int) std::ceil(mesh_bbox.size().x() / probe_dist_x) + 1);
+        int  probe_count_y = std::max(3, (int) std::ceil(mesh_bbox.size().y() / probe_dist_y) + 1);
         auto bed_mesh_algo = "bicubic";
         if (probe_count_x * probe_count_y <= 6) { // lagrange needs up to a total of 6 mesh points
             bed_mesh_algo = "lagrange";
@@ -6567,7 +6568,9 @@ LayerResult GCode::process_layer(const Print& print,
             }
         }
     } else {
-        if (!m_config.time_lapse_gcode.value.empty()) {
+        // Orca #15734: an i3 printing by layer takes its photo later in the layer (the traditional
+        // timelapse insertion below), so writing it here too took two photos per layer.
+        if (!need_insert_timelapse_gcode_for_traditional && !m_config.time_lapse_gcode.value.empty()) {
             DynamicConfig config;
             config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
             config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
@@ -10229,9 +10232,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 speed = std::min(speed, filament_max_volumetric_speed / _mm3_per_mm);
             }
 
-            // if still in avoidance mode and under “max”, clamp to “min”
-            if (m_resonance_avoidance && speed <= m_config.max_resonance_avoidance_speed.value) {
-                speed = std::min(speed, m_config.min_resonance_avoidance_speed.value);
+            // Orca #11462: if still in avoidance mode and under "max", leave the band the nearer way:
+            // speeds in its lower half are clamped down to "min", speeds in its upper half go up to "max".
+            // EDGE: only when the filament's max volumetric speed allows "max"; else down to "min" as before.
+            if (m_resonance_avoidance && speed < m_config.max_resonance_avoidance_speed.value) {
+                const double ra_min = m_config.min_resonance_avoidance_speed.value;
+                const double ra_max = m_config.max_resonance_avoidance_speed.value;
+                const bool   max_within_volumetric_cap = filament_max_volumetric_speed <= 0 ||
+                                                       ra_max <= filament_max_volumetric_speed / _mm3_per_mm;
+                if (speed < ra_min + (ra_max - ra_min) / 2 || !max_within_volumetric_cap)
+                    speed = std::min(speed, ra_min);
+                else
+                    speed = ra_max;
             }
 
             // reset flag for next segment
@@ -11048,10 +11060,20 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     } else {
         // Orca: a travel shorter than the retraction threshold that leads into an external perimeter keeps the outer wall
         // acceleration / jerk, so the nozzle does not decelerate to travel limits just before the visible wall starts.
-        const bool short_travel_to_outer_wall = role == erExternalPerimeter &&
-                                                travel.length() < scale_(EXTRUDER_CONFIG(retraction_minimum_travel));
+        // Orca #11975: the same for a short travel into an overhang wall, at the bridge acceleration that
+        // wall is printed with (and the outer wall jerk).
+        const bool is_short_travel                = travel.length() < scale_(EXTRUDER_CONFIG(retraction_minimum_travel));
+        const bool short_travel_to_outer_wall     = role == erExternalPerimeter && is_short_travel;
+        const bool short_travel_to_overhang_wall  = role == erOverhangPerimeter && is_short_travel;
         if (this->process_flow_value(m_config.default_acceleration) > 0) {
-            if (short_travel_to_outer_wall) {
+            if (short_travel_to_overhang_wall) {
+                const auto   bridge_fop = this->process_flow_value(m_config.bridge_acceleration);
+                const double bridge_acc = bridge_fop.percent ?
+                                              bridge_fop.value * 0.01 * this->process_flow_value(m_config.outer_wall_acceleration) :
+                                              bridge_fop.value;
+                if (bridge_acc > 0)
+                    acceleration_to_set = (unsigned int) floor(bridge_acc + 0.5);
+            } else if (short_travel_to_outer_wall) {
                 if (this->process_flow_value(m_config.outer_wall_acceleration) > 0)
                     acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.outer_wall_acceleration) + 0.5);
             } else {
@@ -11060,7 +11082,7 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             }
         }
         if (this->process_flow_value(m_config.default_jerk) > 0) {
-            if (short_travel_to_outer_wall) {
+            if (short_travel_to_outer_wall || short_travel_to_overhang_wall) {
                 if (this->process_flow_value(m_config.outer_wall_jerk) > 0)
                     jerk_to_set = this->process_flow_value(m_config.outer_wall_jerk);
             } else {
