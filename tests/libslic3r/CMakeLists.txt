@@ -14,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
 	test_model_browser_rules.cpp
 	test_arrange_support_clearance.cpp
 	test_appconfig_trailing_newline.cpp
+	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
 	test_arachne_walls.cpp

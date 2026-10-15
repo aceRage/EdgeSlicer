@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
     hub_quit_tests.cpp
     web_load_retry_tests.cpp
     device_page_load_tests.cpp
+    flutter_web_bundle_tests.cpp
     home_tab_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp
@@ -60,8 +61,12 @@ add_executable(${_TEST_NAME}_tests
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
     gizmo_volume_refs_tests.cpp
+    camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
+    preset_mirror_skip_tests.cpp
+    plate_recentre_tests.cpp
+    bed_texture_pool_tests.cpp
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
@@ -107,6 +112,7 @@ add_executable(${_TEST_NAME}_tests
     libvgcode_input_tests.cpp
     layer_height_check_tests.cpp
     bind_detect_guard_tests.cpp
+    ams_filament_order_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
