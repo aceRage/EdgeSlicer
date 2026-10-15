@@ -19,6 +19,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <algorithm>
+#include <limits>
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -122,6 +123,13 @@ void AppConfig::set_defaults()
         if (get("background_processing").empty())
             set_bool("background_processing", false);
 #endif
+
+        // Orca #11407: auto slice after changes (Preferences > General), off by default.
+        if (get("auto_slice_after_change").empty())
+            set_bool("auto_slice_after_change", false);
+
+        if (get("auto_slice_change_delay_seconds").empty())
+            set("auto_slice_change_delay_seconds", "1");
 
         if (get("drop_project_action").empty())
             set_bool("drop_project_action", true);
@@ -961,6 +969,22 @@ std::string AppConfig::load()
     this->set_defaults();
     m_dirty = false;
     return "";
+}
+
+int AppConfig::auto_slice_delay_seconds(const std::string &value)
+{
+    if (value.empty())
+        return 0;
+    long long seconds = 0;
+    try {
+        seconds = std::stoll(value);
+    } catch (...) {
+        seconds = 0;
+    }
+    if (seconds < 0)
+        seconds = 0;
+    const long long max_seconds = std::numeric_limits<int>::max() / 1000;
+    return int(std::min(seconds, max_seconds));
 }
 
 AppConfig::VendorMap AppConfig::merge_vendor_maps(const VendorMap &base, const VendorMap &mine, const VendorMap &disk)

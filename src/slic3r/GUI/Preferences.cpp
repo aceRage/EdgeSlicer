@@ -11,6 +11,7 @@
 #include "Theme.hpp"
 #include "PresetMirror.hpp"
 #include "I18N.hpp"
+#include "GUI.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include <wx/language.h>
 #include <wx/notebook.h>
@@ -687,6 +688,70 @@ wxBoxSizer *PreferencesDialog::create_item_backup_input(wxString title, wxWindow
 }
 
 // BBS: same layout as the backup interval row, but drives the project auto-save timer
+wxBoxSizer *PreferencesDialog::create_item_auto_reslice(wxString title, wxWindow *parent, wxString checkbox_tooltip, wxString delay_tooltip)
+{
+    wxBoxSizer *sizer_row = new wxBoxSizer(wxHORIZONTAL);
+    sizer_row->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+
+    auto checkbox = new ::CheckBox(parent);
+    checkbox->SetValue(app_config->get_bool("auto_slice_after_change"));
+    checkbox->SetToolTip(checkbox_tooltip);
+    sizer_row->Add(checkbox, 0, wxALIGN_CENTER, 0);
+    sizer_row->Add(0, 0, 0, wxEXPAND | wxLEFT, 8);
+
+    auto checkbox_title = new wxStaticText(parent, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, 0);
+    checkbox_title->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    checkbox_title->SetFont(::Label::Body_13);
+    checkbox_title->SetToolTip(checkbox_tooltip);
+    checkbox_title->Wrap(-1);
+    sizer_row->Add(checkbox_title, 0, wxALIGN_CENTER | wxALL, 3);
+
+    wxString delay_value = app_config->get("auto_slice_change_delay_seconds");
+    if (delay_value.empty())
+        delay_value = "0";
+
+    auto input = new ::TextInput(parent, wxEmptyString, _L("s"), wxEmptyString, wxDefaultPosition, DESIGN_INPUT_SIZE, wxTE_PROCESS_ENTER);
+    StateColor input_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled), std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
+    input->SetBackgroundColor(input_bg);
+    input->GetTextCtrl()->SetValue(delay_value);
+    wxTextValidator validator(wxFILTER_DIGITS);
+    input->GetTextCtrl()->SetValidator(validator);
+    input->SetToolTip(delay_tooltip);
+    sizer_row->Add(0, 0, 0, wxEXPAND | wxLEFT, 5);
+    sizer_row->Add(input, 0, wxALIGN_CENTER_VERTICAL, 0);
+
+    auto commit_delay = [this, input]() {
+        const int seconds   = AppConfig::auto_slice_delay_seconds(into_u8(input->GetTextCtrl()->GetValue()));
+        const wxString sanitized = wxString::Format("%d", seconds);
+        if (input->GetTextCtrl()->GetValue() != sanitized)
+            input->GetTextCtrl()->SetValue(sanitized);
+        app_config->set("auto_slice_change_delay_seconds", into_u8(sanitized));
+        app_config->save();
+    };
+    input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit_delay](wxCommandEvent &e) {
+        commit_delay();
+        e.Skip();
+    });
+    input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit_delay](wxFocusEvent &e) {
+        commit_delay();
+        e.Skip();
+    });
+
+    checkbox->Bind(wxEVT_TOGGLEBUTTON, [this, checkbox, input](wxCommandEvent &e) {
+        const bool enabled = checkbox->GetValue();
+        app_config->set_bool("auto_slice_after_change", enabled);
+        app_config->save();
+        input->Enable(enabled);
+        input->Refresh();
+        e.Skip();
+    });
+
+    input->Enable(checkbox->GetValue());
+    input->Refresh();
+
+    return sizer_row;
+}
+
 wxBoxSizer *PreferencesDialog::create_item_autosave_input(wxString title, wxWindow *parent, wxString tooltip, std::string param)
 {
     wxBoxSizer *m_sizer_input = new wxBoxSizer(wxHORIZONTAL);
@@ -1926,6 +1991,9 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_step_mesh_setting = create_item_checkbox(_L("Show the step mesh parameter setting dialog."), page, _L("If enabled,a parameter settings dialog will appear during STEP file import."), 50, "enable_step_mesh_setting");
     auto item_multi_machine = create_item_checkbox(_L("Multi-device Management (Take effect after restarting EdgeSlicer)."), page, _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), 50, "enable_multi_machine");
     auto item_auto_arrange  = create_item_checkbox(_L("Auto arrange plate after cloning"), page, _L("Auto arrange plate after object cloning"), 50, "auto_arrange");
+    auto item_auto_reslice  = create_item_auto_reslice(_L("Auto slice after changes"), page,
+        _L("If enabled, EdgeSlicer slices again by itself whenever a slicing-related setting changes."),
+        _L("Delay in seconds before auto slicing starts, allowing multiple edits to be grouped. Use 0 to slice immediately."));
     auto item_warn_low_memory = create_item_checkbox(_L("Warn when memory is low during slicing"), page,
         _L("When the PC is nearly out of free memory during slicing, pause and ask whether to continue. "
            "Turn this off to keep slicing without asking (a notice and a log line are still shown). "
@@ -2111,6 +2179,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_auto_reslice, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_warn_low_memory, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
