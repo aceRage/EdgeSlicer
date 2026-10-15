@@ -1996,3 +1996,91 @@ SCENARIO("thumbnail relationships are declared only for thumbnails that were wri
         }
     }
 }
+
+// ---- Orca #16341: painter gizmos reset out-of-range paint states at load --------------------------
+//
+// A 3MF can carry any paint state in paint_seam / paint_fuzzy_skin / paint_supports. The seam,
+// fuzzy skin and support gizmos colour each facet by indexing a table that only has entries up to
+// the states they paint (seam BLOCKER, fuzzy skin FUZZY_SKIN, supports the Edge STABILIZER point
+// state), so they now deserialize with that bound. These tests pin what the gizmos rely on: the
+// loader keeps the crafted state as data, and deserialize() at each gizmo's bound drops it to NONE.
+
+// The paint string a facet painted `state` is written as.
+static std::string paint_string_for(EnforcerBlockerType state)
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10., 10., 10.));
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, state);
+    REQUIRE(volume->seam_facets.set(selector));
+    const std::string out = volume->seam_facets.get_triangle_as_string(0);
+    REQUIRE_FALSE(out.empty());
+    return out;
+}
+
+TEST_CASE("Out-of-range seam, fuzzy skin and support paint states are dropped at each gizmo's bound", "[3mf][Regression][PaintBounds]")
+{
+    const std::string path    = make_temp_3mf_path("paint_state_out_of_range.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    // store_painted_cube() paints one ENFORCER facet in each of the three streams.
+    const std::string enforcer = paint_string_for(EnforcerBlockerType::ENFORCER);
+    const std::string state3   = paint_string_for(static_cast<EnforcerBlockerType>(3));
+    const std::string state4   = paint_string_for(static_cast<EnforcerBlockerType>(4));
+    const std::string blocker  = paint_string_for(EnforcerBlockerType::BLOCKER);
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_seam=\"" + enforcer + "\"", "paint_seam=\"" + state3 + "\""));
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_fuzzy_skin=\"" + enforcer + "\"", "paint_fuzzy_skin=\"" + blocker + "\""));
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_supports=\"" + enforcer + "\"", "paint_supports=\"" + state4 + "\""));
+
+    Model model;
+    REQUIRE(load_project(path, model));
+    REQUIRE(model.objects.size() == 1);
+    const ModelVolume &volume = *model.objects.front()->volumes.front();
+
+    // The loader keeps the states as data; it is the gizmo that must not trust them.
+    REQUIRE(volume.seam_facets.get_data().used_states[3]);
+    REQUIRE(volume.fuzzy_skin_facets.get_data().used_states[size_t(EnforcerBlockerType::BLOCKER)]);
+    REQUIRE(volume.supported_facets.get_data().used_states[4]);
+
+    SECTION("seam (colour table NONE/ENFORCER/BLOCKER)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.seam_facets.get_data(), true, EnforcerBlockerType::BLOCKER));
+        CHECK(selector.num_facets(static_cast<EnforcerBlockerType>(3)) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::ENFORCER) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 0);
+    }
+    SECTION("fuzzy skin (single state FUZZY_SKIN)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.fuzzy_skin_facets.get_data(), true, EnforcerBlockerType::FUZZY_SKIN));
+        CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::FUZZY_SKIN) == 0);
+    }
+    SECTION("supports (Edge: up to the STABILIZER point state)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.supported_facets.get_data(), true, EnforcerBlockerType::STABILIZER));
+        CHECK(selector.num_facets(static_cast<EnforcerBlockerType>(4)) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::STABILIZER) == 0);
+    }
+}
+
+// Edge adaptation: the support gizmo's bound is STABILIZER, not upstream's BLOCKER, so painted
+// stabilizer points still load into the gizmo.
+TEST_CASE("Support paint keeps STABILIZER points at the support gizmo's bound", "[3mf][Regression][PaintBounds]")
+{
+    const TriangleMesh mesh = make_cube(10., 10., 10.);
+    TriangleSelector   painted(mesh);
+    painted.set_facet(0, EnforcerBlockerType::ENFORCER);
+    painted.set_facet(1, EnforcerBlockerType::BLOCKER);
+    painted.set_facet(2, EnforcerBlockerType::STABILIZER);
+
+    TriangleSelector restored(mesh);
+    REQUIRE_NOTHROW(restored.deserialize(painted.serialize(), true, EnforcerBlockerType::STABILIZER));
+    CHECK(restored.num_facets(EnforcerBlockerType::ENFORCER) == 1);
+    CHECK(restored.num_facets(EnforcerBlockerType::BLOCKER) == 1);
+    CHECK(restored.num_facets(EnforcerBlockerType::STABILIZER) == 1);
+}
