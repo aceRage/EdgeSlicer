@@ -1419,6 +1419,44 @@ TEST_CASE("Adaptive layer height profile is bounded by the uncompensated object 
     CHECK(last_z > uncompensated_height - sp.max_layer_height - 1e-6);
 }
 
+TEST_CASE("A variable layer height profile survives a different first layer height", "[Print][Slicing][VLH][Snap757]")
+{
+    // Snapmaker #757: a profile whose first segment differs from the first layer height used to be thrown away
+    // and replaced by a fixed one. The first layer comes from the config either way (generate_object_layers).
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, {{"layer_height", 0.2}, {"initial_layer_print_height", 0.3}});
+    const SlicingParameters sp = print.objects().front()->slicing_parameters();
+    REQUIRE(sp.valid);
+    REQUIRE(sp.first_object_layer_height_fixed());
+    REQUIRE(sp.first_object_layer_height == Approx(0.3));
+    const coordf_t top = sp.object_print_z_uncompensated_max - sp.object_print_z_min;
+
+    ModelObject &object = *model.objects.front();
+
+    SECTION("a valid profile made for a 0.2 mm first layer is kept") {
+        const std::vector<coordf_t> vlh = {0., 0.2, 0.2, 0.12, top, 0.12};
+        object.layer_height_profile.set(vlh);
+        std::vector<coordf_t> profile;
+        PrintObject::update_layer_height_profile(object, sp, profile);
+        CHECK(profile == vlh);
+
+        const std::vector<coordf_t> z = generate_object_layers(sp, profile, false);
+        REQUIRE(z.size() >= 6);
+        CHECK(z[1] == Approx(0.3));         // the configured first layer
+        CHECK(z[3] - z[2] == Approx(0.12)); // then the profile, not a fixed 0.2 mm
+    }
+    SECTION("a profile that does not reach the object top is still regenerated") {
+        const std::vector<coordf_t> short_profile = {0., 0.2, 0.2, 0.12, top - 1., 0.12};
+        object.layer_height_profile.set(short_profile);
+        std::vector<coordf_t> profile;
+        PrintObject::update_layer_height_profile(object, sp, profile);
+        REQUIRE(profile.size() >= 2);
+        CHECK(profile != short_profile);
+        CHECK(profile[1] == Approx(0.3));
+    }
+}
+
 // Orca #15734: a non-Bambu i3 printing by layer wrote time_lapse_gcode at the layer start and again
 // at the traditional timelapse spot later in the layer, two photos per layer. Every printer kind
 // gets it once per layer; the Bambu cases go through our BambuStudio timelapse port.

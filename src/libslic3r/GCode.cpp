@@ -1323,6 +1323,9 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id, tcr.print_z); // TODO: toolchange_z vs print_z
         if (gcodegen.config().enable_prime_tower) {
             deretraction_str += gcodegen.writer().travel_to_z(z, "Force restore layer Z", true);
+            // Snapmaker #993 (Edge): the tower G-code after this may travel without an F word (U1: "G1 Y..."
+            // after the start position); keep the feedrate it inherited before the Z speed cap.
+            deretraction_str += gcodegen.writer().restore_uncapped_z_feedrate();
             Vec3d position{gcodegen.writer().get_position()};
             position.z() = z;
             gcodegen.writer().set_position(position);
@@ -9235,8 +9238,12 @@ std::string GCode::change_layer(coordf_t print_z)
 
     m_need_change_layer_lift_z = true;
 
-    m_nominal_z                 = z;
-    m_writer.get_position().z() = z;
+    m_nominal_z = z;
+    // Snapmaker #993 (Edge adaptation): the writer takes the new layer's Z as before, but remembers the Z the
+    // head is still at, so the deferred layer-change travel is capped by machine_max_speed_z from there.
+    // Upstream instead keeps the writer at the old Z; our wipe tower, Local-Z, timelapse and ZAA code read the
+    // writer's Z right after the layer change and expect the new one, so the geometry stays as it was.
+    m_writer.defer_z_move(z);
 
     // forget last wiping path as wiping after raising Z is pointless
     // BBS. Dont forget wiping path to reduce stringing.
