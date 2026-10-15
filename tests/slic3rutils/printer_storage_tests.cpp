@@ -666,7 +666,7 @@ TEST_CASE("Storage grid: delete and print", "[PrinterStorage][FileGrid]")
     CHECK(model.CanPrint());
 
     Result got;
-    model.DeleteFile("cube.gcode", [&got](const Result& r) { got = r; });
+    model.DeletePrinterFile("cube.gcode", [&got](const Result& r) { got = r; });
     CHECK(got.ok());
     CHECK(model.GetCount() == 2);
     CHECK(model.FindCard("cube.gcode") == nullptr);
@@ -674,7 +674,7 @@ TEST_CASE("Storage grid: delete and print", "[PrinterStorage][FileGrid]")
 
     INFO("a file somebody else deleted meanwhile just goes away");
     printer->files.erase("benchy.gcode");
-    model.DeleteFile("benchy.gcode", [&got](const Result& r) { got = r; });
+    model.DeletePrinterFile("benchy.gcode", [&got](const Result& r) { got = r; });
     CHECK(got.status == Status::NotFound);
     CHECK(model.GetCount() == 1);
 
@@ -696,7 +696,7 @@ TEST_CASE("Storage grid: delete and print", "[PrinterStorage][FileGrid]")
 
     INFO("the last file deleted: Empty");
     printer->state = "standby";
-    model.DeleteFile("parts/bracket.gcode", [&got](const Result& r) { got = r; });
+    model.DeletePrinterFile("parts/bracket.gcode", [&got](const Result& r) { got = r; });
     CHECK(model.GetCount() == 0);
     CHECK(model.GetStatus() == FileGridStatus::Empty);
     model.StartPrint("parts/bracket.gcode", [&got](const Result& r) { got = r; });
@@ -711,11 +711,11 @@ TEST_CASE("Storage grid: failures and printers without a file API", "[PrinterSto
         CHECK(model.GetStatus() == FileGridStatus::NotSupported);
         model.Refresh();
         CHECK(model.GetStatus() == FileGridStatus::NotSupported);
-        CHECK(model.GetMessage().find("SDCP") != std::string::npos);
+        CHECK(model.GetStatusMessage().find("SDCP") != std::string::npos);
         CHECK_FALSE(model.CanDelete());
         CHECK_FALSE(model.CanPrint());
         Result got;
-        model.DeleteFile("a.gcode", [&got](const Result& r) { got = r; });
+        model.DeletePrinterFile("a.gcode", [&got](const Result& r) { got = r; });
         CHECK(got.status == Status::NotSupported);
         model.StartPrint("a.gcode", [&got](const Result& r) { got = r; });
         CHECK(got.status == Status::NotSupported);
@@ -730,7 +730,7 @@ TEST_CASE("Storage grid: failures and printers without a file API", "[PrinterSto
         model.Refresh();
         CHECK(model.GetStatus() == FileGridStatus::Failed);
         CHECK(model.GetCount() == 0);
-        CHECK(model.GetMessage().find("did not answer") != std::string::npos);
+        CHECK(model.GetStatusMessage().find("did not answer") != std::string::npos);
         printer->offline = false;
         model.Refresh();
         CHECK(model.GetStatus() == FileGridStatus::Ready);
@@ -799,7 +799,7 @@ TEST_CASE("Storage grid: a slow printer", "[PrinterStorage][FileGrid]")
 
     INFO("answers arriving after the view (and its model) went away are dropped");
     model->Refresh();
-    model->DeleteFile("part_00.gcode", nullptr);
+    model->DeletePrinterFile("part_00.gcode", nullptr);
     REQUIRE(exec->jobs.size() == 2);
     model.reset();
     exec->drain(); // must not touch the dead model

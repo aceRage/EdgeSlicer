@@ -251,7 +251,7 @@ void RemoteFileGridModel::pump()
     m_pumping = false;
 }
 
-void RemoteFileGridModel::DeleteFile(const std::string& id, std::function<void(const pstore::Result&)> done)
+void RemoteFileGridModel::DeletePrinterFile(const std::string& id, std::function<void(const pstore::Result&)> done)
 {
     if (!m_files || !m_cards.count(id)) {
         if (done)

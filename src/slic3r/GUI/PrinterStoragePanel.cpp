@@ -495,10 +495,10 @@ void PrinterStoragePanel::update_status()
     case FileGridStatus::Ready: text = wxString(); break;
     case FileGridStatus::Empty: text = _L("There are no G-code files on the printer."); break;
     case FileGridStatus::Failed:
-        text = _L("The printer's files could not be listed.") + "\n" + from_u8(m_model->GetMessage());
+        text = _L("The printer's files could not be listed.") + "\n" + from_u8(m_model->GetStatusMessage());
         break;
     case FileGridStatus::NotSupported:
-        text = _L("Storage is not available for this printer.") + "\n" + from_u8(m_model->GetMessage());
+        text = _L("Storage is not available for this printer.") + "\n" + from_u8(m_model->GetStatusMessage());
         break;
     }
     m_message->SetLabel(text);
@@ -659,7 +659,7 @@ void PrinterStoragePanel::on_delete()
     set_busy(true);
     show_note(wxString::Format(_L("Deleting %s..."), from_u8(id)));
     std::shared_ptr<RemoteFileGridModel> model = m_model;
-    model->DeleteFile(id, [this, id](const pstore::Result& r) {
+    model->DeletePrinterFile(id, [this, id](const pstore::Result& r) {
         set_busy(false);
         if (r.ok()) {
             show_note(wxString::Format(_L("Deleted %s."), from_u8(id)));

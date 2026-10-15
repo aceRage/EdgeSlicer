@@ -27,7 +27,7 @@ public:
     ~RemoteFileGridModel() override;
 
     FileGridStatus     GetStatus() const override { return m_status; }
-    const std::string& GetMessage() const override { return m_message; }
+    const std::string& GetStatusMessage() const override { return m_message; }
 
     size_t              GetCount() const override { return m_order.size(); }
     const FileGridCard* GetCard(size_t index) const override;
@@ -42,7 +42,7 @@ public:
 
     bool CanDelete() const override { return m_files != nullptr; }
     bool CanPrint() const override { return m_files != nullptr; }
-    void DeleteFile(const std::string& id, std::function<void(const PrinterStorage::Result&)> done) override;
+    void DeletePrinterFile(const std::string& id, std::function<void(const PrinterStorage::Result&)> done) override;
     void QueryPrinter(std::function<void(const PrinterStorage::Result&, const std::string&, const std::string&)> done) override;
     void StartPrint(const std::string& id, std::function<void(const PrinterStorage::Result&)> done) override;
 

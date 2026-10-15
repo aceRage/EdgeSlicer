@@ -32,8 +32,8 @@ enum class FileGridStatus {
     Loading,      // the list is on its way
     Ready,        // files listed
     Empty,        // the printer has none
-    Failed,       // the list failed; GetMessage() says why (Retry/Refresh asks again)
-    NotSupported, // this printer has no file API this model speaks; GetMessage() says why
+    Failed,       // the list failed; GetStatusMessage() says why (Retry/Refresh asks again)
+    NotSupported, // this printer has no file API this model speaks; GetStatusMessage() says why
 };
 
 enum class FileGridSort { Newest, Oldest, Name, Size };
@@ -66,7 +66,7 @@ struct FileGridCard
 };
 
 // What changed, for the view's handler. `Files`: the list or its order (rebuild every row);
-// `Card`: one card's details or picture (id names it); `Status`: GetStatus() / GetMessage().
+// `Card`: one card's details or picture (id names it); `Status`: GetStatus() / GetStatusMessage().
 enum class FileGridChange { Files, Card, Status };
 
 // Runs the blocking work off the GUI thread and comes back with the result. The model only ever
@@ -79,13 +79,15 @@ public:
     virtual void run(std::function<void()> work, std::function<void()> then) = 0;
 };
 
+// No member is named after a Win32 API (DeleteFile, GetMessage, ...): windows.h turns those into
+// macros in some translation units and not in others, and the two then disagree on the class.
 class IFileGridModel
 {
 public:
     virtual ~IFileGridModel() = default;
 
     virtual FileGridStatus     GetStatus() const  = 0;
-    virtual const std::string& GetMessage() const = 0;
+    virtual const std::string& GetStatusMessage() const = 0;
 
     // Cards in display order.
     virtual size_t              GetCount() const               = 0;
@@ -105,7 +107,7 @@ public:
     virtual bool CanDelete() const = 0;
     virtual bool CanPrint() const  = 0;
     // Delete one file. The card goes away when the printer confirms; `done` gets the result.
-    virtual void DeleteFile(const std::string& id, std::function<void(const PrinterStorage::Result&)> done) = 0;
+    virtual void DeletePrinterFile(const std::string& id, std::function<void(const PrinterStorage::Result&)> done) = 0;
     // What the printer is doing ("standby", "printing", ...), for the confirmation before a print.
     virtual void QueryPrinter(std::function<void(const PrinterStorage::Result&, const std::string& state,
                                                  const std::string& current_file)> done) = 0;
