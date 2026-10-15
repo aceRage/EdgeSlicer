@@ -380,7 +380,7 @@ TEST_CASE("Presets a G-code names but the receiver lacks load as temporary proje
 
     bundle.load_config_model(source, sender_gcode_config(1));
 
-    for (const PresetCollection *presets : {&bundle.prints, &bundle.filaments, static_cast<const PresetCollection *>(&bundle.printers)}) {
+    for (const PresetCollection *presets : std::initializer_list<const PresetCollection *>{&bundle.prints, &bundle.filaments, &bundle.printers}) {
         INFO(presets->get_selected_preset_name());
         CHECK(presets->get_selected_preset().is_project_embedded);
     }
@@ -497,7 +497,7 @@ std::string write_gcode_with_block(const DynamicPrintConfig &block, const char *
 // of UntrustedSettingsGuard applied with none of the user's own presets to vouch for a script.
 void strip_untrusted(const std::string &, DynamicPrintConfig &config)
 {
-    const untrusted::TrustedValues none;
+    const untrusted::TrustedValues none{};
     untrusted::neutralize_settings(config, untrusted::find_untrusted_settings(config, "project settings", none), nullptr);
 }
 
