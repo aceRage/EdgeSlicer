@@ -2084,3 +2084,96 @@ TEST_CASE("Support paint keeps STABILIZER points at the support gizmo's bound", 
     CHECK(restored.num_facets(EnforcerBlockerType::BLOCKER) == 1);
     CHECK(restored.num_facets(EnforcerBlockerType::STABILIZER) == 1);
 }
+
+// ---- Orca #16307: the no-light thumbnail has its own status flag ---------------------------------
+//
+// The no-light pass used to mark thumbnail_status, so a plate whose own thumbnail was not rendered
+// (only on disk) lost Metadata/plate_N.png, and a rendered no-light thumbnail was written a second
+// time from no_light_thumbnail_file.
+
+static int count_zip_entries_named(const std::string &zip_path, const std::string &entry_name)
+{
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    if (!open_zip_reader(&archive, zip_path))
+        return -1;
+    int           count = 0;
+    const mz_uint n     = mz_zip_reader_get_num_files(&archive);
+    for (mz_uint i = 0; i < n; ++i) {
+        mz_zip_archive_file_stat st;
+        if (mz_zip_reader_file_stat(&archive, i, &st) && entry_name == st.m_filename)
+            ++count;
+    }
+    close_zip_reader(&archive);
+    return count;
+}
+
+static void write_binary_file(const std::string &path, const std::string &body)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << body;
+}
+
+SCENARIO("A rendered no-light thumbnail does not suppress the plate thumbnail", "[3mf][thumbnail]")
+{
+    GIVEN("a plate whose no-light thumbnail is rendered and whose plate thumbnail is only on disk") {
+        prepare_3mf_temp_dir();
+        Model model;
+        build_multi_object_model(model);
+        // Same store config as the thumbnail-relationship scenario above.
+        DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+        for (const std::string &key : cfg.keys())
+            if (const ConfigOption *opt = cfg.option(key); opt != nullptr && opt->type() == coEnums) {
+                cfg.erase(key);
+                cfg.option(key, true);
+            }
+
+        // Only the bytes matter: the exporter copies these files into the archive verbatim.
+        const std::string plate_png         = make_temp_3mf_path("no_light_plate_1.png");
+        const std::string no_light_png      = make_temp_3mf_path("no_light_disk_1.png");
+        const ScopeGuard  cleanup_plate     = remove_file_guard(plate_png);
+        const ScopeGuard  cleanup_no_light  = remove_file_guard(no_light_png);
+        const std::string plate_png_body    = std::string("\x89PNG\r\n\x1a\n", 8) + "plate-1-thumbnail-from-disk";
+        const std::string no_light_png_body = std::string("\x89PNG\r\n\x1a\n", 8) + "no-light-thumbnail-from-disk";
+        write_binary_file(plate_png, plate_png_body);
+        write_binary_file(no_light_png, no_light_png_body);
+        REQUIRE(boost::filesystem::exists(plate_png));
+        REQUIRE(boost::filesystem::exists(no_light_png));
+
+        PlateData plate;
+        plate.plate_index             = 0;
+        plate.thumbnail_file          = plate_png;
+        plate.no_light_thumbnail_file = no_light_png;
+
+        ThumbnailData plate_thumbnail; // nothing was rendered for the plate itself
+        ThumbnailData no_light_thumbnail;
+        no_light_thumbnail.set(16, 16);
+        no_light_thumbnail.pixels.assign(16 * 16 * 4, static_cast<unsigned char>(0xff));
+        REQUIRE_FALSE(plate_thumbnail.is_valid());
+        REQUIRE(no_light_thumbnail.is_valid());
+
+        WHEN("the project is written") {
+            const std::string test_file = make_temp_3mf_path("no_light_thumbnail_status.3mf");
+            const ScopeGuard  cleanup   = remove_file_guard(test_file);
+            StoreParams       sp;
+            sp.path                    = test_file.c_str();
+            sp.model                   = &model;
+            sp.config                  = &cfg;
+            sp.plate_data_list         = { &plate };
+            sp.thumbnail_data          = { &plate_thumbnail };
+            sp.no_light_thumbnail_data = { &no_light_thumbnail };
+            sp.strategy                = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+            REQUIRE(store_bbs_3mf(sp));
+
+            THEN("the plate thumbnail is still copied in from disk") {
+                CHECK(extract_zip_entry(test_file, "Metadata/plate_1.png") == plate_png_body);
+            }
+            THEN("the rendered no-light thumbnail is written once, not again from disk") {
+                CHECK(count_zip_entries_named(test_file, "Metadata/plate_no_light_1.png") == 1);
+                const std::string got = extract_zip_entry(test_file, "Metadata/plate_no_light_1.png");
+                CHECK_FALSE(got.empty());
+                CHECK(got != no_light_png_body);
+            }
+        }
+    }
+}
