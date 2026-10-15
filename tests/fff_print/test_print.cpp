@@ -390,6 +390,15 @@ TEST_CASE("Print: {first_object_name} is not replaced by the saved-project file 
     CHECK(resolved_output_name(model, "{input_filename_base}_{first_object_name}", "SavedProject") == "SavedProject_WidgetPart.gcode");
 }
 
+TEST_CASE("Print: regex_replace() reshapes {first_object_name} in the file name", "[Print]")
+{
+    // OrcaSlicer #14650: the documented use, dropping an extension carried in the object name.
+    Model model;
+    add_named_cube(model, "Bracket v2.stl");
+    CHECK(resolved_output_name(model, "{regex_replace(first_object_name, /\\.[^.]*$/, \"\")}") == "Bracket v2.gcode");
+    CHECK(resolved_output_name(model, "{regex_replace(first_object_name, /\\s+/, \"_\")}.gcode") == "Bracket_v2.stl.gcode");
+}
+
 TEST_CASE("Inner-outer-inner wall order starts with the second internal wall on a cube", "[PrintObject][IOI]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
