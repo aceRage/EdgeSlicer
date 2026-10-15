@@ -604,3 +604,24 @@ TEST_CASE("The spiral lift uses the printable area of the extruder the filament 
         CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
     }
 }
+
+// Orca #13516: with manual filament change on, a Bambu Lab printer must get the MANUAL_TOOL_CHANGE
+// tag like any other printer. Upstream's regression came from Bambu's "M1020 S<n>" tool change in
+// GCodeWriter::toolchange, which bypassed toolchange_prefix(); our writer never took that change,
+// so the prefix (and the CoolingBuffer / custom G-code checks that read it) already honours the
+// option. This keeps it that way.
+TEST_CASE("Manual filament change emits MANUAL_TOOL_CHANGE on Bambu Lab printers too", "[GCodeWriter][GCode]")
+{
+    const bool bbl = GENERATE(false, true);
+    CAPTURE(bbl);
+
+    GCodeWriter writer;
+    writer.set_is_bbl_machine(bbl);
+    writer.config.manual_filament_change.value = true;
+    writer.set_extruders({0, 1});
+
+    CHECK(writer.toolchange_prefix() == "; MANUAL_TOOL_CHANGE T");
+    const std::string gcode = writer.toolchange(1);
+    CHECK(gcode.find("; MANUAL_TOOL_CHANGE T1") != std::string::npos);
+    CHECK(gcode.find("M1020") == std::string::npos);
+}
