@@ -520,6 +520,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/ModelBrowserPanel.hpp
     GUI/HomeVendors.cpp
     GUI/HomeVendors.hpp
+    GUI/HomeVaults.cpp
+    GUI/HomeVaults.hpp
+    GUI/HomeDownload.cpp
+    GUI/HomeDownload.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
     GUI/RemoteAccess.cpp
@@ -980,6 +984,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/StepMesh.hpp
     Utils/VendorConnector.cpp
     Utils/VendorConnector.hpp
+    Utils/VaultProvider.cpp
+    Utils/VaultProvider.hpp
     Utils/MainThreadGate.cpp
     Utils/MainThreadGate.hpp
     Utils/ServerLifetime.cpp
