@@ -62,6 +62,7 @@ add_executable(${_TEST_NAME}_tests
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
+    plate_recentre_tests.cpp
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
