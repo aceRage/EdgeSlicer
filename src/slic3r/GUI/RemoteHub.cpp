@@ -979,6 +979,7 @@ struct Request
     // token, on the /h/... routes, instead of putting it in the path (HubClients.hpp).
     std::string bearer;
     std::string client_name; // set by serve() once the token is known: the client's name ("" for the phone link)
+    unsigned    client_scopes { HubClients::SCOPE_FULL }; // set by serve() once the token is known (/pair reports it)
     size_t      content_length { 0 };
 };
 
@@ -5953,7 +5954,10 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
     if (r.method == "GET" && (rest == "/pair" || rest == "/pair/")) {
         // r.ts_login / r.fwd_proto are only ever set here by a loopback peer (Tailscale Serve);
         // the caller clears them for anybody else.
-        respond_json(client, 200, pair_json(!r.ts_login.empty() && r.fwd_proto == "https").dump());
+        // What this link may do (HubClients): an app can hide what it would only be refused.
+        json pj      = pair_json(!r.ts_login.empty() && r.fwd_proto == "https");
+        pj["scopes"] = HubClients::scope_names(r.client_scopes);
+        respond_json(client, 200, pj.dump());
         return;
     }
     // GET /printers/<id>/thumbnail.png - the running job's picture for one printer, out of the
@@ -6544,6 +6548,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
         }
         touch_client(a);
         r.client_name = a.legacy ? std::string() : a.name;
+        r.client_scopes = a.scopes;
         // A client token never sees the phone link's token in anything the hub builds for it.
         struct SwapGuard
         {
