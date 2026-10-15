@@ -3216,3 +3216,86 @@ TEST_CASE("A vt index at the int limits loads and the UV falls back to (0,0)", "
         check_uv(loaded.info.uvs.front()[1], 0.25f, 0.5f);
     }
 }
+
+// ---- Bambu 0067891f2: 3MF auxiliary entries spelled with fullwidth dots and slashes ---------------
+//
+// Upstream narrows the name with encode_path() (WideCharToMultiByte with best-fit), where U+FF0E and
+// U+FF0F become '.' and '/', so "Auxiliaries/．．／evil" became "../evil" only at fopen() time.
+// This tree refuses such look-alikes in normalize_archive_entry_path() before extraction and writes
+// through the wide API (extract_entry_to_file), so the BBS reader never narrows the name. This pins
+// it end to end through the reader.
+TEST_CASE("3MF auxiliary entries spelled with fullwidth dots and slashes are not extracted", "[Untrusted][ZipSlip][3mf]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "fullwidth_aux.3mf";
+    {
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->name        = "cube";
+        object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+        object->add_instance();
+        object->ensure_on_bed();
+        DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+        PlateData          plate;
+        plate.plate_index = 0;
+        const std::string path_str = path.string();
+        StoreParams       sp;
+        sp.path            = path_str.c_str();
+        sp.model           = &model;
+        sp.config          = &cfg;
+        sp.plate_data_list = { &plate };
+        sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+        REQUIRE(store_bbs_3mf(sp));
+    }
+
+    // Re-pack the project with three auxiliary entries.
+    std::vector<std::pair<std::string, std::string>> entries;
+    {
+        mz_zip_archive zip;
+        mz_zip_zero_struct(&zip);
+        REQUIRE(open_zip_reader(&zip, path.string()));
+        const mz_uint n = mz_zip_reader_get_num_files(&zip);
+        for (mz_uint i = 0; i < n; ++i) {
+            mz_zip_archive_file_stat st;
+            REQUIRE(mz_zip_reader_file_stat(&zip, i, &st));
+            std::string data;
+            if (st.m_uncomp_size > 0) {
+                size_t size = 0;
+                void  *mem  = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
+                REQUIRE(mem != nullptr);
+                data.assign(static_cast<const char *>(mem), size);
+                mz_free(mem);
+            }
+            entries.emplace_back(st.m_filename, std::move(data));
+        }
+        close_zip_reader(&zip);
+    }
+    const std::string fullwidth_up = "\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\x8F"; // U+FF0E U+FF0E U+FF0F, best-fit "../"
+    entries.emplace_back("Auxiliaries/Other Files/edge_fw_ok.txt", "ok");
+    entries.emplace_back("Auxiliaries/" + fullwidth_up + fullwidth_up + "edge_fw_escape_a.txt", "escape");
+    entries.emplace_back("Auxiliaries/Other Files/" + fullwidth_up + fullwidth_up + fullwidth_up + "edge_fw_escape_b.txt", "escape");
+    write_zip_entries(path, entries);
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs             plates;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    bool                      loaded     = false;
+    REQUIRE_NOTHROW(loaded = load_bbs_3mf(path.string().c_str(), &config, &ctxt, &model, &plates, &project_presets, &is_bbl_3mf,
+                                         &file_version, nullptr,
+                                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary |
+                                             LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    release_PlateData_list(plates);
+    for (Preset *p : project_presets)
+        delete p;
+    REQUIRE(loaded);
+
+    // The ordinary attachment is extracted; neither look-alike entry is written anywhere.
+    const fs::path aux(model.get_auxiliary_file_temp_path());
+    CHECK(fs::exists(aux / "Other Files" / "edge_fw_ok.txt"));
+    for (fs::recursive_directory_iterator it(scratch.root), end; it != end; ++it)
+        CHECK(it->path().filename().wstring().find(L"edge_fw_escape") == std::wstring::npos); // wide: no narrowing
+}
