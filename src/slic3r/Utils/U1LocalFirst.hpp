@@ -80,6 +80,7 @@ struct Timing
     long long approval_poll_ms { 3000 };       // confirm_lan_status while the printer asks
     long long approval_wait_ms { 90000 };      // how long the printer's prompt is waited for
     int       max_unanswered_asks { 2 };       // then the printer is not asked again
+    long long device_wait_ms { 5000 };         // wait this long for the access code (set_engine)
 };
 
 // How long to wait before the next LAN attempt after `failures` failed ones (0 = at once).
@@ -98,6 +99,9 @@ bool should_fall_back(const Timing& t, const LanHealth& h);
 // confirm_lan_status / request_lan_auth answers (result.state).
 enum class AuthAnswer { Success, Unauthorized, Authorizing, NotAvailable, NoAnswer };
 AuthAnswer parse_auth_answer(const nlohmann::json& result);
+// For the log: the answer's state and message and whether it carried the certificate - never the
+// certificate, key or client id themselves.
+std::string describe_auth_answer(const nlohmann::json& result);
 
 struct AskState
 {

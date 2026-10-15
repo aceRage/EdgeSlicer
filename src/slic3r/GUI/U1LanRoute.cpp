@@ -81,11 +81,18 @@ struct U1LanRoute::State
     std::shared_ptr<MqttClient> lan;
     std::string                 lan_ip;
 
+    // Pacing. Kept per printer for the whole process (see Pace below) as well: the page builds a
+    // new cloud session - and so a new route - every time it reconnects or switches printers, and
+    // a fresh route must not start the back-off (or the approval prompt) over.
     int       failures { 0 };
     long long next_try { 0 };
     bool      asked_this_session { false };
     bool      no_slot { false };
     std::string last_reason;
+    // The pairing access code arrives with sw_mqtt_set_engine, a moment after the page subscribed
+    // (which is where the serial number is first seen); wait for it before the first try.
+    bool      device_set { false };
+    long long sn_seen_at { -1 };
     long long down_since { -1 };
     int       probe_fails { 0 };
     long long next_probe { 0 };
@@ -108,6 +115,56 @@ struct U1LanRoute::State
 
 using StatePtr = std::shared_ptr<U1LanRoute::State>;
 
+// ---- per-printer pacing for the whole process ----
+struct Pace
+{
+    int         failures { 0 };
+    long long   next_try { 0 };
+    bool        asked { false };
+    std::string last_reason;
+};
+static std::mutex& pace_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+static std::map<std::string, Pace>& paces()
+{
+    static std::map<std::string, Pace> p;
+    return p;
+}
+// Lock order: State::mtx, then pace_mutex(). Both called with s->mtx held.
+static void load_pace(U1LanRoute::State& s)
+{
+    if (s.sn.empty())
+        return;
+    std::lock_guard<std::mutex> lk(pace_mutex());
+    auto it = paces().find(s.sn);
+    if (it == paces().end())
+        return;
+    s.failures           = it->second.failures;
+    s.next_try           = it->second.next_try;
+    s.asked_this_session = s.asked_this_session || it->second.asked;
+    s.last_reason        = it->second.last_reason;
+}
+static void save_pace(const U1LanRoute::State& s)
+{
+    if (s.sn.empty())
+        return;
+    std::lock_guard<std::mutex> lk(pace_mutex());
+    Pace& p       = paces()[s.sn];
+    p.failures    = s.failures;
+    p.next_try    = s.next_try;
+    p.asked       = s.asked_this_session;
+    p.last_reason = s.last_reason;
+}
+
+void U1LanRoute::reset_pacing()
+{
+    std::lock_guard<std::mutex> lk(pace_mutex());
+    paces().clear();
+}
+
 static void note_failure(const StatePtr& s, const std::string& why)
 {
     std::lock_guard<std::mutex> lk(s->mtx);
@@ -117,6 +174,7 @@ static void note_failure(const StatePtr& s, const std::string& why)
     if (why != s->last_reason) // one line per new reason, not one per retry
         BOOST_LOG_TRIVIAL(info) << "[U1LanRoute] " << s->sn << " stays on the cloud: " << why << " (next LAN try in " << wait / 1000 << " s)";
     s->last_reason = why;
+    save_pace(*s);
 }
 
 // The LAN session's messages reach the page as the cloud client's own.
@@ -195,6 +253,7 @@ static bool switch_to_lan(const StatePtr& s, const std::shared_ptr<MqttClient>& 
             s->next_probe  = s->now() + s->deps.timing.lan_probe_interval_ms;
             s->failures    = 0;
             s->last_reason.clear();
+            save_pace(*s);
             for (const auto& t : done)
                 s->acked.insert(t);
             switched = true;
@@ -249,6 +308,7 @@ static void fall_back(const StatePtr& s, const std::string& why)
         s->failures    = 1;
         s->next_try    = s->now() + U1LocalFirst::retry_after_ms(s->deps.timing, 1);
         s->last_reason = why;
+        save_pace(*s);
     }
     BOOST_LOG_TRIVIAL(warning) << "[U1LanRoute] " << s->sn << " falling back to the cloud: " << why;
     close_client(lan);
@@ -305,6 +365,7 @@ static void attempt(const StatePtr& s, const std::string& sn)
             BOOST_LOG_TRIVIAL(warning) << "[U1LanRoute] no free LAN client slot on this PC; staying on the cloud";
         s->no_slot  = true;
         s->next_try = s->now() + 3600 * 1000LL;
+        save_pace(*s);
         return;
     }
     json                       params = { { "clientid", client_id } };
@@ -320,7 +381,7 @@ static void attempt(const StatePtr& s, const std::string& sn)
         if (check == U1LocalFirst::AuthAnswer::NoAnswer)
             return note_failure(s, "the printer's pairing port did not answer");
         if (check == U1LocalFirst::AuthAnswer::NotAvailable)
-            return note_failure(s, "the printer does not offer a LAN connection");
+            return note_failure(s, "the printer does not offer a LAN connection (" + U1LocalFirst::describe_auth_answer(answer) + ")");
         if (ask.authorized && d.set_authorized)
             d.set_authorized(sn, false); // the printer forgot this PC
         return note_failure(s, "this PC is not approved on the printer");
@@ -329,6 +390,7 @@ static void attempt(const StatePtr& s, const std::string& sn)
         {
             std::lock_guard<std::mutex> lk(s->mtx);
             s->asked_this_session = true;
+            save_pace(*s);
         }
         static std::atomic<unsigned> seq { 0 };
         const json req = { { "clientid", client_id },
@@ -358,7 +420,7 @@ static void attempt(const StatePtr& s, const std::string& sn)
                 return note_failure(s, "the printer's approval prompt was not answered");
             }
         } else {
-            return note_failure(s, "the printer did not take the approval request");
+            return note_failure(s, "the printer did not take the approval request (" + U1LocalFirst::describe_auth_answer(r) + ")");
         }
     }
     if (d.set_authorized)
@@ -456,13 +518,16 @@ static void run(StatePtr s)
             std::string sn;
             Via         via;
             long long   next_try;
+            bool        waiting_for_code;
             {
                 std::lock_guard<std::mutex> lk(s->mtx);
-                sn       = s->sn;
-                via      = s->table.via();
-                next_try = s->next_try;
+                sn               = s->sn;
+                via              = s->table.via();
+                next_try         = s->next_try;
+                waiting_for_code = !s->device_set && s->sn_seen_at >= 0 &&
+                                   s->now() - s->sn_seen_at < s->deps.timing.device_wait_ms;
             }
-            if (sn.empty())
+            if (sn.empty() || waiting_for_code)
                 continue;
             if (via == Via::Lan)
                 check_lan_health(s);
@@ -530,8 +595,10 @@ static void learn_serial(const StatePtr& s, const std::string& topic)
     {
         std::lock_guard<std::mutex> lk(s->mtx);
         if (s->sn.empty()) {
-            s->sn    = sn;
+            s->sn         = sn;
+            s->sn_seen_at = s->now();
             s->kicked = learned = true;
+            load_pace(*s);
         }
     }
     if (learned)
@@ -663,11 +730,14 @@ void U1LanRoute::set_device(const std::string& sn, const std::string& access_cod
     {
         std::lock_guard<std::mutex> lk(m->mtx);
         if (!sn.empty() && m->sn.empty()) {
-            m->sn     = sn;
-            m->kicked = true;
+            m->sn         = sn;
+            m->sn_seen_at = m->now();
+            load_pace(*m);
         }
         if (!access_code.empty())
             m->code = access_code;
+        m->device_set = true;
+        m->kicked     = true;
     }
     m->cv.notify_all();
 }

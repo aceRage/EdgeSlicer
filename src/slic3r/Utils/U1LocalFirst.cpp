@@ -153,6 +153,25 @@ AuthAnswer parse_auth_answer(const json& result)
     return AuthAnswer::NotAvailable; // "error", "modeNotAvailable", ...
 }
 
+std::string describe_auth_answer(const json& result)
+{
+    if (result.is_null())
+        return "no answer";
+    if (!result.is_object())
+        return "unreadable answer";
+    auto text = [&result](const char* k) {
+        if (!result.contains(k))
+            return std::string("-");
+        std::string v = result[k].is_string() ? result[k].get<std::string>() : result[k].dump();
+        if (v.size() > 120)
+            v = v.substr(0, 120) + "...";
+        return v;
+    };
+    auto has = [&result](const char* k) { return result.contains(k) && result[k].is_string() && !result[k].get<std::string>().empty(); };
+    return "state=" + text("state") + ", message=" + text("message") +
+           ", certificate=" + (has("ca") && has("cert") && has("key") ? "yes" : "no");
+}
+
 AuthStep next_auth_step(const Timing& t, AuthAnswer check, const AskState& s)
 {
     switch (check) {

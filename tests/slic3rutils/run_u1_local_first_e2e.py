@@ -16,6 +16,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+MOCK_CODE = "87654321"
 
 
 def free_port():
@@ -36,13 +37,16 @@ def main():
     ports = [free_port() for _ in range(4)]
     mock = subprocess.Popen([sys.executable, "-u", os.path.join(HERE, "mock_u1_mqtt.py"),
                              "--cloud", str(ports[0]), "--lan", str(ports[1]),
-                             "--pairing", str(ports[2]), "--control", str(ports[3])],
+                             "--pairing", str(ports[2]), "--control", str(ports[3]),
+                             # Not the U1's default access code: the route must use the one the page
+                             # hands set_engine, never a default (owner hand test 2026-10-15).
+                             "--code", MOCK_CODE],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         line = mock.stdout.readline().strip()
         if not line.startswith("READY"):
             raise SystemExit("the mock did not start: %r" % line)
-        env = dict(os.environ, U1MOCK_PORTS=":".join(str(p) for p in ports))
+        env = dict(os.environ, U1MOCK_PORTS=":".join(str(p) for p in ports), U1MOCK_CODE=MOCK_CODE)
         print("mock: " + env["U1MOCK_PORTS"], flush=True)
         started = time.time()
         rc = subprocess.call([exe, "[U1LocalFirstE2E]", "--durations", "yes"] + rest, env=env)

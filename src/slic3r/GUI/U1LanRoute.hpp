@@ -88,6 +88,8 @@ public:
     void        kick();
     // Stop the worker and wait until it has closed its LAN session (tests).
     bool        stop_and_wait(int timeout_ms);
+    // Forget every printer's back-off and "asked this session" (tests).
+    static void reset_pacing();
 
     struct State;
 

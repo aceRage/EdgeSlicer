@@ -20,7 +20,11 @@ Control (HTTP, GET):
   /authorize?cid=X   authorise X at once        /approve?cid=X   approve a waiting X
   /lan/down          stop the LAN broker (listener and sessions)   /lan/up   start it again
   /lan/state         {"up": bool}               /stats   counters, sessions, pending ids
+  /pairing/mode?m=error|normal   error: confirm_lan_status answers {state: error, message: "not LAN mode"}
   /quit              stop everything
+
+Pairing requests on any other "<code>/config/request" than --code get no answer (as on a printer)
+and are counted in stats.wrong_code_requests.
 
 usage: mock_u1_mqtt.py --cloud P1 --lan P2 --pairing P3 --control P4 [--sn SN1] [--code 12345678]
        prints "READY <cloud> <lan> <pairing> <control>" once every port listens.
@@ -36,7 +40,8 @@ from urllib.parse import parse_qs, urlparse
 ARGS = None
 LOOP = None
 STATS = {"kicks": 0, "refused": 0, "requests": {"cloud": 0, "lan": 0},
-         "pairing": {"confirm_lan_status": 0, "request_lan_auth": 0}}
+         "pairing": {"confirm_lan_status": 0, "request_lan_auth": 0}, "wrong_code_requests": 0}
+PAIRING_MODE = {"mode": "normal"}
 AUTHORIZED = set()
 PENDING = set()
 
@@ -237,6 +242,9 @@ def rpc_answer(broker, via):
 
 def pairing_answer(broker):
     def on_message(topic, payload):
+        if topic.endswith("/config/request") and topic != ARGS.code + "/config/request":
+            STATS["wrong_code_requests"] += 1  # a real printer does not answer these
+            return
         if topic != ARGS.code + "/config/request":
             return
         try:
@@ -248,7 +256,9 @@ def pairing_answer(broker):
         cid = params.get("clientid", "")
         if method.endswith("confirm_lan_status"):
             STATS["pairing"]["confirm_lan_status"] += 1
-            if cid in AUTHORIZED:
+            if PAIRING_MODE["mode"] == "error":
+                result = {"state": "error", "message": "not LAN mode", "clientid": cid}
+            elif cid in AUTHORIZED:
                 result = {"state": "success", "clientid": cid, "ca": "CA", "cert": "CERT", "key": "KEY",
                           "port": ARGS.lan, "sn": ARGS.sn}
             else:
@@ -313,6 +323,9 @@ class Control(BaseHTTPRequestHandler):
             if BROKERS["lan"].server is None:
                 on_loop(BROKERS["lan"].start())
             return self.reply({"up": True})
+        if u.path == "/pairing/mode":
+            PAIRING_MODE["mode"] = q.get("m", "normal")
+            return self.reply(PAIRING_MODE)
         if u.path == "/lan/state":
             return self.reply({"up": BROKERS["lan"].server is not None})
         if u.path == "/stats":

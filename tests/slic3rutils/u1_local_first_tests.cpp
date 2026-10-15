@@ -165,6 +165,18 @@ TEST_CASE("U1 local-first: reading the printer's pairing answers", "[U1LocalFirs
     CHECK(parse_auth_answer(json(nullptr)) == AuthAnswer::NoAnswer);
 }
 
+TEST_CASE("U1 local-first: the log line for a pairing answer never carries the certificate", "[U1LocalFirst]")
+{
+    const json refused = { { "state", "error" }, { "message", "not LAN mode" } };
+    CHECK(describe_auth_answer(refused) == "state=error, message=not LAN mode, certificate=no");
+    const json granted = { { "state", "success" }, { "ca", "CA-PEM" }, { "cert", "CERT-PEM" }, { "key", "KEY-PEM" }, { "clientid", "orca-x" } };
+    const std::string line = describe_auth_answer(granted);
+    CHECK(line == "state=success, message=-, certificate=yes");
+    CHECK(line.find("PEM") == std::string::npos);
+    CHECK(line.find("orca-x") == std::string::npos);
+    CHECK(describe_auth_answer(json(nullptr)) == "no answer");
+}
+
 TEST_CASE("U1 local-first: the printer is asked once per session, and not after two unanswered asks", "[U1LocalFirst]")
 {
     const Timing t;
@@ -322,8 +334,12 @@ namespace {
 
 struct Mock
 {
-    int cloud { 0 }, lan { 0 }, pairing { 0 }, control { 0 };
-    bool ok() const { return cloud && lan && pairing && control; }
+    int         cloud { 0 }, lan { 0 }, pairing { 0 }, control { 0 };
+    // The mock printer's pairing access code. run_u1_local_first_e2e.py sets one that is NOT the
+    // U1 default, so a route that pairs before the page handed it the code gets no answer
+    // (owner hand test 2026-10-15: the first tries went out on the default code).
+    std::string code { "12345678" };
+    bool        ok() const { return cloud && lan && pairing && control; }
 };
 
 Mock mock_ports()
@@ -332,6 +348,9 @@ Mock mock_ports()
     const char* v = std::getenv("U1MOCK_PORTS");
     if (v)
         std::sscanf(v, "%d:%d:%d:%d", &m.cloud, &m.lan, &m.pairing, &m.control);
+    const char* c = std::getenv("U1MOCK_CODE");
+    if (c && *c)
+        m.code = c;
     return m;
 }
 
@@ -344,6 +363,15 @@ json ctl(const Mock& m, const std::string& path)
         .on_error([&out](std::string body, std::string, unsigned) { out = json::parse(body, nullptr, false); })
         .perform_sync();
     return out;
+}
+
+int stat_of(const Mock& m, const char* a, const char* b = nullptr)
+{
+    const json s = ctl(m, "/stats");
+    if (!s.is_object() || !s.contains(a))
+        return -1;
+    const json& v = b ? s[a][b] : s[a];
+    return v.is_number_integer() ? v.get<int>() : -1;
 }
 
 template<class Pred> bool wait_until(Pred pred, int timeout_ms)
@@ -360,9 +388,10 @@ template<class Pred> bool wait_until(Pred pred, int timeout_ms)
 // The page's side: one cloud session, what it receives, and the route on it.
 struct Page
 {
-    std::shared_ptr<MqttClient>      cloud;
-    std::shared_ptr<GUI::U1LanRoute> route;
-    std::shared_ptr<std::mutex>      mtx = std::make_shared<std::mutex>();
+    std::string                        sn;
+    std::shared_ptr<MqttClient>        cloud;
+    std::shared_ptr<GUI::U1LanRoute>   route;
+    std::shared_ptr<std::mutex>        mtx = std::make_shared<std::mutex>();
     std::shared_ptr<std::vector<json>> got = std::make_shared<std::vector<json>>();
     struct Store
     {
@@ -402,7 +431,7 @@ struct Page
     bool ask(long long id)
     {
         std::string msg;
-        return cloud->Publish("SN1/request", json({ { "jsonrpc", "2.0" }, { "method", "x" }, { "id", id } }).dump(), 1, msg);
+        return cloud->Publish(sn + "/request", json({ { "jsonrpc", "2.0" }, { "method", "x" }, { "id", id } }).dump(), 1, msg);
     }
     std::string via(long long id, int timeout_ms = 5000)
     {
@@ -412,14 +441,18 @@ struct Page
     }
 };
 
-Page open_page(const Mock& m, const std::string& client_id, const std::string& cloud_id, Timing timing)
+// `engine_delay_ms`: how long after its subscriptions the "page" calls set_engine (which hands the
+// route the serial number and the pairing access code); -1 = never.
+Page open_page(const Mock& m, const std::string& sn, const std::string& client_id, const std::string& cloud_id, Timing timing,
+               int engine_delay_ms = 0)
 {
     Page p;
+    p.sn    = sn;
     p.cloud = MqttClient::create("mqtt://127.0.0.1:" + std::to_string(m.cloud), cloud_id);
     auto got = p.got;
     auto mtx = p.mtx;
-    p.cloud->SetMessageCallback([got, mtx](const std::string& topic, const std::string& payload, void*) {
-        if (topic != "SN1/response")
+    p.cloud->SetMessageCallback([got, mtx, sn](const std::string& topic, const std::string& payload, void*) {
+        if (topic != sn + "/response")
             return;
         std::lock_guard<std::mutex> lk(*mtx);
         got->push_back(json::parse(payload, nullptr, false));
@@ -430,7 +463,7 @@ Page open_page(const Mock& m, const std::string& client_id, const std::string& c
     GUI::U1LanDeps d;
     d.timing          = timing;
     d.known_addresses = [](const std::string&) { return std::vector<std::string> { "127.0.0.1" }; };
-    d.is_that_printer = [](const std::string&, const std::string& sn) { return sn == "SN1"; };
+    d.is_that_printer = [sn](const std::string&, const std::string& asked) { return asked == sn; };
     d.probe           = [m](const std::string&) { return ctl(m, "/lan/state").value("up", false); };
     d.pairing         = [m](const std::string& ip, const std::string& code, const std::string& method, const json& params) {
         return GUI::u1_pairing_exchange(ip, m.pairing, code, method, params, 3000);
@@ -460,10 +493,16 @@ Page open_page(const Mock& m, const std::string& client_id, const std::string& c
         ++store->approvals_requested;
     };
     p.route = GUI::U1LanRoute::attach(p.cloud, d);
-    // What the page does first: subscribe the device topics on its "cloud" session.
-    REQUIRE(p.cloud->Subscribe("SN1/response", 1, msg));
-    REQUIRE(p.cloud->Subscribe("SN1/notification", 1, msg));
-    CHECK(p.cloud->IsSubscribed("SN1/response"));
+    // What the page does first: subscribe the device topics on its "cloud" session (the route
+    // learns the serial number here), then set_engine with the access code.
+    REQUIRE(p.cloud->Subscribe(sn + "/response", 1, msg));
+    REQUIRE(p.cloud->Subscribe(sn + "/notification", 1, msg));
+    CHECK(p.cloud->IsSubscribed(sn + "/response"));
+    if (engine_delay_ms >= 0) {
+        if (engine_delay_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(engine_delay_ms));
+        p.route->set_device(sn, m.code);
+    }
     return p;
 }
 
@@ -483,6 +522,7 @@ Timing fast_timing()
     t.lan_probe_fails       = 2;
     t.approval_poll_ms      = 200;
     t.approval_wait_ms      = 6000;
+    t.device_wait_ms        = 4000;
     return t;
 }
 
@@ -490,24 +530,25 @@ Timing fast_timing()
 
 TEST_CASE("U1 local-first end to end: an approved PC moves to the LAN, falls back, comes back", "[.][U1LocalFirstE2E]")
 {
+    GUI::U1LanRoute::reset_pacing();
     const Mock m = mock_ports();
     REQUIRE(m.ok());
     ctl(m, "/lan/up");
     ctl(m, "/authorize?cid=orca-e2e-a");
-    const int kicks_before = ctl(m, "/stats")["kicks"].get<int>();
-    Page p = open_page(m, "orca-e2e-a", "cloud-e2e-a", fast_timing());
+    const int kicks_before = stat_of(m, "kicks");
+    Page p = open_page(m, "U1E2EA0001", "orca-e2e-a", "cloud-e2e-a", fast_timing());
 
     REQUIRE(wait_until([&] { return p.route->on_lan(); }, 15000));
-    CHECK(p.route->serial() == "SN1");
+    CHECK(p.route->serial() == "U1E2EA0001");
     CHECK(p.ask_state().authorized);
     CHECK(p.approvals() == 0);
     // The page's own calls now reach the printer's broker ...
-    CHECK(p.cloud->IsSubscribed("SN1/response"));
+    CHECK(p.cloud->IsSubscribed("U1E2EA0001/response"));
     REQUIRE(p.ask(101));
     CHECK(p.via(101) == "lan");
     // ... and a cloud answer no longer reaches the page (no duplicates): ask the cloud directly.
     std::string msg;
-    REQUIRE(p.cloud->PublishDirect("SN1/request", json({ { "method", "x" }, { "id", 102 } }).dump(), 1, msg));
+    REQUIRE(p.cloud->PublishDirect("U1E2EA0001/request", json({ { "method", "x" }, { "id", 102 } }).dump(), 1, msg));
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
     CHECK(p.answers(102) == 0);
     CHECK(p.answers(101) == 1);
@@ -526,17 +567,69 @@ TEST_CASE("U1 local-first end to end: an approved PC moves to the LAN, falls bac
     CHECK(p.via(104) == "lan");
 
     close_page(p);
-    const json stats = ctl(m, "/stats");
-    CHECK(stats["kicks"].get<int>() == kicks_before);
-    CHECK(stats["pairing"]["request_lan_auth"] == 0); // never asked: it was approved
+    CHECK(stat_of(m, "kicks") == kicks_before);
+}
+
+TEST_CASE("U1 local-first end to end: pairing waits for the page's access code, never a default", "[.][U1LocalFirstE2E]")
+{
+    GUI::U1LanRoute::reset_pacing();
+    const Mock m = mock_ports();
+    REQUIRE(m.ok());
+    REQUIRE(m.code != "12345678"); // the runner gives the mock a code of its own
+    ctl(m, "/lan/up");
+    ctl(m, "/authorize?cid=orca-e2e-code");
+    const int wrong_before = stat_of(m, "wrong_code_requests");
+    // set_engine (with the code) arrives 1.5 s after the subscriptions, as on a slow page.
+    Page p = open_page(m, "U1E2ECODE7", "orca-e2e-code", "cloud-e2e-code", fast_timing(), 1500);
+    REQUIRE(wait_until([&] { return p.route->on_lan(); }, 15000));
+    // Every pairing request went to the printer's own code: nothing on the default topic.
+    CHECK(stat_of(m, "wrong_code_requests") == wrong_before);
+    REQUIRE(p.ask(151));
+    CHECK(p.via(151) == "lan");
+    close_page(p);
+}
+
+TEST_CASE("U1 local-first end to end: a printer that refuses LAN is retried on the back-off, across new sessions",
+          "[.][U1LocalFirstE2E]")
+{
+    GUI::U1LanRoute::reset_pacing();
+    const Mock m = mock_ports();
+    REQUIRE(m.ok());
+    ctl(m, "/lan/up");
+    ctl(m, "/pairing/mode?m=error");
+    Timing t   = fast_timing();
+    t.retry_ms = { 3000, 8000 };
+    const int checks_before = stat_of(m, "pairing", "confirm_lan_status");
+
+    Page first = open_page(m, "U1E2ENOLAN", "orca-e2e-refused", "cloud-e2e-r0", t);
+    REQUIRE(wait_until([&] { return stat_of(m, "pairing", "confirm_lan_status") == checks_before + 1; }, 10000));
+    close_page(first);
+    // The page reconnects (a new cloud session, a new route) several times within the back-off:
+    // none of them asks the printer again before the 3 s are up.
+    for (int i = 0; i < 4; ++i) {
+        Page again = open_page(m, "U1E2ENOLAN", "orca-e2e-refused", "cloud-e2e-r" + std::to_string(i + 1), t);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        close_page(again);
+    }
+    CHECK(stat_of(m, "pairing", "confirm_lan_status") == checks_before + 1);
+    // After the back-off one more check, and still on the cloud.
+    Page last = open_page(m, "U1E2ENOLAN", "orca-e2e-refused", "cloud-e2e-r9", t);
+    CHECK(wait_until([&] { return stat_of(m, "pairing", "confirm_lan_status") == checks_before + 2; }, 6000));
+    CHECK_FALSE(last.route->on_lan());
+    CHECK(last.approvals() == 0); // an "error" answer is not a reason to prompt
+    REQUIRE(last.ask(161));
+    CHECK(last.via(161) == "cloud");
+    close_page(last);
+    ctl(m, "/pairing/mode?m=normal");
 }
 
 TEST_CASE("U1 local-first end to end: a new PC asks once, is approved on the printer, and connects", "[.][U1LocalFirstE2E]")
 {
+    GUI::U1LanRoute::reset_pacing();
     const Mock m = mock_ports();
     REQUIRE(m.ok());
     ctl(m, "/lan/up");
-    Page p = open_page(m, "orca-e2e-new", "cloud-e2e-new", fast_timing());
+    Page p = open_page(m, "U1E2ENEW01", "orca-e2e-new", "cloud-e2e-new", fast_timing());
 
     // The printer shows its prompt (the mock holds the id as pending) and the PC says so.
     REQUIRE(wait_until([&] {
@@ -558,19 +651,20 @@ TEST_CASE("U1 local-first end to end: a new PC asks once, is approved on the pri
 
 TEST_CASE("U1 local-first end to end: an unanswered prompt keeps the cloud and is not repeated", "[.][U1LocalFirstE2E]")
 {
+    GUI::U1LanRoute::reset_pacing();
     const Mock m = mock_ports();
     REQUIRE(m.ok());
     ctl(m, "/lan/up");
-    const int asked_before = ctl(m, "/stats")["pairing"]["request_lan_auth"].get<int>();
+    const int asked_before = stat_of(m, "pairing", "request_lan_auth");
     Timing t = fast_timing();
     t.approval_wait_ms = 1000;
-    Page p = open_page(m, "orca-e2e-ignored", "cloud-e2e-ignored", t);
+    Page p = open_page(m, "U1E2EIGN01", "orca-e2e-ignored", "cloud-e2e-ignored", t);
 
     REQUIRE(wait_until([&] { return p.ask_state().asks == 1; }, 15000));
     // Several more LAN tries (300/600/1000 ms apart) without a second prompt this session.
     std::this_thread::sleep_for(std::chrono::milliseconds(3500));
     CHECK_FALSE(p.route->on_lan());
-    CHECK(ctl(m, "/stats")["pairing"]["request_lan_auth"].get<int>() == asked_before + 1);
+    CHECK(stat_of(m, "pairing", "request_lan_auth") == asked_before + 1);
     CHECK(p.approvals() == 1);
     REQUIRE(p.ask(301));
     CHECK(p.via(301) == "cloud");
@@ -579,14 +673,15 @@ TEST_CASE("U1 local-first end to end: an unanswered prompt keeps the cloud and i
 
 TEST_CASE("U1 local-first end to end: two slicers on one printer keep their own LAN sessions", "[.][U1LocalFirstE2E]")
 {
+    GUI::U1LanRoute::reset_pacing();
     const Mock m = mock_ports();
     REQUIRE(m.ok());
     ctl(m, "/lan/up");
     ctl(m, "/authorize?cid=orca-e2e-slot0");
     ctl(m, "/authorize?cid=orca-e2e-slot1");
-    const int kicks_before = ctl(m, "/stats")["kicks"].get<int>();
-    Page a = open_page(m, "orca-e2e-slot0", "cloud-e2e-p0", fast_timing());
-    Page b = open_page(m, "orca-e2e-slot1", "cloud-e2e-p1", fast_timing());
+    const int kicks_before = stat_of(m, "kicks");
+    Page a = open_page(m, "U1E2ETWO01", "orca-e2e-slot0", "cloud-e2e-p0", fast_timing());
+    Page b = open_page(m, "U1E2ETWO01", "orca-e2e-slot1", "cloud-e2e-p1", fast_timing());
     REQUIRE(wait_until([&] { return a.route->on_lan() && b.route->on_lan(); }, 15000));
 
     for (long long id = 401; id < 411; ++id) {
@@ -597,9 +692,8 @@ TEST_CASE("U1 local-first end to end: two slicers on one printer keep their own 
         CHECK(a.via(id) == "lan");
         CHECK(b.via(id + 100) == "lan");
     }
-    const json stats = ctl(m, "/stats");
-    CHECK(stats["kicks"].get<int>() == kicks_before);
-    const std::string lan_sessions = stats["sessions"]["lan"].dump();
+    CHECK(stat_of(m, "kicks") == kicks_before);
+    const std::string lan_sessions = ctl(m, "/stats")["sessions"]["lan"].dump();
     CHECK(lan_sessions.find("orca-e2e-slot0") != std::string::npos);
     CHECK(lan_sessions.find("orca-e2e-slot1") != std::string::npos);
     CHECK(a.route->on_lan());
@@ -612,18 +706,18 @@ TEST_CASE("U1 local-first end to end: the pairing exchange against the mock", "[
 {
     const Mock m = mock_ports();
     REQUIRE(m.ok());
-    const json no = GUI::u1_pairing_exchange("127.0.0.1", m.pairing, "12345678", "server.client_manager.confirm_lan_status",
+    const json no = GUI::u1_pairing_exchange("127.0.0.1", m.pairing, m.code, "server.client_manager.confirm_lan_status",
                                              { { "clientid", "orca-e2e-px" } }, 3000);
     CHECK(parse_auth_answer(no) == AuthAnswer::Unauthorized);
     ctl(m, "/authorize?cid=orca-e2e-px");
-    const json yes = GUI::u1_pairing_exchange("127.0.0.1", m.pairing, "12345678", "server.client_manager.confirm_lan_status",
+    const json yes = GUI::u1_pairing_exchange("127.0.0.1", m.pairing, m.code, "server.client_manager.confirm_lan_status",
                                               { { "clientid", "orca-e2e-px" } }, 3000);
     REQUIRE(parse_auth_answer(yes) == AuthAnswer::Success);
     CHECK(yes["port"] == m.lan);
-    // A wrong access code: nothing answers on that topic.
+    // The wrong access code: nothing answers on that topic.
     const json none = GUI::u1_pairing_exchange("127.0.0.1", m.pairing, "00000000", "server.client_manager.confirm_lan_status",
                                                { { "clientid", "orca-e2e-px" } }, 1000);
     CHECK(none.is_null());
     // Nobody listening at all.
-    CHECK(GUI::u1_pairing_exchange("127.0.0.1", 1, "12345678", "x", json::object(), 1000).is_null());
+    CHECK(GUI::u1_pairing_exchange("127.0.0.1", 1, m.code, "x", json::object(), 1000).is_null());
 }
