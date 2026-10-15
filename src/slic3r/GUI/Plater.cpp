@@ -19087,7 +19087,7 @@ void Plater::render_project_state_debug_window() const { p->render_project_state
 // Orca #15916: per-plate bed type overrides are cleared when the selected printer cannot use them.
 // Edge: the capability is PlateBedTypes::allowed_bed_types - the U1 keeps its three plates (#502)
 // rather than "all or nothing".
-void Plater::normalize_bed_types(bool printer_setting_changed)
+void Plater::normalize_bed_types(bool multi_bed_changed)
 {
     if (only_gcode_mode() || using_exported_file())
         return;
@@ -19111,7 +19111,7 @@ void Plater::normalize_bed_types(bool printer_setting_changed)
     }
 
     // Refresh the controls after a capability change, even when no override was reset.
-    if (printer_setting_changed || overrides_reset) {
+    if (multi_bed_changed || overrides_reset) {
         sidebar().update_all_preset_comboboxes();
         wxGetApp().obj_list()->update_and_show_object_settings_item();
     }

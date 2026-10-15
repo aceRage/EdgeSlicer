@@ -59,11 +59,8 @@ ParamsDialog::ParamsDialog(wxWindow * parent)
             auto &preset_bundle = *wxGetApp().preset_bundle;
             const PlateBedTypes::Allowed allowed =
                 PlateBedTypes::allowed_bed_types(preset_bundle.printers.get_edited_preset().config, preset_bundle.is_bbl_vendor());
-            if (m_initial_bed_types.any != allowed.any || m_initial_bed_types.types != allowed.types) {
+            if (m_initial_bed_types.any != allowed.any || m_initial_bed_types.types != allowed.types)
                 wxGetApp().plater()->normalize_bed_types(true);
-                if (auto *plate_tab = dynamic_cast<TabPrintPlate *>(wxGetApp().get_plate_tab()))
-                    plate_tab->update_model_config();
-            }
         }
         if (!m_editing_filament_id.empty()) {
             Filamentinformation *filament_info = new Filamentinformation();
