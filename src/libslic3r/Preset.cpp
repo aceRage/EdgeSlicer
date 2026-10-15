@@ -1861,8 +1861,9 @@ void PresetCollection::load_project_embedded_presets(std::vector<Preset*>& proje
             DynamicPrintConfig config = preset->config;
             if (preset->loading_substitutions && ! preset->loading_substitutions->empty()) {
                 substitutions.push_back({ preset->name, m_type, PresetConfigSubstitutions::Source::ProjectFile, preset->name, std::move(*(preset->loading_substitutions))});
-                free(preset->loading_substitutions);
-                preset->loading_substitutions = NULL;
+                // Allocated with new in the 3MF reader (_BBS_3MF_Importer): free() here was a heap mismatch.
+                delete preset->loading_substitutions;
+                preset->loading_substitutions = nullptr;
             }
             //BBS: use inherit config as the base
             Preset* inherit_preset = nullptr;
