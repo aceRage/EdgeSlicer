@@ -6730,6 +6730,17 @@ LayerResult GCode::process_layer(const Print& print,
             gcode += m_writer.set_jerk_xy(this->process_flow_value(m_config.default_jerk));
         }
 
+        // Snapmaker #937 / #980: reset the travel acceleration and jerk at the second layer when a first-layer travel
+        // override was in effect, resolved the same way as in travel_to(). With the default 0 nothing is written here.
+        if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.travel_acceleration) > 0 &&
+            m_config.first_layer_travel_acceleration.get_abs_value(this->process_flow_value(m_config.travel_acceleration)) > 0) {
+            gcode += m_writer.set_travel_acceleration((unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5));
+        }
+        if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0 &&
+            m_config.first_layer_travel_jerk.get_abs_value(this->process_flow_value(m_config.travel_jerk)) > 0) {
+            gcode += m_writer.set_jerk_xy(this->process_flow_value(m_config.travel_jerk));
+        }
+
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // nozzle_temperature_initial_layer vs. temperature settings.
         if (is_bbl_multi_extruder() && !print.config().single_extruder_multi_material.value) {
@@ -11057,11 +11068,22 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     double       jerk_to_set         = 0.0;
     unsigned int acceleration_to_set = 0;
     if (this->on_first_layer()) {
-        if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.initial_layer_acceleration) > 0) {
-            acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.initial_layer_acceleration) + 0.5);
+        // Snapmaker #937 / #980: a first-layer travel acceleration / jerk overrides the initial layer value for
+        // travels. A percentage resolves over the effective (flow-variant) travel value, the one written on later
+        // layers, not over the raw first entry. 0 (the default) keeps the initial layer value, as before.
+        const double first_layer_travel_accel = m_config.first_layer_travel_acceleration.get_abs_value(
+            this->process_flow_value(m_config.travel_acceleration));
+        const double first_layer_accel = first_layer_travel_accel > 0 ? first_layer_travel_accel :
+                                                                        double(this->process_flow_value(m_config.initial_layer_acceleration));
+        if (this->process_flow_value(m_config.default_acceleration) > 0 && first_layer_accel > 0) {
+            acceleration_to_set = (unsigned int) floor(first_layer_accel + 0.5);
         }
-        if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.initial_layer_jerk) > 0) {
-            jerk_to_set = this->process_flow_value(m_config.initial_layer_jerk);
+        const double first_layer_travel_jerk = m_config.first_layer_travel_jerk.get_abs_value(
+            this->process_flow_value(m_config.travel_jerk));
+        const double first_layer_jerk = first_layer_travel_jerk > 0 ? first_layer_travel_jerk :
+                                                                      double(this->process_flow_value(m_config.initial_layer_jerk));
+        if (this->process_flow_value(m_config.default_jerk) > 0 && first_layer_jerk > 0) {
+            jerk_to_set = first_layer_jerk;
         }
     } else {
         // Orca: a travel shorter than the retraction threshold that leads into an external perimeter keeps the outer wall
