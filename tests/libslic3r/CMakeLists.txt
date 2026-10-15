@@ -14,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
 	test_model_browser_rules.cpp
 	test_arrange_support_clearance.cpp
 	test_appconfig_trailing_newline.cpp
+	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
 	test_arachne_walls.cpp
@@ -104,6 +105,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_load_determinism.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
+	test_preset_printer_type.cpp
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp

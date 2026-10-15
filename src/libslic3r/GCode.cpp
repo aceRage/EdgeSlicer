@@ -1323,6 +1323,9 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id, tcr.print_z); // TODO: toolchange_z vs print_z
         if (gcodegen.config().enable_prime_tower) {
             deretraction_str += gcodegen.writer().travel_to_z(z, "Force restore layer Z", true);
+            // Snapmaker #993 (Edge): the tower G-code after this may travel without an F word (U1: "G1 Y..."
+            // after the start position); keep the feedrate it inherited before the Z speed cap.
+            deretraction_str += gcodegen.writer().restore_uncapped_z_feedrate();
             Vec3d position{gcodegen.writer().get_position()};
             position.z() = z;
             gcodegen.writer().set_position(position);
@@ -2623,19 +2626,50 @@ static void init_ooze_prevention(const Print& print, OozePrevention& ooze_preven
     ooze_prevention.enable = print.config().ooze_prevention.value && !print.config().single_extruder_multi_material;
 }
 
+// Count tool/filament changes across the print from the tool ordering. Used as a fallback when no
+// wipe tower populated WipeTowerData::number_of_toolchanges (left at -1). Covers non-sequential
+// prints without a wipe tower (manual swaps, toolchanger/IDEX). Note: sequential (by-object) prints
+// leave print.tool_ordering() empty, so total_toolchanges stays 0 there (unchanged from before).
+static int total_toolchanges_from_ordering(const ToolOrdering &tool_ordering)
+{
+    int changes = 0;
+    int last    = -1;
+    for (const LayerTools &lt : tool_ordering)
+        for (unsigned int extruder : lt.extruders) {
+            if (last >= 0 && int(extruder) != last)
+                ++ changes;
+            last = int(extruder);
+        }
+    return changes;
+}
+
+// Total tool changes for the print, preferring the wipe-tower count and falling back to the tool
+// ordering when no wipe tower populated it (number_of_toolchanges < 0).
+static int resolve_total_toolchanges(const WipeTowerData &wipe_tower_data, const ToolOrdering &tool_ordering)
+{
+    int changes = wipe_tower_data.number_of_toolchanges;
+    if (changes < 0)
+        changes = total_toolchanges_from_ordering(tool_ordering);
+    return std::max(0, changes);
+}
+
 // Fill in print_statistics and return formatted string containing filament statistics to be inserted into G-code comment section.
 // with_cost false leaves the "; filament cost" line out (filament prices not wanted in the G-code);
 // the statistics are filled the same either way.
+// tool_ordering (optional) is the tool-change fallback for prints without a wipe tower; the per-layer
+// statistics call leaves it out, as it only reads the accumulated weight.
 static std::string update_print_stats_and_format_filament_stats(const bool                   has_wipe_tower,
                                                                 const WipeTowerData&         wipe_tower_data,
                                                                 const std::vector<Extruder>& extruders,
                                                                 PrintStatistics&             print_statistics,
-                                                                const bool                   with_cost = true)
+                                                                const bool                   with_cost     = true,
+                                                                const ToolOrdering*          tool_ordering = nullptr)
 {
     std::string filament_stats_string_out;
 
     print_statistics.clear();
-    print_statistics.total_toolchanges = std::max(0, wipe_tower_data.number_of_toolchanges);
+    print_statistics.total_toolchanges = tool_ordering != nullptr ? resolve_total_toolchanges(wipe_tower_data, *tool_ordering) :
+                                                                    std::max(0, wipe_tower_data.number_of_toolchanges);
     if (!extruders.empty()) {
         std::pair<std::string, unsigned int> out_filament_used_mm("; filament used [mm] = ", 0);
         std::pair<std::string, unsigned int> out_filament_used_cm3("; filament used [cm3] = ", 0);
@@ -3379,11 +3413,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     this->placeholder_parser().set("has_wipe_tower", has_wipe_tower);
     this->placeholder_parser().set("has_single_extruder_multi_material_priming",
                                    !is_bbl_printers && has_wipe_tower && print.config().single_extruder_multi_material_priming);
-    this->placeholder_parser()
-        .set("total_toolchanges",
-             std::max(0,
-                      print.wipe_tower_data()
-                          .number_of_toolchanges)); // Check for negative toolchanges (single extruder mode) and set to 0 (no tool change).
+    // Wipe-tower count when a tower exists, else the tool changes of the tool ordering (OrcaSlicer #13895).
+    this->placeholder_parser().set("total_toolchanges", DoExport::resolve_total_toolchanges(print.wipe_tower_data(), print.tool_ordering()));
     this->placeholder_parser().set("num_extruders", int(print.config().nozzle_diameter.values.size()));
     this->placeholder_parser().set("retract_length", new ConfigOptionFloats(print.config().retraction_length));
 
@@ -3919,15 +3950,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         this->_print_first_layer_extruder_temperatures(file, print, machine_start_gcode, initial_extruder_id, true);
     }
     // Orca: when activate_air_filtration is set on any extruder, find and set the highest during_print_exhaust_fan_speed
-    bool activate_air_filtration        = false;
-    int  during_print_exhaust_fan_speed = 0;
+    // Orca #13228: activate_air_filtration_during_print / _on_completion (both default on) pick which of the two
+    // exhaust fan commands a filament asks for.
+    bool activate_air_filtration_during_print = false;
+    int  during_print_exhaust_fan_speed       = 0;
     for (const auto& extruder : m_writer.extruders()) {
-        activate_air_filtration |= m_config.activate_air_filtration.get_at(extruder.id());
-        if (m_config.activate_air_filtration.get_at(extruder.id()))
+        if (m_config.activate_air_filtration.get_at(extruder.id()) && m_config.activate_air_filtration_during_print.get_at(extruder.id())) {
+            activate_air_filtration_during_print = true;
             during_print_exhaust_fan_speed = std::max(during_print_exhaust_fan_speed,
                                                       m_config.during_print_exhaust_fan_speed.get_at(extruder.id()));
+        }
     }
-    if (activate_air_filtration)
+    if (activate_air_filtration_during_print)
         file.write(m_writer.set_exhaust_fan(during_print_exhaust_fan_speed, true));
 
     print.throw_if_canceled();
@@ -4230,14 +4264,17 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     if (activate_chamber_temp_control && max_chamber_temp > 0)
         file.write(m_writer.set_chamber_temperature(0, false)); // close chamber_temperature
 
-    if (activate_air_filtration) {
-        int complete_print_exhaust_fan_speed = 0;
-        for (const auto& extruder : m_writer.extruders())
-            if (m_config.activate_air_filtration.get_at(extruder.id()))
-                complete_print_exhaust_fan_speed = std::max(complete_print_exhaust_fan_speed,
-                                                            m_config.complete_print_exhaust_fan_speed.get_at(extruder.id()));
-        file.write(m_writer.set_exhaust_fan(complete_print_exhaust_fan_speed, true));
+    bool activate_air_filtration_on_completion = false;
+    int  complete_print_exhaust_fan_speed      = 0;
+    for (const auto& extruder : m_writer.extruders()) {
+        if (m_config.activate_air_filtration.get_at(extruder.id()) && m_config.activate_air_filtration_on_completion.get_at(extruder.id())) {
+            activate_air_filtration_on_completion = true;
+            complete_print_exhaust_fan_speed = std::max(complete_print_exhaust_fan_speed,
+                                                        m_config.complete_print_exhaust_fan_speed.get_at(extruder.id()));
+        }
     }
+    if (activate_air_filtration_on_completion)
+        file.write(m_writer.set_exhaust_fan(complete_print_exhaust_fan_speed, true));
     // adds tags for time estimators
     file.write_format(";%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Last_Line_M73_Placeholder).c_str());
     file.write_format("; EXECUTABLE_BLOCK_END\n\n");
@@ -4249,7 +4286,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // Const inputs
         has_wipe_tower, print.wipe_tower_data(), m_writer.extruders(),
         // Modifies
-        print.m_print_statistics, print.gcode_filament_prices()));
+        print.m_print_statistics, print.gcode_filament_prices(),
+        // Const input (tool-change fallback for non-wipe-tower prints)
+        &print.tool_ordering()));
     print.m_print_statistics.initial_tool = initial_extruder_id;
     if (!is_bbl_printers) {
         // CONFIG_BLOCK first, time estimate after: some firmwares only scan the last N lines for
@@ -9248,8 +9287,12 @@ std::string GCode::change_layer(coordf_t print_z)
 
     m_need_change_layer_lift_z = true;
 
-    m_nominal_z                 = z;
-    m_writer.get_position().z() = z;
+    m_nominal_z = z;
+    // Snapmaker #993 (Edge adaptation): the writer takes the new layer's Z as before, but remembers the Z the
+    // head is still at, so the deferred layer-change travel is capped by machine_max_speed_z from there.
+    // Upstream instead keeps the writer at the old Z; our wipe tower, Local-Z, timelapse and ZAA code read the
+    // writer's Z right after the layer change and expect the new one, so the geometry stays as it was.
+    m_writer.defer_z_move(z);
 
     // forget last wiping path as wiping after raising Z is pointless
     // BBS. Dont forget wiping path to reduce stringing.

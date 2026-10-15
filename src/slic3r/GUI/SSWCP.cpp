@@ -5878,6 +5878,8 @@ void SSWCP_MachineManage_Instance::process()
         sw_SwitchModel();
     } else if (m_cmd == "sw_DeleteDevices") {
         sw_DeleteDevices();
+    } else if (m_cmd == "sw_UpdateDeviceInfo") {
+        sw_UpdateDeviceInfo();
     } else {
         handle_general_fail();
     }
@@ -6066,6 +6068,228 @@ void SSWCP_MachineManage_Instance::sw_SwitchModel()
             handle_general_fail();
         }
     }
+}
+
+namespace {
+
+// The installed-printers list (m_ProfileJson, what the preset dialog installs from) learns that `model`
+// is used with `nozzle`, the way the connect flow does. True when the list changed.
+bool profile_json_add_model_nozzle(const std::string& model, const std::string& nozzle)
+{
+    if (model.empty() || nozzle.empty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(m_ProfileJson_mutex);
+    if (!m_ProfileJson.contains("model") || !m_ProfileJson["model"].is_array())
+        return false;
+
+    for (auto& entry : m_ProfileJson["model"]) {
+        if (!entry.is_object() || !entry.count("model") || !entry["model"].is_string() || entry["model"].get<std::string>() != model)
+            continue;
+        std::string selected = (entry.count("nozzle_selected") && entry["nozzle_selected"].is_string()) ?
+                                   entry["nozzle_selected"].get<std::string>() :
+                                   std::string();
+        if (selected.find(nozzle) != std::string::npos)
+            return false;
+        entry["nozzle_selected"] = selected.empty() ? nozzle : selected + ";" + nozzle;
+        return true;
+    }
+
+    json item;
+    item["vendor"]          = "Snapmaker";
+    item["model"]           = model;
+    item["nozzle_selected"] = nozzle;
+    item["nozzle_diameter"] = nozzle;
+    m_ProfileJson["model"].push_back(item);
+    return true;
+}
+
+// Some variant of `model` is enabled in the app config already.
+bool printer_model_installed(const std::string& model)
+{
+    const auto vendors = wxGetApp().app_config->vendors();
+    for (const auto& v : vendors) {
+        auto m = v.second.find(model);
+        if (m != v.second.end() && !m->second.empty())
+            return true;
+    }
+    return false;
+}
+
+bool same_device_info(const DeviceInfo& a, const DeviceInfo& b)
+{
+    return a.ip == b.ip && a.dev_name == b.dev_name && a.model_name == b.model_name && a.preset_name == b.preset_name &&
+           a.connected == b.connected && a.img == b.img && a.nozzle_sizes == b.nozzle_sizes && a.nozzle_volume_type == b.nozzle_volume_type &&
+           a.sn == b.sn && a.protocol == b.protocol && a.api_key == b.api_key && a.user == b.user && a.password == b.password &&
+           a.ca == b.ca && a.cert == b.cert && a.key == b.key && a.clientId == b.clientId && a.port == b.port &&
+           a.link_mode == b.link_mode && a.userid == b.userid && a.id == b.id;
+}
+
+} // namespace
+
+// Snapmaker #768. The Device page (flutter_web 2.3.40) pushes what it learned about its printers:
+// { "devices": [ { "dev_id": ..., any of ip / dev_name / model_name / nozzle_sizes / ... } ] }.
+// Only the fields present are merged into the stored DeviceInfo, a device that is not stored yet is
+// created, and nothing is saved or refreshed when nothing changed.
+void SSWCP_MachineManage_Instance::sw_UpdateDeviceInfo()
+{
+    if (!m_param_data.count("devices") || !m_param_data["devices"].is_array()) {
+        handle_general_fail(-1, "param [devices] is required (array)");
+        return;
+    }
+
+    // Every AppConfig access is on the UI thread: the connect flow and the other MachineManage
+    // handlers read and write the device list there.
+    wxGetApp().CallAfter([devices_json = m_param_data["devices"]]() {
+        bool any_changed = false;
+        // model + first nozzle of every device that changed, for the installed-printers list
+        std::vector<std::pair<std::string, std::string>> changed_models;
+
+        for (const auto& item : devices_json) {
+            if (!item.is_object() || !item.count("dev_id") || !item["dev_id"].is_string())
+                continue;
+
+            const std::string dev_id = item["dev_id"].get<std::string>();
+            if (dev_id.empty())
+                continue;
+
+            DeviceInfo info;
+            const bool exist = wxGetApp().app_config->get_device_info(dev_id, info);
+            if (!exist) {
+                info.dev_id    = dev_id;
+                info.connected = false;
+                info.protocol  = 0;
+                info.port      = 0;
+            }
+            const DeviceInfo before = info;
+
+            auto str = [&item](const char* key, std::string& out) {
+                if (item.count(key) && item[key].is_string())
+                    out = item[key].get<std::string>();
+            };
+
+            // Merge: only the fields that are present overwrite.
+            str("ip", info.ip);
+            str("dev_name", info.dev_name);
+
+            if (item.count("model_name") && item["model_name"].is_string()) {
+                info.model_name = item["model_name"].get<std::string>();
+
+                // The machine's cover picture, served by the page server.
+                const size_t vendor_pos = info.model_name.find_first_of(" ");
+                if (vendor_pos != std::string::npos) {
+                    const std::string vendor = info.model_name.substr(0, vendor_pos);
+                    info.img = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port()) + "/profiles/" + vendor + "/" +
+                               info.model_name + "_cover.png";
+                }
+            }
+
+            if (item.count("connected") && item["connected"].is_boolean())
+                info.connected = item["connected"].get<bool>();
+
+            str("sn", info.sn);
+            str("link_mode", info.link_mode);
+            str("id", info.id);
+            str("userid", info.userid);
+
+            if (item.count("protocol") && item["protocol"].is_number_integer())
+                info.protocol = item["protocol"].get<int>();
+            if (item.count("port") && item["port"].is_number_integer())
+                info.port = item["port"].get<int>();
+
+            str("user", info.user);
+            str("password", info.password);
+            str("ca", info.ca);
+            str("cert", info.cert);
+            str("key", info.key);
+            str("clientId", info.clientId);
+            str("api_key", info.api_key);
+            str("img", info.img);
+
+            // The same four sizes the connect flow accepts ("0.4" or 0.4 alike). A report with no
+            // readable size keeps the stored sizes instead of wiping them.
+            if (item.count("nozzle_sizes") && item["nozzle_sizes"].is_array()) {
+                std::vector<std::string> sizes = NozzleSync::parse_reported_nozzles(item["nozzle_sizes"]);
+                if (!sizes.empty())
+                    info.nozzle_sizes = std::move(sizes);
+            }
+
+            if (item.count("nozzle_volume_type") && item["nozzle_volume_type"].is_array()) {
+                info.nozzle_volume_type.clear();
+                for (const auto& volume_type : item["nozzle_volume_type"]) {
+                    if (!volume_type.is_string())
+                        continue;
+                    const std::string type = volume_type.get<std::string>();
+                    if (type == "standard" || type == "high_flow")
+                        info.nozzle_volume_type.push_back(type);
+                }
+            }
+
+            // "<model> (<first size> nozzle)": taken from the page when it names one, else rebuilt
+            // when the model or the sizes changed (or none was stored yet). A device that reports
+            // no size keeps its stored name.
+            const bool named = item.count("preset_name") && item["preset_name"].is_string();
+            str("preset_name", info.preset_name);
+            if (!named && !info.model_name.empty() &&
+                (info.preset_name.empty() || info.model_name != before.model_name || info.nozzle_sizes != before.nozzle_sizes))
+                info.preset_name = NozzleSync::device_preset_name(info.model_name, info.nozzle_sizes, info.preset_name);
+
+            if (info.dev_name.empty()) // a card needs a name
+                info.dev_name = !info.ip.empty() ? info.ip : dev_id;
+
+            if (exist && same_device_info(before, info))
+                continue;
+
+            wxGetApp().app_config->save_device_info(info);
+            any_changed = true;
+            if (!info.model_name.empty() && !info.nozzle_sizes.empty())
+                changed_models.emplace_back(info.model_name, NozzleSync::first_nozzle(info.nozzle_sizes));
+        }
+
+        if (!any_changed)
+            return;
+
+        bool profile_changed = false;
+        bool model_missing   = false;
+        for (const auto& mn : changed_models) {
+            profile_changed |= profile_json_add_model_nozzle(mn.first, mn.second);
+            model_missing |= !printer_model_installed(mn.first);
+        }
+
+        // Update the Home cards, the Device page's device list and the printer combo boxes.
+        const auto devices = wxGetApp().app_config->get_devices();
+
+        json param;
+        param["command"]    = "local_devices_arrived";
+        param["sequece_id"] = "10001";
+        param["data"]       = devices;
+        wxGetApp().run_script(wxString::Format("window.postMessage(%s)", param.dump()));
+
+        json data = devices;
+        wxGetApp().device_card_notify(data);
+
+        wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
+
+        // Install the presets of a model or nozzle the app has not seen before. When every changed
+        // model is installed already and no nozzle was added there is nothing to apply, and a reload
+        // of all presets (which asks about unsaved changes) is not worth it (see set_engine).
+        if (!profile_changed && !model_missing)
+            return;
+
+        if (SSWCP_MqttAgent_Instance::m_dialog) {
+            SSWCP_MqttAgent_Instance::m_dialog->SaveProfile();
+            bool flag = false;
+            // Not asked for by the user: keep their modified values silently.
+            SSWCP_MqttAgent_Instance::m_dialog->apply_config(wxGetApp().app_config, wxGetApp().preset_bundle, wxGetApp().preset_updater, flag,
+                                                             true);
+            wxGetApp().update_mode();
+        } else {
+            BOOST_LOG_TRIVIAL(warning) << "sw_UpdateDeviceInfo: preset dialog not available, skip preset install";
+        }
+    });
+
+    send_to_js();
+    finish_job();
 }
 
 // SSWCP_MqttAgent_Instance
@@ -7388,7 +7612,8 @@ std::unordered_set<std::string> SSWCP::m_login_cmd_list = {"sw_UserLogin", "sw_U
                                                            FILE_VIEW, OPEN_TIMELAPSE_FOLDER, CANCEL_DOWNLOAD, DOWNLOAD_FILE_AND_OPEN, DOWN_LOAD_FILE, SUBSCRIBE_DOWNLOAD_STATE, UNSUBSCRIBE_DOWNLOAD_STATE, NOTIFY_UPLOAD_TIMELASPE, GET_FILES_FROM_DIR};
 
 std::unordered_set<std::string> SSWCP::m_machine_manage_cmd_list = {
-    "sw_GetLocalDevices", "sw_AddDevice", "sw_SubscribeLocalDevices", "sw_RenameDevice", "sw_SwitchModel", "sw_DeleteDevices"
+    "sw_GetLocalDevices", "sw_AddDevice", "sw_SubscribeLocalDevices", "sw_RenameDevice", "sw_SwitchModel", "sw_DeleteDevices",
+    "sw_UpdateDeviceInfo"
 };
 
 std::unordered_set<std::string> SSWCP::m_page_state_cmd_list = {
