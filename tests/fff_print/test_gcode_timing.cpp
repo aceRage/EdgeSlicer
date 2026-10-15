@@ -674,8 +674,8 @@ TEST_CASE("The fixed 260 s G29 time is only for Bambu printers", "[GCodeTiming][
         return double(proc.get_time(PrintEstimatedStatistics::ETimeMode::Normal));
     };
 
-    SECTION("a Bambu printer takes 260 s per G29") {
-        REQUIRE_THAT(time_of(with_g29, true) - time_of(without_g29, true), WithinAbs(520.0, 1e-1));
+    SECTION("a Bambu printer takes 260 s for the whole G29 sequence, counted once (Orca #15274)") {
+        REQUIRE_THAT(time_of(with_g29, true) - time_of(without_g29, true), WithinAbs(260.0, 1e-1));
     }
     SECTION("any other printer does not") {
         REQUIRE_THAT(time_of(with_g29, false) - time_of(without_g29, false), WithinAbs(0.0, 1e-3));
