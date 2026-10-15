@@ -215,7 +215,6 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
         }
     return ret;
 }
-#endif
 
 [[nodiscard]] static const std::vector<Polygons> generate_overhangs(const TreeSupportSettings &settings, PrintObject &print_object, std::function<void()> throw_on_cancel)
 {
@@ -289,11 +288,11 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
                 }
                 if (! (enforced_layer || blockers_layers.empty() || blockers_layers[layer_id].empty()))
                     overhangs = diff(overhangs, offset_ex(union_(blockers_layers[layer_id]), scale_(radius_sample_resolution)), ApplySafetyOffset::Yes);
-                if (config.bridge_no_support) {
-                    for (const LayerRegion *layerm : current_layer.regions())
-                        remove_bridges_from_contacts(print_config, lower_layer, *layerm,
-                            float(layerm->flow(frExternalPerimeter).scaled_width()), overhangs);
-                }
+                //if (config.bridge_no_support) {
+                //    for (const LayerRegion *layerm : current_layer.regions())
+                //        remove_bridges_from_contacts(print_config, lower_layer, *layerm,
+                //            float(layerm->flow(frExternalPerimeter).scaled_width()), overhangs);
+                //}
             }
             //check_self_intersections(overhangs, "generate_overhangs1");
             if (! enforcers_layers.empty() && ! enforcers_layers[layer_id].empty()) {
@@ -348,6 +347,7 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
 
     return out;
 }
+#endif
 
 /*!
  * \brief Precalculates all avoidances, that could be required.
@@ -3790,7 +3790,6 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
             if (layer) layer->polygons = intersection(layer->polygons, volumes.m_bed_area);
         });
 
-        // Don't fill in the tree supports, make them hollow with just a single sheath line.
         print.set_status(69, _L("Generating support"));
         // Ultra (support groups, Stage 4a): an empty `group_toolpaths` - which is what a
         // single-group object produces - makes generate_support_toolpaths take exactly the path it

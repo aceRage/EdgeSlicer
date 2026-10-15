@@ -5869,7 +5869,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         else {
             // BBS: define Alt key to enable volume selection mode
             m_selection.set_volume_selection_mode(evt.AltDown() ? Selection::Volume : Selection::Instance);
-            if (evt.LeftDown() && evt.ShiftDown() && m_picking_enabled && m_layers_editing.state != LayersEditing::Editing) {
+            // Alt+Shift+click on a volume adds/removes to/from the selection; don't let Shift start a rectangle selection in that case
+            const bool alt_shift_volume_click = evt.AltDown() && evt.ShiftDown() && !m_hover_volume_idxs.empty();
+            if (evt.LeftDown() && evt.ShiftDown() && !alt_shift_volume_click && m_picking_enabled &&
+                m_layers_editing.state != LayersEditing::Editing) {
                 if (/*m_gizmos.get_current_type() != GLGizmosManager::SlaSupports
                     &&*/ m_gizmos.get_current_type() != GLGizmosManager::FdmSupports
                     && m_gizmos.get_current_type() != GLGizmosManager::Seam
@@ -5895,6 +5898,22 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 
                         if (already_selected && ctrl_down)
                             m_selection.remove(volume_idx);
+                        else if (alt_down && evt.ShiftDown()) {
+                            // Alt+Shift toggles the clicked volume in the current volume selection.
+                            // Limited to a single object instance. Start a new selection if the
+                            // clicked volume belongs to another object/instance.
+                            Selection::EMode mode   = Selection::Volume;
+                            const GLVolume  *volume = m_volumes.volumes[volume_idx];
+                            // Don't require Volume mode: update_type() switches to Instance mode as soon as
+                            // all parts of the instance are selected, which would wrongly reset the selection.
+                            const bool can_extend = !m_selection.is_empty() && !volume->is_wipe_tower &&
+                                                    m_selection.get_object_idx() == volume->object_idx() &&
+                                                    m_selection.get_instance_idx() == volume->instance_idx();
+                            if (already_selected && can_extend)
+                                m_selection.remove_volumes(mode, {(unsigned int) volume_idx});
+                            else
+                                m_selection.add_volumes(mode, {(unsigned int) volume_idx}, !can_extend);
+                        }
                         else if (alt_down) {
                             Selection::EMode mode = Selection::Volume;
                             if (already_selected) {
@@ -10615,18 +10634,18 @@ void GLCanvas3D::_render_paint_toolbar() const
         ImVec2 number_label_size = ImGui::CalcTextSize(std::to_string(i + 1).c_str());
         ImGui::SetCursorPosY(cursor_y + text_offset_y);
         ImGui::SetCursorPosX(spacing + i * (spacing + button_size.x) + (button_size.x - number_label_size.x) / 2);
-        ImGui::TextColored(text_color, std::to_string(i + 1).c_str());
+        ImGui::TextColored(text_color, "%s", std::to_string(i + 1).c_str());
         imgui.pop_bold_font();
 
         ImVec2 filament_first_line_label_size = ImGui::CalcTextSize(filament_text_first_line[i].c_str());
         ImGui::SetCursorPosY(cursor_y + text_offset_y + number_label_size.y);
         ImGui::SetCursorPosX(spacing + i * (spacing + button_size.x) + (button_size.x - filament_first_line_label_size.x) / 2);
-        ImGui::TextColored(text_color, filament_text_first_line[i].c_str());
+        ImGui::TextColored(text_color, "%s", filament_text_first_line[i].c_str());
 
         ImVec2 filament_second_line_label_size = ImGui::CalcTextSize(filament_text_second_line[i].c_str());
         ImGui::SetCursorPosY(cursor_y + text_offset_y + number_label_size.y + filament_first_line_label_size.y);
         ImGui::SetCursorPosX(spacing + i * (spacing + button_size.x) + (button_size.x - filament_second_line_label_size.x) / 2);
-        ImGui::TextColored(text_color, filament_text_second_line[i].c_str());
+        ImGui::TextColored(text_color, "%s", filament_text_second_line[i].c_str());
     }
 
     if (ImGui::GetWindowWidth() == constraint_window_width) {
@@ -10870,9 +10889,9 @@ void GLCanvas3D::_render_assemble_info() const
     double size1 = m_selection.get_bounding_box().size()(1);
     double size2 = m_selection.get_bounding_box().size()(2);
     if (!m_selection.is_empty()) {
-        ImGui::Text(_L("Volume:").ToUTF8()); ImGui::SameLine(caption_max);
+        ImGui::Text("%s", _L("Volume:").ToUTF8().data()); ImGui::SameLine(caption_max);
         ImGui::Text("%.2f", size0 * size1 * size2);
-        ImGui::Text(_L("Size:").ToUTF8()); ImGui::SameLine(caption_max);
+        ImGui::Text("%s", _L("Size:").ToUTF8().data()); ImGui::SameLine(caption_max);
         ImGui::Text("%.2f x %.2f x %.2f", size0, size1, size2);
     }
     imgui->end();
@@ -11083,6 +11102,15 @@ void GLCanvas3D::_update_volumes_hover_state()
     bool ctrl_pressed = wxGetKeyState(WXK_CONTROL); // additive select/deselect
     bool shift_pressed = wxGetKeyState(WXK_SHIFT);  // select by rectangle
     bool alt_pressed = wxGetKeyState(WXK_ALT);      // deselect by rectangle
+
+    // Alt+Shift clicking on a volume adds/removes that single volume to/from the selection
+    if (alt_pressed && shift_pressed && !ctrl_pressed && !m_rectangle_selection.is_dragging()) {
+        for (int i : m_hover_volume_idxs) {
+            GLVolume &volume = *m_volumes.volumes[i];
+            volume.hover     = volume.selected ? GLVolume::HS_Deselect : GLVolume::HS_Select;
+        }
+        return;
+    }
 
     if (alt_pressed && (shift_pressed || ctrl_pressed)) {
         // illegal combinations of keys

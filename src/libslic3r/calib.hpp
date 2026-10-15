@@ -24,7 +24,7 @@ enum class CalibMode : int {
     Calib_Retraction_tower,
     Calib_Input_shaping_freq,
     Calib_Input_shaping_damp,
-    Calib_Junction_Deviation
+    Calib_Cornering
 };
 
 enum class CalibState { Start = 0, Preset, Calibration, CoarseSave, FineCalibration, Save, Finish };
@@ -37,6 +37,7 @@ struct Calib_Params
     bool      print_numbers = false;
     double freqStartX = 0.0, freqEndX = 1.0, freqStartY = 0.0, freqEndY = 1.0;
     int test_model = 0;
+    std::string shaper_type;
     std::vector<double> accelerations;
     std::vector<double> speeds;
 

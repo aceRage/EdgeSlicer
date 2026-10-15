@@ -1,7 +1,7 @@
 {
 	"type": "filament",
 	"name": "Panchroma PLA Satin @BBL base",
-	"inherits": "Panchroma PLA Stain @base",
+	"inherits": "Panchroma PLA Satin @base",
 	"from": "system",
 	"instantiation": "false",
 	"close_additional_fan_first_x_layers": [

@@ -39,7 +39,7 @@ Both are one root cause with one fix (§Important 1). The report's "byte-identic
   `58a93f7f…4fb8`), into `scratchpad/probe/probe_tests.exe`. Cross-validation: that exe reproduces
   `[paintdepth]` **80/1153** exactly. Probe source: `scratchpad/probe/probe_append.cpp`; output:
   `scratchpad/log_probe.txt` (scratchpad =
-  `C:\Users\acesa\AppData\Local\Temp\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad`).
+  `%TEMP%\claude\C--Dev\85fd2715-89f2-41bc-8877-2c5d67ab52c5\scratchpad`).
 
 ## One line per mandatory check
 

@@ -476,13 +476,13 @@ rather than folded into `profile_assets` so the two failure modes stay distingui
 Both gates were written against whatever hub happened to be running on a fixed path, and both
 paths had since moved:
 
-- `test_hardening.py:26` `DATADIR = C:\Users\acesa\AppData\Roaming\Snapmaker_Orca` — the
+- `test_hardening.py:26` `DATADIR = %APPDATA%\Snapmaker_Orca` — the
   pre-rebrand data dir. The live one is `%APPDATA%\EdgeSlicer`.
 - `test_hardening.py:28` `EXE = C:\Dev\SnapmakerOrca\build\Snapmaker_Orca\EdgeSlicer.exe` — a
   build tree, not an install; the gates install to `snorca_hubtest/inst_*`.
 - `test_security_next.py:10` `DATADIR = ...\snorca_hubtest\dd_next` — a scratch dir belonging
   to a hub no script starts any more.
-- `test_security_next.py:11` `LAN_IP = "10.0.0.131"` — hard-wired.
+- `test_security_next.py:11` `LAN_IP = "10.0.0.20"` — hard-wired.
 
 `test_hardening.py`'s docstring also told the operator to run `wait_for_hub.py`, which no
 longer exists.

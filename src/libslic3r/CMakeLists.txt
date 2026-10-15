@@ -305,6 +305,7 @@ set(lisbslic3r_sources
     GCode/LayerTimeSpeedSmoothingFilter.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
+    GCode/ElegooGCodeProcessorHelper.cpp
     GCode/PreCoolingInjector.cpp
     GCode/PreCoolingInjector.hpp
     SliceCompare/Snapshot.cpp
