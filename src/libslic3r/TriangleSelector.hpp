@@ -381,7 +381,7 @@ public:
     // Orca #12016 (Edge: the colour gizmo lists filaments in the sidebar's order, mixed filaments
     // included): the state map for a filament remap. display_filament_ids[i] is the filament id (the
     // painted state) shown in slot i, remap[i] the slot that slot i is remapped to. Every other state
-    // keeps its value. Returns false, leaving an identity map, when nothing changes.
+    // keeps its value, and unpainted triangles (state 0) stay unpainted (#12437). Returns false, leaving an identity map, when nothing changes.
     static bool build_filament_remap_state_map(const std::vector<unsigned int> &display_filament_ids,
                                                const std::vector<size_t>       &remap,
                                                EnforcerBlockerStateMap         &state_map);

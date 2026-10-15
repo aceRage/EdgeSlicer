@@ -91,3 +91,23 @@ TEST_CASE("Remapping painted triangles swaps two filaments", "[TriangleSelector]
     for (int v = 0; v < 3; ++v)
         CHECK(now3.vertices[now3.indices.front()[v]].z() == Approx(10.f));
 }
+
+TEST_CASE("Remapping filament 1 leaves unpainted triangles unpainted", "[TriangleSelector][FilamentRemap]")
+{
+    // Orca #12437: unpainted triangles follow the volume's filament, which the gizmo remaps on its own;
+    // before, remapping filament 1 painted every unpainted triangle with the destination filament.
+    EnforcerBlockerStateMap state_map;
+    REQUIRE(TriangleSelector::build_filament_remap_state_map({1, 2, 3}, {2, 1, 2}, state_map));
+    CHECK(state_map[1] == ebt(3));
+    CHECK(state_map[0] == ebt(0));
+
+    const TriangleMesh mesh(its_make_cube(10., 10., 10.));
+    TriangleSelector   selector(mesh);
+    selector.set_facet(2, ebt(1));
+    selector.remap_triangle_state(state_map);
+
+    CHECK(selector.get_facets(ebt(3)).indices.size() == 1);
+    CHECK(selector.get_facets(ebt(1)).indices.empty());
+    // The other 11 facets are still unpainted.
+    CHECK(selector.get_facets(EnforcerBlockerType::NONE).indices.size() == 11);
+}

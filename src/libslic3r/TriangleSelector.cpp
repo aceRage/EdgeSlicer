@@ -2661,10 +2661,9 @@ bool TriangleSelector::build_filament_remap_state_map(const std::vector<unsigned
         const unsigned int dst_state = display_filament_ids[dst];
         if (src_state == 0 || dst_state == 0 || src_state > MAX_EBT || dst_state > MAX_EBT || src_state == dst_state)
             continue;
+        // Orca #12437: unpainted triangles (state 0) stay unpainted; they follow the volume's filament,
+        // which the gizmo remaps separately.
         state_map[src_state] = static_cast<EnforcerBlockerType>(dst_state);
-        // Unpainted triangles print with the volume's filament: remapping filament 1 repaints them too.
-        if (src_state == 1)
-            state_map[0] = static_cast<EnforcerBlockerType>(dst_state);
         any_change = true;
     }
     return any_change;

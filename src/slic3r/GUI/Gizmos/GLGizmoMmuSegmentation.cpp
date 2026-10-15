@@ -1554,7 +1554,13 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
         const unsigned int current_id     = current_ext_id > 0 ? unsigned(current_ext_id) : 1u;
         const unsigned int dest_id        = current_id <= size_t(EnforcerBlockerType::ExtruderMax) ? unsigned(state_map[current_id]) : current_id;
         if (dest_id != current_id) {
-            mv->config.set("extruder", int(dest_id));
+            // Orca #12437: a volume with its own filament changes; one that uses the object's filament
+            // changes the object's.
+            const ConfigOption *vol_opt = mv->config.option("extruder");
+            if (vol_opt != nullptr && vol_opt->getInt() != 0)
+                mv->config.set("extruder", int(dest_id));
+            else
+                mo->config.set("extruder", int(dest_id));
             if (size_t(idx) < m_volumes_extruder_idxs.size())
                 m_volumes_extruder_idxs[idx] = int(dest_id);
             volume_extruder_changed = true;
@@ -1565,8 +1571,11 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
 
     if (updated) {
         // ORCA: Update renderer colors if base volume extruder changed
-        if (volume_extruder_changed)
+        if (volume_extruder_changed) {
             this->update_triangle_selectors_colors();
+            // ORCA: Update the object list's filament column to the new value
+            wxGetApp().obj_list()->update_objects_list_filament_column(wxGetApp().filaments_cnt());
+        }
 
         // ORCA: No "Filament remapping finished" notification, to reduce UI noise.
         update_model_object();
