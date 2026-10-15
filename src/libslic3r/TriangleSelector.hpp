@@ -378,6 +378,14 @@ public:
     // Orca: remap the state of triangles according to the state_map
     void remap_triangle_state(const EnforcerBlockerStateMap& state_map);
 
+    // Orca #12016 (Edge: the colour gizmo lists filaments in the sidebar's order, mixed filaments
+    // included): the state map for a filament remap. display_filament_ids[i] is the filament id (the
+    // painted state) shown in slot i, remap[i] the slot that slot i is remapped to. Every other state
+    // keeps its value. Returns false, leaving an identity map, when nothing changes.
+    static bool build_filament_remap_state_map(const std::vector<unsigned int> &display_filament_ids,
+                                               const std::vector<size_t>       &remap,
+                                               EnforcerBlockerStateMap         &state_map);
+
 
     // Store the division trees in compact form (a long stream of bits for each triangle of the original mesh).
     // First vector contains pairs of (triangle index, first bit in the second vector).
