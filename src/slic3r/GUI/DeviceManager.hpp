@@ -1335,6 +1335,10 @@ public:
     {
         return GUI::NozzleInfo::diameter_matches_or_unknown(nozzle_diameter(extder_id), target_diameter);
     }
+    // Orca #13255: the diameter to look filament and calibration presets up by - the reported one,
+    // or the selected printer preset's first nozzle while the printer has not reported it (a "0.0"
+    // lookup finds nothing and empties the filament lists).
+    float nozzle_diameter_or_preset(int extder_id) const;
     int  get_flag_bits(std::string str, int start, int count = 1) const;
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
 

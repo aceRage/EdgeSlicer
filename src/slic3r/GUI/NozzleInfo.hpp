@@ -23,4 +23,11 @@ inline bool diameter_matches_or_unknown(float machine_diameter, float target_dia
     return !diameter_known(machine_diameter) || std::fabs(machine_diameter - target_diameter) < 1e-3f;
 }
 
+// Orca #13255: the reported diameter, or fallback (the selected printer preset's) while the printer
+// has not reported one.
+inline float diameter_or(float machine_diameter, float fallback)
+{
+    return diameter_known(machine_diameter) ? machine_diameter : fallback;
+}
+
 }}} // namespace Slic3r::GUI::NozzleInfo

@@ -6462,6 +6462,16 @@ bool MachineObject::is_nozzle_data_invalid()
     return false;
 }
 
+float MachineObject::nozzle_diameter_or_preset(int extder_id) const
+{
+    float fallback = 0.f;
+    if (const PresetBundle* bundle = Slic3r::GUI::wxGetApp().preset_bundle)
+        if (const auto* opt = bundle->printers.get_selected_preset().config.option<ConfigOptionFloats>("nozzle_diameter"))
+            if (!opt->values.empty())
+                fallback = float(opt->values.front());
+    return GUI::NozzleInfo::diameter_or(nozzle_diameter(extder_id), fallback);
+}
+
 bool MachineObject::has_nozzle_rack() const
 {
     if (is_support_nozzle_rack)

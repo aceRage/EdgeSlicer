@@ -31,3 +31,13 @@ TEST_CASE("Nozzle diameter matches when equal or unknown", "[NozzleInfo]")
     CHECK_FALSE(diameter_matches_or_unknown(0.2f, 0.4f));
     CHECK_FALSE(diameter_matches_or_unknown(0.8f, 0.f));
 }
+
+// Orca #13255: preset lookups key on the printer preset's diameter until the printer reports one,
+// so the AMS filament list is not empty (a "0.0" lookup matches no printer preset).
+TEST_CASE("Unknown nozzle diameter falls back to the preset's", "[NozzleInfo]")
+{
+    CHECK(diameter_or(0.f, 0.4f) == 0.4f);
+    CHECK(diameter_or(0.f, 0.6f) == 0.6f);
+    CHECK(diameter_or(0.2f, 0.4f) == 0.2f);
+    CHECK(diameter_or(0.8f, 0.f) == 0.8f);
+}
