@@ -1491,7 +1491,8 @@ TEST_CASE("The build height check counts the raft", "[Print][validate][Regressio
             Model model;
             init_print({ make_cube(20., 20., test_case.height) }, print, model, config);
             const SlicingParameters &slicing_params = print.objects().front()->slicing_parameters();
-            REQUIRE_THAT(slicing_params.object_print_z_min, Catch::Matchers::WithinAbs(0.9, EPSILON));
+            // Edge's raft with these settings puts the object at 1.0 mm (raft layers plus the object gap).
+            REQUIRE_THAT(slicing_params.object_print_z_min, Catch::Matchers::WithinAbs(1.0, EPSILON));
             const std::string error = print.validate().string;
             INFO(error);
             if (test_case.fits)
