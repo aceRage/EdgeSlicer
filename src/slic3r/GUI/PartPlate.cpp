@@ -40,6 +40,7 @@
 #include "2DBed.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "BedTexturePool.hpp"
 #include "PlatePrintSlots.hpp"
 #include "Camera.hpp"
 #include "GUI_Colors.hpp"
@@ -3931,9 +3932,11 @@ void PartPlateList::release_icon_textures()
 			if (part.texture) {
 				part.texture->reset();
 				delete part.texture;
+				part.texture = nullptr; // load_bedtype_textures() keeps live textures across re-layouts
 			}
 			if (part.buffer) {
 				delete part.buffer;
+				part.buffer = nullptr;
 			}
 		}
 	}
@@ -6421,11 +6424,33 @@ void PartPlateList::load_bedtype_textures()
 {
 	if (PartPlateList::is_load_bedtype_textures) return;
 
-	init_bed_type_info();
 	GLint max_tex_size = OpenGLManager::get_gl_info().get_max_tex_size();
 	GLint logo_tex_size = (max_tex_size < 2048) ? max_tex_size : 2048;
+
+	// Ultra: a re-layout (bed size, plate shapes, extruder areas: every printer switch) only moves and
+	// scales the art; the rasters depend on nothing but the SVG file and logo_tex_size. Keep the loaded
+	// textures and hand each back to a new part that shows the same file, so only art that is new to
+	// this layout (dual-nozzle or machine-specific files) is rasterised. A texture that failed to load
+	// is not kept, so it is tried again.
+	BedTexturePool<GLTexture> kept;
+	for (int i = 0; i < (int) btCount; ++i)
+		for (auto &part : bed_texture_info[i].parts) {
+			if (part.texture != nullptr && part.texture->get_id() != 0 && m_bedtype_tex_size == logo_tex_size) {
+				kept.put(part.filename, part.texture);
+				part.texture = nullptr; // init_bed_type_info() resets the parts; this one is not deleted
+			}
+		}
+
+	init_bed_type_info();
+	int reused = 0, rasterised = 0;
 	for (int i = 0; i < (unsigned int)btCount; ++i) {
 		for (int j = 0; j < bed_texture_info[i].parts.size(); j++) {
+			if (GLTexture *tex = kept.take(bed_texture_info[i].parts[j].filename)) {
+				bed_texture_info[i].parts[j].texture = tex;
+				++reused;
+				continue;
+			}
+			++rasterised;
 			std::string filename = resources_dir() + "/images/" + bed_texture_info[i].parts[j].filename;
 			if (boost::filesystem::exists(filename)) {
 				PartPlateList::bed_texture_info[i].parts[j].texture = new GLTexture();
@@ -6437,6 +6462,13 @@ void PartPlateList::load_bedtype_textures()
 			}
 		}
 	}
+	// Art the new layout no longer shows.
+	for (GLTexture *tex : kept.drain()) {
+		tex->reset();
+		delete tex;
+	}
+	m_bedtype_tex_size = logo_tex_size;
+	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": bed-type textures reused " << reused << ", rasterised " << rasterised;
 	PartPlateList::is_load_bedtype_textures = true;
 }
 

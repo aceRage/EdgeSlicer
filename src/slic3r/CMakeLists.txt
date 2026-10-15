@@ -22,6 +22,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsMappingPopup.hpp
     GUI/AMSMaterialsSetting.cpp
     GUI/AMSMaterialsSetting.hpp
+    GUI/AmsFilamentOrder.hpp
     GUI/AMSSetting.cpp
     GUI/AMSSetting.hpp
     GUI/AmsWidgets.cpp
@@ -478,6 +479,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ParamsPanel.hpp
     GUI/PartPlate.cpp
     GUI/PartPlate.hpp
+    GUI/BedTexturePool.hpp
+    GUI/PlateRecentre.hpp
     GUI/PhysicalPrinterDialog.cpp
     GUI/PhysicalPrinterDialog.hpp
     GUI/Plater.cpp
