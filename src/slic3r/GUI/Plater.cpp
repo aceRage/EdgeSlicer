@@ -10,6 +10,7 @@
 #include "libslic3r/FilamentColorLibrary.hpp" // kFullSpectrumSlotCount (recommended slot write-back)
 #include "libslic3r/Config.hpp"
 #include "libslic3r/NozzleSync.hpp"
+#include "libslic3r/FilamentSyncMatch.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
 #include "libslic3r/MixedFilament.hpp"
@@ -746,8 +747,11 @@ std::string extract_base_filament_name(const std::string& full_name)
 // e.g. "Generic PA-CF @U1 0.4 nozzle".  Split by '@' to extract the
 // base name, trim, and compare exactly — so "Generic PA" does NOT
 // accidentally match "Generic PA-CF".
+// Orca #13265: with no exact name, the preset of the reported vendor and type whose default colour
+// is closest to the reported colour wins, before the "Generic <type>" fallback.
 Preset* resolve_filament_preset(PresetBundle* preset_bundle, 
-    const std::string& filament_name, const std::string& filament_type)
+    const std::string& filament_name, const std::string& filament_type,
+    const std::string& filament_vendor = {}, const std::string& filament_colour = {})
 {
     if (!preset_bundle || filament_name.empty())
         return nullptr;
@@ -764,6 +768,28 @@ Preset* resolve_filament_preset(PresetBundle* preset_bundle,
         std::string base = extract_base_filament_name(preset.name);
         if (to_lower(base) == to_lower(filament_name)) {
             return &preset;
+        }
+    }
+
+    // Orca #13265: closest colour among the presets of this vendor and type. A user preset only
+    // counts when it is detached from its parent (its own base), as upstream.
+    if (!filament_vendor.empty() && !filament_colour.empty()) {
+        std::vector<Preset*>     candidates;
+        std::vector<std::string> colours;
+        for (auto& preset : preset_bundle->filaments) {
+            if (!preset.is_compatible || preset_bundle->filaments.get_preset_base(preset) != &preset)
+                continue;
+            if (to_lower(preset.config.opt_string("filament_vendor", 0u)) != to_lower(filament_vendor) ||
+                to_lower(preset.config.opt_string("filament_type", 0u)) != to_lower(filament_type))
+                continue;
+            candidates.push_back(&preset);
+            colours.push_back(preset.config.opt_string("default_filament_colour", 0u));
+        }
+        const int best = FilamentSyncMatch::closest_colour_index(filament_colour, colours);
+        if (best >= 0) {
+            BOOST_LOG_TRIVIAL(info) << "Filament sync: closest-colour preset for " << filament_vendor << " " << filament_type
+                                    << " " << filament_colour << ": " << candidates[best]->name;
+            return candidates[best];
         }
     }
 
@@ -844,6 +870,7 @@ void build_machine_filament_list(PresetBundle* preset_bundle, std::vector<Filame
         fd.m_index = info.index;
         fd.m_name  = info.filament_info;
         fd.m_type  = info.filament_type;
+        fd.m_vendor = info.filament_vendor;
         
         if (!info.color_info.empty() || !info.multiColors.empty()) {
             fd.m_color = FilamentColor::FromColors(info.multiColors, info.colorMode, info.color_info);
@@ -9838,7 +9865,9 @@ void Sidebar::show_sync_filament_dialog()
         ConfigOptionInts*    cmo = preset_bundle->project_config.option<ConfigOptionInts>("filament_colour_mode");
 
         for (size_t i = 0; i < effective_size; ++i) {
-            Preset* matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type);
+            const std::string synced_colour = into_u8(getMainColor(syncedData[i].m_color).GetAsString(wxC2S_HTML_SYNTAX));
+            Preset* matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
+                                                      syncedData[i].m_vendor, synced_colour);
             if (matched) {
                 preset_bundle->set_filament_preset(i, matched->name);
             }

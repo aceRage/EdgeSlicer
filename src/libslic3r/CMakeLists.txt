@@ -458,6 +458,8 @@ set(lisbslic3r_sources
     NormalUtils.hpp
     NozzleSync.cpp
     NozzleSync.hpp
+    FilamentSyncMatch.cpp
+    FilamentSyncMatch.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     SvgSplit.cpp
