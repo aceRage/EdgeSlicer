@@ -22,6 +22,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsMappingPopup.hpp
     GUI/AMSMaterialsSetting.cpp
     GUI/AMSMaterialsSetting.hpp
+    GUI/AmsFilamentOrder.hpp
     GUI/AMSSetting.cpp
     GUI/AMSSetting.hpp
     GUI/AmsWidgets.cpp
@@ -478,6 +479,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ParamsPanel.hpp
     GUI/PartPlate.cpp
     GUI/PartPlate.hpp
+    GUI/BedTexturePool.hpp
+    GUI/PlateRecentre.hpp
     GUI/PhysicalPrinterDialog.cpp
     GUI/PhysicalPrinterDialog.hpp
     GUI/Plater.cpp
@@ -520,6 +523,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/ModelBrowserPanel.hpp
     GUI/HomeVendors.cpp
     GUI/HomeVendors.hpp
+    GUI/HomeVaults.cpp
+    GUI/HomeVaults.hpp
+    GUI/HomeDownload.cpp
+    GUI/HomeDownload.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
     GUI/RemoteAccess.cpp
@@ -558,6 +565,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/BambuSendDiagnosis.cpp
     GUI/DeviceModelCode.hpp
     GUI/DeviceModelCode.cpp
+    GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
@@ -982,6 +990,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/StepMesh.hpp
     Utils/VendorConnector.cpp
     Utils/VendorConnector.hpp
+    Utils/VaultProvider.cpp
+    Utils/VaultProvider.hpp
     Utils/MainThreadGate.cpp
     Utils/MainThreadGate.hpp
     Utils/ServerLifetime.cpp

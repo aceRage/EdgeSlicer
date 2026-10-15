@@ -1068,9 +1068,11 @@ std::vector<ExPolygons> sparse_infill_areas(const std::vector<ExPolygons> &slice
         return out;
     // Inside the walls: the last wall's inner edge.
     const float inset = scaled<float>(line_width + (st.wall_loops - 1) * spacing);
-    // Too narrow for infill: a region that sparse lines this far apart (or three lines) would hardly
-    // cross stays solid - thin pillars, struts and tips.
-    const float narrow = scaled<float>(0.5 * std::max(3. * spacing, spacing / std::max(0.01, st.infill_density)));
+    // Too narrow for infill: an inside less than three lines across stays solid - thin pillars, struts
+    // and tips. Not the sparse line spacing: that made every column narrower than about
+    // 2 * walls + spacing / density (4.5 mm at 15 %) print as solid concentric loops, ignoring the
+    // walls and density the user set, while only the wide columns got them.
+    const float narrow = scaled<float>(0.5 * STABILIZER_MIN_SPARSE_LINES * spacing);
     std::vector<ExPolygons> wide(slices.size());
     for (size_t i = 0; i < slices.size(); ++i) {
         if (slices[i].empty())

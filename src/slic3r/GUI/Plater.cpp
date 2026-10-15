@@ -146,6 +146,7 @@
 #include "UVEditorCanvas.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "PlateRecentre.hpp"
 #include "RemoteAccess.hpp"
 #include "UntrustedSettingsGuard.hpp"
 #include "DualNozzleState.hpp"
@@ -10908,7 +10909,7 @@ struct Plater::priv
     void remove(size_t obj_idx);
     bool delete_object_from_model(size_t obj_idx, bool refresh_immediately = true); //BBS
     void delete_all_objects_from_model();
-    void reset(bool apply_presets_change = false);
+    void reset(bool apply_presets_change = false, bool reload_presets = true);
     void center_selection();
     void drop_selection();
     void mirror(Axis axis);
@@ -10923,6 +10924,8 @@ struct Plater::priv
     bool leave_gizmos_stack();
 
     void take_snapshot(const std::string& snapshot_name, UndoRedo::SnapshotType snapshot_type = UndoRedo::SnapshotType::Action);
+    // Copy the project config's wipe-tower positions into model.wipe_tower (take_snapshot does this first).
+    void sync_model_wipe_tower_from_config();
     /*void take_snapshot(const wxString& snapshot_name, UndoRedo::SnapshotType snapshot_type = UndoRedo::SnapshotType::Action)
         { this->take_snapshot(std::string(snapshot_name.ToUTF8().data()), snapshot_type); }*/
     int  get_active_snapshot_index();
@@ -11761,7 +11764,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             // hub list read "Untitled" instead of nothing).
             if (wxGetApp().is_hub_managed() && RemoteAccess::get().hidden() && Slic3r::has_restore_data(last_backup, originfile)) {
                 RemoteAccess::get().raise_attention("an unsaved project from a previous session is waiting to be restored", "manual");
-                this->q->new_project(e.GetInt(), true);
+                // Skips the preset reload; trigger_restore_project()'s callers load the presets first.
+                this->q->new_project(e.GetInt(), true, wxString(), false);
                 return;
             }
             if (Slic3r::has_restore_data(last_backup, originfile)) {
@@ -11778,7 +11782,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             }
             catch (...) {}
             int skip_confirm = e.GetInt();
-            this->q->new_project(skip_confirm, true);
+            // Skips the preset reload; trigger_restore_project()'s callers load the presets first.
+            this->q->new_project(skip_confirm, true, wxString(), false);
             });
         //wxPostEvent(this->q, wxCommandEvent{EVT_RESTORE_PROJECT});
     }
@@ -11850,11 +11855,11 @@ void Plater::priv::update(unsigned int flags)
         update_status = this->update_background_process(false, flags & (unsigned int)UpdateParams::POSTPONE_VALIDATION_ERROR_MESSAGE);
     //BBS TODO reload_scene
     this->view3D->reload_scene(false, flags & (unsigned int)UpdateParams::FORCE_FULL_SCREEN_REFRESH);
-    this->preview->reload_print();
+    if (is_preview_shown()) this->preview->reload_print();
     //BBS assemble view
     this->assemble_view->reload_scene(false, flags);
 
-    if (current_panel && q->is_preview_shown()) {
+    if (current_panel && is_preview_shown()) {
         q->force_update_all_plate_thumbnails();
         //update_fff_scene_only_shells(true);
     }
@@ -13914,7 +13919,7 @@ void Plater::priv::delete_all_objects_from_model()
     q->notify_filament_usage_changed();
 }
 
-void Plater::priv::reset(bool apply_presets_change)
+void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
 {
     Plater::TakeSnapshot snapshot(q, "Reset Project", UndoRedo::SnapshotType::ProjectSeparator);
 
@@ -13973,11 +13978,17 @@ void Plater::priv::reset(bool apply_presets_change)
 
     project.reset();
 
+    // Edge: the restore handler starts a new project after recreate_GUI() (language or theme
+    // change) too, when the open project's embedded presets may still be loaded. Dropping them
+    // changes the preset lists and can change the selection, so the tabs must reload then.
+    if (!reload_presets && wxGetApp().preset_bundle->has_project_embedded_presets())
+        reload_presets = true;
+
     //BBS: reset all project embedded presets
     wxGetApp().preset_bundle->reset_project_embedded_presets();
     if (apply_presets_change)
         wxGetApp().apply_keeped_preset_modifications();
-    else
+    else if (reload_presets)
         wxGetApp().load_current_presets(false, false);
 
     //BBS
@@ -16393,13 +16404,21 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
         Vec3d cur_plate_pos = cur_plate->get_center_origin();
 
         if (old_plate_pos.x() != cur_plate_pos.x() || old_plate_pos.y() != cur_plate_pos.y()) {
-            for (int i = 0; i < plate_object.size(); ++i) {
-                view3D->select_object_from_idx(plate_object[i]);
-                this->sidebar->obj_list()->update_selections();
-                view3D->center_selected_plate(i);
-            }
-
-            view3D->deselect_all();
+            // Ultra: one "Move Object" undo snapshot for the whole recentre instead of one per plate
+            // (plus one for the deselect), and empty plates are not visited. The non-empty plates are
+            // centred exactly as before, in the same order (see PlateRecentre.hpp).
+            run_plate_recentre(
+                plate_object, [this]() { return Plater::TakeSnapshot(q, L("Move Object")); },
+                [this, &plate_object](int i) {
+                    view3D->select_object_from_idx(plate_object[i]);
+                    this->sidebar->obj_list()->update_selections();
+                    view3D->center_selected_plate(i);
+                },
+                [this]() { view3D->deselect_all(); });
+            // The per-plate snapshots also refreshed the model's copy of the wipe-tower positions
+            // after the moves (the last one, the deselect's, after all of them); keep that.
+            if (m_prevent_snapshots == 0)
+                sync_model_wipe_tower_from_config();
         }
 #if 0   // do not toggle auto calc when change printer
         // update flush matrix
@@ -18546,6 +18565,27 @@ int Plater::priv::get_active_snapshot_index()
     return it - ss_stack.begin();
 }
 
+void Plater::priv::sync_model_wipe_tower_from_config()
+{
+    //FIXME updating the Wipe tower config values at the ModelWipeTower from the Print config.
+    // This is a workaround until we refactor the Wipe Tower position / orientation to live solely inside the Model, not in the Print config.
+    // BBS: add partplate logic
+    if (this->printer_technology == ptFFF) {
+        const DynamicPrintConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
+        const ConfigOptionFloats* tower_x_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_x");
+        const ConfigOptionFloats* tower_y_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_y");
+        assert(tower_x_opt->values.size() == tower_y_opt->values.size());
+        model.wipe_tower.positions.clear();
+        model.wipe_tower.positions.resize(tower_x_opt->values.size());
+        for (int plate_idx = 0; plate_idx < tower_x_opt->values.size(); plate_idx++) {
+            ModelWipeTower& tower = model.wipe_tower;
+
+            tower.positions[plate_idx] = Vec2d(tower_x_opt->get_at(plate_idx), tower_y_opt->get_at(plate_idx));
+            tower.rotation = proj_cfg.opt_float("wipe_tower_rotation_angle");
+        }
+    }
+}
+
 void Plater::priv::take_snapshot(const std::string& snapshot_name, const UndoRedo::SnapshotType snapshot_type)
 {
     if (m_prevent_snapshots > 0)
@@ -18575,24 +18615,7 @@ void Plater::priv::take_snapshot(const std::string& snapshot_name, const UndoRed
     if (view3D->get_canvas3d()->get_gizmos_manager().wants_reslice_supports_on_undo())
         snapshot_data.flags |= UndoRedo::SnapshotData::RECALCULATE_SLA_SUPPORTS;
 
-    //FIXME updating the Wipe tower config values at the ModelWipeTower from the Print config.
-    // This is a workaround until we refactor the Wipe Tower position / orientation to live solely inside the Model, not in the Print config.
-    // BBS: add partplate logic
-    if (this->printer_technology == ptFFF) {
-        const DynamicPrintConfig& config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-        const DynamicPrintConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
-        const ConfigOptionFloats* tower_x_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_x");
-        const ConfigOptionFloats* tower_y_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_y");
-        assert(tower_x_opt->values.size() == tower_y_opt->values.size());
-        model.wipe_tower.positions.clear();
-        model.wipe_tower.positions.resize(tower_x_opt->values.size());
-        for (int plate_idx = 0; plate_idx < tower_x_opt->values.size(); plate_idx++) {
-            ModelWipeTower& tower = model.wipe_tower;
-
-            tower.positions[plate_idx] = Vec2d(tower_x_opt->get_at(plate_idx), tower_y_opt->get_at(plate_idx));
-            tower.rotation = proj_cfg.opt_float("wipe_tower_rotation_angle");
-        }
-    }
+    sync_model_wipe_tower_from_config();
     GLCanvas3D* canvas = get_current_canvas3D();
     if (!canvas) {
         // During destruction, skip snapshot
@@ -19027,7 +19050,7 @@ Print&          Plater::fff_print()         { return p->fff_print; }
 const SLAPrint& Plater::sla_print() const   { return p->sla_print; }
 SLAPrint&       Plater::sla_print()         { return p->sla_print; }
 
-int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_name)
+int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_name, bool reload_presets)
 {
     bool transfer_preset_changes = false;
     // BBS: save confirm
@@ -19062,7 +19085,7 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
     //get_partplate_list().reinit();
     //get_partplate_list().update_slice_context_to_current_plate(p->background_process);
     //p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
-    reset(transfer_preset_changes);
+    reset(transfer_preset_changes, reload_presets);
     reset_project_dirty_after_save();
     reset_project_dirty_initial_presets();
     wxGetApp().update_saved_preset_from_current_preset();
@@ -19679,6 +19702,21 @@ void Plater::calib_pa(const Calib_Params& params)
     p->background_process.fff_print()->set_calib_params(params);
 }
 
+// Check if the machine supports Junction Deviation (Marlin firmware with machine_max_junction_deviation > 0)
+static bool has_junction_deviation(const DynamicPrintConfig* printer_config)
+{
+    if (!printer_config) {
+        return false;
+    }
+    const auto gcode_flavor = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+    const auto junction_dev = printer_config->option<ConfigOptionFloats>("machine_max_junction_deviation");
+    return gcode_flavor &&
+           gcode_flavor->value == GCodeFlavor::gcfMarlinFirmware &&
+           junction_dev &&
+           !junction_dev->values.empty() &&
+           junction_dev->values.front() > 0.0;
+}
+
 void Plater::_calib_pa_pattern(const Calib_Params& params)
 {
     std::vector<double> speeds{params.speeds};
@@ -19716,7 +19754,7 @@ void Plater::_calib_pa_pattern(const Calib_Params& params)
     print_config.set_key_value( "print_sequence", new ConfigOptionEnum(PrintSequence::ByLayer));
     
     //Orca: find jerk value to use in the test
-    if(print_config.option<ConfigOptionFloats>("default_jerk")->values.front() > 0){ // we have set a jerk value
+    if(!has_junction_deviation(printer_config) && print_config.option<ConfigOptionFloats>("default_jerk")->values.front() > 0){ // we have set a jerk value
         auto jerk = print_config.option<ConfigOptionFloats>("outer_wall_jerk")->values.front(); // get outer wall jerk
         if (jerk == 0) // if outer wall jerk is not defined, get inner wall jerk
             jerk = print_config.option<ConfigOptionFloats>("inner_wall_jerk")->values.front();
@@ -19732,7 +19770,11 @@ void Plater::_calib_pa_pattern(const Calib_Params& params)
         print_config.set_key_value("infill_jerk", new ConfigOptionFloats { jerk });
         print_config.set_key_value("travel_jerk", new ConfigOptionFloats { jerk });
     }
-    
+
+    if (has_junction_deviation(printer_config)){
+        print_config.set_key_value("default_junction_deviation", new ConfigOptionFloats { 0 });
+    }
+
     for (const auto& opt : SuggestedConfigCalibPAPattern().float_pairs) {
         print_config.set_key_value(
             opt.first,
@@ -20428,8 +20470,18 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
     auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats {0.3});
+    const auto gcode_flavor_option = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+    if (has_junction_deviation(printer_config)) {
+        printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats {(std::max(printer_config->option<ConfigOptionFloats>("machine_max_junction_deviation")->values.front(), 0.25))});
+        print_config->set_key_value("default_junction_deviation", new ConfigOptionFloats { 0 });
+    } else {
+        const double jerk_value = (gcode_flavor_option && gcode_flavor_option->value == GCodeFlavor::gcfKlipper) ? 5.0 : 10.0;
+        printer_config->set_key_value("machine_max_jerk_x", new ConfigOptionFloats{std::max(printer_config->option<ConfigOptionFloats>("machine_max_jerk_x")->values.front(), jerk_value)});
+        printer_config->set_key_value("machine_max_jerk_y", new ConfigOptionFloats{std::max(printer_config->option<ConfigOptionFloats>("machine_max_jerk_y")->values.front(), jerk_value)});
+        print_config->set_key_value("default_jerk", new ConfigOptionFloats { 0 });
+    }
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
+    printer_config->set_key_value("input_shaping_emit", new ConfigOptionBool{false});
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
@@ -20448,9 +20500,8 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
     print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
-    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 2000 });
-    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 2000 });
-    print_config->set_key_value("default_junction_deviation", new ConfigOptionFloats { 0.25 });
+    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 20000 });
+    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 20000 });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -20477,8 +20528,18 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
     auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats{0.3});
+    const auto gcode_flavor_option = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+    if (has_junction_deviation(printer_config)) {
+        printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats {(std::max(printer_config->option<ConfigOptionFloats>("machine_max_junction_deviation")->values.front(), 0.25))});
+        print_config->set_key_value("default_junction_deviation", new ConfigOptionFloats { 0 });
+    } else {
+        const double jerk_value = (gcode_flavor_option && gcode_flavor_option->value == GCodeFlavor::gcfKlipper) ? 5.0 : 10.0;
+        printer_config->set_key_value("machine_max_jerk_x", new ConfigOptionFloats{std::max(printer_config->option<ConfigOptionFloats>("machine_max_jerk_x")->values.front(), jerk_value)});
+        printer_config->set_key_value("machine_max_jerk_y", new ConfigOptionFloats{std::max(printer_config->option<ConfigOptionFloats>("machine_max_jerk_y")->values.front(), jerk_value)});
+        print_config->set_key_value("default_jerk", new ConfigOptionFloats { 0 });
+    }
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
+    printer_config->set_key_value("input_shaping_emit", new ConfigOptionBool{false});
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
@@ -20497,9 +20558,8 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
     print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
-    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 2000 });
-    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 2000 });
-    print_config->set_key_value("default_junction_deviation", new ConfigOptionFloats { 0.25 });
+    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 20000 });
+    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 20000 });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -20513,21 +20573,39 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     p->background_process.fff_print()->set_calib_params(params);
 }
 
-void Plater::calib_junction_deviation(const Calib_Params& params)
+void Plater::Calib_Cornering(const Calib_Params& params)
 {
-    const auto calib_junction_deviation = wxString::Format(L"Junction Deviation test");
-    new_project(false, false, calib_junction_deviation);
+    const auto Calib_Cornering = wxString::Format(L"Cornering test");
+    new_project(false, false, Calib_Cornering);
     wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
-    if (params.mode != CalibMode::Calib_Junction_Deviation)
+    if (params.mode != CalibMode::Calib_Cornering)
         return;
 
-    if (!add_model(false, Slic3r::resources_dir() + (params.test_model < 1 ? "/calib/input_shaping/ringing_tower.stl" : "/calib/input_shaping/fast_tower_test.stl")))
+    const std::string cornering_model_path = params.test_model == 0
+        ? "/calib/input_shaping/ringing_tower.stl"
+        : (params.test_model == 1 ? "/calib/input_shaping/fast_tower_test.stl" : "/calib/cornering/SCV-V2.stl");
+    if (!add_model(false, Slic3r::resources_dir() + cornering_model_path))
         return;
     auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
     auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats{1.0});
+    if (has_junction_deviation(printer_config)) {
+        printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats{params.end});
+        print_config->set_key_value("default_junction_deviation", new ConfigOptionFloats { 0.0 });
+    } else {
+        printer_config->set_key_value("machine_max_jerk_x", new ConfigOptionFloats{params.end});
+        printer_config->set_key_value("machine_max_jerk_y", new ConfigOptionFloats{params.end});
+        print_config->set_key_value("default_jerk", new ConfigOptionFloats { 0 });
+    }
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
+    // Edge: Klipper takes the input shaping override too, but upstream never turned input shaping off
+    // for a Klipper cornering test, and SET_INPUT_SHAPER stays in force on the printer until a
+    // restart; leave the Klipper override as the user set it.
+    const auto cornering_flavor = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+    if (!(cornering_flavor && cornering_flavor->value == GCodeFlavor::gcfKlipper)) {
+        printer_config->set_key_value("input_shaping_emit", new ConfigOptionBool{true});
+        printer_config->set_key_value("input_shaping_type", new ConfigOptionEnum<InputShaperType>(InputShaperType::Disable));
+    }
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
@@ -20549,7 +20627,6 @@ void Plater::calib_junction_deviation(const Calib_Params& params)
     print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
     print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 2000 });
     print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 2000 });
-    print_config->set_key_value("default_junction_deviation", new ConfigOptionFloats { 0.0 });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -21618,7 +21695,7 @@ void Plater::deselect_all() { p->deselect_all(); }
 void Plater::exit_gizmo() { p->exit_gizmo(); }
 
 void Plater::remove(size_t obj_idx) { p->remove(obj_idx); }
-void Plater::reset(bool apply_presets_change) { p->reset(apply_presets_change); }
+void Plater::reset(bool apply_presets_change, bool reload_presets) { p->reset(apply_presets_change, reload_presets); }
 void Plater::reset_with_confirm()
 {
     if (p->model.objects.empty() || MessageDialog(static_cast<wxWindow *>(this), _L("All objects will be removed, continue?"),

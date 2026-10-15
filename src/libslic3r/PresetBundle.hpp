@@ -228,11 +228,28 @@ private:
 public:
 
     bool backup_user_folder() const;
+    // Writes the user preset folder into a zip archive at zip_path, its entries under "user/".
+    bool backup_user_folder_to_zip(const std::string &zip_path) const;
+
+    // User filament presets made against an older release that no longer show on printers their parent
+    // listed then (resources/info/legacy_compatible_printers.json). (OrcaSlicer #16367.)
+    std::vector<LegacyUserFilamentPreset> legacy_user_filament_presets();
+    // Backs up the user preset folder into a zip in data_dir(), then writes each preset's printers into its file
+    // under one hold of the user presets lock. Nothing is written when the backup failed (backup empty) or the
+    // lock could not be taken (locked false); otherwise failed names the presets whose files could not be written.
+    struct LegacyUserFilamentPresetMigration {
+        bool                     locked{false};
+        std::string              backup;
+        std::vector<std::string> failed;
+    };
+    LegacyUserFilamentPresetMigration migrate_legacy_user_filament_presets(const std::vector<LegacyUserFilamentPreset> &legacy_presets);
 
     //BBS: project embedded preset logic
     PresetsConfigSubstitutions load_project_embedded_presets(std::vector<Preset*> project_presets, ForwardCompatibilitySubstitutionRule substitution_rule);
     std::vector<Preset*> get_current_project_embedded_presets();
     void reset_project_embedded_presets();
+    // Edge: any project-embedded preset loaded (print, filament or printer)?
+    bool has_project_embedded_presets() const;
     // Ultra: the project presets in use (printer, process, filament slots) that `printer_name`
     // cannot use, i.e. that switching to that printer would deselect and hide. Filament presets
     // the loader made up for a slot that matched no preset ("<name>(<file>.3mf)") do not count.

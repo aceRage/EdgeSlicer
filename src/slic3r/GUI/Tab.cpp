@@ -26,6 +26,7 @@
 #include <wx/settings.h>
 #include <wx/filedlg.h>
 #include <algorithm>
+#include <cstdint>
 #include <iomanip>
 #include <sstream>
 
@@ -1906,6 +1907,11 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         return;
     }
 
+    if (opt_key == "gcode_flavor" && m_type == Preset::TYPE_PRINTER) {
+        if (auto printer_tab = dynamic_cast<TabPrinter*>(this))
+            printer_tab->on_gcode_flavor_changed();
+    }
+
     if (opt_key == "compatible_prints")
         this->compatible_widget_reload(m_compatible_prints);
     if (opt_key == "compatible_printers")
@@ -2738,6 +2744,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("xy_hole_compensation", "quality_settings_precision#x-y-compensation");
         optgroup->append_single_option_line("xy_contour_compensation", "quality_settings_precision#x-y-compensation");
         optgroup->append_single_option_line("elefant_foot_compensation", "quality_settings_precision#elephant-foot-compensation");
+        optgroup->append_single_option_line("elefant_foot_layers_density", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("elefant_foot_compensation_layers", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("precise_outer_wall", "quality_settings_precision#precise-wall");
         optgroup->append_single_option_line("precise_z_height", "quality_settings_precision#precise-z-height");
@@ -2944,6 +2951,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("sparse_infill_acceleration", "speed_settings_acceleration#sparse-infill");
         optgroup->append_single_option_line("internal_solid_infill_acceleration", "speed_settings_acceleration#internal-solid-infill");
         optgroup->append_single_option_line("initial_layer_acceleration", "speed_settings_acceleration#initial-layer");
+        optgroup->append_single_option_line("first_layer_travel_acceleration", "speed_settings_acceleration#first-layer-travel");
         optgroup->append_single_option_line("top_surface_acceleration", "speed_settings_acceleration#top-surface");
         optgroup->append_single_option_line("travel_acceleration", "speed_settings_acceleration#travel");
         optgroup->append_single_option_line("accel_to_decel_enable", "speed_settings_acceleration");
@@ -2959,6 +2967,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("infill_jerk", "speed_settings_jerk_xy#infill");
         optgroup->append_single_option_line("top_surface_jerk", "speed_settings_jerk_xy#top-surface");
         optgroup->append_single_option_line("initial_layer_jerk", "speed_settings_jerk_xy#initial-layer");
+        optgroup->append_single_option_line("first_layer_travel_jerk", "speed_settings_jerk_xy#first-layer-travel");
         optgroup->append_single_option_line("travel_jerk", "speed_settings_jerk_xy#travel");
 
         optgroup = page->new_optgroup(L("Advanced"), L"param_advanced", 15);
@@ -3111,6 +3120,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
+        optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
         // Tower interface options (per-filament values on the filament Multimaterial page).
         optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
@@ -4892,6 +4902,8 @@ void TabFilament::build()
         //optgroup->append_line(line);
         optgroup = page->new_optgroup(L("Cooling for specific layer"), L"param_cooling_specific_layer");
         optgroup->append_single_option_line("close_fan_the_first_x_layers");
+        // ORCA: explicit override for the part cooling fan on layer 0; also anchors the ramp when "Full fan speed at layer" is set.
+        optgroup->append_single_option_line("initial_layer_fan_speed");
         optgroup->append_single_option_line("full_fan_speed_layer");
 
         optgroup = page->new_optgroup(L("Part cooling fan"), L"param_cooling_part_fan");
@@ -4925,11 +4937,13 @@ void TabFilament::build()
         optgroup->append_single_option_line("activate_air_filtration", "air-filtration");
 
         line = {L("During print"), ""};
+        line.append_option(optgroup->get_option("activate_air_filtration_during_print"));
         line.append_option(optgroup->get_option("during_print_exhaust_fan_speed"));
         optgroup->append_line(line);
 
 
         line = {L("Complete print"), ""};
+        line.append_option(optgroup->get_option("activate_air_filtration_on_completion"));
         line.append_option(optgroup->get_option("complete_print_exhaust_fan_speed"));
         optgroup->append_line(line);
         //BBS
@@ -5145,9 +5159,39 @@ void TabFilament::toggle_options()
 
       toggle_option("additional_cooling_fan_speed", cfg.opt_bool("auxiliary_fan"));
 
+      // Orca #13228: the exhaust fan speeds apply only where their override is on.
+      bool activate_air_filtration = m_config->opt_bool("activate_air_filtration", 0);
+      toggle_option("activate_air_filtration_during_print", activate_air_filtration);
+      toggle_option("activate_air_filtration_on_completion", activate_air_filtration);
+      toggle_option("during_print_exhaust_fan_speed", activate_air_filtration && m_config->opt_bool("activate_air_filtration_during_print", 0));
+      toggle_option("complete_print_exhaust_fan_speed", activate_air_filtration && m_config->opt_bool("activate_air_filtration_on_completion", 0));
+
       // Orca: toggle dont slow down for external perimeters if
       bool has_slow_down_for_layer_cooling = m_config->opt_bool("slow_down_for_layer_cooling", 0);
       toggle_option("dont_slow_down_outer_wall", has_slow_down_for_layer_cooling);
+
+      // ORCA: First layer fan speed override only makes sense when no layers are gated off ("No cooling for
+      // the first" == 0). Otherwise the override would set layer 0 to a non-zero value while the gate forces
+      // layers 1..N-1 to zero, producing a confusing non-monotonic profile. When the gate is active we both
+      // grey out the UI line and force the underlying value to -1 so the cooling buffer never enters the
+      // override branch.
+      const int close_fan_first_n = m_config->opt_int("close_fan_the_first_x_layers", 0);
+      const bool initial_layer_fan_speed_enabled = close_fan_first_n <= 0;
+      toggle_line("initial_layer_fan_speed", initial_layer_fan_speed_enabled);
+      if (!initial_layer_fan_speed_enabled) {
+          if (auto* opt = dynamic_cast<const ConfigOptionInts*>(m_config->option("initial_layer_fan_speed"))) {
+              bool needs_reset = false;
+              for (int v : opt->values) {
+                  if (v != -1) { needs_reset = true; break; }
+              }
+              if (needs_reset) {
+                  std::vector<int> reset_values(opt->values.size(), -1);
+                  m_config->set_key_value("initial_layer_fan_speed", new ConfigOptionInts(reset_values));
+                  update_dirty();
+                  reload_config();
+              }
+          }
+      }
     }
     if (m_active_page->title() == L("Filament"))
     {
@@ -5379,6 +5423,7 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("gcode_flavor");
         optgroup->append_single_option_line("pellet_modded_printer", "pellet-flow-coefficient");
         optgroup->append_single_option_line("bbl_use_printhost");
+        optgroup->append_single_option_line("enable_power_loss_recovery"); // Orca #11582
         optgroup->append_single_option_line("disable_m73");
         option = optgroup->get_option("thumbnails");
         option.opt.full_width = true;
@@ -5438,6 +5483,8 @@ void TabPrinter::build_fff()
         line.append_option(optgroup->get_option("fan_speedup_overhangs"));
         optgroup->append_line(line);
         optgroup->append_single_option_line("fan_kickstart");
+        // ORCA: minimum non-zero part cooling fan speed.
+        optgroup->append_single_option_line("part_cooling_fan_min_pwm");
 
         optgroup = page->new_optgroup(L("Extruder Clearance"), "param_extruder_clearence");
         optgroup->append_single_option_line("extruder_clearance_radius");
@@ -5721,7 +5768,7 @@ PageShp TabPrinter::build_kinematics_page()
     optgroup->append_single_option_line("emit_machine_limits_to_gcode");
 
     // resonance avoidance ported over from qidi slicer
-    optgroup = page->new_optgroup(L("Resonance Avoidance"), "param_resonance_avoidance");
+    optgroup = page->new_optgroup(L("Resonance Compensation"), "param_resonance_avoidance");
     optgroup->append_single_option_line("resonance_avoidance");
     // Resonance‑avoidance speed inputs
     {
@@ -5729,6 +5776,20 @@ PageShp TabPrinter::build_kinematics_page()
         resonance_line.append_option(optgroup->get_option("min_resonance_avoidance_speed"));
         resonance_line.append_option(optgroup->get_option("max_resonance_avoidance_speed"));
         optgroup->append_line(resonance_line);
+    }
+    optgroup->append_single_option_line("input_shaping_emit", "input-shaping-calib");
+    optgroup->append_single_option_line("input_shaping_type", "input-shaping-calib");
+    {
+        Line freq_line = {L("Frequency"), L("The frequency of the anti-vibration signal will correspond to the natural frequency of the frame.")};
+        freq_line.append_option(optgroup->get_option("input_shaping_freq_x"));
+        freq_line.append_option(optgroup->get_option("input_shaping_freq_y"));
+        optgroup->append_line(freq_line);
+    }
+    {
+        Line damping_line = {L("Damping"), L("Damping ratio for the input shaping filter.")};
+        damping_line.append_option(optgroup->get_option("input_shaping_damp_x"));
+        damping_line.append_option(optgroup->get_option("input_shaping_damp_y"));
+        optgroup->append_line(damping_line);
     }
 
     const std::vector<std::string> speed_axes{
@@ -5752,12 +5813,12 @@ PageShp TabPrinter::build_kinematics_page()
         append_option_line(optgroup, "machine_max_acceleration_travel");
 
         optgroup = page->new_optgroup(L("Jerk limitation"), "param_jerk");
+        // machine max junction deviation
+        append_option_line(optgroup, "machine_max_junction_deviation");
         for (const std::string &axis : axes)	{
             append_option_line(optgroup, "machine_max_jerk_" + axis);
         }
 
-        // machine max junction deviation
-         append_option_line(optgroup, "machine_max_junction_deviation");
     //optgroup = page->new_optgroup(L("Minimum feedrates"));
     //    append_option_line(optgroup, "machine_min_extruding_rate");
     //    append_option_line(optgroup, "machine_min_travel_rate");
@@ -6288,6 +6349,119 @@ void TabPrinter::update_rate_note()
         parent->Layout();
 }
 
+std::vector<InputShaperType> input_shaper_types_for_flavor(GCodeFlavor flavor)
+{
+    switch (flavor) {
+    case GCodeFlavor::gcfKlipper:
+        return {
+            InputShaperType::Default,
+            InputShaperType::ZV,
+            InputShaperType::MZV,
+            InputShaperType::ZVD,
+            InputShaperType::EI,
+            InputShaperType::TwoHumpEI,
+            InputShaperType::ThreeHumpEI,
+            InputShaperType::Disable
+        };
+    case GCodeFlavor::gcfRepRapFirmware:
+        return {
+            InputShaperType::Default,
+            InputShaperType::MZV,
+            InputShaperType::ZVD,
+            InputShaperType::ZVDD,
+            InputShaperType::ZVDDD,
+            InputShaperType::EI2,
+            InputShaperType::EI3,
+            InputShaperType::DAA,
+            InputShaperType::Disable
+        };
+    case GCodeFlavor::gcfMarlinFirmware:
+        return {
+            InputShaperType::ZV,
+            InputShaperType::Disable
+        };
+    default:
+        return {
+            InputShaperType::Default,
+            InputShaperType::Disable
+        };
+    }
+}
+
+void TabPrinter::update_input_shaper_menu(GCodeFlavor flavor)
+{
+    if (m_presets->get_edited_preset().printer_technology() != ptFFF)
+        return;
+
+    const std::vector<InputShaperType> allowed = input_shaper_types_for_flavor(flavor);
+    if (allowed.empty())
+        return;
+
+    const InputShaperType current = m_config->opt_enum<InputShaperType>("input_shaping_type");
+    const bool needs_reset = std::find(allowed.begin(), allowed.end(), current) == allowed.end();
+    const InputShaperType desired = needs_reset ? allowed.front() : current;
+
+    // Edge: only rewrite the stored type while the override is on. Upstream rewrote it whenever the
+    // page was shown, so merely opening Motion ability on a Marlin 2 printer (whose list has no
+    // Default) turned its "Default" into "ZV" and marked the preset modified. With the override off
+    // the type is never written; Marlin's M593 has no type either.
+    if (needs_reset && current != desired && m_config->opt_bool("input_shaping_emit")) {
+        DynamicPrintConfig new_conf = *m_config;
+        new_conf.set_key_value("input_shaping_type", new ConfigOptionEnum<InputShaperType>(desired));
+        m_config_manipulation.apply(m_config, &new_conf);
+    }
+
+    Page* owning_page = nullptr;
+    Field* field = get_field("input_shaping_type", &owning_page);
+    if (field == nullptr)
+        return;
+
+    auto choice_field = dynamic_cast<Choice*>(field);
+    if (choice_field == nullptr)
+        return;
+
+    auto combo = dynamic_cast<ComboBox*>(choice_field->getWindow());
+    if (combo == nullptr)
+        return;
+
+    const ConfigOptionDef* def = m_config->def()->get("input_shaping_type");
+    if (def == nullptr)
+        return;
+
+    const auto& labels = def->enum_labels;
+    const auto& values = def->enum_values;
+
+    wxWindowUpdateLocker locker(combo);
+    combo->Clear();
+
+    for (InputShaperType type : allowed) {
+        const size_t idx = static_cast<size_t>(type);
+        wxString label;
+        if (idx < labels.size() && !labels[idx].empty())
+            label = _(labels[idx]);
+        else if (idx < values.size())
+            label = wxString::FromUTF8(values[idx].c_str());
+        else
+            label = wxString::Format("%d", static_cast<int>(type));
+
+        combo->Append(label, wxNullBitmap,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(static_cast<int>(type))));
+    }
+
+    if (combo->GetCount() == 0)
+        return;
+
+    choice_field->set_value(static_cast<int>(desired), false);
+}
+
+void TabPrinter::on_gcode_flavor_changed()
+{
+    auto* flavor_option = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+    if (!flavor_option)
+        return;
+    update_input_shaper_menu(flavor_option->value);
+}
+
 void TabPrinter::toggle_options()
 {
     if (!m_active_page || m_presets->get_edited_preset().printer_technology() == ptSLA)
@@ -6313,6 +6487,10 @@ void TabPrinter::toggle_options()
         // SoftFever: hide non-BBL settings
         for (auto el : {"use_firmware_retraction", "use_relative_e_distances", "support_multi_bed_types", "pellet_modded_printer", "bed_mesh_max", "bed_mesh_min", "bed_mesh_probe_distance", "adaptive_bed_mesh_margin", "thumbnails"})
           toggle_line(el, !is_BBL_printer);
+
+        // Orca #11582: power loss recovery G-code exists for Bambu Lab printers and Marlin 2 only.
+        const auto *flavor = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+        toggle_line("enable_power_loss_recovery", is_BBL_printer || (flavor && flavor->value == gcfMarlinFirmware));
 
         // "Unload filaments after print" is a Snapmaker tool-changer preference: the flag goes
         // to the printer with the print start, and only that firmware's PRINT_END acts on it.
@@ -6429,11 +6607,13 @@ void TabPrinter::toggle_options()
 
     if (m_active_page->title() == L("Motion ability")) {
         auto gcf = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+        update_input_shaper_menu(gcf);
 
         // Orca: use booleans to avoid repeated comparisons with enum values
         const bool gcf_is_marlin_legacy = gcf == GCodeFlavor::gcfMarlinLegacy;
         const bool gcf_is_marlin_firmware = gcf == GCodeFlavor::gcfMarlinFirmware;
         const bool gcf_is_klipper = gcf == GCodeFlavor::gcfKlipper;
+        const bool gcf_is_reprap_firmware = gcf == GCodeFlavor::gcfRepRapFirmware;
 
         bool silent_mode = m_config->opt_bool("silent_mode");
         int  max_field   = silent_mode ? 2 : 1;
@@ -6462,9 +6642,31 @@ void TabPrinter::toggle_options()
             toggle_option("machine_max_jerk_e", enable_jerk, i);
         }
 
+        bool emittable_limits = gcf_is_marlin_legacy || gcf_is_marlin_firmware || gcf_is_reprap_firmware;
+        toggle_option("emit_machine_limits_to_gcode", emittable_limits);
+
         bool resonance_avoidance = m_config->opt_bool("resonance_avoidance");
         toggle_option("min_resonance_avoidance_speed", resonance_avoidance);
         toggle_option("max_resonance_avoidance_speed", resonance_avoidance);
+
+        // Edge: Klipper takes the override too (SET_INPUT_SHAPER, whatever emit_machine_limits_to_gcode says);
+        // Bambu printers never get it.
+        bool input_shaping_compatible = (gcf_is_marlin_firmware || gcf_is_reprap_firmware || gcf_is_klipper) && !is_BBL_printer;
+
+        for (auto is : {"input_shaping_emit", "input_shaping_type", "input_shaping_freq_x", "input_shaping_freq_y",
+                            "input_shaping_damp_x", "input_shaping_damp_y"})
+                toggle_line(is, input_shaping_compatible);
+
+        if (input_shaping_compatible) {
+            bool emit_machine_limits_to_gcode = gcf_is_klipper || m_config->opt_bool("emit_machine_limits_to_gcode");
+            toggle_option("input_shaping_emit", emit_machine_limits_to_gcode);
+            bool input_shaping_emit = emit_machine_limits_to_gcode && m_config->opt_bool("input_shaping_emit");
+            toggle_option("input_shaping_type", input_shaping_emit);
+            toggle_option("input_shaping_freq_x", input_shaping_emit);
+            toggle_option("input_shaping_freq_y", input_shaping_emit && !gcf_is_reprap_firmware);
+            toggle_option("input_shaping_damp_x", input_shaping_emit);
+            toggle_option("input_shaping_damp_y", input_shaping_emit && !gcf_is_reprap_firmware);
+        }
     }
 }
 
@@ -7072,8 +7274,9 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         load_current_preset();
 
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
-        // Deferred so it runs after this switch settles; sync_bambu_user_presets only reloads the UI
-        // when new/updated files were actually copied (copied==0 -> no-op), so it's self-limiting.
+        // Deferred so it runs after this switch settles. sync_bambu_user_presets only lists the Bambu
+        // Studio folder here (no reads) and returns when nothing changed since the last clean sync;
+        // otherwise the mirror runs on a worker thread and the UI reloads only when files were copied.
         if (m_type == Preset::TYPE_PRINTER)
             wxGetApp().CallAfter([]() { wxGetApp().sync_bambu_user_presets(false); });
 

@@ -91,7 +91,8 @@ public:
         const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes,
         const std::vector<std::vector<WipeTower::ToolChangeResult>> &local_z_tool_changes,
         const std::vector<std::vector<WipeTower::box_coordinates>>  &local_z_reserve_boxes,
-        const WipeTower::ToolChangeResult                           &final_purge) :
+        const WipeTower::ToolChangeResult                           &final_purge,
+        bool                                                         final_purge_drop = false) :
         m_left(/*float(print_config.wipe_tower_x.value)*/ 0.f),
         m_right(float(/*print_config.wipe_tower_x.value +*/ print_config.prime_tower_width.value)),
         m_wipe_tower_pos(float(print_config.wipe_tower_x.get_at(plate_idx)), float(print_config.wipe_tower_y.get_at(plate_idx))),
@@ -102,6 +103,7 @@ public:
         m_local_z_tool_changes(local_z_tool_changes),
         m_local_z_reserve_boxes(local_z_reserve_boxes),
         m_final_purge(final_purge),
+        m_final_purge_drop(final_purge_drop),
         m_layer_idx(-1),
         m_tool_change_idx(0),
         m_local_z_tool_change_idx(local_z_tool_changes.size(), 0),
@@ -164,6 +166,7 @@ private:
     const std::vector<std::vector<WipeTower::ToolChangeResult>> &m_local_z_tool_changes;
     const std::vector<std::vector<WipeTower::box_coordinates>>  &m_local_z_reserve_boxes;
     const WipeTower::ToolChangeResult                           &m_final_purge;
+    const bool                                                   m_final_purge_drop { false };
     // Current layer index.
     int                                                          m_layer_idx;
     int                                                          m_tool_change_idx;
@@ -286,6 +289,9 @@ public:
     std::string     placeholder_parser_process(const std::string &name, const std::string &templ, unsigned int current_extruder_id, const DynamicConfig *config_override = nullptr);
     bool            enable_cooling_markers() const { return m_enable_cooling_markers; }
     std::string     extrusion_role_to_string_for_parser(const ExtrusionRole &);
+
+    // Calculate the interpolated value for the current layer between start_value and end_value
+    float interpolate_value_across_layers(float start_value, float end_value) const;
 
     // For Perl bindings, to be used exclusively by unit tests.
     unsigned int    layer_count() const { return m_layer_count; }

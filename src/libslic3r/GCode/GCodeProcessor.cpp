@@ -848,6 +848,7 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     m_parser.apply_config(config);
 
     m_flavor = config.gcode_flavor;
+    m_printer_model = config.printer_model.value;
 
     m_single_extruder_multi_material = config.single_extruder_multi_material;
 
@@ -1014,6 +1015,10 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     const ConfigOptionString* printer_settings_id = config.option<ConfigOptionString>("printer_settings_id");
     if (printer_settings_id != nullptr)
         m_result.settings_ids.printer = printer_settings_id->value;
+
+    // Orca #14663. A G-code without the key belongs to no Elegoo printer.
+    const ConfigOptionString* printer_model = config.option<ConfigOptionString>("printer_model");
+    m_printer_model = printer_model != nullptr ? printer_model->value : std::string();
 
     // BBS
     m_result.extruders_count = config.option<ConfigOptionFloats>("filament_diameter")->values.size();
@@ -1285,6 +1290,12 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     if (has_scarf_joint_seam != nullptr)
         m_detect_layer_based_on_tag = m_detect_layer_based_on_tag || has_scarf_joint_seam->value;
 
+    // Orca #15379: the G-code viewer loads an opened file's config through this overload, so the
+    // MANUAL_TOOL_CHANGE comments only switched the colour when the file was sliced in-session.
+    const ConfigOptionBool* manual_filament_change = config.option<ConfigOptionBool>("manual_filament_change");
+    if (manual_filament_change != nullptr)
+        m_manual_filament_change = manual_filament_change->value;
+
     const ConfigOptionEnumGeneric *bed_type = config.option<ConfigOptionEnumGeneric>("curr_bed_type");
     if (bed_type != nullptr)
         m_result.bed_type = (BedType)bed_type->value;
@@ -1370,6 +1381,7 @@ void GCodeProcessor::reset()
     m_detect_layer_based_on_tag = false;
 
     m_seams_count = 0;
+    m_g29_time_added = false;
     m_preheat_time = 0.f;
     m_delta_temperature = 0;
     m_preheat_steps = 1;
@@ -1947,6 +1959,10 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
                 default:
                     break;
                 }
+                break;
+            case 5:
+                if (cmd[1] == '6' && cmd[2] == '2' && cmd[3] == '1' && cmd[4] == '1')
+                    process_M6211(line); // Orca #14663: Elegoo filament change
                 break;
             default:
                 break;
@@ -3535,10 +3551,14 @@ void GCodeProcessor::process_G29(const GCodeReader::GCodeLine& line)
     // EDGE (#14573): a wait with no motion queued behind it used to be dropped, which hid that this is a Bambu
     // number. It is counted now, and a Marlin mesh bed leveling start G-code has five G29 lines (G29 P1, G29 P1 X..,
     // G29 P3.2, G29 P3.13, G29 A): 1300 s on a print that does not take them. Only the Bambu printers have the 260 s.
+    // Orca #15274: firmware may split one bed-leveling sequence across multiple G29 subcommands, so
+    // count the 260 s once per processing run. Non-BBL printers still add nothing (#14573).
     if (!s_IsBBLPrinter)
         return;
-    const float value_s = 260.0;
-    simulate_st_synchronize(value_s);
+    if (!m_g29_time_added) {
+        simulate_st_synchronize(260.0f);
+        m_g29_time_added = true;
+    }
 }
 
 void GCodeProcessor::process_G10(const GCodeReader::GCodeLine& line)
@@ -4090,6 +4110,13 @@ void GCodeProcessor::process_M702(const GCodeReader::GCodeLine& line)
         m_time_processor.extruder_unloaded = true;
         simulate_st_synchronize(get_filament_unload_time(m_extruder_id));
     }
+}
+
+void GCodeProcessor::process_M6211(const GCodeReader::GCodeLine& line)
+{
+    // Orca #14663: only the Elegoo firmware knows this command.
+    if (boost::algorithm::istarts_with(m_printer_model, "elegoo"))
+        process_elegoo_M6211(line);
 }
 
 void GCodeProcessor::process_T(const GCodeReader::GCodeLine& line)
@@ -4753,8 +4780,14 @@ void GCodeProcessor::run_post_process()
         }
     };
 
+    // Orca #13741: the layer the export pass is in, for the temperature of a tool change's preheat.
+    // m_layer_id is the analysis pass's counter and holds the total layer count by now, so the
+    // first-layer temperature was never picked on a multi-layer print. 0 = before the first layer
+    // change (start G-code), 1 = the first layer; both take the first-layer temperature.
+    unsigned int current_layer_id = 0;
+
     // add lines M104 to exported gcode
-    auto process_line_T = [this, &export_lines](const std::string& gcode_line, const size_t g1_lines_counter, const ExportLines::Backtrace& backtrace) {
+    auto process_line_T = [this, &export_lines, &current_layer_id](const std::string& gcode_line, const size_t g1_lines_counter, const ExportLines::Backtrace& backtrace) {
         const std::string cmd = GCodeReader::GCodeLine::extract_cmd(gcode_line);
 
         int tool_number = -1;
@@ -4781,8 +4814,8 @@ void GCodeProcessor::run_post_process()
                 export_lines.insert_lines(
                     backtrace, cmd,
                     // line inserter
-                    [tool_number, this](unsigned int id, const std::vector<float>& time_diffs) {
-                        const int temperature = int(m_layer_id != 1 ? m_extruder_temps_config[tool_number] :
+                    [tool_number, this, &current_layer_id](unsigned int id, const std::vector<float>& time_diffs) {
+                        const int temperature = int(current_layer_id > 1 ? m_extruder_temps_config[tool_number] :
                                                                     m_extruder_temps_first_layer_config[tool_number]);
                         // Orca: M104.1 for XL printers, I can't find the documentation for this so I copied the C++ comments from
                         // Prusa-Firmware-Buddy here
@@ -4894,6 +4927,16 @@ void GCodeProcessor::run_post_process()
                 if (eol) {
                     ++line_id;
                     const unsigned int internal_g1_lines_counter = export_lines.update(gcode_line, line_id, g1_lines_counter);
+                    // Orca #13741: count the layer change tag (";" + tag + EOL; the text differs
+                    // between the BBL and the compatible tag sets).
+                    if (gcode_line.size() > 1 && gcode_line.front() == ';') {
+                        std::string_view tag_line(gcode_line);
+                        while (!tag_line.empty() && (tag_line.back() == '\n' || tag_line.back() == '\r'))
+                            tag_line.remove_suffix(1);
+                        tag_line.remove_prefix(1);
+                        if (tag_line == reserved_tag(ETags::Layer_Change))
+                            ++current_layer_id;
+                    }
                     // replace placeholder lines
                     bool processed = process_placeholders(gcode_line);
                     if (processed)

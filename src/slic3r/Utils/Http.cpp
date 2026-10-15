@@ -48,7 +48,6 @@ struct CurlGlobalInit
             "/etc/ssl/ca-bundle.pem"              // OpenSUSE Tumbleweed
         };
 
-        namespace fs = boost::filesystem;
         // Env var name for the OpenSSL CA bundle (SSL_CERT_FILE nomally)
         const char *const SSL_CA_FILE = X509_get_default_cert_file_env();
         const char * ssl_cafile = ::getenv(SSL_CA_FILE);
@@ -1119,6 +1118,14 @@ Http Http::patch(std::string url)
 {
 	Http http{ std::move(url) };
 	curl_easy_setopt(http.p->curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+	return http;
+}
+
+Http Http::custom(const std::string &method, std::string url)
+{
+	Http http{ std::move(url) };
+	// curl copies the string.
+	curl_easy_setopt(http.p->curl, CURLOPT_CUSTOMREQUEST, method.c_str());
 	return http;
 }
 

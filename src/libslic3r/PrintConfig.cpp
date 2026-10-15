@@ -493,6 +493,14 @@ static t_config_enum_values s_keys_map_NozzleVolumeType {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NozzleVolumeType)
 
+// Orca #11616
+static t_config_enum_values s_keys_map_PowerLossRecoveryMode {
+    { "printer_configuration", int(PowerLossRecoveryMode::PrinterConfiguration) },
+    { "enable",                int(PowerLossRecoveryMode::Enable) },
+    { "disable",               int(PowerLossRecoveryMode::Disable) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PowerLossRecoveryMode)
+
 // Ultra: dual-nozzle enums (BBS-faithful label maps; fmmDefault/etMax* are sentinels, not serialized).
 static t_config_enum_values s_keys_map_ExtruderType {
     { "Direct Drive", int(ExtruderType::etDirectDrive) },
@@ -713,6 +721,23 @@ static t_config_enum_values s_keys_map_PrinterStructure {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrinterStructure)
 
+static t_config_enum_values s_keys_map_InputShaperType {
+    {"Default", int(InputShaperType::Default)},
+    {"MZV",     int(InputShaperType::MZV)},
+    {"ZV",      int(InputShaperType::ZV)},
+    {"ZVD",     int(InputShaperType::ZVD)},
+    {"ZVDD",    int(InputShaperType::ZVDD)},
+    {"ZVDDD",   int(InputShaperType::ZVDDD)},
+    {"EI",     int(InputShaperType::EI)},
+    {"EI2",     int(InputShaperType::EI2)},
+    {"2HUMP_EI",int(InputShaperType::TwoHumpEI)},
+    {"EI3",     int(InputShaperType::EI3)},
+    {"3HUMP_EI",int(InputShaperType::ThreeHumpEI)},
+    {"DAA",     int(InputShaperType::DAA)},
+    {"Disable", int(InputShaperType::Disable)}
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InputShaperType)
+
 static t_config_enum_values s_keys_map_PerimeterGeneratorType{
     { "classic", int(PerimeterGeneratorType::Classic) },
     { "arachne", int(PerimeterGeneratorType::Arachne) }
@@ -865,6 +890,21 @@ void PrintConfigDef::init_common_params()
     def->min      = 1;
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionInt(1));	
+
+    // Orca #11526 (with the #13523 fix): thin the internal solid infill of the layers right above the first one
+    // to compensate the elephant foot. 100% (the default) leaves the solid infill untouched.
+    def           = this->add("elefant_foot_layers_density", coPercent);
+    def->label    = L("Elephant foot layers density");
+    def->category = L("Quality");
+    def->tooltip  = L("Density of the internal solid infill on the elephant foot compensation layers. "
+                      "This value is used on the second layer; the following layers get linearly denser "
+                      "up to the number of layers set in \"Elephant foot compensation layers\". "
+                      "100% disables this compensation. Not applied when printing on a raft.");
+    def->sidetext = "%";
+    def->min      = 50;
+    def->max      = 100;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionPercent(100));
 
     def = this->add("layer_height", coFloat);
     def->label = L("Layer height");
@@ -1861,6 +1901,18 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Activate for better air filtration. G-code command: M106 P3 S(0-255)");
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBools{false});
+
+    def = this->add("activate_air_filtration_during_print", coBools);
+    def->full_label = L("During print");
+    def->tooltip = L("Enable this to override the fan speed set in custom G-code during print.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBools{true});
+
+    def = this->add("activate_air_filtration_on_completion", coBools);
+    def->full_label = L("On completion");
+    def->tooltip = L("Enable this to override the fan speed set in custom G-code after print completion.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBools{true});
 
     def = this->add("during_print_exhaust_fan_speed", coInts);
     def->label   = L("Fan speed");
@@ -3233,6 +3285,20 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 300 });
 
+    // Snapmaker #937 (with the #980 fix): first-layer travel acceleration. Upstream defaults to 100%
+    // (of the travel acceleration) and treats 0 as "firmware default"; EdgeSlicer defaults to 0 and
+    // treats 0 as "use the initial layer acceleration", which is what first-layer travels always used,
+    // so existing presets and projects slice exactly as before.
+    def = this->add("first_layer_travel_acceleration", coFloatOrPercent);
+    def->label = L("First layer travel");
+    def->tooltip = L("Acceleration of travel moves on the first layer. If expressed as a percentage (e.g. 50%), it is "
+                     "calculated over the travel acceleration. 0 means first layer travels use the initial layer acceleration.");
+    def->sidetext = L("mm/s² or %");
+    def->ratio_over = "travel_acceleration";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
+
     def = this->add("accel_to_decel_enable", coBools);
     def->label = L("Enable accel_to_decel");
     def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically.");
@@ -3312,6 +3378,17 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 12 });
+
+    // Snapmaker #937 / #980; 0 keeps the initial layer jerk (see first_layer_travel_acceleration).
+    def = this->add("first_layer_travel_jerk", coFloatOrPercent);
+    def->label = L("First layer travel");
+    def->tooltip = L("Jerk of travel moves on the first layer. If expressed as a percentage (e.g. 50%), it is "
+                     "calculated over the travel jerk. 0 means first layer travels use the initial layer jerk.");
+    def->sidetext = L("mm/s or %");
+    def->ratio_over = "travel_jerk";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
 
     def = this->add("initial_layer_line_width", coFloatOrPercent);
     def->label = L("Initial layer");
@@ -3398,7 +3475,25 @@ void PrintConfigDef::init_fff_params()
     def->max = 1000;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInts { 0 });
-    
+
+    // ORCA: explicit override for the part cooling fan speed on the first printed layer.
+    def = this->add("initial_layer_fan_speed", coInts);
+    def->label = L("First layer fan speed");
+    def->tooltip = L("Sets an exact fan speed for the first layer, overriding all other cooling settings. "
+                     "Useful for protecting 3D-printed toolhead parts (e.g. Voron-style ABS/ASA ducts) from "
+                     "a hot bed. A small amount of airflow cools the ducts down, without using full cooling that "
+                     "may in certain conditions hurt first-layer adhesion."
+                     "\nFrom the second layer onwards, normal cooling resumes."
+                     "\nIf \"Full fan speed at layer\" is also set, the fan ramps smoothly from this value "
+                     "on the first layer up to your target by the chosen layer."
+                     "\nOnly available when \"No cooling for the first\" is 0."
+                     "\nSet to -1 to disable it.");
+    def->sidetext = "%";
+    def->min = -1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInts { -1 });
+
     def = this->add("support_material_interface_fan_speed", coInts);
     def->label = L("Support interface fan speed");
     def->tooltip = L("This part cooling fan speed is applied when printing support interfaces. Setting this parameter to a higher than regular speed "
@@ -3657,6 +3752,21 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable this to enable the camera on printer to check the quality of first layer.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // Orca #11582 / #11616. Bambu Lab printers turn it on in fdm_machine_common, which is what
+    // they always did (M1003 S1 at the second layer, S0 at the end).
+    def = this->add("enable_power_loss_recovery", coEnum);
+    def->label = L("Power Loss Recovery");
+    def->tooltip = L("Choose how to control power loss recovery. When set to Printer configuration, the slicer will not emit power loss recovery G-code and will leave the printer's configuration unchanged. Applicable to Bambu Lab or Marlin 2 firmware based printers.");
+    def->mode = comAdvanced;
+    def->enum_keys_map = &ConfigOptionEnum<PowerLossRecoveryMode>::get_enum_values();
+    def->enum_values.push_back("printer_configuration");
+    def->enum_values.push_back("enable");
+    def->enum_values.push_back("disable");
+    def->enum_labels.push_back(L("Printer configuration"));
+    def->enum_labels.push_back(L("Enable"));
+    def->enum_labels.push_back(L("Disable"));
+    def->set_default_value(new ConfigOptionEnum<PowerLossRecoveryMode>(PowerLossRecoveryMode::PrinterConfiguration));
 
 
     //BBS
@@ -3996,6 +4106,28 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
+
+    // ORCA: minimum non-zero part cooling fan speed.
+    def = this->add("part_cooling_fan_min_pwm", coInt);
+    def->label = L("Minimum non-zero part cooling fan speed");
+    def->tooltip = L("Some part-cooling fans cannot start spinning when commanded below a certain PWM duty cycle. "
+                     "When set above 0, any non-zero part-cooling fan command will be raised to at least this percentage "
+                     "so the fan reliably starts. A fan command of 0 (fan off) is always honoured exactly. "
+                     "This clamp is applied after every other fan calculation (first-layer ramp, layer-time interpolation, "
+                     "overhang/bridge/support-interface/ironing overrides), so scaling still operates within the range "
+                     "[this value, 100%]."
+                     "\nIf your firmware already disables the fan below a threshold (for example Klipper's "
+                     "[fan] off_below: 0.10 shuts the fan off whenever the commanded duty cycle is below 10%), "
+                     "this option and the firmware threshold should ideally be set to the same value. Matching them "
+                     "(e.g. off_below: 0.10 in Klipper and 10% here) guarantees the slicer never emits a non-zero "
+                     "value that the firmware would silently drop, and the fan never receives a value below the one "
+                     "you know it can actually spool at."
+                     "\nSet to 0 to deactivate.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
 
     def = this->add("time_cost", coFloat);
@@ -5014,11 +5146,11 @@ void PrintConfigDef::init_fff_params()
             def->set_default_value(new ConfigOptionFloats(axis.max_jerk));
         }
     }
-    // M205 J... [mm] machine junction deviation limits 
+    // M205 J... [mm] machine junction deviation limits
     def = this->add("machine_max_junction_deviation", coFloats);
     def->full_label = L("Maximum Junction Deviation");
     def->category = L("Machine limits");
-    def->tooltip = L("Maximum junction deviation (M205 J, only apply if JD > 0 for Marlin Firmware)");
+    def->tooltip = L("Maximum junction deviation (M205 J, only apply if JD > 0 for Marlin Firmware\nIf your Marlin 2 printer uses Classic Jerk set this value to 0.)");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
     def->max = 0.5f; // Orca #11915: Marlin junction deviation tops out well below 0.5 mm
@@ -5128,6 +5260,56 @@ void PrintConfigDef::init_fff_params()
     def->min      = 0;
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(120));
+
+    // Orca: Input Shaping support
+    def          = this->add("input_shaping_emit", coBool);
+    def->label   = L("Emit input shaping");
+    def->tooltip = L("Override firmware input shaping settings.\nIf disabled, firmware settings are used.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def               = this->add("input_shaping_type", coEnum);
+    def->label        = L("Input shaper type");
+    def->tooltip      = L("Choose the input shaper algorithm.\nDefault uses the firmware default settings.\nDisable turns off input shaping in the firmware.");
+    def->enum_keys_map = &ConfigOptionEnum<InputShaperType>::get_enum_values();
+    def->enum_values  = {"Default", "MZV", "ZV", "ZVD", "ZVDD", "ZVDDD", "EI", "EI2", "2HUMP_EI", "EI3", "3HUMP_EI", "DAA", "Disable"};
+    def->enum_labels  = {L("Default"), L("MZV"), L("ZV"), L("ZVD"), L("ZVDD"), L("ZVDDD"), L("EI"), L("EI2"), L("2HUMP_EI"), L("EI3"), L("3HUMP_EI"), L("DAA"), L("Disable")};
+    def->mode         = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<InputShaperType>(InputShaperType::Default));
+
+    def           = this->add("input_shaping_freq_x", coFloat);
+    def->label    = L("X");
+    def->tooltip  = L("Resonant frequency for the X axis input shaper.\nZero will use the firmware frequency.\nTo disable input shaping, use the Disable type.\nRRF: X and Y values are equal.");
+    def->sidetext = "Hz";
+    def->min      = 0;
+    def->max      = 1000;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def           = this->add("input_shaping_freq_y", coFloat);
+    def->label    = L("Y");
+    def->tooltip  = L("Resonant frequency for the Y axis input shaper.\nZero will use the firmware frequency.\nTo disable input shaping, use the Disable type.");
+    def->sidetext = "Hz";
+    def->min      = 0;
+    def->max      = 1000;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def          = this->add("input_shaping_damp_x", coFloat);
+    def->label   = L("X");
+    def->tooltip = L("Damping ratio for the X axis input shaper.\nZero will use the firmware damping ratio.\nTo disable input shaping, use the Disable type.\nRRF: X and Y values are equal.");
+    def->min     = 0;
+    def->max     = 1;
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def          = this->add("input_shaping_damp_y", coFloat);
+    def->label   = L("Y");
+    def->tooltip = L("Damping ratio for the Y axis input shaper.\nZero will use the firmware damping ratio.\nTo disable input shaping, use the Disable type.");
+    def->min     = 0;
+    def->max     = 1;
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.1));
 
     def = this->add("fan_max_speed", coFloats);
     def->label = L("Fan speed");
@@ -7856,7 +8038,7 @@ void PrintConfigDef::init_fff_params()
     //def->label = L("Z travel");
     //def->tooltip = L("Speed of vertical travel along z axis. "
     //                 "This is typically lower because build plate or gantry is hard to be moved. "
-    //                 "Zero means using travel speed directly in G-code, but will be limited by printer's ability when run G-code.");
+    //                 "Zero uses the active travel speed. Z travel is capped by a positive machine_max_speed_z.");
     def->sidetext = "mm/s";	// milimeters per second, don't need translation
     def->min = 0;
     def->mode = comDevelop;
@@ -8097,6 +8279,16 @@ void PrintConfigDef::init_fff_params()
                      "leaving the filament blob on the gap edge instead of on the outer wall surface.");
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
+
+    def          = this->add("wipe_tower_stagger_toolchange_start", coBool);
+    def->label   = L("Stagger toolchange start");
+    def->tooltip = L("Vary the prime tower entry point for toolchange wiping between layers. "
+                     "This spreads startup ooze and ironing marks across several purge lines instead "
+                     "of stacking them at the same wall gap.\n"
+                     "The tower's first layer, local-Z dithering tool changes, and tower-interface "
+                     "run-in changes keep the legacy start so the wall gap and the purge stay aligned.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     // Tower interface options: three behaviours of Bambu Studio's enable_tower_interface_features,
     // each on its own and for both tower generators. See GCode/WipeTowerInterface.hpp.
@@ -9537,6 +9729,17 @@ size_t printer_extruder_variant_value_index(const ConfigBase &config, const std:
     return sources[extruder_idx];
 }
 
+bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config)
+{
+    if (config.has("enable_power_loss_recovery"))
+        return false;
+    const auto *model = config.option<ConfigOptionString>("printer_model");
+    if (model == nullptr || !boost::starts_with(model->value, "Bambu Lab"))
+        return false;
+    config.set_key_value("enable_power_loss_recovery", new ConfigOptionEnum<PowerLossRecoveryMode>(PowerLossRecoveryMode::Enable));
+    return true;
+}
+
 void resolve_printer_extruder_variants(DynamicPrintConfig &config)
 {
     const std::vector<size_t> sources = printer_extruder_variant_sources(config);
@@ -9789,6 +9992,13 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         } else {
             opt_key = "wall_sequence";
         }
+    }
+    else if (opt_key == "enable_power_loss_recovery") {
+        // Orca #11616: the first form of the option (#11582) was a bool.
+        if (value == "1" || boost::iequals(value, "true"))
+            value = "enable";
+        else if (value == "0" || boost::iequals(value, "false"))
+            value = "disable";
     }
     else if(opt_key == "ensure_vertical_shell_thickness") {
         if(value == "1") {

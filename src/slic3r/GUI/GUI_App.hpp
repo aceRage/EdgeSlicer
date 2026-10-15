@@ -764,8 +764,13 @@ private:
     void            enable_user_preset_folder(bool enable);
     // Ultra: re-mirror the logged-in Bambu Studio user presets into user\default\; when new/updated
     // files were pulled (or force_refresh), reload user presets + refresh the preset UI. Used by the
-    // "Sync now" button and the printer-switch trigger. No-op if the toggle is off.
+    // "Sync now" button (force_refresh: synchronous) and the printer-switch trigger (skipped when the
+    // Bambu Studio folder has not changed since the last clean run, otherwise run on a worker thread
+    // with the reload marshalled back to the UI thread). No-op if the toggle is off.
     void            sync_bambu_user_presets(bool force_refresh);
+    // Remember a mirror run for the printer-switch skip check (UI thread).
+    void            record_bambu_preset_mirror_run(bool clean, const std::string& fingerprint_before, const std::string& logged_in_uid);
+    void            reload_after_bambu_preset_mirror(int copied);
 
     // BBS
     bool            is_studio_active();
@@ -776,6 +781,10 @@ private:
     void            check_web_version();
     void            check_preset_version();
     void            check_new_version_sf(bool show_tips = false, bool by_user = false);
+    // Offers to migrate user filament presets made against an older release that lost printers their parent
+    // listed then. At startup it asks on every start that finds such presets, unless the user chose not to be
+    // reminded; by_user also reports when there is nothing to migrate. (OrcaSlicer #16367.)
+    void            check_legacy_user_filament_presets(bool by_user);
     void            process_network_msg(std::string dev_id, std::string msg);
     void            enter_force_upgrade();
     void            set_skip_version(bool skip = true);
