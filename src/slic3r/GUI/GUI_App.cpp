@@ -1484,6 +1484,9 @@ void GUI_App::post_init()
         plater_->canvas3D()->enable_render(false);
         mainframe->select_tab(size_t(MainFrame::tp3DEditor));
         plater_->select_view_3D("3D");
+        // The first render happens before the queued new_project() sets the same view.
+        plater_->get_camera().select_view("topfront");
+        plater_->get_camera().requires_zoom_to_bed = true;
         //BBS init the opengl resource here
 //#ifdef __linux__
         if (plater_->canvas3D()->get_wxglcanvas()->IsShownOnScreen()&&plater_->canvas3D()->make_current_for_postinit()) {
