@@ -103,6 +103,7 @@ add_executable(${_TEST_NAME}_tests
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
 	test_preset_variant_load.cpp
+	test_preset_renamed_parent.cpp
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
