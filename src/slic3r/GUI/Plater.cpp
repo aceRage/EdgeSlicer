@@ -19775,6 +19775,10 @@ void Plater::calib_pa(const Calib_Params& params)
     const auto calib_pa_name = wxString::Format(L"Pressure Advance Test");
     new_project(false, false, calib_pa_name);
     wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
+    auto print_config   = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    print_config->set_key_value("overhang_reverse", new ConfigOptionBool(false));
+    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
     switch (params.mode) {
         case CalibMode::Calib_PA_Line:
             add_model(false, Slic3r::resources_dir() + "/calib/pressure_advance/pressure_advance_test.stl");
@@ -19787,9 +19791,6 @@ void Plater::calib_pa(const Calib_Params& params)
             break;
         default: break;
     }
-    auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
     print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
     p->background_process.fff_print()->set_calib_params(params);
 }
@@ -20349,6 +20350,7 @@ void Plater::calib_temp(const Calib_Params& params) {
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
     model().objects[0]->config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
     model().objects[0]->config.set_key_value("seam_slope_type", new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
+    model().objects[0]->config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
 
     changed_objects({ 0 });
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
@@ -20501,6 +20503,7 @@ void Plater::calib_retraction(const Calib_Params& params)
     obj->config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
     obj->config.set_key_value("seam_position", new ConfigOptionEnum<SeamPosition>(spAligned));
     obj->config.set_key_value("wall_sequence", new ConfigOptionEnum<WallSequence>(WallSequence::InnerOuter));
+    obj->config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
 
     changed_objects({ 0 });
 
