@@ -1130,3 +1130,56 @@ TEST_CASE("Exhaust fan switches default to on", "[Cooling][Orca13228]")
     CHECK(config.option<ConfigOptionBools>("activate_air_filtration_during_print")->get_at(0));
     CHECK(config.option<ConfigOptionBools>("activate_air_filtration_on_completion")->get_at(0));
 }
+
+// EDGE (6A-2): the #13715 PWM floor goes through #451's tool change fan handling. The tool change G-code
+// switches the fan off, so the fan is written again for the second filament (m_fan_speed_unknown, the
+// _FORCE_RESUME_FAN_SPEED path and the region END); every one of those commands must carry the floor.
+TEST_CASE("The PWM floor holds for the fan written again after a tool change", "[Cooling][Orca13715][Orca15158]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+    config.set_key_value("change_filament_gcode", new ConfigOptionString("T[next_extruder]\nM106 S0\n"));
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"wall_filament", 1},
+        {"sparse_infill_filament", 2},
+        {"solid_infill_filament", 2},
+        {"wall_loops", 2},
+        {"wall_sequence", "inner wall/outer wall"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_overhang_bridge_fan", "1,1"},
+        {"overhang_fan_threshold", "0%,0%"},
+        {"overhang_fan_speed", "8,8"},
+        {"fan_min_speed", "5,5"},
+        {"fan_max_speed", "5,5"},
+        {"close_fan_the_first_x_layers", "1,1"},
+        {"full_fan_speed_layer", "0,0"},
+        {"slow_down_for_layer_cooling", "0,0"},
+        {"part_cooling_fan_min_pwm", 20},
+        {"machine_start_gcode", ""},
+        {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]"},
+    });
+    const std::string gcode = dumped("pwm_floor_toolchange", slice({TestMesh::cube_20x20x20}, config));
+
+    size_t checked = 0;
+    for (const FanAtExtrusion &m : fan_at_extrusions(gcode))
+        if (m.layer >= 2 && m.tool == 1 && m.role == "Sparse infill") {
+            INFO("layer " << m.layer);
+            CHECK(m.fan == 51); // 5 % raised to 20 %
+            ++checked;
+        }
+    CHECK(checked > 0);
+    // Only the tool change G-code's own M106 S0 and the first layer's fan off are below the floor.
+    for (const auto &[layer, cmd] : fan_commands(gcode)) {
+        INFO(cmd);
+        CHECK((part_fan_value(cmd) == 0 || part_fan_value(cmd) >= 51));
+    }
+}
