@@ -883,6 +883,21 @@ void PrintConfigDef::init_common_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionInt(1));	
 
+    // Orca #11526 (with the #13523 fix): thin the internal solid infill of the layers right above the first one
+    // to compensate the elephant foot. 100% (the default) leaves the solid infill untouched.
+    def           = this->add("elefant_foot_layers_density", coPercent);
+    def->label    = L("Elephant foot layers density");
+    def->category = L("Quality");
+    def->tooltip  = L("Density of the internal solid infill on the elephant foot compensation layers. "
+                      "This value is used on the second layer; the following layers get linearly denser "
+                      "up to the number of layers set in \"Elephant foot compensation layers\". "
+                      "100% disables this compensation. Not applied when printing on a raft.");
+    def->sidetext = "%";
+    def->min      = 50;
+    def->max      = 100;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionPercent(100));
+
     def = this->add("layer_height", coFloat);
     def->label = L("Layer height");
     def->category = L("Quality");

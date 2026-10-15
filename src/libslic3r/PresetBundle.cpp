@@ -5050,7 +5050,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     // (Bambu profiles carry a -5 standby delta, the Snapmaker U1 toolchanger ooze prevention with -150).
     "ooze_prevention", "standby_temperature_delta", "preheat_time", "preheat_steps", "delta_temperature",
     // Dimensional compensation calibrated for one machine (first-layer squish, XY accuracy).
-    "elefant_foot_compensation", "elefant_foot_compensation_layers", "xy_contour_compensation", "xy_hole_compensation",
+    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation",
     // Prime tower and purging: depends on the filament-change hardware (single nozzle + AMS,
     // toolchanger, dual nozzle). All wipe_tower_* and prime_tower_* keys are covered by prefix.
     "enable_prime_tower", "prime_volume", "preload_all_filaments", "enable_tower_interface_features",

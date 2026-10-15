@@ -1902,6 +1902,15 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 params.density = f->print_object_config->internal_bridge_density.get_abs_value(1.0);
                 params.dont_adjust = true;
             }
+            // Orca #11526: Elephant foot compensation for solid layers above the bottommost one by infill density manipulation.
+            // EdgeSlicer: only when the object sits on the bed (no raft), as the elephant foot compensation itself.
+            const float elefant_density = float(f->print_object_config->elefant_foot_layers_density.get_abs_value(1.0));
+            if (!is_approx(elefant_density, 1.0f) && surface_fill.surface.is_solid_infill() &&
+                f->print_object_config->raft_layers.value == 0) {
+                const size_t elefant_layers = size_t(std::max(f->print_object_config->elefant_foot_compensation_layers.value, 1));
+                if (f->layer_id > 0 && f->layer_id <= elefant_layers)
+                    params.density = elefant_density * (elefant_layers - (f->layer_id - 1)) / elefant_layers;
+            }
 			// BBS: make fill
 			ExtrusionEntitiesPtr &region_fill_entities = m_regions[surface_fill.region_id]->fills.entities;
 			const size_t entities_before = region_fill_entities.size();
