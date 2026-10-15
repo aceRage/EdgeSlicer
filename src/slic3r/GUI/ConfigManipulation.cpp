@@ -819,7 +819,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool have_default_acceleration = process_flow_float("default_acceleration", 0) > 0;
 
     for (auto el : {"outer_wall_acceleration", "inner_wall_acceleration", "initial_layer_acceleration",
-        "top_surface_acceleration", "travel_acceleration", "bridge_acceleration", "sparse_infill_acceleration", "internal_solid_infill_acceleration"})
+        "first_layer_travel_acceleration", "top_surface_acceleration", "travel_acceleration", "bridge_acceleration", "sparse_infill_acceleration", "internal_solid_infill_acceleration"})
         toggle_field(el, have_default_acceleration);
 
     // Marlin 2 plans with the junction deviation once the printer's machine value is above zero: the
@@ -837,7 +837,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     const std::initializer_list<const char*> jerk_options = {
         "outer_wall_jerk", "inner_wall_jerk", "initial_layer_jerk",
-        "top_surface_jerk", "travel_jerk", "infill_jerk"
+        "first_layer_travel_jerk", "top_surface_jerk", "travel_jerk", "infill_jerk"
     };
 
     if (junction_deviation_enabled) {
@@ -875,8 +875,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("brim_ears_max_angle", have_brim_ear);
     toggle_line("brim_ears_detection_length", have_brim_ear);
 
-    // Hide Elephant foot compensation layers if elefant_foot_compensation is not enabled
-    toggle_line("elefant_foot_compensation_layers", config->opt_float("elefant_foot_compensation") > 0);
+    // Hide Elephant foot compensation layers if neither elefant_foot_compensation nor the
+    // elephant foot layers density (Orca #11526) is in use.
+    const auto *opt_elefant_density = config->option<ConfigOptionPercent>("elefant_foot_layers_density");
+    toggle_line("elefant_foot_compensation_layers", config->opt_float("elefant_foot_compensation") > 0 ||
+                (opt_elefant_density != nullptr && opt_elefant_density->get_abs_value(1.0) < 1.0));
 
     bool have_raft = config->opt_int("raft_layers") > 0;
     bool have_support_material = config->opt_bool("enable_support") || have_raft;

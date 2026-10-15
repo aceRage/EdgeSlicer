@@ -584,3 +584,23 @@ TEST_CASE("A G-code's filament lists are sized to its filaments when its setting
         }
     }
 }
+
+// Port of OrcaSlicer #15830: new_project() at startup skips the preset reload, because the presets
+// were just loaded. Edge adaptation: our restore handler also starts a new project after
+// recreate_GUI(), when a project's embedded presets may still be loaded. Plater::priv::reset()
+// asks has_project_embedded_presets() and reloads the tabs anyway in that case.
+TEST_CASE("has_project_embedded_presets reports a project's own presets until they are reset",
+          "[Preset][Bundle][ProjectPreset][StartupReload]")
+{
+    PresetBundle bundle = make_bundle();
+    CHECK_FALSE(bundle.has_project_embedded_presets());
+
+    load_project(bundle, "Bambu PLA Matte @BBL P1S 0.4 nozzle", P1S_MATTE, 2);
+    std::string slot_name;
+    REQUIRE(find_project_filament(bundle, slot_name) != nullptr);
+    CHECK(bundle.has_project_embedded_presets());
+
+    bundle.reset_project_embedded_presets();
+    CHECK_FALSE(bundle.has_project_embedded_presets());
+    CHECK(find_project_filament(bundle, slot_name) == nullptr);
+}

@@ -856,6 +856,19 @@ std::vector<std::string> PresetBundle::project_presets_lost_on_printer(const std
     return lost;
 }
 
+// Edge: cheap check (no copies, unlike get_current_project_embedded_presets) for whether a
+// project brought presets of its own; Plater::priv::reset() must reload the tabs when it did.
+bool PresetBundle::has_project_embedded_presets() const
+{
+    for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints),
+                                             static_cast<const PresetCollection *>(&this->filaments),
+                                             static_cast<const PresetCollection *>(&this->printers) })
+        for (const Preset &preset : *presets)
+            if (preset.is_project_embedded)
+                return true;
+    return false;
+}
+
 //BBS: reset project embedded presets
 void PresetBundle::reset_project_embedded_presets()
 {
@@ -5124,7 +5137,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     // (Bambu profiles carry a -5 standby delta, the Snapmaker U1 toolchanger ooze prevention with -150).
     "ooze_prevention", "standby_temperature_delta", "preheat_time", "preheat_steps", "delta_temperature",
     // Dimensional compensation calibrated for one machine (first-layer squish, XY accuracy).
-    "elefant_foot_compensation", "elefant_foot_compensation_layers", "xy_contour_compensation", "xy_hole_compensation",
+    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation",
     // Prime tower and purging: depends on the filament-change hardware (single nozzle + AMS,
     // toolchanger, dual nozzle). All wipe_tower_* and prime_tower_* keys are covered by prefix.
     "enable_prime_tower", "prime_volume", "preload_all_filaments", "enable_tower_interface_features",
@@ -5141,7 +5154,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     // Motion settings whose meaning depends on the firmware (Marlin jerk / junction deviation,
     // Klipper square-corner velocity and accel_to_decel). Accelerations and speeds DO carry.
     "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk", "travel_jerk",
-    "default_junction_deviation", "accel_to_decel_enable", "accel_to_decel_factor",
+    "first_layer_travel_jerk", "default_junction_deviation", "accel_to_decel_enable", "accel_to_decel_factor",
     // Internal switch set by the flow-rate calibration, not a user setting.
     "calib_flowrate_topinfill_special_order",
 };
