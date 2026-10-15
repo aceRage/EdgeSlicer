@@ -100,6 +100,7 @@ add_executable(${_TEST_NAME}_tests
     emboss_font_search_tests.cpp
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
+    u1_local_first_tests.cpp
     # Hidden GLFW window + forward-compatible 3.3 core context; skips itself where none can be made.
     gl_core_profile_tests.cpp
     libvgcode_input_tests.cpp
