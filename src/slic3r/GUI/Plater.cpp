@@ -14162,7 +14162,7 @@ void Plater::priv::schedule_background_process()
     this->view3D->get_canvas3d()->set_config(this->config);
 }
 
-// Orca #11407: re-slice by itself after a slicing setting changes, after "auto_slice_change_delay_seconds"
+// Orca #11407 / #12153: re-slice by itself after a slicing setting changes, while the Preview tab is shown, after "auto_slice_change_delay_seconds"
 // (edits within the delay are grouped into one slice).
 void Plater::priv::schedule_auto_reslice_if_needed()
 {
@@ -14172,6 +14172,10 @@ void Plater::priv::schedule_auto_reslice_if_needed()
 
     // Edge: a hidden hub instance slices only when asked.
     if (wxGetApp().is_hub_managed() && RemoteAccess::get().hidden())
+        return;
+
+    // Orca #12153: only while the Preview tab is shown.
+    if (!is_preview_shown())
         return;
 
     if (model.objects.empty())
@@ -14213,6 +14217,9 @@ void Plater::priv::trigger_auto_reslice_now()
         return;
 
     if (wxGetApp().is_hub_managed() && RemoteAccess::get().hidden())
+        return;
+
+    if (!is_preview_shown())
         return;
 
     if (this->model.objects.empty())
