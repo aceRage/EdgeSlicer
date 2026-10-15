@@ -629,6 +629,8 @@ class PartPlateList : public ObjectBase
     // "Left / right nozzle only" label textures: [0] English, [1] Chinese; each [left, right].
     GLTexture m_extruder_label_textures[2][2];
     bool      m_extruder_label_textures_loaded = false;
+    // Raster size the bed-type textures were loaded at (they are kept across re-layouts while it holds).
+    int       m_bedtype_tex_size = 0;
     void      load_extruder_label_textures();
     BoundingBoxf3 m_bounding_box;
     bool m_intialized;

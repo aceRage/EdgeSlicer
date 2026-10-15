@@ -506,6 +506,31 @@ void ObjectList::create_objects_ctrl()
     AppendBitmapColumn(" ", colEditing, wxOSX ? wxDATAVIEW_CELL_EDITABLE : wxDATAVIEW_CELL_INERT, m_columns_width[colEditing] * em,
         wxALIGN_CENTER_HORIZONTAL, 0);
 
+    // Orca #13804: double-clicking an object/part/instance row frames it in the 3D view,
+    // matching the "Fit camera to scene or selected object" canvas button.
+    // The preceding single click has already synced the canvas selection via
+    // wxEVT_DATAVIEW_SELECTION_CHANGED, so we just trigger the zoom here.
+    // No-op in slice-preview mode: the camera is shared with the editor
+    // canvas, so zooming there would move the preview view too, and the
+    // preview canvas's own toolbar button intentionally resets to the bed.
+    // Edge: we have no other ITEM_ACTIVATED handler, so always Skip() to keep
+    // wx's default double-click behaviour (expand/collapse, cell editing).
+    this->Bind(wxEVT_DATAVIEW_ITEM_ACTIVATED, [this](wxDataViewEvent& event) {
+        event.Skip();
+        if (event.GetColumn() == colFilament)
+            return;
+        const wxDataViewItem item = event.GetItem();
+        if (!item.IsOk())
+            return;
+        if (wxGetApp().plater()->is_preview_shown())
+            return;
+        const ItemType type = m_objects_model->GetItemType(item);
+        if (type & (itObject | itVolume | itInstance)) {
+            if (GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D())
+                canvas->zoom_to_selection();
+        }
+    });
+
     //for (int cn = colName; cn < colCount; cn++) {
     //    GetColumn(cn)->SetResizeable(cn == colName);
     //}
