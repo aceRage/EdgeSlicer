@@ -3137,6 +3137,10 @@ void GLCanvas3D::allow_multisample(bool allow)
     m_multisample_allowed = allow;
 }
 
+bool GLCanvas3D::has_mouse_capture() const {
+    return m_canvas != nullptr && m_canvas->HasCapture();
+}
+
 void GLCanvas3D::zoom_to_bed()
 {
     BoundingBoxf3 box = m_bed.build_volume().bounding_volume();
@@ -3599,7 +3603,7 @@ void GLCanvas3D::render(bool only_init)
 
 	// Negative coordinate means out of the window, likely because the window was deactivated.
 	// In that case the tooltip should be hidden.
-    if (m_mouse.position.x() >= 0. && m_mouse.position.y() >= 0.) {
+    if (m_mouse.position.x() >= 0. && m_mouse.position.y() >= 0. || has_mouse_capture()) { // ORCA continue to capture mouse pos mid drag
         if (tooltip.empty())
             tooltip = m_layers_editing.get_tooltip(*this);
 
@@ -5656,6 +5660,23 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     // BBS: single snapshot
     Plater::SingleSnapshot single(wxGetApp().plater());
 
+#ifdef __WXMAC__
+    // On macOS, the mouse key state is only present for mouse btn related events such as wxEVT_LEFT_DOWN.
+    // For other events, all buttons are reported as non-pressed, such as window leaving event. This causes
+    // imgui stopped responding if cursor moved out of window, such as
+    // https://github.com/OrcaSlicer/OrcaSlicer/pull/14999#issuecomment-5151344759
+    // We solve this by correcting the state of the event from the actual mouse state querying with `wxGetMouseState()`
+    // so it works like on other platforms.
+    {
+        const auto state = wxGetMouseState();
+        evt.SetLeftDown(state.LeftIsDown());
+        evt.SetMiddleDown(state.MiddleIsDown());
+        evt.SetRightDown(state.RightIsDown());
+        evt.SetAux1Down(state.Aux1IsDown());
+        evt.SetAux2Down(state.Aux2IsDown());
+    }
+#endif
+
 #if ENABLE_RETINA_GL
     const float scale = m_retina_helper->get_scale_factor();
     evt.SetX(evt.GetX() * scale);
@@ -5669,11 +5690,27 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         // ignore left up events coming from imgui windows and not processed by them
         m_mouse.ignore_left_up = true;
     m_tooltip.set_in_imgui(false);
-    if (imgui->update_mouse_data(evt)) {
+
+    // while a non-ImGui drag is already in progress (gizmo grabber, object move, rectangle selection, layer editing),
+    // don't let ImGui/ImGuizmo claim the event just because the cursor is hovering something like the navigator cube
+    // that incorrectly suppresses the active drag's tooltip and can interrupt its processing. The active drag always takes priority.
+    const bool other_drag_active = m_gizmos.is_dragging() || m_mouse.dragging || m_rectangle_selection.is_dragging() || m_layers_editing.state == LayersEditing::Editing;
+
+    if (imgui->update_mouse_data(evt) && !other_drag_active) {
         if ((evt.LeftDown() || (evt.Moving() && (evt.AltDown() || evt.ShiftDown()))) && m_canvas != nullptr)
             m_canvas->SetFocus();
         m_mouse.position = evt.Leaving() ? Vec2d(-1.0, -1.0) : pos.cast<double>();
         m_tooltip.set_in_imgui(true);
+
+        // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+        const bool imgui_dragging_active = (GImGui != nullptr && ImGui::GetIO().MouseDown[0] && GImGui->ActiveId != 0) || m_navigator_dragging;
+        if (!has_mouse_capture() && imgui_dragging_active)
+            m_canvas->CaptureMouse();
+
+        // release capture as soon as the button goes up
+        if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
+            mouse_up_cleanup();
+
         render();
 #ifdef SLIC3R_DEBUG_MOUSE_EVENTS
         printf((format_mouse_event_debug_message(evt) + " - Consumed by ImGUI\n").c_str());
@@ -5770,6 +5807,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             m_main_toolbar.on_mouse(evt2, *this);
         }
 
+        // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+        if (!has_mouse_capture() && evt.LeftIsDown() && m_gizmos.is_dragging())
+            m_canvas->CaptureMouse();
+
         if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
             mouse_up_cleanup();
 
@@ -5864,6 +5905,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             // Start editing the layer height.
             m_layers_editing.state = LayersEditing::Editing;
             _perform_layer_editing_action(&evt);
+
+            if (!has_mouse_capture()) // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+                m_canvas->CaptureMouse();
         }
 
         else {
@@ -5880,6 +5924,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                     && m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation
                     && m_gizmos.get_current_type() != GLGizmosManager::FuzzySkin) {
                     m_rectangle_selection.start_dragging(m_mouse.position, evt.ShiftDown() ? GLSelectionRectangle::Select : GLSelectionRectangle::Deselect);
+
+                    if (!has_mouse_capture())  // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+                        m_canvas->CaptureMouse();
+
                     m_dirty = true;
                 }
             }
@@ -5964,6 +6012,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                             m_mouse.drag.start_position_3D = scene_position;
                             m_sequential_print_clearance_first_displacement = true;
                             m_moving = true;
+
+                            if (!has_mouse_capture()) // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+                                m_canvas->CaptureMouse();
                         }
                     }
                 }
@@ -5972,6 +6023,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     }
     else if (evt.Dragging() && evt.LeftIsDown() && m_mouse.drag.move_volume_idx != -1 && m_layers_editing.state == LayersEditing::Unknown) {
         if (m_canvas_type != ECanvasType::CanvasAssembleView) {
+
+            if (!has_mouse_capture()) // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+                m_canvas->CaptureMouse();
+
             if (!m_mouse.drag.move_requires_threshold) {
                 m_mouse.dragging = true;
                 Vec3d cur_pos = m_mouse.drag.start_position_3D;
@@ -6027,6 +6082,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     else if (evt.Dragging() && evt.LeftIsDown() && m_picking_enabled && m_rectangle_selection.is_dragging()) {
         //BBS not in assemble view
         if (m_canvas_type != ECanvasType::CanvasAssembleView) {
+
+            if (!has_mouse_capture()) // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+                m_canvas->CaptureMouse();
+
             m_rectangle_selection.dragging(pos.cast<double>());
             m_dirty = true;
         }
@@ -6036,12 +6095,19 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 
         if (m_layers_editing.state != LayersEditing::Unknown && layer_editing_object_idx != -1) {
             if (m_layers_editing.state == LayersEditing::Editing) {
+                if (!has_mouse_capture()) // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+                    m_canvas->CaptureMouse();
+
                 _perform_layer_editing_action(&evt);
                 m_mouse.position = pos.cast<double>();
             }
         }
         // do not process the dragging if the left mouse was set down in another canvas
         else if (is_camera_rotate(evt, swap_mouse_buttons)) {
+
+            if (!has_mouse_capture()) // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+                m_canvas->CaptureMouse();
+
             // Orca: Sphere rotation for painting view
             // if dragging over blank area with left button or button functions swapped then rotate
             if ((any_gizmo_active || swap_mouse_buttons || m_hover_volume_idxs.empty()) && m_mouse.is_start_position_3D_defined()) {
@@ -6118,6 +6184,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             m_mouse.drag.start_position_3D = Vec3d((double)pos(0), (double)pos(1), 0.0);
         }
         else if (is_camera_pan(evt, swap_mouse_buttons)) {
+
+            if (!has_mouse_capture()) // ORCA keep tracking mouse position while drag active and cursor not in window bounds
+                m_canvas->CaptureMouse();
+
             // if dragging with right button or if button functions swapped and dragging with left button over blank area then pan
             if (m_mouse.is_start_position_2D_defined()) {
                 // get point in model space at Z = 0
@@ -7560,8 +7630,17 @@ static const float cameraProjection[16] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.
 void GLCanvas3D::_render_3d_navigator()
 {
     if (!wxGetApp().show_3d_navigator()) {
+        m_navigator_dragging = false;
         return;
     }
+
+    // Fix stealing capture event from other drag events
+    const bool other_drag_active = !m_navigator_dragging && (m_moving || m_rectangle_selection.is_dragging() || m_gizmos.is_dragging() || m_layers_editing.state == LayersEditing::Editing);
+
+    ImGuiIO& io = ImGui::GetIO();
+    const bool saved_mouse_down0 = io.MouseDown[0];
+    if (other_drag_active)
+        io.MouseDown[0] = false;
 
     ImGuizmo::BeginFrame();
 
@@ -7587,7 +7666,6 @@ void GLCanvas3D::_render_3d_navigator()
     sc *= (float) dpi / (float) DPI_DEFAULT;
 #endif // WIN32
 
-    const ImGuiIO& io              = ImGui::GetIO();
     const float viewManipulateLeft = 0;
     const float viewManipulateTop  = io.DisplaySize.y;
     const float camDistance        = 8.f;
@@ -7609,6 +7687,10 @@ void GLCanvas3D::_render_3d_navigator()
     const auto result = ImGuizmo::ViewManipulate(cameraView, cameraProjection, ImGuizmo::OPERATION::ROTATE, ImGuizmo::MODE::WORLD, nullptr,
                                                  camDistance, ImVec2(viewManipulateLeft, viewManipulateTop - size), ImVec2(size, size),
                                                  0x00101010);
+
+    // Restore the real mouse-down state
+    if (other_drag_active)
+        io.MouseDown[0] = saved_mouse_down0;
 
     if (result.changed) {
         for (unsigned int c = 0; c < 4; ++c) {
@@ -7641,6 +7723,8 @@ void GLCanvas3D::_render_3d_navigator()
 
         request_extra_frame();
     }
+
+    m_navigator_dragging = result.dragging;
 
     const float fitButtonSize = ImGui::GetFontSize() * 2.5f;
     const float fitButtonGap = 8.0f * sc;
@@ -10353,7 +10437,10 @@ void GLCanvas3D::_render_imgui_select_plate_toolbar()
     ImGui::PopStyleColor(8);
     ImGui::PopStyleVar(7);
 
-    if (ImGui::IsWindowHovered() || is_hovered) {
+    // Also keep the scrollbar visible while it is being dragged (the mouse is captured, so it may leave the window)
+    const bool is_scrollbar_active_drag = GImGui != nullptr && ImGui::GetIO().MouseDown[0] && GImGui->ActiveId != 0 && GImGui->ActiveIdWindow == ImGui::GetCurrentWindow();
+
+    if (ImGui::IsWindowHovered() || is_hovered || is_scrollbar_active_drag) {
         m_sel_plate_toolbar.is_display_scrollbar = true;
     } else {
         m_sel_plate_toolbar.is_display_scrollbar = false;
