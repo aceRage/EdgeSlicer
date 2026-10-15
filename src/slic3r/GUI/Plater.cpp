@@ -16307,9 +16307,9 @@ void Plater::priv::on_select_bed_type(wxCommandEvent &evt)
 
                 // update plater with new config
                 q->on_config_change(wxGetApp().preset_bundle->full_config());
-                // Orca #15916: the plate tab shows the global bed type for "same as global" plates.
-                if (auto *plate_tab = dynamic_cast<TabPrintPlate *>(wxGetApp().get_plate_tab()))
-                    plate_tab->update_model_config();
+                // Orca #15916/#16344: rebuild the plate tab from the current selection; its cached
+                // plates may be gone after a reset.
+                wxGetApp().obj_list()->update_and_show_object_settings_item();
 
                 // update app_config
                 AppConfig* app_config = wxGetApp().app_config;
