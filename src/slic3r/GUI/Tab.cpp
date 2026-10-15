@@ -4901,6 +4901,8 @@ void TabFilament::build()
         //optgroup->append_line(line);
         optgroup = page->new_optgroup(L("Cooling for specific layer"), L"param_cooling_specific_layer");
         optgroup->append_single_option_line("close_fan_the_first_x_layers");
+        // ORCA: explicit override for the part cooling fan on layer 0; also anchors the ramp when "Full fan speed at layer" is set.
+        optgroup->append_single_option_line("initial_layer_fan_speed");
         optgroup->append_single_option_line("full_fan_speed_layer");
 
         optgroup = page->new_optgroup(L("Part cooling fan"), L"param_cooling_part_fan");
@@ -4934,11 +4936,13 @@ void TabFilament::build()
         optgroup->append_single_option_line("activate_air_filtration", "air-filtration");
 
         line = {L("During print"), ""};
+        line.append_option(optgroup->get_option("activate_air_filtration_during_print"));
         line.append_option(optgroup->get_option("during_print_exhaust_fan_speed"));
         optgroup->append_line(line);
 
 
         line = {L("Complete print"), ""};
+        line.append_option(optgroup->get_option("activate_air_filtration_on_completion"));
         line.append_option(optgroup->get_option("complete_print_exhaust_fan_speed"));
         optgroup->append_line(line);
         //BBS
@@ -5154,9 +5158,39 @@ void TabFilament::toggle_options()
 
       toggle_option("additional_cooling_fan_speed", cfg.opt_bool("auxiliary_fan"));
 
+      // Orca #13228: the exhaust fan speeds apply only where their override is on.
+      bool activate_air_filtration = m_config->opt_bool("activate_air_filtration", 0);
+      toggle_option("activate_air_filtration_during_print", activate_air_filtration);
+      toggle_option("activate_air_filtration_on_completion", activate_air_filtration);
+      toggle_option("during_print_exhaust_fan_speed", activate_air_filtration && m_config->opt_bool("activate_air_filtration_during_print", 0));
+      toggle_option("complete_print_exhaust_fan_speed", activate_air_filtration && m_config->opt_bool("activate_air_filtration_on_completion", 0));
+
       // Orca: toggle dont slow down for external perimeters if
       bool has_slow_down_for_layer_cooling = m_config->opt_bool("slow_down_for_layer_cooling", 0);
       toggle_option("dont_slow_down_outer_wall", has_slow_down_for_layer_cooling);
+
+      // ORCA: First layer fan speed override only makes sense when no layers are gated off ("No cooling for
+      // the first" == 0). Otherwise the override would set layer 0 to a non-zero value while the gate forces
+      // layers 1..N-1 to zero, producing a confusing non-monotonic profile. When the gate is active we both
+      // grey out the UI line and force the underlying value to -1 so the cooling buffer never enters the
+      // override branch.
+      const int close_fan_first_n = m_config->opt_int("close_fan_the_first_x_layers", 0);
+      const bool initial_layer_fan_speed_enabled = close_fan_first_n <= 0;
+      toggle_line("initial_layer_fan_speed", initial_layer_fan_speed_enabled);
+      if (!initial_layer_fan_speed_enabled) {
+          if (auto* opt = dynamic_cast<const ConfigOptionInts*>(m_config->option("initial_layer_fan_speed"))) {
+              bool needs_reset = false;
+              for (int v : opt->values) {
+                  if (v != -1) { needs_reset = true; break; }
+              }
+              if (needs_reset) {
+                  std::vector<int> reset_values(opt->values.size(), -1);
+                  m_config->set_key_value("initial_layer_fan_speed", new ConfigOptionInts(reset_values));
+                  update_dirty();
+                  reload_config();
+              }
+          }
+      }
     }
     if (m_active_page->title() == L("Filament"))
     {
@@ -5447,6 +5481,8 @@ void TabPrinter::build_fff()
         line.append_option(optgroup->get_option("fan_speedup_overhangs"));
         optgroup->append_line(line);
         optgroup->append_single_option_line("fan_kickstart");
+        // ORCA: minimum non-zero part cooling fan speed.
+        optgroup->append_single_option_line("part_cooling_fan_min_pwm");
 
         optgroup = page->new_optgroup(L("Extruder Clearance"), "param_extruder_clearence");
         optgroup->append_single_option_line("extruder_clearance_radius");

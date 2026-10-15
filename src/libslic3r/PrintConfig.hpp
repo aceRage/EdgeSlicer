@@ -1818,6 +1818,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               fan_kickstart))
     ((ConfigOptionBool,                fan_speedup_overhangs))
     ((ConfigOptionFloat,               fan_speedup_time))
+    // ORCA: minimum PWM (as a percent 0-100) emitted when the part-cooling fan is asked for a non-zero speed.
+    // Used to overcome the PWM start-up threshold on fans that cannot spool below a certain duty cycle.
+    // A value of 0 (the default) leaves behaviour unchanged. A fan command of 0 (off) is always honoured.
+    ((ConfigOptionInt,                 part_cooling_fan_min_pwm))
     ((ConfigOptionFloats,              filament_diameter))
     ((ConfigOptionFloats,              filament_density))
     ((ConfigOptionStrings,             filament_type))
@@ -2070,6 +2074,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionStrings,            filament_multi_colors))
     ((ConfigOptionInts,               filament_colour_mode))
     ((ConfigOptionBools,              activate_air_filtration))
+    ((ConfigOptionBools,              activate_air_filtration_during_print))
+    ((ConfigOptionBools,              activate_air_filtration_on_completion))
     ((ConfigOptionInts,               during_print_exhaust_fan_speed))
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
@@ -2080,6 +2086,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloats,              initial_layer_infill_speed))
     ((ConfigOptionInts,               nozzle_temperature_initial_layer))
     ((ConfigOptionInts,               full_fan_speed_layer))
+    // ORCA: explicit override for the part cooling fan speed on the first printed layer.
+    ((ConfigOptionInts,               initial_layer_fan_speed))
     ((ConfigOptionFloats,               fan_max_speed))
     ((ConfigOptionFloats,             max_layer_height))
     ((ConfigOptionFloats,               fan_min_speed))

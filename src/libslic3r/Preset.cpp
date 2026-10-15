@@ -1266,10 +1266,10 @@ static std::vector<std::string> s_Preset_filament_options {
     //BBS:temperature_vitrification
     "temperature_vitrification", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
     "slow_down_for_layer_cooling", "fan_min_speed",
-    "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "full_fan_speed_layer", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
+    "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "full_fan_speed_layer", "initial_layer_fan_speed", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
     "filament_start_gcode", "filament_end_gcode",
     //exhaust fan control
-    "activate_air_filtration","during_print_exhaust_fan_speed","complete_print_exhaust_fan_speed",
+    "activate_air_filtration","activate_air_filtration_during_print","activate_air_filtration_on_completion","during_print_exhaust_fan_speed","complete_print_exhaust_fan_speed",
     // Retract overrides
     "filament_retraction_length", "filament_z_hop", "filament_z_hop_types", "filament_retract_lift_above", "filament_retract_lift_below", "filament_retract_lift_enforce", "filament_retraction_speed", "filament_deretraction_speed", "filament_retract_restart_extra", "filament_retraction_minimum_travel",
     "filament_retract_when_changing_layer", "filament_wipe", "filament_retract_before_wipe", "filament_retract_length_toolchange", "filament_retract_restart_extra_toolchange",
@@ -1328,7 +1328,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "enable_pre_heating", // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
     "printer_technology",
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",
-    "fan_kickstart", "fan_speedup_time", "fan_speedup_overhangs",
+    "fan_kickstart", "part_cooling_fan_min_pwm", "fan_speedup_time", "fan_speedup_overhangs",
     "single_extruder_multi_material", "manual_filament_change", "machine_start_gcode", "machine_end_gcode", "unload_filaments_at_end", "before_layer_change_gcode", "printing_by_object_gcode", "layer_change_gcode", "time_lapse_gcode", "change_filament_gcode", "change_extrusion_role_gcode",
     "printer_model", "printer_variant", "printable_height", "extruder_clearance_radius", "extruder_clearance_max_radius", "extruder_clearance_height_to_lid", "extruder_clearance_height_to_rod", "extruder_clearance_dist_to_rod",
     "nozzle_height",
