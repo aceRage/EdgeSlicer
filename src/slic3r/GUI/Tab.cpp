@@ -5967,6 +5967,7 @@ if (is_marlin_flavor)
         optgroup = page->new_optgroup(L("Wipe tower"), "param_tower");
         optgroup->append_single_option_line("purge_in_prime_tower", "semm");
         optgroup->append_single_option_line("enable_filament_ramming", "semm");
+        optgroup->append_single_option_line("tool_change_on_wipe_tower", "semm");
         optgroup->append_single_option_line("ramming_line_width_ratio");
         optgroup->append_single_option_line("enable_change_pressure_when_wiping");
         optgroup->append_single_option_line("ramming_pressure_advance_value");
@@ -6518,6 +6519,12 @@ void TabPrinter::toggle_options()
         toggle_option("extruders_count", !bSEMM);
         toggle_option("manual_filament_change", bSEMM);
         toggle_option("purge_in_prime_tower", bSEMM && !is_BBL_printer);
+
+        // Orca #13703: "Tool change on wipe tower" only makes sense for multi-extruder (multi-toolhead) printers
+        // using the Type 2 wipe tower (here: every non-BBL printer). SEMM already always travels to the tower
+        // as part of the purge, so the option is irrelevant there.
+        const size_t extruders_count = m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
+        toggle_option("tool_change_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
     }
     wxString extruder_number;
     long val = 1;
