@@ -209,7 +209,9 @@ struct Extder
 
     //current nozzle
     NozzleType     current_nozzle_type{NozzleType::ntUndefine};            // 0-hardened_steel 1-stainless_steel
-    float current_nozzle_diameter = {0.4f}; // 0-0.2mm  1-0.4mm 2-0.6 mm3-0.8mm
+    // 0 = unknown until the printer reports it (Orca #12814; NozzleInfo.hpp). Was 0.4, which made a
+    // printer that never reports its nozzle look like a 0.4 mm one.
+    float current_nozzle_diameter = {0.0f};
     // Ultra: reported nozzle flow variant (nvtStandard=Standard, nvtBigTraffic=High Flow),
     // used to auto-match the sliced nozzle_volume_type to the installed nozzle.
     NozzleVolumeType current_nozzle_flow{NozzleVolumeType::nvtStandard};

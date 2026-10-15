@@ -394,7 +394,9 @@ public:
     void update_timelapse_enable_status();
     bool is_same_printer_model();
     bool is_blocking_printing(MachineObject* obj_);
-    bool is_same_nozzle_diameters(float& tag_nozzle_diameter) const;
+    // tag_nozzle_diameter / printer_nozzle_diameter: the preset's and the printer's diameter of the
+    // first used extruder that differs. A diameter the printer has not reported counts as a match.
+    bool is_same_nozzle_diameters(float& tag_nozzle_diameter, float& printer_nozzle_diameter) const;
     bool is_same_nozzle_type(const Extder& extruder, std::string& filament_type) const;
     bool has_tips(MachineObject* obj);
     bool is_timeout();

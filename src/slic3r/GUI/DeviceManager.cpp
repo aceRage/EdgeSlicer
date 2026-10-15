@@ -6409,7 +6409,7 @@ void MachineObject::parse_new_info(json print)
                 //current nozzle info
                 if (extder_obj.nozzle_id == 0xff) {
                     extder_obj.current_nozzle_type = NozzleType::ntUndefine;
-                    extder_obj.current_nozzle_diameter = 0.4f;
+                    extder_obj.current_nozzle_diameter = 0.0f; // no nozzle mounted: unknown (Orca #12814)
                 } else {
                     for (auto i = 0; i < m_nozzle_data.nozzles.size(); i++) {
                         if (m_nozzle_data.nozzles[i].id == extder_obj.nozzle_id) {

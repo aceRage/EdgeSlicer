@@ -77,6 +77,7 @@ add_executable(${_TEST_NAME}_tests
     stream_page_icon_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
+    nozzle_info_tests.cpp
     device_controls_tests.cpp
     bambu_fans_tests.cpp
     printer_timelapse_tests.cpp
