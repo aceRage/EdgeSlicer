@@ -68,7 +68,7 @@ inline unsigned parse_scopes(const std::string& csv)
     return mask;
 }
 
-inline unsigned parse_scopes(const nlohmann::json& arr)
+inline unsigned parse_scope_list(const nlohmann::json& arr)
 {
     unsigned mask = 0;
     if (!arr.is_array()) return 0;
@@ -218,7 +218,7 @@ inline Client from_settings(const nlohmann::json& j)
     c.id           = j.value("id", std::string());
     c.name         = j.value("name", std::string());
     c.hash         = j.value("hash", std::string());
-    c.scopes       = parse_scopes(j.value("scopes", nlohmann::json::array()));
+    c.scopes       = parse_scope_list(j.value("scopes", nlohmann::json::array()));
     c.tagged_ok    = j.value("tagged_ok", false);
     c.created_at   = j.value("created_at", 0LL);
     c.last_used_at = j.value("last_used_at", 0LL);

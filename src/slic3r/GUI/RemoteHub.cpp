@@ -5562,7 +5562,7 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         try { in = json::parse(body); } catch (...) { respond_json(client, 400, json_error("expected JSON")); return; }
         if (!in.is_object()) { respond_json(client, 400, json_error("expected a JSON object")); return; }
         std::string token;
-        const json  c = create_client(in.value("name", std::string()), HubClients::parse_scopes(in.value("scopes", json::array())),
+        const json  c = create_client(in.value("name", std::string()), HubClients::parse_scope_list(in.value("scopes", json::array())),
                                       in.value("tagged_ok", false), token);
         if (token.empty()) { respond_json(client, 400, json_error(c.value("error", std::string("could not create the client")))); return; }
         const PhoneLinks links = phone_links();
