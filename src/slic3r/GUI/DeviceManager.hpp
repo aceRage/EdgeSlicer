@@ -1013,6 +1013,7 @@ public:
     bool is_support_auto_recovery_step_loss{false};
     bool is_support_ams_humidity {false};
     bool is_support_remote_dry {false}; // fun2 bit 5: "ams_filament_drying" is accepted
+    bool is_support_print_with_emmc {false}; // fun2 bit 0: the printer can print from its internal storage
     bool is_support_prompt_sound{false};
     bool is_support_filament_tangle_detect{false};
     bool is_support_1080dpi {false};

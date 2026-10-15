@@ -2576,6 +2576,7 @@ void SelectMachineDialog::on_send_print()
 
     m_print_job->sdcard_state = (int) obj_->get_sdcard_state();
     m_print_job->has_sdcard   = bambu_storage_usable_for_lan(m_print_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));
+    m_print_job->could_emmc_print = obj_->is_support_print_with_emmc;
 
 
     bool timelapse_option = select_timelapse->IsShown() ? m_checkbox_list["timelapse"]->GetValue() : true;
@@ -3279,9 +3280,9 @@ void SelectMachineDialog::update_show_status()
         return;
     }
 
-    // check sdcard when if lan mode printer
+    // check sdcard when if lan mode printer (a printer that prints from internal storage needs none, as in Bambu Studio)
     if (obj_->is_lan_mode_printer()) {
-        if (obj_->get_sdcard_state() == MachineObject::SdcardState::NO_SDCARD) {
+        if (obj_->get_sdcard_state() == MachineObject::SdcardState::NO_SDCARD && !obj_->is_support_print_with_emmc) {
             show_status(PrintDialogStatus::PrintStatusLanModeNoSdcard);
             return;
         }

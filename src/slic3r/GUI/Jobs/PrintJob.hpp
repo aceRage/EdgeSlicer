@@ -84,6 +84,9 @@ public:
     bool        task_layer_inspect;
     bool        cloud_print_only { false };
     bool        has_sdcard { false };
+    // The printer can print from its internal storage (fun2 bit 0): a LAN print needs no card then,
+    // as in Bambu Studio (PrintJob::could_emmc_print).
+    bool        could_emmc_print { false };
     // MachineObject::SdcardState of the printer's storage (0 none, 1 normal, 2 abnormal, 3 read-only);
     // only used to say why has_sdcard is false.
     int         sdcard_state { 0 };
