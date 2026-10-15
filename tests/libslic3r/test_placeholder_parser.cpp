@@ -306,3 +306,54 @@ SCENARIO("Placeholder parser variables", "[PlaceholderParser]") {
     }
     SECTION("if else completely empty") { REQUIRE(parser.process("{if false then elsif false then else endif}", 0, nullptr, nullptr, nullptr) == ""); }
 }
+
+// OrcaSlicer #14526. Our coFloatsOrPercents support came earlier (2bd5c595a4); these are upstream's
+// cases. small_perimeter_speed is a plain (non-nullable) ConfigOptionFloatsOrPercents here, and a
+// bare reference reads the current extruder's element (upstream reads the filament_map extruder,
+// which is the same index when no filament_map is set).
+SCENARIO("Placeholder parser coFloatsOrPercents vector access", "[PlaceholderParser]") {
+    PlaceholderParser parser;
+    auto config = DynamicPrintConfig::full_print_config();
+
+    // outer_wall_speed is the ratio_over target for small_perimeter_speed.
+    // Different values per extruder to verify parent resolves at the same element index.
+    config.set_deserialize_strict({
+        { "outer_wall_speed", "60,70,80,90" },
+        { "nozzle_diameter", "0.4,0.4,0.4,0.4" },
+        { "pressure_advance", "1.5,2.0,3.0,4.0" }
+    });
+    // small_perimeter_speed:
+    //   [0] = 50% of outer_wall_speed[0] (= 60) -> 30
+    //   [1] = 80% of outer_wall_speed[1] (= 70) -> 56
+    //   [2] = 0 absolute
+    //   [3] = 50% of outer_wall_speed[3] (= 90) -> 45
+    REQUIRE(config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed") != nullptr);
+    config.option<ConfigOptionFloatsOrPercents>("small_perimeter_speed")->values = {
+        FloatOrPercent{50.0, true},
+        FloatOrPercent{80.0, true},
+        FloatOrPercent{0.0, false},
+        FloatOrPercent{50.0, true},
+    };
+
+    parser.apply_config(config);
+    parser.set("foo", 0);
+    parser.set("bar", 1);
+    parser.set("baz", 3);
+    parser.set("num_extruders", 4);
+
+    SECTION("Indexed access - percent resolved against parent at same index [0]") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[0]}")) == Approx(30.0)); }
+    SECTION("Indexed access - percent resolved against parent at same index [1]") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[1]}")) == Approx(56.0)); }
+    SECTION("Indexed access - percent resolved against parent at same index [3]") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[3]}")) == Approx(45.0)); }
+    SECTION("Variable-indexed access via foo (=0) - percent value") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[foo]}")) == Approx(30.0)); }
+    SECTION("Variable-indexed access via bar (=1) - percent value") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[bar]}")) == Approx(56.0)); }
+    SECTION("Variable-indexed access via baz (=3) - percent value") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[baz]}")) == Approx(45.0)); }
+    SECTION("Literal-indexed access - absolute value") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[2]}")) == Approx(0.0)); }
+    SECTION("No-index (extruder-based) access - percent resolved via current extruder") { REQUIRE(std::stod(parser.process("{small_perimeter_speed}")) == Approx(30.0)); }
+    // Edge: the bare reference follows the current extruder.
+    SECTION("No-index access on extruder 1") { REQUIRE(std::stod(parser.process("{small_perimeter_speed}", 1)) == Approx(56.0)); }
+    SECTION("Out-of-range index clamps to index 0") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[99]}")) == Approx(30.0)); }
+    SECTION("coFloats no-index access (outer_wall_speed)") { REQUIRE(std::stod(parser.process("{outer_wall_speed}")) == Approx(60.0)); }
+    SECTION("coFloats indexed access (outer_wall_speed)") { REQUIRE(std::stod(parser.process("{outer_wall_speed[2]}")) == Approx(80.0)); }
+    SECTION("coFloats no-index access (pressure_advance)") { REQUIRE(std::stod(parser.process("{pressure_advance}")) == Approx(1.5)); }
+    SECTION("coFloats indexed access (pressure_advance)") { REQUIRE(std::stod(parser.process("{pressure_advance[2]}")) == Approx(3.0)); }
+}
