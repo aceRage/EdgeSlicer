@@ -149,7 +149,10 @@ def main():
         st, body = get(port, base + "/state")
         expect("plain loopback still works after the refusals: 200", st == 200, st)
 
-        time.sleep(1.0)  # let the log flush
+        # hub.log is flushed every couple of seconds by the hub's loop: wait for it.
+        t_log = time.time()
+        while time.time() - t_log < 15 and "refused a Tailscale Serve request" not in hub_log_text(dd):
+            time.sleep(0.5)
         log = hub_log_text(dd)
         n_lines = log.count("refused a Tailscale Serve request with no tailnet login")
         expect("hub.log names the refusal", n_lines >= 1, n_lines)
