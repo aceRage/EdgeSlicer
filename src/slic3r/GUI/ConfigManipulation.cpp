@@ -875,8 +875,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("brim_ears_max_angle", have_brim_ear);
     toggle_line("brim_ears_detection_length", have_brim_ear);
 
-    // Hide Elephant foot compensation layers if elefant_foot_compensation is not enabled
-    toggle_line("elefant_foot_compensation_layers", config->opt_float("elefant_foot_compensation") > 0);
+    // Hide Elephant foot compensation layers if neither elefant_foot_compensation nor the
+    // elephant foot layers density (Orca #11526) is in use.
+    const auto *opt_elefant_density = config->option<ConfigOptionPercent>("elefant_foot_layers_density");
+    toggle_line("elefant_foot_compensation_layers", config->opt_float("elefant_foot_compensation") > 0 ||
+                (opt_elefant_density != nullptr && opt_elefant_density->get_abs_value(1.0) < 1.0));
 
     bool have_raft = config->opt_int("raft_layers") > 0;
     bool have_support_material = config->opt_bool("enable_support") || have_raft;
@@ -1078,6 +1081,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("prime_tower_width", have_prime_tower && wipe_tower_wall_type != WipeTowerWallType::wtwRib);
 
     toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && !is_BBL_Printer);
+    toggle_line("wipe_tower_stagger_toolchange_start", have_prime_tower && !is_BBL_Printer);
 
     bool use_cyclic_ordering = config->has("toolchange_ordering") &&
         config->opt_enum<ToolChangeOrderingType>("toolchange_ordering") == ToolChangeOrderingType::Cyclic;
