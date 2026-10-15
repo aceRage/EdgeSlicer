@@ -2513,6 +2513,8 @@ TEST_CASE("A per-object draft shield follows the object layers, not interlaced s
 namespace {
 struct FirstLayerTravelMove
 {
+    int    layer;  // 1 = first layer, counted from the ";LAYER_CHANGE" tags (the travel to the next
+                   // layer's start belongs to that layer even though it runs before the Z move)
     long   z;      // um, before the move
     bool   travel;
     int    accel;  // last M204 S
@@ -2522,17 +2524,20 @@ struct FirstLayerTravelMove
 std::vector<FirstLayerTravelMove> first_layer_travel_moves(const std::string &gcode)
 {
     std::vector<FirstLayerTravelMove> moves;
+    int    layer = 0;
     int    accel = 0;
     double jerk  = 0.;
     GCodeReader parser;
     parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         float v = 0.f;
-        if (line.cmd_is("M204") && line.has_value('S', v))
+        if (line.raw().rfind(";LAYER_CHANGE", 0) == 0)
+            ++layer;
+        else if (line.cmd_is("M204") && line.has_value('S', v))
             accel = int(v + 0.5f);
         else if (line.cmd_is("M205") && line.has_value('X', v))
             jerk = v;
         else if ((line.cmd_is("G1") || line.cmd_is("G0")) && (line.has(X) || line.has(Y)))
-            moves.push_back({ std::lround(double(self.z()) * 1000.), !line.extruding(self), accel, jerk });
+            moves.push_back({ layer, std::lround(double(self.z()) * 1000.), !line.extruding(self), accel, jerk });
     });
     return moves;
 }
@@ -2598,7 +2603,8 @@ void require_only_first_layer_travels_change(const std::string &before, const st
         REQUIRE(a[i].z == b[i].z);
         REQUIRE(a[i].travel == b[i].travel);
         const bool differs = a[i].accel != b[i].accel || std::abs(a[i].jerk - b[i].jerk) > 1e-6;
-        if (a[i].z > 200) {
+        REQUIRE(a[i].layer == b[i].layer);
+        if (a[i].layer > 1) {
             upper_changed += differs;
             continue;
         }
@@ -2637,7 +2643,7 @@ TEST_CASE("First layer travels keep the initial layer acceleration and jerk at t
 
     size_t first_layer_travels = 0, at_initial = 0, at_travel = 0;
     for (const FirstLayerTravelMove &m : first_layer_travel_moves(unset)) {
-        if (m.z > 200 || !m.travel)
+        if (m.layer != 1 || !m.travel)
             continue;
         ++first_layer_travels;
         at_initial += m.accel == 500 && std::abs(m.jerk - 6.) < 1e-6;
