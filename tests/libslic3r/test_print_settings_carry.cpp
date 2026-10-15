@@ -397,6 +397,30 @@ TEST_CASE("Print settings carry: never leave a combination the settings page rew
         CHECK_FALSE(dst.opt_bool("spiral_mode"));
     }
 
+    SECTION("spiral vase is not carried together with side stabilizers") {
+        DynamicPrintConfig base;
+        base.set_key_value("spiral_mode", new ConfigOptionBool(false));
+        base.set_key_value("wall_loops", new ConfigOptionInt(1));
+        base.set_key_value("top_shell_layers", new ConfigOptionInt(0));
+        base.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
+        base.set_key_value("enable_support", new ConfigOptionBool(false));
+        base.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
+        base.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
+        DynamicPrintConfig src = base;
+        src.set_key_value("spiral_mode", new ConfigOptionBool(true));
+        src.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smAuto));
+        DynamicPrintConfig dst = base;
+        std::map<std::string, std::string> kept;
+        carry_print_settings(dst, src, true, nullptr, &kept);
+        CHECK_FALSE(dst.opt_bool("spiral_mode"));
+        CHECK(kept["spiral_mode"].find("conflict") != std::string::npos);
+        // Stabilizers off in the source: nothing blocks the vase.
+        src.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
+        dst = base;
+        carry_print_settings(dst, src, true);
+        CHECK(dst.opt_bool("spiral_mode"));
+    }
+
     SECTION("extrusion rate smoothing is not carried onto a profile with arc fitting") {
         DynamicPrintConfig src;
         src.set_key_value("max_volumetric_extrusion_rate_slope", new ConfigOptionFloats({ 300. }));

@@ -2638,6 +2638,9 @@ void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 	new_conf.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
 	new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
 	new_conf.set_key_value("wall_direction", new ConfigOptionEnum<WallDirection>(WallDirection::Auto));
+	// Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
+	if (global_config->has("stabilizer_supports"))
+		new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
 	const auto applying_keys = global_config->diff(new_conf);
 
 	for (ModelObject* object : obj_ptrs) {
@@ -4845,6 +4848,11 @@ int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_n
 
 	auto is_object_config_compatible_with_spiral_vase = [](ModelObject* object) {
 		const DynamicPrintConfig& config = object->config.get();
+		// The object's own stabilizer mode, else the process preset's.
+		const DynamicPrintConfig& global_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+		const DynamicPrintConfig& stabilizer_src = config.has("stabilizer_supports") ? config : global_config;
+		if (stabilizer_src.has("stabilizer_supports") && stabilizer_src.opt_enum<StabilizerMode>("stabilizer_supports") != smOff)
+			return false;
 		if (config.has("wall_loops") && config.opt_int("wall_loops") == 1 &&
 			config.has("top_shell_layers") && config.opt_int("top_shell_layers") == 0 &&
 			config.has("sparse_infill_density") && config.option<ConfigOptionPercent>("sparse_infill_density")->value == 0 &&
