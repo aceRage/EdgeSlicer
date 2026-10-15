@@ -1069,8 +1069,8 @@ namespace client
                 const ConfigOption *opt_parent = opt_def->ratio_over.empty() ? nullptr : ctx->resolve_symbol(opt_def->ratio_over);
                 if (opt_parent == nullptr)
                     ctx->throw_exception("FloatOrPercent variable failed to resolve the \"ratio_over\" dependencies", it_range);
-                if (boost::ends_with(opt_def->ratio_over, "extrusion_width")) {
-                    // Extrusion width supports defaults and a complex graph of dependencies.
+                if (boost::ends_with(opt_def->ratio_over, "line_width")) {
+                    // Line width supports defaults and a complex graph of dependencies.
                     assert(opt_parent->type() == coFloatOrPercent);
                     v *= Flow::extrusion_width(opt_def->ratio_over, static_cast<const ConfigOptionFloatOrPercent*>(opt_parent), *ctx, static_cast<unsigned int>(ctx->current_extruder_id));
                     break;
@@ -1114,8 +1114,8 @@ namespace client
             case coFloatOrPercent:
             {
                 std::string opt_key(opt.it_range.begin(), opt.it_range.end());
-                if (boost::ends_with(opt_key, "extrusion_width")) {
-                    // Extrusion width supports defaults and a complex graph of dependencies.
+                if (boost::ends_with(opt_key, "line_width")) {
+                    // Line width supports defaults and a complex graph of dependencies.
                     output.set_d(Flow::extrusion_width(opt_key, *ctx, static_cast<unsigned int>(ctx->current_extruder_id)));
                 } else if (! static_cast<const ConfigOptionFloatOrPercent*>(opt.opt)->percent) {
                     // Not a percent, just return the value.
@@ -2236,9 +2236,13 @@ namespace client
                         initializer_list(_r1)[px::bind(&MyContext::vector_variable_new_from_initializer_list, _r1, _a, _b, _1)]
                         // Process it before conditional_expression, as conditional_expression requires a vector reference to be augmented with an index.
                         // Only process such variable references, which return a naked vector variable.
-                    // Orca todo: following code cause strange build errors with MSVC C++17
-                    // |  eps(px::bind(&MyContext::could_be_vector_variable_reference, _b)) >>
-                    //         variable_reference(_r1)[px::val(qi::_pass) = px::bind(&MyContext::vector_variable_new_from_copy, _r1, _a, _b, _1)]
+                        // Edge: only when the naked vector reference is the whole right hand side. A bare vector
+                        // in a scalar expression resolves to the current extruder's element (BambuStudio rule, see
+                        // vector_element_to_expr), so "local t = nozzle_temperature + 5" must keep falling through
+                        // to conditional_expression instead of copying the vector and failing on the "+".
+                    |  eps(px::bind(&MyContext::could_be_vector_variable_reference, _b)) >>
+                            (variable_reference(_r1) >> &(lit(';') | lit('}') | kw["elsif"] | kw["else"] | kw["endif"]))
+                                [qi::_pass = px::bind(&MyContext::vector_variable_new_from_copy, _r1, _a, _b, _1)]
                        // Would NOT consume '(' conditional_expression ')' because such value was consumed with the expression above.
                     |  conditional_expression(_r1)
                             [px::bind(&MyContext::scalar_variable_new_from_scalar_expression, _r1, _a, _b, _1)]
