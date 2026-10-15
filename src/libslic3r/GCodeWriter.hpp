@@ -164,6 +164,9 @@ public:
     // physically at is remembered until a Z move is emitted, so the machine_max_speed_z cap measures
     // that travel from where the head really is. m_pos (and everything that reads it) is unchanged.
     void        defer_z_move(double z);
+    // Snapmaker #993 (Edge): "G1 F<uncapped Z travel speed>" when machine_max_speed_z lowered the last Z
+    // travel's feedrate, else empty. For G-code that follows a Z move and moves without an F word of its own.
+    std::string restore_uncapped_z_feedrate() const;
     double      get_zhop() const { return m_lifted; }
 
     //BBS: set offset for gcode writer
@@ -289,8 +292,6 @@ public:
     double      cap_speed_for_z(double speed, double dz, double length) const;
     // The same for a straight XYZ move, measured between the emitted (quantized) end points.
     double      xyz_travel_speed(const Vec3d &from, const Vec3d &to, double speed) const;
-    // "G1 F<uncapped Z travel speed>" when the cap lowered it, else empty (see the .cpp).
-    std::string restore_uncapped_z_feedrate() const;
     // The Z the head is physically at: the pre-layer-change Z while a deferred layer change is pending.
     double      physical_z() const { return (m_has_deferred_z && m_pos.z() == m_deferred_to_z) ? m_deferred_from_z : m_pos.z(); }
     std::string _travel_to_z(double z, const std::string &comment);
