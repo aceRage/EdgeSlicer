@@ -32,6 +32,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <boost/system/errc.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/nowide/cstdio.hpp>
@@ -10676,10 +10677,14 @@ bool has_restore_data(std::string & path, std::string& origin)
         origin = "<lock>";
         return false;
     }
-    if (boost::filesystem::exists(path + "/lock.txt")) {
+    // The caller (Plater EVT_RESTORE_PROJECT) removes this directory unless origin is
+    // "<lock>", so every way of failing to establish the backup's state has to claim
+    // the lock instead (Orca #16431). Edge PR #475 is a different backup-thread race.
+    boost::system::error_code ec;
+    if (boost::filesystem::exists(path + "/lock.txt", ec)) {
         std::string pid;
-        load_string_file(path + "/lock.txt", pid);
         try {
+            load_string_file(path + "/lock.txt", pid);
             if (get_process_name(boost::lexical_cast<int>(pid)) ==
                 get_process_name(0)) {
                 origin = "<lock>";
@@ -10687,12 +10692,23 @@ bool has_restore_data(std::string & path, std::string& origin)
             }
         }
         catch (...) {
+            origin = "<lock>";
             return false;
         }
+    } else if (ec && ec != boost::system::errc::no_such_file_or_directory &&
+               ec != boost::system::errc::not_a_directory) {
+        origin = "<lock>";
+        return false;
     }
     std::string file3mf = path + "/.3mf";
-    if (!boost::filesystem::exists(file3mf))
+    if (!boost::filesystem::exists(file3mf, ec)) {
+        // A .3mf that is simply absent is a spent backup and stays collectable. A
+        // probe that could not look must not be: only a different error means unknown.
+        if (ec && ec != boost::system::errc::no_such_file_or_directory &&
+            ec != boost::system::errc::not_a_directory)
+            origin = "<lock>";
         return false;
+    }
     try {
         if (boost::filesystem::exists(path + "/origin.txt"))
             load_string_file(path + "/origin.txt", origin);
