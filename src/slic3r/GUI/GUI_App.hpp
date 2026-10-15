@@ -38,6 +38,7 @@
 #include <mutex>
 #include <stack>
 #include <unordered_map>
+#include <vector>
 //#define BBL_HAS_FIRST_PAGE          1
 #define STUDIO_INACTIVE_TIMEOUT     15*60*1000
 #define LOG_FILES_MAX_NUM           30
@@ -265,6 +266,11 @@ private:
     // post_init must not start a blank project in that case, or it discards the model the
     // URL is in the middle of loading.
     bool            m_url_open_pending { false };
+#ifdef __APPLE__
+    // Model URLs that arrived before post_init(). Drain after post_init() so the
+    // download starts on a fully built GUI (Snap #997 / d29a199d3ef5094f864371acf9b2bee5c4b19511).
+    std::vector<wxString> m_pending_mac_open_urls;
+#endif // __APPLE__
     std::string     m_pending_connector_link;
     bool            m_app_conf_exists{ false };
     EAppMode        m_app_mode{ EAppMode::Editor };
@@ -770,6 +776,10 @@ private:
     void            check_web_version();
     void            check_preset_version();
     void            check_new_version_sf(bool show_tips = false, bool by_user = false);
+    // Offers to migrate user filament presets made against an older release that lost printers their parent
+    // listed then. At startup it asks on every start that finds such presets, unless the user chose not to be
+    // reminded; by_user also reports when there is nothing to migrate. (OrcaSlicer #16367.)
+    void            check_legacy_user_filament_presets(bool by_user);
     void            process_network_msg(std::string dev_id, std::string msg);
     void            enter_force_upgrade();
     void            set_skip_version(bool skip = true);

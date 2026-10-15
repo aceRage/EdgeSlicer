@@ -228,6 +228,21 @@ private:
 public:
 
     bool backup_user_folder() const;
+    // Writes the user preset folder into a zip archive at zip_path, its entries under "user/".
+    bool backup_user_folder_to_zip(const std::string &zip_path) const;
+
+    // User filament presets made against an older release that no longer show on printers their parent
+    // listed then (resources/info/legacy_compatible_printers.json). (OrcaSlicer #16367.)
+    std::vector<LegacyUserFilamentPreset> legacy_user_filament_presets();
+    // Backs up the user preset folder into a zip in data_dir(), then writes each preset's printers into its file
+    // under one hold of the user presets lock. Nothing is written when the backup failed (backup empty) or the
+    // lock could not be taken (locked false); otherwise failed names the presets whose files could not be written.
+    struct LegacyUserFilamentPresetMigration {
+        bool                     locked{false};
+        std::string              backup;
+        std::vector<std::string> failed;
+    };
+    LegacyUserFilamentPresetMigration migrate_legacy_user_filament_presets(const std::vector<LegacyUserFilamentPreset> &legacy_presets);
 
     //BBS: project embedded preset logic
     PresetsConfigSubstitutions load_project_embedded_presets(std::vector<Preset*> project_presets, ForwardCompatibilitySubstitutionRule substitution_rule);
@@ -559,6 +574,8 @@ public:
     // `enabled`: empty when nothing was added, otherwise default_printer_variant(enabled) (the first
     // newly added variant would be the smallest nozzle, "0.2", when only 0.4 was enabled before).
     static std::string          variant_to_activate(const std::set<std::string> &previous, const std::set<std::string> &enabled);
+    // Snapmaker #876: tolerant parser for the '|'-separated flush volume lists kept in AppConfig printer settings.
+    static bool                 parse_flush_volume_list(const std::string &src, std::vector<double> &out);
     static const char* SM_DEFAULT_FILAMENT;
     static const char *ORCA_FILAMENT_LIBRARY;
 
