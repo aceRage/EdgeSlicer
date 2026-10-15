@@ -1019,3 +1019,58 @@ TEST_CASE("No cooling for the first layer keeps the ramp from layer 1", "[Coolin
     CHECK(fans[2] == 171);
     CHECK(fans[3] == 255);
 }
+
+// Orca #14270: initial_layer_fan_speed (per filament) sets the first layer's part fan exactly.
+TEST_CASE("First layer fan speed sets the first layer's fan", "[Cooling][Orca14270]")
+{
+    DynamicPrintConfig config = steady_fan_config(100, 0, 0);
+    config.set_deserialize_strict({{"initial_layer_fan_speed", "30"}});
+    const std::string      gcode = dumped("first_layer_fan_30", slice({TestMesh::cube_20x20x20}, config));
+    const std::vector<int> fans  = first_fan_per_layer(fan_at_extrusions(gcode));
+    REQUIRE(fans.size() > 3);
+    CHECK(fans[0] == 76); // 30 %
+    CHECK(fans[1] == 255);
+    CHECK(fans[3] == 255);
+}
+
+TEST_CASE("First layer fan speed anchors the fan ramp", "[Cooling][Orca14270]")
+{
+    DynamicPrintConfig config = steady_fan_config(100, 0, 5);
+    config.set_deserialize_strict({{"initial_layer_fan_speed", "20"}});
+    const std::string      gcode = dumped("first_layer_fan_ramp", slice({TestMesh::cube_20x20x20}, config));
+    const std::vector<int> fans  = first_fan_per_layer(fan_at_extrusions(gcode));
+    REQUIRE(fans.size() > 5);
+    // 20 % on layer 0, then 20 + layer / 4 * 80: 40, 60, 80 %, full speed from layer 4.
+    CHECK(fans[0] == 51);
+    CHECK(fans[1] == 102);
+    CHECK(fans[2] == 153);
+    CHECK(fans[3] == 204);
+    CHECK(fans[4] == 255);
+    for (size_t i = 1; i < fans.size(); ++i)
+        CHECK(fans[i] >= fans[i - 1]);
+}
+
+TEST_CASE("First layer fan speed is ignored while the first layers have no cooling", "[Cooling][Orca14270]")
+{
+    DynamicPrintConfig config = steady_fan_config(100, 1, 0);
+    config.set_deserialize_strict({{"initial_layer_fan_speed", "30"}});
+    const std::string with_override = slice({TestMesh::cube_20x20x20}, config);
+    const std::vector<int> fans     = first_fan_per_layer(fan_at_extrusions(with_override));
+    REQUIRE(fans.size() > 2);
+    CHECK(fans[0] <= 0);
+    CHECK(fans[1] == 255);
+    // -1 (the default) leaves the fan sequence alone.
+    config.set_deserialize_strict({{"initial_layer_fan_speed", "-1"}});
+    CHECK(fan_commands(slice({TestMesh::cube_20x20x20}, config)) == fan_commands(with_override));
+}
+
+// With both options the floor of #13715 applies to the first layer override too.
+TEST_CASE("The PWM floor raises a low first layer fan speed", "[Cooling][Orca13715][Orca14270]")
+{
+    DynamicPrintConfig config = steady_fan_config(100, 0, 0);
+    config.set_deserialize_strict({{"initial_layer_fan_speed", "5"}, {"part_cooling_fan_min_pwm", 20}});
+    const std::vector<int> fans = first_fan_per_layer(fan_at_extrusions(slice({TestMesh::cube_20x20x20}, config)));
+    REQUIRE(fans.size() > 1);
+    CHECK(fans[0] == 51);
+    CHECK(fans[1] == 255);
+}
