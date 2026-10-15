@@ -23,6 +23,7 @@
 #include "AmsDrying.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
+#include "NozzleInfo.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
 #define USE_LOCAL_SOCKET_BIND 0
@@ -186,7 +187,7 @@ struct NozzleData
 
 struct Extder
 {
-    int id; // 0-right 1-left
+    int id{0}; // 0-right 1-left (initialised: the default extruder pushed when none is reported is the main one)
 
     int ext_has_filament{0};
     int buffer_has_filament{0};
@@ -1319,6 +1320,21 @@ public:
     bool check_enable_np(const json& print) const;
     void parse_new_info(json print);
     bool is_nozzle_data_invalid();
+    // The diameter of the nozzle on extruder extder_id (0 = main/right, 1 = deputy/left); 0 when
+    // the printer has not reported it (Orca #12814).
+    float nozzle_diameter(int extder_id) const
+    {
+        for (const Extder& e : m_extder_data.extders)
+            if (e.id == extder_id)
+                return e.current_nozzle_diameter;
+        return 0.f;
+    }
+    // Orca #13330 (DevExtderSystem::NozzleDiameterMatchesOrUnknown): true when the nozzle on
+    // extder_id has target_diameter, or when the printer has not reported its diameter.
+    bool nozzle_diameter_matches_or_unknown(int extder_id, float target_diameter) const
+    {
+        return GUI::NozzleInfo::diameter_matches_or_unknown(nozzle_diameter(extder_id), target_diameter);
+    }
     int  get_flag_bits(std::string str, int start, int count = 1) const;
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
 

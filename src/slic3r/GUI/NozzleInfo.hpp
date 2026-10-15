@@ -16,4 +16,11 @@ namespace Slic3r { namespace GUI { namespace NozzleInfo {
 // True when the printer has reported a usable diameter.
 inline bool diameter_known(float diameter) { return std::isfinite(diameter) && diameter > 0.f; }
 
+// Orca #13330 (DevExtderSystem::NozzleDiameterMatchesOrUnknown): the printer's diameter equals the
+// target within 1 micron, or the printer has not reported one.
+inline bool diameter_matches_or_unknown(float machine_diameter, float target_diameter)
+{
+    return !diameter_known(machine_diameter) || std::fabs(machine_diameter - target_diameter) < 1e-3f;
+}
+
 }}} // namespace Slic3r::GUI::NozzleInfo

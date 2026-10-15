@@ -17,3 +17,17 @@ TEST_CASE("A zero or invalid nozzle diameter is unknown", "[NozzleInfo]")
     CHECK(diameter_known(0.4f));
     CHECK(diameter_known(0.8f));
 }
+
+// Orca #13330: every nozzle diameter check passes when the printer has not reported one, and
+// otherwise compares within a micron (preset values are doubles, reports are floats).
+TEST_CASE("Nozzle diameter matches when equal or unknown", "[NozzleInfo]")
+{
+    CHECK(diameter_matches_or_unknown(0.f, 0.4f));
+    CHECK(diameter_matches_or_unknown(0.f, 0.6f));
+    CHECK(diameter_matches_or_unknown(0.4f, 0.4f));
+    CHECK(diameter_matches_or_unknown(0.4f, float(0.4)));
+    CHECK(diameter_matches_or_unknown(0.6f, 0.6004f));
+    CHECK_FALSE(diameter_matches_or_unknown(0.4f, 0.6f));
+    CHECK_FALSE(diameter_matches_or_unknown(0.2f, 0.4f));
+    CHECK_FALSE(diameter_matches_or_unknown(0.8f, 0.f));
+}
