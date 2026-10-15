@@ -128,6 +128,7 @@
 #include "slic3r/Utils/VendorConnector.hpp"
 #include "HomePanel.hpp"
 #include "PresetMirror.hpp"
+#include "PresetMirrorCore.hpp"
 #include "Tab.hpp"
 #include "SysInfoDialog.hpp"
 #include "UpdateDialogs.hpp"
@@ -257,6 +258,24 @@ bool GUI_App::has_filament_hot_bed_nozzle_rules() const
 }
 
 class MainFrame;
+
+namespace {
+// Bambu Studio preset mirror, printer-switch path (UI thread only, except the worker body).
+// The gate remembers the source fingerprint of the last clean run, so a switch with nothing new in
+// the Bambu Studio folder costs one directory listing instead of reading ~1300 files. When
+// something did change, the run happens on this worker and only the preset reload comes back to
+// the UI thread. At most one worker at a time; mirror_bambu_user_presets_ex() serialises it
+// against the UI-thread runs (startup, Preferences "Sync now" / "Re-pull all").
+mirror::MirrorSkipGate s_preset_mirror_gate;
+boost::thread          s_preset_mirror_worker;
+std::atomic<bool>      s_preset_mirror_busy{false};
+
+void join_preset_mirror_worker()
+{
+    if (s_preset_mirror_worker.joinable())
+        s_preset_mirror_worker.join();
+}
+} // namespace
 
 namespace {
 
@@ -1214,7 +1233,9 @@ void GUI_App::log_version_info()
     BOOST_LOG_TRIVIAL(warning) << "[Version] EdgeSlicer: " << EDGESLICER_FULL_VERSION
                                << ", Build: " << SLIC3R_VERSION;
 
-    std::string flutter_ver = common::get_flutter_version();
+    const std::string bundled_flutter_version_json =
+        (boost::filesystem::path(resources_dir()) / "web" / "flutter_web" / "version.json").string();
+    std::string flutter_ver = common::get_flutter_version(bundled_flutter_version_json);
     BOOST_LOG_TRIVIAL(warning) << "[Version] Orca Web: " << (flutter_ver.empty() ? "N/A" : flutter_ver);
 
     std::string profile_ver = common::get_profile_version();
@@ -1484,6 +1505,9 @@ void GUI_App::post_init()
         plater_->canvas3D()->enable_render(false);
         mainframe->select_tab(size_t(MainFrame::tp3DEditor));
         plater_->select_view_3D("3D");
+        // The first render happens before the queued new_project() sets the same view.
+        plater_->get_camera().select_view("topfront");
+        plater_->get_camera().requires_zoom_to_bed = true;
         //BBS init the opengl resource here
 //#ifdef __linux__
         if (plater_->canvas3D()->get_wxglcanvas()->IsShownOnScreen()&&plater_->canvas3D()->make_current_for_postinit()) {
@@ -1749,7 +1773,9 @@ GUI_App::GUI_App()
     m_page_http_server.start();
     profiler.mark("m_page_http_server.start");
     repoint_saved_device_covers();
-    BOOST_LOG_TRIVIAL(info) << "[Flutter] Version:" << common::get_flutter_version();
+    BOOST_LOG_TRIVIAL(info) << "[Flutter] Version:"
+                            << common::get_flutter_version(
+                                   (boost::filesystem::path(resources_dir()) / "web" / "flutter_web" / "version.json").string());
     BOOST_LOG_TRIVIAL(info) << "[Profile] Version:" << common::get_profile_version();
     flush_logs();
     m_fltviews.set_app(this);
@@ -3152,6 +3178,8 @@ int GUI_App::OnExit()
     RemoteAccess::get().stop();
 
     stop_sync_user_preset();
+    // A Bambu Studio preset mirror started by a printer switch may still be writing.
+    join_preset_mirror_worker();
 
     if (m_device_manager) {
         delete m_device_manager;
@@ -3859,7 +3887,9 @@ bool GUI_App::on_init_inner()
     // manifest-tracked (protects fork-native presets, respects user deletions). Gated by a toggle.
     if (app_config->get_bool("sync_bambu_user_presets")) {
         std::string bs_uid = (m_agent && m_agent->is_user_login()) ? m_agent->get_user_id() : std::string();
-        mirror_bambu_user_presets(bs_uid);
+        // Remembered so the first printer switch can skip the re-sync when nothing has changed.
+        const std::string before = mirror_change_fingerprint(bs_uid);
+        record_bambu_preset_mirror_run(mirror_bambu_user_presets_ex(bs_uid).clean, before, bs_uid);
     }
 
     // BBS if load user preset failed
@@ -6546,21 +6576,68 @@ void GUI_App::enable_user_preset_folder(bool enable)
     GUI::wxGetApp().preset_bundle->update_user_presets_directory(DEFAULT_USER_FOLDER_NAME);
 }
 
+void GUI_App::record_bambu_preset_mirror_run(bool clean, const std::string& fingerprint_before, const std::string& logged_in_uid)
+{
+    s_preset_mirror_gate.record_run(clean, fingerprint_before, clean ? mirror_change_fingerprint(logged_in_uid) : std::string());
+}
+
+void GUI_App::reload_after_bambu_preset_mirror(int copied)
+{
+    if (!preset_bundle)
+        return;
+    try {
+        preset_bundle->load_user_presets(DEFAULT_USER_FOLDER_NAME, ForwardCompatibilitySubstitutionRule::Enable);
+        if (mainframe) mainframe->update_side_preset_ui();
+        BOOST_LOG_TRIVIAL(info) << "[preset-mirror] refreshed preset UI after sync (copied=" << copied << ")";
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "[preset-mirror] post-sync refresh failed: " << e.what();
+    }
+}
+
 void GUI_App::sync_bambu_user_presets(bool force_refresh)
 {
     if (!app_config || !app_config->get_bool("sync_bambu_user_presets"))
         return;
     std::string uid = (m_agent && m_agent->is_user_login()) ? m_agent->get_user_id() : std::string();
-    int copied = mirror_bambu_user_presets(uid);
-    if (copied > 0 || force_refresh) {
-        try {
-            preset_bundle->load_user_presets(DEFAULT_USER_FOLDER_NAME, ForwardCompatibilitySubstitutionRule::Enable);
-            if (mainframe) mainframe->update_side_preset_ui();
-            BOOST_LOG_TRIVIAL(info) << "[preset-mirror] refreshed preset UI after sync (copied=" << copied << ")";
-        } catch (const std::exception& e) {
-            BOOST_LOG_TRIVIAL(error) << "[preset-mirror] post-sync refresh failed: " << e.what();
-        }
+
+    if (force_refresh) {
+        // Preferences "Sync now" / "Re-pull all": synchronous, always runs and always reloads.
+        const std::string before = mirror_change_fingerprint(uid);
+        const MirrorRunResult r  = mirror_bambu_user_presets_ex(uid);
+        record_bambu_preset_mirror_run(r.clean, before, uid);
+        reload_after_bambu_preset_mirror(r.copied);
+        return;
     }
+
+    // Printer switch: skip when nothing changed since the last clean run.
+    const std::string before = mirror_change_fingerprint(uid);
+    if (s_preset_mirror_gate.can_skip(before)) {
+        BOOST_LOG_TRIVIAL(debug) << "[preset-mirror] Bambu Studio presets unchanged since the last sync; skipped";
+        return;
+    }
+    if (s_preset_mirror_busy.exchange(true)) {
+        // A run is already under way; the next switch looks again.
+        return;
+    }
+    join_preset_mirror_worker(); // the previous worker has finished (busy was false); reap it
+    BOOST_LOG_TRIVIAL(info) << "[preset-mirror] Bambu Studio presets changed (or first check); syncing in the background";
+    s_preset_mirror_worker = boost::thread([this, uid, before]() {
+        MirrorRunResult r;
+        try {
+            r = mirror_bambu_user_presets_ex(uid);
+        } catch (...) {
+            r = MirrorRunResult();
+        }
+        // Back on the UI thread: remember the run, reload when something was copied. The gate is
+        // only touched there. If the app is closing, OnExit joins this thread first and the queued
+        // call is dropped with the application object.
+        this->CallAfter([this, r, before, uid]() {
+            record_bambu_preset_mirror_run(r.clean, before, uid);
+            s_preset_mirror_busy = false;
+            if (r.copied > 0)
+                reload_after_bambu_preset_mirror(r.copied);
+        });
+    });
 }
 
 void GUI_App::check_track_enable()

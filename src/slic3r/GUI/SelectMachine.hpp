@@ -40,6 +40,7 @@
 #include "Widgets/PopupWindow.hpp"
 #include <wx/simplebook.h>
 #include <wx/hashmap.h>
+#include <map>
 
 #include "Jobs/Worker.hpp"
 
@@ -131,7 +132,10 @@ enum class ConfigNozzleIdx : int
 std::string get_nozzle_volume_type_cloud_string(int nozzle_volume_type);
 
 
-WX_DECLARE_HASH_MAP(int, Material *, wxIntegerHash, wxIntegerEqual, MaterialHash);
+// Orca #14408: MaterialHash is keyed by material/extruder index and is iterated in key order in
+// several places (the AMS override preview, the materials row), so it must be an ordered container.
+// A hash map iterates in an unspecified, implementation-dependent order, which scrambled them.
+using MaterialHash = std::map<int, Material *>;
 
 #define SELECT_MACHINE_DIALOG_BUTTON_SIZE wxSize(FromDIP(68), FromDIP(23))
 // The Send button on the prepare page is deliberately larger (about 1.6x) than the
