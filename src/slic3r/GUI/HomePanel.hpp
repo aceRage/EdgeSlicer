@@ -25,6 +25,7 @@ namespace GUI {
 
 class WebViewPanel;
 class HomeVendors;
+class HomeVaults;
 class ModelBrowserPanel;
 
 // The Home tab: a local page (resources/web/home) with a side menu of sections - Recent (the
@@ -91,6 +92,7 @@ private:
     // Print History, picked by the file's name (HomeTab::download_open_kind).
     void open_downloaded(const std::string& path);
     void ensure_vendors();
+    void ensure_vaults();
     void reveal_archived(const std::string& id);
     void delete_archived(const std::string& id);
 
@@ -140,6 +142,7 @@ private:
     std::shared_ptr<std::atomic<bool>> m_library_cancel { std::make_shared<std::atomic<bool>>(false) };
 
     std::unique_ptr<HomeVendors> m_vendors; // made when the page first asks
+    std::unique_ptr<HomeVaults>  m_vaults;  // the same
 
     // Worker threads report back through CallAfter only while this is alive.
     std::shared_ptr<bool> m_alive { std::make_shared<bool>(true) };
