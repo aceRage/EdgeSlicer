@@ -20476,7 +20476,15 @@ void Plater::calib_retraction(const Calib_Params& params)
 
     print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
 
-    double layer_height = 0.2;
+    // Orca #11835: a layer height the nozzle can print.
+    const double nozzle_diameter = printer_config->option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
+    double       layer_height;
+    if (nozzle_diameter <= 0.1)
+        layer_height = 0.05;
+    else if (nozzle_diameter <= 0.2)
+        layer_height = 0.1;
+    else
+        layer_height = 0.2;
 
     auto max_lh = printer_config->option<ConfigOptionFloats>("max_layer_height");
     if (max_lh->values[0] < layer_height)
@@ -20582,7 +20590,6 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     filament_config->set_key_value("enable_pressure_advance", new ConfigOptionBools {true});
     filament_config->set_key_value("pressure_advance", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("adaptive_pressure_advance", new ConfigOptionBools{false});
-    print_config->set_key_value("layer_height", new ConfigOptionFloat(0.2));
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
@@ -20640,7 +20647,6 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     filament_config->set_key_value("enable_pressure_advance", new ConfigOptionBools {true});
     filament_config->set_key_value("pressure_advance", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("adaptive_pressure_advance", new ConfigOptionBools{false});
-    print_config->set_key_value("layer_height", new ConfigOptionFloat(0.2));
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
@@ -20707,7 +20713,6 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     filament_config->set_key_value("enable_pressure_advance", new ConfigOptionBools {true});
     filament_config->set_key_value("pressure_advance", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("adaptive_pressure_advance", new ConfigOptionBools{false});
-    print_config->set_key_value("layer_height", new ConfigOptionFloat(0.2));
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
