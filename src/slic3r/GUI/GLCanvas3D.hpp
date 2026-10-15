@@ -637,6 +637,7 @@ private:
     bool m_toolpath_outside{ false };
     ECursorType m_cursor_type;
     GLSelectionRectangle m_rectangle_selection;
+    bool m_navigator_dragging{ false };
 
     //BBS:add plate related logic
     mutable std::vector<int> m_hover_volume_idxs;
@@ -988,6 +989,7 @@ public:
     void update_volumes_colors_by_extruder();
 
     bool is_dragging() const { return m_gizmos.is_dragging() || m_moving; }
+    bool has_mouse_capture() const;
 
     void render(bool only_init = false);
     // EDGE (core profile): reads the GL error flag after a frame or thumbnail pass and logs it with the canvas
