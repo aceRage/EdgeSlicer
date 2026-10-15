@@ -6462,8 +6462,11 @@ LayerResult GCode::process_layer(const Print& print,
 
     PrinterStructure printer_structure                           = m_config.printer_structure.value;
     bool             need_insert_timelapse_gcode_for_traditional = false;
+    // Orca #11444: only when there is a timelapse to take. A non-Bambu i3 printer with no timelapse
+    // G-code got the photo's retract and lift anyway, mid-layer after the walls and again at the
+    // layer end; Bambu Lab printers write their photo command themselves.
     if (printer_structure == PrinterStructure::psI3 && !m_spiral_vase && (!m_wipe_tower || !m_wipe_tower->enable_timelapse_print()) &&
-        print.config().print_sequence == PrintSequence::ByLayer) {
+        print.config().print_sequence == PrintSequence::ByLayer && (is_BBL_Printer() || !m_config.time_lapse_gcode.value.empty())) {
         need_insert_timelapse_gcode_for_traditional = true;
     }
     // Every BBL machine that is not an i3 (X1/P1 family excepted, whose older profiles still carry
