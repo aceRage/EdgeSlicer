@@ -21,6 +21,7 @@ add_executable(${_TEST_NAME}_tests
     account_providers_tests.cpp
     library_index_tests.cpp
     vendor_connector_tests.cpp
+    vault_provider_tests.cpp
     vendor_csv_split_tests.cpp
     step_mesh_tests.cpp
     http_body_redirect_tests.cpp

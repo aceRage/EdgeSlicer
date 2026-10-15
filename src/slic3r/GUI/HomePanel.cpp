@@ -3,6 +3,7 @@
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GcodeArchive.hpp"
+#include "HomeVaults.hpp"
 #include "HomeVendors.hpp"
 #include "I18N.hpp"
 #include "MainFrame.hpp"
@@ -102,6 +103,7 @@ HomePanel::HomePanel(wxWindow* parent)
 HomePanel::~HomePanel()
 {
     m_vendors.reset();
+    m_vaults.reset();
     *m_alive = false;
     *m_library_cancel = true;
 }
@@ -120,6 +122,14 @@ void HomePanel::ensure_vendors()
 {
     if (!m_vendors)
         m_vendors = std::make_unique<HomeVendors>(
+            this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); },
+            [this](const std::string& path) { open_downloaded(path); });
+}
+
+void HomePanel::ensure_vaults()
+{
+    if (!m_vaults)
+        m_vaults = std::make_unique<HomeVaults>(
             this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); },
             [this](const std::string& path) { open_downloaded(path); });
 }
@@ -364,6 +374,8 @@ void HomePanel::handle(const json& msg)
         library_refresh(false);
         ensure_vendors();
         m_vendors->send_state();
+        ensure_vaults();
+        m_vaults->send_state();
     } else if (command == "home_section") {
         const std::string section = msg.value("section", std::string());
         if (HomeTab::valid_section(section))
@@ -411,6 +423,8 @@ void HomePanel::handle(const json& msg)
         wxGetApp().open_preferences();
     } else if (m_vendors && m_vendors->handle(msg)) {
         // a Vendors command
+    } else if (m_vaults && m_vaults->handle(msg)) {
+        // a Vaults command
     } else if (command == "library_scan") {
         library_refresh(true);
     } else if (command == "library_thumbs") {
@@ -539,6 +553,64 @@ void HomePanel::send_init()
     s["clear_filters"]     = _u8L("Clear filters");
     s["all"]               = _u8L("All");
     s["vendors"]           = _u8L("Vendors");
+    s["vaults"]            = _u8L("Vaults");
+    s["add_vault"]         = _u8L("Add vault");
+    s["add_vault_hint"]    = _u8L("Where do you keep the models you want to reach from EdgeSlicer?");
+    s["vault_folder"]      = _u8L("Folder or network share");
+    s["vault_folder_hint"] = _u8L("A folder on this computer, an external drive or a NAS share mounted as a folder. Its models show in the Library.");
+    s["vault_folders"]     = _u8L("Folders and network shares");
+    s["folders_count"]     = _u8L("folders");
+    s["show_in_library"]   = _u8L("Show in Library");
+    s["vaults_empty"]      = _u8L("Vaults are your own model storage: a NAS, a network share or cloud storage. Add one to browse its models here and open them straight into a project.");
+    s["more_actions"]      = _u8L("More actions");
+    s["vault_webdav"]      = _u8L("WebDAV server");
+    s["vault_webdav_hint"] = _u8L("A folder on a NAS or server that speaks WebDAV: QNAP, Nextcloud, ownCloud, Apache, rclone...");
+    s["vault_azure"]       = _u8L("Azure Blob container");
+    s["vault_azure_hint"]  = _u8L("A container in Azure Storage, read with a SAS link that allows Read and List.");
+    s["vault_s3"]          = _u8L("S3-compatible bucket");
+    s["vault_s3_hint"]     = _u8L("AWS S3, Cloudflare R2, Backblaze B2, MinIO, Wasabi... read with an access key.");
+    s["builtin"]           = _u8L("Built-in");
+    s["kind_webdav"]       = _u8L("WebDAV");
+    s["kind_azure_blob"]   = _u8L("Azure Blob");
+    s["kind_s3"]           = _u8L("S3-compatible");
+    s["kind_synology"]     = _u8L("Synology NAS");
+    s["fetch_files"]       = _u8L("Fetch files");
+    s["fetching"]          = _u8L("Fetching...");
+    s["not_fetched"]       = _u8L("Not fetched yet");
+    s["fetched"]           = _u8L("Fetched");
+    s["listing_partial"]   = _u8L("The listing stopped early: not every file is shown.");
+    s["vault_http"]        = _u8L("Unencrypted (http) on your local network");
+    s["vault_http_ok"]     = _u8L("Unencrypted (http) on your local network; warning turned off");
+    s["sas_expires"]       = _u8L("SAS link expires");
+    s["downloads_to"]      = _u8L("Downloads to");
+    s["open_downloads"]    = _u8L("Open downloads folder");
+    s["remove_vault"]      = _u8L("Remove vault");
+    s["vault_settings"]    = _u8L("Vault");
+    s["vault_name"]        = _u8L("Name");
+    s["vault_address"]     = _u8L("Address");
+    s["addr_webdav"]       = _u8L("Folder address (https://, or http:// on your local network)");
+    s["addr_azure"]        = _u8L("Container address, without the SAS (?sv=...)");
+    s["addr_s3"]           = _u8L("Endpoint (https://s3.<region>.amazonaws.com, your R2 or MinIO address...)");
+    s["prefix"]            = _u8L("Only files under (prefix)");
+    s["bucket"]            = _u8L("Bucket");
+    s["region"]            = _u8L("Region (auto for Cloudflare R2)");
+    s["addressing"]        = _u8L("Addressing");
+    s["addressing_path"]   = _u8L("Path style (endpoint/bucket)");
+    s["addressing_virtual"] = _u8L("Virtual host (bucket.endpoint)");
+    s["signin"]            = _u8L("Sign-in");
+    s["auth_none"]         = _u8L("None (public)");
+    s["auth_basic"]        = _u8L("User name and password");
+    s["auth_bearer"]       = _u8L("Token");
+    s["auth_sas"]          = _u8L("SAS link");
+    s["auth_sigv4"]        = _u8L("Access key");
+    s["max_depth"]         = _u8L("Folder levels");
+    s["downloads_folder"]  = _u8L("Downloads folder");
+    s["browse"]            = _u8L("Browse...");
+    s["use_default"]       = _u8L("Use the default");
+    s["default_is"]        = _u8L("Default:");
+    s["vault_creds_after"] = _u8L("Save the vault, then set its credentials on its card. They are kept in your system's credential store.");
+    s["s3_key_hint"]       = _u8L("Use a key that can only read this bucket.");
+    s["vault_files_empty"] = _u8L("No model files listed yet. Set the credentials, then Fetch files.");
     s["connectors"]        = _u8L("Connectors");
     s["connector"]         = _u8L("Connector");
     s["add_connector"]     = _u8L("Add connector");
