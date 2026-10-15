@@ -75,7 +75,9 @@ EditGCodeDialog::EditGCodeDialog(wxWindow* parent, const std::string& key, const
     m_add_btn = new ScalableButton(this, wxID_ANY, "add_copies");
     m_add_btn->SetToolTip(_L("Add selected placeholder to G-code"));
 
-    m_gcode_editor = new wxTextCtrl(this, wxID_ANY, value, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE
+    // The G-code is UTF-8; an implicit std::string -> wxString conversion uses the locale code page
+    // and mangled the degree sign (and other non-ASCII text) a little more on every open / save.
+    m_gcode_editor = new wxTextCtrl(this, wxID_ANY, wxString::FromUTF8(value), wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE
 #ifdef _WIN32
     | wxBORDER_SIMPLE
 #endif
@@ -131,7 +133,8 @@ EditGCodeDialog::~EditGCodeDialog()
 
 std::string EditGCodeDialog::get_edited_gcode() const
 {
-    return into_u8(m_gcode_editor->GetValue());
+    wxString text = m_gcode_editor->GetValue();
+    return std::string(text.ToUTF8());
 }
 
 void EditGCodeDialog::on_search_update()
