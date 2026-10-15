@@ -1178,6 +1178,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/IconManager.cpp                           # defines STB_RECT_PACK_IMPLEMENTATION before its include
     GUI/Search.cpp                                # defines FTS_FUZZY_MATCH_IMPLEMENTATION before its include
     GUI/DualNozzleSliceDialog.cpp                 # namespace-scope using namespace DualNozzleSync
+    GUI/HomeVaults.cpp                            # lower/read_file/write_atomic/LIST_LIMIT also in HomeVendors.cpp
     GUI/DualNozzleState.cpp                       # namespace-scope using namespace DualNozzleSync
     GUI/Gizmos/GLGizmoCut.cpp                     # namespace-scope using namespace Geometry
     GUI/Gizmos/GLGizmosCommon.cpp                 # namespace-scope using-directives for the gizmo data objects
