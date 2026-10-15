@@ -236,6 +236,9 @@ public:
     CalibPressureAdvanceLine(GCode* gcodegen);
     ~CalibPressureAdvanceLine(){};
 
+    // Orca #14440: the X bounds of the pattern on the given bed (Y spans the bed).
+    BoundingBoxf print_extents(const BoundingBoxf &bed_ext) const;
+
     std::string generate_test(double start_pa = 0, double step_pa = 0.002, int count = 50);
 
     void set_speed(double fast = 100.0, double slow = 20.0)

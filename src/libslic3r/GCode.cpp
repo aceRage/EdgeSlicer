@@ -3390,10 +3390,27 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         BoundingBoxf bbox;
         auto         pts = std::make_unique<ConfigOptionPoints>();
-        if (print.calib_mode() == CalibMode::Calib_PA_Line || print.calib_mode() == CalibMode::Calib_PA_Pattern) {
+        if (print.calib_mode() == CalibMode::Calib_PA_Pattern) {
+            // PA_Pattern can have any size or arrangement - not dependent on 3mf model size
             bbox = bbox_bed;
             bbox.offset(-25.0);
             // add 4 corner points of bbox into pts
+            pts->values.reserve(4);
+            pts->values.emplace_back(bbox.min.x(), bbox.min.y());
+            pts->values.emplace_back(bbox.max.x(), bbox.min.y());
+            pts->values.emplace_back(bbox.max.x(), bbox.max.y());
+            pts->values.emplace_back(bbox.min.x(), bbox.max.y());
+
+        } else if (print.calib_mode() == CalibMode::Calib_PA_Line) {
+            // Orca #14440: derive the X bounds from the actual calibration geometry (less bed mesh probing).
+            CalibPressureAdvanceLine temp_pa_line_forsize(this);
+            const BoundingBoxf       pattern_extents = temp_pa_line_forsize.print_extents(bbox_bed);
+
+            bbox = bbox_bed;
+            bbox.offset(-25.0);
+            bbox.min.x() = std::max(pattern_extents.min.x(), bbox.min.x());
+            bbox.max.x() = std::min(pattern_extents.max.x(), bbox.max.x());
+
             pts->values.reserve(4);
             pts->values.emplace_back(bbox.min.x(), bbox.min.y());
             pts->values.emplace_back(bbox.max.x(), bbox.min.y());
@@ -11949,7 +11966,7 @@ std::string GCode::set_object_info(Print* print)
         return "";
     std::ostringstream gcode;
     // Orca: check if we are in pa calib mode
-    if (print->calib_mode() == CalibMode::Calib_PA_Line || print->calib_mode() == CalibMode::Calib_PA_Pattern) {
+    if (print->calib_mode() == CalibMode::Calib_PA_Pattern) {
         BoundingBoxf bbox_bed(print->config().printable_area.values);
         bbox_bed.offset(-25.0);
         Polygon polygon_bed;
@@ -11960,6 +11977,8 @@ std::string GCode::set_object_info(Print* print)
         gcode << "EXCLUDE_OBJECT_DEFINE NAME="
               << "Orca-PA-Calibration-Test"
               << " CENTER=" << 0 << "," << 0 << " POLYGON=" << polygon_to_string(polygon_bed, print, true) << "\n";
+    } else if (print->calib_mode() == CalibMode::Calib_PA_Line) {
+        // Orca #14440: PA_Line has only one object, no EXCLUDE_OBJECT_DEFINE needed
     } else {
         m_instance_names.clear();
         for (PrintObject* object : print->objects()) {
