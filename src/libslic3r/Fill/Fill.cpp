@@ -1909,7 +1909,9 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 f->print_object_config->raft_layers.value == 0) {
                 const size_t elefant_layers = size_t(std::max(f->print_object_config->elefant_foot_compensation_layers.value, 1));
                 if (f->layer_id > 0 && f->layer_id <= elefant_layers)
-                    params.density = elefant_density * (elefant_layers - (f->layer_id - 1)) / elefant_layers;
+                    // Orca #13523: the second layer gets the set density and the following layers get linearly
+                    // denser, so the last compensation layer is the closest to a full solid layer.
+                    params.density = 1.0f - (1.0f - elefant_density) * (elefant_layers - (f->layer_id - 1)) / elefant_layers;
             }
 			// BBS: make fill
 			ExtrusionEntitiesPtr &region_fill_entities = m_regions[surface_fill.region_id]->fills.entities;
