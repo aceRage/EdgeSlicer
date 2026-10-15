@@ -1879,6 +1879,18 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBools{false});
 
+    def = this->add("activate_air_filtration_during_print", coBools);
+    def->full_label = L("During print");
+    def->tooltip = L("Enable this to override the fan speed set in custom G-code during print.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBools{true});
+
+    def = this->add("activate_air_filtration_on_completion", coBools);
+    def->full_label = L("On completion");
+    def->tooltip = L("Enable this to override the fan speed set in custom G-code after print completion.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBools{true});
+
     def = this->add("during_print_exhaust_fan_speed", coInts);
     def->label   = L("Fan speed");
     def->tooltip=L("Speed of exhaust fan during printing. This speed will override the speed in filament custom G-code.");

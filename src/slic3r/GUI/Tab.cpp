@@ -4933,11 +4933,13 @@ void TabFilament::build()
         optgroup->append_single_option_line("activate_air_filtration", "air-filtration");
 
         line = {L("During print"), ""};
+        line.append_option(optgroup->get_option("activate_air_filtration_during_print"));
         line.append_option(optgroup->get_option("during_print_exhaust_fan_speed"));
         optgroup->append_line(line);
 
 
         line = {L("Complete print"), ""};
+        line.append_option(optgroup->get_option("activate_air_filtration_on_completion"));
         line.append_option(optgroup->get_option("complete_print_exhaust_fan_speed"));
         optgroup->append_line(line);
         //BBS
@@ -5152,6 +5154,13 @@ void TabFilament::toggle_options()
             toggle_option(el, has_enable_overhang_bridge_fan);
 
       toggle_option("additional_cooling_fan_speed", cfg.opt_bool("auxiliary_fan"));
+
+      // Orca #13228: the exhaust fan speeds apply only where their override is on.
+      bool activate_air_filtration = m_config->opt_bool("activate_air_filtration", 0);
+      toggle_option("activate_air_filtration_during_print", activate_air_filtration);
+      toggle_option("activate_air_filtration_on_completion", activate_air_filtration);
+      toggle_option("during_print_exhaust_fan_speed", activate_air_filtration && m_config->opt_bool("activate_air_filtration_during_print", 0));
+      toggle_option("complete_print_exhaust_fan_speed", activate_air_filtration && m_config->opt_bool("activate_air_filtration_on_completion", 0));
 
       // Orca: toggle dont slow down for external perimeters if
       bool has_slow_down_for_layer_cooling = m_config->opt_bool("slow_down_for_layer_cooling", 0);

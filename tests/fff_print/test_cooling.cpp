@@ -1074,3 +1074,59 @@ TEST_CASE("The PWM floor raises a low first layer fan speed", "[Cooling][Orca137
     CHECK(fans[0] == 51);
     CHECK(fans[1] == 255);
 }
+
+namespace {
+
+// The exhaust fan (M106 P3) commands of `gcode`, in order.
+std::vector<std::string> exhaust_fan_commands(const std::string &gcode)
+{
+    std::vector<std::string> out;
+    std::istringstream       in(gcode);
+    std::string              line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind("M106 P3 ", 0) == 0)
+            out.push_back(line);
+    }
+    return out;
+}
+
+std::vector<std::string> exhaust_fans_of_slice(const char *during, const char *on_completion, const char *activate = "1")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"activate_air_filtration", activate},
+        {"during_print_exhaust_fan_speed", "50"},
+        {"complete_print_exhaust_fan_speed", "70"},
+        {"activate_air_filtration_during_print", during},
+        {"activate_air_filtration_on_completion", on_completion},
+    });
+    return exhaust_fan_commands(slice({TestMesh::cube_20x20x20}, config));
+}
+
+} // namespace
+
+// Orca #13228: separate switches for the exhaust fan override during the print and on completion.
+TEST_CASE("Exhaust fan overrides follow their during-print and completion switches", "[Cooling][Orca13228]")
+{
+    using V = std::vector<std::string>;
+    // Both on (the defaults): unchanged from before the two switches.
+    CHECK(exhaust_fans_of_slice("1", "1") == V{"M106 P3 S127", "M106 P3 S178"});
+    CHECK(exhaust_fans_of_slice("0", "1") == V{"M106 P3 S178"});
+    CHECK(exhaust_fans_of_slice("1", "0") == V{"M106 P3 S127"});
+    CHECK(exhaust_fans_of_slice("0", "0").empty());
+    // Without air filtration neither command is written, whatever the switches say.
+    CHECK(exhaust_fans_of_slice("1", "1", "0").empty());
+}
+
+TEST_CASE("Exhaust fan switches default to on", "[Cooling][Orca13228]")
+{
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(config.option<ConfigOptionBools>("activate_air_filtration_during_print")->get_at(0));
+    CHECK(config.option<ConfigOptionBools>("activate_air_filtration_on_completion")->get_at(0));
+}
