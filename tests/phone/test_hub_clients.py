@@ -73,6 +73,14 @@ class Hub:
             return e.code, e.read().decode("utf-8", "replace")
 
 
+def err(body):
+    """The error text of a JSON error body (its quotes unescaped)."""
+    try:
+        return json.loads(body).get("error", "")
+    except ValueError:
+        return body
+
+
 def serve(login=None, funnel=False):
     h = {"X-Forwarded-Host": "hub-pc.example.ts.net", "X-Forwarded-Proto": "https", "X-Forwarded-For": "100.64.0.7"}
     if login:
@@ -131,9 +139,9 @@ def run(hub, dd):
     st, body = hub.req("/r/%s/pair" % TOKEN)
     expect("phone link: /pair lists every scope", st == 200 and len(json.loads(body).get("scopes", [])) == 4, st)
     st, body = hub.req("/r/%s/api/instances/open" % ta, "POST", body=b"")
-    expect("status client: an upload is 403 and names the print permission", st == 403 and '"print"' in body, (st, body[:120]))
+    expect("status client: an upload is 403 and names the print permission", st == 403 and '"print"' in err(body), (st, body[:120]))
     st, body = hub.req("/r/%s/bambu?id=nothing" % ta)
-    expect("status client: a camera is 403", st == 403 and '"camera"' in body, st)
+    expect("status client: a camera is 403", st == 403 and '"camera"' in err(body), st)
     st, body = hub.req("/h/summary", headers=bearer(ta))
     expect("status client by header: /h/summary 200", st == 200, st)
     st, body = hub.req("/h/summary")
@@ -147,7 +155,7 @@ def run(hub, dd):
     st, body = hub.req("/h/api/instances/open", "POST", headers=bearer(tb), body=b"")
     expect("print client: an upload passes the permission check (400 for the empty upload)", st == 400, (st, body[:120]))
     st, body = hub.req("/h/i/1/api/printers/dev1/control", "POST", headers=bearer(tb), body=b"{}")
-    expect("print client: a printer control is 403 (needs control)", st == 403 and '"control"' in body, (st, body[:120]))
+    expect("print client: a printer control is 403 (needs control)", st == 403 and '"control"' in err(body), (st, body[:120]))
 
     # ---- Tailscale Serve ----
     st, _ = hub.req("/h/summary", headers=bearer(ta, serve(login=ALLOWED)))
@@ -219,7 +227,9 @@ def main():
         if not expect("the test hub starts with the seeded phone link", hj.get("pid") == p.pid and hj.get("token") == TOKEN):
             return 1
         made = run(Hub(hj), dd)
-        time.sleep(1.0)
+        t_log = time.time()  # hub.log is flushed every couple of seconds by the hub loop
+        while time.time() - t_log < 15 and "wrong tokens from one source" not in hub_log_text(dd):
+            time.sleep(0.5)
         log = hub_log_text(dd)
         expect("hub.log: a client connected", "RemoteHub: client c" in log and ") connected, may " in log)
         expect("hub.log: a scope refusal", ") may not POST" in log)
