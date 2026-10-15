@@ -7770,7 +7770,8 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         dlg.GetEventHandler()->ProcessEvent(evt);
         dlg.confirm_from_other();
         name = input_name;
-        detach = dlg.get_detach_value(m_type);
+        // Edge: the detach button asked for a detached copy already; the dialog only adds to that.
+        detach = detach || dlg.get_detach_value(m_type);
     }
 
     // Ultra: instead of prompting for a name when saving a modified system preset,
@@ -7790,7 +7791,8 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         //BBS: add project embedded preset relate logic
         save_to_project = dlg.get_save_to_project_selection(m_type);
         project_printers = dlg.get_project_printers_selection(m_type);
-        detach           = dlg.get_detach_value(m_type);
+        // Edge: the detach button asked for a detached copy already; the dialog only adds to that.
+        detach           = detach || dlg.get_detach_value(m_type);
     }
 
     //BBS record current preset name
