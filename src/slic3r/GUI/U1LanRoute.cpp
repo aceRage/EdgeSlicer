@@ -145,7 +145,20 @@ static void close_client(std::shared_ptr<MqttClient> c)
         return;
     c->SetMessageCallback(nullptr);
     std::string ignore;
-    c->Disconnect(ignore);
+    try {
+        c->Disconnect(ignore);
+    } catch (const std::exception&) {}
+}
+
+// Paho throws (MQTT error -1, TCP/TLS connect failure) for a host that refuses the connection.
+static bool safe_connect(const std::shared_ptr<MqttClient>& c, std::string& msg)
+{
+    try {
+        return c->Connect(msg);
+    } catch (const std::exception& e) {
+        msg = e.what();
+        return false;
+    }
 }
 
 // Move the device topics onto `lan`. False when the LAN broker refused a subscription.
@@ -372,7 +385,7 @@ static void attempt(const StatePtr& s, const std::string& sn)
         return note_failure(s, "could not build the LAN session");
     wire_lan_messages(s, lan);
     std::string msg;
-    if (!lan->Connect(msg)) {
+    if (!safe_connect(lan, msg)) {
         close_client(lan);
         return note_failure(s, "the printer's broker refused the connection (" + msg + ")");
     }
@@ -731,7 +744,7 @@ json u1_pairing_exchange(const std::string& host, int port, const std::string& c
     });
     std::string msg;
     json        out = nullptr;
-    if (client->Connect(msg) && client->SubscribeDirect(code + "/config/response", 1, msg)) {
+    if (safe_connect(client, msg) && client->SubscribeDirect(code + "/config/response", 1, msg)) {
         const json body = { { "jsonrpc", "2.0" }, { "method", method }, { "params", params }, { "id", id } };
         if (client->PublishDirect(code + "/config/request", body.dump(), 1, msg)) {
             std::unique_lock<std::mutex> lk(box->m);

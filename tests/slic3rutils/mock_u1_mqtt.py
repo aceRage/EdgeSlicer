@@ -194,14 +194,15 @@ class Broker:
         self.server = await asyncio.start_server(self.accept, "127.0.0.1", self.port)
 
     async def stop(self):
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
-            self.server = None
+        # Sessions first: since Python 3.12 wait_closed() also waits for every open connection.
+        server, self.server = self.server, None
         for s in list(self.all):
             s.close()
         self.all.clear()
         self.sessions.clear()
+        if server:
+            server.close()
+            await server.wait_closed()
 
     async def accept(self, reader, writer):
         s = Session(self, reader, writer)
