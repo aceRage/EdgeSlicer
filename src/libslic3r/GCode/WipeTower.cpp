@@ -44,6 +44,20 @@ std::vector<float> compute_compacted_wipe_tower_z(const std::vector<std::vector<
     return tower_z;
 }
 
+float last_emitted_wipe_tower_z_nonbbl(const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes,
+                                       float                                                       base_z)
+{
+    float last = base_z;
+    for (size_t i = 0; i < tool_changes.size(); ++i) {
+        if (tool_changes[i].empty())
+            continue;
+        // Non-BBL always prints sparse layer 0 (ignore_sparse = sparse && m_layer_idx != 0).
+        if (!(wipe_tower_layer_is_sparse(tool_changes[i]) && i != 0))
+            last += tool_changes[i].front().layer_height;
+    }
+    return last;
+}
+
 static const double wipe_tower_wall_infill_overlap = 0.0;
 // Rib wall path resolution and fillet sampling, as in Bambu Studio's WipeTower.cpp.
 static constexpr double WIPE_TOWER_RESOLUTION         = 0.1;
