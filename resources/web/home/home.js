@@ -14,6 +14,8 @@
 //   library_progress {scanning, files}     a scan is running
 //   library_thumbs {images: {id: dataUri}} Library covers, asked for as cards scroll in
 //   library_plates {id, plates: [{index, name, image}]}  a 3MF's plates, for its detail view
+// The Vaults section is the user's own storage: for now the Library's folders (local or a mounted NAS
+// share) as one card, and an Add vault chooser (tests/design_vaults_home_tab.md). Vendors stay vendors.
 //   vendors {connectors: [...], items: [...]}  HomeVendors.cpp send_state(): connector specs (never
 //                                          a secret), and items keyed by opaque keys
 //   vendor_thumbs {images: {key: dataUri}} vendor thumbnails (PNG, JPEG, GIF or WebP)
@@ -33,7 +35,7 @@
     asked: new Set(),
     printer: '',
     search: '',
-    sort: { recent: 'newest', library: 'newest', history: 'newest', vendors: 'newest' },
+    sort: { recent: 'newest', library: 'newest', history: 'newest', vendors: 'newest', vaults: 'newest' },
     lib: null,          // the last 'library' message
     libThumbs: {},
     libAsked: new Set(),
@@ -50,12 +52,13 @@
     venShown: [],
     venRendered: 0,
   };
-  const SECTIONS = ['recent', 'library', 'history', 'vendors'];
+  const SECTIONS = ['recent', 'library', 'history', 'vendors', 'vaults'];
   const SORTS = {
     recent: ['newest', 'oldest', 'name'],
     library: ['newest', 'oldest', 'added', 'name', 'size'],
     history: ['newest', 'oldest', 'name'],
     vendors: ['newest', 'oldest', 'name'],
+    vaults: ['newest', 'oldest', 'name'],
   };
   const SORT_LABELS = { newest: ['sort_newest', 'Newest first'], oldest: ['sort_oldest', 'Oldest first'],
     added: ['sort_added', 'Recently added'], name: ['sort_name', 'Name'], size: ['sort_size', 'Largest first'] };
@@ -380,6 +383,7 @@
     if (state.section === 'history') renderHistory();
     else if (state.section === 'library') renderLibrary();
     else if (state.section === 'vendors') renderVendors();
+    else if (state.section === 'vaults') renderVaults();
     else renderRecent();
   }
 
@@ -403,7 +407,7 @@
       b.setAttribute('aria-current', on ? 'page' : 'false');
     }
     for (const id of SECTIONS) $(id).hidden = section !== id;
-    $('title').textContent = t(section, { recent: 'Recent', library: 'Library', history: 'Print History', vendors: 'Vendors' }[section]);
+    $('title').textContent = t(section, { recent: 'Recent', library: 'Library', history: 'Print History', vendors: 'Vendors', vaults: 'Vaults' }[section]);
     fillSort(section);
     $('refresh').classList.toggle('spin', section === 'library' && !!state.lib && state.lib.scanning);
     closeMenu();
@@ -419,6 +423,46 @@
     for (const [name, value] of Object.entries(theme)) {
       if (/^--[a-z-]+$/.test(name) && typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value))
         root.style.setProperty(name, value);
+    }
+    accentForText(theme);
+  }
+
+  // WCAG AA (4.5:1) for accent-coloured text. A theme's accent is meant for borders and fills, so
+  // unless the theme names them, --accent-strong (under --accent-fg) and --accent-text (on
+  // --accent-soft and --bg) are the accent shaded towards black or white just far enough.
+  function accentForText(theme) {
+    const root = document.documentElement, css = getComputedStyle(root);
+    const rgb = name => {
+      const m = /^#([0-9a-f]{6})$/i.exec(css.getPropertyValue(name).trim());
+      return m ? [0, 2, 4].map(i => parseInt(m[1].substr(i, 2), 16)) : null;
+    };
+    const lum = c => {
+      const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+      return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+    };
+    const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+    const hex = c => '#' + c.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+    // The least mix of accent towards black or white that clears 4.5:1 against every background.
+    const shade = (accent, backs) => {
+      let best = null;
+      for (const to of [[0, 0, 0], [255, 255, 255]]) {
+        for (let t = 0; t <= 1.0001; t += 0.02) {
+          const c = accent.map((v, i) => v + (to[i] - v) * t);
+          if (backs.every(b => ratio(c, b) >= 4.5)) { if (!best || t < best.t) best = { t, c }; break; }
+        }
+      }
+      return best ? hex(best.c) : null;
+    };
+    const accent = rgb('--accent');
+    if (!accent || !('--accent' in theme || '--accent-fg' in theme || '--accent-soft' in theme || '--bg' in theme)) return;
+    const fg = rgb('--accent-fg'), soft = rgb('--accent-soft'), bg = rgb('--bg');
+    if (!('--accent-strong' in theme) && fg) {
+      const c = shade(accent, [fg]);
+      if (c) root.style.setProperty('--accent-strong', c);
+    }
+    if (!('--accent-text' in theme) && soft && bg) {
+      const c = shade(accent, [soft, bg]);
+      if (c) root.style.setProperty('--accent-text', c);
     }
   }
 
@@ -466,6 +510,7 @@
       renderLibrary(keepScroll);
       if (!lib.scanning) stopSpin();
     }
+    if (state.section === 'vaults') renderVaults(); // its folders card
     if (!$('folders').hidden) renderFolders();
   }
 
@@ -1204,6 +1249,81 @@
         : t('no_match', 'Nothing matches your search.');
   }
 
+  // ---- Vaults ----
+  // A source's card: a vault, or the Library's folders (and, if Vendors and Vaults are ever merged, a
+  // vendor connector: it has the same look, .conn). opts: {title, cls, kind, badge, lines: [{text,
+  // cls, title}], buttons: [{label, primary, title, disabled, run}], menu: [entries for openMenu]}.
+  function sourceCard(opts) {
+    const box = el('div', 'conn' + (opts.cls ? ' ' + opts.cls : ''));
+    box.setAttribute('role', 'listitem');
+    const top = el('div', 'top');
+    const title = el('div', 'title', opts.title);
+    title.title = opts.title;
+    top.appendChild(title);
+    if (opts.badge) top.appendChild(el('span', 'badge', opts.badge));
+    if (opts.menu && opts.menu.length) {
+      const more = el('button', 'more');
+      more.type = 'button';
+      more.setAttribute('aria-label', t('more_actions', 'More actions') + ': ' + opts.title);
+      more.appendChild(svg(ICON_MORE));
+      more.addEventListener('click', (e) => { e.stopPropagation(); if (menuFor === more) closeMenu(); else openMenu(more, opts.menu); });
+      top.appendChild(more);
+    }
+    box.appendChild(top);
+    if (opts.kind) box.appendChild(el('div', 'kind', opts.kind));
+    for (const l of opts.lines || []) {
+      if (!l || !l.text) continue;
+      const d = el('div', 'line' + (l.cls ? ' ' + l.cls : ''), l.text);
+      d.title = l.title || l.text;
+      box.appendChild(d);
+    }
+    if (opts.buttons && opts.buttons.length) {
+      const row = el('div', 'row');
+      for (const b of opts.buttons) {
+        const btn = el('button', 'btn' + (b.primary ? ' primary' : ''), b.label);
+        btn.type = 'button';
+        if (b.title) btn.title = b.title;
+        btn.disabled = !!b.disabled;
+        btn.addEventListener('click', b.run);
+        row.appendChild(btn);
+      }
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  // The Library's folders, local or a mounted NAS share, as one vault card: they are managed in the Library.
+  function foldersCard(lib) {
+    const lines = [{ text: lib.folders.length + ' ' + t('folders_count', 'folders') + ' · ' + lib.items.length + ' ' + t('files', 'files') }];
+    for (const f of lib.folders) if (f.scanned && !f.online)
+      lines.push({ text: leaf(f.path) + ': ' + t('offline', 'Not reachable, showing the files from the last scan'), cls: 'warn', title: f.path });
+    return sourceCard({
+      title: t('vault_folders', 'Folders and network shares'), cls: 'folders', kind: t('library', 'Library'), lines: lines,
+      buttons: [{ label: t('show_in_library', 'Show in Library'), primary: true, run: () => showSection('library', true) },
+                { label: t('manage_folders', 'Manage folders'), run: openFolders }],
+    });
+  }
+
+  function renderVaults() {
+    const list = $('vault-list'), empty = $('vaults-empty');
+    list.textContent = '';
+    const lib = state.lib;
+    if (lib && lib.folders.length) list.appendChild(foldersCard(lib));
+    $('vault-status').textContent = '';
+    empty.hidden = list.childNodes.length > 0;
+    $('vaults-empty-text').textContent = lib === null ? t('loading', 'Loading...')
+      : t('vaults_empty', 'Vaults are your own model storage: a NAS, a network share or cloud storage. Add one to browse its models here and open them straight into a project.');
+    $('vault-empty-add').hidden = lib === null;
+  }
+
+  function openAddVault() {
+    closeMenu();
+    $('vault-add').hidden = false;
+    const first = $('vault-choices').querySelector('button');
+    if (first) first.focus();
+  }
+  function closeAddVault() { $('vault-add').hidden = true; }
+
   // ---- item detail ----
   let detailKey = '';
   function setDetailThumb(uri) {
@@ -1706,6 +1826,11 @@
       { label: t('import_paste', 'Paste JSON...'), run: () => post('vendor_import', { source: 'paste' }) },
     ]);
   });
+  $('vault-add-btn').addEventListener('click', openAddVault);
+  $('vault-empty-add').addEventListener('click', openAddVault);
+  $('vault-add-folder').addEventListener('click', () => { closeAddVault(); post('library_add_folder'); });
+  $('vault-add-cancel').addEventListener('click', closeAddVault);
+  $('vault-add').addEventListener('click', (e) => { if (e.target === $('vault-add')) closeAddVault(); });
   $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key), max: csvOpts.max, rows: csvOpts.rows }));
   $('ven-csv-gear').addEventListener('click', openExportOpts);
   $('ven-export-opts-ok').addEventListener('click', commitExportOpts);
@@ -1719,7 +1844,8 @@
   $('ven-editor-mode').addEventListener('click', toggleEditorMode);
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!$('ven-editor').hidden) closeEditor();
+    if (!$('vault-add').hidden) closeAddVault();
+    else if (!$('ven-editor').hidden) closeEditor();
     else if (!$('ven-detail').hidden) closeDetail();
     else if (!$('lib-detail').hidden) closeLibDetail();
   });

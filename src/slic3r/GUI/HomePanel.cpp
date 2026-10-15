@@ -539,6 +539,16 @@ void HomePanel::send_init()
     s["clear_filters"]     = _u8L("Clear filters");
     s["all"]               = _u8L("All");
     s["vendors"]           = _u8L("Vendors");
+    s["vaults"]            = _u8L("Vaults");
+    s["add_vault"]         = _u8L("Add vault");
+    s["add_vault_hint"]    = _u8L("Where do you keep the models you want to reach from EdgeSlicer?");
+    s["vault_folder"]      = _u8L("Folder or network share");
+    s["vault_folder_hint"] = _u8L("A folder on this computer, an external drive or a NAS share mounted as a folder. Its models show in the Library.");
+    s["vault_folders"]     = _u8L("Folders and network shares");
+    s["folders_count"]     = _u8L("folders");
+    s["show_in_library"]   = _u8L("Show in Library");
+    s["vaults_empty"]      = _u8L("Vaults are your own model storage: a NAS, a network share or cloud storage. Add one to browse its models here and open them straight into a project.");
+    s["more_actions"]      = _u8L("More actions");
     s["connectors"]        = _u8L("Connectors");
     s["connector"]         = _u8L("Connector");
     s["add_connector"]     = _u8L("Add connector");
