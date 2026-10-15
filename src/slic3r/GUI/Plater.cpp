@@ -20415,7 +20415,9 @@ void Plater::calib_max_vol_speed(const Calib_Params& params)
     if (max_lh->values[0] < layer_height)
         max_lh->values[0] = { layer_height };
 
-    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats { 200 });
+    // Orca #13658: never lower the filament's own limit.
+    const double filament_max_volumetric_speed = calib_filament_flow_values(*filament_config, plater_calib_filament_volume_type()).max_volumetric_speed;
+    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats { std::max(filament_max_volumetric_speed, 200.0) });
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats{0.0});
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
     obj_cfg.set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
@@ -20602,9 +20604,11 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
-    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 20000 });
-    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 20000 });
+    // Orca #13658: print the tower at the machine's limits rather than a fixed 200 mm/s and 20000 mm/s².
+    const CalibMotionLimits motion_limits = calib_machine_motion_limits(*printer_config, 200., 20000.);
+    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { motion_limits.speed });
+    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
+    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -20658,9 +20662,11 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
-    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 20000 });
-    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 20000 });
+    // Orca #13658: print the tower at the machine's limits rather than a fixed 200 mm/s and 20000 mm/s².
+    const CalibMotionLimits motion_limits = calib_machine_motion_limits(*printer_config, 200., 20000.);
+    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { motion_limits.speed });
+    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
+    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -20710,7 +20716,9 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
-    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats{200});
+    // Orca #13658: never lower the filament's own limit.
+    const double filament_max_volumetric_speed = calib_filament_flow_values(*filament_config, plater_calib_filament_volume_type()).max_volumetric_speed;
+    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats{std::max(filament_max_volumetric_speed, 200.0)});
     // Orca #11178: keep the filament's own pressure advance when it is on.
     calib_enable_pressure_advance_if_off(*filament_config, plater_calib_filament_volume_type());
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
@@ -20723,9 +20731,11 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
-    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 2000 });
-    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 2000 });
+    // Orca #13658: print the tower at the machine's limits rather than a fixed 200 mm/s and 2000 mm/s².
+    const CalibMotionLimits motion_limits = calib_machine_motion_limits(*printer_config, 200., 2000.);
+    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { motion_limits.speed });
+    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
+    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));

@@ -6,6 +6,21 @@
 
 namespace Slic3r {
 
+CalibMotionLimits calib_machine_motion_limits(const ConfigBase &printer_config, double fallback_speed, double fallback_acceleration)
+{
+    auto first = [&printer_config](const char *key) {
+        const auto *opt = printer_config.option<ConfigOptionFloats>(key);
+        return opt != nullptr && !opt->values.empty() ? opt->values.front() : 0.;
+    };
+    const double speed_x = first("machine_max_speed_x");
+    const double speed_y = first("machine_max_speed_y");
+    const double accel   = first("machine_max_acceleration_extruding");
+    CalibMotionLimits limits;
+    limits.speed        = speed_x > 0. && speed_y > 0. ? std::min(speed_x, speed_y) : fallback_speed;
+    limits.acceleration = accel > 0. ? accel : fallback_acceleration;
+    return limits;
+}
+
 // Calculate the optimal Pressure Advance speed
 float CalibPressureAdvance::find_optimal_PA_speed(const DynamicPrintConfig &config, double line_width, double layer_height, int filament_idx)
 {

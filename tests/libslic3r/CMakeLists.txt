@@ -107,6 +107,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
 	test_filament_remap.cpp
+	test_calib_settings.cpp
 	test_preset_printer_type.cpp
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp

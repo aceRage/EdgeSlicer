@@ -269,6 +269,16 @@ private:
     bool   m_draw_numbers{true};
 };
 
+// Orca #13658: the speed and acceleration the input shaping and cornering towers print at, the machine's
+// limits (the slower of the X/Y max speeds, the max extruding acceleration) so a calibration is never slowed
+// below what the printer can do. Edge: a limit that is not set (missing or 0) falls back to the given value.
+struct CalibMotionLimits
+{
+    double speed;
+    double acceleration;
+};
+CalibMotionLimits calib_machine_motion_limits(const ConfigBase &printer_config, double fallback_speed, double fallback_acceleration);
+
 struct SuggestedConfigCalibPAPattern
 {
     // Orca #11835: the pattern keeps the process layer heights.
