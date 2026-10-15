@@ -99,6 +99,7 @@
 #include <slic3r/GUI/CreatePresetsDialog.hpp>
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "GenericDownloadDialog.hpp"
+#include "SwitchTiming.hpp" // DIAGNOSTIC (diag/printer-switch-timing)
 
 #define UPDATE_BUSER    true
 #define UPDATE_BUAUTO   false
@@ -1579,6 +1580,7 @@ void MainFrame::init_tabpanel() {
 
 // SoftFever
 void MainFrame::show_device(bool bBBLPrinter) {
+    SWITCH_TIMING("MainFrame::show_device");
     auto idx = -1;
     // Ultra: leaving a Flashforge printer - unmount its device tab first
     if (m_ff_device != nullptr && (idx = m_tabpanel->FindPage(m_ff_device)) != wxNOT_FOUND) {
@@ -1643,6 +1645,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
 // Ultra: Flashforge device tab (Orca-Flashforge port) - third Device-tab mode
 void MainFrame::show_flashforge_device()
 {
+    SWITCH_TIMING("MainFrame::show_flashforge_device");
     if (m_ff_device != nullptr && m_tabpanel->FindPage(m_ff_device) != wxNOT_FOUND)
         return;
     int idx;
@@ -4387,6 +4390,7 @@ void MainFrame::on_value_changed(wxCommandEvent& event)
         return;
 
     auto opt_key = event.GetString();
+    SWITCH_TIMING("MainFrame::on_value_changed");
     if (m_plater) {
         m_plater->on_config_change(*tab->get_config()); // propagate config change events to the plater
         if (opt_key == "extruders_count") {

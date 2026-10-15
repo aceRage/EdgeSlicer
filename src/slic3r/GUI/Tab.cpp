@@ -72,6 +72,7 @@
 #include "CostsDialog.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
+#include "SwitchTiming.hpp" // DIAGNOSTIC (diag/printer-switch-timing)
 #include <wx/textdlg.h>
 #ifdef WIN32
 	#include <commctrl.h>
@@ -1643,7 +1644,10 @@ void Tab::update_dirty()
 void Tab::update_tab_ui(bool update_plater_presets)
 {
     if (m_presets_choice) {
-        m_presets_choice->update();
+        {
+            SWITCH_TIMING_TAG("tab preset combo update", switch_timing::type_name(int(m_type)));
+            m_presets_choice->update();
+        }
         if (update_plater_presets)
             on_presets_changed();
     }
@@ -2288,6 +2292,7 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     //Orca: sync filament num if it's a multi tool printer
     if (opt_key == "extruders_count" && !m_config->opt_bool("single_extruder_multi_material")){
+        SWITCH_TIMING("Tab::on_value_change(extruders_count): set_num_filaments + on_filaments_change + print tab update");
         const auto *nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(m_config->option("nozzle_diameter"));
         size_t num_extruder = (nozzle_diameter != nullptr) ? nozzle_diameter->values.size() : 0;
         int         old_filament_size = wxGetApp().preset_bundle->filament_presets.size();
@@ -2510,9 +2515,12 @@ void Tab::on_presets_changed()
     if (wxGetApp().plater() == nullptr)
         return;
 
+    SWITCH_TIMING_TAG("Tab::on_presets_changed", switch_timing::type_name(int(m_type)));
     // Instead of PostEvent (EVT_TAB_PRESETS_CHANGED) just call update_presets
     wxGetApp().plater()->sidebar().update_presets(m_type);
 
+    {
+    SWITCH_TIMING("plate render options (is_bbl_vendor, has_cali_lines)");
     bool is_bbl_vendor_preset = wxGetApp().preset_bundle->is_bbl_vendor();
     if (is_bbl_vendor_preset) {
         wxGetApp().plater()->get_partplate_list().set_render_option(true, true);
@@ -2524,6 +2532,7 @@ void Tab::on_presets_changed()
     } else {
         wxGetApp().plater()->get_partplate_list().set_render_option(false, true);
         wxGetApp().plater()->get_partplate_list().set_render_cali(false);
+    }
     }
 
     // Printer selected at the Printer tab, update "compatible" marks at the print and filament selectors.
@@ -2540,6 +2549,7 @@ void Tab::on_presets_changed()
     // to avoid needless preset loading from update() function
     m_dependent_tabs.clear();
 
+    SWITCH_TIMING("update_project_dirty_from_presets");
     wxGetApp().plater()->update_project_dirty_from_presets();
 }
 
@@ -5675,9 +5685,13 @@ void TabPrinter::extruders_count_changed(size_t extruders_count)
     /* This function should be call in any case because of correct updating/rebuilding
      * of unregular pages of a Printer Settings
      */
-    build_unregular_pages();
+    {
+        SWITCH_TIMING("TabPrinter::build_unregular_pages");
+        build_unregular_pages();
+    }
 
     if (is_count_changed) {
+        SWITCH_TIMING("on_value_change(extruders_count) [count changed]");
         on_value_change("extruders_count", extruders_count);
         // BBS
         //wxGetApp().obj_list()->update_objects_list_filament_column(extruders_count);
@@ -6192,6 +6206,7 @@ if (is_marlin_flavor)
 // this gets executed after preset is loaded and before GUI fields are updated
 void TabPrinter::on_preset_loaded()
 {
+    SWITCH_TIMING("TabPrinter::on_preset_loaded");
     // Orca
     // update the extruders count field
     auto   *nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(m_config->option("nozzle_diameter"));
@@ -6676,11 +6691,15 @@ void Tab::reactive_preset_combo_box()
 void Tab::load_current_preset()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<<boost::format(": enter");
+    SWITCH_TIMING_TAG("Tab::load_current_preset", switch_timing::type_name(int(m_type)));
     const Preset& preset = m_presets->get_edited_preset();
 
     update_btns_enabling();
 
-    update();
+    {
+        SWITCH_TIMING("Tab::update() (toggle options)");
+        update();
+    }
     if (m_type == Slic3r::Preset::TYPE_PRINTER) {
         // For the printer profile, generate the extruder pages.
         if (preset.printer_technology() == ptFFF)
@@ -6690,14 +6709,23 @@ void Tab::load_current_preset()
     }
 
     // Reload preset pages with the new configuration values.
-    reload_config();
+    {
+        SWITCH_TIMING("reload_config (active page)");
+        reload_config();
+    }
 
     // Refresh field decorations (orange/modified markers) after reload.
     // Without this, stale decorations from a previous dirty state persist
     // even after discard_current_changes() resets the config.
-    update_changed_ui();
+    {
+        SWITCH_TIMING("update_changed_ui #1");
+        update_changed_ui();
+    }
 
-    update_ui_items_related_on_parent_preset(m_presets->get_selected_preset_parent());
+    {
+        SWITCH_TIMING("update_ui_items_related_on_parent_preset");
+        update_ui_items_related_on_parent_preset(m_presets->get_selected_preset_parent());
+    }
 
 //	m_undo_to_sys_btn->Enable(!preset.is_default);
 
@@ -6712,7 +6740,10 @@ void Tab::load_current_preset()
         // checking out if this Tab exists till this moment
         if (!wxGetApp().checked_tab(this))
             return;
-        update_tab_ui();
+        {
+            SWITCH_TIMING("update_tab_ui");
+            update_tab_ui();
+        }
 
         // update show/hide tabs
         if (m_type == Slic3r::Preset::TYPE_PRINTER) {
@@ -6763,7 +6794,10 @@ void Tab::load_current_preset()
                     dynamic_cast<Notebook*>(wxGetApp().tab_panel())->SetPageImage(wxGetApp().tab_panel()->FindPage(this), printer_technology == ptFFF ? "printer" : "sla_printer");
 #endif
             }
-            on_presets_changed();
+            {
+                SWITCH_TIMING("on_presets_changed (from printer load_current_preset)");
+                on_presets_changed();
+            }
             if (printer_technology == ptFFF) {
                 static_cast<TabPrinter*>(this)->m_initial_extruders_count = static_cast<const ConfigOptionFloats*>(m_presets->get_selected_preset().config.option("nozzle_diameter"))->values.size(); //static_cast<TabPrinter*>(this)->m_extruders_count;
                 const Preset* parent_preset = m_presets->get_selected_preset_parent();
@@ -6772,14 +6806,28 @@ void Tab::load_current_preset()
             }
         }
         else {
-            on_presets_changed();
-            if (m_type == Preset::TYPE_SLA_PRINT || m_type == Preset::TYPE_PRINT)
+            {
+                SWITCH_TIMING("on_presets_changed (from load_current_preset)");
+                on_presets_changed();
+            }
+            if (m_type == Preset::TYPE_SLA_PRINT || m_type == Preset::TYPE_PRINT) {
+                SWITCH_TIMING("update_frequently_changed_parameters");
                 update_frequently_changed_parameters();
+            }
         }
         m_opt_status_value = (m_presets->get_selected_preset_parent() ? osSystemValue : 0) | osInitValue;
-        init_options_list();
-        update_visibility();
-        update_changed_ui();
+        {
+            SWITCH_TIMING("init_options_list");
+            init_options_list();
+        }
+        {
+            SWITCH_TIMING("update_visibility (page tree rebuild)");
+            update_visibility();
+        }
+        {
+            SWITCH_TIMING("update_changed_ui #2");
+            update_changed_ui();
+        }
     }
 #if 0
     );
@@ -6878,6 +6926,7 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 {
     BOOST_LOG_TRIVIAL(info) << boost::format("select preset, name %1%, delete_current %2%")
         %preset_name %delete_current;
+    SWITCH_TIMING_TAG("Tab::select_preset", switch_timing::type_name(int(m_type)));
     if (preset_name.empty()) {
         if (delete_current) {
             // Find an alternate preset to be selected after the current preset is deleted.
@@ -6974,6 +7023,7 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         //
         // With the introduction of the SLA printer types, we need to support switching between
         // the FFF and SLA printers.
+        SWITCH_TIMING("printer: compatibility checks of current print/filament + carry capture");
         const Preset 		&new_printer_preset     = *m_presets->find_preset(preset_name, true);
 		const PresetWithVendorProfile new_printer_preset_with_vendor_profile = m_presets->get_preset_with_vendor_profile(new_printer_preset);
         PrinterTechnology    old_printer_technology = m_presets->get_edited_preset().printer_technology();
@@ -7108,12 +7158,16 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         	       show_incompatible_presets              ? PresetSelectCompatibleType::OnlyIfWasCompatible : PresetSelectCompatibleType::Always;
         };
         if (current_dirty || delete_current || print_tab || printer_tab)
+            switch_timing::log_line("update_compatible follows (timed by its own enter/exit log lines)");
+        if (current_dirty || delete_current || print_tab || printer_tab)
             m_preset_bundle->update_compatible(
             	update_compatible_type(technology_changed, print_tab,   (print_tab ? this : wxGetApp().get_tab(Preset::TYPE_PRINT))->m_show_incompatible_presets),
             	update_compatible_type(technology_changed, false, 		wxGetApp().get_tab(Preset::TYPE_FILAMENT)->m_show_incompatible_presets));
         // Initialize the UI from the current preset.
-        if (printer_tab)
+        if (printer_tab) {
+            SWITCH_TIMING("TabPrinter::update_pages");
             static_cast<TabPrinter*>(this)->update_pages();
+        }
 
         if (! is_selected && printer_tab)
         {
@@ -7137,6 +7191,7 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 
         // Orca: update presets for the selected printer
         if (m_type == Preset::TYPE_PRINTER && wxGetApp().app_config->get_bool("remember_printer_config")) {
+            SWITCH_TIMING("remember_printer_config block (update_selections + keep colours + on_filaments_change)");
             // Ultra: preserve the current project's filament colours across EVERY printer switch.
             // The stock/fork default (update_selections) restores the target printer's OWN
             // AppConfig-remembered filaments, clobbering the project's colours. This was gated to
@@ -7177,7 +7232,10 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 if (const ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
                     oldFlushVolumesVector = flushVector->values;
 
-                m_preset_bundle->update_selections(*wxGetApp().app_config);
+                {
+                    SWITCH_TIMING("PresetBundle::update_selections");
+                    m_preset_bundle->update_selections(*wxGetApp().app_config);
+                }
 
                 m_preset_bundle->filament_presets = oldFilamentPresets;
 
@@ -7211,6 +7269,7 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         // which is why this runs last) when it is compatible. Carried values stay dirty, so each one
         // can be reverted and "discard all" restores the selected profile exactly.
         if (carry_process && m_type == Preset::TYPE_PRINTER) {
+            SWITCH_TIMING("print settings carry (select target + apply)");
             m_preset_bundle->select_print_carry_target(print_settings_carry);
             const std::vector<std::string> carried = m_preset_bundle->apply_print_settings_carry(print_settings_carry);
             if (!carried.empty()) {
@@ -7226,7 +7285,10 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 m_carry_notes.insert(m_carry_notes.begin(), note);
             }
         }
-        load_current_preset();
+        {
+            SWITCH_TIMING("load_current_preset (this tab)");
+            load_current_preset();
+        }
 
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
         // Deferred so it runs after this switch settles; sync_bambu_user_presets only reloads the UI
@@ -7265,7 +7327,10 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         }
 
         // Trigger the on_presets_changed event to apply cached config for dependent tabs
-        on_presets_changed();
+        {
+            SWITCH_TIMING("on_presets_changed (end of select_preset)");
+            on_presets_changed();
+        }
 
         // Snapmaker #769: refresh the sidebar nozzle UI after a printer preset switch. Entries that do not
         // go through the sidebar (Machine Settings combo, preset deletion, UnsavedChangesDialog transfer,

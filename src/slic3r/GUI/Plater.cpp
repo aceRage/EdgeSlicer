@@ -245,6 +245,7 @@
 #include "filamentsync/SyncFilamentColorDialog.hpp"
 
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "SwitchTiming.hpp" // DIAGNOSTIC (diag/printer-switch-timing)
 #include <chrono>
 
 using boost::optional;
@@ -3915,6 +3916,7 @@ static void reset_u1_unsupported_plate_bed_types(PartPlateList &plate_list)
 
 void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
 {
+    SWITCH_TIMING("Sidebar::update_all_preset_comboboxes");
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
     const auto print_tech = preset_bundle.printers.get_edited_preset().printer_technology();
 
@@ -3980,6 +3982,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             // even when the preset's own print_host is empty.
             std::vector<PrintHostDevices::Device> ph_devices;
             std::string                          ph_model_key, ph_pick;
+            SWITCH_TIMING("print-host devices + load_printer_url");
             try {
                 PrintHostDevices::migrate_from_presets(preset_bundle);
                 ph_model_key = PrintHostDevices::current_model_key(preset_bundle);
@@ -4182,12 +4185,17 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
     }
 
     if (print_tech == ptFFF) {
+        SWITCH_TIMING("filament combos update");
         for (PlaterPresetComboBox* cb : p->combos_filament)
             cb->update();
     }
 
     if (p->combo_printer){
-        p->combo_printer->update();
+        {
+            SWITCH_TIMING("printer combo update");
+            p->combo_printer->update();
+        }
+        SWITCH_TIMING("update_printer_thumbnail");
         update_printer_thumbnail();
     }
         
@@ -4200,6 +4208,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
         else if (const Preset* parent = preset_bundle.printers.get_selected_preset_parent(); parent != nullptr && parent->vendor != nullptr)
             is_flashforge = parent->vendor->id == "Flashforge";
     }
+    SWITCH_TIMING("Device tab swap (show_device / show_flashforge_device) + tab SetSelection");
     if (is_flashforge)
         p_mainframe->show_flashforge_device();
     else
@@ -4217,6 +4226,7 @@ void Sidebar::update_presets(Preset::Type preset_type)
     const auto print_tech = preset_bundle.printers.get_edited_preset().printer_technology();
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": enter, preset_type %1%")%preset_type;
+    SWITCH_TIMING_TAG("Sidebar::update_presets", switch_timing::type_name(int(preset_type)));
     switch (preset_type) {
     case Preset::TYPE_FILAMENT:
     {
@@ -4240,12 +4250,21 @@ void Sidebar::update_presets(Preset::Type preset_type)
 
         }
 
-        for (size_t i = 0; i < filament_cnt; i++)
-            p->combos_filament[i]->update();
+        {
+            SWITCH_TIMING("filament combos update");
+            for (size_t i = 0; i < filament_cnt; i++)
+                p->combos_filament[i]->update();
+        }
 
-        update_dynamic_filament_list();
+        {
+            SWITCH_TIMING("update_dynamic_filament_list");
+            update_dynamic_filament_list();
+        }
 
-        p->plater->notify_filament_usage_changed();
+        {
+            SWITCH_TIMING("notify_filament_usage_changed");
+            p->plater->notify_filament_usage_changed();
+        }
 
         break;
     }
@@ -4291,15 +4310,25 @@ void Sidebar::update_presets(Preset::Type preset_type)
         }
 
         update_all_preset_comboboxes();
-        p->show_preset_comboboxes();
+        {
+            SWITCH_TIMING("show_preset_comboboxes");
+            p->show_preset_comboboxes();
+        }
 
         // A printer of another vendor may use another account (title bar Account button).
-        AccountStatus::refresh();
+        {
+            SWITCH_TIMING("AccountStatus::refresh");
+            AccountStatus::refresh();
+        }
 
         /* update bed shape */
         Tab* printer_tab = wxGetApp().get_tab(Preset::TYPE_PRINTER);
         if (printer_tab) {
-            printer_tab->update();
+            {
+                SWITCH_TIMING("printer_tab->update() (again)");
+                printer_tab->update();
+            }
+            SWITCH_TIMING("printer_tab->on_preset_loaded() (again)");
             printer_tab->on_preset_loaded();
         }
 
@@ -4320,7 +4349,10 @@ void Sidebar::update_presets(Preset::Type preset_type)
     }
 
     // Synchronize config.ini with the current selections.
-    wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
+    {
+        SWITCH_TIMING("export_selections");
+        wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
+    }
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": exit.");
 
@@ -4533,6 +4565,7 @@ void Sidebar::jump_to_option(size_t selected)
 // BBS. Move logic from Plater::on_extruders_change() to Sidebar::on_filaments_change().
 void Sidebar::on_filaments_change(size_t num_filaments)
 {
+    SWITCH_TIMING("Sidebar::on_filaments_change");
     auto& choices = combos_filament();
 
     if (num_filaments == choices.size()) {
@@ -9917,6 +9950,7 @@ void Sidebar::sync_nozzle_flow_combos()
 
 void Sidebar::update_nozzle_settings(bool switch_machine)
 {
+    SWITCH_TIMING("Sidebar::update_nozzle_settings");
     if (!p->m_nozzle_notebook)
         return;
 
@@ -11835,6 +11869,7 @@ Plater::priv::~priv()
 
 void Plater::priv::update(unsigned int flags)
 {
+    SWITCH_TIMING("Plater::priv::update");
     // the following line, when enabled, causes flickering on NVIDIA graphics cards
 //    wxWindowUpdateLocker freeze_guard(q);
 #ifdef SUPPORT_AUTOCENTER
@@ -16297,6 +16332,9 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
     }
 
     auto idx = combo->get_filament_idx();
+    if (preset_type == Preset::TYPE_PRINTER)
+        switch_timing::mark_switch_start("printer combo");
+    SWITCH_TIMING_TAG("Plater::on_select_preset", switch_timing::type_name(int(preset_type)));
 
     // BBS:Save the plate parameters before switching
     PartPlateList& old_plate_list = this->partplate_list;
@@ -16370,11 +16408,20 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
         //BBS
         //wxWindowUpdateLocker noUpdates1(sidebar->print_panel());
         wxWindowUpdateLocker noUpdates2(sidebar->filament_panel());
+        SWITCH_TIMING("Tab::select_preset (from plater combo)");
         wxGetApp().get_tab(preset_type)->select_preset(preset_name);
     }
 
     // update plater with new config
-    q->on_config_change(wxGetApp().preset_bundle->full_config());
+    {
+        SWITCH_TIMING("on_select_preset: on_config_change(full_config)");
+        DynamicPrintConfig switch_full_config;
+        {
+            SWITCH_TIMING("PresetBundle::full_config");
+            switch_full_config = wxGetApp().preset_bundle->full_config();
+        }
+        q->on_config_change(switch_full_config);
+    }
     if (preset_type == Preset::TYPE_PRINT)
         q->record_preferred_print_profile();
     if (preset_type == Preset::TYPE_PRINTER) {
@@ -16385,7 +16432,10 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
      * Furthermore, Layers editing is implemented only for FFF printers
      * and for SLA presets they should be deleted
      */
-        wxGetApp().obj_list()->update_object_list_by_printer_technology();
+        {
+            SWITCH_TIMING("ObjectList::update_object_list_by_printer_technology");
+            wxGetApp().obj_list()->update_object_list_by_printer_technology();
+        }
 
         // BBS:Model reset by plate center
         PartPlateList& cur_plate_list = this->partplate_list;
@@ -16393,7 +16443,10 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
         Vec3d cur_plate_pos = cur_plate->get_center_origin();
 
         if (old_plate_pos.x() != cur_plate_pos.x() || old_plate_pos.y() != cur_plate_pos.y()) {
+            SWITCH_TIMING("recenter objects on every plate (select + center_selected_plate + undo snapshot per plate)");
+            switch_timing::log_line("recenter: plates=" + std::to_string(plate_object.size()));
             for (int i = 0; i < plate_object.size(); ++i) {
+                SWITCH_TIMING("recenter one plate");
                 view3D->select_object_from_idx(plate_object[i]);
                 this->sidebar->obj_list()->update_selections();
                 view3D->center_selected_plate(i);
@@ -18291,8 +18344,14 @@ void Plater::priv::set_bed_shape(const Pointfs& shape, const Pointfs& exclude_ar
         //Pointfs& exclude_areas = config->option<ConfigOptionPoints>("bed_exclude_area")->values;
         // Ultra: preserve object centering relative to the plate on a printer/bed-size switch
         // (move_instances=true). Left off for 3mf-load reset_size calls so projects load unshifted.
-        partplate_list.reset_size(max.x() - min.x() - Bed3D::Axes::DefaultTipRadius, max.y() - min.y() - Bed3D::Axes::DefaultTipRadius, z, /*reload_objects*/true, /*update_shapes*/false, /*move_instances*/true);
-        partplate_list.set_shapes(shape, exclude_areas, custom_texture, height_to_lid, height_to_rod);
+        {
+            SWITCH_TIMING("PartPlateList::reset_size (move instances, reload objects)");
+            partplate_list.reset_size(max.x() - min.x() - Bed3D::Axes::DefaultTipRadius, max.y() - min.y() - Bed3D::Axes::DefaultTipRadius, z, /*reload_objects*/true, /*update_shapes*/false, /*move_instances*/true);
+        }
+        {
+            SWITCH_TIMING("PartPlateList::set_shapes");
+            partplate_list.set_shapes(shape, exclude_areas, custom_texture, height_to_lid, height_to_rod);
+        }
 
         Vec2d new_shape_position = partplate_list.get_current_shape_position();
         if (shape_position != new_shape_position)
@@ -24557,6 +24616,7 @@ void Plater::on_filaments_delete(size_t num_filaments, size_t filament_id, int r
 // BBS.
 void Plater::on_filaments_change(size_t num_filaments)
 {
+    SWITCH_TIMING("Plater::on_filaments_change");
     // only update elements in plater
     update_filament_colors_in_full_config();
 
@@ -25531,6 +25591,7 @@ void Plater::notify_filament_usage_changed()
 
 void Plater::on_config_change(const DynamicPrintConfig &config)
 {
+    SWITCH_TIMING("Plater::on_config_change");
     bool update_scheduled = false;
     bool bed_shape_changed = false;
     bool print_sequence_changed = false;
@@ -25608,13 +25669,18 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
         }
     }
 
-    if (bed_shape_changed)
+    if (bed_shape_changed) {
+        SWITCH_TIMING("set_bed_shape");
         set_bed_shape();
+    }
 
-    if (update_scheduled)
+    if (update_scheduled) {
+        SWITCH_TIMING("Plater::update (reload scene)");
         update();
+    }
 
     if (p->main_frame->is_loaded()) {
+        SWITCH_TIMING("schedule_background_process + title");
         this->p->schedule_background_process();
         update_title_dirty_status();
     }

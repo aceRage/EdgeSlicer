@@ -195,6 +195,7 @@ typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS2)(
 
 #ifdef WIN32
 #include "dev-utils/BaseException.h"
+#include "SwitchTiming.hpp" // DIAGNOSTIC (diag/printer-switch-timing)
 #endif
 
 #if ENABLE_THUMBNAIL_GENERATOR_DEBUG
@@ -3982,6 +3983,10 @@ bool GUI_App::on_init_inner()
 
     Bind(wxEVT_IDLE, [this](wxIdleEvent& event)
     {
+        if (switch_timing::switch_pending()) {
+            switch_timing::switch_pending() = false;
+            switch_timing::log_line("==== first idle after switch at +" + std::to_string(switch_timing::ms_since(switch_timing::switch_start())) + " ms");
+        }
         bool curr_studio_active = this->is_studio_active();
         if (m_studio_active != curr_studio_active) {
             if (curr_studio_active) {
@@ -6547,8 +6552,13 @@ void GUI_App::sync_bambu_user_presets(bool force_refresh)
 {
     if (!app_config || !app_config->get_bool("sync_bambu_user_presets"))
         return;
+    SWITCH_TIMING("GUI_App::sync_bambu_user_presets (deferred, UI thread)");
     std::string uid = (m_agent && m_agent->is_user_login()) ? m_agent->get_user_id() : std::string();
-    int copied = mirror_bambu_user_presets(uid);
+    int copied = 0;
+    {
+        SWITCH_TIMING("mirror_bambu_user_presets (file scan)");
+        copied = mirror_bambu_user_presets(uid);
+    }
     if (copied > 0 || force_refresh) {
         try {
             preset_bundle->load_user_presets(DEFAULT_USER_FOLDER_NAME, ForwardCompatibilitySubstitutionRule::Enable);
