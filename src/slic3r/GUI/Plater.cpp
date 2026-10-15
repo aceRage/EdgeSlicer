@@ -146,6 +146,7 @@
 #include "UVEditorCanvas.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "PlateRecentre.hpp"
 #include "RemoteAccess.hpp"
 #include "UntrustedSettingsGuard.hpp"
 #include "DualNozzleState.hpp"
@@ -10923,6 +10924,8 @@ struct Plater::priv
     bool leave_gizmos_stack();
 
     void take_snapshot(const std::string& snapshot_name, UndoRedo::SnapshotType snapshot_type = UndoRedo::SnapshotType::Action);
+    // Copy the project config's wipe-tower positions into model.wipe_tower (take_snapshot does this first).
+    void sync_model_wipe_tower_from_config();
     /*void take_snapshot(const wxString& snapshot_name, UndoRedo::SnapshotType snapshot_type = UndoRedo::SnapshotType::Action)
         { this->take_snapshot(std::string(snapshot_name.ToUTF8().data()), snapshot_type); }*/
     int  get_active_snapshot_index();
@@ -16401,13 +16404,21 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
         Vec3d cur_plate_pos = cur_plate->get_center_origin();
 
         if (old_plate_pos.x() != cur_plate_pos.x() || old_plate_pos.y() != cur_plate_pos.y()) {
-            for (int i = 0; i < plate_object.size(); ++i) {
-                view3D->select_object_from_idx(plate_object[i]);
-                this->sidebar->obj_list()->update_selections();
-                view3D->center_selected_plate(i);
-            }
-
-            view3D->deselect_all();
+            // Ultra: one "Move Object" undo snapshot for the whole recentre instead of one per plate
+            // (plus one for the deselect), and empty plates are not visited. The non-empty plates are
+            // centred exactly as before, in the same order (see PlateRecentre.hpp).
+            run_plate_recentre(
+                plate_object, [this]() { return Plater::TakeSnapshot(q, L("Move Object")); },
+                [this, &plate_object](int i) {
+                    view3D->select_object_from_idx(plate_object[i]);
+                    this->sidebar->obj_list()->update_selections();
+                    view3D->center_selected_plate(i);
+                },
+                [this]() { view3D->deselect_all(); });
+            // The per-plate snapshots also refreshed the model's copy of the wipe-tower positions
+            // after the moves (the last one, the deselect's, after all of them); keep that.
+            if (m_prevent_snapshots == 0)
+                sync_model_wipe_tower_from_config();
         }
 #if 0   // do not toggle auto calc when change printer
         // update flush matrix
@@ -18554,6 +18565,27 @@ int Plater::priv::get_active_snapshot_index()
     return it - ss_stack.begin();
 }
 
+void Plater::priv::sync_model_wipe_tower_from_config()
+{
+    //FIXME updating the Wipe tower config values at the ModelWipeTower from the Print config.
+    // This is a workaround until we refactor the Wipe Tower position / orientation to live solely inside the Model, not in the Print config.
+    // BBS: add partplate logic
+    if (this->printer_technology == ptFFF) {
+        const DynamicPrintConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
+        const ConfigOptionFloats* tower_x_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_x");
+        const ConfigOptionFloats* tower_y_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_y");
+        assert(tower_x_opt->values.size() == tower_y_opt->values.size());
+        model.wipe_tower.positions.clear();
+        model.wipe_tower.positions.resize(tower_x_opt->values.size());
+        for (int plate_idx = 0; plate_idx < tower_x_opt->values.size(); plate_idx++) {
+            ModelWipeTower& tower = model.wipe_tower;
+
+            tower.positions[plate_idx] = Vec2d(tower_x_opt->get_at(plate_idx), tower_y_opt->get_at(plate_idx));
+            tower.rotation = proj_cfg.opt_float("wipe_tower_rotation_angle");
+        }
+    }
+}
+
 void Plater::priv::take_snapshot(const std::string& snapshot_name, const UndoRedo::SnapshotType snapshot_type)
 {
     if (m_prevent_snapshots > 0)
@@ -18583,24 +18615,7 @@ void Plater::priv::take_snapshot(const std::string& snapshot_name, const UndoRed
     if (view3D->get_canvas3d()->get_gizmos_manager().wants_reslice_supports_on_undo())
         snapshot_data.flags |= UndoRedo::SnapshotData::RECALCULATE_SLA_SUPPORTS;
 
-    //FIXME updating the Wipe tower config values at the ModelWipeTower from the Print config.
-    // This is a workaround until we refactor the Wipe Tower position / orientation to live solely inside the Model, not in the Print config.
-    // BBS: add partplate logic
-    if (this->printer_technology == ptFFF) {
-        const DynamicPrintConfig& config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-        const DynamicPrintConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
-        const ConfigOptionFloats* tower_x_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_x");
-        const ConfigOptionFloats* tower_y_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_y");
-        assert(tower_x_opt->values.size() == tower_y_opt->values.size());
-        model.wipe_tower.positions.clear();
-        model.wipe_tower.positions.resize(tower_x_opt->values.size());
-        for (int plate_idx = 0; plate_idx < tower_x_opt->values.size(); plate_idx++) {
-            ModelWipeTower& tower = model.wipe_tower;
-
-            tower.positions[plate_idx] = Vec2d(tower_x_opt->get_at(plate_idx), tower_y_opt->get_at(plate_idx));
-            tower.rotation = proj_cfg.opt_float("wipe_tower_rotation_angle");
-        }
-    }
+    sync_model_wipe_tower_from_config();
     GLCanvas3D* canvas = get_current_canvas3D();
     if (!canvas) {
         // During destruction, skip snapshot
