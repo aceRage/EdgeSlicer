@@ -37,6 +37,7 @@
 #include "slic3r/GUI/OptionsGroup.hpp"
 #include "wxExtensions.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include <wx/wupdlock.h>
 
 #include "GUI_App.hpp"
@@ -315,6 +316,16 @@ void Tab::create_preset_tab()
     //add_scaled_button(panel, &m_btn_compare_preset, "compare");
     add_scaled_button(m_top_panel, &m_btn_save_preset, "save");
     add_scaled_button(m_top_panel, &m_btn_delete_preset, "cross");
+    if (m_type == Preset::TYPE_FILAMENT) {
+        // Favourite filaments: the star toggles the selected filament; the combo's context menu
+        // (right-click, context-menu key, Shift+F10) and the stars in its list do the same.
+        add_scaled_button(m_top_panel, &m_btn_favorite_filament, into_u8(FavoriteFilamentsUI::star_icon_name(false)));
+        m_btn_favorite_filament->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+            FavoriteFilamentsUI::toggle(FavoriteFilamentsUI::key_for(m_presets->get_selected_preset()));
+            update_favorite_button();
+        });
+        m_favorite_subscription = FavoriteFilamentsUI::subscribe([this]() { update_favorite_button(); });
+    }
     //if (m_type == Preset::Type::TYPE_PRINTER)
     //    add_scaled_button(panel, &m_btn_edit_ph_printer, "cog");
 
@@ -388,6 +399,8 @@ void Tab::create_preset_tab()
 
         m_btn_save_preset->Show();
         m_btn_delete_preset->Show(); // ORCA: fixes delete preset button visible while search box focused
+        if (m_btn_favorite_filament)
+            m_btn_favorite_filament->Show();
         m_undo_btn->Show();          // ORCA: fixes revert preset button visible while search box focused
         m_btn_search->Show();
         m_search_item->Hide();
@@ -418,6 +431,8 @@ void Tab::create_preset_tab()
 
          m_btn_save_preset->Hide();
          m_btn_delete_preset->Hide(); // ORCA: fixes delete preset button visible while search box focused
+         if (m_btn_favorite_filament)
+             m_btn_favorite_filament->Hide();
          m_undo_btn->Hide();          // ORCA: fixes revert preset button visible while search box focused
          m_btn_search->Hide();
          m_search_item->Show();
@@ -458,6 +473,8 @@ void Tab::create_preset_tab()
     m_top_sizer->Add(m_undo_to_sys_btn, 0, wxALIGN_CENTER_VERTICAL);
     m_top_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
 #endif
+    if (m_btn_favorite_filament)
+        m_top_sizer->Add(m_btn_favorite_filament, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_save_preset, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_delete_preset, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_search, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
@@ -6897,10 +6914,27 @@ void Tab::update_btns_enabling()
     const Preset& preset = m_presets->get_edited_preset();
     m_btn_delete_preset->Show((m_type == Preset::TYPE_PRINTER && m_preset_bundle->physical_printers.has_selection())
                               || (!preset.is_default && !preset.is_system));
+    update_favorite_button();
 
     //if (m_btn_edit_ph_printer)
     //    m_btn_edit_ph_printer->SetToolTip( m_preset_bundle->physical_printers.has_selection() ?
     //                                       _L("Edit physical printer") : _L("Add physical printer"));
+}
+
+Tab::~Tab()
+{
+    if (m_favorite_subscription)
+        FavoriteFilamentsUI::unsubscribe(m_favorite_subscription);
+}
+
+void Tab::update_favorite_button()
+{
+    if (!m_btn_favorite_filament || !m_presets)
+        return;
+    const bool fav = FavoriteFilamentsUI::is_favorite(m_presets->get_selected_preset());
+    m_btn_favorite_filament->SetBitmap_(into_u8(FavoriteFilamentsUI::star_icon_name(fav)));
+    m_btn_favorite_filament->SetToolTip(fav ? _L("Remove this filament from your favorite filaments")
+                                            : _L("Add this filament to your favorite filaments (they are listed first in every filament list)"));
 }
 
 void Tab::update_preset_choice()
