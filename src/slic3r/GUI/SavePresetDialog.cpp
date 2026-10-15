@@ -124,6 +124,15 @@ SavePresetDialog::Item::Item(Preset::Type type, const std::string &suffix, wxBox
         sizer->Add(m_every_printer, 0, wxEXPAND | wxTOP | wxLEFT, BORDER_W);
     }
 
+    if (parent->m_mode == comDevelop) {
+        m_detach_checkbox = new wxCheckBox(parent, wxID_ANY, _L("Detach from parent"));
+        sizer->Add(m_detach_checkbox, 0, wxALIGN_LEFT | wxALL, BORDER_W);
+        // Set initial state (unchecked by default)
+        m_detach_checkbox->SetValue(m_detach);
+        // Bind the checkbox event to update the detach state for this item
+        m_detach_checkbox->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { m_detach = m_detach_checkbox->GetValue(); });
+    }
+
     m_radio_group->Bind(wxEVT_COMMAND_RADIOBOX_SELECTED, [this](wxCommandEvent &e) {
         m_save_to_project = m_radio_group->GetSelection() == 1;
         if (m_every_printer)
@@ -259,15 +268,15 @@ void SavePresetDialog::Item::DoSetSize(int x, int y, int width, int height, int 
 //          SavePresetDialog
 //-----------------------------------------------
 
-SavePresetDialog::SavePresetDialog(wxWindow *parent, Preset::Type type, std::string suffix)
-    : DPIDialog(parent, wxID_ANY, _L("Save preset"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
+SavePresetDialog::SavePresetDialog(wxWindow *parent, Preset::Type type, int mode, std::string suffix)
+    : DPIDialog(parent, wxID_ANY, _L("Save preset"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX), m_mode(mode)
 {
     build(std::vector<Preset::Type>{type}, suffix);
     wxGetApp().UpdateDlgDarkUI(this);
 }
 
-SavePresetDialog::SavePresetDialog(wxWindow *parent, std::vector<Preset::Type> types, std::string suffix)
-    : DPIDialog(parent, wxID_ANY, _L("Save preset"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
+SavePresetDialog::SavePresetDialog(wxWindow *parent, std::vector<Preset::Type> types, int mode, std::string suffix)
+    : DPIDialog(parent, wxID_ANY, _L("Save preset"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX), m_mode(mode)
 {
     build(types, suffix);
     wxGetApp().UpdateDlgDarkUI(this);
@@ -361,6 +370,14 @@ ProjectPresetPrinters SavePresetDialog::get_project_printers_selection(Preset::T
     for (const Item *item : m_items)
         if (item->type() == type) return item->project_printers();
     return ProjectPresetPrinters::Keep;
+}
+
+bool SavePresetDialog::get_detach_value(Preset::Type type)
+{
+    for (const Item* item : m_items)
+        if (item->type() == type)
+            return item->is_detached();
+    return false;
 }
 
 bool SavePresetDialog::enable_ok_btn() const
