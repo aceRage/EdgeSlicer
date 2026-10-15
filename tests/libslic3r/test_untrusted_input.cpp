@@ -3141,3 +3141,58 @@ TEST_CASE("Importing a preset JSON whose name climbs out of the preset directory
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+// ---- Bambu 7930283f2: bounded 3MF / AMF importer error formatting -------------------------------
+//
+// The PrusaSlicer 3MF importer and the zipped AMF importer formatted their XML parse errors with
+// ::sprintf into 1024-byte stack buffers, with the archive entry name and the parser's message as
+// %s arguments. They now use snprintf. A malformed entry with a long name must fail to load
+// cleanly (the message is truncated, never written past the buffer).
+
+namespace {
+
+// An archive entry name close to miniz's 512-byte limit.
+std::string long_entry_name(const std::string &prefix, const std::string &suffix)
+{
+    return prefix + std::string(480 - prefix.size() - suffix.size(), 'a') + suffix;
+}
+
+} // namespace
+
+TEST_CASE("A malformed 3MF model entry with a long name fails to load cleanly", "[3mf][untrusted]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "malformed_long_name.3mf";
+
+    SECTION("model XML (streamed parser)")
+    {
+        write_zip_entries(path, { { long_entry_name("3D/", ".model"), "<model unit=\"millimeter\"><resources><object" } });
+    }
+    SECTION("config XML (buffered parser)")
+    {
+        write_zip_entries(path, { { "3D/3dmodel.model", "<model unit=\"millimeter\"><resources/><build/></model>" },
+                                  { "Metadata/Slic3r_PE_model.config", "<config><object id=\"1\"" } });
+    }
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    bool                      loaded = true;
+    REQUIRE_NOTHROW(loaded = load_3mf(path.string().c_str(), config, ctxt, &model, false));
+    CHECK_FALSE(loaded);
+}
+
+TEST_CASE("A malformed zipped AMF entry with a long name fails to load cleanly", "[amf][untrusted]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "malformed_long_name.zip.amf";
+    write_zip_entries(path, { { long_entry_name("", ".amf"), "<?xml version=\"1.0\"?><amf unit=\"millimeter\"><object id=\"0\"><mesh" } });
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    bool                      use_inches = false;
+    bool                      loaded     = true;
+    REQUIRE_NOTHROW(loaded = load_amf(path.string().c_str(), &config, &ctxt, &model, &use_inches));
+    CHECK_FALSE(loaded);
+}
