@@ -4,8 +4,8 @@
 //
 // GUI-free so the ordering rules can be unit-tested without a window: Popup() gathers a name, a
 // vendor and a type for each filament the printer can use, hands them to sort(), and shows the
-// result. Ported from OrcaSlicer #11293 (current filaments first) on top of Bambu Studio's name
-// sort ("FIX: sort the filament names").
+// result. Ported from OrcaSlicer #11293 (the filaments in use first) and #11306 (Generic above the
+// other vendors) on top of Bambu Studio's sort ("FIX: sort the filament names").
 
 #include <algorithm>
 #include <climits>
@@ -41,37 +41,39 @@ inline std::map<std::string, int> selected_ranks(const std::vector<std::string> 
 
 namespace detail {
 
-// Bambu's own favourites, shown first when nothing in use outranks them.
-inline const std::map<std::string, int> &bambu_name_order()
+// Case-insensitive for ASCII, which is what vendor, type and alias names are made of; bytes above
+// 127 (UTF-8 in a user preset's name) compare as they are.
+inline int compare_no_case(const std::string &a, const std::string &b)
 {
-    static const std::map<std::string, int> table = {{"Bambu PLA Basic", 0},
-                                                     {"Bambu PLA Matte", 1},
-                                                     {"Bambu PETG HF", 2},
-                                                     {"Bambu ABS", 3},
-                                                     {"Bambu PLA Silk", 4},
-                                                     {"Bambu PLA-CF", 5},
-                                                     {"Bambu PLA Galaxy", 6},
-                                                     {"Bambu PLA Metal", 7},
-                                                     {"Bambu PLA Marble", 8},
-                                                     {"Bambu PETG-CF", 9},
-                                                     {"Bambu PETG Translucent", 10},
-                                                     {"Bambu ABS-GF", 11}};
-    return table;
+    const size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char ca = static_cast<unsigned char>(a[i]);
+        unsigned char cb = static_cast<unsigned char>(b[i]);
+        if (ca >= 'A' && ca <= 'Z')
+            ca = static_cast<unsigned char>(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z')
+            cb = static_cast<unsigned char>(cb - 'A' + 'a');
+        if (ca != cb)
+            return ca < cb ? -1 : 1;
+    }
+    if (a.size() == b.size())
+        return 0;
+    return a.size() < b.size() ? -1 : 1;
 }
 
-inline int name_rank(const std::string &name, const std::map<std::string, int> &selected)
+// The position of value in the priority list (compared without case); values not listed come
+// after every listed one.
+inline int priority_rank(const std::vector<std::string> &priorities, const std::string &value)
 {
-    const auto sel = selected.find(name);
-    if (sel != selected.end())
-        return sel->second;
-    const auto &table = bambu_name_order();
-    const auto  it    = table.find(name);
-    return it != table.end() ? it->second : INT_MAX;
+    const auto it = std::find_if(priorities.begin(), priorities.end(),
+                                 [&value](const std::string &p) { return compare_no_case(p, value) == 0; });
+    return int(it - priorities.begin());
 }
 
-inline int position_in(const std::vector<std::string> &order, const std::string &value)
+inline int selected_rank(const std::string &name, const std::map<std::string, int> &selected)
 {
-    return int(std::find(order.begin(), order.end(), value) - order.begin());
+    const auto it = selected.find(name);
+    return it != selected.end() ? it->second : INT_MAX;
 }
 
 } // namespace detail
@@ -79,26 +81,33 @@ inline int position_in(const std::vector<std::string> &order, const std::string 
 inline bool less(const Entry &left, const Entry &right, const std::map<std::string, int> &selected)
 {
     {
-        const int l = detail::name_rank(left.name, selected);
-        const int r = detail::name_rank(right.name, selected);
+        const int l = detail::selected_rank(left.name, selected);
+        const int r = detail::selected_rank(right.name, selected);
         if (l != r)
             return l < r;
     }
-    {
-        static const std::vector<std::string> vendors{"Bambu Lab", "Generic"};
-        const int                             l = detail::position_in(vendors, left.vendor);
-        const int                             r = detail::position_in(vendors, right.vendor);
+    { // Generic first, then the vendors alphabetically
+        static const std::vector<std::string> vendors{"Generic"};
+        const int l = detail::priority_rank(vendors, left.vendor);
+        const int r = detail::priority_rank(vendors, right.vendor);
         if (l != r)
             return l < r;
+        const int c = detail::compare_no_case(left.vendor, right.vendor);
+        if (c != 0)
+            return c < 0;
     }
-    {
+    { // the common types first, then the types alphabetically
         static const std::vector<std::string> types{"PLA", "PETG", "ABS", "TPU"};
-        const int                             l = detail::position_in(types, left.type);
-        const int                             r = detail::position_in(types, right.type);
+        const int l = detail::priority_rank(types, left.type);
+        const int r = detail::priority_rank(types, right.type);
         if (l != r)
             return l < r;
+        const int c = detail::compare_no_case(left.type, right.type);
+        if (c != 0)
+            return c < 0;
     }
-    return left.name < right.name;
+    const int c = detail::compare_no_case(left.name, right.name);
+    return c != 0 ? c < 0 : left.name < right.name;
 }
 
 inline void sort(std::vector<Entry> &entries, const std::map<std::string, int> &selected)

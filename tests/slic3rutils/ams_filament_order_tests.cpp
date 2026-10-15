@@ -65,23 +65,24 @@ TEST_CASE("AMS filament list: the filaments in use come first", "[AmsFilamentOrd
         {"Generic PLA", "Generic", "PLA"},
     };
 
-    SECTION("without anything selected, Bambu's own order leads")
+    SECTION("without anything selected, Generic leads, then the vendors alphabetically")
     {
         const auto names = sorted_names(entries);
-        REQUIRE(names.front() == "Bambu PLA Basic");
+        REQUIRE(names == std::vector<std::string>{"Generic PLA", "Generic PETG", "Bambu PLA Basic", "Polymaker PolyLite PLA"});
     }
-    SECTION("a selected filament outranks Bambu's order, and extruder 1 leads extruder 2")
+    SECTION("a selected filament outranks everything, and extruder 1 leads extruder 2")
     {
         const auto ranks = AmsFilamentOrder::selected_ranks({"Polymaker PolyLite PLA", "Generic PETG"});
         const auto names = sorted_names(entries, ranks);
         REQUIRE(names.size() == 4);
         REQUIRE(names[0] == "Polymaker PolyLite PLA");
         REQUIRE(names[1] == "Generic PETG");
-        REQUIRE(names[2] == "Bambu PLA Basic");
+        REQUIRE(names[2] == "Generic PLA");
+        REQUIRE(names[3] == "Bambu PLA Basic");
     }
 }
 
-TEST_CASE("AMS filament list: Bambu's favourites keep their listed order", "[AmsFilamentOrder]")
+TEST_CASE("AMS filament list: one vendor sorts by type, then name", "[AmsFilamentOrder]")
 {
     const auto names = sorted_names({{"Bambu ABS", "Bambu Lab", "ABS"},
                                      {"Bambu PETG HF", "Bambu Lab", "PETG"},
@@ -92,10 +93,18 @@ TEST_CASE("AMS filament list: Bambu's favourites keep their listed order", "[Ams
 
 TEST_CASE("AMS filament list: vendor, then type, then name", "[AmsFilamentOrder]")
 {
-    SECTION("Bambu Lab before Generic before other vendors")
+    SECTION("Generic above Bambu Lab (Orca #11306), the other vendors alphabetically")
     {
-        const auto names = sorted_names({{"Acme PLA", "Acme", "PLA"}, {"Generic PLA", "Generic", "PLA"}, {"Other PLA", "Bambu Lab", "PLA"}});
-        REQUIRE(names == std::vector<std::string>{"Other PLA", "Generic PLA", "Acme PLA"});
+        const auto names = sorted_names({{"Bambu PLA Basic", "Bambu Lab", "PLA"},
+                                         {"Zeta PLA", "Zeta", "PLA"},
+                                         {"Generic PLA", "Generic", "PLA"},
+                                         {"Acme PLA", "Acme", "PLA"}});
+        REQUIRE(names == std::vector<std::string>{"Generic PLA", "Acme PLA", "Bambu PLA Basic", "Zeta PLA"});
+    }
+    SECTION("vendor and type match without regard to case")
+    {
+        const auto names = sorted_names({{"b", "acme", "petg"}, {"a", "ACME", "PLA"}, {"c", "generic", "abs"}});
+        REQUIRE(names == std::vector<std::string>{"c", "a", "b"});
     }
     SECTION("PLA, PETG, ABS, TPU, then other types, within a vendor")
     {
@@ -106,10 +115,16 @@ TEST_CASE("AMS filament list: vendor, then type, then name", "[AmsFilamentOrder]
                                          {"G PLA", "Generic", "PLA"}});
         REQUIRE(names == std::vector<std::string>{"G PLA", "G PETG", "G ABS", "G TPU", "G PA"});
     }
-    SECTION("alphabetical when all else is equal")
+    SECTION("alphabetical when all else is equal, without regard to case")
     {
-        const auto names = sorted_names({{"Beta", "Acme", "PLA"}, {"Alpha", "Acme", "PLA"}});
-        REQUIRE(names == std::vector<std::string>{"Alpha", "Beta"});
+        const auto names = sorted_names({{"beta", "Acme", "PLA"}, {"Alpha", "Acme", "PLA"}, {"Gamma", "Acme", "PLA"}});
+        REQUIRE(names == std::vector<std::string>{"Alpha", "beta", "Gamma"});
+    }
+    SECTION("the order is a strict weak ordering on equal entries")
+    {
+        std::vector<Entry> same(5, Entry{"X", "Acme", "PLA"});
+        AmsFilamentOrder::sort(same, {});
+        REQUIRE(same.size() == 5);
     }
 }
 
