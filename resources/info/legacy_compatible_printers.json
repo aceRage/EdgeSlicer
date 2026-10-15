@@ -1,0 +1,454 @@
+{
+    "presets": {
+        "Anycubic Generic ABS": [
+            "Anycubic Kobra 3 0.4 nozzle"
+        ],
+        "Anycubic Generic TPU": [
+            "Anycubic Kobra 3 0.4 nozzle"
+        ],
+        "Bambu PETG @0.2 nozzle": [
+            "Qidi Q1 Pro 0.2 nozzle"
+        ],
+        "Blocks Generic ABS": [
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic ASA": [
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic ASA-CF": [
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic PA": [
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic PA-CF": [
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic PC": [
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic PETG": [
+            "BLOCKS RD50 V2 0.4 nozzle",
+            "BLOCKS RD50 V2 0.6 nozzle",
+            "BLOCKS RD50 V2 0.8 nozzle",
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic PLA": [
+            "BLOCKS RD50 V2 0.4 nozzle",
+            "BLOCKS RD50 V2 0.6 nozzle",
+            "BLOCKS RD50 V2 0.8 nozzle",
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic PLA-CF": [
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic PVA": [
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Blocks Generic TPU": [
+            "BLOCKS RD50 V2 0.4 nozzle",
+            "BLOCKS RD50 V2 0.6 nozzle",
+            "BLOCKS RD50 V2 0.8 nozzle",
+            "BLOCKS RF50 0.4 nozzle",
+            "BLOCKS RF50 0.6 nozzle",
+            "BLOCKS RF50 0.8 nozzle"
+        ],
+        "Flashforge ABS Basic": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge ABS Basic @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge ASA Basic": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge ASA Basic @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge HS PETG": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge HS PETG @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PETG Basic @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PETG Pro": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PETG Pro @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PETG Transparent": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PETG Transparent @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Basic": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Basic @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Color Change": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Color Change @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Galaxy": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Galaxy @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Luminous": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Luminous @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Matte": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Matte @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Metal": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Metal @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Pro": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Pro @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Silk": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Silk @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "Flashforge PLA Sparkle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle"
+        ],
+        "Flashforge PLA Sparkle @FF AD5M 0.25 nozzle": [
+            "Flashforge AD5X 0.4 nozzle",
+            "Flashforge AD5X 0.6 nozzle",
+            "Flashforge AD5X 0.8 nozzle",
+            "Flashforge Adventurer 5M 0.4 Nozzle",
+            "Flashforge Adventurer 5M 0.6 Nozzle",
+            "Flashforge Adventurer 5M 0.8 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.6 Nozzle",
+            "Flashforge Adventurer 5M Pro 0.8 Nozzle"
+        ],
+        "HATCHBOX PETG @0.2 nozzle": [
+            "Qidi Q1 Pro 0.2 nozzle"
+        ],
+        "Prusa Generic PA": [
+            "Prusa MINIIS 0.25 nozzle",
+            "Prusa MINIIS 0.4 nozzle",
+            "Prusa MINIIS 0.6 nozzle",
+            "Prusa MINIIS 0.8 nozzle"
+        ],
+        "Prusa Generic PA-CF": [
+            "Prusa MINIIS 0.25 nozzle",
+            "Prusa MINIIS 0.4 nozzle",
+            "Prusa MINIIS 0.6 nozzle",
+            "Prusa MINIIS 0.8 nozzle"
+        ],
+        "Prusa Generic PLA-CF": [
+            "Prusa MINIIS 0.25 nozzle",
+            "Prusa MINIIS 0.4 nozzle",
+            "Prusa MINIIS 0.6 nozzle",
+            "Prusa MINIIS 0.8 nozzle"
+        ],
+        "Prusament rPLA @CORE One": [
+            "Prusa CORE One MMU3 0.6 nozzle"
+        ],
+        "QIDI PETG Basic @0.2 nozzle": [
+            "Qidi Q1 Pro 0.2 nozzle"
+        ],
+        "QIDI PETG Rapido @0.2 nozzle": [
+            "Qidi Q1 Pro 0.2 nozzle"
+        ],
+        "QIDI PETG Translucent @0.2 nozzle": [
+            "Qidi Q1 Pro 0.2 nozzle"
+        ],
+        "Sovol Zero PETG HS Nozzle": [
+            "Sovol Zero 0.4 nozzle"
+        ],
+        "Sovol Zero PLA Basic HS Nozzle": [
+            "Sovol Zero 0.4 nozzle"
+        ],
+        "Sovol Zero PLA Silk HS Nozzle": [
+            "Sovol Zero 0.4 nozzle"
+        ],
+        "Z-Bolt ABS": [
+            "Z-Bolt S1000 0.6 nozzle",
+            "Z-Bolt S1000 0.8 nozzle",
+            "Z-Bolt S1000 Dual 0.6 nozzle",
+            "Z-Bolt S1000 Dual 0.8 nozzle",
+            "Z-Bolt S300 0.6 nozzle",
+            "Z-Bolt S300 0.8 nozzle",
+            "Z-Bolt S300 Dual 0.6 nozzle",
+            "Z-Bolt S300 Dual 0.8 nozzle",
+            "Z-Bolt S400 0.6 nozzle",
+            "Z-Bolt S400 0.8 nozzle",
+            "Z-Bolt S400 Dual 0.6 nozzle",
+            "Z-Bolt S400 Dual 0.8 nozzle",
+            "Z-Bolt S600 0.6 nozzle",
+            "Z-Bolt S600 0.8 nozzle",
+            "Z-Bolt S600 Dual 0.6 nozzle",
+            "Z-Bolt S600 Dual 0.8 nozzle",
+            "Z-Bolt S800 Dual 0.6 nozzle",
+            "Z-Bolt S800 Dual 0.8 nozzle"
+        ],
+        "Z-Bolt ABS HT": [
+            "Z-Bolt S1000 0.6 nozzle",
+            "Z-Bolt S1000 0.8 nozzle",
+            "Z-Bolt S1000 Dual 0.6 nozzle",
+            "Z-Bolt S1000 Dual 0.8 nozzle",
+            "Z-Bolt S300 0.6 nozzle",
+            "Z-Bolt S300 0.8 nozzle",
+            "Z-Bolt S300 Dual 0.6 nozzle",
+            "Z-Bolt S300 Dual 0.8 nozzle",
+            "Z-Bolt S400 0.6 nozzle",
+            "Z-Bolt S400 0.8 nozzle",
+            "Z-Bolt S400 Dual 0.6 nozzle",
+            "Z-Bolt S400 Dual 0.8 nozzle",
+            "Z-Bolt S600 0.6 nozzle",
+            "Z-Bolt S600 0.8 nozzle",
+            "Z-Bolt S600 Dual 0.6 nozzle",
+            "Z-Bolt S600 Dual 0.8 nozzle",
+            "Z-Bolt S800 Dual 0.6 nozzle",
+            "Z-Bolt S800 Dual 0.8 nozzle"
+        ],
+        "Z-Bolt PA": [
+            "Z-Bolt S1000 0.6 nozzle",
+            "Z-Bolt S1000 0.8 nozzle",
+            "Z-Bolt S1000 Dual 0.6 nozzle",
+            "Z-Bolt S1000 Dual 0.8 nozzle",
+            "Z-Bolt S300 0.6 nozzle",
+            "Z-Bolt S300 0.8 nozzle",
+            "Z-Bolt S300 Dual 0.6 nozzle",
+            "Z-Bolt S300 Dual 0.8 nozzle",
+            "Z-Bolt S400 0.6 nozzle",
+            "Z-Bolt S400 0.8 nozzle",
+            "Z-Bolt S400 Dual 0.6 nozzle",
+            "Z-Bolt S400 Dual 0.8 nozzle",
+            "Z-Bolt S600 0.6 nozzle",
+            "Z-Bolt S600 0.8 nozzle",
+            "Z-Bolt S600 Dual 0.6 nozzle",
+            "Z-Bolt S600 Dual 0.8 nozzle",
+            "Z-Bolt S800 Dual 0.6 nozzle",
+            "Z-Bolt S800 Dual 0.8 nozzle"
+        ],
+        "Z-Bolt PETG": [
+            "Z-Bolt S1000 0.6 nozzle",
+            "Z-Bolt S1000 0.8 nozzle",
+            "Z-Bolt S1000 Dual 0.6 nozzle",
+            "Z-Bolt S1000 Dual 0.8 nozzle",
+            "Z-Bolt S300 0.6 nozzle",
+            "Z-Bolt S300 0.8 nozzle",
+            "Z-Bolt S300 Dual 0.6 nozzle",
+            "Z-Bolt S300 Dual 0.8 nozzle",
+            "Z-Bolt S400 0.6 nozzle",
+            "Z-Bolt S400 0.8 nozzle",
+            "Z-Bolt S400 Dual 0.6 nozzle",
+            "Z-Bolt S400 Dual 0.8 nozzle",
+            "Z-Bolt S600 0.6 nozzle",
+            "Z-Bolt S600 0.8 nozzle",
+            "Z-Bolt S600 Dual 0.6 nozzle",
+            "Z-Bolt S600 Dual 0.8 nozzle",
+            "Z-Bolt S800 Dual 0.6 nozzle",
+            "Z-Bolt S800 Dual 0.8 nozzle"
+        ],
+        "Z-Bolt PLA": [
+            "Z-Bolt S1000 0.6 nozzle",
+            "Z-Bolt S1000 0.8 nozzle",
+            "Z-Bolt S1000 Dual 0.6 nozzle",
+            "Z-Bolt S1000 Dual 0.8 nozzle",
+            "Z-Bolt S300 0.6 nozzle",
+            "Z-Bolt S300 0.8 nozzle",
+            "Z-Bolt S300 Dual 0.6 nozzle",
+            "Z-Bolt S300 Dual 0.8 nozzle",
+            "Z-Bolt S400 0.6 nozzle",
+            "Z-Bolt S400 0.8 nozzle",
+            "Z-Bolt S400 Dual 0.6 nozzle",
+            "Z-Bolt S400 Dual 0.8 nozzle",
+            "Z-Bolt S600 0.6 nozzle",
+            "Z-Bolt S600 0.8 nozzle",
+            "Z-Bolt S600 Dual 0.6 nozzle",
+            "Z-Bolt S600 Dual 0.8 nozzle",
+            "Z-Bolt S800 Dual 0.6 nozzle",
+            "Z-Bolt S800 Dual 0.8 nozzle"
+        ]
+    }
+}
