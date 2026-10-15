@@ -508,6 +508,8 @@ private:
     void sw_SwitchModel();
 
     void sw_DeleteDevices();
+
+    void sw_UpdateDeviceInfo();
 };
 
 // Instance class for page state change subscription
