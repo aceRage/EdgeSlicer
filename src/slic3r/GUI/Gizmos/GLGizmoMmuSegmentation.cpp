@@ -1538,6 +1538,7 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
     if (!mo) return;
 
     bool volume_extruder_changed = false;
+    const std::vector<int> filaments_before = get_extruder_id_for_volumes(*mo);
 
     for (ModelVolume* mv : mo->volumes) {
         if (!mv->is_model_part()) continue;
@@ -1550,7 +1551,10 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
         ts->request_update_render_data(true);
 
         // ORCA: Remap the base volume filament as well when it is remapped.
-        const int          current_ext_id = mv->extruder_id();
+        // Edge: read from the filaments taken before this loop. A volume that uses the object's filament
+        // changes the object's, which a later volume on the object's filament would otherwise read back
+        // as its own and remap a second time (a 1<->2 swap ended where it started).
+        const int          current_ext_id = size_t(idx) < filaments_before.size() ? filaments_before[idx] : mv->extruder_id();
         const unsigned int current_id     = current_ext_id > 0 ? unsigned(current_ext_id) : 1u;
         const unsigned int dest_id        = current_id <= size_t(EnforcerBlockerType::ExtruderMax) ? unsigned(state_map[current_id]) : current_id;
         if (dest_id != current_id) {
