@@ -16,6 +16,9 @@ TEST_CASE("home tab: sections", "[HomeTab]")
     CHECK_FALSE(valid_section(""));
     CHECK(valid_section("library"));
     CHECK(valid_section("vendors"));
+    CHECK(valid_section("vaults"));
+    CHECK(section_or_default("vaults") == "vaults");
+    CHECK(section_or_default("vendors") == "vendors");
     CHECK_FALSE(valid_section("hub"));
     CHECK_FALSE(valid_section("Recent"));
     CHECK(section_or_default("history") == "history");
