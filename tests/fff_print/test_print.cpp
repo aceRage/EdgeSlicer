@@ -910,6 +910,76 @@ TEST_CASE("Non-mixed two-filament G-code is unchanged by mixed-id expansion", "[
     }
 }
 
+// OrcaSlicer #13895: without a wipe tower, total_toolchanges (custom G-code and the
+// "; total filament change" statistics line) came from WipeTowerData::number_of_toolchanges,
+// which stays -1 there, so it always read 0. It now falls back to the tool ordering.
+TEST_CASE("total_toolchanges counts tool changes without a wipe tower", "[Print][GCode][Placeholders]")
+{
+    // Integer after the first occurrence of `prefix`, or -1 when the prefix is missing.
+    auto int_after = [](const std::string &gcode, const std::string &prefix) {
+        const size_t pos = gcode.find(prefix);
+        return pos == std::string::npos ? -1 : std::atoi(gcode.c_str() + pos + prefix.size());
+    };
+    // Tool changes in the G-code body: every "T<n>" command that selects a different tool than the last one.
+    auto body_toolchanges = [](const std::string &gcode) {
+        int    changes = 0;
+        int    last    = -1;
+        size_t pos     = 0;
+        while (pos < gcode.size()) {
+            const size_t eol  = gcode.find('\n', pos);
+            const size_t end  = eol == std::string::npos ? gcode.size() : eol;
+            std::string  line = gcode.substr(pos, end - pos);
+            if (line.size() >= 2 && line[0] == 'T' && std::isdigit(static_cast<unsigned char>(line[1]))) {
+                const int tool = std::atoi(line.c_str() + 1);
+                if (last >= 0 && tool != last)
+                    ++changes;
+                last = tool;
+            }
+            pos = end == gcode.size() ? gcode.size() : end + 1;
+        }
+        return changes;
+    };
+
+    SECTION("two filaments, no tower: walls on 1, infill on 2") {
+        DynamicPrintConfig config = two_filament_config(false, false);
+        config.set_deserialize_strict({
+            {"sparse_infill_density",  "20%"},
+            {"sparse_infill_filament", "2"},
+            {"solid_infill_filament",  "2"},
+            {"machine_start_gcode",    "; TT=[total_toolchanges] TT2={total_toolchanges}\n"},
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.extruders() == std::vector<unsigned int>{0, 1});
+        REQUIRE_FALSE(print.has_wipe_tower());
+
+        std::string gcode;
+        REQUIRE_NOTHROW(gcode = export_print_gcode(print));
+        const int from_start_gcode = int_after(gcode, "; TT=");
+        CHECK(from_start_gcode > 0);
+        CHECK(int_after(gcode, " TT2=") == from_start_gcode);
+        // The statistics line is written for non-BBL printers once the count is non-zero.
+        CHECK(int_after(gcode, "; total filament change = ") == from_start_gcode);
+        // Each layer prints both filaments, so the count tracks the tool changes actually emitted.
+        CHECK(from_start_gcode == body_toolchanges(gcode));
+    }
+
+    SECTION("one filament used: still 0 and no statistics line") {
+        DynamicPrintConfig config = two_filament_config(false, false);
+        config.set_deserialize_strict({{"machine_start_gcode", "; TT=[total_toolchanges]\n"}});
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.extruders() == std::vector<unsigned int>{0});
+
+        std::string gcode;
+        REQUIRE_NOTHROW(gcode = export_print_gcode(print));
+        CHECK(int_after(gcode, "; TT=") == 0);
+        CHECK(gcode.find("; total filament change") == std::string::npos);
+    }
+}
+
 // Pattern "13" names physical 1 and 3. Expanding those tokens in Print::extruders(), or
 // unioning the later object's ToolOrdering, is each enough to register T0 and T2. Component B
 // (filament 2) is unused and must stay out of Print::extruders() — over-including it would
