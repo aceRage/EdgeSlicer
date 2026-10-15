@@ -73,7 +73,9 @@ TEST_CASE("check_package refuses what is not a sliced job", "[RemoteHub][remote-
     TempDir t;
     {
         const std::string path = (t.dir / "text.gcode.3mf").string();
-        boost::nowide::ofstream(path.c_str()) << "G28\nG1 X10\n";
+        boost::nowide::ofstream text(path.c_str());
+        text << "G28\nG1 X10\n";
+        text.close();
         REQUIRE_FALSE(ArchiveImport::check_package(path).error.empty());
     }
     // A ZIP with no G-code at all (a plain project).
