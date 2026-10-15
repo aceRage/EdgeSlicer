@@ -2,9 +2,79 @@
 #include "BoundingBox.hpp"
 #include "Config.hpp"
 #include "Model.hpp"
+#include "Flow.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace Slic3r {
+
+float calib_stepped_layer_value(int layer_index, unsigned int layer_count, float start_value, float end_value, float step)
+{
+    if (layer_index <= 1 || layer_count < 2)
+        return start_value;
+    const float ratio = std::min(1.f, float(layer_index) / (float(layer_count) - 1.f));
+    if (step > 0.f) {
+        // Discrete equal-width bands. The band is clamped to the last one so the value can't overshoot the range:
+        // at the top layer ratio * n_bands == n_bands, which would otherwise index one band past the end.
+        const int n_bands = int(std::lround(std::abs(end_value - start_value) / step)) + 1;
+        const int band    = std::min(n_bands - 1, static_cast<int>(ratio * n_bands));
+        return start_value + (end_value >= start_value ? 1.f : -1.f) * band * step;
+    }
+    return start_value + ratio * (end_value - start_value);
+}
+
+double calib_vfa_speed_limit(double max_volumetric_speed, double line_width, double layer_height, double nozzle_diameter)
+{
+    const double mm3_per_mm = Flow(float(line_width), float(layer_height), float(nozzle_diameter)).mm3_per_mm();
+    return mm3_per_mm > 0.0 ? max_volumetric_speed / mm3_per_mm : 1e9;
+}
+
+CalibVfaPlan calib_vfa_plan(double start, double end, double step, double default_layer_height, std::vector<double> candidates,
+                            double machine_min_layer_height, double machine_max_layer_height, double max_volumetric_speed,
+                            double line_width, double nozzle_diameter)
+{
+    CalibVfaPlan plan;
+    plan.layer_height = default_layer_height;
+    plan.end_speed    = end;
+    auto limit = [&](double lh) { return calib_vfa_speed_limit(max_volumetric_speed, line_width, lh, nozzle_diameter); };
+    if (max_volumetric_speed <= 0.0 || nozzle_diameter <= 0.0 || end <= limit(default_layer_height))
+        return plan;
+
+    // Candidate layer heights within the machine's layer-height limits (when set), sorted and unique.
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](double lh) {
+                         return lh <= 0.0 || (machine_min_layer_height > 0.0 && lh < machine_min_layer_height - 1e-6) ||
+                                (machine_max_layer_height > 0.0 && lh > machine_max_layer_height + 1e-6);
+                     }),
+                     candidates.end());
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end(), [](double a, double b) { return std::abs(a - b) < 1e-6; }),
+                     candidates.end());
+    if (candidates.empty()) {
+        plan.result = CalibVfaPlan::Result::NoCandidates;
+        return plan;
+    }
+
+    // Largest candidate <= the default layer height that still reaches the end speed (smallest change).
+    for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+        if (*it > default_layer_height + 1e-6)
+            continue; // never increase the layer height above the default
+        if (limit(*it) >= end) {
+            plan.result       = CalibVfaPlan::Result::LayerHeightReduced;
+            plan.layer_height = *it;
+            return plan;
+        }
+    }
+
+    // Even the smallest layer height is too thick: lower the end speed, snapped down to a step multiple.
+    const double min_lh = candidates.front();
+    double       new_end = step > 0.0 ? std::floor(limit(min_lh) / step) * step : limit(min_lh);
+    if (new_end < start + step)
+        new_end = start + step;
+    plan.result       = CalibVfaPlan::Result::EndSpeedLowered;
+    plan.layer_height = min_lh;
+    plan.end_speed    = new_end;
+    return plan;
+}
 
 bool calib_pa_batch_values_plausible(const std::vector<double> &accelerations, const std::vector<double> &speeds)
 {

@@ -289,6 +289,8 @@ public:
 
     // Calculate the interpolated value for the current layer between start_value and end_value
     float interpolate_value_across_layers(float start_value, float end_value) const;
+    // Orca #14759: in equal bands of `step` (PA and VFA towers)
+    float interpolate_value_across_layers(float start_value, float end_value, float step) const;
 
     // For Perl bindings, to be used exclusively by unit tests.
     unsigned int    layer_count() const { return m_layer_count; }
