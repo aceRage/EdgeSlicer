@@ -1673,3 +1673,36 @@ TEST_CASE("normalize_fdm reads generic enum options and tolerates a missing prin
         CHECK(cfg.opt_bool("enable_prime_tower"));
     }
 }
+
+TEST_CASE("Orca's initial_layer_travel_acceleration / _jerk names are not process options; ours are first_layer_travel_*", "[Config][ConfigDefs][Orca11674][Snap937]")
+{
+    // Orca #11674 adds first-layer travel acceleration / jerk as initial_layer_travel_acceleration and
+    // initial_layer_travel_jerk. EdgeSlicer has the same feature as first_layer_travel_acceleration /
+    // first_layer_travel_jerk (Snapmaker #937 + #980, PR #497). Orca's acceleration name is also Bambu
+    // Studio's per-extruder key, carried with values such as 6000 by 74 BBL process presets and one QIDI
+    // preset: declaring it (or aliasing it) would make those presets change their first-layer travels.
+    CHECK(print_config_def.get("initial_layer_travel_acceleration") == nullptr);
+    CHECK(print_config_def.get("initial_layer_travel_jerk") == nullptr);
+    for (const char *key : {"initial_layer_travel_acceleration", "initial_layer_travel_jerk"}) {
+        INFO(key);
+        const std::vector<std::string> &opts = Preset::print_options();
+        CHECK(std::find(opts.begin(), opts.end(), key) == opts.end());
+    }
+    // Orca #11674 / #13320 are reconciled onto these keys: the same feature (float or percent of the travel
+    // acceleration / jerk, in the print options), with EdgeSlicer's default 0 = "keep the initial layer value".
+    const std::pair<const char *, const char *> ours[] = {{"first_layer_travel_acceleration", "travel_acceleration"},
+                                                         {"first_layer_travel_jerk", "travel_jerk"}};
+    for (const auto &[key, ratio_over] : ours) {
+        INFO(key);
+        const ConfigOptionDef *def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->type == coFloatOrPercent);
+        CHECK(def->ratio_over == ratio_over);
+        const std::vector<std::string> &opts = Preset::print_options();
+        CHECK(std::find(opts.begin(), opts.end(), key) != opts.end());
+        const auto *opt = dynamic_cast<const ConfigOptionFloatOrPercent *>(def->default_value.get());
+        REQUIRE(opt != nullptr);
+        CHECK(opt->value == 0.);
+        CHECK_FALSE(opt->percent);
+    }
+}
