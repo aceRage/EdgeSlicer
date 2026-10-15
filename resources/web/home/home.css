@@ -242,6 +242,15 @@ button.choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 .choice span { color: var(--mute); font-size: 12px; }
 .choice-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .choice-row .btn { height: 28px; padding: 0 12px; }
+.choice .tag { font-style: normal; font-weight: 600; font-size: 11px; margin-left: 8px; padding: 1px 8px; border-radius: 10px;
+  background: var(--accent-soft); color: var(--fg); }
+#vault-builtins:empty { display: none; }
+#vault-filters:empty { display: none; }
+#vault-filters { margin-bottom: 8px; }
+#vault-more { height: 1px; }
+#vault-editor-body { overflow-y: auto; flex: 1; min-height: 0; padding-right: 4px; }
+#vault-editor-body ul.hints { margin: 0 0 12px; padding-left: 18px; color: var(--mute); font-size: 12px; }
+#vault-editor-body ul.hints li { margin-bottom: 4px; }
 .dialog.detail { width: 820px; }
 .detail-head { display: flex; gap: 18px; margin-bottom: 12px; }
 .detail-thumb { flex: 0 0 220px; height: 220px; background: var(--thumb); border-radius: 10px; display: flex;

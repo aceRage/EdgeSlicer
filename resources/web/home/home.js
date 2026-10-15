@@ -15,7 +15,11 @@
 //   library_thumbs {images: {id: dataUri}} Library covers, asked for as cards scroll in
 //   library_plates {id, plates: [{index, name, image}]}  a 3MF's plates, for its detail view
 // The Vaults section is the user's own storage: for now the Library's folders (local or a mounted NAS
-// share) as one card, and an Add vault chooser (tests/design_vaults_home_tab.md). Vendors stay vendors.
+// share) as one card, the user's WebDAV / Azure Blob / S3 vaults (HomeVaults.cpp) and their files, and an
+// Add vault chooser (tests/design_vaults_home_tab.md). Vendors stay vendors:
+//   vaults {vaults: [...], files: [{key, vault, name, folder, size, mtime, type}], builtins, downloads_default}
+//                                          HomeVaults.cpp send_state(): specs without secrets, opaque keys
+//   vault_notice {text, error} / vault_saved {id} / vault_invalid {error} / vault_dir {path}
 //   vendors {connectors: [...], items: [...]}  HomeVendors.cpp send_state(): connector specs (never
 //                                          a secret), and items keyed by opaque keys
 //   vendor_thumbs {images: {key: dataUri}} vendor thumbnails (PNG, JPEG, GIF or WebP)
@@ -51,6 +55,10 @@
     venFilter: { connector: new Set(), tag: new Set(), license: new Set() },
     venShown: [],
     venRendered: 0,
+    vlt: null,          // the last 'vaults' message
+    vltFilter: { vault: new Set(), type: new Set() },
+    vltShown: [],
+    vltRendered: 0,
   };
   const SECTIONS = ['recent', 'library', 'history', 'vendors', 'vaults'];
   const SORTS = {
@@ -1304,25 +1312,345 @@
     });
   }
 
-  function renderVaults() {
-    const list = $('vault-list'), empty = $('vaults-empty');
-    list.textContent = '';
-    const lib = state.lib;
-    if (lib && lib.folders.length) list.appendChild(foldersCard(lib));
-    $('vault-status').textContent = '';
-    empty.hidden = list.childNodes.length > 0;
-    $('vaults-empty-text').textContent = lib === null ? t('loading', 'Loading...')
-      : t('vaults_empty', 'Vaults are your own model storage: a NAS, a network share or cloud storage. Add one to browse its models here and open them straight into a project.');
-    $('vault-empty-add').hidden = lib === null;
+  // ---- vault cards and files ----
+  function vaultOf(id) { return state.vlt ? state.vlt.vaults.find((v) => v.id === id) : null; }
+  function vaultKindLabel(v) {
+    if (v.builtin === 'synology') return t('kind_synology', 'Synology NAS');
+    return t('kind_' + v.kind, { webdav: 'WebDAV', azure_blob: 'Azure Blob', s3: 'S3-compatible' }[v.kind] || v.kind);
   }
 
+  function vaultCard(v) {
+    const lines = [];
+    lines.push({ text: v.address + (v.bucket ? ' · ' + v.bucket : '') + (v.prefix ? ' · ' + v.prefix : '') });
+    if (v.syncing) lines.push({ text: t('fetching', 'Fetching...') });
+    else if (v.synced_at) lines.push({ text: v.count + ' ' + t('files', 'files') + ' · ' + t('fetched', 'Fetched') + ' ' + fmtDate(v.synced_at) });
+    else lines.push({ text: t('not_fetched', 'Not fetched yet') });
+    if (v.partial) lines.push({ text: t('listing_partial', 'The listing stopped early: not every file is shown.'), cls: 'warn' });
+    const missing = (v.slots || []).filter((s) => !s.set);
+    if (missing.length) lines.push({ text: t('credentials', 'Credentials') + ': ' + missing.map((s) => s.label).join(', ') + ' ' + t('not_set', 'not set'), cls: 'warn' });
+    else if ((v.slots || []).length)
+      lines.push({ text: t('credentials', 'Credentials') + ': ' + (v.secure ? t('saved_secure', 'saved in your system\'s credential store') : t('saved_session', 'kept until EdgeSlicer closes')) });
+    if (v.http) lines.push(v.http_ok ? { text: t('vault_http_ok', 'Unencrypted (http) on your local network; warning turned off'), cls: 'warn' }
+      : { text: t('vault_http', 'Unencrypted (http) on your local network'), cls: 'warn' });
+    if (v.sas_expires) {
+      const soon = v.sas_expires - Date.now() / 1000 < 7 * 86400;
+      lines.push({ text: t('sas_expires', 'SAS link expires') + ' ' + fmtDate(v.sas_expires), cls: soon ? 'warn' : '' });
+    }
+    lines.push({ text: t('downloads_to', 'Downloads to') + ' ' + leaf(v.downloads), title: v.downloads });
+    if (v.last_error) lines.push({ text: v.last_error, cls: 'err' });
+    const buttons = [{ label: v.syncing ? t('fetching', 'Fetching...') : t('fetch_files', 'Fetch files'), primary: true, disabled: v.syncing,
+      run: () => post('vault_sync', { id: v.id }) }];
+    for (const s of v.slots || [])
+      buttons.push({ label: (s.set ? t('change', 'Change') : t('set', 'Set')) + ' ' + s.label, run: () => post('vault_secret', { id: v.id, slot: s.key }) });
+    const menu = [
+      { label: t('test', 'Test connection'), run: () => post('vault_test', { id: v.id }) },
+      { label: t('edit', 'Edit'), run: () => openVaultEditor(v, null) },
+      { label: t('open_downloads', 'Open downloads folder'), run: () => post('vault_open_folder', { id: v.id }) },
+    ];
+    if ((v.slots || []).some((s) => s.set)) menu.push({ label: t('forget', 'Forget credentials'), run: () => post('vault_forget', { id: v.id }) });
+    menu.push('-');
+    menu.push({ label: t('remove_vault', 'Remove vault'), danger: true, run: () => post('vault_delete', { id: v.id }) });
+    const box = sourceCard({ title: v.name, cls: 'vault', kind: vaultKindLabel(v), lines: lines, buttons: buttons, menu: menu });
+    box.dataset.vault = v.id;
+    return box;
+  }
+
+  const VAULT_TYPES = { '3mf': '3MF', stl: 'STL', step: 'STEP', stp: 'STEP', obj: 'OBJ', zip: 'ZIP' };
+  function vaultFileMatches(f, skip) {
+    const fl = state.vltFilter;
+    if (skip !== 'vault' && fl.vault.size && !fl.vault.has(f.vault)) return false;
+    if (skip !== 'type' && fl.type.size && !fl.type.has(VAULT_TYPES[f.type] || f.type)) return false;
+    const v = vaultOf(f.vault);
+    return matches([f.name, f.folder, v && v.name], state.search);
+  }
+
+  function vaultFileCard(f) {
+    const v = vaultOf(f.vault);
+    const meta = el('div', 'meta');
+    for (const x of [fmtDate(f.mtime), fmtSize(f.size)]) if (x) meta.appendChild(el('span', '', x));
+    const open = () => post('vault_download', { key: f.key, open: true });
+    const c = card({
+      name: stem(f.name) || f.name,
+      badges: [{ text: VAULT_TYPES[f.type] || f.type.toUpperCase() }],
+      lines: [[v && v.name, f.folder].filter(Boolean).join(' · ')],
+      meta: meta,
+      onOpen: open,
+      menu: [
+        { label: t('download_open', 'Download & Open'), run: open },
+        { label: t('download', 'Download'), run: () => post('vault_download', { key: f.key }) },
+      ],
+    });
+    c.dataset.id = f.key;
+    c.title = f.name;
+    return c;
+  }
+
+  function renderVaultFilters(files) {
+    const box = $('vault-filters');
+    box.textContent = '';
+    const groups = [
+      { key: 'vault', label: t('vaults', 'Vaults'), value: (f) => f.vault, name: (id) => (vaultOf(id) || { name: id }).name },
+      { key: 'type', label: t('type', 'Type'), value: (f) => VAULT_TYPES[f.type] || f.type, name: (x) => x },
+    ];
+    let any = false;
+    for (const g of groups) {
+      const all = new Map();
+      for (const f of files) all.set(g.value(f), 0);
+      const sel = state.vltFilter[g.key];
+      for (const x of [...sel]) if (!all.has(x)) sel.delete(x);
+      if (all.size < 2) continue;
+      for (const f of files) if (vaultFileMatches(f, g.key)) all.set(g.value(f), all.get(g.value(f)) + 1);
+      const row = el('div', 'filter-row');
+      row.appendChild(el('span', 'label', g.label));
+      for (const [x, n] of [...all.entries()].sort((a, b) => String(g.name(a[0])).localeCompare(String(g.name(b[0]))))) {
+        const c = el('button', 'chip' + (sel.has(x) ? ' active' : ''), g.name(x));
+        c.type = 'button';
+        c.setAttribute('aria-pressed', sel.has(x) ? 'true' : 'false');
+        c.appendChild(el('span', 'count', n));
+        c.addEventListener('click', () => { if (sel.has(x)) sel.delete(x); else sel.add(x); renderVaults(); });
+        row.appendChild(c);
+      }
+      box.appendChild(row);
+      any = true;
+    }
+    if (any && Object.values(state.vltFilter).some((f) => f.size)) {
+      const row = el('div', 'filter-row');
+      row.appendChild(el('span', 'label', ''));
+      const c = el('button', 'chip clear', t('clear_filters', 'Clear filters'));
+      c.type = 'button';
+      c.addEventListener('click', () => { for (const f of Object.values(state.vltFilter)) f.clear(); renderVaults(); });
+      row.appendChild(c);
+      box.appendChild(row);
+    }
+  }
+
+  let vaultMoreObserver = null;
+  function renderMoreVaultFiles() {
+    const end = Math.min(state.vltShown.length, state.vltRendered + LIB_PAGE);
+    const frag = document.createDocumentFragment();
+    for (let k = state.vltRendered; k < end; ++k) frag.appendChild(vaultFileCard(state.vltShown[k]));
+    $('vault-grid').appendChild(frag);
+    state.vltRendered = end;
+  }
+
+  function renderVaults(keepScroll) {
+    const section = $('vaults');
+    const scroll = keepScroll ? section.scrollTop : 0;
+    const list = $('vault-list'), empty = $('vaults-empty'), grid = $('vault-grid');
+    list.textContent = '';
+    grid.textContent = '';
+    if (vaultMoreObserver) vaultMoreObserver.disconnect();
+    state.vltShown = [];
+    state.vltRendered = 0;
+    const lib = state.lib, vlt = state.vlt;
+    if (vlt) for (const v of vlt.vaults) list.appendChild(vaultCard(v));
+    if (lib && lib.folders.length) list.appendChild(foldersCard(lib));
+    const files = vlt ? vlt.files : [];
+    renderVaultFilters(files);
+    $('vault-status').textContent = vlt && vlt.vaults.length ? files.length + ' ' + t('files', 'files') : '';
+    state.vltShown = sortBy(files.filter((f) => vaultFileMatches(f, '')), state.sort.vaults, (f) => f.name || '', (f) => f.mtime || 0);
+    if ('IntersectionObserver' in window) {
+      vaultMoreObserver = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting) && state.vltRendered < state.vltShown.length) renderMoreVaultFiles();
+      }, { root: section, rootMargin: '800px' });
+    }
+    renderMoreVaultFiles();
+    while (keepScroll && state.vltRendered < state.vltShown.length && grid.scrollHeight < scroll + section.clientHeight) renderMoreVaultFiles();
+    if (keepScroll) section.scrollTop = scroll;
+    if (vaultMoreObserver) vaultMoreObserver.observe($('vault-more'));
+    else while (state.vltRendered < state.vltShown.length) renderMoreVaultFiles();
+
+    const loading = lib === null || vlt === null;
+    const noVaults = !vlt || !vlt.vaults.length;
+    empty.hidden = state.vltShown.length > 0 || (!loading && noVaults && list.childNodes.length > 0);
+    $('vaults-empty-text').textContent = loading ? t('loading', 'Loading...')
+      : noVaults ? t('vaults_empty', 'Vaults are your own model storage: a NAS, a network share or cloud storage. Add one to browse its models here and open them straight into a project.')
+        : !files.length ? t('vault_files_empty', 'No model files listed yet. Set the credentials, then Fetch files.')
+          : t('no_match', 'Nothing matches your search.');
+    $('vault-empty-add').hidden = loading || !noVaults;
+  }
+
+  function receiveVaults(msg) {
+    state.vlt = {
+      vaults: Array.isArray(msg.vaults) ? msg.vaults : [],
+      files: Array.isArray(msg.files) ? msg.files : [],
+      builtins: Array.isArray(msg.builtins) ? msg.builtins : [],
+      downloadsDefault: String(msg.downloads_default || ''),
+    };
+    if (state.section === 'vaults') renderVaults(true);
+    if (!$('vault-editor').hidden) renderVaultSlots();
+  }
+
+  // ---- Add vault ----
   function openAddVault() {
     closeMenu();
+    const box = $('vault-builtins');
+    box.textContent = '';
+    for (const b of state.vlt ? state.vlt.builtins : []) {
+      const c = el('button', 'choice');
+      c.type = 'button';
+      c.id = 'vault-builtin-' + b.id;
+      const title = el('b', '', b.title || b.id);
+      title.appendChild(el('em', 'tag', t('builtin', 'Built-in')));
+      c.appendChild(title);
+      c.appendChild(el('span', '', b.description || ''));
+      c.addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { template: b }); });
+      box.appendChild(c);
+    }
     $('vault-add').hidden = false;
-    const first = $('vault-choices').querySelector('button');
+    const first = $('vault-add').querySelector('.choices button');
     if (first) first.focus();
   }
   function closeAddVault() { $('vault-add').hidden = true; }
+
+  // ---- vault editor ----
+  // The page only edits the spec (no secret); credentials are set in native dialogs from the card.
+  const vEditor = { id: '', spec: null, template: null };
+  const AUTHS = {
+    webdav: [['basic', 'auth_basic', 'User name and password'], ['bearer', 'auth_bearer', 'Token'], ['none', 'auth_none', 'None (public)']],
+    azure_blob: [['sas', 'auth_sas', 'SAS link'], ['none', 'auth_none', 'None (public)']],
+    s3: [['sigv4', 'auth_sigv4', 'Access key'], ['none', 'auth_none', 'None (public)']],
+  };
+  const ADDR_HINTS = { webdav: 'https://nas.example.com:5006/models/', azure_blob: 'https://account.blob.core.windows.net/models',
+    s3: 'https://s3.eu-west-1.amazonaws.com' };
+
+  function openVaultEditor(v, preset) {
+    closeMenu();
+    const tpl = preset && preset.template ? preset.template : (v && v.builtin && state.vlt ? state.vlt.builtins.find((b) => b.id === v.builtin) : null);
+    vEditor.id = v ? v.id : '';
+    vEditor.template = tpl || null;
+    if (v) vEditor.spec = JSON.parse(JSON.stringify(v.spec));
+    else if (tpl) vEditor.spec = Object.assign({ name: tpl.title || '', url: '', downloads_dir: '' }, JSON.parse(JSON.stringify(tpl.spec)));
+    else {
+      const kind = (preset && preset.kind) || 'webdav';
+      vEditor.spec = { name: '', kind: kind, url: '', auth: AUTHS[kind][0][0], prefix: '', bucket: '', region: '', addressing: 'path',
+        recursive: true, max_depth: 6, downloads_dir: '' };
+    }
+    $('vault-editor-error').hidden = true;
+    $('vault-editor-title').textContent = v ? v.name : tpl ? (tpl.title || t('add_vault', 'Add vault')) : (preset && preset.title) || t('add_vault', 'Add vault');
+    renderVaultEditor();
+    $('vault-editor').hidden = false;
+    const first = $('vault-editor-body').querySelector('input');
+    if (first) first.focus();
+  }
+  function closeVaultEditor() { $('vault-editor').hidden = true; }
+
+  function vaultEditorError(text) {
+    const e = $('vault-editor-error');
+    e.textContent = text;
+    e.hidden = !text;
+  }
+
+  function renderVaultSlots() {
+    const box = document.getElementById('vault-editor-slots');
+    if (!box) return;
+    box.textContent = '';
+    const v = vaultOf(vEditor.id);
+    if (!v) { box.appendChild(el('p', 'hint', t('vault_creds_after', 'Save the vault, then set its credentials on its card. They are kept in your system\'s credential store.'))); return; }
+    if (!(v.slots || []).length) { box.appendChild(el('p', 'hint', t('none', 'None'))); return; }
+    for (const s of v.slots) {
+      const row = el('div', 'slot');
+      row.appendChild(el('span', 'what', s.label + ': ' + (s.set ? (v.secure ? t('saved_secure', 'saved in your system\'s credential store') : t('saved_session', 'kept until EdgeSlicer closes')) : t('not_set', 'not set'))));
+      const b = el('button', 'btn', s.set ? t('change', 'Change') : t('set', 'Set'));
+      b.type = 'button';
+      b.addEventListener('click', () => post('vault_secret', { id: v.id, slot: s.key }));
+      row.appendChild(b);
+      box.appendChild(row);
+    }
+  }
+
+  function renderVaultEditor() {
+    const body = $('vault-editor-body');
+    body.textContent = '';
+    const s = vEditor.spec;
+    const kind = s.kind;
+    if (vEditor.template && Array.isArray(vEditor.template.hints) && vEditor.template.hints.length) {
+      const ul = el('ul', 'hints');
+      for (const h of vEditor.template.hints) ul.appendChild(el('li', '', h));
+      body.appendChild(ul);
+    }
+    const field = (grid, label, key, opts) => {
+      opts = opts || {};
+      const l = el('label', opts.check ? 'check' : 'field');
+      if (opts.wide) l.classList.add('wide');
+      let input;
+      if (opts.options) {
+        input = el('select');
+        for (const [value, k, fallback] of opts.options) { const o = el('option', '', t(k, fallback)); o.value = value; input.appendChild(o); }
+        input.value = s[key] || opts.options[0][0];
+        input.addEventListener('change', () => { s[key] = input.value; if (opts.rerender) renderVaultEditor(); });
+      } else if (opts.check) {
+        input = el('input');
+        input.type = 'checkbox';
+        input.checked = s[key] !== false;
+        input.addEventListener('change', () => { s[key] = input.checked; });
+      } else {
+        input = el('input');
+        input.type = opts.number ? 'number' : 'text';
+        if (opts.number) { input.min = '0'; input.max = '20'; }
+        input.value = s[key] === undefined || s[key] === null ? '' : String(s[key]);
+        if (opts.hint) input.placeholder = opts.hint;
+        input.spellcheck = false;
+        input.addEventListener('input', () => { s[key] = opts.number ? Number(input.value) : input.value.trim(); });
+      }
+      input.id = 'vault-field-' + key;
+      if (opts.check) { l.appendChild(input); l.appendChild(el('span', '', label)); }
+      else { l.appendChild(el('span', '', label)); l.appendChild(input); }
+      grid.appendChild(l);
+      return input;
+    };
+    const group = (title) => {
+      const fs = el('fieldset', 'group');
+      fs.appendChild(el('legend', '', title));
+      const grid = el('div', 'form-grid');
+      fs.appendChild(grid);
+      body.appendChild(fs);
+      return { fs: fs, grid: grid };
+    };
+    const g1 = group(t('vault_settings', 'Vault'));
+    field(g1.grid, t('vault_name', 'Name'), 'name');
+    const addrLabel = { webdav: t('addr_webdav', 'Folder address (https://, or http:// on your local network)'),
+      azure_blob: t('addr_azure', 'Container address, without the SAS (?sv=...)'), s3: t('addr_s3', 'Endpoint') }[kind];
+    field(g1.grid, addrLabel, 'url', { wide: true, hint: (vEditor.template && vEditor.template.url_hint) || ADDR_HINTS[kind] });
+    if (kind === 's3') {
+      field(g1.grid, t('bucket', 'Bucket'), 'bucket');
+      field(g1.grid, t('region', 'Region (auto for Cloudflare R2)'), 'region', { hint: 'us-east-1' });
+      field(g1.grid, t('addressing', 'Addressing'), 'addressing', { options: [['path', 'addressing_path', 'Path style (endpoint/bucket)'], ['virtual', 'addressing_virtual', 'Virtual host (bucket.endpoint)']] });
+    }
+    if (kind !== 'webdav') field(g1.grid, t('prefix', 'Only files under (prefix)'), 'prefix', { hint: 'models/' });
+    field(g1.grid, t('include_subfolders', 'Include subfolders'), 'recursive', { check: true });
+    field(g1.grid, t('max_depth', 'Folder levels'), 'max_depth', { number: true });
+
+    const g2 = group(t('signin', 'Sign-in'));
+    field(g2.grid, t('signin', 'Sign-in'), 'auth', { options: AUTHS[kind], rerender: true });
+    const slots = el('div', 'slots');
+    slots.id = 'vault-editor-slots';
+    g2.fs.appendChild(slots);
+    if (kind === 's3' && s.auth !== 'none') g2.fs.appendChild(el('p', 'hint', t('s3_key_hint', 'Use a key that can only read this bucket.')));
+
+    const g3 = group(t('downloads_folder', 'Downloads folder'));
+    const dir = field(g3.grid, t('downloads_folder', 'Downloads folder'), 'downloads_dir', { wide: true, hint: state.vlt ? state.vlt.downloadsDefault : '' });
+    const row = el('div', 'choice-row');
+    const browse = el('button', 'btn', t('browse', 'Browse...'));
+    browse.type = 'button';
+    browse.addEventListener('click', () => post('vault_pick_dir', { current: s.downloads_dir || '' }));
+    row.appendChild(browse);
+    const def = el('button', 'btn', t('use_default', 'Use the default'));
+    def.type = 'button';
+    def.addEventListener('click', () => { s.downloads_dir = ''; dir.value = ''; });
+    row.appendChild(def);
+    g3.fs.appendChild(row);
+    g3.fs.appendChild(el('p', 'hint', t('default_is', 'Default:') + ' ' + (state.vlt ? state.vlt.downloadsDefault : '')));
+    renderVaultSlots();
+  }
+
+  function saveVaultEditor() {
+    vaultEditorError('');
+    const spec = JSON.parse(JSON.stringify(vEditor.spec));
+    if (vEditor.id) spec.id = vEditor.id; else delete spec.id;
+    if (vEditor.template) spec.builtin = vEditor.template.id;
+    post('vault_save', { spec: spec });
+  }
 
   // ---- item detail ----
   let detailKey = '';
@@ -1787,6 +2115,25 @@
         case 'vendor_saved':
           editorDone();
           break;
+        case 'vaults':
+          receiveVaults(msg);
+          break;
+        case 'vault_notice':
+          toast(String(msg.text || ''), !!msg.error);
+          break;
+        case 'vault_saved':
+          closeVaultEditor();
+          break;
+        case 'vault_invalid':
+          vaultEditorError(String(msg.error || ''));
+          break;
+        case 'vault_dir':
+          if (!$('vault-editor').hidden && vEditor.spec) {
+            vEditor.spec.downloads_dir = String(msg.path || '');
+            const d = document.getElementById('vault-field-downloads_dir');
+            if (d) d.value = vEditor.spec.downloads_dir;
+          }
+          break;
         case 'vendor_invalid':
           editorError(String(msg.error || ''));
           break;
@@ -1809,6 +2156,7 @@
   $('refresh').addEventListener('click', () => {
     // Vendors' lists are metered: Refresh only redraws them; each connector has its own Fetch Changes.
     if (state.section === 'vendors') { post('vendor_state'); return; }
+    if (state.section === 'vaults') { post('vault_state'); post('library_scan'); return; }
     $('refresh').classList.add('spin'); post('home_refresh'); setTimeout(stopSpin, 3000);
   });
   $('new-project').addEventListener('click', () => post('project_new'));
@@ -1829,6 +2177,11 @@
   $('vault-add-btn').addEventListener('click', openAddVault);
   $('vault-empty-add').addEventListener('click', openAddVault);
   $('vault-add-folder').addEventListener('click', () => { closeAddVault(); post('library_add_folder'); });
+  $('vault-add-webdav').addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { kind: 'webdav', title: $('vault-add-webdav').querySelector('b').textContent }); });
+  $('vault-add-azure').addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { kind: 'azure_blob', title: $('vault-add-azure').querySelector('b').textContent }); });
+  $('vault-add-s3').addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { kind: 's3', title: $('vault-add-s3').querySelector('b').textContent }); });
+  $('vault-editor-cancel').addEventListener('click', closeVaultEditor);
+  $('vault-editor-save').addEventListener('click', saveVaultEditor);
   $('vault-add-cancel').addEventListener('click', closeAddVault);
   $('vault-add').addEventListener('click', (e) => { if (e.target === $('vault-add')) closeAddVault(); });
   $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key), max: csvOpts.max, rows: csvOpts.rows }));
@@ -1845,6 +2198,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!$('vault-add').hidden) closeAddVault();
+    else if (!$('vault-editor').hidden) closeVaultEditor();
     else if (!$('ven-editor').hidden) closeEditor();
     else if (!$('ven-detail').hidden) closeDetail();
     else if (!$('lib-detail').hidden) closeLibDetail();

@@ -56,6 +56,37 @@ const LIB = { type: 'library', hidden: 0, scanning: false, files_seen: 0, scanne
     items: [1, 2, 3, 4].map(n => ({ id: 'f' + n, name: 'part' + n + '.stl', type: 'stl', root: 'D:/Models', rel_dir: '', mtime: 1760000000, size: 1000, added: 1760000000 })) };
 const NO_LIB = { type: 'library', hidden: 0, scanning: false, files_seen: 0, scanned_at: 1760000000, folders: [], items: [] };
 
+// What HomeVaults::send_state() sends: specs without secrets, opaque file keys, the shipped built-in.
+const SYNOLOGY = Object.assign(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'resources', 'vaults', 'synology.json'), 'utf8')), { id: 'synology' });
+SYNOLOGY.spec.builtin = 'synology';
+const NO_VAULTS = { type: 'vaults', vaults: [], files: [], builtins: [], downloads_default: 'C:/Users/me/Downloads/EdgeSlicer Vaults' };
+const NOW_S = Math.floor(Date.now() / 1000);
+const VAULTS = { type: 'vaults', builtins: [SYNOLOGY], downloads_default: 'C:/Users/me/Downloads/EdgeSlicer Vaults',
+    vaults: [
+        { id: 'nas-1', name: 'DiskStation', kind: 'webdav', builtin: 'synology', address: 'http://192.168.1.20:5005/models/', bucket: '', prefix: '',
+          spec: { format: 'edgeslicer-vault', version: 1, id: 'nas-1', name: 'DiskStation', kind: 'webdav', url: 'http://192.168.1.20:5005/models/', auth: 'basic',
+                  recursive: true, max_depth: 6, builtin: 'synology', downloads_dir: '' },
+          slots: [{ key: 'user', label: 'User name', set: true }, { key: 'password', label: 'Password', set: false }], secure: true, syncing: false,
+          synced_at: NOW_S - 3600, count: 2, partial: false, last_error: '', http: true, http_ok: false, sas_expires: 0,
+          downloads: 'C:/Users/me/Downloads/EdgeSlicer Vaults' },
+        { id: 'az-2', name: 'Azure prints', kind: 'azure_blob', builtin: '', address: 'https://acct.blob.core.windows.net/models', bucket: '', prefix: 'prints/',
+          spec: { format: 'edgeslicer-vault', version: 1, id: 'az-2', name: 'Azure prints', kind: 'azure_blob', url: 'https://acct.blob.core.windows.net/models',
+                  prefix: 'prints/', auth: 'sas', recursive: true, max_depth: 6, builtin: '', downloads_dir: '' },
+          slots: [{ key: 'sas', label: 'SAS link', set: true }], secure: true, syncing: false, synced_at: NOW_S - 60, count: 1, partial: false, last_error: '',
+          http: false, http_ok: false, sas_expires: NOW_S + 3 * 86400, downloads: 'C:/Users/me/Downloads/EdgeSlicer Vaults' },
+        { id: 's3-3', name: 'S3 prints', kind: 's3', builtin: '', address: 'https://s3.eu-west-1.amazonaws.com', bucket: 'prints', prefix: '',
+          spec: { format: 'edgeslicer-vault', version: 1, id: 's3-3', name: 'S3 prints', kind: 's3', url: 'https://s3.eu-west-1.amazonaws.com', bucket: 'prints',
+                  region: 'eu-west-1', addressing: 'path', prefix: '', auth: 'sigv4', recursive: true, max_depth: 6, builtin: '', downloads_dir: 'D:/Vaults/S3 prints' },
+          slots: [{ key: 'access_key_id', label: 'Access key ID', set: true }, { key: 'secret_access_key', label: 'Secret access key', set: true }],
+          secure: true, syncing: false, synced_at: 0, count: 0, partial: false, last_error: 'Access denied (HTTP 403, AccessDenied). Check the credentials and what they are allowed to read.',
+          http: false, http_ok: false, sas_expires: 0, downloads: 'D:/Vaults/S3 prints' },
+    ],
+    files: [
+        { key: 'f-nas', vault: 'nas-1', name: 'gear v2.stl', folder: 'parts', size: 120000, mtime: NOW_S - 7200, type: 'stl' },
+        { key: 'f-nas2', vault: 'nas-1', name: '<img src=x onerror="window.__xss=1">.3mf', folder: '', size: 5000, mtime: NOW_S - 86400, type: '3mf' },
+        { key: 'f-az', vault: 'az-2', name: 'bracket.3mf', folder: 'tools', size: 900000, mtime: NOW_S - 600, type: '3mf' },
+    ] };
+
 const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     const files = { '/home/index.html': 'text/html; charset=utf-8', '/home/home.js': 'application/javascript', '/home/home.css': 'text/css' };
@@ -148,6 +179,7 @@ async function main() {
 
         // ---- 3. empty state --------------------------------------------------------------------
         await receive(NO_LIB);
+        await receive(NO_VAULTS);
         const empty = JSON.parse(await evalJs(`JSON.stringify({ text: document.getElementById('vaults-empty-text').textContent,
             btn: !document.getElementById('vault-empty-add').hidden, cards: document.querySelectorAll('#vault-list .conn').length })`));
         check('empty: the explanation, an Add vault button, no cards', /^Vaults are your own model storage/.test(empty.text) && empty.btn && empty.cards === 0, JSON.stringify(empty));
@@ -157,7 +189,7 @@ async function main() {
         const chooserOpen = () => evalJs(`!document.getElementById('vault-add').hidden`);
         await evalJs(`document.getElementById('vault-empty-add').click(); 1`);
         check('the empty state\'s Add vault opens the chooser', await chooserOpen());
-        check('the chooser has the focus on its first choice', (await evalJs('document.activeElement.id')) === 'vault-add-folder');
+        check('the chooser has the focus on its first choice', (await evalJs('document.activeElement.id')) === 'vault-add-webdav');
         await key('Escape');
         check('Escape closes it', !(await chooserOpen()));
         await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
@@ -166,7 +198,7 @@ async function main() {
         check('a click on the backdrop closes it', !(await chooserOpen()));
         await evalJs(`document.getElementById('vault-add-btn').click(); document.getElementById('vault-add-cancel').click(); 1`);
         check('Cancel closes it', !(await chooserOpen()));
-        await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
+        await evalJs(`document.getElementById('vault-add-btn').click(); document.getElementById('vault-add-folder').focus(); 1`);
         await clearSent();
         await key('Enter');
         await sleep(50);
@@ -198,7 +230,149 @@ async function main() {
         check('Manage folders opens the Library folder manager', !(await evalJs(`document.getElementById('folders').hidden`)));
         await evalJs(`document.getElementById('folders-done').click(); 1`);
 
-        // ---- 6. Vendors is untouched -------------------------------------------------------------
+        // ---- 6. storage vaults: cards, files, editor -----------------------------------------------
+        await receive(VAULTS);
+        await sleep(50);
+        const vc = JSON.parse(await evalJs(`JSON.stringify([].map.call(document.querySelectorAll('#vault-list .conn.vault'), c => ({
+            id: c.dataset.vault, title: c.querySelector('.title').textContent, kind: c.querySelector('.kind').textContent,
+            lines: [].map.call(c.querySelectorAll('.line'), l => l.textContent), warn: [].map.call(c.querySelectorAll('.line.warn'), l => l.textContent),
+            err: [].map.call(c.querySelectorAll('.line.err'), l => l.textContent), btns: [].map.call(c.querySelectorAll('.row .btn'), b => b.textContent),
+            imgs: c.querySelectorAll('img').length })))`));
+        await shot('vaults_cards');
+        check('three vault cards, then the folders card', vc.length === 3 && (await evalJs(`document.querySelectorAll('#vault-list .conn').length`)) === 4, vc.length);
+        check('kind labels: Synology NAS (built-in), Azure Blob, S3-compatible', vc[0].kind === 'Synology NAS' && vc[1].kind === 'Azure Blob' && vc[2].kind === 'S3-compatible',
+              vc.map(v => v.kind).join('|'));
+        check('a vault card shows its address, never a token', vc[0].lines[0] === 'http://192.168.1.20:5005/models/' && !JSON.stringify(vc).includes('sig='), vc[0].lines[0]);
+        check('the http vault says it is unencrypted', vc[0].warn.some(w => /Unencrypted \(http\)/.test(w)), vc[0].warn.join('|'));
+        check('missing credentials are named', vc[0].warn.some(w => w === 'Credentials: Password not set'), vc[0].warn.join('|'));
+        check('a set credential says where it is kept', vc[1].lines.includes("Credentials: saved in your system's credential store"), vc[1].lines.join('|'));
+        check('a SAS link close to expiry is a warning', vc[1].warn.some(w => /^SAS link expires/.test(w)), vc[1].warn.join('|'));
+        check('the last error is shown', vc[2].err.length === 1 && /HTTP 403/.test(vc[2].err[0]), vc[2].err.join('|'));
+        check('the downloads folder is named', vc[2].lines.some(l => l === 'Downloads to S3 prints'), vc[2].lines.join('|'));
+        check('vault text is text, never markup', vc.every(v => v.imgs === 0) && !(await evalJs('!!window.__xss')));
+        check('Fetch files and a Set button per missing credential', JSON.stringify(vc[0].btns) === JSON.stringify(['Fetch files', 'Change User name', 'Set Password']), vc[0].btns.join('|'));
+        await clearSent();
+        await evalJs(`document.querySelector('.conn.vault[data-vault=nas-1] .row .btn').click(); document.querySelectorAll('.conn.vault[data-vault=nas-1] .row .btn')[2].click(); 1`);
+        let s6 = await sent();
+        check('Fetch files sends vault_sync, Set Password sends vault_secret (the page never sees the secret)',
+              s6.length === 2 && s6[0].command === 'vault_sync' && s6[0].id === 'nas-1' && s6[1].command === 'vault_secret' && s6[1].slot === 'password', JSON.stringify(s6));
+        const menuOf = async (id) => {
+            await evalJs(`document.querySelector('.conn.vault[data-vault=${id}] .more').click(); 1`);
+            return JSON.parse(await evalJs(`JSON.stringify([].map.call(document.querySelectorAll('#menu button'), b => b.textContent))`));
+        };
+        const m6 = await menuOf('az-2');
+        check('the vault menu: Test, Edit, Open downloads folder, Forget, Remove', JSON.stringify(m6) === JSON.stringify(['Test connection', 'Edit', 'Open downloads folder', 'Forget credentials', 'Remove vault']), m6.join('|'));
+        await clearSent();
+        await evalJs(`[].find.call(document.querySelectorAll('#menu button'), b => b.textContent === 'Test connection').click(); 1`);
+        await menuOf('az-2');
+        await evalJs(`[].find.call(document.querySelectorAll('#menu button'), b => b.textContent === 'Remove vault').click(); 1`);
+        s6 = await sent();
+        check('Test sends vault_test, Remove sends vault_delete (the slicer asks first)', s6.map(m => m.command).join() === 'vault_test,vault_delete' && s6[1].id === 'az-2', JSON.stringify(s6));
+
+        // Files.
+        const files = () => evalJs(`JSON.stringify([].map.call(document.querySelectorAll('#vault-grid .card'), c => ({ key: c.dataset.id, name: c.querySelector('.name').textContent,
+            sub: c.querySelector('.sub') ? c.querySelector('.sub').textContent : '', badge: c.querySelector('.badge').textContent, imgs: c.querySelectorAll('img').length })))`);
+        let fl = JSON.parse(await files());
+        check('the files of every vault, newest first', fl.length === 3 && fl[0].key === 'f-az' && fl[2].key === 'f-nas2', fl.map(f => f.key).join());
+        check('a file card: name, vault and folder, type', fl[1].name === 'gear v2' && fl[1].sub === 'DiskStation \u00b7 parts' && fl[1].badge === 'STL', JSON.stringify(fl[1]));
+        check('a file name is text, never markup', fl.every(f => f.imgs === 0) && fl[2].name.includes('<img'), fl[2].name);
+        check('the status counts the files', (await evalJs(`document.getElementById('vault-status').textContent`)) === '3 files');
+        await clearSent();
+        await evalJs(`document.querySelector('#vault-grid .card[data-id=f-nas]').click(); 1`);
+        s6 = await sent();
+        check('a click on a file is Download & Open', s6.length === 1 && s6[0].command === 'vault_download' && s6[0].key === 'f-nas' && s6[0].open === true, JSON.stringify(s6));
+        await clearSent();
+        await evalJs(`document.querySelector('#vault-grid .card[data-id=f-nas] .more').click(); 1`);
+        await evalJs(`[].find.call(document.querySelectorAll('#menu button'), b => b.textContent === 'Download').click(); 1`);
+        s6 = await sent();
+        check('Download from the menu saves without opening', s6.length === 1 && s6[0].command === 'vault_download' && !s6[0].open, JSON.stringify(s6));
+        const chipCount = await evalJs(`document.querySelectorAll('#vault-filters .chip').length`);
+        check('filters by vault and by type', chipCount === 2 + 2, chipCount);
+        await evalJs(`[].find.call(document.querySelectorAll('#vault-filters .chip'), c => c.firstChild.textContent === 'Azure prints').click(); 1`);
+        fl = JSON.parse(await files());
+        check('the vault filter keeps that vault\'s files', fl.length === 1 && fl[0].key === 'f-az', fl.map(f => f.key).join());
+        await evalJs(`document.querySelector('#vault-filters .chip.clear').click(); 1`);
+        await evalJs(`(function(){ var s = document.getElementById('search'); s.value = 'gear'; s.dispatchEvent(new Event('input')); return 1; })()`);
+        await sleep(250);
+        fl = JSON.parse(await files());
+        check('search finds a file by name', fl.length === 1 && fl[0].key === 'f-nas', fl.map(f => f.key).join());
+        await evalJs(`(function(){ var s = document.getElementById('search'); s.value = ''; s.dispatchEvent(new Event('input')); return 1; })()`);
+        await sleep(250);
+
+        // The chooser with the built-in, and the editor.
+        await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
+        const ch = JSON.parse(await evalJs(`JSON.stringify({ first: document.activeElement.id, ids: [].map.call(document.querySelectorAll('#vault-add .choices button.choice'), b => b.id),
+            tag: (document.querySelector('#vault-builtin-synology .tag') || {}).textContent })`));
+        check('the chooser: Synology (built-in) first, then WebDAV, Azure Blob, S3, Folder',
+              JSON.stringify(ch.ids) === JSON.stringify(['vault-builtin-synology', 'vault-add-webdav', 'vault-add-azure', 'vault-add-s3', 'vault-add-folder']) &&
+              ch.first === 'vault-builtin-synology' && ch.tag === 'Built-in', JSON.stringify(ch));
+        await evalJs(`document.getElementById('vault-builtin-synology').click(); 1`);
+        const ed = JSON.parse(await evalJs(`JSON.stringify({ open: !document.getElementById('vault-editor').hidden, chooser: !document.getElementById('vault-add').hidden,
+            hints: document.querySelectorAll('#vault-editor-body ul.hints li').length, name: document.getElementById('vault-field-name').value,
+            ph: document.getElementById('vault-field-url').placeholder, bucket: !!document.getElementById('vault-field-bucket'),
+            prefix: !!document.getElementById('vault-field-prefix'), auth: [].map.call(document.querySelectorAll('#vault-field-auth option'), o => o.value),
+            pw: document.querySelectorAll('#vault-editor-body input[type=password]').length, focus: document.activeElement.id })`));
+        await shot('vaults_editor_synology');
+        check('Synology opens the editor with its hints, name and address example', ed.open && !ed.chooser && ed.hints === SYNOLOGY.hints.length && ed.hints > 0 && ed.name === 'Synology NAS' &&
+              ed.ph === 'https://diskstation.local:5006/models/' && ed.focus === 'vault-field-name', JSON.stringify(ed));
+        check('a WebDAV editor has no bucket or prefix; sign-in basic / bearer / none; no password field in the page',
+              !ed.bucket && !ed.prefix && JSON.stringify(ed.auth) === JSON.stringify(['basic', 'bearer', 'none']) && ed.pw === 0, JSON.stringify(ed));
+        await evalJs(`(function(){ var u = document.getElementById('vault-field-url'); u.value = 'http://192.168.1.20:5005/models'; u.dispatchEvent(new Event('input'));
+            var n = document.getElementById('vault-field-name'); n.value = 'Home NAS'; n.dispatchEvent(new Event('input')); return 1; })()`);
+        await clearSent();
+        await evalJs(`document.getElementById('vault-field-downloads_dir').parentNode.parentNode.parentNode.querySelector('.choice-row .btn').click(); 1`);
+        s6 = await sent();
+        check('Browse asks the slicer for a folder', s6.length === 1 && s6[0].command === 'vault_pick_dir', JSON.stringify(s6));
+        await receive({ type: 'vault_dir', path: 'D:/Prints/From NAS' });
+        check('the picked folder fills the field', (await evalJs(`document.getElementById('vault-field-downloads_dir').value`)) === 'D:/Prints/From NAS');
+        await clearSent();
+        await evalJs(`document.getElementById('vault-editor-save').click(); 1`);
+        s6 = await sent();
+        const saved = s6.length === 1 ? s6[0].spec : {};
+        check('Save sends the spec: kind, built-in, address, sign-in, folder, and no secret',
+              s6.length === 1 && s6[0].command === 'vault_save' && saved.kind === 'webdav' && saved.builtin === 'synology' && saved.url === 'http://192.168.1.20:5005/models' &&
+              saved.auth === 'basic' && saved.name === 'Home NAS' && saved.downloads_dir === 'D:/Prints/From NAS' && !('id' in saved) &&
+              !/password|secret|token|sig=/i.test(JSON.stringify(saved)), JSON.stringify(s6));
+        await receive({ type: 'vault_invalid', error: 'Plain http is only allowed for a device on your local network.' });
+        check('a refused save shows why and keeps the editor open', !(await evalJs(`document.getElementById('vault-editor-error').hidden`)) &&
+              !(await evalJs(`document.getElementById('vault-editor').hidden`)));
+        await receive({ type: 'vault_saved', id: 'home-nas-1' });
+        check('a saved vault closes the editor', await evalJs(`document.getElementById('vault-editor').hidden`));
+
+        const editorFor = async (btn) => {
+            await evalJs(`document.getElementById('vault-add-btn').click(); document.getElementById('${btn}').click(); 1`);
+            return JSON.parse(await evalJs(`JSON.stringify({ title: document.getElementById('vault-editor-title').textContent,
+                bucket: !!document.getElementById('vault-field-bucket'), region: !!document.getElementById('vault-field-region'),
+                addressing: [].map.call(document.querySelectorAll('#vault-field-addressing option'), o => o.value), prefix: !!document.getElementById('vault-field-prefix'),
+                auth: [].map.call(document.querySelectorAll('#vault-field-auth option'), o => o.value), ph: document.getElementById('vault-field-url').placeholder,
+                hint: document.getElementById('vault-editor-body').textContent })`));
+        };
+        const az = await editorFor('vault-add-azure');
+        check('Azure Blob: a prefix, sign-in SAS link or none, the container example', az.prefix && !az.bucket && JSON.stringify(az.auth) === JSON.stringify(['sas', 'none']) &&
+              az.ph === 'https://account.blob.core.windows.net/models' && az.title === 'Azure Blob container', JSON.stringify(az));
+        await key('Escape');
+        check('Escape closes the editor', await evalJs(`document.getElementById('vault-editor').hidden`));
+        const s3 = await editorFor('vault-add-s3');
+        await shot('vaults_editor_s3');
+        check('S3: bucket, region, addressing, prefix, access key or none, a read-only key hint', s3.bucket && s3.region && s3.prefix &&
+              JSON.stringify(s3.addressing) === JSON.stringify(['path', 'virtual']) && JSON.stringify(s3.auth) === JSON.stringify(['sigv4', 'none']) &&
+              /only read this bucket/.test(s3.hint), JSON.stringify(s3));
+        await evalJs(`document.getElementById('vault-editor-cancel').click(); 1`);
+        await menuOf('nas-1');
+        await evalJs(`[].find.call(document.querySelectorAll('#menu button'), b => b.textContent === 'Edit').click(); 1`);
+        const edit = JSON.parse(await evalJs(`JSON.stringify({ name: document.getElementById('vault-field-name').value, url: document.getElementById('vault-field-url').value,
+            slots: [].map.call(document.querySelectorAll('#vault-editor-slots .slot'), s => s.textContent) })`));
+        check('Edit fills the editor from the vault and lists its credentials', edit.name === 'DiskStation' && edit.url === 'http://192.168.1.20:5005/models/' &&
+              edit.slots.length === 2 && /Password: not set/.test(edit.slots[1]), JSON.stringify(edit));
+        await clearSent();
+        await evalJs(`document.getElementById('vault-editor-save').click(); 1`);
+        s6 = await sent();
+        check('saving an edited vault keeps its id', s6.length === 1 && s6[0].spec.id === 'nas-1', JSON.stringify(s6));
+        await receive({ type: 'vault_saved', id: 'nas-1' });
+        await receive({ type: 'vault_notice', text: 'DiskStation: Connected.', error: false });
+        check('a notice is shown', (await evalJs(`document.getElementById('toast').textContent`)) === 'DiskStation: Connected.');
+
+        // ---- 7. Vendors is untouched -------------------------------------------------------------
         await clearSent();
         await receive({ type: 'show_section', section: 'vendors' });
         const ven = JSON.parse(await evalJs(`JSON.stringify({ title: document.getElementById('title').textContent, shown: !document.getElementById('vendors').hidden,
@@ -207,15 +381,18 @@ async function main() {
         check('and saves "vendors"', (await sent()).some(m => m.command === 'home_section' && m.section === 'vendors'));
         await evalJs(`document.querySelector('.rail-item[data-section=vaults]').click(); 1`);
 
-        // ---- 7. contrast ------------------------------------------------------------------------
-        // The text this section adds, with its primary buttons and the active rail item on the accent
-        // colours made for text (#478, folded in).
+        // ---- 8. contrast ------------------------------------------------------------------------
+        // The text this section adds, with its primary buttons, active chips and the active rail item on
+        // the accent colours made for text (#478, folded in).
+        await evalJs(`[].find.call(document.querySelectorAll('#vault-filters .chip'), c => c.firstChild.textContent === 'DiskStation').click(); 1`);
+        check('a picked filter chip is active', (await evalJs(`document.querySelectorAll('#vault-filters .chip.active').length`)) === 1);
         await evalJs(`document.getElementById('vault-add-btn').click(); 1`);
         const pairs = `(function(){
             function bgOf(n) { while (n) { var b = getComputedStyle(n).backgroundColor; if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b; n = n.parentElement; } return getComputedStyle(document.body).backgroundColor; }
             var out = [];
-            ['#vault-list .conn .title', '#vault-list .conn .kind', '#vault-list .conn .line', '#vault-list .conn .line.warn', '#vault-list .conn .btn', '#vault-add-btn', '.rail-item.active',
-             '.choice b', '.choice span', '.dialog.chooser h2', '.dialog.chooser .hint']
+            ['#vault-list .conn .title', '#vault-list .conn .kind', '#vault-list .conn .line', '#vault-list .conn .line.warn', '#vault-list .conn .line.err',
+             '#vault-list .conn .btn', '#vault-add-btn', '.rail-item.active', '#vault-grid .card .name', '#vault-grid .card .sub', '#vault-grid .card .meta',
+             '#vault-filters .chip', '#vault-grid .badge', '.choice b', '.choice span', '.choice .tag', '.dialog.chooser h2', '.dialog.chooser .hint']
               .forEach(function(sel) { document.querySelectorAll(sel).forEach(function(n) { if (!n.offsetParent) return;
                   out.push({ sel: sel, fg: getComputedStyle(n).color, bg: bgOf(n) }); }); });
             return JSON.stringify(out); })()`;
