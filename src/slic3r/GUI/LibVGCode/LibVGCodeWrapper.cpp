@@ -523,13 +523,17 @@ public:
                 m_priming.emplace_back(wipe_tower_data.priming.get()->at(i));
             }
         }
-        if (wipe_tower_data.final_purge)
+        // Orca #15917 / Edge #184: draw the final purge only when it is the on-tower (drop) variant.
+        // process() re-picks final_purge_drop with the current positions and clearance, so this
+        // stays in lockstep with WipeTowerIntegration::finalize() after a drag that skipped the
+        // tower step. The no-drop variant unloads at the object's top, off the tower.
+        if (wipe_tower_data.final_purge && wipe_tower_data.final_purge_drop && !wipe_tower_data.final_purge->gcode.empty())
             m_final.emplace_back(*wipe_tower_data.final_purge.get());
 
         m_angle = print.model().wipe_tower.rotation / 180.0f * PI;
         // ORCA/BBS: plate index
         m_position = print.model().wipe_tower.positions[print.get_plate_index()].cast<float>();
-        m_layers_count = wipe_tower_data.tool_changes.size() + (m_priming.empty() ? 0 : 1);
+        m_layers_count = wipe_tower_data.tool_changes.size() + (m_priming.empty() ? 0 : 1) + (m_final.empty() ? 0 : 1);
     }
 
     const std::vector<Slic3r::WipeTower::ToolChangeResult>& tool_change(size_t idx) {

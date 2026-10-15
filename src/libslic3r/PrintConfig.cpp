@@ -8015,7 +8015,7 @@ void PrintConfigDef::init_fff_params()
     //def->label = L("Z travel");
     //def->tooltip = L("Speed of vertical travel along z axis. "
     //                 "This is typically lower because build plate or gantry is hard to be moved. "
-    //                 "Zero means using travel speed directly in G-code, but will be limited by printer's ability when run G-code.");
+    //                 "Zero uses the active travel speed. Z travel is capped by a positive machine_max_speed_z.");
     def->sidetext = "mm/s";	// milimeters per second, don't need translation
     def->min = 0;
     def->mode = comDevelop;
@@ -8256,6 +8256,16 @@ void PrintConfigDef::init_fff_params()
                      "leaving the filament blob on the gap edge instead of on the outer wall surface.");
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
+
+    def          = this->add("wipe_tower_stagger_toolchange_start", coBool);
+    def->label   = L("Stagger toolchange start");
+    def->tooltip = L("Vary the prime tower entry point for toolchange wiping between layers. "
+                     "This spreads startup ooze and ironing marks across several purge lines instead "
+                     "of stacking them at the same wall gap.\n"
+                     "The tower's first layer, local-Z dithering tool changes, and tower-interface "
+                     "run-in changes keep the legacy start so the wall gap and the purge stay aligned.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     // Tower interface options: three behaviours of Bambu Studio's enable_tower_interface_features,
     // each on its own and for both tower generators. See GCode/WipeTowerInterface.hpp.

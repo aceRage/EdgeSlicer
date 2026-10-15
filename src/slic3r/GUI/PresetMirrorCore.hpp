@@ -210,6 +210,51 @@ struct UidCandidate {
 // Returns the index into `cands`, or -1 when there is nothing usable.
 int choose_uid(const std::vector<UidCandidate>& cands, const std::string& logged_in_uid);
 
+// ---- change detection (printer-switch fast path) -----------------------------------------------
+//
+// Every printer switch used to run the whole mirror: read every source preset, .info and base/
+// file, and every copy of them, on the UI thread (~0.4 s on a ~660-file Bambu Studio folder),
+// although it nearly always found nothing to do. The plan is a function of the source files,
+// the manifest and the dest files, and a dest-only change (the user deleting or editing a copy
+// here) never leads to a copy, so when neither the source tree nor the manifest changed since a
+// clean run, a new run would copy nothing. The fingerprint below detects that from a directory
+// listing alone (name, size and mtime; no file is opened).
+
+// One line per regular file under <dir>/{filament,process,machine}/ and their base/ subfolders:
+// "<rel>|<size>|<mtime>", sorted. Empty when `src_uid_dir` is empty, missing or could not be
+// listed completely; callers treat an empty fingerprint as "changed" (run the mirror).
+std::string source_tree_fingerprint(const std::string& src_uid_dir);
+
+// "<size>|<mtime>" of one file, or "-" when it does not exist.
+std::string file_stamp(const std::string& path);
+
+// The part of a change fingerprint (see mirror_change_fingerprint) that describes the source:
+// everything before its trailing "manifest=" line. Every run rewrites the manifest, so a run is
+// judged by whether the source moved while it ran, and remembered by the stamp it left behind.
+std::string fingerprint_source_part(const std::string& fingerprint);
+
+// Remembers the fingerprint left by the last clean run, and says whether a switch-time run can be
+// skipped because nothing changed since. Records nothing (and forgets the old one) when the run
+// was not clean, a fingerprint could not be taken, or the source changed while the run read it,
+// so the next switch runs again.
+class MirrorSkipGate
+{
+public:
+    bool can_skip(const std::string& fingerprint) const { return !fingerprint.empty() && fingerprint == m_last; }
+    // `before`: taken just before the run; `after`: just after it.
+    void record_run(bool clean, const std::string& before, const std::string& after)
+    {
+        if (clean && !before.empty() && !after.empty() && fingerprint_source_part(before) == fingerprint_source_part(after))
+            m_last = after;
+        else
+            m_last.clear();
+    }
+    void invalidate() { m_last.clear(); }
+
+private:
+    std::string m_last;
+};
+
 }}} // namespace Slic3r::GUI::mirror
 
 #endif // slic3r_GUI_PresetMirrorCore_hpp_
