@@ -42,6 +42,8 @@
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
 #include "Plater.hpp"
+#include "ParamsDialog.hpp"
+#include "libslic3r/PlateBedTypes.hpp"
 #include "MainFrame.hpp"
 #include "format.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -3645,6 +3647,13 @@ void TabPrint::toggle_options()
     }
 
     m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT, flow_variant_view_index());
+
+    if (m_type == Preset::TYPE_PLATE) {
+        // Orca #15916: the plate bed type is editable only when the printer takes per-plate bed types
+        // (Edge: the U1 takes its three plates).
+        toggle_option("curr_bed_type", PlateBedTypes::supports_bed_type_choice(PlateBedTypes::allowed_bed_types(
+                                           m_preset_bundle->printers.get_edited_preset().config, m_preset_bundle->is_bbl_vendor())));
+    }
 
     Field *field = m_active_page->get_field("support_style");
     auto   support_type = m_config->opt_enum<SupportType>("support_type");
@@ -7279,6 +7288,15 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
             }
         }
         load_current_preset();
+
+        // Orca #15916: wait for the settings dialog to close; its edits are still provisional.
+        if (printer_tab && is_selected) {
+            Plater *plater = wxGetApp().plater();
+            ParamsDialog *dialog = wxGetApp().params_dialog();
+            if (plater && !plater->is_loading_project() &&
+                (!dialog || !dialog->IsShown()))
+                plater->normalize_bed_types(false);
+        }
 
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
         // Deferred so it runs after this switch settles. sync_bambu_user_presets only lists the Bambu

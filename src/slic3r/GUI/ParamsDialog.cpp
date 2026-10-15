@@ -3,6 +3,7 @@
 #include "ParamsPanel.hpp"
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
+#include "Plater.hpp"
 #include "Tab.hpp"
 
 #include "libslic3r/Utils.hpp"
@@ -51,7 +52,19 @@ ParamsDialog::ParamsDialog(wxWindow * parent)
             Hide();
         }
 #else
+        auto *tab = m_panel ? dynamic_cast<Tab *>(m_panel->get_current_tab()) : nullptr;
         Hide();
+        if (tab && tab->type() == Preset::TYPE_PRINTER) {
+            // Orca #15916: normalize only after the dialog closes, when the final capability is known.
+            auto &preset_bundle = *wxGetApp().preset_bundle;
+            const PlateBedTypes::Allowed allowed =
+                PlateBedTypes::allowed_bed_types(preset_bundle.printers.get_edited_preset().config, preset_bundle.is_bbl_vendor());
+            if (m_initial_bed_types.any != allowed.any || m_initial_bed_types.types != allowed.types) {
+                wxGetApp().plater()->normalize_bed_types(true);
+                if (auto *plate_tab = dynamic_cast<TabPrintPlate *>(wxGetApp().get_plate_tab()))
+                    plate_tab->update_model_config();
+            }
+        }
         if (!m_editing_filament_id.empty()) {
             Filamentinformation *filament_info = new Filamentinformation();
             filament_info->filament_id        = m_editing_filament_id;
@@ -75,7 +88,15 @@ void ParamsDialog::Popup()
     if (m_panel && m_panel->get_current_tab()) {
         bool just_edit = false;
         if (!m_editing_filament_id.empty()) just_edit = true;
-        dynamic_cast<Tab *>(m_panel->get_current_tab())->set_just_edit(just_edit);
+        auto *tab = dynamic_cast<Tab *>(m_panel->get_current_tab());
+        tab->set_just_edit(just_edit);
+        if (tab->type() == Preset::TYPE_PRINTER) {
+            // Orca #15916: remember the initial bed type capability and compare it when the dialog closes.
+            // Bambu profiles support multiple bed types even when the option is unset; the U1 has its own three.
+            auto &preset_bundle = *wxGetApp().preset_bundle;
+            m_initial_bed_types =
+                PlateBedTypes::allowed_bed_types(preset_bundle.printers.get_edited_preset().config, preset_bundle.is_bbl_vendor());
+        }
     }
     Show();
 }

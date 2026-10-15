@@ -11,6 +11,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/NozzleSync.hpp"
 #include "libslic3r/FilamentSyncMatch.hpp"
+#include "libslic3r/PlateBedTypes.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
 #include "libslic3r/MixedFilament.hpp"
@@ -10910,7 +10911,8 @@ struct Plater::priv
     BoundingBox scaled_bed_shape_bb() const;
 
     // BBS: backup & restore
-    std::vector<size_t> load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi = false);
+    std::vector<size_t> load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi = false,
+                                   bool* config_loaded_out = nullptr);
     std::vector<size_t> load_model_objects(const ModelObjectPtrs& model_objects, bool allow_negative_z = false, bool split_object = false);
 
     fs::path get_export_file_path(GUI::FileType file_type);
@@ -12221,8 +12223,14 @@ static void log_substitutions(const PresetsConfigSubstitutions &substitutions, c
 }
 
 // BBS: backup & restore
-std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi)
+std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi,
+                                             bool* config_loaded_out)
 {
+    // Orca #15916: tells Plater::load_files that a project config was loaded, so the plates'
+    // bed types are checked against the (possibly new) printer.
+    if (config_loaded_out != nullptr)
+        *config_loaded_out = false;
+
     std::vector<size_t> empty_result;
     bool dlg_cont = true;
     bool is_user_cancel = false;
@@ -12813,6 +12821,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 file_wipe_tower_y = *wipe_tower_y_opt;
 
                             preset_bundle->load_config_model(filename.string(), std::move(config), file_version);
+                            if (config_loaded_out != nullptr)
+                                *config_loaded_out = true;
 
                             ConfigOption* bed_type_opt = preset_bundle->project_config.option("curr_bed_type");
                             if (bed_type_opt != nullptr) {
@@ -16297,6 +16307,9 @@ void Plater::priv::on_select_bed_type(wxCommandEvent &evt)
 
                 // update plater with new config
                 q->on_config_change(wxGetApp().preset_bundle->full_config());
+                // Orca #15916: the plate tab shows the global bed type for "same as global" plates.
+                if (auto *plate_tab = dynamic_cast<TabPrintPlate *>(wxGetApp().get_plate_tab()))
+                    plate_tab->update_model_config();
 
                 // update app_config
                 AppConfig* app_config = wxGetApp().app_config;
@@ -19071,6 +19084,39 @@ void Plater::reset_project_dirty_initial_presets() { p->reset_project_dirty_init
 void Plater::render_project_state_debug_window() const { p->render_project_state_debug_window(); }
 #endif // ENABLE_PROJECT_DIRTY_STATE_DEBUG_WINDOW
 
+// Orca #15916: per-plate bed type overrides are cleared when the selected printer cannot use them.
+// Edge: the capability is PlateBedTypes::allowed_bed_types - the U1 keeps its three plates (#502)
+// rather than "all or nothing".
+void Plater::normalize_bed_types(bool printer_setting_changed)
+{
+    if (only_gcode_mode() || using_exported_file())
+        return;
+
+    auto &preset_bundle = *wxGetApp().preset_bundle;
+    // Keep FFF plate settings intact while an SLA printer is selected.
+    if (preset_bundle.printers.get_edited_preset().printer_technology() != ptFFF)
+        return;
+
+    const PlateBedTypes::Allowed allowed =
+        PlateBedTypes::allowed_bed_types(preset_bundle.printers.get_edited_preset().config, preset_bundle.is_bbl_vendor());
+    const bool overrides_reset = !allowed.any && !p->partplate_list.check_all_plate_local_bed_type(allowed.types);
+
+    if (overrides_reset) {
+        set_plater_dirty(true);
+        show_info(this,
+                  allowed.types.empty() ?
+                      _L("The selected printer does not support multiple bed types.\nBed type overrides were reset to the global bed type.") :
+                      _L("The selected printer does not have some of the plates' bed types.\nThose bed type overrides were reset to the global bed type."),
+                  _L("Plate bed types reset"));
+    }
+
+    // Refresh the controls after a capability change, even when no override was reset.
+    if (printer_setting_changed || overrides_reset) {
+        sidebar().update_all_preset_comboboxes();
+        wxGetApp().obj_list()->update_and_show_object_settings_item();
+    }
+}
+
 Sidebar&        Plater::sidebar()           { return *p->sidebar; }
 const Model&    Plater::model() const       { return p->model; }
 Model&          Plater::model()             { return p->model; }
@@ -19281,6 +19327,9 @@ void Plater::load_project(wxString const& filename2,
     else
         p->dirty_state.update_from_undo_redo_stack(true);
     up_to_date(true, true);
+
+    // Orca #15916: clear plate overrides that are incompatible with the selected printer.
+    normalize_bed_types(false);
 
     wxGetApp().params_panel()->switch_to_object_if_has_object_configs();
 
@@ -20896,7 +20945,12 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_
     p->m_slice_all_only_has_gcode = false;
     //BBS: wish to reset all plates stats item selected state when load a new file
     p->preview->get_canvas3d()->reset_select_plate_toolbar_selection();
-    std::vector<size_t> loaded = p->load_files(input_files, strategy, ask_multi);
+    bool config_loaded = false;
+    std::vector<size_t> loaded = p->load_files(input_files, strategy, ask_multi, &config_loaded);
+    // Orca #15916: clear plate bed type overrides the loaded printer cannot use (load_project does
+    // its own after the load).
+    if (config_loaded && !is_loading_project())
+        normalize_bed_types(false);
     if (!loaded.empty())
     {
         // After loading a project, initialize the filament temp mixing state
