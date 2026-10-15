@@ -99,6 +99,9 @@ public:
 	//BBS
 	static Http put2(std::string url);
 	static Http patch(std::string url);
+	// Any other method by name (WebDAV's PROPFIND for the Home tab's vaults). A request body, if
+	// any, goes in with set_post_body(); the method stays `method`.
+	static Http custom(const std::string &method, std::string url);
 
 	//BBS set global header for each http request
 	static void set_extra_headers(std::map<std::string, std::string> headers);
