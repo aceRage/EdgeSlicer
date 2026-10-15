@@ -12,6 +12,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
+
+#include "libslic3r/I18N.hpp"
+#include "libslic3r/format.hpp"
 
 namespace Slic3r {
 
@@ -340,6 +345,65 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
     }
 
     return output.str();
+}
+
+// Orca #14198: validate an adaptive pressure advance model (one "PA,flow,acceleration" set per line).
+// Edge: spaces and tabs around the values are allowed, as AdaptivePAInterpolator reads them fine.
+std::string AdaptivePAProcessor::validate_adaptive_pa_model(const std::string &model_str)
+{
+    if (model_str.empty())
+        return {}; // Empty model is valid
+
+    std::istringstream model_stream(model_str);
+    std::string        line;
+    int                line_number = 0;
+
+    while (std::getline(model_stream, line)) {
+        ++line_number;
+
+        // Trim whitespace
+        const auto first = line.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            continue; // Skip empty lines
+        const auto last = line.find_last_not_of(" \t\r\n");
+        line = line.substr(first, last - first + 1);
+
+        // Only numbers, commas, dots and blanks are allowed (no letters or other characters)
+        for (char c : line) {
+            if (!std::isdigit(static_cast<unsigned char>(c)) && c != ',' && c != '.' && c != ' ' && c != '\t')
+                return Slic3r::format(_u8L("Line %1%: only numbers, commas and dots are allowed"), line_number);
+        }
+
+        // Exactly 3 values (PA, flow, acceleration)
+        if (std::count(line.begin(), line.end(), ',') != 2)
+            return Slic3r::format(_u8L("Line %1%: must contain exactly 3 comma-separated values (PA, flow, acceleration)"), line_number);
+
+        double values[3];
+        try {
+            std::istringstream line_stream(line);
+            std::string        value;
+            for (double &v : values) {
+                std::getline(line_stream, value, ',');
+                if (value.find_first_not_of(" \t") == std::string::npos)
+                    return Slic3r::format(_u8L("Line %1%: invalid numeric value"), line_number);
+                size_t used = 0;
+                v           = std::stod(value, &used);
+                if (value.find_first_not_of(" \t", used) != std::string::npos)
+                    return Slic3r::format(_u8L("Line %1%: invalid numeric value"), line_number);
+            }
+        } catch (const std::exception &) {
+            return Slic3r::format(_u8L("Line %1%: invalid numeric value"), line_number);
+        }
+        const double pa = values[0], flow = values[1], accel = values[2];
+        if (pa >= 2.0)
+            return Slic3r::format(_u8L("Line %1%: PA value must be less than 2"), line_number);
+        if (flow <= pa)
+            return Slic3r::format(_u8L("Line %1%: flow value must be greater than PA value"), line_number);
+        if (accel <= flow)
+            return Slic3r::format(_u8L("Line %1%: acceleration value must be greater than flow value"), line_number);
+    }
+
+    return {}; // All validations passed
 }
 
 } // namespace Slic3r

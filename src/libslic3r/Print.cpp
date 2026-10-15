@@ -48,6 +48,7 @@
 #include "nlohmann/json.hpp"
 
 #include "GCode/ConflictChecker.hpp"
+#include "GCode/AdaptivePAProcessor.hpp"
 
 #include <codecvt>
 
@@ -3102,6 +3103,22 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             if (m_default_region_config.precise_outer_wall && m_default_region_config.wall_sequence != WallSequence::InnerOuter) {
                 warning->string  = L("The precise wall option will be ignored for outer-inner or inner-outer-inner wall sequences.");
                 warning->opt_key = "precise_outer_wall";
+            }
+
+            // Orca #14198: check the adaptive pressure advance model of every filament that uses it.
+            // Edge: enable_pressure_advance is flow-variant (read as the G-code generator does).
+            if (warning->string.empty()) {
+                for (unsigned int extruder_id : extruders) {
+                    if (!m_config.adaptive_pressure_advance.get_at(extruder_id) ||
+                        !get_value_at(m_config, m_config.enable_pressure_advance, ConfigFlowDomain::Filament, extruder_id))
+                        continue;
+                    const std::string &pa_model = m_config.adaptive_pressure_advance_model.get_at(extruder_id);
+                    if (!pa_model.empty() && !AdaptivePAProcessor::validate_adaptive_pa_model(pa_model).empty()) {
+                        warning->string  = L("The Adaptive Pressure Advance model for one or more extruders may contain invalid values.");
+                        warning->opt_key = "adaptive_pressure_advance_model";
+                        break;
+                    }
+                }
             }
 
         } catch (std::exception& e) {

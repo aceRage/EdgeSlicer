@@ -8,6 +8,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include "FlowVariantEdit.hpp"
 #include "Plater.hpp"
 
@@ -119,6 +120,33 @@ void ConfigManipulation::check_nozzle_temperature_initial_layer_range(DynamicPri
     }
 }
 
+
+// Orca #14198: tell the user when the adaptive pressure advance model they typed is not valid.
+// Edge: each value (filament / flow variant) is checked on its own rather than joined into one text.
+void ConfigManipulation::check_adaptive_pressure_advance_model(DynamicPrintConfig* config)
+{
+    if (is_msg_dlg_already_exist || !config->has("adaptive_pressure_advance_model"))
+        return;
+
+    const auto* model = config->option<ConfigOptionStrings>("adaptive_pressure_advance_model");
+    if (model == nullptr || model->values.empty())
+        return;
+
+    std::string error;
+    for (const std::string& value : model->values) {
+        error = AdaptivePAProcessor::validate_adaptive_pa_model(value);
+        if (!error.empty())
+            break;
+    }
+    if (!error.empty()) {
+        wxString msg_text = _L("Adaptive Pressure Advance model validation failed:\n");
+        msg_text += from_u8(error);
+        MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxOK);
+        is_msg_dlg_already_exist = true;
+        dialog.ShowModal();
+        is_msg_dlg_already_exist = false;
+    }
+}
 
 void ConfigManipulation::check_filament_max_volumetric_speed(DynamicPrintConfig *config)
 {
