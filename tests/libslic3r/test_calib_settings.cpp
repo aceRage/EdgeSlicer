@@ -28,3 +28,13 @@ TEST_CASE("Motion calibration towers print at the machine limits", "[Calib][Moti
         CHECK(limits.acceleration == Approx(2000.));
     }
 }
+
+TEST_CASE("PA calibration batch values that look swapped are refused", "[Calib][PressureAdvance]")
+{
+    // Orca #11493
+    CHECK(calib_pa_batch_values_plausible({}, {}));
+    CHECK(calib_pa_batch_values_plausible({1000., 5000.}, {}));
+    CHECK(calib_pa_batch_values_plausible({1000., 5000.}, {50., 200.}));
+    CHECK_FALSE(calib_pa_batch_values_plausible({50., 200.}, {1000., 5000.}));
+    CHECK_FALSE(calib_pa_batch_values_plausible({200.}, {200.}));
+}

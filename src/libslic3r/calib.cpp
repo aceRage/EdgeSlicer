@@ -6,6 +6,15 @@
 
 namespace Slic3r {
 
+bool calib_pa_batch_values_plausible(const std::vector<double> &accelerations, const std::vector<double> &speeds)
+{
+    if (accelerations.empty() || speeds.empty())
+        return true;
+    const double min_accel = *std::min_element(accelerations.begin(), accelerations.end());
+    const double max_speed = *std::max_element(speeds.begin(), speeds.end());
+    return min_accel > max_speed;
+}
+
 CalibMotionLimits calib_machine_motion_limits(const ConfigBase &printer_config, double fallback_speed, double fallback_acceleration)
 {
     auto first = [&printer_config](const char *key) {

@@ -297,6 +297,15 @@ void PA_Calibration_Dlg::on_start(wxCommandEvent& event) {
     ParseStringValues(m_tiBMAccels->GetTextCtrl()->GetValue().ToStdString(), m_params.accelerations);
     ParseStringValues(m_tiBMSpeeds->GetTextCtrl()->GetValue().ToStdString(), m_params.speeds);
 
+    // Orca #11493: guard against swapped inputs (accelerations must exceed speeds).
+    if (!calib_pa_batch_values_plausible(m_params.accelerations, m_params.speeds)) {
+        MessageDialog msg_dlg(nullptr,
+            _L("Acceleration values must be greater than speed values.\nPlease verify the inputs."),
+            wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+
     m_plater->calib_pa(m_params);
     EndModal(wxID_OK);
 

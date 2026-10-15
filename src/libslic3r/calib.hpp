@@ -269,6 +269,10 @@ private:
     bool   m_draw_numbers{true};
 };
 
+// Orca #11493: the PA calibration's batch accelerations and speeds look swapped when an acceleration is
+// not above every speed. Empty lists are fine.
+bool calib_pa_batch_values_plausible(const std::vector<double> &accelerations, const std::vector<double> &speeds);
+
 // Orca #13658: the speed and acceleration the input shaping and cornering towers print at, the machine's
 // limits (the slower of the X/Y max speeds, the max extruding acceleration) so a calibration is never slowed
 // below what the printer can do. Edge: a limit that is not set (missing or 0) falls back to the given value.
