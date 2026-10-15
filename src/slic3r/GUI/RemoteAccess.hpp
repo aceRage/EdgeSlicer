@@ -163,6 +163,7 @@ private:
     ApiResponse api_archive_delete(const std::string& id);
     ApiResponse api_archive_send(const std::string& id, const std::string& form_body);
     ApiResponse api_archive_preview(const std::string& id, const std::string& form_body);
+    ApiResponse api_archive_import(const std::string& form_body); // remote printing: a job another PC sent (hub only)
     ApiResponse api_presets();
     ApiResponse api_select_preset(const std::string& type, const std::string& name, int index);
     ApiResponse api_filament_color(int index, const std::string& color);

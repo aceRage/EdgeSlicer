@@ -110,6 +110,7 @@ inline unsigned route_scope(const std::string& method, const std::string& rest)
     // Registering this device for notifications is part of reading the printers' state.
     if (starts("/push/")) return SCOPE_STATUS;
     if (rest == "/api/instances/open") return SCOPE_PRINT;
+    if (rest == "/api/archive/upload" || rest == "/api/instances/ensure") return SCOPE_PRINT; // remote printing
     if (starts("/i/")) {
         const size_t      slash = rest.find('/', 3);
         const std::string sub   = slash == std::string::npos ? std::string() : rest.substr(slash);

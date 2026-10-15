@@ -45,7 +45,8 @@ struct Meta
     // A "connect" send's printer serial, when the Device tab knew it: what lets a record made while
     // the printer had no LAN card be listed under that card once it has one (normalize_printer).
     std::string printer_serial;
-    std::string source { "desktop" }; // desktop | phone
+    std::string source { "desktop" }; // desktop | phone | remote (a sliced job another PC sent through the hub)
+    std::string source_client;        // remote: the hub client that sent it (its name on the hub page)
     std::string mode { "upload" };    // upload | print
     std::string file_name;     // the name the printer was given ("plate_1.gcode"); "" = the source's
 

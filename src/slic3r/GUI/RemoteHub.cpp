@@ -9,6 +9,8 @@
 #include "AppPush.hpp"
 #include "HubEventDedupe.hpp"
 #include "HubClients.hpp"
+#include "ArchiveImport.hpp" // remote printing: what a .gcode.3mf from another PC must pass
+#include "libslic3r/UntrustedInput.hpp"
 #include "HubPushOwner.hpp"
 #include "GcodeArchive.hpp" // normalize_printer: the Reprint list's printer names
 #include "SnapmakerLan.hpp" // the LAN cards a "connect" record may belong to
@@ -976,6 +978,7 @@ struct Request
     // Authorization: Bearer <client token> - how a client that is not a browser page sends its
     // token, on the /h/... routes, instead of putting it in the path (HubClients.hpp).
     std::string bearer;
+    std::string client_name; // set by serve() once the token is known: the client's name ("" for the phone link)
     size_t      content_length { 0 };
 };
 
@@ -2892,6 +2895,12 @@ public:
     bool        set_phone(bool on, const std::string& token); // rebinds the listener, persists
     std::string new_link(); // rotate the phone token (explicit only); returns the new one
     long     spawn_slicer(const std::string& file, bool hidden = false); // "" = an empty window
+    // Remote printing (A2): a slicer instance that can send a job - the network plug-in and the
+    // printers live in instances, never in the hub. An instance that answers is used (a hidden
+    // one first, so a window somebody is working in keeps its selected printer); with none, a
+    // hidden one is started and waited for (up to ENSURE_INSTANCE_S). One caller at a time, so two
+    // uploads at once start one instance, not two. 0 and `error` when there is none to be had.
+    long     ensure_send_instance(std::string& error, bool& spawned);
     // One request to an instance's loopback API (HTTP: never on the tray's GUI thread).
     std::pair<int, std::string> instance_post(long pid, const std::string& sub);
     bool     instance_window(long pid, bool show);
@@ -3021,6 +3030,7 @@ private:
     // Spawns that have not dropped their <pid>.json yet, so a burst of phone uploads cannot get
     // past the instance cap while the first process is still starting.
     std::vector<std::pair<long, long long>> m_recent_spawns;
+    std::mutex                     m_ensure_mutex; // ensure_send_instance(): one caller at a time (never taken under m_mutex)
     std::string                    m_state; // full Stream-tab state JSON (with credentials)
     std::string                    m_secret;      // per run; in hub.json and the hub page, required as X-Hub-Secret on /hub/*
     // This data dir's durable relay identity (design_hosted_relay.md section 2): an Ed25519 key
@@ -5420,6 +5430,44 @@ void HubServer::note_scope_denied(const Auth& a, unsigned needed, const std::str
                                << rest.substr(0, 120) << " (needs " << json(HubClients::scope_names(needed)).dump() << ")";
 }
 
+// How long ensure_send_instance() waits for a hidden slicer it started to answer. A cold start
+// on a busy PC was seen to take well over a minute (plug-in load, presets, OpenGL warm-up).
+static const int ENSURE_INSTANCE_S = 240;
+
+long HubServer::ensure_send_instance(std::string& error, bool& spawned)
+{
+    spawned = false;
+    std::lock_guard<std::mutex> one_at_a_time(m_ensure_mutex);
+    auto pick = [this]() -> long {
+        // Probed: a registered instance that does not answer (still starting, hung) is no use.
+        long visible = 0;
+        for (const Instance& inst : instances(true)) {
+            if (!inst.alive || inst.title.empty()) continue;
+            if (inst.hidden) return inst.pid;
+            if (!visible) visible = inst.pid;
+        }
+        return visible;
+    };
+    if (const long pid = pick()) return pid;
+    if (instances_in_flight() >= MAX_INSTANCES) {
+        error = "too many slicer windows are starting or open on that PC; try again in a minute";
+        return 0;
+    }
+    const long pid = spawn_slicer("", true);
+    if (pid <= 0) { error = "could not start a slicer on that PC"; return 0; }
+    spawned = true;
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: started a hidden slicer (pid " << pid << ") to send a job; waiting for it";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(ENSURE_INSTANCE_S);
+    while (std::chrono::steady_clock::now() < deadline && !m_quit) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!pid_alive(pid)) { error = "the slicer on that PC stopped while it was starting; see its log"; return 0; }
+        for (const Instance& inst : instances(false))
+            if (inst.pid == pid && !probe_instance(inst).title.empty()) return pid;
+    }
+    error = "the slicer on that PC did not finish starting within " + std::to_string(ENSURE_INSTANCE_S) + " s; try again";
+    return 0;
+}
+
 long HubServer::spawn_slicer(const std::string& file, bool hidden)
 {
     // The child must live on this hub's data dir: without --datadir it starts on the default one,
@@ -6096,6 +6144,8 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "GET"},  {"path", "/api/instances"},       {"description", "running slicer instances: id (pid), index, title, project path, slicing"} },
             { {"method", "GET"},  {"path", "/api/archive[?offset=&limit=&printer={id}&model={key}]"}, {"description", "the G-code archive, read by the hub (no slicer window needed): {enabled?, max?, total, offset, limit, next_offset, printers [{id, name, kind}], models [{key, name, count, printers [{id, name, kind, online}]}], records}, newest first; records are the same rows /i/{id}/api/archive lists plus model_key / model_name (the model the file was sliced for; \"other\" when unknown), and a printer is never named by an address. models[].printers are where a record of that model may be reprinted (send with printer={id}). Sending or deleting one still goes through a slicer window (/i/{id}/api/archive/{id}/send; a Bambu one takes /i/{id}/api/archive/{id}/preview first for its AMS mapping)"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}/thumbnail.png"}, {"description", "one record's preview; cacheable, since a record's preview never changes"} },
+            { {"method", "POST"}, {"path", "/api/archive/upload[?printer={id}]"}, {"description", "remote printing (needs the print permission): body = a sliced Bambu job (.gcode.3mf, at most 500 MB), header X-File-Name = its name; it is checked as an untrusted download and stored in this PC's G-code archive (source remote), a hidden slicer being started for it when none runs. Answers {record, instance, spawned, preview, send}: then POST i/{instance}/api/archive/{id}/preview for the AMS mapping sheet and .../send (confirm=1, your own ams_mapping if you like) to print, and follow i/{instance}/api/jobs/{job}. 400 with the reason when the file is refused, 409 when this PC does not store G-code files, 503 when no slicer could be started"} },
+            { {"method", "POST"}, {"path", "/api/instances/ensure"}, {"description", "remote printing: {instance, spawned} - a slicer instance that can send (a hidden one is started and waited for, up to 4 minutes, when none runs)"} },
             { {"method", "POST"}, {"path", "/api/instances/open"},  {"description", "body = a .3mf/.stl/.obj/.step/.glb file, header X-File-Name = its name; starts a new (hidden) slicer instance with it; ?visible=1 opens a window"} },
             { {"method", "POST"}, {"path", "/i/{id}/open?mode=load|import"}, {"description", "same upload, opened in instance {id}: load = save the current project, then open this project (default for .3mf); import = add the model to the current plate (default otherwise)"} },
             { {"method", "*"},    {"path", "/i/{id}/api/..."},      {"description", "the instance's own API (see GET /i/{id}/api)"} },
@@ -6142,6 +6192,70 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             respond_cacheable(client, "image/png", png);
             return;
         }
+    }
+    // ---- remote printing: another PC sends a sliced job (research 2b, A1 + A2) ----
+    // POST /api/instances/ensure - a slicer instance that can send (started hidden when none runs).
+    // POST /api/archive/upload   - body = a .gcode.3mf, X-File-Name = its name, ?printer={id}: the
+    //   file becomes a record of this PC's G-code archive (source remote) and the answer says which
+    //   instance to send it from; /i/{instance}/api/archive/{id}/preview and /send then work exactly
+    //   as the phone's Reprint tab uses them (mapping sheet, the client's own ams_mapping).
+    if (rest == "/api/instances/ensure" && r.method == "POST") {
+        std::string error;
+        bool        spawned = false;
+        const long  pid     = ensure_send_instance(error, spawned);
+        if (!pid) { respond_json(client, 503, json_error(error)); return; }
+        respond_json(client, 200, json{ { "instance", pid }, { "spawned", spawned } }.dump());
+        return;
+    }
+    if (rest == "/api/archive/upload" && r.method == "POST") {
+        // Everything that can be refused is refused before the body is read.
+        const std::string name = ArchiveImport::clean_name(percent_decode(r.file_name));
+        if (name.empty()) { respond_json(client, 400, json_error("X-File-Name must name a sliced job ending in .gcode.3mf")); return; }
+        if (r.content_length == 0) { respond_json(client, 400, json_error("empty upload (Content-Length required)")); return; }
+        if (r.content_length > untrusted::MODEL_DOWNLOAD_SIZE_LIMIT) { respond_json(client, 413, json_error("the file is larger than 500 MB")); return; }
+        const std::string printer = percent_decode(query_param(r.query, "printer"));
+        if (printer.size() > 64 || printer.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:") != std::string::npos) {
+            respond_json(client, 400, json_error("printer is not a printer id"));
+            return;
+        }
+        std::string path, error;
+        if (!spool_upload(client, r, path, error)) { respond_json(client, 400, json_error(error)); return; }
+        // The archive keeps its own copy; the spooled one goes whatever happens next.
+        struct Spooled
+        {
+            fs::path dir;
+            ~Spooled() { boost::system::error_code ig; if (!dir.empty()) fs::remove_all(dir, ig); }
+        } spooled { fs::path(path).parent_path() };
+        gc_uploads();
+        bool       spawned = false;
+        const long pid     = ensure_send_instance(error, spawned);
+        if (!pid) { respond_json(client, 503, json_error(error)); return; }
+        int port = 0;
+        for (const Instance& inst : instances(false))
+            if (inst.pid == pid) port = inst.port;
+        if (!port) { respond_json(client, 503, json_error("the slicer on that PC went away; try again")); return; }
+        int         status = 502;
+        std::string body   = json_error("the slicer did not answer");
+        Http::post("http://127.0.0.1:" + std::to_string(port) + "/api/archive/import")
+            .timeout_connect(2).timeout_max(600)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .set_post_body("path=" + percent_encode(path) + "&name=" + percent_encode(name) + "&printer=" + percent_encode(printer) +
+                           "&client=" + percent_encode(r.client_name))
+            .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+            .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? json_error(err) : b; })
+            .perform_sync();
+        if (status != 200) { respond_json(client, status, body); return; }
+        json out;
+        try { out["record"] = json::parse(body); } catch (...) { respond_json(client, 502, json_error("the slicer answered something else")); return; }
+        const std::string id = out["record"].value("id", std::string());
+        out["instance"] = pid;
+        out["spawned"]  = spawned;
+        out["preview"]  = "i/" + std::to_string(pid) + "/api/archive/" + id + "/preview";
+        out["send"]     = "i/" + std::to_string(pid) + "/api/archive/" + id + "/send";
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: a job from another PC" << (r.client_name.empty() ? std::string() : " (client " + r.client_name + ")")
+                                << " is archive record " << id << " on instance " << pid;
+        respond_json(client, 200, out.dump());
+        return;
     }
     if (rest == "/api/instances/open" && r.method == "POST") {
         // Refuse before reading the upload: there is no point spooling a gigabyte we will not open.
@@ -6429,6 +6543,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             return;
         }
         touch_client(a);
+        r.client_name = a.legacy ? std::string() : a.name;
         // A client token never sees the phone link's token in anything the hub builds for it.
         struct SwapGuard
         {

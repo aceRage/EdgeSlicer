@@ -264,6 +264,7 @@ static json meta_json(const Meta& m)
     j["project_title"] = m.project_title;
     j["project_path"]  = m.project_path;
     j["source"]        = m.source;
+    if (!m.source_client.empty()) j["source_client"] = m.source_client;
     j["mode"]          = m.mode;
     j["sent_name"]     = m.file_name; // the name the printer was given, before the archive tidied it
     j["filaments"]     = json::array();
