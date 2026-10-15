@@ -137,8 +137,11 @@ TEST_CASE("theme pack: Home tab variables", "[ThemePack]")
     spec.palette["panel_bg"] = "#201515";
     spec.home["--bg"]        = "#101010";
     spec.home["--unknown"]   = "#123456";
+    spec.home["--accent-text"] = "#F0C08A";
     const auto css = home_css(spec);
     CHECK(css.at("--accent") == "#B5651D");
+    CHECK(css.at("--accent-text") == "#F0C08A");
+    CHECK_FALSE(css.contains("--accent-strong")); // the page derives it from --accent
     CHECK(css.at("--thumb") == "#201515");
     CHECK(css.at("--bg") == "#101010");
     CHECK_FALSE(css.contains("--unknown"));
