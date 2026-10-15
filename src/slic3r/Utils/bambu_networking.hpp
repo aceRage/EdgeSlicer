@@ -283,11 +283,13 @@ struct PrintParams {
      * printer's "mapping" answer as "nozzle_mapping" in the payload. Empty = no handshake,
      * which is what every single-nozzle job sends, keeping its payload byte-identical. */
     std::string     nozzle_mapping_request;
-    /* Ultra (dual-nozzle): 1 = automatic extruder (PA) calibration, 0 = manual PA values.
-     * BambuStudio reads this from a "PA value" switch (m_pa_value_switch->GetValue() ? 0 : 1);
-     * this fork has no such switch, so the host leaves the default 1. Serialized into the
-     * project_file payload only for dual-nozzle jobs. */
-    int             extruder_cali_manual_mode{ 1 };
+    /* Ultra (dual-nozzle): the PA mode. Bambu Studio computes it from its print-dialog switch
+     * "Nozzles and filaments of the same type share the same PA profile", which defaults to ON,
+     * as switch ? 0 : 1 - so an untouched Studio job sends 0, and 1 is the non-default state.
+     * This fork has no such switch and sends Studio's default, 0 (it used to send 1, wrongly
+     * described as "automatic"). -1 = leave the key out. Serialized into the project_file
+     * payload only for dual-nozzle jobs. */
+    int             extruder_cali_manual_mode{ 0 };
 };
 
 struct TaskQueryParams

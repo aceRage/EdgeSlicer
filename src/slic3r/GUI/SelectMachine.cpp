@@ -1408,7 +1408,7 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
     // and falls back to the preset's two nozzles when the printer has not reported any.
     BambuNozzleMapping::RequestInput in;
     in.calibration              = m_checkbox_list["flow_cali"] && m_checkbox_list["flow_cali"]->GetValue() ? 1 : 0;
-    in.extrude_cali_manual_mode = 1; // no PA-value switch in this fork: automatic, as the payload sends
+    in.extrude_cali_manual_mode = 0; // no PA-mode switch in this fork: Bambu Studio's default, as the payload sends
     if (gcode_result)
         for (auto f : gcode_result->filament_change_sequence)
             in.filament_change_sequence.push_back(int(f));
@@ -2571,8 +2571,9 @@ void SelectMachineDialog::on_send_print()
     else
         BOOST_LOG_TRIVIAL(info) << "build_nozzle_mapping_request: none for this job";
 
-    // No PA-value switch in this fork: automatic extruder calibration (1), per the payload docs.
-    m_print_job->extruder_cali_manual_mode = 1;
+    // No PA-mode switch in this fork: send Bambu Studio's default. Its switch "Nozzles and
+    // filaments of the same type share the same PA profile" defaults to ON, which sends 0.
+    m_print_job->extruder_cali_manual_mode = 0;
 
     m_print_job->sdcard_state = (int) obj_->get_sdcard_state();
     m_print_job->has_sdcard   = bambu_storage_usable_for_lan(m_print_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));

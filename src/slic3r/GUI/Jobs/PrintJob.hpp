@@ -93,8 +93,8 @@ public:
     int         auto_flow_cali{0};
     int         auto_offset_cali{0};
     /* Ultra (dual-nozzle): BBL::PrintParams::extruder_cali_manual_mode. This fork has no
-     * PA-value switch; the default 1 (automatic calibration) is always used. */
-    int         extruder_cali_manual_mode{1};
+     * PA-mode switch; Bambu Studio's default (its switch ON -> 0) is always used. */
+    int         extruder_cali_manual_mode{0};
 
     void set_print_config(std::string bed_type, bool bed_leveling, bool flow_cali, bool vabration_cali, bool record_timelapse, bool layer_inspect,
         int auto_bed_levelingt,
