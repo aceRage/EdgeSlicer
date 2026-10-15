@@ -752,6 +752,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "complete_print_exhaust_fan_speed",
         "activate_chamber_temp_control",
         "manual_filament_change",
+        "enable_power_loss_recovery",
         "disable_m73",
         "use_firmware_retraction",
         "enable_long_retraction_when_cut",

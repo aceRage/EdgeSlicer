@@ -23,6 +23,7 @@
 #include "AmsDrying.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
+#include "NozzleInfo.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
 #define USE_LOCAL_SOCKET_BIND 0
@@ -186,7 +187,7 @@ struct NozzleData
 
 struct Extder
 {
-    int id; // 0-right 1-left
+    int id{0}; // 0-right 1-left (initialised: the default extruder pushed when none is reported is the main one)
 
     int ext_has_filament{0};
     int buffer_has_filament{0};
@@ -209,7 +210,9 @@ struct Extder
 
     //current nozzle
     NozzleType     current_nozzle_type{NozzleType::ntUndefine};            // 0-hardened_steel 1-stainless_steel
-    float current_nozzle_diameter = {0.4f}; // 0-0.2mm  1-0.4mm 2-0.6 mm3-0.8mm
+    // 0 = unknown until the printer reports it (Orca #12814; NozzleInfo.hpp). Was 0.4, which made a
+    // printer that never reports its nozzle look like a 0.4 mm one.
+    float current_nozzle_diameter = {0.0f};
     // Ultra: reported nozzle flow variant (nvtStandard=Standard, nvtBigTraffic=High Flow),
     // used to auto-match the sliced nozzle_volume_type to the installed nozzle.
     NozzleVolumeType current_nozzle_flow{NozzleVolumeType::nvtStandard};
@@ -1317,6 +1320,25 @@ public:
     bool check_enable_np(const json& print) const;
     void parse_new_info(json print);
     bool is_nozzle_data_invalid();
+    // The diameter of the nozzle on extruder extder_id (0 = main/right, 1 = deputy/left); 0 when
+    // the printer has not reported it (Orca #12814).
+    float nozzle_diameter(int extder_id) const
+    {
+        for (const Extder& e : m_extder_data.extders)
+            if (e.id == extder_id)
+                return e.current_nozzle_diameter;
+        return 0.f;
+    }
+    // Orca #13330 (DevExtderSystem::NozzleDiameterMatchesOrUnknown): true when the nozzle on
+    // extder_id has target_diameter, or when the printer has not reported its diameter.
+    bool nozzle_diameter_matches_or_unknown(int extder_id, float target_diameter) const
+    {
+        return GUI::NozzleInfo::diameter_matches_or_unknown(nozzle_diameter(extder_id), target_diameter);
+    }
+    // Orca #13255: the diameter to look filament and calibration presets up by - the reported one,
+    // or the selected printer preset's first nozzle while the printer has not reported it (a "0.0"
+    // lookup finds nothing and empties the filament lists).
+    float nozzle_diameter_or_preset(int extder_id) const;
     int  get_flag_bits(std::string str, int start, int count = 1) const;
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
 

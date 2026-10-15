@@ -6409,7 +6409,7 @@ void MachineObject::parse_new_info(json print)
                 //current nozzle info
                 if (extder_obj.nozzle_id == 0xff) {
                     extder_obj.current_nozzle_type = NozzleType::ntUndefine;
-                    extder_obj.current_nozzle_diameter = 0.4f;
+                    extder_obj.current_nozzle_diameter = 0.0f; // no nozzle mounted: unknown (Orca #12814)
                 } else {
                     for (auto i = 0; i < m_nozzle_data.nozzles.size(); i++) {
                         if (m_nozzle_data.nozzles[i].id == extder_obj.nozzle_id) {
@@ -6460,6 +6460,16 @@ bool MachineObject::is_nozzle_data_invalid()
     }
 
     return false;
+}
+
+float MachineObject::nozzle_diameter_or_preset(int extder_id) const
+{
+    float fallback = 0.f;
+    if (const PresetBundle* bundle = Slic3r::GUI::wxGetApp().preset_bundle)
+        if (const auto* opt = bundle->printers.get_selected_preset().config.option<ConfigOptionFloats>("nozzle_diameter"))
+            if (!opt->values.empty())
+                fallback = float(opt->values.front());
+    return GUI::NozzleInfo::diameter_or(nozzle_diameter(extder_id), fallback);
 }
 
 bool MachineObject::has_nozzle_rack() const
