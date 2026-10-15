@@ -7229,8 +7229,9 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         load_current_preset();
 
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
-        // Deferred so it runs after this switch settles; sync_bambu_user_presets only reloads the UI
-        // when new/updated files were actually copied (copied==0 -> no-op), so it's self-limiting.
+        // Deferred so it runs after this switch settles. sync_bambu_user_presets only lists the Bambu
+        // Studio folder here (no reads) and returns when nothing changed since the last clean sync;
+        // otherwise the mirror runs on a worker thread and the UI reloads only when files were copied.
         if (m_type == Preset::TYPE_PRINTER)
             wxGetApp().CallAfter([]() { wxGetApp().sync_bambu_user_presets(false); });
 
