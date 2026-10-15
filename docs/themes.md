@@ -105,6 +105,9 @@ Everything except `name` is optional; whatever a theme leaves out keeps the stoc
   `titlebar_bg` and keep it low in contrast so the title and buttons stay readable. Windows and
   Linux only; macOS keeps its own title bar and takes `titlebar_bg` for the strip below it.
 - **home**: Home tab CSS variables (`resources/web/home/home.css`), over the ones the palette sets.
+  The page keeps accent-coloured text at 4.5:1: unless a pack names them, `--accent-strong` (the
+  fill under `accent_text`) and `--accent-text` (accent text on `accent_soft` and `panel_bg`) are
+  the pack's `accent` shaded towards black or white just far enough.
 
 ### Palette roles
 
