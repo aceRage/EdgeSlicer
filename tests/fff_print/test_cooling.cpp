@@ -898,3 +898,124 @@ TEST_CASE("Tool change G-code stays intact with the fan speed-up and the overhan
     }
     CHECK(changes > 10);
 }
+
+// ---- Package 6A-2 (tests/orca_port_plan_remaining.md): fan options ----
+
+namespace {
+
+// A 20 mm cube with the part fan always on at `fan_pct` (no layer-time interpolation), ";TEST_LAYER"
+// written at every layer change, and the first `close_fan` layers without cooling.
+DynamicPrintConfig steady_fan_config(int fan_pct, int close_fan, int full_fan_layer)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const std::string  fan    = std::to_string(fan_pct);
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"reduce_fan_stop_start_freq", "1"},
+        {"fan_min_speed", fan},
+        {"fan_max_speed", fan},
+        {"enable_overhang_bridge_fan", "0"},
+        {"close_fan_the_first_x_layers", std::to_string(close_fan)},
+        {"full_fan_speed_layer", std::to_string(full_fan_layer)},
+        {"slow_down_for_layer_cooling", "0"},
+        {"machine_start_gcode", ""},
+        {"layer_change_gcode", ";TEST_LAYER_Z=[layer_z]"},
+    });
+    return config;
+}
+
+// The part fan value (0-255, -1 before any fan command) in force for the first extrusion of each
+// printed layer, in print order (index 0 is the first layer).
+std::vector<int> first_fan_per_layer(const std::vector<FanAtExtrusion> &moves)
+{
+    std::vector<int> out;
+    int              last = -2;
+    for (const FanAtExtrusion &m : moves)
+        if (m.layer != last) {
+            out.push_back(m.fan);
+            last = m.layer;
+        }
+    return out;
+}
+
+} // namespace
+
+// Orca #13715: part_cooling_fan_min_pwm raises any non-zero part fan command to a floor; 0 stays 0.
+TEST_CASE("GCodeWriter::set_fan raises a non-zero speed to the PWM floor", "[Cooling][Orca13715]")
+{
+    // 255.5 * pct / 100, truncated.
+    CHECK(part_fan_value(GCodeWriter::set_fan(gcfMarlinFirmware, 5)) == 12);
+    CHECK(part_fan_value(GCodeWriter::set_fan(gcfMarlinFirmware, 5, 0)) == 12);
+    CHECK(part_fan_value(GCodeWriter::set_fan(gcfMarlinFirmware, 5, 20)) == 51);
+    CHECK(part_fan_value(GCodeWriter::set_fan(gcfMarlinFirmware, 20, 20)) == 51);
+    CHECK(part_fan_value(GCodeWriter::set_fan(gcfMarlinFirmware, 50, 20)) == 127);
+    CHECK(part_fan_value(GCodeWriter::set_fan(gcfMarlinFirmware, 0, 20)) == 0);
+    CHECK(part_fan_value(GCodeWriter::set_fan(gcfKlipper, 1, 100)) == 255);
+
+    GCodeWriter writer;
+    writer.config.gcode_flavor.value = gcfMarlinFirmware;
+    CHECK(part_fan_value(writer.set_fan(5)) == 12);
+    writer.config.part_cooling_fan_min_pwm.value = 20;
+    CHECK(part_fan_value(writer.set_fan(5)) == 51);
+    CHECK(part_fan_value(writer.set_fan(0)) == 0);
+}
+
+TEST_CASE("The PWM floor applies to every part fan command of a slice", "[Cooling][Orca13715]")
+{
+    DynamicPrintConfig config = steady_fan_config(5, 1, 0);
+    {
+        const std::string gcode = dumped("pwm_floor_off", slice({TestMesh::cube_20x20x20}, config));
+        int               low   = 0;
+        for (const auto &[layer, cmd] : fan_commands(gcode))
+            if (part_fan_value(cmd) == 12)
+                ++low;
+        CHECK(low > 0);
+    }
+    config.set_deserialize_strict({{"part_cooling_fan_min_pwm", 20}});
+    const std::string gcode    = dumped("pwm_floor_20", slice({TestMesh::cube_20x20x20}, config));
+    const auto        commands = fan_commands(gcode);
+    int               on       = 0;
+    for (const auto &[layer, cmd] : commands) {
+        const int v = part_fan_value(cmd);
+        INFO(cmd);
+        CHECK((v == 0 || v >= 51));
+        if (v > 0)
+            ++on;
+    }
+    CHECK(on > 0);
+    // The first layer is still printed with the fan off.
+    const std::vector<int> fans = first_fan_per_layer(fan_at_extrusions(gcode));
+    REQUIRE(fans.size() > 2);
+    CHECK(fans[0] <= 0);
+    CHECK(fans[1] == 51);
+}
+
+// Orca #13715: "No cooling for the first 0 layers" with a ramp used to be forced to 1, so the first
+// layer never had the fan on. Now the ramp starts on layer 0 at 1/M of the speed.
+TEST_CASE("With no cooling for the first 0 layers the fan ramp starts on the first layer", "[Cooling][Orca13715]")
+{
+    const std::string      gcode = dumped("ramp_n0_m4", slice({TestMesh::cube_20x20x20}, steady_fan_config(100, 0, 4)));
+    const std::vector<int> fans  = first_fan_per_layer(fan_at_extrusions(gcode));
+    REQUIRE(fans.size() > 5);
+    // factor (layer + 1) / 4 of 100 %: 25, 50, 75 %, then full speed.
+    CHECK(fans[0] == 63);
+    CHECK(fans[1] == 127);
+    CHECK(fans[2] == 191);
+    CHECK(fans[3] == 255);
+    CHECK(fans[5] == 255);
+}
+
+TEST_CASE("No cooling for the first layer keeps the ramp from layer 1", "[Cooling][Orca13715]")
+{
+    const std::string      gcode = dumped("ramp_n1_m4", slice({TestMesh::cube_20x20x20}, steady_fan_config(100, 1, 4)));
+    const std::vector<int> fans  = first_fan_per_layer(fan_at_extrusions(gcode));
+    REQUIRE(fans.size() > 4);
+    // factor (layer + 1 - 1) / 3: off, 33, 67 %, then full speed.
+    CHECK(fans[0] <= 0);
+    CHECK(fans[1] == 84);
+    CHECK(fans[2] == 171);
+    CHECK(fans[3] == 255);
+}

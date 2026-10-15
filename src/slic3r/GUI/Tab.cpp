@@ -5444,6 +5444,8 @@ void TabPrinter::build_fff()
         line.append_option(optgroup->get_option("fan_speedup_overhangs"));
         optgroup->append_line(line);
         optgroup->append_single_option_line("fan_kickstart");
+        // ORCA: minimum non-zero part cooling fan speed.
+        optgroup->append_single_option_line("part_cooling_fan_min_pwm");
 
         optgroup = page->new_optgroup(L("Extruder Clearance"), "param_extruder_clearence");
         optgroup->append_single_option_line("extruder_clearance_radius");
