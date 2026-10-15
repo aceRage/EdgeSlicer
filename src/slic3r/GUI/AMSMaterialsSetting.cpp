@@ -3,6 +3,7 @@
 #include "MsgDialog.hpp"
 #include "GUI_App.hpp"
 #include "libslic3r/Preset.hpp"
+#include "AmsFilamentOrder.hpp"
 #include "I18N.hpp"
 #include <boost/log/trivial.hpp>
 #include <wx/colordlg.h>
@@ -850,6 +851,43 @@ bool AMSMaterialsSetting::Show(bool show)
     return DPIDialog::Show(show);
 }
 
+// The vendor and type the sort groups a listed filament by.
+static AmsFilamentOrder::Entry _collect_filament_info(const std::string &shown_name, const Preset &filament)
+{
+    auto first_string = [&filament](const char *key) {
+        const auto *opt = dynamic_cast<const ConfigOptionStrings *>(filament.config.option(key));
+        return (opt && !opt->values.empty()) ? opt->values.front() : std::string();
+    };
+    return AmsFilamentOrder::Entry{shown_name, first_string("filament_vendor"), first_string("filament_type")};
+}
+
+// For each filament preset in use on the plate (extruder order), the alias of its base system
+// preset, found by walking the inherits chain; empty where the chain breaks. These are the entries
+// the AMS filament list promotes to the top (Orca #11293).
+static std::vector<std::string> _selected_filament_aliases(PresetBundle &bundle)
+{
+    std::vector<std::string> aliases;
+    for (const std::string &name : bundle.filament_presets) {
+        const Preset *match  = nullptr;
+        std::string   wanted = name;
+        // inherits chains are short; the bound only stops a malformed cycle
+        for (int depth = 0; depth < 16; ++depth) {
+            const Preset *found = bundle.filaments.find_preset(wanted, false, true);
+            if (!found) {
+                BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << " no filament preset named " << wanted;
+                match = nullptr;
+                break;
+            }
+            match = found;
+            if (match->inherits().empty())
+                break;
+            wanted = match->inherits();
+        }
+        aliases.push_back(match ? match->alias : std::string());
+    }
+    return aliases;
+}
+
 void AMSMaterialsSetting::Popup(wxString filament, wxString sn, wxString temp_min, wxString temp_max, wxString k, wxString n)
 {
     if (!obj) return;
@@ -863,9 +901,12 @@ void AMSMaterialsSetting::Popup(wxString filament, wxString sn, wxString temp_mi
     m_input_k_val->GetTextCtrl()->SetValue(k);
     m_input_n_val->GetTextCtrl()->SetValue(n);
 
-    int selection_idx = -1, idx = 0;
     wxArrayString filament_items;
     wxString bambu_filament_name;
+    // The entry to select once the list is sorted (its position is not known until then), and what
+    // the sort needs to know about every entry.
+    std::string                              hint_filament_name;
+    std::vector<AmsFilamentOrder::Entry>     order_entries;
 
     std::set<std::string> filament_id_set;
     PresetBundle *        preset_bundle = wxGetApp().preset_bundle;
@@ -895,8 +936,10 @@ void AMSMaterialsSetting::Popup(wxString filament, wxString sn, wxString temp_mi
                     } else {
                         filament_id_set.insert(filament_it->filament_id);
                         // name matched
+                        std::string shown_name; // what this preset is listed as; empty if it is not listed
                         if (filament_it->is_system) {
-                            filament_items.push_back(filament_it->alias);
+                            shown_name = filament_it->alias;
+                            order_entries.push_back(_collect_filament_info(shown_name, *filament_it));
                             FilamentInfos filament_infos;
                             filament_infos.filament_id             = filament_it->filament_id;
                             filament_infos.setting_id              = filament_it->setting_id;
@@ -909,7 +952,8 @@ void AMSMaterialsSetting::Popup(wxString filament, wxString sn, wxString temp_mi
                                 wxString    wx_user_preset_alias = wxString(user_preset_alias.c_str(), wxConvUTF8);
                                 user_preset_alias                = wx_user_preset_alias.ToStdString();
 
-                                filament_items.push_back(user_preset_alias);
+                                shown_name = user_preset_alias;
+                                order_entries.push_back(_collect_filament_info(shown_name, *filament_it));
                                 FilamentInfos filament_infos;
                                 filament_infos.filament_id            = filament_it->filament_id;
                                 filament_infos.setting_id             = filament_it->setting_id;
@@ -918,7 +962,7 @@ void AMSMaterialsSetting::Popup(wxString filament, wxString sn, wxString temp_mi
                         }
 
                         if (filament_it->filament_id == ams_filament_id) {
-                            selection_idx = idx;
+                            hint_filament_name = shown_name;
                             bambu_filament_name = filament_it->alias;
 
 
@@ -940,7 +984,6 @@ void AMSMaterialsSetting::Popup(wxString filament, wxString sn, wxString temp_mi
                                 }
                             }
                         }
-                        idx++;
                     }
                 }
             }
@@ -988,6 +1031,23 @@ void AMSMaterialsSetting::Popup(wxString filament, wxString sn, wxString temp_mi
 
         m_button_reset->Show();
         //m_button_confirm->Show();
+    }
+
+    // Sort the filaments: the ones in use on the plate first, then Bambu's usual order
+    if (preset_bundle)
+        AmsFilamentOrder::sort(order_entries, AmsFilamentOrder::selected_ranks(_selected_filament_aliases(*preset_bundle)));
+    for (const AmsFilamentOrder::Entry &entry : order_entries)
+        filament_items.push_back(entry.name);
+
+    // the position of the filament the slot holds, now that the list is in its final order
+    int selection_idx = -1;
+    if (!hint_filament_name.empty()) {
+        for (size_t i = 0; i < order_entries.size(); ++i) {
+            if (order_entries[i].name == hint_filament_name) {
+                selection_idx = int(i);
+                break;
+            }
+        }
     }
 
     m_comboBox_filament->Set(filament_items);
