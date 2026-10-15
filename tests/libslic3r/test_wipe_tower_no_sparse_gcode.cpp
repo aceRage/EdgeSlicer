@@ -719,14 +719,14 @@ TEST_CASE("Moving the object next to the tower after a far slice blocks the drop
         Model              model;
         add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
 
-        const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
-        check_drop_taken(far);
+        const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+        check_drop_taken(far_slice);
 
         model.objects.front()->instances.front()->set_offset(Vec3d(80., 140., 0.));
         model.objects.front()->ensure_on_bed();
-        const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
-        REQUIRE(near.has_final_purge);
-        check_no_drop_no_ram(near);
+        const FinalPurgeSlice near_slice = slice_final_purge_model(print, model, config);
+        REQUIRE(near_slice.has_final_purge);
+        check_no_drop_no_ram(near_slice);
     }
 }
 
@@ -740,16 +740,16 @@ TEST_CASE("Moving the tower next to the object after a far slice blocks the drop
         Model              model;
         add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
 
-        const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
-        check_drop_taken(far);
+        const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+        check_drop_taken(far_slice);
 
         config.set_deserialize_strict({
             { "wipe_tower_x", "100" },
             { "wipe_tower_y", "40" },
         });
-        const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
-        REQUIRE(near.has_final_purge);
-        check_no_drop_no_ram(near);
+        const FinalPurgeSlice near_slice = slice_final_purge_model(print, model, config);
+        REQUIRE(near_slice.has_final_purge);
+        check_no_drop_no_ram(near_slice);
     }
 }
 
@@ -763,14 +763,14 @@ TEST_CASE("Moving the object far from the tower after a near slice restores the 
         Model              model;
         add_final_purge_cube(model, print, 20., 20., Vec3d(80., 140., 0.), 2.0, 0.3);
 
-        const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
-        REQUIRE(near.has_final_purge);
-        check_no_drop_no_ram(near);
+        const FinalPurgeSlice near_slice = slice_final_purge_model(print, model, config);
+        REQUIRE(near_slice.has_final_purge);
+        check_no_drop_no_ram(near_slice);
 
         model.objects.front()->instances.front()->set_offset(Vec3d(40., 40., 0.));
         model.objects.front()->ensure_on_bed();
-        const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
-        check_drop_taken(far);
+        const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+        check_drop_taken(far_slice);
     }
 }
 
@@ -788,21 +788,21 @@ TEST_CASE("A one-layer tower with a blocked drop suppresses ramming", "[WipeTowe
     Model              model;
     add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 0.3, 0.3);
 
-    const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
-    REQUIRE(far.has_final_purge);
-    CHECK(far.final_purge_drop);
+    const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+    REQUIRE(far_slice.has_final_purge);
+    CHECK(far_slice.final_purge_drop);
 
     model.objects.front()->instances.front()->set_offset(Vec3d(80., 140., 0.));
     model.objects.front()->ensure_on_bed();
     print.apply(model, config);
     print.set_status_silent();
     print.process();
-    FinalPurgeSlice near;
-    near.has_final_purge  = print.wipe_tower_data().final_purge && !print.wipe_tower_data().final_purge->gcode.empty();
-    near.final_purge_drop = print.wipe_tower_data().final_purge_drop;
-    near.gcode            = Slic3r::Test::gcode(print);
-    REQUIRE(near.has_final_purge);
-    check_no_drop_no_ram(near);
+    FinalPurgeSlice near_slice;
+    near_slice.has_final_purge  = print.wipe_tower_data().final_purge && !print.wipe_tower_data().final_purge->gcode.empty();
+    near_slice.final_purge_drop = print.wipe_tower_data().final_purge_drop;
+    near_slice.gcode            = Slic3r::Test::gcode(print);
+    REQUIRE(near_slice.has_final_purge);
+    check_no_drop_no_ram(near_slice);
 }
 
 TEST_CASE("No-sparse Print purge Z matches the G-code drop Z", "[WipeTower][GCode][FinalPurge]")
@@ -862,8 +862,8 @@ TEST_CASE("Widening the toolhead radius after a far slice blocks the drop", "[Wi
     Model model;
     add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
 
-    const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
-    check_drop_taken(far);
+    const FinalPurgeSlice far_slice = slice_final_purge_model(print, model, config);
+    check_drop_taken(far_slice);
 
     config.set_deserialize_strict({ { "extruder_clearance_radius", 200. } });
     const FinalPurgeSlice blocked = slice_final_purge_model(print, model, config);
