@@ -5385,6 +5385,7 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("gcode_flavor");
         optgroup->append_single_option_line("pellet_modded_printer", "pellet-flow-coefficient");
         optgroup->append_single_option_line("bbl_use_printhost");
+        optgroup->append_single_option_line("enable_power_loss_recovery"); // Orca #11582
         optgroup->append_single_option_line("disable_m73");
         option = optgroup->get_option("thumbnails");
         option.opt.full_width = true;
@@ -6446,6 +6447,10 @@ void TabPrinter::toggle_options()
         // SoftFever: hide non-BBL settings
         for (auto el : {"use_firmware_retraction", "use_relative_e_distances", "support_multi_bed_types", "pellet_modded_printer", "bed_mesh_max", "bed_mesh_min", "bed_mesh_probe_distance", "adaptive_bed_mesh_margin", "thumbnails"})
           toggle_line(el, !is_BBL_printer);
+
+        // Orca #11582: power loss recovery G-code exists for Bambu Lab printers and Marlin 2 only.
+        const auto *flavor = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+        toggle_line("enable_power_loss_recovery", is_BBL_printer || (flavor && flavor->value == gcfMarlinFirmware));
 
         // "Unload filaments after print" is a Snapmaker tool-changer preference: the flag goes
         // to the printer with the print start, and only that firmware's PRINT_END acts on it.

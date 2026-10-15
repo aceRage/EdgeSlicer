@@ -493,6 +493,14 @@ static t_config_enum_values s_keys_map_NozzleVolumeType {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NozzleVolumeType)
 
+// Orca #11616
+static t_config_enum_values s_keys_map_PowerLossRecoveryMode {
+    { "printer_configuration", int(PowerLossRecoveryMode::PrinterConfiguration) },
+    { "enable",                int(PowerLossRecoveryMode::Enable) },
+    { "disable",               int(PowerLossRecoveryMode::Disable) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PowerLossRecoveryMode)
+
 // Ultra: dual-nozzle enums (BBS-faithful label maps; fmmDefault/etMax* are sentinels, not serialized).
 static t_config_enum_values s_keys_map_ExtruderType {
     { "Direct Drive", int(ExtruderType::etDirectDrive) },
@@ -3674,6 +3682,21 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable this to enable the camera on printer to check the quality of first layer.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // Orca #11582 / #11616. Bambu Lab printers turn it on in fdm_machine_common, which is what
+    // they always did (M1003 S1 at the second layer, S0 at the end).
+    def = this->add("enable_power_loss_recovery", coEnum);
+    def->label = L("Power Loss Recovery");
+    def->tooltip = L("Choose how to control power loss recovery. When set to Printer configuration, the slicer will not emit power loss recovery G-code and will leave the printer's configuration unchanged. Applicable to Bambu Lab or Marlin 2 firmware based printers.");
+    def->mode = comAdvanced;
+    def->enum_keys_map = &ConfigOptionEnum<PowerLossRecoveryMode>::get_enum_values();
+    def->enum_values.push_back("printer_configuration");
+    def->enum_values.push_back("enable");
+    def->enum_values.push_back("disable");
+    def->enum_labels.push_back(L("Printer configuration"));
+    def->enum_labels.push_back(L("Enable"));
+    def->enum_labels.push_back(L("Disable"));
+    def->set_default_value(new ConfigOptionEnum<PowerLossRecoveryMode>(PowerLossRecoveryMode::PrinterConfiguration));
 
 
     //BBS
@@ -9604,6 +9627,17 @@ size_t printer_extruder_variant_value_index(const ConfigBase &config, const std:
     return sources[extruder_idx];
 }
 
+bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config)
+{
+    if (config.has("enable_power_loss_recovery"))
+        return false;
+    const auto *model = config.option<ConfigOptionString>("printer_model");
+    if (model == nullptr || !boost::starts_with(model->value, "Bambu Lab"))
+        return false;
+    config.set_key_value("enable_power_loss_recovery", new ConfigOptionEnum<PowerLossRecoveryMode>(PowerLossRecoveryMode::Enable));
+    return true;
+}
+
 void resolve_printer_extruder_variants(DynamicPrintConfig &config)
 {
     const std::vector<size_t> sources = printer_extruder_variant_sources(config);
@@ -9856,6 +9890,13 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         } else {
             opt_key = "wall_sequence";
         }
+    }
+    else if (opt_key == "enable_power_loss_recovery") {
+        // Orca #11616: the first form of the option (#11582) was a bool.
+        if (value == "1" || boost::iequals(value, "true"))
+            value = "enable";
+        else if (value == "0" || boost::iequals(value, "false"))
+            value = "disable";
     }
     else if(opt_key == "ensure_vertical_shell_thickness") {
         if(value == "1") {

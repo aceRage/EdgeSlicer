@@ -3343,6 +3343,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 add_error("Error load config from json:"+reason);
                 return;
             }
+            // Edge (Orca #11582): a Bambu Lab project from before the option keeps its M1003.
+            if (upgrade_missing_power_loss_recovery(config))
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": project has no enable_power_loss_recovery; Bambu Lab printer, set to enable";
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", load project config file successfully from %1%\n") %dest_file;
         }
     }
@@ -3411,6 +3414,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //skip this file
                 return;
             }
+
+            // Edge (Orca #11582): the same for an embedded printer preset from before the option.
+            if (type == Preset::TYPE_PRINTER)
+                upgrade_missing_power_loss_recovery(config);
 
             Preset *preset = new Preset(type, preset_name, false);
             preset->file = dest_file;

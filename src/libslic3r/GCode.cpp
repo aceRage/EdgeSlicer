@@ -4034,13 +4034,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     m_printed_objects.emplace_back(&object);
                 this->process_layers(print, tool_ordering, collect_layers_to_print(object),
                                      *print_object_instance_sequential_active - object.instances().data(), file, prime_extruder);
-                // BBS: close powerlost recovery
-                {
-                    if (is_bbl_printers && m_second_layer_things_done) {
-                        file.write("; close powerlost recovery\n");
-                        file.write("M1003 S0\n");
-                    }
-                }
+                // Orca #11582 / #11616: turn power loss recovery off again if this print turned it on
+                // (Bambu Lab printers do by default).
+                if (m_second_layer_things_done && print.config().enable_power_loss_recovery.value == PowerLossRecoveryMode::Enable)
+                    file.write(m_writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable));
                 ++finished_objects;
                 // Flag indicating whether the nozzle temperature changes from 1st to 2nd layer were performed.
                 // Reset it when starting another object from 1st layer.
@@ -4102,13 +4099,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
             // and export G-code into file.
             this->process_layers(print, tool_ordering, print_object_instances_ordering, layers_to_print, file);
-            // BBS: close powerlost recovery
-            {
-                if (is_bbl_printers && m_second_layer_things_done) {
-                    file.write("; close powerlost recovery\n");
-                    file.write("M1003 S0\n");
-                }
-            }
+            // Orca #11582 / #11616: turn power loss recovery off again if this print turned it on.
+            if (m_second_layer_things_done && print.config().enable_power_loss_recovery.value == PowerLossRecoveryMode::Enable)
+                file.write(m_writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable));
             if (m_wipe_tower)
                 // Purge the extruder, pull out the active filament.
                 file.write(m_wipe_tower->finalize(*this));
@@ -6699,12 +6692,10 @@ LayerResult GCode::process_layer(const Print& print,
     }
 
     if (!first_layer && !m_second_layer_things_done) {
+        // Orca #11582 / #11616: set power loss recovery as the printer profile asks (Bambu Lab
+        // profiles enable it, as Bambu Studio always did; Marlin 2 gets M413).
+        gcode += m_writer.enable_power_loss_recovery(print.config().enable_power_loss_recovery.value);
         if (print.is_BBL_printer()) {
-            // BBS: open powerlost recovery
-            {
-                gcode += "; open powerlost recovery\n";
-                gcode += "M1003 S1\n";
-            }
             // BBS: open first layer inspection at second layer
             if (print.config().scan_first_layer.value) {
                 // BBS: retract first to avoid droping when scan model
