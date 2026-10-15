@@ -16,14 +16,10 @@
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
-#include <boost/filesystem/file_status.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
-
-#ifndef _WIN32
-#include <unistd.h>
-#endif
 
 #include <algorithm>
 #include <array>
@@ -32,6 +28,18 @@
 #include <fstream>
 #include <functional>
 #include <thread>
+
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace Slic3r;
 
@@ -2002,58 +2010,147 @@ SCENARIO("thumbnail relationships are declared only for thumbnails that were wri
     }
 }
 
-// has_restore_data() runs from the queued EVT_RESTORE_PROJECT handler, whose try starts after
-// the call, so a filesystem_error from probing the stored backup path aborts the application.
-// The realistic trigger is an absolute path from another user's config whose home is not
-// searchable, so the parent, not the backup directory, is what blocks.
+namespace {
+
+struct TempBackupDir
+{
+    boost::filesystem::path path;
+    TempBackupDir(const char *tag)
+        : path(boost::filesystem::temp_directory_path() / boost::filesystem::unique_path(std::string(tag) + "_%%%%%%%%"))
+    {
+        boost::filesystem::create_directories(path);
+    }
+    ~TempBackupDir()
+    {
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(path, ec);
+    }
+};
+
+} // namespace
+
+// Every "return false" that leaves origin empty is an instruction to the caller to
+// remove_all() the backup directory (Plater.cpp's EVT_RESTORE_PROJECT handler).
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be interpreted", "[3mf]")
+{
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+
+    SECTION("an empty lock.txt holds no pid")
+    {
+        std::ofstream lock((backup / "lock.txt").string());
+        lock.close();
+        REQUIRE(boost::filesystem::file_size(backup / "lock.txt") == 0);
+
+        std::string path = backup.string(), origin;
+        bool        has  = true;
+        REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+        CHECK_FALSE(has);
+        CHECK(origin == "<lock>");
+    }
+
+    SECTION("lock.txt holds something that is not a pid")
+    {
+        std::ofstream((backup / "lock.txt").string()) << "not-a-pid";
+
+        std::string path = backup.string(), origin;
+        bool        has  = true;
+        REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+        CHECK_FALSE(has);
+        CHECK(origin == "<lock>");
+    }
+}
+
 #ifndef _WIN32
-TEST_CASE("has_restore_data reports no restore data for a path it cannot probe", "[3mf]")
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be read", "[3mf]")
 {
     if (::geteuid() == 0) {
-        SUCCEED("root ignores the directory permissions this test depends on");
+        SUCCEED("root ignores the file permissions this test depends on");
         return;
     }
 
-    const boost::filesystem::path outer = boost::filesystem::temp_directory_path() /
-        boost::filesystem::unique_path("edge_restore_%%%%%%%%");
-    const boost::filesystem::path backup = outer / "backup";
-    REQUIRE(boost::filesystem::create_directories(backup));
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
     std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
-    std::ofstream((backup / "origin.txt").string()) << "project.3mf";
+    std::ofstream((backup / "lock.txt").string()) << "1";
+    boost::system::error_code mode_ec;
+    boost::filesystem::permissions(backup / "lock.txt", boost::filesystem::no_perms, mode_ec);
 
-    // Control: while the path is readable the session is found, so the false below really is
-    // the probe failing and not a mis-built fixture.
-    std::string readable = backup.string(), origin;
-    REQUIRE(has_restore_data(readable, origin));
-    REQUIRE(readable == (backup / ".3mf").string());
-    REQUIRE(origin == "project.3mf");
-
-    // Puts the permissions back before the temp directory is removed, and does so even if an
-    // assertion below throws.
-    struct Searchable
-    {
-        boost::filesystem::path dir;
-        ~Searchable()
-        {
-            boost::system::error_code ec;
-            boost::filesystem::permissions(dir, boost::filesystem::owner_all, ec);
-            boost::filesystem::remove_all(dir, ec);
-        }
-    } restore{outer};
-
-    // Non-throwing here too: a filesystem that refuses the mode change has to reach the skip
-    // below rather than fail the test. The probe then still succeeds, which is that same case.
-    boost::system::error_code probe_ec;
-    boost::filesystem::permissions(outer, boost::filesystem::no_perms, probe_ec);
-    if (boost::filesystem::exists(backup / ".3mf", probe_ec) || !probe_ec) {
-        SUCCEED("the backup path could not be made unprobeable here");
+    boost::nowide::ifstream probe((backup / "lock.txt").string());
+    if (probe.good()) {
+        SUCCEED("this filesystem does not enforce file read permissions");
         return;
     }
 
-    std::string unprobeable = backup.string(), origin2;
-    bool        has         = true;
-    REQUIRE_NOTHROW(has = has_restore_data(unprobeable, origin2));
+    std::string path = backup.string(), origin;
+    bool        has  = true;
+    REQUIRE_NOTHROW(has = has_restore_data(path, origin));
     CHECK_FALSE(has);
-    CHECK(unprobeable == backup.string()); // not rewritten to the .3mf it could not confirm
+    CHECK(origin == "<lock>");
+    boost::filesystem::permissions(backup / "lock.txt", boost::filesystem::owner_all, mode_ec);
 }
-#endif // _WIN32
+#endif
+
+#ifdef _WIN32
+// Windows has no mode bits to take away; a lock.txt another process holds open with no sharing
+// cannot be read either, which is the same "state unknown" case.
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be read (Windows)", "[3mf]")
+{
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+    std::ofstream((backup / "lock.txt").string()) << "1";
+
+    struct ExclusiveHandle
+    {
+        HANDLE h;
+        explicit ExclusiveHandle(const boost::filesystem::path &p)
+            : h(::CreateFileW(p.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+        ~ExclusiveHandle() { if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h); }
+    } exclusive(backup / "lock.txt");
+    REQUIRE(exclusive.h != INVALID_HANDLE_VALUE);
+
+    boost::nowide::ifstream probe((backup / "lock.txt").string());
+    REQUIRE_FALSE(probe.good());
+    probe.close();
+
+    std::string path = backup.string(), origin;
+    bool        has  = true;
+    REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+    CHECK_FALSE(has);
+    CHECK(origin == "<lock>");
+}
+#endif
+TEST_CASE("has_restore_data leaves a spent backup collectable", "[3mf]")
+{
+    TempBackupDir           outer("orca_spent");
+    boost::filesystem::path backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+
+    SECTION("no lock and no project")
+    {
+        std::string path = backup.string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
+    }
+
+    SECTION("a lock from a process that is not us, and no project")
+    {
+        std::ofstream((backup / "lock.txt").string()) << "1";
+
+        std::string path = backup.string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
+    }
+
+    SECTION("the directory does not exist at all")
+    {
+        std::string path = (outer.path / "gone").string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
+    }
+}
