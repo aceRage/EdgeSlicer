@@ -23,13 +23,13 @@ namespace Slic3r { namespace GUI { namespace FavoriteFilamentsUI {
 
 namespace {
 
-std::map<int, std::function<void()>> &subscribers()
+std::map<int, std::function<void()>> &fav_subscribers()
 {
     static std::map<int, std::function<void()>> subs;
     return subs;
 }
 
-std::set<std::string> read_config()
+std::set<std::string> fav_read_config()
 {
     std::set<std::string> keys;
     AppConfig *config = wxGetApp().app_config;
@@ -44,7 +44,7 @@ std::set<std::string> read_config()
     return keys;
 }
 
-void write_config(const std::set<std::string> &keys)
+void fav_write_config(const std::set<std::string> &keys)
 {
     AppConfig *config = wxGetApp().app_config;
     if (!config)
@@ -55,7 +55,7 @@ void write_config(const std::set<std::string> &keys)
 
 // Once per session, after the system presets are loaded: a favourite whose system preset a vendor
 // renamed (renamed_from in the new profile) moves to the new name.
-void migrate_once(std::set<std::string> &keys)
+void fav_migrate_once(std::set<std::string> &keys)
 {
     static bool done = false;
     if (done || keys.empty())
@@ -75,17 +75,17 @@ void migrate_once(std::set<std::string> &keys)
             renamed.emplace_back(key, old_name);
     }
     if (FavoriteFilaments::migrate(keys, current, FavoriteFilaments::rename_map(renamed)))
-        write_config(keys);
+        fav_write_config(keys);
 }
 
-void notify()
+void fav_notify()
 {
     // After the event that changed the set has finished: a picker may rebuild its own list.
     wxGetApp().CallAfter([]() {
         // Copy: a subscriber may unsubscribe (a dialog closing) while we iterate.
-        const auto subs = subscribers();
+        const auto subs = fav_subscribers();
         for (const auto &[id, fn] : subs)
-            if (subscribers().count(id) > 0 && fn)
+            if (fav_subscribers().count(id) > 0 && fn)
                 fn();
     });
 }
@@ -99,8 +99,8 @@ std::string key_for(const Preset &preset)
 
 std::set<std::string> load()
 {
-    std::set<std::string> keys = read_config();
-    migrate_once(keys);
+    std::set<std::string> keys = fav_read_config();
+    fav_migrate_once(keys);
     return keys;
 }
 
@@ -114,8 +114,8 @@ bool toggle(const std::string &key)
         return false;
     std::set<std::string> keys  = load();
     const bool            state = FavoriteFilaments::toggle(keys, key);
-    write_config(keys);
-    notify();
+    fav_write_config(keys);
+    fav_notify();
     return state;
 }
 
@@ -123,11 +123,11 @@ int subscribe(std::function<void()> on_changed)
 {
     static int next_id = 1;
     const int  id      = next_id++;
-    subscribers().emplace(id, std::move(on_changed));
+    fav_subscribers().emplace(id, std::move(on_changed));
     return id;
 }
 
-void unsubscribe(int id) { subscribers().erase(id); }
+void unsubscribe(int id) { fav_subscribers().erase(id); }
 
 int append_toggle_item(wxMenu &menu, const std::string &key)
 {
@@ -281,7 +281,7 @@ void FavoriteComboList::on_action(int row)
     if (entry < 0)
         return;
     toggle(m_entries[entry].key);
-    update_stars(); // at once; the other pickers hear about it through notify()
+    update_stars(); // at once; the other pickers hear about it through fav_notify()
 }
 
 int FavoriteComboList::entry_of_row(int row) const
