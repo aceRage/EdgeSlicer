@@ -1346,6 +1346,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                bridge_no_support))
     ((ConfigOptionFloat,               elefant_foot_compensation))
     ((ConfigOptionInt,                 elefant_foot_compensation_layers))
+    ((ConfigOptionPercent,             elefant_foot_layers_density))
     ((ConfigOptionFloat,               max_bridge_length))
     ((ConfigOptionFloatOrPercent,      line_width))
     // Force the generation of solid shells between adjacent materials/volumes.
@@ -1526,6 +1527,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              initial_layer_acceleration))
     ((ConfigOptionFloatsOrPercents,     bridge_acceleration))
     ((ConfigOptionFloats,              travel_acceleration))
+    // Snapmaker #937 / #980: first-layer travel override; 0 keeps the initial layer acceleration.
+    ((ConfigOptionFloatOrPercent,      first_layer_travel_acceleration))
     ((ConfigOptionFloatsOrPercents,     sparse_infill_acceleration))
     ((ConfigOptionFloatsOrPercents,     internal_solid_infill_acceleration))
 
@@ -1536,6 +1539,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              top_surface_jerk))
     ((ConfigOptionFloats,              initial_layer_jerk))
     ((ConfigOptionFloats,              travel_jerk))
+    ((ConfigOptionFloatOrPercent,      first_layer_travel_jerk))
     ((ConfigOptionBool,               precise_z_height))
     ((ConfigOptionFloats,              default_junction_deviation))
         
@@ -1814,6 +1818,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               fan_kickstart))
     ((ConfigOptionBool,                fan_speedup_overhangs))
     ((ConfigOptionFloat,               fan_speedup_time))
+    // ORCA: minimum PWM (as a percent 0-100) emitted when the part-cooling fan is asked for a non-zero speed.
+    // Used to overcome the PWM start-up threshold on fans that cannot spool below a certain duty cycle.
+    // A value of 0 (the default) leaves behaviour unchanged. A fan command of 0 (off) is always honoured.
+    ((ConfigOptionInt,                 part_cooling_fan_min_pwm))
     ((ConfigOptionFloats,              filament_diameter))
     ((ConfigOptionFloats,              filament_density))
     ((ConfigOptionStrings,             filament_type))
@@ -2066,6 +2074,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionStrings,            filament_multi_colors))
     ((ConfigOptionInts,               filament_colour_mode))
     ((ConfigOptionBools,              activate_air_filtration))
+    ((ConfigOptionBools,              activate_air_filtration_during_print))
+    ((ConfigOptionBools,              activate_air_filtration_on_completion))
     ((ConfigOptionInts,               during_print_exhaust_fan_speed))
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
@@ -2076,6 +2086,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloats,              initial_layer_infill_speed))
     ((ConfigOptionInts,               nozzle_temperature_initial_layer))
     ((ConfigOptionInts,               full_fan_speed_layer))
+    // ORCA: explicit override for the part cooling fan speed on the first printed layer.
+    ((ConfigOptionInts,               initial_layer_fan_speed))
     ((ConfigOptionFloats,               fan_max_speed))
     ((ConfigOptionFloats,             max_layer_height))
     ((ConfigOptionFloats,               fan_min_speed))
@@ -2167,6 +2179,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_rib_width))
     ((ConfigOptionBool,               wipe_tower_fillet_wall))
     ((ConfigOptionBool,               wipe_tower_wall_gap))
+    ((ConfigOptionBool,               wipe_tower_stagger_toolchange_start))
     // Tower interface options (GCode/WipeTowerInterface.hpp), each off by default.
     ((ConfigOptionBool,               wipe_tower_interface_temp))
     ((ConfigOptionBool,               wipe_tower_interface_run_in))
