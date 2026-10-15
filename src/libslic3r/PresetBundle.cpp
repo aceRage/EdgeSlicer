@@ -855,6 +855,19 @@ std::vector<std::string> PresetBundle::project_presets_lost_on_printer(const std
     return lost;
 }
 
+// Edge: cheap check (no copies, unlike get_current_project_embedded_presets) for whether a
+// project brought presets of its own; Plater::priv::reset() must reload the tabs when it did.
+bool PresetBundle::has_project_embedded_presets() const
+{
+    for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints),
+                                             static_cast<const PresetCollection *>(&this->filaments),
+                                             static_cast<const PresetCollection *>(&this->printers) })
+        for (const Preset &preset : *presets)
+            if (preset.is_project_embedded)
+                return true;
+    return false;
+}
+
 //BBS: reset project embedded presets
 void PresetBundle::reset_project_embedded_presets()
 {
