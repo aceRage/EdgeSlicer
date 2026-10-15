@@ -8,6 +8,7 @@
 #include "WebPush.hpp"
 #include "AppPush.hpp"
 #include "HubEventDedupe.hpp"
+#include "HubClients.hpp"
 #include "HubPushOwner.hpp"
 #include "GcodeArchive.hpp" // normalize_printer: the Reprint list's printer names
 #include "SnapmakerLan.hpp" // the LAN cards a "connect" record may belong to
@@ -294,14 +295,15 @@ static bool ct_equal(const std::string& a, const std::string& b)
 
 // The phone link's token, straight from the OS CSPRNG (std::random_device; a seeded mt19937 has
 // only as much entropy as its seed). Rejection sampling keeps the 32 symbols equally likely.
-static std::string random_token()
+// A client token (HubClients) is the same alphabet, longer: 26 symbols, 130 bits.
+static std::string random_token(size_t length = 14)
 {
     static const char alphabet[] = "abcdefghijkmnpqrstuvwxyz23456789"; // no 0/o/1/l look-alikes
     const unsigned    n     = (unsigned) sizeof(alphabet) - 1;
     const unsigned    limit = 256u - (256u % n); // 256 % 32 == 0 today; correct if the alphabet changes
     std::random_device rd;
     std::string        t;
-    while (t.size() < 14) {
+    while (t.size() < length) {
         const unsigned v = rd() & 0xffu;
         if (v >= limit) continue;
         t += alphabet[v % n];
@@ -970,6 +972,10 @@ struct Request
     // Serve's own marks on what it forwards (X-Forwarded-For / -Host / -Proto) and on a Funnel
     // request (Tailscale-Funnel-Request). Only believed from loopback, like ts_login.
     bool        forwarded { false }, funnel { false };
+    std::string fwd_for; // X-Forwarded-For as Serve sent it: whose wrong tokens a tagged device's are (rate limit)
+    // Authorization: Bearer <client token> - how a client that is not a browser page sends its
+    // token, on the /h/... routes, instead of putting it in the path (HubClients.hpp).
+    std::string bearer;
     size_t      content_length { 0 };
 };
 
@@ -1011,8 +1017,14 @@ static bool read_request(tcp::socket& client, Request& r)
             else if (key == "content-type") r.content_type = lower(val);
             else if (key == "tailscale-user-login") r.ts_login = val;
             else if (key == "x-forwarded-proto") { r.fwd_proto = lower(val); r.forwarded = true; }
-            else if (key == "x-forwarded-for" || key == "x-forwarded-host") r.forwarded = true;
+            else if (key == "x-forwarded-for") { r.forwarded = true; r.fwd_for = val.substr(0, 64); }
+            else if (key == "x-forwarded-host") r.forwarded = true;
             else if (key == "tailscale-funnel-request") r.funnel = true;
+            else if (key == "authorization" && lower(val.substr(0, 7)) == "bearer ") {
+                const std::string t = val.substr(7);
+                const size_t      e = t.find_last_not_of(' ');
+                r.bearer            = e == std::string::npos ? "" : t.substr(0, e + 1);
+            }
         }
         pos = nl + 2;
     }
@@ -1028,8 +1040,33 @@ static void write_all(tcp::socket& s, const std::string& data)
     asio::write(s, asio::buffer(data), ec);
 }
 
-static void respond(tcp::socket& s, int status, const std::string& type, const std::string& body, const std::string& extra_headers = "")
+// Set by serve() for the length of one request made with a client token (HubClients) rather than
+// the phone link's: every copy of the phone link's token in a body the hub builds - the links in
+// /state, /pair and /summary, the thumbnail URLs, the manifest's id - is replaced by the client's
+// own, so a scoped client is only ever handed links that carry its own permissions. Instance
+// answers are tunnelled byte for byte and never contain it (instances do not know the token).
+struct LinkTokenSwap
 {
+    std::string from, to;
+};
+static thread_local LinkTokenSwap t_link_swap;
+
+static std::string swap_link_token(const std::string& body)
+{
+    const LinkTokenSwap& sw = t_link_swap;
+    if (sw.from.empty() || sw.to.empty() || body.find(sw.from) == std::string::npos) return body;
+    std::string out;
+    out.reserve(body.size() + 32);
+    size_t pos = 0;
+    for (size_t hit; (hit = body.find(sw.from, pos)) != std::string::npos; pos = hit + sw.from.size())
+        out.append(body, pos, hit - pos).append(sw.to);
+    out.append(body, pos, std::string::npos);
+    return out;
+}
+
+static void respond(tcp::socket& s, int status, const std::string& type, const std::string& raw_body, const std::string& extra_headers = "")
+{
+    const std::string body = type.compare(0, 6, "image/") == 0 ? raw_body : swap_link_token(raw_body);
     std::ostringstream o;
     // nosniff so a body the hub relays (an uploaded name, a printer's answer) can never be
     // re-interpreted as script; no-referrer because the phone's token is in the path and the page
@@ -1136,6 +1173,23 @@ static std::string force_close(const std::string& head)
     }
     if (upgrade) return head;
     return out + "Connection: close\r\n\r\n";
+}
+
+// A head without its Authorization line: a client token presented on /h/... is the hub's
+// business only, and never travels on to a slicer instance.
+static std::string strip_authorization(const std::string& head)
+{
+    std::string out;
+    size_t      pos = 0;
+    while (pos < head.size()) {
+        size_t nl = head.find("\r\n", pos);
+        if (nl == std::string::npos) nl = head.size();
+        const std::string line = head.substr(pos, nl - pos);
+        pos = nl + 2;
+        if (lower(line.substr(0, std::min<size_t>(14, line.size()))) == "authorization:") continue;
+        out += line + "\r\n";
+    }
+    return out;
 }
 
 static void pump(tcp::socket& from, tcp::socket& to)
@@ -1414,6 +1468,21 @@ std::string Testing::hubid_from_public_key(const std::vector<unsigned char>& pub
     for (int i = 0; i < 8; ++i) { // 8 bytes = 16 hex characters
         out.push_back(HEX[digest[i] >> 4]);
         out.push_back(HEX[digest[i] & 0x0f]);
+    }
+    return out;
+}
+
+// What settings.json keeps of a client token (HubClients::Client::hash): its full SHA-256, hex.
+std::string Testing::client_token_hash(const std::string& token)
+{
+    if (token.empty()) return std::string();
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256((const unsigned char*) token.data(), token.size(), digest);
+    static const char* HEX = "0123456789abcdef";
+    std::string        out;
+    for (unsigned char d : digest) {
+        out.push_back(HEX[d >> 4]);
+        out.push_back(HEX[d & 0x0f]);
     }
     return out;
 }
@@ -2906,6 +2975,27 @@ private:
     bool  login_allowed(const std::string& login);
     void  note_refused_no_login(bool funnel);          // counts and logs (at most once a minute) a Serve request with no login
     json  remote_json_locked() const;                  // m_mutex held
+
+    // ---- per-client tokens (HubClients.hpp) ----
+    struct Auth
+    {
+        bool        ok { false };
+        bool        legacy { false }; // the phone link (m_token): every scope
+        std::string id, name, token;  // the client (id "phone-link" for the legacy one) and the token it presented
+        unsigned    scopes { HubClients::SCOPE_NONE };
+        bool        tagged_ok { false };
+    };
+    Auth  resolve_token(const std::string& token);     // constant-time against the link, hashed against the clients
+    json  clients_json_locked() const;                 // the hub page's list (no hash, no token); m_mutex held
+    json  create_client(const std::string& name, unsigned scopes, bool tagged_ok, std::string& token_out);
+    bool  revoke_client(const std::string& id);
+    void  touch_client(const Auth& a);                 // last_used_at, and the first-use log line of this run
+    // Rate limits. `source` is whoever made the request (a LAN address, a tailnet login, a tagged
+    // device's tailnet address). False = refuse with 429.
+    bool  auth_source_blocked(const std::string& source);
+    void  note_auth_failure(const std::string& source);
+    bool  client_rate_ok(const Auth& a, unsigned needed);
+    void  note_scope_denied(const Auth& a, unsigned needed, const std::string& method, const std::string& rest);
     void  remember_old_token_locked(const std::string& token); // m_mutex held
     static Instance probe_instance(Instance inst);
 
@@ -2947,6 +3037,13 @@ private:
     long long                      m_refused_no_login { 0 };      // Serve requests with no tailnet login refused this run
     long long                      m_refused_no_login_at { 0 };   // ... the latest one (unix seconds)
     long long                      m_refused_no_login_logged { 0 }; // when the log last said so
+    std::vector<HubClients::Client> m_clients;                   // per-client tokens, hashed (persisted)
+    std::set<std::string>          m_clients_seen;               // clients that have connected this run (log once)
+    long long                      m_clients_persisted_at { 0 }; // when last_used_at last reached settings.json
+    std::map<std::string, HubClients::Bucket>     m_rate_all, m_rate_print; // per client id
+    std::map<std::string, HubClients::FailWindow> m_auth_fail;              // per source
+    long long                      m_scope_denied_logged { 0 };
+    long long                      m_rate_limited_logged { 0 };
     int                            m_go2rtc_port { 0 };
     // What register_streams() has put into this go2rtc (name -> source). Only its single worker
     // touches it; go2rtc lives exactly as long as this server, so it never goes stale.
@@ -3058,6 +3155,7 @@ json HubServer::info_json()
     j["version"]     = std::string(SLIC3R_VERSION);
     j["exe"]         = own_exe_identity();
     j["remote"]      = remote_json_locked();
+    j["clients"]     = clients_json_locked(); // per-client tokens: names, scopes, last use (never a token or hash)
     j["ips"]         = json::array();
     j["url"]         = "";
     if (m_phone) {
@@ -3141,6 +3239,10 @@ void HubServer::write_hub_json()
         st["old_tokens"] = m_old_tokens;
         st["hub_instance"] = m_hub_instance; // written once, then carried forward unchanged
         st["token_version"] = m_token_version;
+        // Per-client tokens, as hashes: a copy of this file hands out no working client token.
+        json cl = json::array();
+        for (const HubClients::Client& c : m_clients) cl.push_back(HubClients::to_settings(c));
+        st["clients"] = cl;
         // The relay identity, private half included. settings.json is this hub's own file on its
         // own data dir, and it already holds the phone token and the VAPID private key for exactly
         // the same reason: losing it would silently break every client that ever trusted this hub.
@@ -5137,6 +5239,187 @@ void HubServer::note_refused_no_login(bool funnel)
                                << " refused so far this run)";
 }
 
+// ---- per-client tokens (HubClients.hpp) -------------------------------------------------------
+// Limits. Generous for a phone page that polls several routes and shows a camera wall, tight for
+// what writes a file to disk or starts a print; wrong tokens from one place are cut off quickly.
+static constexpr double    RATE_ALL_BURST     = 300;  // requests at once, per client
+static constexpr double    RATE_ALL_PER_S     = 10;   // ... refilled per second
+static constexpr double    RATE_PRINT_BURST   = 20;   // uploads / slices / sends / preset changes at once
+static constexpr double    RATE_PRINT_PER_S   = 1.0 / 3.0;
+static constexpr int       AUTH_FAIL_LIMIT    = 20;   // wrong tokens from one source ...
+static constexpr long long AUTH_FAIL_WINDOW   = 600000; // ... inside 10 minutes ...
+static constexpr long long AUTH_FAIL_BLOCK    = 600000; // ... block it for 10 minutes
+static constexpr size_t    MAX_CLIENTS        = 64;
+static const char* const   LEGACY_CLIENT_ID   = "phone-link";
+
+static long long mono_ms()
+{
+    return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+HubServer::Auth HubServer::resolve_token(const std::string& token)
+{
+    Auth a;
+    if (!valid_token(token)) return a;
+    const std::string hash = Testing::client_token_hash(token); // outside the lock: SHA-256 is not free
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const bool legacy = ct_equal(token, m_token);
+    const int  i      = HubClients::find_by_hash(m_clients, hash);
+    if (legacy) {
+        a.ok = a.legacy = true;
+        a.id            = LEGACY_CLIENT_ID;
+        a.name          = "Phone link";
+        a.scopes        = HubClients::SCOPE_FULL;
+    } else if (i >= 0) {
+        const HubClients::Client& c = m_clients[(size_t) i];
+        a.ok        = true;
+        a.id        = c.id;
+        a.name      = c.name;
+        a.scopes    = c.scopes;
+        a.tagged_ok = c.tagged_ok;
+    }
+    if (a.ok) a.token = token;
+    return a;
+}
+
+json HubServer::clients_json_locked() const
+{
+    json list = json::array();
+    // The phone link first: it is a client too (every scope), but it is rotated with "New link"
+    // rather than revoked here, and its token is the QR code on this page anyway.
+    list.push_back(json{ { "id", LEGACY_CLIENT_ID },
+                         { "name", "Phone link (QR code above)" },
+                         { "scopes", HubClients::scope_names(HubClients::SCOPE_FULL) },
+                         { "tagged_ok", false },
+                         { "legacy", true },
+                         { "created_at", 0 },
+                         { "last_used_at", 0 } });
+    for (const HubClients::Client& c : m_clients) list.push_back(HubClients::to_public(c));
+    return json{ { "list", list },
+                 { "scopes", HubClients::scope_names(HubClients::SCOPE_FULL) },
+                 { "max", MAX_CLIENTS } };
+}
+
+json HubServer::create_client(const std::string& name_in, unsigned scopes, bool tagged_ok, std::string& token_out)
+{
+    token_out.clear();
+    const std::string name = HubClients::clean_name(name_in);
+    scopes &= HubClients::SCOPE_FULL;
+    if (name.empty()) return json{ { "error", "give the client a name" } };
+    if (scopes == HubClients::SCOPE_NONE) return json{ { "error", "choose at least one permission" } };
+    HubClients::Client c;
+    c.name       = name;
+    c.scopes     = scopes;
+    c.tagged_ok  = tagged_ok;
+    c.created_at = now_unix();
+    c.id         = "c" + random_hex(6);
+    const std::string token = random_token(26);
+    c.hash                  = Testing::client_token_hash(token);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_clients.size() >= MAX_CLIENTS) return json{ { "error", "this hub already has " + std::to_string(MAX_CLIENTS) + " clients; revoke one first" } };
+        m_clients.push_back(c);
+    }
+    write_hub_json();
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: client " << c.id << " (" << c.name << ") created with "
+                            << json(HubClients::scope_names(scopes)).dump() << (tagged_ok ? ", tagged devices allowed" : "");
+    token_out = token;
+    return HubClients::to_public(c);
+}
+
+bool HubServer::revoke_client(const std::string& id)
+{
+    std::string name;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = std::find_if(m_clients.begin(), m_clients.end(), [&id](const HubClients::Client& c) { return c.id == id; });
+        if (it == m_clients.end()) return false;
+        name = it->name;
+        m_clients.erase(it);
+        m_rate_all.erase(id);
+        m_rate_print.erase(id);
+        m_clients_seen.erase(id);
+    }
+    write_hub_json();
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: client " << id << " (" << name << ") revoked";
+    return true;
+}
+
+void HubServer::touch_client(const Auth& a)
+{
+    const long long now     = now_unix();
+    bool            first   = false, persist = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        first = m_clients_seen.insert(a.id).second;
+        if (!a.legacy)
+            for (HubClients::Client& c : m_clients)
+                if (c.id == a.id) c.last_used_at = now;
+        // last_used_at reaches the file at most every ten minutes; the page reads the live copy.
+        if (!a.legacy && now - m_clients_persisted_at > 600) { m_clients_persisted_at = now; persist = true; }
+    }
+    if (first)
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: client " << a.id << " (" << a.name << ") connected, may "
+                                << json(HubClients::scope_names(a.scopes)).dump();
+    if (persist) write_hub_json();
+}
+
+bool HubServer::auth_source_blocked(const std::string& source)
+{
+    if (source.empty()) return false;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_auth_fail.find(source);
+    return it != m_auth_fail.end() && HubClients::blocked(it->second, mono_ms());
+}
+
+void HubServer::note_auth_failure(const std::string& source)
+{
+    if (source.empty()) return;
+    const long long now = mono_ms();
+    bool            now_blocked = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_auth_fail.size() > 1024) // a scan from many addresses: forget the ones that went quiet
+            for (auto it = m_auth_fail.begin(); it != m_auth_fail.end();)
+                it = (now - it->second.window_start_ms > AUTH_FAIL_WINDOW && !HubClients::blocked(it->second, now)) ? m_auth_fail.erase(it) : std::next(it);
+        HubClients::FailWindow& f = m_auth_fail[source];
+        HubClients::note_failure(f, now, AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW, AUTH_FAIL_BLOCK);
+        now_blocked = f.blocked_until_ms == now + AUTH_FAIL_BLOCK;
+    }
+    if (now_blocked)
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: " << AUTH_FAIL_LIMIT << " wrong tokens from one source; refusing it for "
+                                   << AUTH_FAIL_BLOCK / 60000 << " minutes";
+}
+
+bool HubServer::client_rate_ok(const Auth& a, unsigned needed)
+{
+    const long long now = mono_ms();
+    bool            ok;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        ok = HubClients::take(m_rate_all[a.id], RATE_ALL_BURST, RATE_ALL_PER_S, now);
+        if (ok && needed == HubClients::SCOPE_PRINT) ok = HubClients::take(m_rate_print[a.id], RATE_PRINT_BURST, RATE_PRINT_PER_S, now);
+        if (ok || now - m_rate_limited_logged < 60000) return ok;
+        m_rate_limited_logged = now;
+    }
+    BOOST_LOG_TRIVIAL(warning) << "RemoteHub: client " << a.id << " (" << a.name << ") is over its request rate"
+                               << (needed == HubClients::SCOPE_PRINT ? " for uploads / prints" : "") << "; answering 429";
+    return false;
+}
+
+void HubServer::note_scope_denied(const Auth& a, unsigned needed, const std::string& method, const std::string& rest)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const long long now = mono_ms();
+        if (now - m_scope_denied_logged < 10000) return;
+        m_scope_denied_logged = now;
+    }
+    // The route without its query; never the token (it is not part of `rest`).
+    BOOST_LOG_TRIVIAL(warning) << "RemoteHub: client " << a.id << " (" << a.name << ") may not " << method << " "
+                               << rest.substr(0, 120) << " (needs " << json(HubClients::scope_names(needed)).dump() << ")";
+}
+
 long HubServer::spawn_slicer(const std::string& file, bool hidden)
 {
     // The child must live on this hub's data dir: without --datadir it starts on the default one,
@@ -5212,6 +5495,54 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
             if (j["remote"]["access"].value("action", std::string()).empty()) j["remote"]["access"]["action"] = "Try again";
         }
         respond_json(client, error.empty() ? 200 : 409, j.dump());
+    } else if (r.path == "/hub/clients" && r.method == "GET") {
+        // Per-client tokens (HubClients.hpp): names, permissions, last use. Never a token or a hash.
+        json j;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            j = clients_json_locked();
+        }
+        respond_json(client, 200, j.dump());
+    } else if (r.path == "/hub/clients" && r.method == "POST") {
+        // {name, scopes: ["status", "camera", "control", "print"], tagged_ok} -> the new client and
+        // its token, exactly once: the hub keeps only a hash, so this answer is the only place the
+        // token ever appears. The links are the phone link's with this token in its place.
+        std::string body;
+        if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("request too large")); return; }
+        json in;
+        try { in = json::parse(body); } catch (...) { respond_json(client, 400, json_error("expected JSON")); return; }
+        if (!in.is_object()) { respond_json(client, 400, json_error("expected a JSON object")); return; }
+        std::string token;
+        const json  c = create_client(in.value("name", std::string()), HubClients::parse_scopes(in.value("scopes", json::array())),
+                                      in.value("tagged_ok", false), token);
+        if (token.empty()) { respond_json(client, 400, json_error(c.value("error", std::string("could not create the client")))); return; }
+        const PhoneLinks links = phone_links();
+        std::string      legacy;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            legacy = m_token;
+        }
+        auto own = [&](std::string url) {
+            const std::string from = "/r/" + legacy + "/";
+            const size_t      at   = url.find(from);
+            if (at != std::string::npos) url.replace(at, from.size(), "/r/" + token + "/");
+            return url;
+        };
+        json out;
+        out["client"] = c;
+        out["token"]  = token;
+        out["links"]  = json{ { "lan", own(links.lan) }, { "remote", own(links.remote) } };
+        respond_json(client, 200, out.dump());
+    } else if (r.path == "/hub/clients/revoke" && r.method == "POST") {
+        const std::string id = percent_decode(query_param(r.query, "id"));
+        if (id == LEGACY_CLIENT_ID) { respond_json(client, 400, json_error("the phone link is replaced with New link, not revoked")); return; }
+        if (!revoke_client(id)) { respond_json(client, 404, json_error("no such client")); return; }
+        json j;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            j = clients_json_locked();
+        }
+        respond_json(client, 200, j.dump());
     } else if ((r.path == "/hub/" || r.path == "/hub/index.html") && r.method == "GET") {
         // The page gets the per-run secret and sends it back as X-Hub-Secret on every call.
         std::string page, secret;
@@ -5751,6 +6082,16 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         json j;
         j["name"]    = "EdgeSlicer hub API";
         j["version"] = 2;
+        // Per-client tokens (HubClients.hpp). Every route below is reachable as /r/<token>/<route>
+        // or, for a program rather than a browser page, as /h/<route> with Authorization: Bearer
+        // <token>. What a token may do is its scopes; a route outside them answers 403.
+        j["auth"] = json{ { "path", "/r/{token}/..." },
+                          { "header", "/h/... with Authorization: Bearer {token}" },
+                          { "scopes", json{ { "status", "read: devices, printers, events, archive, jobs, notifications" },
+                                            { "camera", "camera streams and timelapses" },
+                                            { "control", "printer controls, slicer windows, archive deletes, anything else that changes something" },
+                                            { "print", "upload, slice, presets, send and reprint" } } },
+                          { "limits", "wrong tokens: 20 per 10 minutes per source, then 429 for 10 minutes; per client: 10 requests/s (300 burst), uploads/prints 20 per minute" } };
         j["routes"]  = json::array({
             { {"method", "GET"},  {"path", "/api/instances"},       {"description", "running slicer instances: id (pid), index, title, project path, slicing"} },
             { {"method", "GET"},  {"path", "/api/archive[?offset=&limit=&printer={id}&model={key}]"}, {"description", "the G-code archive, read by the hub (no slicer window needed): {enabled?, max?, total, offset, limit, next_offset, printers [{id, name, kind}], models [{key, name, count, printers [{id, name, kind, online}]}], records}, newest first; records are the same rows /i/{id}/api/archive lists plus model_key / model_name (the model the file was sliced for; \"other\" when unknown), and a printer is never named by an address. models[].printers are where a record of that model may be reprinted (send with printer={id}). Sending or deleting one still goes through a slicer window (/i/{id}/api/archive/{id}/send; a Bambu one takes /i/{id}/api/archive/{id}/preview first for its AMS mapping)"} },
@@ -5855,7 +6196,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             // Replay the request against the instance with the prefix stripped; the instance
             // answers with Connection: close, so the splice ends by itself.
             const std::string line = r.method + " " + sub + (r.query.empty() ? "" : "?" + r.query) + " HTTP/1.1\r\n";
-            const std::string head = line + r.head.substr(r.head.find("\r\n") + 2);
+            const std::string head = strip_authorization(line + r.head.substr(r.head.find("\r\n") + 2));
             try {
                 tunnel(client, target.port, force_close(head), r.pending);
             } catch (const std::exception& e) {
@@ -5950,33 +6291,48 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             r.forwarded = r.funnel = false;
         }
         // Through Serve with no tailnet login at all - a tagged device, or a Funnel visitor from
-        // the public internet. The allow-list cannot check them, so they get nothing; before this
-        // they fell through to the token alone. Plain loopback (the PC's own pages and tools)
-        // carries none of Serve's marks and is unaffected.
+        // the public internet. The allow-list cannot check them. Funnel gets nothing, ever. A tagged
+        // device gets in only with a client token whose owner allowed tagged devices for it
+        // (HubClients::Client::tagged_ok), checked below once the token is known; the phone link
+        // never allows it. Plain loopback (the PC's own pages and tools) carries none of Serve's
+        // marks and is unaffected.
         const Testing::ServeRequest serve_kind =
             Testing::classify_serve_request(Testing::trusted_proxy_headers(peer.is_loopback(), r.via_relay), r.ts_login, r.forwarded, r.funnel);
-        if (serve_kind == Testing::ServeRequest::NoLogin) {
+        const bool tagged = serve_kind == Testing::ServeRequest::NoLogin && !r.funnel;
+        auto refuse_no_login = [&]() {
             note_refused_no_login(r.funnel);
             respond(client, 403, "text/plain; charset=utf-8",
                     "This printer hub only answers people signed in to its owner's tailnet. Requests through Tailscale Funnel "
                     "or from tagged devices are refused.");
-            return;
-        }
+        };
+        if (serve_kind == Testing::ServeRequest::NoLogin && !tagged) { refuse_no_login(); return; }
         const bool via_serve = serve_kind == Testing::ServeRequest::Tailnet;
         if (via_serve && !login_allowed(r.ts_login)) {
             BOOST_LOG_TRIVIAL(warning) << "RemoteHub: tailnet login not allowed: " << r.ts_login;
             respond(client, 403, "text/plain; charset=utf-8", "This printer hub is not shared with " + r.ts_login + ". Ask its owner to add you on the hub page.");
             return;
         }
-        const std::string cookie_flags = (via_serve && r.fwd_proto == "https") ? "; Secure" : "";
+        const std::string cookie_flags = ((via_serve || tagged) && r.fwd_proto == "https") ? "; Secure" : "";
+        // Whose wrong tokens these are, for the limit on guessing: the tailnet login through Serve,
+        // a tagged device's tailnet address, the LAN address otherwise. Plain loopback (this PC)
+        // is never limited.
+        const std::string source = via_serve ? "login:" + lower(r.ts_login) :
+                                   tagged    ? "tagged:" + r.fwd_for :
+                                   peer.is_loopback() ? std::string() : "ip:" + peer.to_string();
 
         // The stream player lives at the root so its relative "api/ws" resolves here. Gate: the
-        // phone's rt cookie, or - loopback only - the hub secret as `lt`, which is how the PC's own
-        // Stream tab embeds it. The two scripts are public (verbatim go2rtc files).
-        const bool player_ok = ct_equal(cookie_value(r.cookies, "rt"), token) ||
-                               (peer.is_loopback() && ct_equal(query_param(r.query, "lt"), secret));
+        // rt cookie the page set (a token with the camera permission), or - loopback only - the
+        // hub secret as `lt`, which is how the PC's own Stream tab embeds it. The two scripts are
+        // public (verbatim go2rtc files).
+        auto player_ok = [&]() {
+            if (!via_serve && !tagged && peer.is_loopback() && ct_equal(query_param(r.query, "lt"), secret)) return true;
+            const std::string rt = cookie_value(r.cookies, "rt");
+            if (rt.empty()) return false;
+            const Auth pa = resolve_token(rt);
+            return pa.ok && HubClients::allows(pa.scopes, HubClients::SCOPE_CAMERA) && (!tagged || pa.tagged_ok);
+        };
         if (r.path == PLAYER_PAGE) {
-            if (!player_ok) { respond(client, 404, "text/plain", "not found"); return; }
+            if (!player_ok()) { respond(client, 404, "text/plain", "not found"); return; }
             std::string page;
             if (serve_web_asset(client, "player.html", page)) respond(client, 200, "text/html; charset=utf-8", page);
             return;
@@ -5989,7 +6345,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             }
         }
         if (r.path == GO2RTC_WS) {
-            if (!player_ok) { respond(client, 404, "text/plain", "not found"); return; }
+            if (!player_ok()) { respond(client, 404, "text/plain", "not found"); return; }
             if (go2rtc_port == 0) { respond(client, 503, "text/plain", "stream relay is not running"); return; }
             // Labelled with its stream, so register_streams() can move this viewer off a stream
             // whose source it replaced or removed (and so let go2rtc close the old connection).
@@ -6017,31 +6373,68 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             handle_hub(client, r);
             return;
         }
-        // /r/<token>/... - the token pulled out of the path first, so it can be compared in
-        // constant time instead of as a path prefix.
-        const std::string prefix = "/r/" + token;
-        std::string       rest, given;
-        bool              token_ok = false;
-        if (r.path.compare(0, 3, "/r/") == 0) {
+        // Two ways to present a token (HubClients.hpp):
+        //   /r/<token>/...                         - the phone link and the pages (a browser can only do this)
+        //   /h/... + Authorization: Bearer <token> - a program (another PC's slicer, a script), so the
+        //                                            token stays out of URLs, logs and histories
+        // Both reach the same routes below. The token is pulled out first, so it is compared in
+        // constant time (resolve_token) rather than as a path prefix.
+        std::string rest, given, prefix;
+        const bool  by_path   = r.path.compare(0, 3, "/r/") == 0;
+        const bool  by_header = r.path == "/h" || r.path.compare(0, 3, "/h/") == 0;
+        if (by_path) {
             const size_t slash = r.path.find('/', 3);
-            given    = r.path.substr(3, slash == std::string::npos ? std::string::npos : slash - 3);
-            token_ok = ct_equal(given, token);
+            given  = r.path.substr(3, slash == std::string::npos ? std::string::npos : slash - 3);
+            prefix = "/r/" + given;
             if (slash != std::string::npos) rest = r.path.substr(slash);
+        } else if (by_header) {
+            given  = r.bearer;
+            prefix = "/h";
+            rest   = r.path.substr(2);
         }
-        if (!token_ok || (!phone && !peer.is_loopback())) {
+        if ((by_path || by_header) && auth_source_blocked(source)) {
+            respond_json(client, 429, json_error("too many wrong tokens from here; try again in a few minutes"));
+            return;
+        }
+        const Auth a = (by_path || by_header) ? resolve_token(given) : Auth{};
+        if (!a.ok || (!phone && !peer.is_loopback())) {
             // A link we replaced ourselves gets a page saying so - an installed icon or a saved QR
             // would otherwise open a blank 404 and nobody could tell it from a typo. Same reach as
             // a live link (the LAN only while phone access is on), same constant-time compare, and
             // the page names neither the new token nor anything else.
-            if (!token_ok && (phone || peer.is_loopback()))
+            if (!a.ok && by_path && (phone || peer.is_loopback()))
                 for (const std::string& old : old_tokens)
                     if (ct_equal(given, old)) {
                         respond(client, 404, "text/html; charset=utf-8", REPLACED_LINK_PAGE, "X-Frame-Options: DENY\r\n");
                         return;
                     }
+            if (!a.ok && (by_path || by_header)) note_auth_failure(source);
+            if (tagged) { refuse_no_login(); return; }
             respond(client, 404, "text/plain", "not found");
             return;
         }
+        if (tagged && !a.tagged_ok) { refuse_no_login(); return; }
+        // What this client may do. The phone link may do everything; a client token only what its
+        // owner ticked on the hub page.
+        const unsigned needed = HubClients::route_scope(r.method, rest);
+        if (!HubClients::allows(a.scopes, needed)) {
+            note_scope_denied(a, needed, r.method, rest);
+            const auto names = HubClients::scope_names(needed);
+            respond_json(client, 403, json_error("this client may not do that" + (names.empty() ? std::string() : "; it needs the \"" + names.front() + "\" permission")));
+            return;
+        }
+        // The PC's own pages on loopback are never limited; everybody else is, per client.
+        if (!(peer.is_loopback() && serve_kind == Testing::ServeRequest::Local) && !client_rate_ok(a, needed)) {
+            respond(client, 429, "application/json", json_error("too many requests; slow down"), "Retry-After: 10\r\n");
+            return;
+        }
+        touch_client(a);
+        // A client token never sees the phone link's token in anything the hub builds for it.
+        struct SwapGuard
+        {
+            ~SwapGuard() { t_link_swap = LinkTokenSwap(); }
+        } swap_guard;
+        if (!a.legacy) t_link_swap = LinkTokenSwap{ token, a.token };
         if (rest.empty()) { respond(client, 302, "text/plain", "", "Location: " + prefix + "/\r\n"); return; }
         if (rest == "/" || rest == "/index.html") {
             // A top-level page: never in anybody's frame. (The player at /stream.html deliberately
@@ -6050,7 +6443,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             std::string page;
             if (!serve_web_asset(client, "stream_center.html", page, "X-Frame-Options: DENY\r\n")) return;
             respond(client, 200, "text/html; charset=utf-8", page,
-                    "X-Frame-Options: DENY\r\nSet-Cookie: rt=" + token + "; Path=/; SameSite=Lax" + cookie_flags + "\r\n");
+                    "X-Frame-Options: DENY\r\nSet-Cookie: rt=" + a.token + "; Path=/; SameSite=Lax" + cookie_flags + "\r\n");
         } else if (rest == "/state") {
             // Through Tailscale Serve the phone learns who it is signed in as (shown in its top bar).
             std::string st = state_for_phone();
@@ -6180,6 +6573,13 @@ bool HubServer::start()
         // A data dir written before this existed gets its version from what it can still see: the
         // links it remembers replacing, plus this one. Only ever a floor, and it only ever grows.
         m_token_version = std::max(1, j.value("token_version", 0));
+        // The per-client tokens (HubClients). A malformed entry is dropped, and logged, rather
+        // than given a guess at its scopes.
+        for (const auto& cj : j.value("clients", json::array())) {
+            HubClients::Client c = HubClients::from_settings(cj);
+            if (c.id.empty()) { BOOST_LOG_TRIVIAL(warning) << "RemoteHub: dropping a malformed client entry from settings.json"; continue; }
+            m_clients.push_back(std::move(c));
+        }
         const std::string saved = j.value("token", "");
         for (const auto& t : j.value("old_tokens", json::array())) remember_old_token_locked(t.get<std::string>());
         if (valid_token(saved)) {

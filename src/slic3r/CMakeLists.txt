@@ -569,6 +569,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
     GUI/HubEventDedupe.hpp
+    GUI/HubClients.hpp
     GUI/LoginTicketGate.hpp
     GUI/HubPushOwner.hpp
     GUI/RemoteNotify.cpp

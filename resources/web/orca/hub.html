@@ -81,6 +81,7 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
 <div class="row">
   <div class="card" id="phone"><h2>Home (this network)</h2><div id="phonebody">Loading…</div></div>
   <div class="card" id="remote"><h2>Away (Tailscale)</h2><div id="remotebody">Loading…</div></div>
+  <div class="card" id="clients"><h2>Apps and PCs</h2><div id="clientsbody">Loading…</div></div>
   <div class="card" id="slicers"><h2>Slicer windows</h2><div id="slicerbody">Loading…</div>
     <div class="acts">
       <span class="btn dim" id="new">Open New Slicer</span>
@@ -932,8 +933,92 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
             body.appendChild(d);
         });
     }
+    // ---- Apps and PCs: per-client tokens (HubClients.hpp). Each one may do only what was ticked
+    // here, and is revoked on its own. The token is shown once, right after it is made: the hub
+    // keeps only a hash of it. The phone link is listed first (it may do everything) and is
+    // replaced with New link on the Home card, not revoked here.
+    var SCOPE_TEXT = { status: 'See printers and progress', camera: 'Watch cameras', control: 'Control printers and slicer windows', print: 'Upload and print' };
+    var lastClients = null, clientForm = false, freshClient = null;
+    function renderClients() {
+        var body = document.getElementById('clientsbody');
+        if (!info || !info.clients) return;
+        var key = JSON.stringify(info.clients) + JSON.stringify(freshClient);
+        if (key === lastClients || clientForm) return; // never while the form is half filled in
+        lastClients = key;
+        body.innerHTML = '';
+        body.appendChild(el('div', 'note', 'Give each phone, PC or script its own access instead of sharing the phone link, so it can do only what it needs and be cut off on its own.'));
+        if (freshClient) {
+            var f = el('div', 'form');
+            f.appendChild(el('div', 'note strong', 'Access for "' + freshClient.client.name + '" - copy it now, it is not shown again'));
+            f.appendChild(el('div', 'note', 'Token (a program sends it as "Authorization: Bearer <token>" to /h/...):'));
+            f.appendChild(el('div', 'url', freshClient.token));
+            f.appendChild(copyButton(freshClient.token));
+            [['remote', 'Away link (Tailscale)'], ['lan', 'Home link']].forEach(function(p) {
+                var u = freshClient.links && freshClient.links[p[0]];
+                if (!u) return;
+                f.appendChild(el('div', 'note', p[1] + ':'));
+                f.appendChild(el('div', 'url', u));
+                f.appendChild(copyButton(u));
+            });
+            var done = el('span', 'btn dim small', 'Done'); done.onclick = function() { freshClient = null; lastClients = null; renderClients(); };
+            f.appendChild(el('div', 'acts')).appendChild(done);
+            body.appendChild(f);
+        }
+        (info.clients.list || []).forEach(function(c) {
+            var d = el('div', 'dest');
+            var t = el('div', 't', c.name); d.appendChild(t);
+            var may = (c.scopes || []).map(function(s) { return SCOPE_TEXT[s] || s; }).join(', ');
+            d.appendChild(el('div', 'm', 'May: ' + (may || 'nothing') + (c.tagged_ok ? ' - also from tagged Tailscale devices' : '')));
+            if (!c.legacy) {
+                d.appendChild(el('div', 'm', 'Made ' + new Date(c.created_at * 1000).toLocaleDateString() +
+                    (c.last_used_at ? ', last used ' + new Date(c.last_used_at * 1000).toLocaleString() : ', never used')));
+                var x = el('span', 'btn warn small', 'Revoke');
+                x.setAttribute('aria-label', 'Revoke ' + c.name);
+                x.onclick = function() {
+                    if (!confirm('Revoke "' + c.name + '"? It stops working at once.')) return;
+                    post('/hub/clients/revoke?id=' + encodeURIComponent(c.id)).then(function(j) { if (j && j.list) info.clients = j; lastClients = null; renderClients(); });
+                };
+                d.appendChild(el('div', 'acts')).appendChild(x);
+            }
+            body.appendChild(d);
+        });
+        var add = el('span', 'btn dim', 'Add access');
+        add.onclick = function() {
+            clientForm = true;
+            var f = el('div', 'form');
+            f.appendChild(el('label', '', 'Name (who or what it is for)'));
+            var name = el('input'); name.placeholder = 'Workshop PC'; name.maxLength = 60; f.appendChild(name);
+            var kinds = el('div', 'kinds'), boxes = {};
+            Object.keys(SCOPE_TEXT).forEach(function(s) {
+                var l = el('label'), cb = el('input'); cb.type = 'checkbox'; cb.checked = s === 'status';
+                boxes[s] = cb; l.appendChild(cb); l.appendChild(document.createTextNode(SCOPE_TEXT[s])); kinds.appendChild(l);
+            });
+            f.appendChild(kinds);
+            var tl = el('label'), tcb = el('input'); tcb.type = 'checkbox';
+            tl.appendChild(tcb); tl.appendChild(document.createTextNode('Also from a tagged Tailscale device (no Tailscale sign-in; Funnel stays refused)'));
+            var tk = el('div', 'kinds'); tk.appendChild(tl); f.appendChild(tk);
+            var err = el('div', 'err', '');
+            var ok = el('span', 'btn', 'Create'), cancel = el('span', 'btn dim', 'Cancel');
+            ok.onclick = function() {
+                var scopes = Object.keys(boxes).filter(function(s) { return boxes[s].checked; });
+                fetch('/hub/clients', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, hdrs()),
+                                        body: JSON.stringify({ name: name.value, scopes: scopes, tagged_ok: tcb.checked }) })
+                    .then(function(r) { return r.json(); })
+                    .then(function(j) {
+                        if (!j || !j.token) { err.textContent = (j && j.error) || 'Could not create it.'; return; }
+                        freshClient = j; clientForm = false; lastClients = null; refresh();
+                    }).catch(function() { err.textContent = 'Could not reach the hub.'; });
+            };
+            cancel.onclick = function() { clientForm = false; lastClients = null; renderClients(); };
+            var acts = el('div', 'acts'); acts.appendChild(ok); acts.appendChild(cancel);
+            f.appendChild(acts); f.appendChild(err);
+            body.replaceChild(f, add);
+            name.focus();
+        };
+        body.appendChild(add);
+    }
     function refresh() {
-        fetch('/hub/info', { headers: hdrs() }).then(function(r) { return r.json(); }).then(function(j) { info = j; renderPhone(); renderRemote(); document.getElementById('status').textContent = 'Hub pid ' + j.pid + ', port ' + j.port + ', version ' + j.version; }).catch(function() {});
+        fetch('/hub/info', { headers: hdrs() }).then(function(r) { return r.json(); }).then(function(j) { info = j; renderPhone(); renderRemote(); renderClients(); document.getElementById('status').textContent = 'Hub pid ' + j.pid + ', port ' + j.port + ', version ' + j.version; }).catch(function() {});
         fetch('/hub/instances', { headers: hdrs() }).then(function(r) { return r.json(); }).then(function(j) { renderSlicers(j.instances || []); }).catch(function() {});
         if (!openForm) refreshNotify(); // never while a form is half typed
         refreshPush();
