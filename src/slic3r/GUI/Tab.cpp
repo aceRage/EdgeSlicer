@@ -3120,6 +3120,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
+        optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
         // Tower interface options (per-filament values on the filament Multimaterial page).
         optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
@@ -7268,8 +7269,9 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         load_current_preset();
 
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
-        // Deferred so it runs after this switch settles; sync_bambu_user_presets only reloads the UI
-        // when new/updated files were actually copied (copied==0 -> no-op), so it's self-limiting.
+        // Deferred so it runs after this switch settles. sync_bambu_user_presets only lists the Bambu
+        // Studio folder here (no reads) and returns when nothing changed since the last clean sync;
+        // otherwise the mirror runs on a worker thread and the UI reloads only when files were copied.
         if (m_type == Preset::TYPE_PRINTER)
             wxGetApp().CallAfter([]() { wxGetApp().sync_bambu_user_presets(false); });
 

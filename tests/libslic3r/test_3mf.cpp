@@ -18,6 +18,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
 
 #include <algorithm>
@@ -27,6 +28,18 @@
 #include <fstream>
 #include <functional>
 #include <thread>
+
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace Slic3r;
 
@@ -1994,5 +2007,150 @@ SCENARIO("thumbnail relationships are declared only for thumbnails that were wri
             }
             boost::filesystem::remove(test_file);
         }
+    }
+}
+
+namespace {
+
+struct TempBackupDir
+{
+    boost::filesystem::path path;
+    TempBackupDir(const char *tag)
+        : path(boost::filesystem::temp_directory_path() / boost::filesystem::unique_path(std::string(tag) + "_%%%%%%%%"))
+    {
+        boost::filesystem::create_directories(path);
+    }
+    ~TempBackupDir()
+    {
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(path, ec);
+    }
+};
+
+} // namespace
+
+// Every "return false" that leaves origin empty is an instruction to the caller to
+// remove_all() the backup directory (Plater.cpp's EVT_RESTORE_PROJECT handler).
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be interpreted", "[3mf]")
+{
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+
+    SECTION("an empty lock.txt holds no pid")
+    {
+        std::ofstream lock((backup / "lock.txt").string());
+        lock.close();
+        REQUIRE(boost::filesystem::file_size(backup / "lock.txt") == 0);
+
+        std::string path = backup.string(), origin;
+        bool        has  = true;
+        REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+        CHECK_FALSE(has);
+        CHECK(origin == "<lock>");
+    }
+
+    SECTION("lock.txt holds something that is not a pid")
+    {
+        std::ofstream((backup / "lock.txt").string()) << "not-a-pid";
+
+        std::string path = backup.string(), origin;
+        bool        has  = true;
+        REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+        CHECK_FALSE(has);
+        CHECK(origin == "<lock>");
+    }
+}
+
+#ifndef _WIN32
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be read", "[3mf]")
+{
+    if (::geteuid() == 0) {
+        SUCCEED("root ignores the file permissions this test depends on");
+        return;
+    }
+
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+    std::ofstream((backup / "lock.txt").string()) << "1";
+    boost::system::error_code mode_ec;
+    boost::filesystem::permissions(backup / "lock.txt", boost::filesystem::no_perms, mode_ec);
+
+    boost::nowide::ifstream probe((backup / "lock.txt").string());
+    if (probe.good()) {
+        SUCCEED("this filesystem does not enforce file read permissions");
+        return;
+    }
+
+    std::string path = backup.string(), origin;
+    bool        has  = true;
+    REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+    CHECK_FALSE(has);
+    CHECK(origin == "<lock>");
+    boost::filesystem::permissions(backup / "lock.txt", boost::filesystem::owner_all, mode_ec);
+}
+#endif
+
+#ifdef _WIN32
+// Windows has no mode bits to take away; a lock.txt another process holds open with no sharing
+// cannot be read either, which is the same "state unknown" case.
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be read (Windows)", "[3mf]")
+{
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+    std::ofstream((backup / "lock.txt").string()) << "1";
+
+    struct ExclusiveHandle
+    {
+        HANDLE h;
+        explicit ExclusiveHandle(const boost::filesystem::path &p)
+            : h(::CreateFileW(p.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+        ~ExclusiveHandle() { if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h); }
+    } exclusive(backup / "lock.txt");
+    REQUIRE(exclusive.h != INVALID_HANDLE_VALUE);
+
+    boost::nowide::ifstream probe((backup / "lock.txt").string());
+    REQUIRE_FALSE(probe.good());
+    probe.close();
+
+    std::string path = backup.string(), origin;
+    bool        has  = true;
+    REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+    CHECK_FALSE(has);
+    CHECK(origin == "<lock>");
+}
+#endif
+TEST_CASE("has_restore_data leaves a spent backup collectable", "[3mf]")
+{
+    TempBackupDir           outer("orca_spent");
+    boost::filesystem::path backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+
+    SECTION("no lock and no project")
+    {
+        std::string path = backup.string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
+    }
+
+    SECTION("a lock from a process that is not us, and no project")
+    {
+        std::ofstream((backup / "lock.txt").string()) << "1";
+
+        std::string path = backup.string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
+    }
+
+    SECTION("the directory does not exist at all")
+    {
+        std::string path = (outer.path / "gone").string(), origin;
+        CHECK_FALSE(has_restore_data(path, origin));
+        CHECK(origin.empty());
     }
 }
