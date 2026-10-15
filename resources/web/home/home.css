@@ -148,6 +148,38 @@ button, input, select { font: inherit; color: inherit; }
 
 /* ---- library ---- */
 .lib-top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+/* Export CSV: the button and, joined to it, the gear that opens the export options. */
+.split-btn { display: inline-flex; flex: none; position: relative; }
+.split-btn .btn { border-radius: 0; }
+.split-btn .split-main { border-radius: 6px 0 0 6px; border-right-width: 0; }
+.split-btn .split-gear { border-radius: 0 6px 6px 0; width: 32px; padding: 0; display: inline-flex; align-items: center;
+  justify-content: center; border-left: 1px solid var(--ctl-line); }
+.split-btn .split-gear svg { width: 16px; height: 16px; fill: var(--mute); }
+.split-btn .btn:hover, .split-btn .btn:focus-visible { z-index: 1; }
+.split-btn .split-gear:hover svg, .split-btn .split-gear:focus-visible svg { fill: var(--accent); }
+.split-btn .split-main:hover { border-right-width: 1px; margin-right: -1px; }
+.split-btn .btn:active:not(:disabled) { background: var(--hover); }
+.split-btn .btn:disabled { opacity: .45; }
+@media (max-width: 700px) {
+  #vendors .lib-top { flex-wrap: wrap; }
+  #vendors .lib-top .status { flex: 1 1 100%; }
+}
+
+/* The export options dialog: sections of settings; a new kind of setting is a new .opt-section. */
+.dialog.opts { width: 440px; }
+.opt-section { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; }
+.opt-section legend { padding: 0; margin-bottom: 8px; font-weight: 600; color: var(--mute); font-size: 12px; text-transform: none; }
+.opt-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+.opt-field > .opt-label { font-weight: 600; }
+.opt-radio { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 2px 0; }
+.opt-radio input { accent-color: var(--accent); margin: 0; }
+.opt-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.opt-row select, .opt-row input[type=number] { height: 32px; background: var(--ctl); border: 1px solid var(--ctl-line); border-radius: 6px; padding: 0 8px; color: var(--fg); }
+.opt-row select:focus, .opt-row input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.opt-row input[type=number] { width: 110px; }
+.opt-hint { color: var(--mute); font-size: 12px; margin: 0; }
+.opt-error { color: var(--danger); font-size: 12px; margin: 0; }
+.opt-radio input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .status { flex: 1; color: var(--mute); font-size: 12px; min-width: 0; }
 .status button.link { border: 0; background: none; color: var(--accent-text); cursor: pointer; padding: 0; margin-left: 6px; }
 .status button.link:hover { text-decoration: underline; }

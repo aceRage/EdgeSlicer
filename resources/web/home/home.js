@@ -1013,6 +1013,203 @@
     state.venRendered = end;
   }
 
+  // ---- CSV export: the options behind the gear ----
+  // Remembered per viewer: the last choice, and the choice made while exporting one connector alone.
+  const CSV_MAX_KEY = 'ven-csv-max';
+  function loadCsvMax() {
+    try {
+      const v = JSON.parse(localStorage.getItem(CSV_MAX_KEY) || '{}');
+      const obj = (x) => (x && typeof x === 'object' ? x : {});
+      return { last: v && v.last !== undefined ? v.last : null, byId: obj(v && v.byId),
+               rowsLast: v && v.rowsLast ? v.rowsLast : null, rowsById: obj(v && v.rowsById) };
+    } catch (e) { return { last: null, byId: {}, rowsLast: null, rowsById: {} }; }
+  }
+  function saveCsvChoice(st) {
+    try { localStorage.setItem(CSV_MAX_KEY, JSON.stringify(st)); } catch (e) { /* private window: not remembered */ }
+  }
+  function csvScope() {
+    const ids = [];
+    for (const i of state.venShown) if (ids.indexOf(i.connector) < 0) ids.push(i.connector);
+    return ids.map((id) => {
+      const c = connectorOf(id);
+      const csv = c && c.spec && c.spec.csv;
+      return { id: id, limit: csv ? CsvMax.clean(csv.max_records) : 0, rows: csv ? CsvMax.cleanRows(csv.rows) : '' };
+    });
+  }
+  // What the next "Export CSV" click uses (see csvmax.js for where the starting values come from).
+  let csvOpts = { rows: 'model', max: 0 };
+  function rememberCsvOpts(o) {
+    const st = loadCsvMax();
+    st.last = o.max;
+    st.rowsLast = o.rows;
+    const scope = csvScope();
+    if (scope.length === 1) { st.byId[scope[0].id] = o.max; st.rowsById[scope[0].id] = o.rows; }
+    saveCsvChoice(st);
+  }
+  function csvSummary() {
+    return CsvMax.summarize(csvOpts.rows, csvOpts.max, {
+      model: t('csv_sum_model', 'Per model'), file: t('csv_sum_file', 'Per file'),
+      all: t('csv_sum_all', 'all in one file'), per: t('csv_sum_per', 'per file') });
+  }
+  // The current settings stay visible without opening the dialog: in the buttons' tooltips.
+  function updateCsvButtons() {
+    const sum = csvSummary(), name = t('csv_options', 'Export options');
+    $('ven-csv').title = t('export_csv', 'Export CSV') + ': ' + sum;
+    $('ven-csv-gear').title = name + ': ' + sum;
+    $('ven-csv-gear').setAttribute('aria-label', name);
+  }
+  function resetCsvOpts() {
+    const stored = loadCsvMax(), scope = csvScope();
+    csvOpts = { rows: CsvMax.defaultRows(scope, stored), max: CsvMax.defaultMax(scope, stored) };
+    updateCsvButtons();
+  }
+
+  // The Export options dialog is a list of sections. To add another group of settings (an export
+  // template, column mappings...), push one more entry onto EXPORT_SECTIONS:
+  //   { id, title(), build(box, focusables) -> { validate() -> '' or an error text, commit() } }
+  // build() fills `box` with the section's controls; OK calls every handle's validate(), and only when
+  // all pass, every commit(). Nothing else in the dialog needs to change.
+  const EXPORT_SECTIONS = [];
+  let exportHandles = [];
+  let exportOptsReturn = null;
+
+  EXPORT_SECTIONS.push({
+    id: 'csv',
+    title: () => t('csv_section', 'CSV'),
+    build(box) {
+      let rows = csvOpts.rows, max = csvOpts.max;
+      const group = el('div', 'opt-field');
+      group.setAttribute('role', 'radiogroup');
+      const gl = el('span', 'opt-label', t('csv_rows', 'Rows'));
+      gl.id = 'opt-csv-rows-label';
+      group.setAttribute('aria-labelledby', gl.id);
+      group.appendChild(gl);
+      const radios = [];
+      for (const [value, key, fallback] of [['model', 'csv_rows_model', 'One row per model'], ['file', 'csv_rows_file', 'One row per file']]) {
+        const lab = el('label', 'opt-radio');
+        const r = el('input');
+        r.type = 'radio';
+        r.name = 'opt-csv-rows';
+        r.value = value;
+        r.checked = rows === value;
+        r.addEventListener('change', () => { if (r.checked) rows = value; });
+        lab.appendChild(r);
+        lab.appendChild(el('span', '', t(key, fallback)));
+        group.appendChild(lab);
+        radios.push(r);
+      }
+      group.appendChild(el('p', 'opt-hint', t('csv_rows_tip', 'One row per model: file names and sizes are folded into file_count, file_names and total_size_bytes. One row per file: a row for each file of a model.')));
+      box.appendChild(group);
+
+      const mf = el('div', 'opt-field');
+      const ml = el('label', 'opt-label', t('csv_max', 'Max records per file'));
+      ml.htmlFor = 'opt-csv-max';
+      mf.appendChild(ml);
+      const row = el('div', 'opt-row');
+      const sel = el('select');
+      sel.id = 'opt-csv-max';
+      for (const n of CsvMax.PRESETS) {
+        const o = el('option', '', n ? String(n) : t('all', 'All'));
+        o.value = String(n);
+        sel.appendChild(o);
+      }
+      const oc = el('option', '', t('csv_custom', 'Custom...'));
+      oc.value = 'custom';
+      sel.appendChild(oc);
+      const custom = el('input');
+      custom.type = 'number';
+      custom.min = '1';
+      custom.max = String(CsvMax.CAP);
+      custom.step = '1';
+      custom.id = 'opt-csv-custom';
+      custom.setAttribute('aria-label', t('csv_max', 'Max records per file'));
+      if (CsvMax.PRESETS.indexOf(max) >= 0) sel.value = String(max);
+      else { sel.value = 'custom'; custom.value = String(max); }
+      custom.hidden = sel.value !== 'custom';
+      const err = el('p', 'opt-error');
+      err.setAttribute('role', 'alert');
+      err.hidden = true;
+      sel.addEventListener('change', () => {
+        custom.hidden = sel.value !== 'custom';
+        err.hidden = true;
+        if (sel.value === 'custom') custom.focus();
+      });
+      custom.addEventListener('input', () => { err.hidden = true; });
+      row.appendChild(sel);
+      row.appendChild(custom);
+      mf.appendChild(row);
+      mf.appendChild(err);
+      mf.appendChild(el('p', 'opt-hint', t('csv_max_tip', 'More records than this are written as numbered files (name_1.csv, name_2.csv...)')));
+      box.appendChild(mf);
+
+      const value = () => (sel.value === 'custom' ? CsvMax.clean(custom.value) : Number(sel.value) || 0);
+      return {
+        validate() {
+          if (sel.value === 'custom' && !value()) {
+            err.textContent = t('csv_bad_max', 'Enter a whole number of 1 or more.');
+            err.hidden = false;
+            custom.focus();
+            return err.textContent;
+          }
+          return '';
+        },
+        commit() {
+          csvOpts = { rows: rows, max: value() };
+          rememberCsvOpts(csvOpts);
+          updateCsvButtons();
+        },
+      };
+    },
+  });
+
+  function openExportOpts() {
+    const body = $('ven-export-opts-body');
+    body.textContent = '';
+    exportHandles = [];
+    for (const sec of EXPORT_SECTIONS) {
+      const fs = el('fieldset', 'opt-section');
+      fs.dataset.section = sec.id;
+      fs.appendChild(el('legend', '', sec.title()));
+      exportHandles.push(sec.build(fs));
+      body.appendChild(fs);
+    }
+    exportOptsReturn = document.activeElement;
+    $('ven-export-opts').hidden = false;
+    const first = $('ven-export-opts').querySelector('input:checked') || $('ven-export-opts').querySelector('select, input, button');
+    if (first) first.focus();
+  }
+  function closeExportOpts() {
+    $('ven-export-opts').hidden = true;
+    exportHandles = [];
+    const back = exportOptsReturn && document.body.contains(exportOptsReturn) ? exportOptsReturn : $('ven-csv-gear');
+    exportOptsReturn = null;
+    back.focus();
+  }
+  function commitExportOpts() {
+    for (const h of exportHandles) if (h.validate()) return;
+    for (const h of exportHandles) h.commit();
+    closeExportOpts();
+  }
+  // Tab stays inside the dialog; Enter is OK (a button keeps its own meaning); Esc cancels.
+  function exportOptsKey(e) {
+    const dlg = $('ven-export-opts');
+    if (dlg.hidden) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeExportOpts(); return; }
+    if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') { e.preventDefault(); commitExportOpts(); return; }
+    if (e.key !== 'Tab') return;
+    const items = Array.from(dlg.querySelectorAll('input, select, button')).filter((x) => !x.disabled && x.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (!dlg.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+
+  // The settings start over from the remembered/default values only when the set of connectors
+  // listed changes, so a choice the user just made is not reset by a re-render (a sync, a search).
+  let csvShownScope = null;
+  function csvScopeKey() { return csvScope().map((c) => c.id + ':' + c.limit + ':' + c.rows).join('|'); }
+
   function renderVendors(keepScroll) {
     const section = $('vendors');
     const scroll = keepScroll ? section.scrollTop : 0;
@@ -1031,6 +1228,8 @@
     $('ven-csv').disabled = !ven.items.length;
     state.venShown = sortBy(ven.items.filter((i) => venMatchesExcept(i, '')), state.sort.vendors,
       (i) => i.name || '', (i) => isoSeconds(i.updated));
+    if (csvShownScope === null || csvScopeKey() !== csvShownScope) resetCsvOpts();
+    csvShownScope = csvScopeKey();
     if ('IntersectionObserver' in window) {
       venThumbObserver = new IntersectionObserver((entries) => {
         for (const e of entries) if (e.isIntersecting) { askVenThumb(e.target.dataset.id); venThumbObserver.unobserve(e.target); }
@@ -1247,6 +1446,10 @@
       { path: 'download.direct_field', label: 'Or: direct link field of a file' },
       { path: 'download.limited', label: 'Downloads count against a limit (ask first)', check: true },
     ] },
+    { group: 'CSV export (optional)', fields: [
+      { path: 'csv.rows', label: 'Rows', optional: true, options: [['', 'Not set (per model)'], ['model', 'One row per model'], ['file', 'One row per file']] },
+      { path: 'csv.max_records', label: 'Max records per file (blank = one file)', number: true, optional: true, hint: '200' },
+    ] },
     { group: 'Quota headers (optional)', fields: [
       { path: 'quota.used', label: 'Used', hint: 'X-Api-Calls-Used' },
       { path: 'quota.limit', label: 'Limit', hint: 'X-Api-Calls-Limit' },
@@ -1269,6 +1472,15 @@
     let cur = o;
     for (const k of ks.slice(0, -1)) { if (!cur[k] || typeof cur[k] !== 'object') cur[k] = {}; cur = cur[k]; }
     cur[ks[ks.length - 1]] = v;
+  }
+
+  // Remove an optional key (and its object once empty), so a cleared box leaves the template as it was.
+  function clearPath(o, path) {
+    const ks = path.split('.');
+    const parents = [o];
+    for (const k of ks.slice(0, -1)) { const next = parents[parents.length - 1][k]; if (!next || typeof next !== 'object') return; parents.push(next); }
+    delete parents[parents.length - 1][ks[ks.length - 1]];
+    for (let n = parents.length - 1; n > 0; --n) { if (Object.keys(parents[n]).length) break; delete parents[n - 1][ks[n - 1]]; }
   }
 
   function openEditor(c) {
@@ -1359,7 +1571,9 @@
           input = el('select');
           for (const [value, label] of f.options) { const op = el('option', '', label); op.value = value; input.appendChild(op); }
           input.value = v || f.options[0][0];
-          input.addEventListener('change', () => setPath(editor.spec, f.path, input.value));
+          input.addEventListener('change', () => {
+            if (f.optional && input.value === '') clearPath(editor.spec, f.path); else setPath(editor.spec, f.path, input.value);
+          });
         } else if (f.check) {
           input = el('input'); input.type = 'checkbox'; input.checked = !!v;
           input.addEventListener('change', () => setPath(editor.spec, f.path, input.checked));
@@ -1379,7 +1593,10 @@
           if (f.hint) input.placeholder = f.hint;
           if (f.list) input.setAttribute('list', f.list);
           input.spellcheck = false;
-          input.addEventListener('input', () => setPath(editor.spec, f.path, f.number ? Number(input.value) : input.value.trim()));
+          input.addEventListener('input', () => {
+            if (f.optional && input.value.trim() === '') { clearPath(editor.spec, f.path); return; }
+            setPath(editor.spec, f.path, f.number ? Number(input.value) : input.value.trim());
+          });
         }
         if (f.check) { l.appendChild(input); l.appendChild(el('span', '', f.label)); }
         else { l.appendChild(el('span', '', f.label)); l.appendChild(input); }
@@ -1614,7 +1831,12 @@
   $('vault-add-folder').addEventListener('click', () => { closeAddVault(); post('library_add_folder'); });
   $('vault-add-cancel').addEventListener('click', closeAddVault);
   $('vault-add').addEventListener('click', (e) => { if (e.target === $('vault-add')) closeAddVault(); });
-  $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key) }));
+  $('ven-csv').addEventListener('click', () => post('vendor_csv', { keys: state.venShown.map((i) => i.key), max: csvOpts.max, rows: csvOpts.rows }));
+  $('ven-csv-gear').addEventListener('click', openExportOpts);
+  $('ven-export-opts-ok').addEventListener('click', commitExportOpts);
+  $('ven-export-opts-cancel').addEventListener('click', closeExportOpts);
+  $('ven-export-opts').addEventListener('click', (e) => { if (e.target === $('ven-export-opts')) closeExportOpts(); });
+  document.addEventListener('keydown', exportOptsKey, true);
   $('ven-detail-close').addEventListener('click', closeDetail);
   $('ven-detail').addEventListener('click', (e) => { if (e.target === $('ven-detail')) closeDetail(); });
   $('ven-editor-cancel').addEventListener('click', closeEditor);

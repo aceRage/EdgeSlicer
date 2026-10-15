@@ -410,6 +410,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
            config->opt_int("enforce_support_layers") == 0 &&
            ! config->opt_bool("detect_thin_wall") &&
            ! config->opt_bool("overhang_reverse") &&
+           // Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
+           (! config->has("stabilizer_supports") || config->opt_enum<StabilizerMode>("stabilizer_supports") == smOff) &&
             config->opt_enum<WallDirection>("wall_direction") == WallDirection::Auto &&
             config->opt_enum<TimelapseType>("timelapse_type") == TimelapseType::tlTraditional))
     {
@@ -424,6 +426,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             new_conf.set_key_value("enforce_support_layers", new ConfigOptionInt(0));
             new_conf.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
             new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
+            if (new_conf.has("stabilizer_supports"))
+                new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
             new_conf.set_key_value("wall_direction", new ConfigOptionEnum<WallDirection>(WallDirection::Auto));
             new_conf.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
             sparse_infill_density = 0;
@@ -980,6 +984,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("support_filament", have_support_material || have_skirt || stab_on);
 
     toggle_line("raft_contact_distance", have_raft && !have_support_soluble);
+    // Orca:Hide raft expansion when raft is not enabled
+    toggle_line("raft_expansion", have_raft);
+    // Orca: Slim, Strong and Hybrid tree supports size their raft by first layer expansion only.
+    toggle_field("raft_expansion", !(is_tree(support_type) && (support_style == smsTreeSlim || support_style == smsTreeStrong || support_style == smsTreeHybrid)));
 
     // Orca: First-layer density is available for supports broadly.
     toggle_field("raft_first_layer_density", have_support_material);
@@ -1107,18 +1115,24 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
 
+    // Orca #10312: the fuzzy skin rows show unless fuzzy skin is Disabled. "None (allow paint)"
+    // keeps them: it still gets fuzzy skin wherever it is painted on.
+    const bool has_fuzzy_skin = config->opt_enum<FuzzySkinType>("fuzzy_skin") != FuzzySkinType::Disabled_fuzzy;
+    for (auto el : {"fuzzy_skin_mode", "fuzzy_skin_noise_type", "fuzzy_skin_point_distance", "fuzzy_skin_thickness", "fuzzy_skin_first_layer"})
+        toggle_line(el, has_fuzzy_skin);
+
     NoiseType fuzzy_skin_noise_type = config->opt_enum<NoiseType>("fuzzy_skin_noise_type");
     const bool is_ripple = fuzzy_skin_noise_type == NoiseType::Ripple;
-    toggle_line("fuzzy_skin_scale", fuzzy_skin_noise_type != NoiseType::Classic && !is_ripple);
-    toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi && !is_ripple);
-    toggle_line("fuzzy_skin_persistence", (fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow) && !is_ripple);
-    toggle_line("fuzzy_skin_ripples_per_layer", is_ripple);
-    toggle_line("fuzzy_skin_ripple_offset", is_ripple);
-    toggle_line("fuzzy_skin_layers_between_ripple_offset", is_ripple);
+    toggle_line("fuzzy_skin_scale", fuzzy_skin_noise_type != NoiseType::Classic && !is_ripple && has_fuzzy_skin);
+    toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi && !is_ripple && has_fuzzy_skin);
+    toggle_line("fuzzy_skin_persistence", (fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow) && !is_ripple && has_fuzzy_skin);
+    toggle_line("fuzzy_skin_ripples_per_layer", is_ripple && has_fuzzy_skin);
+    toggle_line("fuzzy_skin_ripple_offset", is_ripple && has_fuzzy_skin);
+    toggle_line("fuzzy_skin_layers_between_ripple_offset", is_ripple && has_fuzzy_skin);
     // The overhang skip reuses the lower-layer polygons of overhang wall detection; without it
-    // there is nothing to act on. It is NOT gated on the fuzzy_skin type: "None" still gets fuzzy
-    // skin wherever it is painted on, and the other fuzzy rows stay visible for the same reason.
-    toggle_line("fuzzy_skin_skip_overhangs", config->opt_bool("detect_overhang_wall"));
+    // there is nothing to act on. It is NOT gated on "None": that still gets fuzzy skin wherever
+    // it is painted on. Only Disabled (#10312, paint ignored too) hides it.
+    toggle_line("fuzzy_skin_skip_overhangs", config->opt_bool("detect_overhang_wall") && has_fuzzy_skin);
 
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
@@ -1299,6 +1313,7 @@ void ConfigManipulation::toggle_print_sla_options(DynamicPrintConfig* config)
 int ConfigManipulation::show_spiral_mode_settings_dialog(bool is_object_config)
 {
     wxString msg_text = _(L("Spiral mode only works when wall loops is 1, support is disabled, top shell layers is 0, sparse infill density is 0 and timelapse type is traditional."));
+    msg_text += " " + _(L("Side stabilizers must be off too."));
     auto printer_structure_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
     if (printer_structure_opt && printer_structure_opt->value == PrinterStructure::psI3) {
         msg_text += _(L(" But machines with I3 structure will not generate timelapse videos."));
