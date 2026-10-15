@@ -83,3 +83,7 @@ Maximum width of the chamfer zone measured from the tower perimeter. The brim wi
 ## Wall gap
 
 Create small gaps in the wipe tower outer wall at tool change entry points. The first extrusion path after a filament change will enter through the gap, leaving the filament blob on the gap edge instead of on the outer wall surface.
+
+## Stagger toolchange start
+
+Vary the prime-tower wipe start along the tower depth so startup ooze and ironing marks do not stack on the same purge line. The setting is off by default and is enabled only on Snapmaker U1 system process profiles. Stagger is 0 on the first layer, on local-Z tool changes, on tower-interface changes, and on the final purge. When stagger is on, the nozzle wipes from the offset start to the box top, then travels back to the original start and wipes the skipped band so the full purge volume is kept and the strip is filled.

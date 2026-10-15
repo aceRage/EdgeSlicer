@@ -6921,7 +6921,12 @@ void DeviceManager::check_pushing()
 {
     keep_alive();
     MachineObject* obj = this->get_selected_machine();
-    if (obj && !obj->is_support_mqtt_alive) {
+    // Orca #13802: the selected machine can be missing or stale when the timer fires. Having no
+    // selection is normal (no warning, this runs every tick); the early return keeps every later
+    // use of obj behind one check.
+    if (!obj)
+        return;
+    if (!obj->is_support_mqtt_alive) {
         std::chrono::system_clock::time_point start = std::chrono::system_clock::now();
         auto internal = std::chrono::duration_cast<std::chrono::milliseconds>(start - obj->last_update_time);
         if (internal.count() > TIMEOUT_FOR_STRAT && internal.count() < 1000 * 60 * 60 * 300) {
