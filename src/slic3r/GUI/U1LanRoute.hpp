@@ -4,6 +4,11 @@
 // account is reached over the LAN whenever it answers there, and through Snapmaker's cloud only
 // when it does not. Design: tests/design_u1_local_first.md (main checkout).
 //
+// STATUS (owner hand test 2026-10-15): OFF by default. A U1 in cloud mode answers the pairing
+// check with "link mode is not LAN", and its LAN mode turns the cloud off, so on current firmware
+// this path cannot work for a cloud-bound U1. Plan B in the design note (the printer's Moonraker
+// WebSocket on port 80) waits on U1MoonrakerProbe's hardware result.
+//
 // The Device page keeps its cloud session (sw_create_mqtt_client with the cloud broker). A
 // U1LanRoute rides on that session's MqttClient (MqttClient::SetRoute) and carries the printer's
 // four device topics (<sn>/request, response, status, notification) over a second session to the
@@ -28,6 +33,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+class wxWindow;
 
 namespace Slic3r {
 namespace GUI {
@@ -98,7 +105,9 @@ private:
     std::shared_ptr<State> m;
 };
 
-// app_config "snapmaker_local_first": anything but "0" (missing included) is on.
+// app_config "snapmaker_local_first" == "1" turns the route on; it is OFF by default. Current U1
+// firmware refuses LAN pairing while the printer is in cloud mode (and its LAN mode switches the
+// cloud off), so on a cloud-bound U1 the route could only ever probe port 1884 and give up.
 bool u1_local_first_enabled();
 // Attach a route to a page engine when its broker is the Snapmaker cloud and local-first is on.
 void attach_u1_lan_route_if_cloud(const std::shared_ptr<MqttClient>& engine, const std::string& server_address);
@@ -138,6 +147,10 @@ private:
     struct Lock;
     std::unique_ptr<Lock> m_lock;
 };
+
+// The read-only U1 Moonraker probe (Help menu), shown only with EDGESLICER_U1_PROBE=1.
+bool u1_moonraker_probe_enabled();
+void run_u1_moonraker_probe_dialog(wxWindow* parent);
 
 // The app's world: SnapmakerLan for addresses and identity, the pairing exchange on port 1884,
 // MQTTS to the printer, the slot store, a notification when the printer asks for approval.

@@ -82,6 +82,7 @@
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
 #include "NetworkTestDialog.hpp"
+#include "U1LanRoute.hpp" // the read-only U1 Moonraker probe
 #include "FirewallCheckDialog.hpp"
 #include "BambuSetupNoticeDialog.hpp"
 #include "ConfigWizard.hpp"
@@ -2785,6 +2786,13 @@ static wxMenu* generate_help_menu()
     append_menu_item(helpMenu, wxID_ANY, _L("Import Profile"), _L("Import Profile"), [](wxCommandEvent&) {
         wxGetApp().import_presets();
     });
+
+    // Owner diagnostic (tests/design_u1_local_first.md, Plan B): does a cloud-bound U1's Moonraker
+    // answer on the LAN? Read-only; only with EDGESLICER_U1_PROBE=1 in the environment.
+    if (u1_moonraker_probe_enabled())
+        append_menu_item(helpMenu, wxID_ANY, _L("Diagnostic: U1 local Moonraker probe (read-only)..."),
+                         _L("Ask a U1 on the LAN for its status over HTTP and its WebSocket, read-only"),
+                         [](wxCommandEvent&) { run_u1_moonraker_probe_dialog(wxGetApp().mainframe); });
 
     append_menu_item(helpMenu, wxID_ANY, _L("Open Network Test"), _L("Open Network Test"), [](wxCommandEvent&) {
         // Plain modal dialog: its test threads never touch the dialog itself (they keep only

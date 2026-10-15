@@ -1,6 +1,8 @@
 #include "U1LanRoute.hpp"
 
+#include "GUI.hpp" // into_u8
 #include "GUI_App.hpp"
+#include "MsgDialog.hpp"
 #include "I18N.hpp"
 #include "NotificationManager.hpp"
 #include "Plater.hpp"
@@ -10,6 +12,11 @@
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/InstanceLock.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "slic3r/Utils/U1MoonrakerProbe.hpp"
+
+#include <wx/choicdlg.h>
+#include <wx/msgdlg.h>
+#include <wx/textdlg.h>
 
 #include <boost/beast/core/detail/base64.hpp>
 #include <boost/format.hpp>
@@ -20,6 +27,7 @@
 #include <boost/nowide/fstream.hpp>
 
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <condition_variable>
 #include <map>
@@ -1020,7 +1028,11 @@ U1LanSlotStore& U1LanSlotStore::app()
 
 bool u1_local_first_enabled()
 {
-    return !(wxGetApp().app_config && wxGetApp().app_config->get("snapmaker_local_first") == "0");
+    // Off unless asked for: on U1 firmware up to at least 1.5.x the pairing port refuses every
+    // client while the printer is in cloud (WAN) mode ("link mode is not LAN", owner hand test
+    // 2026-10-15), and LAN mode switches the cloud off, so a cloud-bound U1 can never pair. The
+    // route stays for printers or firmware that allow both.
+    return wxGetApp().app_config && wxGetApp().app_config->get("snapmaker_local_first") == "1";
 }
 
 std::shared_ptr<U1LanRoute> u1_lan_route_of(const std::shared_ptr<MqttClient>& engine)
@@ -1094,6 +1106,55 @@ U1LanDeps make_app_u1_lan_deps()
         });
     };
     return d;
+}
+
+// ------------------------------------------- read-only Moonraker probe ----
+
+bool u1_moonraker_probe_enabled()
+{
+    const char* v = std::getenv("EDGESLICER_U1_PROBE");
+    return v && std::string(v) == "1";
+}
+
+void run_u1_moonraker_probe_dialog(wxWindow* parent)
+{
+    // The printers this PC knows on the LAN (mDNS, typed in, Device tab, cameras), plus a free entry.
+    std::vector<SnapmakerLan::Device> known;
+    for (const SnapmakerLan::Device& d : SnapmakerLan::devices())
+        if (SnapmakerLan::is_local_address(d.ip))
+            known.push_back(d);
+    wxArrayString choices;
+    for (const SnapmakerLan::Device& d : known)
+        choices.Add(wxString::FromUTF8((d.name.empty() ? d.id : d.name) + "  (" + SnapmakerLan::host_of(d.ip) + ")"));
+    choices.Add(_L("Type an address..."));
+    wxSingleChoiceDialog pick(parent,
+                              _L("Pick the U1 to probe. The probe only reads: three HTTP GETs and the WebSocket methods "
+                                 "server.info, printer.info and printer.objects.query. It sends no G-code and changes nothing."),
+                              _L("U1 local Moonraker probe (read-only)"), choices);
+    if (pick.ShowModal() != wxID_OK)
+        return;
+    std::string host;
+    const int   sel = pick.GetSelection();
+    if (sel >= 0 && sel < (int) known.size()) {
+        host = SnapmakerLan::host_of(known[sel].ip);
+    } else {
+        wxTextEntryDialog entry(parent, _L("The printer's LAN address (its screen shows it):"), _L("U1 local Moonraker probe (read-only)"));
+        if (entry.ShowModal() != wxID_OK)
+            return;
+        host = SnapmakerLan::host_of(into_u8(entry.GetValue()));
+    }
+    if (host.empty() || !SnapmakerLan::is_lan_host(host)) {
+        MessageDialog(parent, _L("That is not a LAN address."), _L("U1 local Moonraker probe (read-only)"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+    BOOST_LOG_TRIVIAL(info) << "[u1-moonraker-probe] started (read-only)";
+    wxBusyCursor busy;
+    // Blocking but bounded (a few seconds per step); the dialog shows when it is done.
+    const std::vector<U1MoonrakerProbe::Step> steps = U1MoonrakerProbe::run(host);
+    const std::string                         text  = U1MoonrakerProbe::report(steps);
+    BOOST_LOG_TRIVIAL(info) << "[u1-moonraker-probe] done";
+    wxMessageDialog done(parent, wxString::FromUTF8(text), _L("U1 local Moonraker probe (read-only)"), wxOK | wxICON_INFORMATION);
+    done.ShowModal();
 }
 
 } // namespace GUI

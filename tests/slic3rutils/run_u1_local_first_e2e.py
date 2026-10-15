@@ -42,19 +42,31 @@ def main():
                              # hands set_engine, never a default (owner hand test 2026-10-15).
                              "--code", MOCK_CODE],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    procs = [mock]
     try:
         line = mock.stdout.readline().strip()
         if not line.startswith("READY"):
             raise SystemExit("the mock did not start: %r" % line)
-        env = dict(os.environ, U1MOCK_PORTS=":".join(str(p) for p in ports), U1MOCK_CODE=MOCK_CODE)
-        print("mock: " + env["U1MOCK_PORTS"], flush=True)
+        # Two fake Moonrakers for the read-only probe: one with its WebSocket, one without.
+        mr_ports = [free_port(), free_port()]
+        for port, extra in ((mr_ports[0], []), (mr_ports[1], ["--no-ws"])):
+            fake = subprocess.Popen([sys.executable, "-u", os.path.join(HERE, "fake_moonraker_ws.py"), "--port", str(port)] + extra,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            procs.append(fake)
+            line = fake.stdout.readline().strip()
+            if not line.startswith("READY"):
+                raise SystemExit("the fake Moonraker did not start: %r" % line)
+        env = dict(os.environ, U1MOCK_PORTS=":".join(str(p) for p in ports), U1MOCK_CODE=MOCK_CODE,
+                   U1MOCK_MOONRAKER=":".join(str(p) for p in mr_ports))
+        print("mock: " + env["U1MOCK_PORTS"] + " moonraker: " + env["U1MOCK_MOONRAKER"], flush=True)
         started = time.time()
         rc = subprocess.call([exe, "[U1LocalFirstE2E]", "--durations", "yes"] + rest, env=env)
         print("E2E_EXIT=%d (%.0f s)" % (rc, time.time() - started), flush=True)
         return rc
     finally:
-        mock.kill()
-        mock.wait()
+        for p in procs:  # only what this script started, by handle
+            p.kill()
+            p.wait()
 
 
 if __name__ == "__main__":

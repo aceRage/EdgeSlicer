@@ -1057,6 +1057,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/MqttReconnectPolicy.hpp
     Utils/U1LocalFirst.cpp
     Utils/U1LocalFirst.hpp
+    Utils/U1MoonrakerProbe.cpp
+    Utils/U1MoonrakerProbe.hpp
     Utils/MoonRaker.cpp
     Utils/MoonRaker.hpp
     Utils/TimeSyncManager.cpp

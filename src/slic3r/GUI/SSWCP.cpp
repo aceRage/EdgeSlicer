@@ -6486,8 +6486,8 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         
         client->SetMessageCallback(SSWCP_MqttAgent_Instance::mqtt_msg_cb);
 
-        // Ultra: a U1 bound to the Snapmaker account is served over the LAN whenever it answers
-        // there; the cloud session stays the page's (U1LanRoute.hpp).
+        // Ultra: with app_config snapmaker_local_first = "1" (off by default) a U1 bound to the
+        // Snapmaker account is served over the LAN when it pairs there (U1LanRoute.hpp).
         attach_u1_lan_route_if_cloud(client, server_address);
 
         m_res_data["type"] = type;
