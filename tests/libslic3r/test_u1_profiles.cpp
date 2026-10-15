@@ -491,3 +491,71 @@ TEST_CASE("Every U1 filament that fits the 0.4 or 0.6 machine also fits the mixe
     }
     CHECK(checked > 100);
 }
+
+// Snapmaker #876: an empty flush_volumes_matrix / flush_volumes_vector (written after a device
+// filament sync) made boost::lexical_cast throw and aborted the whole preset load.
+TEST_CASE("parse_flush_volume_list tolerates empty and malformed lists", "[Preset][U1][FlushVolumes]")
+{
+    std::vector<double> out{ 1.0 };
+    CHECK_FALSE(PresetBundle::parse_flush_volume_list("", out));
+    CHECK(out.empty());
+    CHECK_FALSE(PresetBundle::parse_flush_volume_list("||", out));
+    CHECK_FALSE(PresetBundle::parse_flush_volume_list("abc", out));
+
+    REQUIRE(PresetBundle::parse_flush_volume_list("0|140.5||bad|280", out));
+    CHECK(out == std::vector<double>{ 0., 140.5, 280. });
+}
+
+TEST_CASE("Loading selections with empty flush volumes does not throw and keeps the defaults", "[Preset][U1][FlushVolumes]")
+{
+    SnapmakerTree &t = tree();
+    AppConfig      config = t.wizard_enabled_u1();
+    PresetBundle::PresetPreferences preferred;
+    preferred.printer_model_id = U1_MODEL;
+    preferred.printer_variant  = "0.4";
+    t.bundle->load_selections(config, preferred);
+    const std::string printer = t.bundle->printers.get_selected_preset_name();
+    const std::vector<double> before = t.bundle->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values;
+
+    config.set_printer_setting(printer, "flush_volumes_matrix", "");
+    config.set_printer_setting(printer, "flush_volumes_vector", "");
+    CHECK_NOTHROW(t.bundle->load_selections(config, preferred));
+    CHECK_NOTHROW(t.bundle->update_selections(config));
+    CHECK(t.bundle->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values == before);
+
+    // A well-formed list is still read (update_multi_material_filament_presets then resizes it to the
+    // filament count, so only check that loading it is fine and leaves a matrix behind).
+    config.set_printer_setting(printer, "flush_volumes_matrix", "0|10|20|0");
+    CHECK_NOTHROW(t.bundle->update_selections(config));
+    CHECK_FALSE(t.bundle->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values.empty());
+}
+
+// Snapmaker #759 + #920: the U1 has no Cool Steel Plate (btSuperTack). It stays available only
+// through support_multi_bed_types (the "ex" list), and the start G-code never branches on it.
+TEST_CASE("The U1 plate list has three plates and no Cool Steel Plate", "[Preset][U1][BedType]")
+{
+    const ConfigOptionDef *def = print_config_def.get("curr_bed_type");
+    REQUIRE(def != nullptr);
+
+    CHECK(def->enum_values_u1 == std::vector<std::string>{ "Textured PEI Plate", "High Temp Plate", "Graphic Effect Plate" });
+    REQUIRE(def->enum_labels_u1.size() == def->enum_values_u1.size());
+    for (const std::string &label : def->enum_labels_u1)
+        CHECK(label != "Cool Steel Plate");
+
+    const auto &ex = def->enum_values_ex;
+    CHECK(std::find(ex.begin(), ex.end(), "Supertack Plate") != ex.end());
+    CHECK(def->enum_values_ex.size() == def->enum_labels_ex.size());
+}
+
+TEST_CASE("The U1 start G-code does not branch on the Cool Steel Plate", "[Preset][U1][BedType]")
+{
+    SnapmakerTree &t = tree();
+    for (const char *name : { "Snapmaker U1 (0.4 nozzle)", "Snapmaker U1 (0.2 nozzle)", "Snapmaker U1 (0.6 nozzle)", "Snapmaker U1 (0.8 nozzle)" }) {
+        const Preset *printer = t.bundle->printers.find_preset(name, false);
+        REQUIRE(printer != nullptr);
+        const std::string &start = printer->config.opt_string("machine_start_gcode");
+        INFO(name);
+        CHECK(start.find("Supertack") == std::string::npos);
+        CHECK(start.find("Cool Steel") == std::string::npos);
+    }
+}

@@ -2932,6 +2932,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     m_enable_cooling_markers = true;
     this->apply_print_config(print.config());
+    // Orca a2a9f95b6b: m_config is a FullPrintConfig, but only the print config was applied so far, so its
+    // object and region options still held the hard-coded defaults. Region options read below (small area
+    // infill flow compensation) never saw the process preset's value.
+    m_config.apply(print.default_object_config());
+    m_config.apply(print.default_region_config());
 
     // m_volumetric_speed = DoExport::autospeed_volumetric_limit(print);
     print.throw_if_canceled();
@@ -3414,8 +3419,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         auto probe_dist_x  = std::max(1., m_config.bed_mesh_probe_distance.value.x());
         auto probe_dist_y  = std::max(1., m_config.bed_mesh_probe_distance.value.y());
-        int  probe_count_x = std::max(3, (int) std::ceil(mesh_bbox.size().x() / probe_dist_x));
-        int  probe_count_y = std::max(3, (int) std::ceil(mesh_bbox.size().y() / probe_dist_y));
+        // Orca #11491: points, not intervals: n intervals of at most probe_dist need n + 1 points.
+        int  probe_count_x = std::max(3, (int) std::ceil(mesh_bbox.size().x() / probe_dist_x) + 1);
+        int  probe_count_y = std::max(3, (int) std::ceil(mesh_bbox.size().y() / probe_dist_y) + 1);
         auto bed_mesh_algo = "bicubic";
         if (probe_count_x * probe_count_y <= 6) { // lagrange needs up to a total of 6 mesh points
             bed_mesh_algo = "lagrange";
@@ -5107,6 +5113,20 @@ static bool custom_gcode_sets_temperature(
 void GCode::print_machine_envelope(GCodeOutputStream& file, Print& print)
 {
     const auto flavor = print.config().gcode_flavor.value;
+
+    // Orca: Override input shaping values
+    // Edge: never for Bambu printers (Marlin legacy flavour, no M593), and for Klipper too (below).
+    const auto write_input_shaping = [&]() {
+        if (!print.config().input_shaping_emit.value || flavor == gcfMarlinLegacy || print.is_BBL_printer())
+            return;
+        const bool input_shaping_disable = print.config().input_shaping_type.value == InputShaperType::Disable;
+        file.write(writer().set_input_shaping('X', print.config().input_shaping_damp_x.value,
+            print.config().input_shaping_freq_x.value, print.config().opt_serialize("input_shaping_type")));
+        if (flavor != gcfRepRapFirmware && !input_shaping_disable) {
+            file.write(writer().set_input_shaping('Y', print.config().input_shaping_damp_y.value,
+                print.config().input_shaping_freq_y.value, ""));
+        }
+    };
     if ((flavor == gcfMarlinLegacy || flavor == gcfMarlinFirmware || flavor == gcfRepRapFirmware) &&
         print.config().emit_machine_limits_to_gcode.value == true) {
         int factor = flavor == gcfRepRapFirmware ? 60 : 1; // RRF M203 and M566 are in mm/min
@@ -5147,6 +5167,12 @@ void GCode::print_machine_envelope(GCodeOutputStream& file, Print& print)
 
         // New Marlin uses M205 J[mm] for junction deviation (only apply if it is > 0)
         file.write_format(writer().set_junction_deviation(config().machine_max_junction_deviation.values.front()).c_str());
+
+        write_input_shaping();
+    } else if (flavor == gcfKlipper) {
+        // Edge: Klipper ignores the machine limits, but takes the input shaping override
+        // (SET_INPUT_SHAPER) whenever it is on.
+        write_input_shaping();
     }
 }
 
@@ -6542,7 +6568,9 @@ LayerResult GCode::process_layer(const Print& print,
             }
         }
     } else {
-        if (!m_config.time_lapse_gcode.value.empty()) {
+        // Orca #15734: an i3 printing by layer takes its photo later in the layer (the traditional
+        // timelapse insertion below), so writing it here too took two photos per layer.
+        if (!need_insert_timelapse_gcode_for_traditional && !m_config.time_lapse_gcode.value.empty()) {
             DynamicConfig config;
             config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
             config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
@@ -6613,42 +6641,43 @@ LayerResult GCode::process_layer(const Print& print,
     }
     case CalibMode::Calib_Input_shaping_freq: {
         if (m_layer_index == 1) {
-            gcode += writer().set_input_shaping('A', print.calib_params().start, 0.f);
+            gcode += writer().set_input_shaping('A', print.calib_params().start, 0.f, print.calib_params().shaper_type);
+            if (m_writer.get_gcode_flavor() == gcfKlipper) {
+                // Disable minimum cruise ratio to ensure consistent motion for calibration
+                gcode += "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0\n";
+            }
         } else {
             if (print.calib_params().freqStartX == print.calib_params().freqStartY &&
                 print.calib_params().freqEndX == print.calib_params().freqEndY) {
-                gcode += writer().set_input_shaping('A', 0.f,
-                                                    (print.calib_params().freqStartX) +
-                                                        ((print.calib_params().freqEndX) - (print.calib_params().freqStartX)) *
-                                                            (m_layer_index - 2) / (m_layer_count - 3));
+                gcode += writer().set_input_shaping('A', 0.f, this->interpolate_value_across_layers(print.calib_params().freqStartX, print.calib_params().freqEndX), "");
             } else {
-                gcode += writer().set_input_shaping('X', 0.f,
-                                                    (print.calib_params().freqStartX) +
-                                                        ((print.calib_params().freqEndX) - (print.calib_params().freqStartX)) *
-                                                            (m_layer_index - 2) / (m_layer_count - 3));
-                gcode += writer().set_input_shaping('Y', 0.f,
-                                                    (print.calib_params().freqStartY) +
-                                                        ((print.calib_params().freqEndY) - (print.calib_params().freqStartY)) *
-                                                            (m_layer_index - 2) / (m_layer_count - 3));
+                gcode += writer().set_input_shaping('X', 0.f, this->interpolate_value_across_layers(print.calib_params().freqStartX, print.calib_params().freqEndX), "");
+                gcode += writer().set_input_shaping('Y', 0.f, this->interpolate_value_across_layers(print.calib_params().freqStartY, print.calib_params().freqEndY), "");
             }
         }
         break;
     }
     case CalibMode::Calib_Input_shaping_damp: {
         if (m_layer_index == 1) {
-            gcode += writer().set_input_shaping('X', 0.f, print.calib_params().freqStartX);
-            gcode += writer().set_input_shaping('Y', 0.f, print.calib_params().freqStartY);
+            if (m_writer.get_gcode_flavor() == gcfKlipper) {
+                // Disable minimum cruise ratio to ensure consistent motion for calibration
+                gcode += "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0\n";
+            }
+            gcode += writer().set_input_shaping('X', 0.f, print.calib_params().freqStartX, print.calib_params().shaper_type);
+            gcode += writer().set_input_shaping('Y', 0.f, print.calib_params().freqStartY, print.calib_params().shaper_type);
         } else {
-            gcode += writer().set_input_shaping('A',
-                                                print.calib_params().start + ((print.calib_params().end) - (print.calib_params().start)) *
-                                                                                 (m_layer_index) / (m_layer_count),
-                                                0.f);
+            gcode += writer().set_input_shaping('A', this->interpolate_value_across_layers(print.calib_params().start, print.calib_params().end), 0.f, "");
         }
         break;
     }
-    case CalibMode::Calib_Junction_Deviation: {
-        gcode += writer().set_junction_deviation(print.calib_params().start + ((print.calib_params().end) - (print.calib_params().start)) *
-                                                                                  (m_layer_index) / (m_layer_count));
+    case CalibMode::Calib_Cornering: {
+        if (m_writer.get_gcode_flavor() == gcfMarlinFirmware &&
+            !m_config.machine_max_junction_deviation.values.empty() &&
+            m_config.machine_max_junction_deviation.values.front() > 0) {
+            gcode += writer().set_junction_deviation(this->interpolate_value_across_layers(print.calib_params().start, print.calib_params().end));
+        } else {
+            gcode += writer().set_jerk_xy(this->interpolate_value_across_layers(print.calib_params().start, print.calib_params().end));
+        }
         break;
     }
     }
@@ -8069,6 +8098,7 @@ LayerResult GCode::process_layer(const Print& print,
                     layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
                     instance_to_print.print_object.slicing_parameters().raft_layers() == layer_to_print.object_layer->id();
 
+                m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
@@ -8497,6 +8527,7 @@ LayerResult GCode::process_layer(const Print& print,
             // extrusion). Without this, support_interface_speed/accel etc. resolve from
             // whatever object's config m_config last saw (a previous object on this layer,
             // or a previous layer's object), not this partition's own object.
+            m_config.apply(print.default_region_config());
             m_config.apply(obj.config(), true);
             m_layer                  = ltp.support_layer;
             m_object_layer_over_raft = false;
@@ -8709,6 +8740,8 @@ LayerResult GCode::process_layer(const Print& print,
                 bool object_layer_over_raft = layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
                                               instance_to_print.print_object.slicing_parameters().raft_layers() ==
                                                   layer_to_print.object_layer->id();
+                // Orca a2a9f95b6b: don't carry the previous object's region options into this one.
+                m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
@@ -10210,9 +10243,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 speed = std::min(speed, filament_max_volumetric_speed / _mm3_per_mm);
             }
 
-            // if still in avoidance mode and under “max”, clamp to “min”
-            if (m_resonance_avoidance && speed <= m_config.max_resonance_avoidance_speed.value) {
-                speed = std::min(speed, m_config.min_resonance_avoidance_speed.value);
+            // Orca #11462: if still in avoidance mode and under "max", leave the band the nearer way:
+            // speeds in its lower half are clamped down to "min", speeds in its upper half go up to "max".
+            // EDGE: only when the filament's max volumetric speed allows "max"; else down to "min" as before.
+            if (m_resonance_avoidance && speed < m_config.max_resonance_avoidance_speed.value) {
+                const double ra_min = m_config.min_resonance_avoidance_speed.value;
+                const double ra_max = m_config.max_resonance_avoidance_speed.value;
+                const bool   max_within_volumetric_cap = filament_max_volumetric_speed <= 0 ||
+                                                       ra_max <= filament_max_volumetric_speed / _mm3_per_mm;
+                if (speed < ra_min + (ra_max - ra_min) / 2 || !max_within_volumetric_cap)
+                    speed = std::min(speed, ra_min);
+                else
+                    speed = ra_max;
             }
 
             // reset flag for next segment
@@ -10957,6 +10999,17 @@ std::string GCode::extrusion_role_to_string_for_parser(const ExtrusionRole& role
     }
 }
 
+// Calculate the interpolated value for the current layer between start_value and end_value
+float GCode::interpolate_value_across_layers(float start_value, float end_value) const {
+    if (m_layer_index == 1) {
+        return start_value;
+    } else {
+        float ratio = (m_layer_index - 2.0f) / (m_layer_count - 3.0f);
+        ratio = std::max(0.0f, std::min(1.0f, ratio)); // clamp
+        return start_value + ratio * (end_value - start_value);
+    }
+}
+
 std::string encodeBase64(uint64_t value)
 {
     // Always use big endian mode
@@ -11029,10 +11082,20 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     } else {
         // Orca: a travel shorter than the retraction threshold that leads into an external perimeter keeps the outer wall
         // acceleration / jerk, so the nozzle does not decelerate to travel limits just before the visible wall starts.
-        const bool short_travel_to_outer_wall = role == erExternalPerimeter &&
-                                                travel.length() < scale_(EXTRUDER_CONFIG(retraction_minimum_travel));
+        // Orca #11975: the same for a short travel into an overhang wall, at the bridge acceleration that
+        // wall is printed with (and the outer wall jerk).
+        const bool is_short_travel                = travel.length() < scale_(EXTRUDER_CONFIG(retraction_minimum_travel));
+        const bool short_travel_to_outer_wall     = role == erExternalPerimeter && is_short_travel;
+        const bool short_travel_to_overhang_wall  = role == erOverhangPerimeter && is_short_travel;
         if (this->process_flow_value(m_config.default_acceleration) > 0) {
-            if (short_travel_to_outer_wall) {
+            if (short_travel_to_overhang_wall) {
+                const auto   bridge_fop = this->process_flow_value(m_config.bridge_acceleration);
+                const double bridge_acc = bridge_fop.percent ?
+                                              bridge_fop.value * 0.01 * this->process_flow_value(m_config.outer_wall_acceleration) :
+                                              bridge_fop.value;
+                if (bridge_acc > 0)
+                    acceleration_to_set = (unsigned int) floor(bridge_acc + 0.5);
+            } else if (short_travel_to_outer_wall) {
                 if (this->process_flow_value(m_config.outer_wall_acceleration) > 0)
                     acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.outer_wall_acceleration) + 0.5);
             } else {
@@ -11041,7 +11104,7 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             }
         }
         if (this->process_flow_value(m_config.default_jerk) > 0) {
-            if (short_travel_to_outer_wall) {
+            if (short_travel_to_outer_wall || short_travel_to_overhang_wall) {
                 if (this->process_flow_value(m_config.outer_wall_jerk) > 0)
                     jerk_to_set = this->process_flow_value(m_config.outer_wall_jerk);
             } else {

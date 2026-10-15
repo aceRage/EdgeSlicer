@@ -327,11 +327,18 @@ std::vector<ExPolygons> slice_struts(const PrintObject &object, const std::vecto
                                      const std::function<void()> &throw_if_canceled);
 
 // Walls and infill (stabilizer_wall_loops > 0): per layer, the part of the stabilizer slices that prints
-// as sparse infill - inside the walls, wide enough for the infill's line spacing (thin pillars, struts
-// and tips stay solid), and sparse on the layers below and above too, so every body keeps solid bottom
-// and top layers. Empty everywhere with no walls set. `line_width` and `spacing` are the support flow's, mm.
+// as sparse infill - inside the walls, at least STABILIZER_MIN_SPARSE_LINES line spacings wide (thin
+// pillars, struts and tips stay solid), and sparse on the layers below and above too, so every body
+// keeps solid bottom and top layers. Empty everywhere with no walls set. `line_width` and `spacing` are
+// the support flow's, mm.
+//
+// The width limit does not depend on the infill density: a column whose inside is narrower than the
+// sparse line spacing (2.8 mm at 15 % and 0.42 mm lines) still gets its walls and sparse lines that
+// cross it every few millimetres, as the user set. With 2 walls and 0.42 mm support lines a body needs
+// to be about 2.9 mm across (its narrow side) for that; anything thinner prints solid.
 static constexpr size_t STABILIZER_BOTTOM_SOLID_LAYERS = 2;
 static constexpr size_t STABILIZER_TOP_SOLID_LAYERS    = 3;
+static constexpr double STABILIZER_MIN_SPARSE_LINES    = 3.;
 std::vector<ExPolygons> sparse_infill_areas(const std::vector<ExPolygons> &slices, const StabilizerSettings &settings,
                                             double line_width, double spacing);
 

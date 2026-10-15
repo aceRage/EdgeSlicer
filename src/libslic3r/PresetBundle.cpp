@@ -42,6 +42,8 @@
 #include <boost/log/trivial.hpp>
 #include <miniz/miniz.h>
 #include "miniz_extension.hpp"
+#include "Time.hpp"
+#include "Zipper.hpp"
 
 
 // Store the print/filament/printer presets into a "presets" subdirectory of the Slic3rPE config dir.
@@ -680,6 +682,89 @@ bool PresetBundle::backup_user_folder() const
     }
 }
 
+// Per system filament preset of an older release, by its name then, the printers it listed that the preset it
+// now loads as does not (resources/info/legacy_compatible_printers.json, written by
+// scripts/legacy_compatible_printers.py). Empty if the file is missing or malformed. (OrcaSlicer #16367.)
+static std::map<std::string, std::vector<std::string>> legacy_compatible_printers()
+{
+    const boost::filesystem::path path = boost::filesystem::path(resources_dir()) / "info" / "legacy_compatible_printers.json";
+    try {
+        boost::nowide::ifstream in(path.string());
+        return json::parse(in).at("presets").get<std::map<std::string, std::vector<std::string>>>();
+    } catch (const std::exception &err) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": can not read " << path.string() << ": " << err.what();
+        return {};
+    }
+}
+
+bool PresetBundle::backup_user_folder_to_zip(const std::string &zip_path) const
+{
+    namespace bfs = boost::filesystem;
+    const bfs::path user_dir = bfs::path(data_dir()) / PRESET_USER_DIR;
+    BOOST_LOG_TRIVIAL(info) << "Backing up user folder to: " << zip_path;
+    try {
+        Zipper zipper(zip_path);
+        // Directories get their own entries, which extract_archive_confined() needs to recreate them.
+        zipper.add_entry(std::string(PRESET_USER_DIR) + "/", nullptr, 0);
+        // The loader follows symlinked folders, and migration writes the presets in them.
+        for (const bfs::directory_entry &entry : bfs::recursive_directory_iterator(user_dir, bfs::directory_options::follow_directory_symlink)) {
+            const std::string name = (bfs::path(PRESET_USER_DIR) / entry.path().lexically_relative(user_dir)).generic_string();
+            if (bfs::is_directory(entry.status())) {
+                zipper.add_entry(name + "/", nullptr, 0);
+                continue;
+            }
+            if (!bfs::is_regular_file(entry.status()))
+                continue;
+            boost::nowide::ifstream in(entry.path().string(), std::ios::binary);
+            const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (!in.good() && !in.eof())
+                throw Slic3r::RuntimeError("can not read " + entry.path().string());
+            zipper.add_entry(name, data.data(), data.size());
+        }
+        zipper.finalize();
+        return true;
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << "Exception during user folder backup: " << ex.what();
+        boost::system::error_code ec;
+        bfs::remove(zip_path, ec);
+        return false;
+    }
+}
+
+std::vector<LegacyUserFilamentPreset> PresetBundle::legacy_user_filament_presets()
+{
+    return filaments.legacy_user_filament_presets(legacy_compatible_printers());
+}
+
+PresetBundle::LegacyUserFilamentPresetMigration PresetBundle::migrate_legacy_user_filament_presets(const std::vector<LegacyUserFilamentPreset> &legacy_presets)
+{
+    LegacyUserFilamentPresetMigration     result;
+    std::vector<LegacyUserFilamentPreset> written;
+    const std::string zip_path = data_dir() + "/filament_preset_migration_" +
+                                 Utils::time2str(Utils::TimeZone::utc, Utils::TimeFormat::iso8601Z) + "_backup.zip";
+    // Before the lock: zipping a large folder takes longer than a guard may be held.
+    if (!backup_user_folder_to_zip(zip_path))
+        return result;
+    result.backup = zip_path;
+    {
+        // One hold for every write, so a lock another instance keeps is one outcome rather than a failure per
+        // preset (the lock backs off for a while after a miss). Held without the collection mutex, the order
+        // InstanceLock requires; each write re-reads its file, so a save that slipped in before is respected.
+        const std::string lock_path = user_presets_lock_path();
+        InstanceLock      instance_lock(lock_path);
+        if (!lock_path.empty() && !instance_lock.locked())
+            return result;
+        result.locked = true;
+        for (const LegacyUserFilamentPreset &legacy : legacy_presets)
+            if (PresetCollection::write_legacy_user_filament_preset(legacy))
+                written.push_back(legacy);
+            else
+                result.failed.push_back(legacy.preset);
+    }
+    filaments.apply_legacy_user_filament_presets(written);
+    return result;
+}
+
 //BBS: load project embedded presets
 PresetsConfigSubstitutions PresetBundle::load_project_embedded_presets(std::vector<Preset*> project_presets, ForwardCompatibilitySubstitutionRule substitution_rule)
 {
@@ -1222,7 +1307,9 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             preset.filament_id = key_values[BBL_JSON_KEY_FILAMENT_ID];
         preset.is_external = true;
         preset.version     = *version;
-        inherit_preset     = collection->find_preset(inherits_value, false, true); // pointer maybe wrong after insert, redo find
+        // Ultra: redone with the renamed_from lookup the first find used, else a preset on a renamed parent
+        // lost its base_id and was saved whole instead of as its difference.
+        inherit_preset     = collection->find_preset2(inherits_value, false); // pointer maybe wrong after insert, redo find
         if (inherit_preset) preset.base_id = inherit_preset->setting_id;
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << preset.name << " have filament_id: " << preset.filament_id << " and base_id: " << preset.base_id;
         Preset::normalize(preset.config);
@@ -2209,6 +2296,31 @@ void PresetBundle::load_installed_sla_materials(AppConfig &config)
         preset.set_visible_from_appconfig(config);
 }
 
+// Snapmaker #876: parse a '|'-separated list of doubles (flush_volumes_matrix / flush_volumes_vector)
+// stored in an AppConfig printer setting. An empty string (written after a device filament sync,
+// Snapmaker issue #616) or a malformed token used to make boost::lexical_cast throw and abort the
+// whole preset load at startup. Empty and malformed tokens are skipped; returns true and fills
+// `out` only when at least one valid value was parsed, so the existing defaults stay otherwise.
+bool PresetBundle::parse_flush_volume_list(const std::string &src, std::vector<double> &out)
+{
+    out.clear();
+    if (src.empty())
+        return false;
+    std::vector<std::string> tokens;
+    boost::algorithm::split(tokens, src, boost::algorithm::is_any_of("|"));
+    out.reserve(tokens.size());
+    for (const std::string &tok : tokens) {
+        if (tok.empty())
+            continue;
+        try {
+            out.push_back(boost::lexical_cast<double>(tok));
+        } catch (const boost::bad_lexical_cast &) {
+            // Skip a malformed entry rather than aborting the entire load.
+        }
+    }
+    return !out.empty();
+}
+
 void PresetBundle::update_selections(AppConfig &config)
 {
     std::string initial_printer_profile_name    = printers.get_selected_preset_name();
@@ -2237,16 +2349,14 @@ void PresetBundle::update_selections(AppConfig &config)
                                                                     filament_presets.size());
     ApplyFilamentColors(project_config, filamentColors);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
-    std::vector<std::string> matrix;
-    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_matrix")) {
-        boost::algorithm::split(matrix, config.get_printer_setting(initial_printer_profile_name, "flush_volumes_matrix"), boost::algorithm::is_any_of("|"));
-        auto flush_volumes_matrix = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
-        project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = std::vector<double>(flush_volumes_matrix.begin(), flush_volumes_matrix.end());
+    std::vector<double> flush_values;
+    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_matrix") &&
+        parse_flush_volume_list(config.get_printer_setting(initial_printer_profile_name, "flush_volumes_matrix"), flush_values)) {
+        project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = flush_values;
     }
-    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_vector")) {
-        boost::algorithm::split(matrix, config.get_printer_setting(initial_printer_profile_name, "flush_volumes_vector"), boost::algorithm::is_any_of("|"));
-        auto flush_volumes_vector = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
-        project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values = std::vector<double>(flush_volumes_vector.begin(), flush_volumes_vector.end());
+    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_vector") &&
+        parse_flush_volume_list(config.get_printer_setting(initial_printer_profile_name, "flush_volumes_vector"), flush_values)) {
+        project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values = flush_values;
     }
     if (config.has("app", "flush_multiplier")) {
         std::string str_flush_multiplier = config.get("app", "flush_multiplier");
@@ -2392,16 +2502,14 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
                                                                     filament_presets.size());
     ApplyFilamentColors(project_config, filamentColors);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
-    std::vector<std::string> matrix;
-    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_matrix")) {
-        boost::algorithm::split(matrix, config.get_printer_setting(initial_printer_profile_name, "flush_volumes_matrix"), boost::algorithm::is_any_of("|"));
-        auto flush_volumes_matrix = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
-        project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = std::vector<double>(flush_volumes_matrix.begin(), flush_volumes_matrix.end());
+    std::vector<double> flush_values;
+    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_matrix") &&
+        parse_flush_volume_list(config.get_printer_setting(initial_printer_profile_name, "flush_volumes_matrix"), flush_values)) {
+        project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = flush_values;
     }
-    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_vector")) {
-        boost::algorithm::split(matrix, config.get_printer_setting(initial_printer_profile_name, "flush_volumes_vector"), boost::algorithm::is_any_of("|"));
-        auto flush_volumes_vector = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
-        project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values = std::vector<double>(flush_volumes_vector.begin(), flush_volumes_vector.end());
+    if (config.has_printer_setting(initial_printer_profile_name, "flush_volumes_vector") &&
+        parse_flush_volume_list(config.get_printer_setting(initial_printer_profile_name, "flush_volumes_vector"), flush_values)) {
+        project_config.option<ConfigOptionFloats>("flush_volumes_vector")->values = flush_values;
     }
     if (config.has("app", "flush_multiplier")) {
         std::string str_flush_multiplier = config.get("app", "flush_multiplier");
@@ -3077,7 +3185,7 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
                 }
             }
             else if (!filament_inherits.empty())
-                filament_parent_preset =  const_cast<PresetBundle*>(this)->filaments.find_preset(filament_inherits, false, true);
+                filament_parent_preset =  const_cast<PresetBundle*>(this)->filaments.find_preset2(filament_inherits, false);
 
             if (filament_parent_preset) {
                 std::vector<std::string> dirty_options = cfg_rw.diff(filament_parent_preset->config);
@@ -5112,13 +5220,14 @@ static const std::vector<PrintCarryConflict> &print_carry_conflicts()
               return tree ? !(style == smsDefault || style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid || style == smsTreeOrganic)
                           : !(style == smsDefault || style == smsGrid || style == smsSnug);
           } },
-        { "spiral vase prerequisites", { "spiral_mode" },
+        { "spiral vase prerequisites", { "spiral_mode", "stabilizer_supports" },
           [](const DynamicPrintConfig &c, const DynamicPrintConfig *) {
               if (!print_carry_bool(c, "spiral_mode"))
                   return false;
               return !(print_carry_int(c, "wall_loops") == 1 && print_carry_int(c, "top_shell_layers") == 0 && print_carry_float(c, "sparse_infill_density") == 0 &&
                        !print_carry_bool(c, "enable_support") && print_carry_int(c, "enforce_support_layers") == 0 && !print_carry_bool(c, "detect_thin_wall") &&
-                       !print_carry_bool(c, "overhang_reverse") && print_carry_int(c, "wall_direction") == int(WallDirection::Auto) &&
+                       !print_carry_bool(c, "overhang_reverse") && print_carry_int(c, "stabilizer_supports") == int(smOff) &&
+                       print_carry_int(c, "wall_direction") == int(WallDirection::Auto) &&
                        print_carry_int(c, "timelapse_type") == int(TimelapseType::tlTraditional));
           } },
         { "alternate extra wall with vertical shell thickness All", { "alternate_extra_wall", "ensure_vertical_shell_thickness" },
