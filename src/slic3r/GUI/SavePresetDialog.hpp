@@ -78,7 +78,6 @@ class SavePresetDialog : public DPIDialog
         RadioGroup*         m_radio_group; // ORCA
         wxCheckBox*         m_every_printer {nullptr};
         bool                m_detach{false};
-        wxCheckBox*         m_detach_checkbox{nullptr};
 
         void update();
     };
