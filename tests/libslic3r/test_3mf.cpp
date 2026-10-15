@@ -31,6 +31,14 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 using namespace Slic3r;
@@ -1994,8 +2002,8 @@ SCENARIO("thumbnail relationships are declared only for thumbnails that were wri
                 const std::string rels = extract_zip_entry(test_file, "_rels/.rels");
                 CHECK(rels.find("/Metadata/plate_1.png") != std::string::npos);
                 CHECK(rels.find("/Metadata/plate_1_small.png") != std::string::npos);
-            CHECK_FALSE(extract_zip_entry(test_file, "Metadata/plate_1.png").empty());
-            CHECK_FALSE(extract_zip_entry(test_file, "Metadata/plate_1_small.png").empty());
+                CHECK_FALSE(extract_zip_entry(test_file, "Metadata/plate_1.png").empty());
+                CHECK_FALSE(extract_zip_entry(test_file, "Metadata/plate_1_small.png").empty());
             }
             boost::filesystem::remove(test_file);
         }
@@ -2086,6 +2094,37 @@ TEST_CASE("has_restore_data claims the lock when lock.txt cannot be read", "[3mf
 }
 #endif
 
+#ifdef _WIN32
+// Windows has no mode bits to take away; a lock.txt another process holds open with no sharing
+// cannot be read either, which is the same "state unknown" case.
+TEST_CASE("has_restore_data claims the lock when lock.txt cannot be read (Windows)", "[3mf]")
+{
+    TempBackupDir               outer("orca_lock");
+    boost::filesystem::path     backup = outer.path / "backup";
+    REQUIRE(boost::filesystem::create_directory(backup));
+    std::ofstream((backup / ".3mf").string()) << "stand-in for the backed-up project";
+    std::ofstream((backup / "lock.txt").string()) << "1";
+
+    struct ExclusiveHandle
+    {
+        HANDLE h;
+        explicit ExclusiveHandle(const boost::filesystem::path &p)
+            : h(::CreateFileW(p.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+        ~ExclusiveHandle() { if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h); }
+    } exclusive(backup / "lock.txt");
+    REQUIRE(exclusive.h != INVALID_HANDLE_VALUE);
+
+    boost::nowide::ifstream probe((backup / "lock.txt").string());
+    REQUIRE_FALSE(probe.good());
+    probe.close();
+
+    std::string path = backup.string(), origin;
+    bool        has  = true;
+    REQUIRE_NOTHROW(has = has_restore_data(path, origin));
+    CHECK_FALSE(has);
+    CHECK(origin == "<lock>");
+}
+#endif
 TEST_CASE("has_restore_data leaves a spent backup collectable", "[3mf]")
 {
     TempBackupDir           outer("orca_spent");
