@@ -136,10 +136,17 @@ TEST_CASE("Printer switch: PresetBundle cost per step", "[.][bench_printer_switc
         const std::vector<std::string> cycle = { "Bambu Lab X1 Carbon 0.4 nozzle", "Snapmaker U1 (0.4 nozzle)", "Bambu Lab H2D 0.4 nozzle",
                                                  "Voron 2.4 350 0.4 nozzle" };
         const std::vector<std::string> short_name = { "X1C", "U1", "H2D", "Voron" };
-        for (const std::string &p : cycle)
-            REQUIRE(bundle.printers.find_preset(p, false) != nullptr);
+        // A default AppConfig installs no printer models, so every vendor printer is invisible and
+        // select_preset_by_name() would fall back to the first visible preset. Force them visible
+        // the way Plater::priv::on_select_preset does for a model picked from the combo.
+        for (const std::string &p : cycle) {
+            Preset *preset = bundle.printers.find_preset(p, false);
+            REQUIRE(preset != nullptr);
+            preset->is_visible = true;
+        }
 
         REQUIRE(bundle.printers.select_preset_by_name(cycle[0], true));
+        REQUIRE(bundle.printers.get_selected_preset_name() == cycle[0]);
         bundle.update_compatible(PresetSelectCompatibleType::Always, PresetSelectCompatibleType::Always);
         DynamicPrintConfig prev_full = bundle.full_config();
 
@@ -167,6 +174,7 @@ TEST_CASE("Printer switch: PresetBundle cost per step", "[.][bench_printer_switc
                 t = clk::now();
                 bundle.printers.select_preset_by_name(cycle[to], false);
                 per_step.add("select", ms_since(t));
+                REQUIRE(bundle.printers.get_selected_preset_name() == cycle[to]);
 
                 t = clk::now();
                 bundle.update_compatible(PresetSelectCompatibleType::Always, PresetSelectCompatibleType::Always);
