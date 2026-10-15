@@ -573,6 +573,8 @@ private:
     bool m_in_render;
     // EDGE (core profile): set once this canvas has rendered a frame with no GL error; see report_frame_gl_errors().
     bool m_gl_clean_frame_logged{ false };
+    // How many canvases are inside render() right now - see is_frame_in_progress().
+    static int s_frames_in_progress;
     wxTimer m_timer;
     wxTimer m_timer_set_color;
     LayersEditing m_layers_editing;
@@ -828,6 +830,11 @@ public:
     void on_change_color_mode(bool is_dark, bool reinit = true);
     const bool get_dark_mode_status() { return m_is_dark; }
     void set_as_dirty();
+    // True while any GLCanvas3D is inside render(). The other surfaces that share the app's one
+    // GL context (the UV editor canvas) check this before making themselves current: a frame interrupted
+    // by another surface finishes drawing into that surface and then presents a window the context no
+    // longer belongs to, which on Mesa/X11 is a fatal X error (BadMatch) rather than a no-op.
+    static bool is_frame_in_progress() { return s_frames_in_progress > 0; }
     void requires_check_outside_state() { m_requires_check_outside_state = true; }
 
     unsigned int get_volumes_count() const;
