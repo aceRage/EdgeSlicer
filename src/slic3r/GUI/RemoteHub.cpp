@@ -6224,20 +6224,23 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         }
         std::string path, error;
         if (!spool_upload(client, r, path, error)) { respond_json(client, 400, json_error(error)); return; }
-        // The archive keeps its own copy; the spooled one goes whatever happens next.
+        // The archive keeps its own copy; the spooled one goes before any answer does, so a client
+        // that hears back never finds it still there (and it goes on an exception too).
         struct Spooled
         {
             fs::path dir;
-            ~Spooled() { boost::system::error_code ig; if (!dir.empty()) fs::remove_all(dir, ig); }
+            void     remove() { boost::system::error_code ig; if (!dir.empty()) fs::remove_all(dir, ig); dir.clear(); }
+            ~Spooled() { remove(); }
         } spooled { fs::path(path).parent_path() };
+        auto answer = [&](int st, const std::string& text) { spooled.remove(); respond_json(client, st, text); };
         gc_uploads();
         bool       spawned = false;
         const long pid     = ensure_send_instance(error, spawned);
-        if (!pid) { respond_json(client, 503, json_error(error)); return; }
+        if (!pid) { answer(503, json_error(error)); return; }
         int port = 0;
         for (const Instance& inst : instances(false))
             if (inst.pid == pid) port = inst.port;
-        if (!port) { respond_json(client, 503, json_error("the slicer on that PC went away; try again")); return; }
+        if (!port) { answer(503, json_error("the slicer on that PC went away; try again")); return; }
         int         status = 502;
         std::string body   = json_error("the slicer did not answer");
         Http::post("http://127.0.0.1:" + std::to_string(port) + "/api/archive/import")
@@ -6248,9 +6251,9 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
             .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? json_error(err) : b; })
             .perform_sync();
-        if (status != 200) { respond_json(client, status, body); return; }
+        if (status != 200) { answer(status, body); return; }
         json out;
-        try { out["record"] = json::parse(body); } catch (...) { respond_json(client, 502, json_error("the slicer answered something else")); return; }
+        try { out["record"] = json::parse(body); } catch (...) { answer(502, json_error("the slicer answered something else")); return; }
         const std::string id = out["record"].value("id", std::string());
         out["instance"] = pid;
         out["spawned"]  = spawned;
@@ -6258,7 +6261,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         out["send"]     = "i/" + std::to_string(pid) + "/api/archive/" + id + "/send";
         BOOST_LOG_TRIVIAL(info) << "RemoteHub: a job from another PC" << (r.client_name.empty() ? std::string() : " (client " + r.client_name + ")")
                                 << " is archive record " << id << " on instance " << pid;
-        respond_json(client, 200, out.dump());
+        answer(200, out.dump());
         return;
     }
     if (rest == "/api/instances/open" && r.method == "POST") {
