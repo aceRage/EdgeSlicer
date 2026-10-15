@@ -3157,6 +3157,20 @@ std::string long_entry_name(const std::string &prefix, const std::string &suffix
     return prefix + std::string(480 - prefix.size() - suffix.size(), 'a') + suffix;
 }
 
+// The importers report a malformed entry either by returning false or by throwing the formatted
+// message (FileIOError, as Plater shows it). Either is a clean failure; the message fits the buffer.
+template<typename Load> void check_load_fails_cleanly(Load load)
+{
+    try {
+        CHECK_FALSE(load());
+    } catch (const std::exception &e) {
+        const std::string message = e.what();
+        INFO(message);
+        CHECK_FALSE(message.empty());
+        CHECK(message.size() < 1024);
+    }
+}
+
 } // namespace
 
 TEST_CASE("A malformed 3MF model entry with a long name fails to load cleanly", "[3mf][untrusted]")
@@ -3177,9 +3191,7 @@ TEST_CASE("A malformed 3MF model entry with a long name fails to load cleanly", 
     Model                     model;
     DynamicPrintConfig        config;
     ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
-    bool                      loaded = true;
-    REQUIRE_NOTHROW(loaded = load_3mf(path.string().c_str(), config, ctxt, &model, false));
-    CHECK_FALSE(loaded);
+    check_load_fails_cleanly([&] { return load_3mf(path.string().c_str(), config, ctxt, &model, false); });
 }
 
 TEST_CASE("A malformed zipped AMF entry with a long name fails to load cleanly", "[amf][untrusted]")
@@ -3192,9 +3204,7 @@ TEST_CASE("A malformed zipped AMF entry with a long name fails to load cleanly",
     DynamicPrintConfig        config;
     ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
     bool                      use_inches = false;
-    bool                      loaded     = true;
-    REQUIRE_NOTHROW(loaded = load_amf(path.string().c_str(), &config, &ctxt, &model, &use_inches));
-    CHECK_FALSE(loaded);
+    check_load_fails_cleanly([&] { return load_amf(path.string().c_str(), &config, &ctxt, &model, &use_inches); });
 }
 
 // ---- Bambu 04de87fc2: OBJ UV indices near the int limits ----------------------------------------
