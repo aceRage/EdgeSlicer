@@ -604,3 +604,314 @@ TEST_CASE("The spiral lift uses the printable area of the extruder the filament 
         CHECK(count_cmd(parse_spiral_gcode(spiral_lift_gcode(s)), "G3") == 0);
     }
 }
+
+// Snapmaker #993: generated Z travel respects machine_max_speed_z (pure Z travel, lift/unlift, the Z component
+// of XYZ travel and of the spiral lift). Ported from the upstream tests (open PR, head 06583b935f) to this
+// tree's writer, plus the Edge adaptations: the layer-change Z is deferred through defer_z_move(), and the
+// spiral lift is slowed only as far as its Z component needs.
+namespace {
+
+// GCodeWriter::full_gcode_comment is a process-wide static (true by default, set per export), so
+// these exact-string cases switch it off and put it back, whatever ran before them.
+struct NoFullComments
+{
+    bool saved = GCodeWriter::full_gcode_comment;
+    NoFullComments() { GCodeWriter::full_gcode_comment = false; }
+    ~NoFullComments() { GCodeWriter::full_gcode_comment = saved; }
+};
+
+void setup_z_speed_writer(GCodeWriter &writer, double travel_speed, double travel_speed_z, double max_speed_z,
+                          bool arc_fitting = false, double z_hop = 1.5)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("travel_speed", new ConfigOptionFloats{travel_speed});
+    config.set_key_value("travel_speed_z", new ConfigOptionFloat(travel_speed_z));
+    config.set_key_value("machine_max_speed_z", new ConfigOptionFloats{max_speed_z, 5.});
+    config.set_key_value("z_hop", new ConfigOptionFloats{z_hop});
+    config.set_key_value("travel_slope", new ConfigOptionFloats{3.});
+    config.set_key_value("retract_lift_above", new ConfigOptionFloats{0.});
+    config.set_key_value("retract_lift_below", new ConfigOptionFloats{0.});
+    config.set_key_value("enable_arc_fitting", new ConfigOptionBool(arc_fitting));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+    writer.apply_print_config(print_config);
+    writer.set_is_first_layer(false);
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+}
+
+// The highest Z velocity (mm/s) of the G1 moves in `gcode` that change Z, read from `start`.
+double max_g1_z_velocity(const std::string &gcode, const Vec3d &start, int *z_moves = nullptr)
+{
+    std::ostringstream preamble;
+    preamble << "G1 X" << start.x() << " Y" << start.y() << " Z" << start.z() << " F6000\n";
+    double      worst = 0.;
+    int         count = 0;
+    bool        first = true;
+    GCodeReader reader;
+    reader.parse_buffer(preamble.str() + gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (first) {
+            first = false;
+            return;
+        }
+        if (line.cmd_is("G1") && line.dist_Z(self) != 0.) {
+            ++count;
+            const double dz       = std::abs(line.dist_Z(self));
+            const double distance = std::hypot(line.dist_XY(self), dz);
+            worst                 = std::max(worst, line.new_F(self) / 60. * dz / distance);
+        }
+    });
+    if (z_moves != nullptr)
+        *z_moves = count;
+    return worst;
+}
+
+// Drop the F words (and the lines that only set a feedrate): what is left is the path.
+std::string without_feedrates(const std::string &gcode)
+{
+    std::istringstream in(gcode);
+    std::string        line, out;
+    while (std::getline(in, line)) {
+        std::string body = line.substr(0, line.find(';'));
+        const size_t f   = body.find(" F");
+        if (f != std::string::npos) {
+            const size_t end = body.find(' ', f + 1);
+            body.erase(f, end == std::string::npos ? std::string::npos : end - f);
+        }
+        while (!body.empty() && body.back() == ' ')
+            body.pop_back();
+        if (body != "G1")
+            out += body + "\n";
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Z travel respects the machine Z speed limit", "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    struct SpeedCase
+    {
+        double      travel_speed;
+        double      travel_speed_z;
+        double      max_speed_z;
+        std::string feedrate;
+        std::string restored; // the feedrate left active after an unknown-position travel, when capped
+    };
+    const SpeedCase cases[] = {
+        {100., 0., 40., " F2400", "G1 F6000\n"}, // travel speed capped
+        {30., 0., 40., " F1800", ""},            // below the limit: unchanged
+        {100., 70., 40., " F2400", "G1 F4200\n"}, // travel_speed_z capped
+        {100., 20., 40., " F1200", ""},          // travel_speed_z below the limit: unchanged
+        {100., 0., 0., " F6000", ""},            // no limit: unchanged
+    };
+    for (const SpeedCase &c : cases) {
+        CAPTURE(c.travel_speed, c.travel_speed_z, c.max_speed_z);
+        GCodeWriter writer;
+        setup_z_speed_writer(writer, c.travel_speed, c.travel_speed_z, c.max_speed_z);
+
+        CHECK(writer.travel_to_z(10.) == "G1 Z10" + c.feedrate + "\n");
+        CHECK(writer.travel_to_z(9.) == "G1 Z9" + c.feedrate + "\n");
+
+        writer.set_position(Vec3d(100., 100., 9.));
+        writer.set_current_position_clear(true);
+
+        // Normal lift: the lift and the unlift are Z travel; the travel between them is not slowed.
+        writer.lift(LiftType::NormalLift);
+        const std::string hop = writer.travel_to_xyz(Vec3d(110., 100., 9.));
+        CHECK(hop.find("G1 Z10.5" + c.feedrate + "\n") == 0);
+        CHECK(hop.find("G1 X110 Y100 Z10.5 F" + std::to_string(int(c.travel_speed * 60.)) + "\n") != std::string::npos);
+        CHECK(writer.unlift() == "G1 Z9" + c.feedrate + "\n");
+
+        // Immediate lift (spiral vase).
+        CHECK(writer.lift(LiftType::NormalLift, true) == "G1 Z10.5" + c.feedrate + "\n");
+        CHECK(writer.unlift() == "G1 Z9" + c.feedrate + "\n");
+
+        // A travel that only changes Z is a Z travel.
+        CHECK(writer.travel_to_xyz(Vec3d(110., 100., 8.)) == "G1 X110 Y100 Z8" + c.feedrate + "\n");
+
+        // Unknown position: XY first, then Z.
+        writer.set_current_position_clear(false);
+        // Edge: the follower (wipe tower or custom G-code without F words) keeps the feedrate it had before.
+        CHECK(writer.travel_to_xyz(Vec3d(120., 100., 7.)) ==
+              "G1 X120 Y100 F" + std::to_string(int(c.travel_speed * 60.)) + "\nG1 Z7" + c.feedrate + "\n" + c.restored);
+    }
+}
+
+TEST_CASE("Z travel keeps the first-layer travel speed and follows a changed limit", "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("travel_speed", new ConfigOptionFloats{100.});
+    config.set_key_value("travel_speed_z", new ConfigOptionFloat(0.));
+    config.set_key_value("machine_max_speed_z", new ConfigOptionFloats{40., 40.});
+    config.set_key_value("initial_layer_travel_speed", new ConfigOptionFloatsOrPercents({FloatOrPercent{25., true}}));
+    PrintConfig print_config;
+    print_config.apply(config, true);
+
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+    // First layer: 25 % of 100 mm/s, under the limit.
+    CHECK(writer.travel_to_z(1.) == "G1 Z1 F1500\n");
+    writer.set_is_first_layer(false);
+    CHECK(writer.travel_to_z(2.) == "G1 Z2 F2400\n");
+
+    config.set_key_value("machine_max_speed_z", new ConfigOptionFloats{10., 10.});
+    print_config.apply(config, true);
+    writer.apply_print_config(print_config);
+    CHECK(writer.travel_to_z(3.) == "G1 Z3 F600\n");
+    // XY travel is not touched.
+    CHECK(writer.travel_to_xy(Vec2d(10., 0.)) == "G1 X10 Y0 F6000\n");
+}
+
+TEST_CASE("Combined XYZ travel limits its Z velocity without slowing shallow moves", "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 0., 40.);
+    writer.set_current_position_clear(true);
+
+    CHECK(writer.travel_to_xyz(Vec3d(10., 0., 10.)) == "G1 X10 Y0 Z10 F3394.112\n");
+    CHECK(writer.travel_to_xyz(Vec3d(20., 0., 0.)) == "G1 X20 Y0 Z0 F3394.112\n");
+    CHECK(writer.travel_to_xyz(Vec3d(120., 0., 1.)) == "G1 X120 Y0 Z1 F6000\n");
+    CHECK(writer.travel_to_xyz(Vec3d(220., 0., 1.)) == "G1 X220 Y0 F6000\n");
+
+    setup_z_speed_writer(writer, 100., 0., 0.);
+    CHECK(writer.travel_to_xyz(Vec3d(230., 0., 11.)) == "G1 X230 Y0 Z11 F6000\n");
+
+    // Measured between the emitted (rounded) coordinates, and the feedrate rounded down.
+    setup_z_speed_writer(writer, 100., 0., 40.);
+    writer.set_position(Vec3d(0.00049, 0., 0.00049));
+    int z_moves = 0;
+    CHECK(max_g1_z_velocity(writer.travel_to_xyz(Vec3d(1.00049, 0., 1.00051)), Vec3d::Zero(), &z_moves) <= 40. + 0.0001);
+    CHECK(z_moves == 1);
+}
+
+TEST_CASE("Each Z-hop segment respects the Z velocity limit", "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    for (LiftType type : {LiftType::NormalLift, LiftType::LazyLift, LiftType::SpiralLift}) {
+        for (double distance : {0.5, 10., 120.}) {
+            CAPTURE(int(type), distance);
+            GCodeWriter writer;
+            setup_z_speed_writer(writer, 100., 0., 40.);
+            writer.set_current_position_clear(true);
+            std::string gcode = writer.travel_to_xyz(Vec3d(50., 50., 10.));
+            writer.lift(type);
+            gcode += writer.travel_to_xyz(Vec3d(50. + distance, 50. + distance, 10.));
+            gcode += writer.unlift();
+            INFO(gcode);
+
+            int z_moves = 0;
+            CHECK(max_g1_z_velocity(gcode, Vec3d::Zero(), &z_moves) <= 40. + 0.0001);
+            CHECK(z_moves >= 3);
+            if (type == LiftType::NormalLift || distance > 10.)
+                CHECK(gcode.find(" F6000") != std::string::npos);
+            if (type == LiftType::SpiralLift) {
+                // Edge: the spiral is slowed only as far as its Z component needs (here not at all),
+                // not to the Z limit itself.
+                CHECK(gcode.find("G1 F6000\n") != std::string::npos);
+            }
+        }
+    }
+}
+
+TEST_CASE("A deferred layer change caps its travel from the previous layer's Z and keeps the hop height",
+          "[GCodeWriter][ZSpeed]")
+{
+    NoFullComments no_comments;
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 0., 40., false, 0.4);
+
+    SECTION("the travel climbs the layer height: capped") {
+        writer.set_position(Vec3d(167.804, 167.985, 0.3));
+        writer.set_current_position_clear(true);
+        writer.defer_z_move(0.5);
+        // Everything that reads the writer's position right after the layer change sees the new layer's Z.
+        CHECK(writer.get_position().z() == Approx(0.5));
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.5), "", true) == "G1 X167.921 Y167.804 Z.5 F3528.285\n");
+    }
+    SECTION("the head is already at that Z: full travel speed") {
+        writer.set_position(Vec3d(167.804, 167.985, 0.5));
+        writer.set_current_position_clear(true);
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.5), "", true) == "G1 X167.921 Y167.804 Z.5 F6000\n");
+    }
+    SECTION("a lift before the layer change lifts above the new layer") {
+        writer.set_position(Vec3d(167.804, 167.985, 0.3));
+        writer.set_current_position_clear(true);
+        writer.lift();                // GCode::change_layer() retracts and lifts first ...
+        writer.defer_z_move(0.5);     // ... then moves the writer to the new layer
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.5), "", true).find("G1 Z.9 F2400\n") == 0);
+        CHECK(writer.get_zhop() == Approx(0.4));
+        CHECK(writer.unlift() == "G1 Z.5 F2400\n");
+    }
+    SECTION("a Z move or a new position ends the deferral") {
+        writer.set_position(Vec3d(167.804, 167.985, 0.3));
+        writer.set_current_position_clear(true);
+        writer.defer_z_move(0.5);
+        CHECK(writer.travel_to_z(0.7) == "G1 Z.7 F2400\n");
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.7), "", true) == "G1 X167.921 Y167.804 Z.7 F6000\n");
+
+        writer.set_position(Vec3d(167.804, 167.985, 0.3));
+        writer.defer_z_move(0.5);
+        writer.set_position(Vec3d(167.804, 167.985, 0.5));
+        CHECK(writer.travel_to_xyz(Vec3d(167.921, 167.804, 0.5), "", true) == "G1 X167.921 Y167.804 Z.5 F6000\n");
+    }
+}
+
+TEST_CASE("A spiral lift at a layer change keeps its path and caps only its Z component", "[GCodeWriter][ZSpeed][SpiralLift]")
+{
+    NoFullComments no_comments;
+    // U1-like: 500 mm/s travel, 20 mm/s Z limit, 0.4 mm z-hop, 3 degree slope.
+    auto spiral_at_layer_change = [](bool arc_fitting, bool deferred) {
+        GCodeWriter writer;
+        setup_z_speed_writer(writer, 500., 0., 20., arc_fitting, 0.4);
+        writer.set_position(Vec3d(100., 100., deferred ? 0.2 : 0.4));
+        writer.set_current_position_clear(true);
+        writer.lift(LiftType::SpiralLift);
+        if (deferred)
+            writer.defer_z_move(0.4);
+        return writer.travel_to_xyz(Vec3d(150., 100., 0.4), "", true);
+    };
+
+    SECTION("emulated with G1 segments (arc fitting off)") {
+        const std::string deferred  = spiral_at_layer_change(false, true);
+        const std::string reference = spiral_at_layer_change(false, false);
+        INFO(deferred);
+        // Same path as without the layer change (the #471 geometry), only feedrates differ.
+        CHECK(without_feedrates(deferred) == without_feedrates(reference));
+        // Every segment, the first one climbing the 0.2 mm layer as well, stays within 20 mm/s in Z.
+        CHECK(max_g1_z_velocity(deferred, Vec3d(100., 100., 0.2)) <= 20. * 1.001);
+        CHECK(max_g1_z_velocity(reference, Vec3d(100., 100., 0.4)) <= 20. * 1.001);
+
+        // The first segment alone runs slower; the second restores the spiral's feedrate, which is far
+        // above the Z limit (a 3 degree spiral is mostly XY motion).
+        const std::vector<SpiralLine> lines = parse_spiral_gcode(deferred);
+        REQUIRE(lines.size() > 3);
+        REQUIRE(lines[0].has('F'));
+        REQUIRE_FALSE(lines[1].has('F'));
+        REQUIRE(lines[2].has('F'));
+        CHECK(lines[0].v.at('F') < lines[2].v.at('F'));
+        CHECK(lines[2].v.at('F') > 20. * 60. * 5.);
+        CHECK(lines[2].v.at('F') < 500. * 60.);
+        // Without a layer change, one feedrate for the whole spiral, as before.
+        const std::vector<SpiralLine> ref_lines = parse_spiral_gcode(reference);
+        CHECK(std::count_if(ref_lines.begin(), ref_lines.end(), [](const SpiralLine &l) { return l.has('F'); }) == 2);
+    }
+    SECTION("one G3 arc (arc fitting on)") {
+        const std::string deferred = spiral_at_layer_change(true, true);
+        INFO(deferred);
+        CHECK(without_feedrates(deferred) == without_feedrates(spiral_at_layer_change(true, false)));
+        const std::vector<SpiralLine> lines = parse_spiral_gcode(deferred);
+        const auto arc = std::find_if(lines.begin(), lines.end(), [](const SpiralLine &l) { return l.cmd == "G3"; });
+        REQUIRE(arc != lines.end());
+        const double dz         = arc->v.at('Z') - 0.2;
+        const double arc_length = std::hypot(2. * PI * std::hypot(arc->v.at('I'), arc->v.at('J')), dz);
+        CHECK(arc->v.at('F') / 60. * dz / arc_length <= 20. + 0.0001);
+        CHECK(arc->v.at('F') > 20. * 60. * 5.);
+        CHECK(arc->v.at('F') < 500. * 60.);
+    }
+}
