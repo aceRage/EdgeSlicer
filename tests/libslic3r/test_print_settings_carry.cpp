@@ -62,7 +62,7 @@ TEST_CASE("Print settings carry: key classification", "[Preset][PrintSettingsCar
                              "prime_tower_width", "prime_tower_brim_width", "wipe_tower_rotation_angle", "wipe_tower_x", "wipe_tower_no_sparse_layers",
                              "filename_format", "enable_arc_fitting", "timelapse_type", "exclude_object", "gcode_label_objects",
                              "flush_into_infill", "toolchange_ordering", "default_jerk", "default_junction_deviation", "post_process",
-                             "xy_hole_compensation", "elefant_foot_compensation" }) {
+                             "xy_hole_compensation", "elefant_foot_compensation", "elefant_foot_layers_density" }) {
         INFO(key);
         CHECK(print_carry_is_printer_coupled(key));
     }
@@ -84,7 +84,7 @@ TEST_CASE("Print settings carry: key classification", "[Preset][PrintSettingsCar
     // The listed keys are real process options, so the lists cannot silently rot.
     for (const char *key : { "standby_temperature_delta", "ooze_prevention", "enable_prime_tower", "filename_format", "enable_arc_fitting",
                              "print_extruder_id", "print_extruder_variant", "timelapse_type", "exclude_object", "support_top_z_distance",
-                             "support_bottom_z_distance", "initial_layer_print_height" }) {
+                             "support_bottom_z_distance", "initial_layer_print_height", "elefant_foot_layers_density" }) {
         INFO(key);
         CHECK(contains(Preset::print_options(), key));
     }
@@ -395,6 +395,30 @@ TEST_CASE("Print settings carry: never leave a combination the settings page rew
         dst.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlSmooth)); // printer-coupled, stays
         carry_print_settings(dst, vase, true);
         CHECK_FALSE(dst.opt_bool("spiral_mode"));
+    }
+
+    SECTION("spiral vase is not carried together with side stabilizers") {
+        DynamicPrintConfig base;
+        base.set_key_value("spiral_mode", new ConfigOptionBool(false));
+        base.set_key_value("wall_loops", new ConfigOptionInt(1));
+        base.set_key_value("top_shell_layers", new ConfigOptionInt(0));
+        base.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
+        base.set_key_value("enable_support", new ConfigOptionBool(false));
+        base.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
+        base.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
+        DynamicPrintConfig src = base;
+        src.set_key_value("spiral_mode", new ConfigOptionBool(true));
+        src.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smAuto));
+        DynamicPrintConfig dst = base;
+        std::map<std::string, std::string> kept;
+        carry_print_settings(dst, src, true, nullptr, &kept);
+        CHECK_FALSE(dst.opt_bool("spiral_mode"));
+        CHECK(kept["spiral_mode"].find("conflict") != std::string::npos);
+        // Stabilizers off in the source: nothing blocks the vase.
+        src.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
+        dst = base;
+        carry_print_settings(dst, src, true);
+        CHECK(dst.opt_bool("spiral_mode"));
     }
 
     SECTION("extrusion rate smoothing is not carried onto a profile with arc fitting") {

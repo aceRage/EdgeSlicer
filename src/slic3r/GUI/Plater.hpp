@@ -334,7 +334,7 @@ public:
     const SLAPrint& sla_print() const;
     SLAPrint& sla_print();
 
-    int new_project(bool skip_confirm = false, bool silent = false, const wxString& project_name = wxString());
+    int new_project(bool skip_confirm = false, bool silent = false, const wxString& project_name = wxString(), bool reload_presets = true);
     // BBS: save & backup
     void load_project(wxString const & filename = "", wxString const & originfile = "-");
     int save_project(bool saveAs = false);
@@ -370,7 +370,7 @@ public:
     void calib_VFA(const Calib_Params& params);
     void calib_input_shaping_freq(const Calib_Params& params);
     void calib_input_shaping_damp(const Calib_Params& params);
-    void calib_junction_deviation(const Calib_Params& params);
+    void Calib_Cornering(const Calib_Params& params);
 
     BuildVolume_Type get_build_volume_type() const;
 
@@ -479,7 +479,7 @@ public:
     void deselect_all();
     void exit_gizmo();
     void remove(size_t obj_idx);
-    void reset(bool apply_presets_change = false);
+    void reset(bool apply_presets_change = false, bool reload_presets = true);
     void reset_with_confirm();
     //BBS: return int for various result
     int close_with_confirm(std::function<bool(bool yes_or_no)> second_check = nullptr); // BBS close project

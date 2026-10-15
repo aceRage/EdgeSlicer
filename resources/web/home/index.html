@@ -17,13 +17,19 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6H2v14a2 2 0 0 0 2 2h14v-2H4zm16-4H8a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm0 14H8V4h12z"/></svg>
       <span data-i18n="library">Library</span>
     </button>
-    <button class="rail-item" data-section="history" type="button">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8H5a3 3 0 0 0-3 3v6h4v4h12v-4h4v-6a3 3 0 0 0-3-3zm-3 11H8v-5h8zm3-7a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-1-9H6v4h12z"/></svg>
-      <span data-i18n="history">Print History</span>
-    </button>
     <button class="rail-item" data-section="vendors" type="button">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 4H4v2h16zm1 10v-2l-1-5H4l-1 5v2h1v6h10v-6h4v6h2v-6zm-9 4H6v-4h6z"/></svg>
       <span data-i18n="vendors">Vendors</span>
+    </button>
+    <!-- Vaults: the user's own model storage (folders and NAS shares via the Library, later WebDAV,
+         Azure Blob and S3). Vendors stay vendors. See tests/design_vaults_home_tab.md. -->
+    <button class="rail-item" data-section="vaults" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" d="M4 3h16a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1h-1v1h-3v-1H8v1H5v-1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm1 2v13h14V5zm7 2a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM6 9h1v5H6z"/></svg>
+      <span data-i18n="vaults">Vaults</span>
+    </button>
+    <button class="rail-item" data-section="history" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8H5a3 3 0 0 0-3 3v6h4v4h12v-4h4v-6a3 3 0 0 0-3-3zm-3 11H8v-5h8zm3-7a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-1-9H6v4h12z"/></svg>
+      <span data-i18n="history">Print History</span>
     </button>
     <!-- Models: the in-app model browser, a native panel the slicer shows in place of this page. -->
     <button class="rail-item" id="rail-models" data-action="models" type="button" hidden>
@@ -71,7 +77,10 @@
     <section id="vendors" class="section" hidden>
       <div class="lib-top">
         <div id="ven-status" class="status"></div>
-        <button id="ven-csv" class="btn" type="button" data-i18n="export_csv">Export CSV</button>
+        <div class="split-btn" id="ven-csv-split">
+          <button id="ven-csv" class="btn split-main" type="button" data-i18n="export_csv">Export CSV</button>
+          <button id="ven-csv-gear" class="btn split-gear" type="button" aria-label="Export options" aria-haspopup="dialog" title="Export options"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg></button>
+        </div>
         <button id="ven-import" class="btn" type="button" data-i18n="import">Import</button>
         <button id="ven-add" class="btn primary" type="button" data-i18n="add_connector">Add connector</button>
       </div>
@@ -80,6 +89,21 @@
       <div class="grid" id="vendors-grid"></div>
       <div id="ven-more" aria-hidden="true"></div>
       <div class="empty" id="vendors-empty" hidden><p id="vendors-empty-text"></p></div>
+    </section>
+
+    <section id="vaults" class="section" hidden>
+      <div class="lib-top">
+        <div id="vault-status" class="status"></div>
+        <button id="vault-add-btn" class="btn primary" type="button" data-i18n="add_vault">Add vault</button>
+      </div>
+      <div id="vault-list" class="connectors" role="list"></div>
+      <div id="vault-filters"></div>
+      <div class="grid" id="vault-grid"></div>
+      <div id="vault-more" aria-hidden="true"></div>
+      <div class="empty" id="vaults-empty" hidden>
+        <p id="vaults-empty-text"></p>
+        <button id="vault-empty-add" class="btn primary" type="button" data-i18n="add_vault">Add vault</button>
+      </div>
     </section>
 
     <section id="history" class="section" hidden>
@@ -142,6 +166,46 @@
   </div>
 </div>
 
+<div id="vault-add" class="overlay" hidden>
+  <div class="dialog chooser" role="dialog" aria-modal="true" aria-labelledby="vault-add-title">
+    <h2 id="vault-add-title" data-i18n="add_vault">Add vault</h2>
+    <p class="hint" data-i18n="add_vault_hint">Where do you keep the models you want to reach from EdgeSlicer?</p>
+    <div class="choices" id="vault-choices">
+      <div id="vault-builtins" class="choices"></div>
+      <button id="vault-add-webdav" class="choice" type="button">
+        <b data-i18n="vault_webdav">WebDAV server</b>
+        <span data-i18n="vault_webdav_hint">A folder on a NAS or server that speaks WebDAV: QNAP, Nextcloud, ownCloud, Apache, rclone...</span>
+      </button>
+      <button id="vault-add-azure" class="choice" type="button">
+        <b data-i18n="vault_azure">Azure Blob container</b>
+        <span data-i18n="vault_azure_hint">A container in Azure Storage, read with a SAS link that allows Read and List.</span>
+      </button>
+      <button id="vault-add-s3" class="choice" type="button">
+        <b data-i18n="vault_s3">S3-compatible bucket</b>
+        <span data-i18n="vault_s3_hint">AWS S3, Cloudflare R2, Backblaze B2, MinIO, Wasabi... read with an access key.</span>
+      </button>
+      <button id="vault-add-folder" class="choice" type="button">
+        <b data-i18n="vault_folder">Folder or network share</b>
+        <span data-i18n="vault_folder_hint">A folder on this computer, an external drive or a NAS share mounted as a folder. Its models show in the Library.</span>
+      </button>
+    </div>
+    <div class="dialog-actions"><span class="grow"></span><button id="vault-add-cancel" class="btn" type="button" data-i18n="cancel">Cancel</button></div>
+  </div>
+</div>
+
+<div id="vault-editor" class="overlay" hidden>
+  <div class="dialog editor" role="dialog" aria-modal="true" aria-labelledby="vault-editor-title">
+    <h2 id="vault-editor-title" data-i18n="vault_settings">Vault</h2>
+    <div id="vault-editor-error" class="notice" hidden></div>
+    <div id="vault-editor-body"></div>
+    <div class="dialog-actions">
+      <span class="grow"></span>
+      <button id="vault-editor-cancel" class="btn" type="button" data-i18n="cancel">Cancel</button>
+      <button id="vault-editor-save" class="btn primary" type="button" data-i18n="save">Save</button>
+    </div>
+  </div>
+</div>
+
 <div id="ven-editor" class="overlay" hidden>
   <div class="dialog editor" role="dialog" aria-modal="true" aria-labelledby="ven-editor-title">
     <h2 id="ven-editor-title" data-i18n="connector">Connector</h2>
@@ -157,11 +221,24 @@
   </div>
 </div>
 
+<div id="ven-export-opts" class="overlay" hidden>
+  <div class="dialog opts" role="dialog" aria-modal="true" aria-labelledby="ven-export-opts-title">
+    <h2 id="ven-export-opts-title" data-i18n="csv_options">Export options</h2>
+    <div id="ven-export-opts-body"></div>
+    <div class="dialog-actions">
+      <span class="grow"></span>
+      <button id="ven-export-opts-cancel" class="btn" type="button" data-i18n="cancel">Cancel</button>
+      <button id="ven-export-opts-ok" class="btn primary" type="button" data-i18n="csv_ok">OK</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast" hidden role="status"></div>
 <datalist id="dl-category"></datalist>
 <datalist id="dl-vendor"></datalist>
 <datalist id="dl-license"></datalist>
 
+<script src="csvmax.js"></script>
 <script src="home.js"></script>
 </body>
 </html>

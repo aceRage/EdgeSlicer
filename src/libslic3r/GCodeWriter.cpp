@@ -534,50 +534,88 @@ std::string GCodeWriter::set_pressure_advance(double pa) const
     return gcode.str();
 }
 
-std::string GCodeWriter::set_input_shaping(char axis, float damp, float freq) const
+// Orca: input shaping support
+std::string GCodeWriter::set_input_shaping(char axis, float damp, float freq, std::string type) const
 {
-    if (freq < 0.0f || damp < 0.f || damp > 1.0f || (axis != 'X' && axis != 'Y' && axis != 'Z' && axis != 'A'))// A = all axis
-    {
-    throw std::runtime_error("Invalid input shaping parameters: freq=" + std::to_string(freq) + ", damp=" + std::to_string(damp));
+    bool disable = type == "Disable";
+    if (disable){
+        freq = 0.0f;
+        damp = 0.0f;
+        axis = 'A';
+        type = "Default";
+    } else if (freq < 0.0f || damp < 0.f || damp > 1.0f || (axis != 'X' && axis != 'Y' && axis != 'Z' && axis != 'A')) { // A = all axis
+        throw std::runtime_error("Invalid input shaping parameters: axis=" + std::string(1, axis) + ", freq=" + std::to_string(freq) + ", damp=" + std::to_string(damp));
     }
     std::ostringstream gcode;
-    if (FLAVOR_IS(gcfKlipper)) {
-        gcode << "SET_INPUT_SHAPER";
+    std::ostringstream params;
+    switch (this->config.gcode_flavor.value) {
+    case gcfKlipper: {
+        if (!type.empty() && type != "Default") {
+            params << " SHAPER_TYPE=" << type;
+        }
         if (axis != 'A')
         {
             if (freq > 0.0f) {
-                gcode << " SHAPER_FREQ_" << axis << "=" << std::fixed << std::setprecision(2) << freq;
-            }
-            if (damp > 0.0f){
-                gcode  << " DAMPING_RATIO_" << axis << "=" << damp;
-            } 
-        } else {
-            if (freq > 0.0f) {
-                gcode << " SHAPER_FREQ_X=" << std::fixed << std::setprecision(2) << freq << " SHAPER_FREQ_Y=" << std::fixed << std::setprecision(2) << freq;
+                params << " SHAPER_FREQ_" << axis << "=" << std::fixed << std::setprecision(2) << freq;
             }
             if (damp > 0.0f) {
-                gcode << " DAMPING_RATIO_X=" << std::fixed << std::setprecision(3) << damp << " DAMPING_RATIO_Y=" << std::fixed << std::setprecision(3) << damp;
+                params << " DAMPING_RATIO_" << axis << "=" << std::fixed << std::setprecision(3) << damp;
+            }
+        } else {
+            if (freq > 0.0f || disable) {
+                params << " SHAPER_FREQ_X=" << std::fixed << std::setprecision(2) << freq << " SHAPER_FREQ_Y=" << std::fixed << std::setprecision(2) << freq;
+            }
+            if (damp > 0.0f || disable) {
+                params << " DAMPING_RATIO_X=" << std::fixed << std::setprecision(3) << damp << " DAMPING_RATIO_Y=" << std::fixed << std::setprecision(3) << damp;
             }
         }
-    } else {
-        gcode << "M593";
-        if (axis != 'A')
-        {
-            gcode << " " << axis;
+        if (!params.str().empty()) {
+            gcode << "SET_INPUT_SHAPER" << params.str();
         }
-        if (freq > 0.0f)
-        {
-            gcode << " F" << std::fixed << std::setprecision(2) << freq;
-        }
-        if (damp > 0.0f)
-        {
-            gcode << " D" << std::fixed << std::setprecision(3) << damp;
-        }
+        break;
     }
-    if (GCodeWriter::full_gcode_comment){
-        gcode << " ; Override input shaping";
+    case gcfRepRapFirmware: {
+        if (!type.empty() && type != "Default" && type != "DAA") {
+            params << " P\"" << type << "\"";
+        }
+        if (freq > 0.0f || disable) {
+            params << " F" << std::fixed << std::setprecision(2) << freq;
+        }
+        if (damp > 0.0f || disable) {
+            params << " S" << std::fixed << std::setprecision(3) << damp;
+        }
+        if (!params.str().empty()) {
+            gcode << "M593" << params.str();
+        }
+        break;
     }
-    gcode << "\n";
+    case gcfMarlinFirmware: {
+        if (axis != 'A') {
+            params << " " << axis;
+        }
+        if (freq > 0.0f || disable) {
+            params << " F" << std::fixed << std::setprecision(2) << freq;
+        }
+        if (damp > 0.0f || disable) {
+            params << " D" << std::fixed << std::setprecision(3) << damp;
+        }
+        if (!params.str().empty()) {
+            gcode << "M593" << params.str();
+        }
+        break;
+    }
+    case gcfMarlinLegacy: {
+        throw std::runtime_error("Input shaping is not supported by Marlin < 2.1.2.\nCheck your firmware version and update your G-code flavor to 'Marlin 2'");
+    }
+    default:
+        throw std::runtime_error("Input shaping is only supported by Klipper, RepRapFirmware and Marlin 2");
+    }
+    if (!gcode.str().empty()) {
+        if (GCodeWriter::full_gcode_comment) {
+            gcode << " ; Override input shaping";
+        }
+        gcode << "\n";
+    }
     return gcode.str();
 }
 
@@ -1203,9 +1241,13 @@ std::string GCodeWriter::unlift()
     return gcode;
 }
 
-std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, unsigned int speed)
+std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, unsigned int speed, unsigned int part_cooling_fan_min_pwm)
 {
     std::ostringstream gcode;
+    // ORCA: clamp non-zero fan commands up to the configured PWM floor so fans that can't spool at low duty
+    // cycles still start reliably. Zero (fan off) is preserved exactly so disable-fan commands are never altered.
+    if (speed > 0 && part_cooling_fan_min_pwm > 0 && speed < part_cooling_fan_min_pwm)
+        speed = part_cooling_fan_min_pwm;
     if (speed == 0) {
         switch (gcode_flavor) {
         case gcfTeacup:
@@ -1240,7 +1282,9 @@ std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, unsigned int sp
 std::string GCodeWriter::set_fan(unsigned int speed) const
 {
     //BBS
-    return GCodeWriter::set_fan(this->config.gcode_flavor, speed);
+    // ORCA: pick up the per-printer PWM floor from the active config.
+    return GCodeWriter::set_fan(this->config.gcode_flavor, speed,
+                                static_cast<unsigned int>(std::max(0, this->config.part_cooling_fan_min_pwm.value)));
 }
 
 //BBS: set additional fan speed for BBS machine only

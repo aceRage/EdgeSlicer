@@ -42,6 +42,8 @@
 #include <boost/log/trivial.hpp>
 #include <miniz/miniz.h>
 #include "miniz_extension.hpp"
+#include "Time.hpp"
+#include "Zipper.hpp"
 
 
 // Store the print/filament/printer presets into a "presets" subdirectory of the Slic3rPE config dir.
@@ -680,6 +682,89 @@ bool PresetBundle::backup_user_folder() const
     }
 }
 
+// Per system filament preset of an older release, by its name then, the printers it listed that the preset it
+// now loads as does not (resources/info/legacy_compatible_printers.json, written by
+// scripts/legacy_compatible_printers.py). Empty if the file is missing or malformed. (OrcaSlicer #16367.)
+static std::map<std::string, std::vector<std::string>> legacy_compatible_printers()
+{
+    const boost::filesystem::path path = boost::filesystem::path(resources_dir()) / "info" / "legacy_compatible_printers.json";
+    try {
+        boost::nowide::ifstream in(path.string());
+        return json::parse(in).at("presets").get<std::map<std::string, std::vector<std::string>>>();
+    } catch (const std::exception &err) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": can not read " << path.string() << ": " << err.what();
+        return {};
+    }
+}
+
+bool PresetBundle::backup_user_folder_to_zip(const std::string &zip_path) const
+{
+    namespace bfs = boost::filesystem;
+    const bfs::path user_dir = bfs::path(data_dir()) / PRESET_USER_DIR;
+    BOOST_LOG_TRIVIAL(info) << "Backing up user folder to: " << zip_path;
+    try {
+        Zipper zipper(zip_path);
+        // Directories get their own entries, which extract_archive_confined() needs to recreate them.
+        zipper.add_entry(std::string(PRESET_USER_DIR) + "/", nullptr, 0);
+        // The loader follows symlinked folders, and migration writes the presets in them.
+        for (const bfs::directory_entry &entry : bfs::recursive_directory_iterator(user_dir, bfs::directory_options::follow_directory_symlink)) {
+            const std::string name = (bfs::path(PRESET_USER_DIR) / entry.path().lexically_relative(user_dir)).generic_string();
+            if (bfs::is_directory(entry.status())) {
+                zipper.add_entry(name + "/", nullptr, 0);
+                continue;
+            }
+            if (!bfs::is_regular_file(entry.status()))
+                continue;
+            boost::nowide::ifstream in(entry.path().string(), std::ios::binary);
+            const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (!in.good() && !in.eof())
+                throw Slic3r::RuntimeError("can not read " + entry.path().string());
+            zipper.add_entry(name, data.data(), data.size());
+        }
+        zipper.finalize();
+        return true;
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << "Exception during user folder backup: " << ex.what();
+        boost::system::error_code ec;
+        bfs::remove(zip_path, ec);
+        return false;
+    }
+}
+
+std::vector<LegacyUserFilamentPreset> PresetBundle::legacy_user_filament_presets()
+{
+    return filaments.legacy_user_filament_presets(legacy_compatible_printers());
+}
+
+PresetBundle::LegacyUserFilamentPresetMigration PresetBundle::migrate_legacy_user_filament_presets(const std::vector<LegacyUserFilamentPreset> &legacy_presets)
+{
+    LegacyUserFilamentPresetMigration     result;
+    std::vector<LegacyUserFilamentPreset> written;
+    const std::string zip_path = data_dir() + "/filament_preset_migration_" +
+                                 Utils::time2str(Utils::TimeZone::utc, Utils::TimeFormat::iso8601Z) + "_backup.zip";
+    // Before the lock: zipping a large folder takes longer than a guard may be held.
+    if (!backup_user_folder_to_zip(zip_path))
+        return result;
+    result.backup = zip_path;
+    {
+        // One hold for every write, so a lock another instance keeps is one outcome rather than a failure per
+        // preset (the lock backs off for a while after a miss). Held without the collection mutex, the order
+        // InstanceLock requires; each write re-reads its file, so a save that slipped in before is respected.
+        const std::string lock_path = user_presets_lock_path();
+        InstanceLock      instance_lock(lock_path);
+        if (!lock_path.empty() && !instance_lock.locked())
+            return result;
+        result.locked = true;
+        for (const LegacyUserFilamentPreset &legacy : legacy_presets)
+            if (PresetCollection::write_legacy_user_filament_preset(legacy))
+                written.push_back(legacy);
+            else
+                result.failed.push_back(legacy.preset);
+    }
+    filaments.apply_legacy_user_filament_presets(written);
+    return result;
+}
+
 //BBS: load project embedded presets
 PresetsConfigSubstitutions PresetBundle::load_project_embedded_presets(std::vector<Preset*> project_presets, ForwardCompatibilitySubstitutionRule substitution_rule)
 {
@@ -768,6 +853,19 @@ std::vector<std::string> PresetBundle::project_presets_lost_on_printer(const std
     for (const std::string &name : this->filament_presets)
         check(this->filaments, this->filaments.find_preset(name, false));
     return lost;
+}
+
+// Edge: cheap check (no copies, unlike get_current_project_embedded_presets) for whether a
+// project brought presets of its own; Plater::priv::reset() must reload the tabs when it did.
+bool PresetBundle::has_project_embedded_presets() const
+{
+    for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints),
+                                             static_cast<const PresetCollection *>(&this->filaments),
+                                             static_cast<const PresetCollection *>(&this->printers) })
+        for (const Preset &preset : *presets)
+            if (preset.is_project_embedded)
+                return true;
+    return false;
 }
 
 //BBS: reset project embedded presets
@@ -1222,7 +1320,9 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             preset.filament_id = key_values[BBL_JSON_KEY_FILAMENT_ID];
         preset.is_external = true;
         preset.version     = *version;
-        inherit_preset     = collection->find_preset(inherits_value, false, true); // pointer maybe wrong after insert, redo find
+        // Ultra: redone with the renamed_from lookup the first find used, else a preset on a renamed parent
+        // lost its base_id and was saved whole instead of as its difference.
+        inherit_preset     = collection->find_preset2(inherits_value, false); // pointer maybe wrong after insert, redo find
         if (inherit_preset) preset.base_id = inherit_preset->setting_id;
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " " << __LINE__ << preset.name << " have filament_id: " << preset.filament_id << " and base_id: " << preset.base_id;
         Preset::normalize(preset.config);
@@ -3098,7 +3198,7 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
                 }
             }
             else if (!filament_inherits.empty())
-                filament_parent_preset =  const_cast<PresetBundle*>(this)->filaments.find_preset(filament_inherits, false, true);
+                filament_parent_preset =  const_cast<PresetBundle*>(this)->filaments.find_preset2(filament_inherits, false);
 
             if (filament_parent_preset) {
                 std::vector<std::string> dirty_options = cfg_rw.diff(filament_parent_preset->config);
@@ -4963,7 +5063,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     // (Bambu profiles carry a -5 standby delta, the Snapmaker U1 toolchanger ooze prevention with -150).
     "ooze_prevention", "standby_temperature_delta", "preheat_time", "preheat_steps", "delta_temperature",
     // Dimensional compensation calibrated for one machine (first-layer squish, XY accuracy).
-    "elefant_foot_compensation", "elefant_foot_compensation_layers", "xy_contour_compensation", "xy_hole_compensation",
+    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation",
     // Prime tower and purging: depends on the filament-change hardware (single nozzle + AMS,
     // toolchanger, dual nozzle). All wipe_tower_* and prime_tower_* keys are covered by prefix.
     "enable_prime_tower", "prime_volume", "preload_all_filaments", "enable_tower_interface_features",
@@ -4980,7 +5080,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     // Motion settings whose meaning depends on the firmware (Marlin jerk / junction deviation,
     // Klipper square-corner velocity and accel_to_decel). Accelerations and speeds DO carry.
     "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk", "travel_jerk",
-    "default_junction_deviation", "accel_to_decel_enable", "accel_to_decel_factor",
+    "first_layer_travel_jerk", "default_junction_deviation", "accel_to_decel_enable", "accel_to_decel_factor",
     // Internal switch set by the flow-rate calibration, not a user setting.
     "calib_flowrate_topinfill_special_order",
 };
@@ -5133,13 +5233,14 @@ static const std::vector<PrintCarryConflict> &print_carry_conflicts()
               return tree ? !(style == smsDefault || style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid || style == smsTreeOrganic)
                           : !(style == smsDefault || style == smsGrid || style == smsSnug);
           } },
-        { "spiral vase prerequisites", { "spiral_mode" },
+        { "spiral vase prerequisites", { "spiral_mode", "stabilizer_supports" },
           [](const DynamicPrintConfig &c, const DynamicPrintConfig *) {
               if (!print_carry_bool(c, "spiral_mode"))
                   return false;
               return !(print_carry_int(c, "wall_loops") == 1 && print_carry_int(c, "top_shell_layers") == 0 && print_carry_float(c, "sparse_infill_density") == 0 &&
                        !print_carry_bool(c, "enable_support") && print_carry_int(c, "enforce_support_layers") == 0 && !print_carry_bool(c, "detect_thin_wall") &&
-                       !print_carry_bool(c, "overhang_reverse") && print_carry_int(c, "wall_direction") == int(WallDirection::Auto) &&
+                       !print_carry_bool(c, "overhang_reverse") && print_carry_int(c, "stabilizer_supports") == int(smOff) &&
+                       print_carry_int(c, "wall_direction") == int(WallDirection::Auto) &&
                        print_carry_int(c, "timelapse_type") == int(TimelapseType::tlTraditional));
           } },
         { "alternate extra wall with vertical shell thickness All", { "alternate_extra_wall", "ensure_vertical_shell_thickness" },

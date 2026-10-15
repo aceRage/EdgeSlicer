@@ -272,6 +272,133 @@ int count_ioi_sandwiches(const Print &print)
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// OrcaSlicer #13892: built-in placeholders in custom G-code and output file names
+// ---------------------------------------------------------------------------
+TEST_CASE("PrintStatistics exposes initial_extruder and the extruded_*_total aliases", "[Print][Placeholders]")
+{
+    PrintStatistics stats;
+    stats.initial_tool          = 1;
+    stats.total_weight          = 12.5;
+    stats.total_extruded_volume = 3400.;
+
+    const DynamicConfig config = stats.config();
+    CHECK(config.opt_int("initial_tool") == 1);
+    CHECK(config.opt_int("initial_extruder") == 1);
+    CHECK(config.opt_float("extruded_weight_total") == Approx(12.5));
+    CHECK(config.opt_float("extruded_volume_total") == Approx(3400.));
+
+    // Before the export finishes the file name keeps the placeholders as text, so every
+    // documented name has to exist there too or naming the file throws "not a variable name".
+    const DynamicConfig placeholders = PrintStatistics::placeholders();
+    for (const std::string key : {"initial_extruder", "extruded_weight_total", "extruded_volume_total"})
+        CHECK(placeholders.opt_string(key) == "{" + key + "}");
+}
+
+TEST_CASE("version placeholder survives Print::apply and the new aliases name an unfinished print", "[Print][Placeholders]")
+{
+    Model        model;
+    ModelObject *obj = model.add_object();
+    obj->name        = "Cube";
+    obj->add_volume(make_cube(20.0, 20.0, 20.0));
+    obj->add_instance();
+    obj->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filename_format",
+                         new ConfigOptionString("{initial_extruder}_{extruded_weight_total}_{extruded_volume_total}"));
+    Print print;
+    print.auto_assign_extruders(obj);
+    print.apply(model, config);
+
+    // Print::apply() clears the parser config; "version" used to vanish with it.
+    CHECK(print.placeholder_parser().process("{version}") == std::string(Snapmaker_VERSION));
+    CHECK(print.placeholder_parser().process("[version]") == std::string(Snapmaker_VERSION));
+
+    std::string name;
+    REQUIRE_NOTHROW(name = print.output_filename());
+    CHECK(name == "{initial_extruder}_{extruded_weight_total}_{extruded_volume_total}.gcode");
+}
+
+// ---------------------------------------------------------------------------
+// {first_object_name} filename placeholder (OrcaSlicer #14497)
+// ---------------------------------------------------------------------------
+namespace {
+
+// Add a printable 20mm cube named `name` to `model`; returns it so the caller can tweak it.
+ModelObject* add_named_cube(Model& model, const std::string& name)
+{
+    ModelObject* obj = model.add_object();
+    obj->name = name;
+    obj->add_volume(make_cube(20.0, 20.0, 20.0));
+    obj->add_instance();
+    obj->ensure_on_bed();
+    return obj;
+}
+
+// Resolve `format` to an output file name for a print of `model`. `filename_base`, when set,
+// is the saved-project name passed to output_filename().
+std::string resolved_output_name(Model& model, const std::string& format, const std::string& filename_base = {})
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filename_format", new ConfigOptionString(format));
+
+    Print print;
+    for (ModelObject* obj : model.objects)
+        print.auto_assign_extruders(obj);
+    print.apply(model, config);
+    return print.output_filename(filename_base);
+}
+
+} // namespace
+
+TEST_CASE("Print: {first_object_name} names the first printable object on the plate", "[Print]")
+{
+    Model model;
+
+    SECTION("uses the object's name") {
+        add_named_cube(model, "WidgetPart");
+        CHECK(resolved_output_name(model, "{first_object_name}") == "WidgetPart.gcode");
+    }
+
+    SECTION("picks the first when several objects are printable") {
+        add_named_cube(model, "FirstPart");
+        add_named_cube(model, "SecondPart");
+        CHECK(resolved_output_name(model, "{first_object_name}") == "FirstPart.gcode");
+    }
+
+    SECTION("skips objects outside the print volume (e.g. on another plate)") {
+        // First in model order, but not on the current plate, so is_printable() is false.
+        add_named_cube(model, "OtherPlatePart")->instances.front()->print_volume_state = ModelInstancePVS_Fully_Outside;
+        add_named_cube(model, "OnPlatePart");
+        CHECK(resolved_output_name(model, "{first_object_name}") == "OnPlatePart.gcode");
+    }
+
+    SECTION("is empty when the object has no name") {
+        add_named_cube(model, "");
+        CHECK(resolved_output_name(model, "part_{first_object_name}") == "part_.gcode");
+    }
+}
+
+TEST_CASE("Print: {first_object_name} is not replaced by the saved-project file name", "[Print]")
+{
+    // Passing a saved-project file name as the filename_base must not change {first_object_name}.
+    Model model;
+    add_named_cube(model, "WidgetPart");
+    CHECK(resolved_output_name(model, "{first_object_name}", "SavedProject") == "WidgetPart.gcode");
+    // Edge: {input_filename_base} does take the project name, the two stay independent.
+    CHECK(resolved_output_name(model, "{input_filename_base}_{first_object_name}", "SavedProject") == "SavedProject_WidgetPart.gcode");
+}
+
+TEST_CASE("Print: regex_replace() reshapes {first_object_name} in the file name", "[Print]")
+{
+    // OrcaSlicer #14650: the documented use, dropping an extension carried in the object name.
+    Model model;
+    add_named_cube(model, "Bracket v2.stl");
+    CHECK(resolved_output_name(model, "{regex_replace(first_object_name, /\\.[^.]*$/, \"\")}") == "Bracket v2.gcode");
+    CHECK(resolved_output_name(model, "{regex_replace(first_object_name, /\\s+/, \"_\")}.gcode") == "Bracket_v2.stl.gcode");
+}
+
 TEST_CASE("Inner-outer-inner wall order starts with the second internal wall on a cube", "[PrintObject][IOI]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
@@ -910,6 +1037,76 @@ TEST_CASE("Non-mixed two-filament G-code is unchanged by mixed-id expansion", "[
     }
 }
 
+// OrcaSlicer #13895: without a wipe tower, total_toolchanges (custom G-code and the
+// "; total filament change" statistics line) came from WipeTowerData::number_of_toolchanges,
+// which stays -1 there, so it always read 0. It now falls back to the tool ordering.
+TEST_CASE("total_toolchanges counts tool changes without a wipe tower", "[Print][GCode][Placeholders]")
+{
+    // Integer after the first occurrence of `prefix`, or -1 when the prefix is missing.
+    auto int_after = [](const std::string &gcode, const std::string &prefix) {
+        const size_t pos = gcode.find(prefix);
+        return pos == std::string::npos ? -1 : std::atoi(gcode.c_str() + pos + prefix.size());
+    };
+    // Tool changes in the G-code body: every "T<n>" command that selects a different tool than the last one.
+    auto body_toolchanges = [](const std::string &gcode) {
+        int    changes = 0;
+        int    last    = -1;
+        size_t pos     = 0;
+        while (pos < gcode.size()) {
+            const size_t eol  = gcode.find('\n', pos);
+            const size_t end  = eol == std::string::npos ? gcode.size() : eol;
+            std::string  line = gcode.substr(pos, end - pos);
+            if (line.size() >= 2 && line[0] == 'T' && std::isdigit(static_cast<unsigned char>(line[1]))) {
+                const int tool = std::atoi(line.c_str() + 1);
+                if (last >= 0 && tool != last)
+                    ++changes;
+                last = tool;
+            }
+            pos = end == gcode.size() ? gcode.size() : end + 1;
+        }
+        return changes;
+    };
+
+    SECTION("two filaments, no tower: walls on 1, infill on 2") {
+        DynamicPrintConfig config = two_filament_config(false, false);
+        config.set_deserialize_strict({
+            {"sparse_infill_density",  "20%"},
+            {"sparse_infill_filament", "2"},
+            {"solid_infill_filament",  "2"},
+            {"machine_start_gcode",    "; TT=[total_toolchanges] TT2={total_toolchanges}\n"},
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.extruders() == std::vector<unsigned int>{0, 1});
+        REQUIRE_FALSE(print.has_wipe_tower());
+
+        std::string gcode;
+        REQUIRE_NOTHROW(gcode = export_print_gcode(print));
+        const int from_start_gcode = int_after(gcode, "; TT=");
+        CHECK(from_start_gcode > 0);
+        CHECK(int_after(gcode, " TT2=") == from_start_gcode);
+        // The statistics line is written for non-BBL printers once the count is non-zero.
+        CHECK(int_after(gcode, "; total filament change = ") == from_start_gcode);
+        // Each layer prints both filaments, so the count tracks the tool changes actually emitted.
+        CHECK(from_start_gcode == body_toolchanges(gcode));
+    }
+
+    SECTION("one filament used: still 0 and no statistics line") {
+        DynamicPrintConfig config = two_filament_config(false, false);
+        config.set_deserialize_strict({{"machine_start_gcode", "; TT=[total_toolchanges]\n"}});
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.extruders() == std::vector<unsigned int>{0});
+
+        std::string gcode;
+        REQUIRE_NOTHROW(gcode = export_print_gcode(print));
+        CHECK(int_after(gcode, "; TT=") == 0);
+        CHECK(gcode.find("; total filament change") == std::string::npos);
+    }
+}
+
 // Pattern "13" names physical 1 and 3. Expanding those tokens in Print::extruders(), or
 // unioning the later object's ToolOrdering, is each enough to register T0 and T2. Component B
 // (filament 2) is unused and must stay out of Print::extruders() — over-including it would
@@ -1220,6 +1417,57 @@ TEST_CASE("Adaptive layer height profile is bounded by the uncompensated object 
     const double last_z = profile[profile.size() - 2];
     CHECK(last_z <= uncompensated_height + 1e-6);
     CHECK(last_z > uncompensated_height - sp.max_layer_height - 1e-6);
+}
+
+// Orca #15734: a non-Bambu i3 printing by layer wrote time_lapse_gcode at the layer start and again
+// at the traditional timelapse spot later in the layer, two photos per layer. Every printer kind
+// gets it once per layer; the Bambu cases go through our BambuStudio timelapse port.
+TEST_CASE("Timelapse g-code is emitted once per layer for Bambu and non-Bambu printers", "[Print][Regression]")
+{
+    struct PrinterCase
+    {
+        const char *name;
+        const char *structure;
+        bool        is_bbl;
+    };
+    const PrinterCase cases[] = {
+        {"non-BBL undefined", "undefine", false},
+        {"non-BBL CoreXY", "corexy", false},
+        {"non-BBL i3", "i3", false},
+        {"non-BBL H-Bot", "hbot", false},
+        {"non-BBL Delta", "delta", false},
+        {"Bambu CoreXY", "corexy", true},
+        {"Bambu i3", "i3", true},
+    };
+    for (const PrinterCase &printer : cases) {
+        DYNAMIC_SECTION(printer.name)
+        {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({
+                {"initial_layer_print_height", 0.2},
+                {"layer_change_gcode", ";TEST_LAYER_CHANGE"},
+                {"layer_height", 0.2},
+                {"printer_structure", printer.structure},
+                {"spiral_mode", false},
+                {"time_lapse_gcode", "TIMELAPSE_TAKE_FRAME"},
+            });
+            Print print;
+            print.is_BBL_printer() = printer.is_bbl;
+            Model model;
+            init_print({TestMesh::cube_20x20x20}, print, model, config);
+            const std::string gcode = Slic3r::Test::gcode(print);
+
+            const auto count = [&gcode](const std::string &token) {
+                size_t occurrences = 0;
+                for (size_t pos = gcode.find(token); pos != std::string::npos; pos = gcode.find(token, pos + token.size()))
+                    ++occurrences;
+                return occurrences;
+            };
+            const size_t layer_changes = count("\n;TEST_LAYER_CHANGE\n");
+            REQUIRE(layer_changes > 0);
+            CHECK(count("\nTIMELAPSE_TAKE_FRAME\n") == layer_changes);
+        }
+    }
 }
 
 // Orca #16066: two copies of one object share a single slice. A copy that sliced itself and then becomes identical
