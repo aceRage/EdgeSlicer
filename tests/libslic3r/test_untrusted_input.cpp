@@ -3159,15 +3159,24 @@ std::string long_entry_name(const std::string &prefix, const std::string &suffix
 
 // The importers report a malformed entry either by returning false or by throwing the formatted
 // message (FileIOError, as Plater shows it). Either is a clean failure; the message fits the buffer.
+// load() runs outside the Catch macros: they would catch the exception themselves.
 template<typename Load> void check_load_fails_cleanly(Load load)
 {
+    bool        loaded = true;
+    bool        threw  = false;
+    std::string message;
     try {
-        CHECK_FALSE(load());
+        loaded = load();
     } catch (const std::exception &e) {
-        const std::string message = e.what();
-        INFO(message);
+        threw   = true;
+        message = e.what();
+    }
+    INFO(message);
+    if (threw) {
         CHECK_FALSE(message.empty());
         CHECK(message.size() < 1024);
+    } else {
+        CHECK_FALSE(loaded);
     }
 }
 
