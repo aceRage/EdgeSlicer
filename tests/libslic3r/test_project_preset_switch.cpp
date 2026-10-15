@@ -472,7 +472,11 @@ TEST_CASE("An empty choice list in a G-code's settings keeps the value it had be
     const DynamicPrintConfig config = bundle.config_from_gcode(file.string(), ForwardCompatibilitySubstitutionRule::Enable, substitutions);
 
     CHECK(config.opt_serialize("nozzle_volume_type") == "High Flow");
-    CHECK(config.option<ConfigOptionStrings>("filament_multi_colors")->values.empty());
+    // An empty text list is the file's own value and is not replaced by the bundle's. Edge's Preset::normalize pads
+    // the per-filament list to one (empty) entry for the one filament, so it is not literally empty here.
+    const std::vector<std::string> &multi_colors = config.option<ConfigOptionStrings>("filament_multi_colors")->values;
+    REQUIRE(multi_colors.size() == 1);
+    CHECK(multi_colors.front().empty());
     boost::system::error_code ec;
     boost::filesystem::remove(file, ec);
 }
