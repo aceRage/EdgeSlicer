@@ -38,6 +38,22 @@ constexpr MixedFilamentAutoGradientAction mixed_filament_auto_gradient_action(bo
     return MixedFilamentAutoGradientAction::Confirm;
 }
 
+// Snap #1008: automatic mixed-color match keeps every participating component
+// at least 15%. With a 100% total the structural caps are 85% (two colors)
+// and 70% (three colors). Search uses the two-color cap so the triple bound
+// falls out of the remaining weight. Manual match uses the same search
+// bounds; the count-dependent cap is the post-match advisory so a valid 85%
+// two-color recipe is not reported as over range. Recipes land in
+// MixedFilamentManager (never filament_is_mixed).
+inline constexpr int kMixedColorMatchMinComponentPercent      = 15;
+inline constexpr int kMixedColorMatchMaxPairComponentPercent  = 85;
+inline constexpr int kMixedColorMatchMaxMultiComponentPercent = 70;
+
+inline constexpr int mixed_color_match_max_component_percent(size_t active_components)
+{
+    return active_components >= 3 ? kMixedColorMatchMaxMultiComponentPercent : kMixedColorMatchMaxPairComponentPercent;
+}
+
 // Represents a virtual "mixed" filament created from physical filaments
 // (layer cadence and/or same-layer interleaved stripe distribution). Display
 // colour blending uses FilamentMixer  so pair previews better

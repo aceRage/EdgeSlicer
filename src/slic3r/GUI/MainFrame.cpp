@@ -2739,6 +2739,9 @@ static wxMenu* generate_help_menu()
     // Open Config Folder
     append_menu_item(helpMenu, wxID_ANY, _L("Show Configuration Folder"), _L("Show Configuration Folder"),
         [](wxCommandEvent&) { Slic3r::GUI::desktop_open_datadir_folder(); });
+    append_menu_item(helpMenu, wxID_ANY, _L("Migrate Filament Presets"),
+        _L("Bring back filament presets that a profile update removed from printers they were made for"),
+        [](wxCommandEvent&) { wxGetApp().check_legacy_user_filament_presets(true); });
     // Export Logs
     append_menu_item(helpMenu, wxID_ANY, _L("Export Logs"), _L("Export application logs as ZIP file"),
         [](wxCommandEvent&) { wxGetApp().mainframe->export_logs(); });
