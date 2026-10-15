@@ -777,6 +777,41 @@ TEST_CASE("FanMover never splits a move of tool change G-code", "[FanMover][GCod
     CHECK(fan < travel);
 }
 
+// Orca #15904 as merged upstream brackets the tool change with internal ";_FAN_MOVER_SKIP_START/END"
+// markers instead, which its FanMover reads and drops. We keep our visible markers (above) but honour
+// upstream's too, so G-code or a template written for upstream keeps its moves whole.
+TEST_CASE("FanMover honours and drops upstream's tool change markers", "[FanMover][GCode][Orca15904]")
+{
+    const std::vector<std::string> out = fan_mover_layers(2.f, false, 0.f, {
+        "G1 X0 Y0 F600\n"
+        "M106 S51\n"
+        "G1 X5 E1\n"
+        ";_FAN_MOVER_SKIP_START\n"
+        "G1 X65 F600\n"    // 6 s
+        ";_FAN_MOVER_SKIP_END\n"
+        "T1\n"
+        "M106 S255\n"
+        "G1 X70 E1\n",
+    });
+    REQUIRE(out.size() == 1);
+    const std::string &g = out[0];
+    INFO(g);
+    // The markers are consumed.
+    CHECK(g.find(";_FAN_MOVER_SKIP_") == std::string::npos);
+    // The travel is not split: no waypoint between the move before it and the tool change.
+    const size_t before = g.find("G1 X5 E1\n");
+    const size_t travel = g.find("\nG1 X65 F600\n");
+    const size_t tool   = g.find("\nT1\n");
+    REQUIRE(before != std::string::npos);
+    REQUIRE(travel != std::string::npos);
+    REQUIRE(tool != std::string::npos);
+    CHECK(without_fan_lines(g.substr(before, tool + 1 - before)) == "G1 X5 E1\nG1 X65 F600\n");
+    // The fan still comes early: before the travel rather than inside it.
+    const size_t fan = g.find("M106 S255");
+    REQUIRE(fan != std::string::npos);
+    CHECK(fan < travel);
+}
+
 // The kickstart path: a fan increase is kicked at 100% and its own speed is put back once the kick time
 // has run out, which may fall inside the next move. That move must not be split when it is tool change
 // G-code either.

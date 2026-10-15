@@ -344,7 +344,6 @@ TEST_CASE("Bambu Studio's names load as our keys, with the value converted", "[B
 TEST_CASE("Every Bambu enum value of a shared key loads", "[BambuAliases][Config]")
 {
     const std::set<std::pair<std::string, std::string>> no_equivalent = {
-        { "fuzzy_skin", "disabled_fuzzy" },    // "off, ignore paint": ours paints with fuzzy_skin=none
         { "nozzle_type", "tungsten_carbide" }, // no such nozzle type here
     };
     // Keys handle_legacy's ignore set retires whatever their value (see hubtest notes on extruder_type).

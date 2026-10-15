@@ -1871,6 +1871,27 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
     return estimate_wipe_tower_polygon(config, plate_index, wt_pos, wt_size, plate_extruder_size, use_global_objects);
 }
 
+// Plate-local box the prime tower may occupy: the whole plate, or on a dual-nozzle printer (H2D / H2C / X2D)
+// the part both nozzles reach, since every nozzle purges into the tower. Bambu Studio limits the tower to that
+// shared part as well, which is why its default tower sits at X 40 and not in the strip one nozzle owns.
+// Printers without per-nozzle areas (single nozzle, the U1, the Creator 5) get the whole plate.
+static BoundingBoxf prime_tower_placement_box(const DynamicPrintConfig &config, int plate_width, int plate_depth)
+{
+	BoundingBoxf box(Vec2d(0., 0.), Vec2d(double(plate_width), double(plate_depth)));
+	const auto *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
+	if (nozzles == nullptr || nozzles->values.size() < 2)
+		return box;
+	const ExtruderAreas areas = extruder_areas_from_config(config);
+	if (!areas.multi() || !areas.has_exclusive_regions() || areas.shared.empty())
+		return box;
+	const BoundingBox shared = get_extents(areas.shared);
+	const Vec2d lo(std::max(box.min.x(), unscaled(shared.min.x())), std::max(box.min.y(), unscaled(shared.min.y())));
+	const Vec2d hi(std::min(box.max.x(), unscaled(shared.max.x())), std::min(box.max.y(), unscaled(shared.max.y())));
+	if (lo.x() < hi.x() && lo.y() < hi.y())
+		return BoundingBoxf(lo, hi);
+	return box;
+}
+
 arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const DynamicPrintConfig& config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size, bool use_global_objects) const
 {
 	float x = dynamic_cast<const ConfigOptionFloats*>(config.option("wipe_tower_x"))->get_at(plate_index);
@@ -1891,23 +1912,30 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 	// A position valid by WIPE_TOWER_MARGIN is the user's choice and stays untouched; an
 	// invalid one is re-placed with the comfort margin (falling back to the validity bounds
 	// on cramped plates). std::clamp is UB if lo > hi, so keep every hi >= lo.
-	const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
-	BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%") % wp_brim_width;
-	const float x_hi   = std::max(margin, (float) plate_width - w - margin);
-	const float y_hi   = std::max(margin, (float) plate_depth - depth - margin);
-	const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
-	float x_lo_c = margin_c, x_hi_c = (float) plate_width - w - margin_c;
-	if (x_lo_c > x_hi_c) { x_lo_c = margin; x_hi_c = x_hi; }
-	float y_lo_c = margin_c, y_hi_c = (float) plate_depth - depth - margin_c;
-	if (y_lo_c > y_hi_c) { y_lo_c = margin; y_hi_c = y_hi; }
-	// Drag clamps reach this limit through the volume's bounding box (post-slice: the real
-	// mesh, a couple of mm inside this reserved estimate), so a drop can land slightly out
-	// of bounds — snap it onto the bound; only far-out positions get the comfort re-place.
-	const float tol = 5.f;
-	if (x < margin - tol || x > x_hi + tol) x = std::clamp(x, x_lo_c, x_hi_c);
-	else                                    x = std::clamp(x, margin, x_hi);
-	if (y < margin - tol || y > y_hi + tol) y = std::clamp(y, y_lo_c, y_hi_c);
-	else                                    y = std::clamp(y, margin, y_hi);
+		// On a dual-nozzle printer the tower must also sit where both nozzles reach, so the box the
+		// tower may occupy is the shared part of the plate (Bambu Studio keeps it there too).
+		const BoundingBoxf box = prime_tower_placement_box(config, plate_width, plate_depth);
+		const float bx0 = (float) box.min.x(), bx1 = (float) box.max.x();
+		const float by0 = (float) box.min.y(), by1 = (float) box.max.y();
+		const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
+		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%") % wp_brim_width;
+		const float x_lo   = bx0 + margin;
+		const float y_lo   = by0 + margin;
+		const float x_hi   = std::max(x_lo, bx1 - w - margin);
+		const float y_hi   = std::max(y_lo, by1 - depth - margin);
+		const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
+		float x_lo_c = bx0 + margin_c, x_hi_c = bx1 - w - margin_c;
+		if (x_lo_c > x_hi_c) { x_lo_c = x_lo; x_hi_c = x_hi; }
+		float y_lo_c = by0 + margin_c, y_hi_c = by1 - depth - margin_c;
+		if (y_lo_c > y_hi_c) { y_lo_c = y_lo; y_hi_c = y_hi; }
+		// Drag clamps reach this limit through the volume's bounding box (post-slice: the real
+		// mesh, a couple of mm inside this reserved estimate), so a drop can land slightly out
+		// of bounds - snap it onto the bound; only far-out positions get the comfort re-place.
+		const float tol = 5.f;
+		if (x < x_lo - tol || x > x_hi + tol) x = std::clamp(x, x_lo_c, x_hi_c);
+		else                                  x = std::clamp(x, x_lo, x_hi);
+		if (y < y_lo - tol || y > y_hi + tol) y = std::clamp(y, y_lo_c, y_hi_c);
+		else                                  y = std::clamp(y, y_lo, y_hi);
     wt_pos(0) = x;
     wt_pos(1) = y;
     wt_pos(2) = 0.f;
@@ -2610,6 +2638,9 @@ void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 	new_conf.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
 	new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
 	new_conf.set_key_value("wall_direction", new ConfigOptionEnum<WallDirection>(WallDirection::Auto));
+	// Side stabilizers are support-role layers a vase cannot carry (Print::validate rejects them).
+	if (global_config->has("stabilizer_supports"))
+		new_conf.set_key_value("stabilizer_supports", new ConfigOptionEnum<StabilizerMode>(smOff));
 	const auto applying_keys = global_config->diff(new_conf);
 
 	for (ModelObject* object : obj_ptrs) {
@@ -3933,8 +3964,11 @@ void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx)
         const float margin     = float(WIPE_TOWER_AUTO_MARGIN) + brim_width;
         const float w          = float(footprint.width);
         const float d          = float(footprint.depth);
-        x = std::clamp(x, margin, std::max(margin, float(m_plate_width) - w - margin));
-        y = std::clamp(y, margin, std::max(margin, float(m_plate_depth) - d - margin));
+        // Dual-nozzle printers: the tower goes where both nozzles reach, like in Bambu Studio.
+        const BoundingBoxf box = prime_tower_placement_box(full_config, m_plate_width, m_plate_depth);
+        const float x_lo = float(box.min.x()) + margin, y_lo = float(box.min.y()) + margin;
+        x = std::clamp(x, x_lo, std::max(x_lo, float(box.max.x()) - w - margin));
+        y = std::clamp(y, y_lo, std::max(y_lo, float(box.max.y()) - d - margin));
     }
 
     ConfigOptionFloat wt_x_opt(x);
@@ -4814,6 +4848,11 @@ int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_n
 
 	auto is_object_config_compatible_with_spiral_vase = [](ModelObject* object) {
 		const DynamicPrintConfig& config = object->config.get();
+		// The object's own stabilizer mode, else the process preset's.
+		const DynamicPrintConfig& global_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+		const DynamicPrintConfig& stabilizer_src = config.has("stabilizer_supports") ? config : global_config;
+		if (stabilizer_src.has("stabilizer_supports") && stabilizer_src.opt_enum<StabilizerMode>("stabilizer_supports") != smOff)
+			return false;
 		if (config.has("wall_loops") && config.opt_int("wall_loops") == 1 &&
 			config.has("top_shell_layers") && config.opt_int("top_shell_layers") == 0 &&
 			config.has("sparse_infill_density") && config.option<ConfigOptionPercent>("sparse_infill_density")->value == 0 &&

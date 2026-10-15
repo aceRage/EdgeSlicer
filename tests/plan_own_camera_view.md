@@ -237,7 +237,7 @@ the test plan checks they still work in the same clean-data-dir run.
    (`HKCU\Software\Classes\CLSID\{233E64FB-…}\InprocServer32` → `%APPDATA%\OrcaSlicer\plugins\BambuSource.dll`
    on the owner's PC). With the preference on, no DirectShow graph is built, so it is never loaded -
    but only a **process module check** proves that, not the log alone. Best: also run once on a
-   Windows account or VM without OrcaSlicer/Bambu Studio (devwin11).
+   Windows account or VM without OrcaSlicer/Bambu Studio (the build VM).
 6. **Cold start**: the first Play after the hub starts can see go2rtc's stream handlers not yet
    registered (finding 5); the player retries within 15 s. Possibly worth making the hub wait for
    go2rtc readiness before answering `/hub/camera`.
@@ -355,7 +355,7 @@ revision 1 (setting off by default) - don't use it.
     proving the setting is the only switch. Tick it again and Play: back to the own view. On your PC that path may even *play*, through OrcaSlicer's registered DirectShow filter
     (risk 5); the step-7 module check then shows `live555.dll` and OrcaSlicer's `BambuSource.dll`,
     which is exactly the contrast with step 7 that we want to see.
-12. Optional, strongest: repeat 2-8 on devwin11 (no OrcaSlicer/Bambu Studio, so no HKCU filter).
+12. Optional, strongest: repeat 2-8 on the build VM (no OrcaSlicer/Bambu Studio, so no HKCU filter).
 13. Upgrade check: start camspike2 once on a **copy** of a data dir from an older build (copy an old
     test data dir, never `%APPDATA%\EdgeSlicer` itself): the setting comes up ticked. Untick it,
     restart: it stays unticked.

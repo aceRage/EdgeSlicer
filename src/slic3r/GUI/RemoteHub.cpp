@@ -3863,6 +3863,9 @@ json HubServer::summary_json()
         if (row.contains("ip"))          p["ip"]          = row["ip"];
         if (row.contains("print_error")) p["print_error"] = row["print_error"];
         if (row.contains("stage"))       p["stage"]       = row["stage"];
+        // How the job ended ("cancelled" for a stop the person asked for): the instance's watcher
+        // keeps it after the printer drops print_error. Absent when there is nothing to say.
+        if (row.contains("ended") && row["ended"].is_string() && !row["ended"].get<std::string>().empty()) p["ended"] = row["ended"];
         // The phone's native printer screen: what may be set (heaters with limits, speed, light,
         // fans), the U1's toolhead filaments and a Bambu printer's AMS units - as the instance's
         // row carried them. A stale row keeps them for display; the app offers no control on one.
