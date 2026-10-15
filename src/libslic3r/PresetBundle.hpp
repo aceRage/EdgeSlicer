@@ -407,6 +407,7 @@ public:
 
     // The settings an OrcaSlicer / EdgeSlicer G-code was sliced with, from its config block, ready for load_config_model().
     // Throws when the file carries no such block (another slicer, or the block was left out).
+    // Runs untrusted_config_filter on the result, as load_config_file() does for a G-code.
     DynamicPrintConfig          config_from_gcode(const std::string &path, ForwardCompatibilitySubstitutionRule compatibility_rule,
                                                   ConfigSubstitutions &substitutions) const;
 

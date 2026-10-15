@@ -3384,8 +3384,6 @@ ConfigSubstitutions PresetBundle::load_config_file(const std::string &path, Forw
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" enter, gcodefile %1%, compatibility_rule %2%")%path %compatibility_rule;
         ConfigSubstitutions config_substitutions;
         DynamicPrintConfig  config = config_from_gcode(path, compatibility_rule, config_substitutions);
-        if (untrusted_config_filter)
-            untrusted_config_filter(path, config);
 		load_config_file_config(path, true, std::move(config));
 		return config_substitutions;
 	}
@@ -3407,6 +3405,11 @@ DynamicPrintConfig PresetBundle::config_from_gcode(const std::string &path, Forw
     config.apply(this->project_config);
     const DynamicPrintConfig base = config;
     substitutions = config.load_from_gcode_file(path, compatibility_rule);
+    // Edge: the file's settings are not ones the user wrote. Strip post_process scripts, print-host
+    // addresses and the like (UntrustedSettingsGuard) before anything adopts them. Every way of
+    // opening a G-code's settings goes through here, so none can skip the check.
+    if (untrusted_config_filter)
+        untrusted_config_filter(path, config);
     // An empty list of choices sets nothing: G-code written by a tool rather than from presets leaves per-extruder
     // lists such as nozzle_volume_type empty, and the settings tabs expect a choice per extruder. An empty text
     // list, such as filament_multi_colour, is a value of its own and stays.
@@ -3415,12 +3418,9 @@ DynamicPrintConfig PresetBundle::config_from_gcode(const std::string &path, Forw
             if (const ConfigOption *below = base.option(key); below != nullptr && static_cast<const ConfigOptionVectorBase *>(below)->size() > 0)
                 config.set_key_value(key, below->clone());
     Preset::normalize(config);
-    // The block holds flush_volumes_matrix already multiplied by the multiplier the slice used, so a
-    // multiplier of 1 keeps the purge volumes the file was sliced with. G-code from before 2.3.2 held the
-    // plain matrix and loses a multiplier other than 1.
-    for (const char *key : { "flush_multiplier", "flush_multiplier_fast" })
-        if (auto *multiplier = config.option<ConfigOptionFloats>(key))
-            std::fill(multiplier->values.begin(), multiplier->values.end(), 1.);
+    // Edge: unlike upstream Orca, the block holds the plain flush_volumes_matrix and the multiplier the
+    // slice used (GCode.cpp and the wipe tower apply flush_multiplier when they use the matrix, and
+    // flush_multiplier is a single float here, not a list), so both are kept as the file has them.
     return config;
 }
 
