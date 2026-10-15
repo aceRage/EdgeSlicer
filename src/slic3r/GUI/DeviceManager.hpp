@@ -2,6 +2,7 @@
 #define slic3r_DeviceManager_hpp_
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -20,6 +21,7 @@
 #include "LanReconnectLadder.hpp"
 #include "FirstRequestGate.hpp"
 #include "SsdpConnectType.hpp"
+#include "BindListRefresh.hpp"
 #include "AmsDrying.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
@@ -1472,6 +1474,18 @@ public:
                                  const std::string& announced_bind, bool saved_lan, bool has_access_code, long long now_ms);
     std::map<std::string, std::string>                     m_ssdp_outcome_logged; // "<dev_id>|<list>" -> last line
     std::map<std::string, SsdpConnectType::LanMemory>      m_ssdp_lan_memory;     // dev_id -> what it announced lately
+    // Bind-list refresh (BindListRefresh.hpp): the gate that rate-limits and debounces it, and each
+    // local printer's last state after the SSDP rules, to see a change in.
+    BindListRefresh::Gate                                  m_bind_refresh;
+    std::map<std::string, BindListRefresh::PrinterState>   m_ssdp_state;
+    class RefreshTimer;                                    // wxTimer with a callback (the .cpp)
+    RefreshTimer*                                          m_auto_refresh_timer { nullptr };
+    RefreshTimer*                                          m_probe_timer { nullptr };
+    std::shared_ptr<int>                                   m_refresh_token { std::make_shared<int>(0) };
+    // Fetch the account's bind list off the GUI thread, parse it on the GUI thread, then `done`.
+    void fetch_bind_list_async(std::function<void()> done);
+    void arm_auto_refresh();
+    void set_probe_sending(bool sending);
     static long long                                       ssdp_now_ms();
     // The printer announced "lan" within SsdpConnectType::LAN_MEMORY_MS.
     bool lan_announced_recently(const std::string& dev_id) const;
@@ -1480,6 +1494,20 @@ public:
     // bind; if a run of non-"lan" announcements had already switched it, it is made "lan" again
     // here so the access code can be entered. Logs the decision (never the access code).
     SsdpConnectType::PickerOffer picker_offer_for(MachineObject* obj, const char* panel_list);
+
+    // "Refresh printers" (the Device tab's printer picker, the send dialogs): re-read SSDP
+    // discovery (an active search for a few seconds, then back to listening) and, when signed in,
+    // fetch the account's bind list again - without signing out. Rate-limited
+    // (BindListRefresh::Gate). `done`, if given, runs on the GUI thread once the list is up to
+    // date (immediately when signed out); it does not run when the press was too soon (the
+    // return value is false then) or there is no network agent.
+    bool refresh_printers(const char* why, std::function<void()> done = {});
+    // Only the discovery half: the send dialogs fetch the bind list themselves. `rate_limited`:
+    // from a button press, shares the Refresh button's minimum gap.
+    bool restart_discovery(const char* why, bool rate_limited = false);
+    // A known printer's connect_type / bind_state changed (LAN <-> cloud, bound <-> free) after
+    // the SSDP rules: schedule a debounced, rate-limited re-fetch of the bind list.
+    void note_printer_state_change(const std::string& dev_id, const std::string& connect_type, const std::string& bind_state);
     MachineObject* insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code);
     /* disconnect all machine connections */
     void disconnect_all();

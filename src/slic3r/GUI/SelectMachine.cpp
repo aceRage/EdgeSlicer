@@ -2672,6 +2672,10 @@ void SelectMachineDialog::update_user_machine_list()
 void SelectMachineDialog::on_refresh(wxCommandEvent &event)
 {
     BOOST_LOG_TRIVIAL(info) << "m_printer_last_select: on_refresh";
+    // Search the network again as well (rate-limited): the list below is rebuilt from the account's
+    // printers (fetched next) and from what discovery has heard.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        dev->restart_discovery("send dialog refresh", /* rate_limited */ true);
     show_status(PrintDialogStatus::PrintStatusRefreshingMachineList);
 
     update_user_machine_list();
