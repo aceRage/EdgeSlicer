@@ -272,6 +272,54 @@ int count_ioi_sandwiches(const Print &print)
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// OrcaSlicer #13892: built-in placeholders in custom G-code and output file names
+// ---------------------------------------------------------------------------
+TEST_CASE("PrintStatistics exposes initial_extruder and the extruded_*_total aliases", "[Print][Placeholders]")
+{
+    PrintStatistics stats;
+    stats.initial_tool          = 1;
+    stats.total_weight          = 12.5;
+    stats.total_extruded_volume = 3400.;
+
+    const DynamicConfig config = stats.config();
+    CHECK(config.opt_int("initial_tool") == 1);
+    CHECK(config.opt_int("initial_extruder") == 1);
+    CHECK(config.opt_float("extruded_weight_total") == Approx(12.5));
+    CHECK(config.opt_float("extruded_volume_total") == Approx(3400.));
+
+    // Before the export finishes the file name keeps the placeholders as text, so every
+    // documented name has to exist there too or naming the file throws "not a variable name".
+    const DynamicConfig placeholders = PrintStatistics::placeholders();
+    for (const std::string key : {"initial_extruder", "extruded_weight_total", "extruded_volume_total"})
+        CHECK(placeholders.opt_string(key) == "{" + key + "}");
+}
+
+TEST_CASE("version placeholder survives Print::apply and the new aliases name an unfinished print", "[Print][Placeholders]")
+{
+    Model        model;
+    ModelObject *obj = model.add_object();
+    obj->name        = "Cube";
+    obj->add_volume(make_cube(20.0, 20.0, 20.0));
+    obj->add_instance();
+    obj->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filename_format",
+                         new ConfigOptionString("{initial_extruder}_{extruded_weight_total}_{extruded_volume_total}"));
+    Print print;
+    print.auto_assign_extruders(obj);
+    print.apply(model, config);
+
+    // Print::apply() clears the parser config; "version" used to vanish with it.
+    CHECK(print.placeholder_parser().process("{version}") == std::string(Snapmaker_VERSION));
+    CHECK(print.placeholder_parser().process("[version]") == std::string(Snapmaker_VERSION));
+
+    std::string name;
+    REQUIRE_NOTHROW(name = print.output_filename());
+    CHECK(name == "{initial_extruder}_{extruded_weight_total}_{extruded_volume_total}.gcode");
+}
+
 TEST_CASE("Inner-outer-inner wall order starts with the second internal wall on a cube", "[PrintObject][IOI]")
 {
     const char *wall_generator = GENERATE("classic", "arachne");
