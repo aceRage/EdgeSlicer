@@ -114,16 +114,28 @@ TEST_CASE("Per-plate bed type overrides follow the printer's bed types", "[Plate
         CHECK_FALSE(supports_bed_type_choice(a));
     }
 
-    SECTION("The U1 keeps its three plates and loses the others") {
+    SECTION("The U1 keeps its three plates and Cool Plate, and loses the others") {
         const Allowed a = allowed_bed_types(printer("Snapmaker U1", false), false);
         CHECK_FALSE(a.any);
-        CHECK(a.types == std::vector<BedType>{btPTE, btPEI, btGESP});
+        CHECK(a.types == std::vector<BedType>{btPTE, btPEI, btGESP, btPC});
         CHECK(supports_bed_type_choice(a));
-        std::vector<BedType> plates = {btPTE, btPEI, btGESP, btSuperTack, btPC, btDefault};
+        CHECK(is_allowed(a, btPC));
+        CHECK_FALSE(is_allowed(a, btSuperTack));
+        CHECK_FALSE(is_allowed(a, btPCT));
+        CHECK_FALSE(is_allowed(a, btEP));
+        std::vector<BedType> plates = {btPTE, btPEI, btGESP, btSuperTack, btPC, btEP, btPCT, btDefault};
         CHECK(normalize(plates, a));
-        CHECK(plates == std::vector<BedType>{btPTE, btPEI, btGESP, btDefault, btDefault, btDefault});
-        std::vector<BedType> fine = {btGESP, btDefault};
+        CHECK(plates == std::vector<BedType>{btPTE, btPEI, btGESP, btDefault, btPC, btDefault, btDefault, btDefault});
+        std::vector<BedType> fine = {btGESP, btPC, btDefault};
         CHECK_FALSE(normalize(fine, a));
+    }
+
+    SECTION("The U1 bed type list (sidebar, plate tab) offers Cool Plate but not Cool Steel") {
+        const ConfigOptionDef *def = print_config_def.get("curr_bed_type");
+        REQUIRE(def != nullptr);
+        REQUIRE(def->enum_values_u1.size() == def->enum_labels_u1.size());
+        CHECK(def->enum_values_u1 == std::vector<std::string>{"Textured PEI Plate", "High Temp Plate", "Graphic Effect Plate", "Cool Plate"});
+        CHECK(std::find(def->enum_values_u1.begin(), def->enum_values_u1.end(), "Supertack Plate") == def->enum_values_u1.end());
     }
 
     SECTION("A U1 with support_multi_bed_types takes every bed type") {

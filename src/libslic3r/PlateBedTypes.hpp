@@ -12,10 +12,10 @@ namespace PlateBedTypes {
 // overrides the selected printer accepts. Pure logic, so it can be tested without the GUI.
 //
 // - Bambu printers and printers with support_multi_bed_types accept every bed type.
-// - The Snapmaker U1 without support_multi_bed_types has its own bed type selector with three
-//   plates (Textured PEI, Smooth PEI / High Temp, Graphic Effect; Snapmaker #759/#920, PR #502), so
-//   it accepts those three. Upstream Orca enables support_multi_bed_types on the U1 instead (#15174),
-//   which would bring back the plates the U1 does not have.
+// - The Snapmaker U1 without support_multi_bed_types has its own bed type selector (the curr_bed_type
+//   enum_values_u1 list): Textured PEI, Smooth PEI / High Temp, Graphic Effect (Snapmaker #759/#920,
+//   PR #502) and Cool Plate (Edge, owner 2026-10-15), so it accepts those four. Upstream Orca enables
+//   support_multi_bed_types on the U1 instead (#15174), which would bring back plates the U1 does not have.
 // - Every other printer has a single bed type: per-plate overrides are not allowed.
 struct Allowed
 {

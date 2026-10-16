@@ -1229,13 +1229,17 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.emplace_back(L("Textured PEI Plate"));
     def->enum_labels.emplace_back(L("Textured Cool Plate"));
     def->enum_labels.emplace_back(L("Cool Plate (SuperTack)"));
-    // U1 only 3 (Snapmaker #759: Cool Steel Plate is not a real U1 plate; it only shows with support_multi_bed_types)
+    // U1: Snapmaker's 3 plates (Snapmaker #759: Cool Steel Plate is not a real U1 plate; it only shows with
+    // support_multi_bed_types) plus Cool Plate (Edge, owner 2026-10-15: a cold plate option must stay
+    // available). Appended last so the existing rows keep their positions.
     def->enum_values_u1.emplace_back("Textured PEI Plate");
     def->enum_values_u1.emplace_back("High Temp Plate");
     def->enum_values_u1.emplace_back("Graphic Effect Plate");
+    def->enum_values_u1.emplace_back("Cool Plate");
     def->enum_labels_u1.emplace_back(L("Textured PEI Plate"));
     def->enum_labels_u1.emplace_back(L("Smooth PEI Plate"));
     def->enum_labels_u1.emplace_back(L("Graphic Effect Plate"));
+    def->enum_labels_u1.emplace_back(L("Cool Plate"));
     // U1 use 7 when open support_multi_bed_types
     def->enum_values_ex.emplace_back("Cool Plate");
     def->enum_values_ex.emplace_back("Engineering Plate");

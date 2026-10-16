@@ -3921,7 +3921,8 @@ void Sidebar::remove_unused_filament_combos(const size_t current_extruder_count)
 }
 
 // Snapmaker #759/#920: the U1 has no Cool Steel Plate (btSuperTack) unless support_multi_bed_types is on.
-// A project saved with it falls back to Textured PEI (global bed type) or "same as global" (per plate).
+// Edge (owner 2026-10-15): the U1 list has Cool Plate, so a project saved with Cool Steel maps to Cool Plate,
+// the other low-temperature plate (global bed type and per-plate overrides alike).
 static bool u1_has_no_cool_steel_plate()
 {
     const auto &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
@@ -3939,7 +3940,7 @@ static void reset_u1_unsupported_plate_bed_types(PartPlateList &plate_list)
         return;
     for (PartPlate *plate : plate_list.get_plate_list())
         if (plate != nullptr && plate->get_bed_type(false) == btSuperTack)
-            plate->set_bed_type(btDefault);
+            plate->set_bed_type(btPC);
 }
 
 void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
@@ -4182,8 +4183,9 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             
             // Orca: Update proj_config directly to avoid callback context issues
             if (is_snapmaker_u1 && !support_multi_bed_types) {
-                if (bed_type_to_use != btPTE && bed_type_to_use != btPEI && bed_type_to_use != btGESP) {
-                    bed_type_to_use = btPTE;
+                // Edge: Cool Plate is a U1 plate too; a remembered Cool Steel Plate maps to it.
+                if (bed_type_to_use != btPTE && bed_type_to_use != btPEI && bed_type_to_use != btGESP && bed_type_to_use != btPC) {
+                    bed_type_to_use = bed_type_to_use == btSuperTack ? btPC : btPTE;
                     wxGetApp().app_config->set("curr_bed_type", std::to_string(int(bed_type_to_use)));
                     wxGetApp().app_config->set_printer_setting(printer_name, "curr_bed_type", std::to_string(int(bed_type_to_use)));
                 }
@@ -4195,9 +4197,10 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
         } else {
             if (is_snapmaker_u1 && !support_multi_bed_types) {
                 BedType curr = wxGetApp().preset_bundle->project_config.opt_enum<BedType>("curr_bed_type");
-                if (curr != btPTE && curr != btPEI && curr != btGESP) {
-                    wxGetApp().preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(btPTE));
-                    m_bed_type_list->SetSelection(0);
+                if (curr != btPTE && curr != btPEI && curr != btGESP && curr != btPC) {
+                    wxGetApp().preset_bundle->project_config.set_key_value("curr_bed_type",
+                        new ConfigOptionEnum<BedType>(curr == btSuperTack ? btPC : btPTE));
+                    m_bed_type_list->SetSelection(get_selection_index());
                 } else
                     m_bed_type_list->SetSelection(get_selection_index());
             } else
@@ -12833,7 +12836,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             if (bed_type_opt != nullptr) {
                                 BedType bed_type = (BedType)bed_type_opt->getInt();
                                 if (bed_type == btSuperTack && u1_has_no_cool_steel_plate()) {
-                                    bed_type = btPTE;
+                                    bed_type = btPC; // Edge: Cool Plate, the U1's low-temperature plate in its list
                                     preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
                                 }
                                 // update app config for bed type
