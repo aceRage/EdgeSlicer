@@ -150,6 +150,16 @@ struct Diagnosis
     bool fix_would_help(bool allow_public) const;
 };
 
+// Whether the check dialog's "Also allow on Public networks" box starts ticked: the PC is on a
+// Public network right now, the firewall is on there and drops EdgeSlicer's traffic, and rules for
+// Public would change that (not when "Block all incoming connections" is set for Public - no allow
+// rule gets past that). The user opened the check because something on *this* network does not
+// work, so the fix they confirm (UAC) should be the one that works on it: on 2026-10-16 the owner's
+// Wi-Fi was Public, the box was off, and both the Device-page camera and the Stream tab stayed
+// broken after the first fix. The installer keeps Private and Domain only: it cannot know which
+// network a PC will be on, and it would open the hub port on every cafe Wi-Fi without asking.
+bool default_allow_public(const Diagnosis& d);
+
 Diagnosis diagnose(const Snapshot& snapshot, const std::string& exe, const std::string& go2rtc, const EnvLookup& env = {});
 // One line per fact, in English, for the log.
 std::vector<std::string> describe_for_log(const Diagnosis& d);
