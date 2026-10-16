@@ -543,6 +543,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/LanReconnectLadder.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
+    GUI/BambuNetInfo.hpp
     GUI/BindListRefresh.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp

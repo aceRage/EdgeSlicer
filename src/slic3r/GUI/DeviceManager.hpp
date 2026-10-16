@@ -535,6 +535,9 @@ public:
     /* properties */
     std::string dev_name;
     std::string dev_ip;
+    // The address the printer reports in push_status net.info. Only the camera falls back to it
+    // while dev_ip is empty (no SSDP announcement got through); see BambuNetInfo.hpp.
+    std::string net_reported_ip;
     std::string dev_id;
     bool        local_use_ssl_for_mqtt { true };
     bool        local_use_ssl_for_ftp { true };
