@@ -196,6 +196,7 @@ typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS2)(
 
 #ifdef WIN32
 #include "dev-utils/BaseException.h"
+#include <Windows.h>
 #endif
 
 #if ENABLE_THUMBNAIL_GENERATOR_DEBUG
@@ -3320,6 +3321,19 @@ bool GUI_App::on_init_inner()
     CBaseException::set_log_folder(data_dir());
 #endif
 
+#ifdef _WIN32
+    m_session_end_reset_timer.SetOwner(this);
+    Bind(wxEVT_TIMER, [this](wxTimerEvent&) { reset_session_end(); }, m_session_end_reset_timer.GetId());
+
+    // wxApp::OnEndSession deletes all top-level windows under open modal dialogs and corrupts the heap (Sentry SNAPMAKER_ORCA-1H6).
+    wxGetApp().Bind(wxEVT_QUERY_END_SESSION, [this](wxCloseEvent&) {
+        m_in_session_end = true;
+        abort_all_modal_dialogs();
+        m_session_end_reset_timer.StartOnce(60000);
+    });
+
+    wxGetApp().Bind(wxEVT_END_SESSION, [this](wxCloseEvent&) { ::ExitProcess(0); });
+#else
     wxGetApp().Bind(wxEVT_QUERY_END_SESSION, [this](auto & e) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< "received wxEVT_QUERY_END_SESSION";
         if (mainframe) {
@@ -3334,6 +3348,7 @@ bool GUI_App::on_init_inner()
         for (auto d : dialogStack)
             d->EndModal(wxID_ABORT);
     });
+#endif
 
 #ifdef __APPLE__
     // A quit request from the Dock, a logout or a restart ends with AppKit calling exit() right after this
@@ -4116,6 +4131,12 @@ bool GUI_App::on_init_inner()
     profiler.mark("on_init_inner return");
 
     return true;
+}
+
+void GUI_App::reset_session_end()
+{
+    m_session_end_reset_timer.Stop();
+    m_in_session_end = false;
 }
 
 void GUI_App::machine_find()
@@ -8433,6 +8454,9 @@ std::vector<std::pair<unsigned int, std::string>> GUI_App::get_selected_presets(
 // - Taking snapshot
 bool GUI_App::check_and_save_current_preset_changes(const wxString& caption, const wxString& header, bool remember_choice/* = true*/, bool dont_save_insted_of_discard/* = false*/)
 {
+    if (m_in_session_end)
+        return true;
+
     if (has_current_preset_changes()) {
         int act_buttons = ActionButtons::SAVE;
         if (dont_save_insted_of_discard)
@@ -8608,6 +8632,9 @@ bool GUI_App::can_load_project()
 
 bool GUI_App::check_print_host_queue()
 {
+    if (m_in_session_end)
+        return true;
+
     wxString dirty;
     std::vector<std::pair<std::string, std::string>> jobs;
     // Get ongoing jobs from dialog

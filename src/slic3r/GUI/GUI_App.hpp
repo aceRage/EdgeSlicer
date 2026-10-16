@@ -31,6 +31,7 @@
 #include <wx/string.h>
 #include <wx/snglinst.h>
 #include <wx/msgdlg.h>
+#include <wx/timer.h>
 
 #include <atomic>
 #include <set>
@@ -251,9 +252,19 @@ public:
 
     static std::atomic<bool> m_app_alive; // 标记应用是否存活
 
+    // True once Windows began ending the session; close-path dialogs check it
+    // to auto-discard instead of interacting (Sentry SNAPMAKER_ORCA-1H6).
+    bool in_session_end() const { return m_in_session_end; }
+
+    // A queried session end was cancelled: restore interactive close.
+    void reset_session_end();
+
     static void log_version_info();
 
 private:
+    bool m_in_session_end{ false };
+    wxTimer m_session_end_reset_timer; // fallback reset for a cancelled session end
+
     bool            m_initialized { false };
     bool            m_post_initialized { false };
     // Startup is over: post_init() has run and the wx event queue it filled (project reset, config

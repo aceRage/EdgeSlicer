@@ -549,6 +549,14 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     // declare events
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< ": mainframe received close_widow event";
+        // Session end: no interaction, no teardown - wx deletes all windows
+        // under us (Sentry SNAPMAKER_ORCA-1H6, see GUI_App QUERY_END_SESSION).
+        // Must run before the hub-managed hide so logout does not park the
+        // instance in the tray (Edge #463 only covers the Hub).
+        if (wxGetApp().in_session_end()) {
+            event.Skip();
+            return;
+        }
         // Ultra: a hub-managed instance closes to the hub's tray menu, not to the grave. Only
         // request_quit() (tray, hub page, POST /api/quit, File > Quit) really ends it.
         const bool quit_requested = m_quit_requested;
@@ -924,6 +932,13 @@ WXLRESULT MainFrame::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam
         AdjustWorkingAreaForAutoHide(hWnd, mmi);
         return 0;
     }
+    case WM_ENDSESSION:
+        // wx ignores the wParam=0 "session cancelled" broadcast; without this
+        // reset the session-end guards would silently discard unsaved changes
+        // on every later manual close.
+        if (wParam == 0)
+            wxGetApp().reset_session_end();
+        break;
 
     /* The PC woke up. Handled here rather than through wxEVT_POWER_RESUME because Windows only sends
      * PBT_APMRESUMESUSPEND (the one wx maps) when a person woke the machine; PBT_APMRESUMEAUTOMATIC is
