@@ -759,6 +759,45 @@ static std::vector<int> parse_int_list(const std::string& value)
     return out;
 }
 
+// The 1-based filament -> extruder map a plate's metadata reports, as slice_info.config writes it:
+// the map the plate was sliced with (PlateData::filament_maps, empty for an unsliced plate), else
+// the project's filament_map; on a machine with identical independent toolheads an all-1s map
+// becomes the real per-toolhead assignment (see identity_filament_map); padded with 1 to the
+// filament count, with every entry at least 1. model_settings.config writes the same map for a
+// plate that is not hand-grouped, so the files a reader (Bambu Connect, the printer) cross-checks
+// agree. Reported metadata only: the live config, routing and the G-code are untouched.
+static std::vector<int> reported_filament_maps(const PlateData& plate_data, const DynamicPrintConfig& config)
+{
+    std::vector<int> filament_maps = plate_data.filament_maps;
+    if (filament_maps.empty()) {
+        if (auto* opt = config.option<ConfigOptionInts>("filament_map"))
+            filament_maps = opt->values;
+    }
+
+    size_t filaments_count = 0;
+    if (auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour")))
+        filaments_count = colours->values.size();
+
+    // A machine with several identical independent toolheads (Snapmaker U1, Flashforge
+    // Creator 5) never goes through ToolOrdering's grouping engine - that path is gated on
+    // distinct extruder variants - so filament_map is left at its preset default of all-1s
+    // while the G-code drives T0..T3. Bambu-derived firmware reads this map to resolve a
+    // filament to a physical nozzle, so report the assignment the machine actually prints with.
+    const std::vector<int> identity = identity_filament_map(config, filaments_count);
+    if (!identity.empty()) {
+        const bool map_is_trivial = filament_maps.empty() ||
+                                    std::all_of(filament_maps.begin(), filament_maps.end(), [](int v) { return v <= 1; });
+        if (map_is_trivial)
+            filament_maps = identity;
+    }
+
+    if (filament_maps.size() < filaments_count)
+        filament_maps.resize(filaments_count, 1);
+    for (int& v : filament_maps)
+        if (v < 1) v = 1;
+    return filament_maps;
+}
+
 static std::string join_int_list_comma(const std::vector<int>& values)
 {
     std::stringstream stream;
@@ -8800,9 +8839,29 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             return true;
         }
+        // A sliced-plate file (.gcode.3mf: Send to Bambu Connect, export plate sliced file, send to a
+        // printer) carries filament_map as long as filament_colour / filament_type / filament_ids,
+        // one entry per filament, as Bambu Studio always writes it. This fork leaves filament_map at
+        // its one-entry default on a single-nozzle machine (X1C, P1S, A1...), and a reader that indexes
+        // the per-filament arrays together - Bambu Connect builds its filament / AMS list from them -
+        // found no map entry for filament 2 and on. A missing entry means extruder 1 everywhere in
+        // this fork, so the padding changes nothing for the slicer itself. Project saves are written
+        // as they are, so a saved project reloads and re-slices exactly as before.
+        const DynamicPrintConfig* to_write = &config;
+        DynamicPrintConfig        aligned;
+        if (m_save_gcode) {
+            const auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour"));
+            const auto* map     = config.option<ConfigOptionInts>("filament_map");
+            if (colours != nullptr && map != nullptr && map->values.size() < colours->values.size()) {
+                aligned = config;
+                aligned.option<ConfigOptionInts>("filament_map")->values.resize(colours->values.size(), 1);
+                to_write = &aligned;
+            }
+        }
+
         const std::string& temp_path = model.get_backup_path();
         std::string temp_file = temp_path + std::string("/") + "_temp_1.config";
-        if (!config.save_to_json(temp_file, std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION))) {
+        if (!to_write->save_to_json(temp_file, std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION))) {
             add_error("Unable to write project config file");
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << " failed to write " << temp_file;
             return false;
@@ -9174,11 +9233,29 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 // Ultra (Phase 8): write the real per-filament nozzle map (1-based) when present, so a saved
                 // project keeps the dual-nozzle grouping. Falls back to 1 (single nozzle) per filament when
                 // filament_map is absent/short (classic machines, or not yet grouped).
-                const auto* fmap_opt = plate_manual ? plate_map_opt : dynamic_cast<const ConfigOptionInts*>(config.option("filament_map"));
-                for (int i = 0; i < filaments_count; ++i) {
-                    int v = (fmap_opt && i < (int)fmap_opt->values.size() && fmap_opt->values[i] >= 1) ? fmap_opt->values[i] : 1;
-                    stream << v;
-                    if (i != (filaments_count - 1))
+                // A hand-grouped plate writes its own explicit map. Every other plate writes the map
+                // slice_info.config reports for it (reported_filament_maps): for a sliced plate the
+                // map it was sliced with, otherwise the project's map - with the identical-toolhead
+                // substitution on a Snapmaker U1 / Flashforge Creator 5. This file used to write the
+                // project-level map for every plate, so a sliced plate's two metadata files could
+                // disagree: an all-1s map on a U1, or on a dual-nozzle Bambu (H2D/H2C) the map of
+                // whichever plate was sliced last ("send all plates", the CLI) - and Bambu Connect
+                // reads the per-plate map here. Reported metadata only: the live config is untouched,
+                // and the loader ignores this map for a plate that is not "Manual".
+                std::vector<int> filament_map;
+                if (plate_manual) {
+                    filament_map.reserve(filaments_count);
+                    for (int i = 0; i < (int)filaments_count; ++i)
+                        filament_map.push_back(
+                            (i < (int)plate_map_opt->values.size() && plate_map_opt->values[i] >= 1) ? plate_map_opt->values[i] : 1);
+                } else {
+                    filament_map = reported_filament_maps(*plate_data, config);
+                    filament_map.resize(filaments_count, 1);
+                }
+
+                for (int i = 0; i < (int)filaments_count; ++i) {
+                    stream << filament_map[i];
+                    if (i != (int)(filaments_count - 1))
                         stream << " ";
                 }
                 stream << "\"/>\n";
@@ -9664,39 +9741,8 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
 
                 // filament -> extruder map, 1 based. BBS always carries a full-length filament_map;
                 // this fork leaves it short on classic single-nozzle machines, so pad with 1 there.
-                std::vector<int> filament_maps = plate_data->filament_maps;
-                if (filament_maps.empty()) {
-                    if (auto* opt = config.option<ConfigOptionInts>("filament_map"))
-                        filament_maps = opt->values;
-                }
-                {
-                    size_t filaments_count = 0;
-                    if (auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour")))
-                        filaments_count = colours->values.size();
-
-                    // A machine with several identical independent toolheads (Snapmaker U1,
-                    // Flashforge Creator 5) never goes through ToolOrdering's grouping engine -
-                    // that path is gated on distinct extruder variants - so filament_map is left
-                    // at its preset default of all-1s and this file used to claim every filament
-                    // sat in toolhead 1 while the G-code drove T0..T3. Bambu-derived firmware
-                    // reads this map to resolve a filament to a physical nozzle, so report the
-                    // assignment the machine actually prints with. Reported metadata only: the
-                    // live config is untouched, so routing, flush volumes and the emitted G-code
-                    // are unchanged (see identity_filament_map's comment).
-                    const std::vector<int> identity = identity_filament_map(config, filaments_count);
-                    if (!identity.empty()) {
-                        const bool map_is_trivial = filament_maps.empty() ||
-                                                    std::all_of(filament_maps.begin(), filament_maps.end(),
-                                                                [](int v) { return v <= 1; });
-                        if (map_is_trivial)
-                            filament_maps = identity;
-                    }
-
-                    if (filament_maps.size() < filaments_count)
-                        filament_maps.resize(filaments_count, 1);
-                    for (int& v : filament_maps)
-                        if (v < 1) v = 1;
-                }
+                // model_settings.config writes the same map (reported_filament_maps).
+                const std::vector<int> filament_maps = reported_filament_maps(*plate_data, config);
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
                 add_vector<int>(stream, filament_maps);
                 stream << "\"/>\n";
