@@ -96,6 +96,7 @@
 #include "libslic3r/CustomModels.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
 #include "../Utils/BambuStudioLauncher.hpp"
+#include "../Utils/BambuConnect.hpp"
 #include "BlenderBridge.hpp"
 #include "FreeCADBridge.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
@@ -4231,6 +4232,9 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
         update_printer_thumbnail();
     }
         
+    // Send to Bambu Connect is offered for Bambu printers only.
+    p_mainframe->show_bambu_connect_menu_items(preset_bundle.is_bbl_vendor());
+
     // Ultra: Flashforge printers get the ported Orca-Flashforge device tab
     bool is_flashforge = false;
     {
@@ -11699,6 +11703,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         q->Bind(EVT_GLTOOLBAR_SEND_GCODE, &priv::on_action_send_gcode, this);
         q->Bind(EVT_GLTOOLBAR_EXPORT_SLICED_FILE, &priv::on_action_export_sliced_file, this);
         q->Bind(EVT_GLTOOLBAR_EXPORT_ALL_SLICED_FILE, &priv::on_action_export_all_sliced_file, this);
+        q->Bind(EVT_GLTOOLBAR_SEND_TO_BAMBU_CONNECT, [q](SimpleEvent &) { q->send_to_bambu_connect(false); });
+        q->Bind(EVT_GLTOOLBAR_SEND_ALL_TO_BAMBU_CONNECT, [q](SimpleEvent &) { q->send_to_bambu_connect(true); });
         q->Bind(EVT_GLTOOLBAR_SEND_TO_PRINTER, &priv::on_action_export_to_sdcard, this);
         q->Bind(EVT_GLTOOLBAR_SEND_TO_PRINTER_ALL, &priv::on_action_export_to_sdcard_all, this);
         q->Bind(EVT_GLTOOLBAR_PRINT_MULTI_MACHINE, &priv::on_action_send_to_multi_machine, this);
@@ -22480,6 +22486,92 @@ void Plater::export_bambu_3mf()
     p->notification_manager->push_notification(NotificationType::CustomNotification,
                                                NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
     warn_live_stabilizers_dropped(p->notification_manager.get(), p->model);
+}
+
+// "Bambu Connect is not installed" (or could not be opened): a link to Bambu's own page, nothing else.
+// EdgeSlicer never downloads or installs Bambu Connect.
+static void show_bambu_connect_unavailable(wxWindow *parent, bool installed_but_failed)
+{
+    const wxString msg = installed_but_failed ?
+        _L("Bambu Connect could not be opened. Check that Bambu Connect is installed and up to date, then try again.") :
+        _L("Bambu Connect is not installed. Bambu Connect is Bambu Lab's free app that sends sliced files to "
+           "Bambu printers with your Bambu account or over LAN. Install it from Bambu Lab, then send again.");
+    RichMessageDialog dlg(parent, msg, _L("Send to Bambu Connect"), wxOK | wxCANCEL | wxICON_INFORMATION);
+    dlg.SetOKCancelLabels(_L("Open Bambu Connect page"), _L("Close"));
+    dlg.CentreOnScreen();
+    if (dlg.ShowModal() == wxID_OK)
+        wxLaunchDefaultBrowser(BambuConnect::INFO_URL);
+}
+
+void Plater::send_to_bambu_connect(bool all_plates)
+{
+    if (p->model.objects.empty())
+        return;
+    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
+    if (preset_bundle == nullptr || !preset_bundle->is_bbl_vendor())
+        return;
+    PartPlateList &plates = get_partplate_list();
+    if (!all_plates && p->process_completed_with_error == plates.get_curr_plate_index())
+        return;
+    const bool ready = all_plates ? plates.is_all_slice_result_ready_for_export() :
+                                    plates.get_curr_plate()->is_slice_result_ready_for_export();
+    if (!ready) {
+        show_info(this, all_plates ? _L("Slice all plates first, then send them to Bambu Connect.") :
+                                     _L("Slice the plate first, then send it to Bambu Connect."),
+                  _L("Send to Bambu Connect"));
+        return;
+    }
+
+    // Check first, so a missing Bambu Connect costs no export.
+    if (BambuConnect::detect_installed() == BambuConnect::Installed::No) {
+        show_bambu_connect_unavailable(this, false);
+        return;
+    }
+
+    // Same validation and default name as "Export plate sliced file".
+    try {
+        const unsigned int state = p->update_restart_background_process(false, false);
+        if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
+            return;
+    } catch (const Slic3r::PlaceholderParserError &ex) {
+        show_error(this, ex.what(), true);
+        return;
+    } catch (const std::exception &ex) {
+        show_error(this, ex.what(), false);
+        return;
+    }
+
+    const std::string dir = BambuConnect::prepare_temp_dir();
+    if (dir.empty()) {
+        show_error(this, _L("Could not create a temporary folder for the file to send to Bambu Connect."));
+        return;
+    }
+    const std::string display_name = BambuConnect::display_name_for(into_u8(get_export_gcode_filename(".gcode.3mf", true, all_plates)));
+    const fs::path    output_path  = into_path(from_u8(dir)) / into_path(from_u8(BambuConnect::temp_file_name_for(display_name)));
+    const std::string output_u8    = into_u8(from_path(output_path));
+
+    const int plate_idx = all_plates ? PLATE_ALL_IDX : plates.get_curr_plate_index();
+    // Exactly what "Export plate sliced file" / "Export all plate sliced file" write.
+    const int ret = export_3mf(output_path, SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode | SaveStrategy::SkipModel,
+                               plate_idx);
+    boost::system::error_code ec;
+    if (ret < 0 || !fs::exists(output_path, ec)) {
+        show_error(this, _L("Failed to export the sliced file for Bambu Connect."));
+        return;
+    }
+
+    const std::string url = BambuConnect::build_import_url(output_u8, display_name);
+    // The path holds the user's temp folder; log the leaf and the size only.
+    BOOST_LOG_TRIVIAL(info) << "Send to Bambu Connect: " << (all_plates ? "all plates" : "plate") << ", file "
+                            << into_u8(from_path(output_path.filename())) << ", url length " << url.size();
+    if (!wxLaunchDefaultBrowser(from_u8(url), wxBROWSER_NOBUSYCURSOR)) {
+        BOOST_LOG_TRIVIAL(warning) << "Send to Bambu Connect: the bambu-connect:// URL could not be opened";
+        show_bambu_connect_unavailable(this, true);
+        return;
+    }
+    p->notification_manager->push_notification(
+        NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+        format(_u8L("Sent \"%1%\" to Bambu Connect. Choose the printer and start the print there."), display_name));
 }
 
 void Plater::export_and_open_in_bambu_studio()

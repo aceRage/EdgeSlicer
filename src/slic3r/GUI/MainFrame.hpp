@@ -112,6 +112,11 @@ class MainFrame : public DPIFrame
     std::string m_account_menubar_sig;             // what that menu currently shows
     //wxMenu* publishMenu{ nullptr };
     wxMenu *    m_calib_menu{nullptr};
+    // File > Export > Send plate / all plates to Bambu Connect: shown for Bambu printers only.
+    wxMenu *                  m_export_menu{ nullptr };
+    std::vector<wxMenuItem *> m_bambu_connect_items;
+    int                       m_bambu_connect_anchor_id{ wxID_NONE };
+    bool                      m_bambu_connect_items_shown{ true };
     bool        enable_multi_machine{ false };
 
 #if 0
@@ -136,6 +141,8 @@ class MainFrame : public DPIFrame
     bool can_export_supports() const;
     bool can_export_gcode() const;
     bool can_export_all_gcode() const;
+    // Bambu printer selected and the plate (all plates) sliced: File > Export > Send ... to Bambu Connect.
+    bool can_send_to_bambu_connect(bool all_plates) const;
     bool can_print_3mf() const;
     bool can_send_gcode() const;
     bool can_slice() const;
@@ -279,7 +286,8 @@ public:
         eSendToPrinterAll    = 6,
         eUploadGcode         = 7,
         eExportAllSlicedFile = 8,
-        ePrintMultiMachine   = 9
+        ePrintMultiMachine   = 9,
+        eSendToBambuConnect  = 10 // Bambu printers: current plate, or all plates in the all-plates view
     };
 
     void update_layout();
@@ -433,6 +441,8 @@ public:
 
     //SoftFever
     void show_device(bool bBBLPrinter);
+    // Attach / detach the File > Export "Send ... to Bambu Connect" items (Bambu printers only).
+    void show_bambu_connect_menu_items(bool show);
 
     PA_Calibration_Dlg* m_pa_calib_dlg{ nullptr };
     Temp_Calibration_Dlg* m_temp_calib_dlg{ nullptr };
