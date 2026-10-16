@@ -2,6 +2,7 @@
 // tests/plan_support_highlight_by_layer.md.
 
 #include "SupportOverhangHighlight.hpp"
+#include "SupportOverhangDetect.hpp"
 
 #include "../ClipperUtils.hpp"
 #include "../Config.hpp"
@@ -124,7 +125,7 @@ SupportOverhangRule support_overhang_rule(const ConfigBase &cfg)
     if (r.threshold_angle > 0) {
         // Both generators: "+1 makes the threshold inclusive", and below 90.
         r.source    = SupportOverhangRule::Source::Angle;
-        r.angle_deg = std::min(double(r.threshold_angle) + 1., 89.);
+        r.angle_deg = r.tree ? tree_support_threshold_angle(r.threshold_angle) : normal_support_threshold_angle(r.threshold_angle);
     } else if (r.tree) {
         // TreeSupport::detect_overhangs(): 30 degrees when the angle is 0; the overlap setting is
         // not read by any tree style (Orca #12367 hides it for trees).
@@ -132,9 +133,11 @@ SupportOverhangRule support_overhang_rule(const ConfigBase &cfg)
         r.angle_deg = 30.;
     } else {
         r.source = SupportOverhangRule::Source::Overlap;
-        if (const auto *ov = cfg.option<ConfigOptionFloatOrPercent>("support_threshold_overlap"))
-            r.overlap_mm = ov->get_abs_value(r.outer_wall_width);
-        else
+        if (const auto *ov = cfg.option<ConfigOptionFloatOrPercent>("support_threshold_overlap")) {
+            r.overlap_mm      = ov->get_abs_value(r.outer_wall_width);
+            r.overlap_value   = ov->value;
+            r.overlap_percent = ov->percent;
+        } else
             r.overlap_mm = 0.5 * r.outer_wall_width;
         // For display only: the angle at the config's layer height. The real value depends on
         // the layer height, see effective_angle_deg().
@@ -203,47 +206,47 @@ std::vector<ExPolygons> support_overhangs_from_slices(const std::vector<ExPolygo
     if (n < 2 || heights.empty())
         return out;
 
-    // Tree: "Filter out areas whose diameter that is smaller than extrusion_width".
-    std::vector<ExPolygons> extrudable;
+    // Phase 4: the generators' own per-layer decision (Support/SupportOverhangDetect.cpp), with the
+    // same inputs they compute: the threshold, the line width, the external perimeter width.
     if (rule.tree) {
-        extrudable.resize(n);
-        const float w = float(scale_(rule.line_width));
+        // TreeSupport::detect_overhangs().
+        const coordf_t extrusion_width        = rule.line_width;
+        const coordf_t extrusion_width_scaled = scale_(extrusion_width);
+        const double   threshold_rad          = Geometry::deg2rad(tree_support_threshold_angle(rule.threshold_angle));
+        std::vector<ExPolygons> extrudable(n);
         tbb::parallel_for(tbb::blocked_range<size_t>(0, n), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t i = range.begin(); i < range.end(); ++ i)
-                extrudable[i] = intersection_ex(lslices[i], offset2_ex(lslices[i], -w / 2, w));
+                extrudable[i] = tree_support_extrudable(lslices[i], extrusion_width_scaled);
         });
-    }
-    const std::vector<ExPolygons> &src = rule.tree ? extrudable : lslices;
-
-    tbb::parallel_for(tbb::blocked_range<size_t>(1, n), [&](const tbb::blocked_range<size_t> &range) {
-        for (size_t i = range.begin(); i < range.end(); ++ i) {
-            const bool   enforced = int(i) < rule.enforce_layers;
-            const double lower_h  = i - 1 < heights.size() ? heights[i - 1] : heights.back();
-            if (rule.tree) {
-                // TreeSupport::detect_overhangs(), "normal overhang".
-                const double off = enforced ? -0.15 * rule.line_width : rule.lower_layer_offset(lower_h);
-                out[i] = diff_ex(src[i], offset_ex(src[i - 1], float(scale_(off)), SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS));
-            } else {
-                // SupportMaterial.cpp detect_overhangs(), auto normal support, one region.
-                const double   off   = enforced ? 0. : rule.lower_layer_offset(lower_h);
-                const Polygons cur   = to_polygons(src[i]);
-                const Polygons lower = to_polygons(src[i - 1]);
-                Polygons d;
-                if (off <= 0.) {
-                    d = diff(cur, lower);
-                } else {
-                    const float off_scaled = float(scale_(off));
-                    d = diff(cur, expand(lower, off_scaled, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS));
-                    if (! d.empty())
-                        // "Offset the support regions back to a full overhang".
-                        d = diff(intersection(expand(d, off_scaled, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS), cur), lower);
-                }
-                if (d.empty() || offset(d, -0.1f * float(scale_(rule.outer_wall_width))).empty())
+        tbb::parallel_for(tbb::blocked_range<size_t>(1, n), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i) {
+                const coordf_t lower_h               = i - 1 < heights.size() ? heights[i - 1] : heights.back();
+                const coordf_t lower_layer_offset    = tree_support_lower_layer_offset(i, rule.enforce_layers, extrusion_width, lower_h, threshold_rad);
+                const coordf_t support_offset_scaled = scale_(lower_layer_offset);
+                ExPolygons     lower_offseted;
+                out[i] = tree_support_layer_overhangs(extrudable[i], extrudable[i - 1], support_offset_scaled, lower_offseted);
+            }
+        });
+    } else {
+        // SupportMaterial.cpp detect_overhangs(), automatic normal supports, one region. The
+        // external perimeter width as LayerRegion::flow(frExternalPerimeter).scaled_width() gives it.
+        const float  width         = float(rule.outer_wall_width);
+        const float  fw            = float(coord_t(scale_(width)));
+        const double threshold_rad = Geometry::deg2rad(normal_support_threshold_angle(rule.threshold_angle));
+        const ConfigOptionFloatOrPercent overlap(rule.overlap_value, rule.overlap_percent);
+        static const Polygons no_buildplate_covered;
+        tbb::parallel_for(tbb::blocked_range<size_t>(1, n), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i) {
+                const double   lower_h            = i - 1 < heights.size() ? heights[i - 1] : heights.back();
+                const float    lower_layer_offset = normal_support_lower_layer_offset(i, rule.enforce_layers, threshold_rad, lower_h, fw, overlap);
+                const Polygons d = normal_support_region_overhangs(to_polygons(lslices[i]), to_polygons(lslices[i - 1]), lower_layer_offset,
+                                                                   /*auto_normal_support*/ true, /*buildplate_only*/ false, no_buildplate_covered);
+                if (normal_support_overhang_too_thin(d, fw))
                     continue;
                 out[i] = union_ex(d);
             }
-        }
-    });
+        });
+    }
     return out;
 }
 

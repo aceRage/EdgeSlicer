@@ -19,6 +19,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Support/SupportOverhangDetect.hpp"
 #include "libslic3r/Support/SupportOverhangHighlight.hpp"
 #include "libslic3r/Support/TreeSupport.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -753,4 +754,72 @@ TEST_CASE("Support highlight benchmark: pre-slice preview (slice + detect + map)
             release_PlateData_list(plate_data);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 4: one detector (Support/SupportOverhangDetect.hpp) for both generators and the highlight.
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Support highlight detector: the highlight and the generators detect the same overhangs", "[SupportHighlight]")
+{
+    // With the generators' extras out of the way (no small-overhang removal, no bridges, no
+    // expansion; a 20 degree frustum has no sharp tails or cantilevers) what each generator holds up is
+    // exactly its detector's output, and the highlight runs the same detector on the same slices.
+    for (const char *type : { "normal(auto)", "tree(auto)" }) {
+        for (const int angle : { 0, 40 }) {
+            DynamicPrintConfig config = support_config(type, angle, 0.2, {
+                { "support_remove_small_overhang", 0 },
+                { "support_expansion",             0 },
+                { "bridge_no_support",             0 },
+            });
+            Print print;
+            Model model;
+            init_print({ TriangleMesh(inverted_frustum_its(20.)) }, print, model, config);
+            print.process();
+            const PrintObject &object = *print.objects().front();
+
+            std::vector<ExPolygons> lslices;
+            std::vector<double>     heights;
+            for (const Layer *layer : object.layers()) {
+                lslices.push_back(layer->lslices);
+                heights.push_back(layer->height);
+            }
+            const std::vector<ExPolygons> ours = support_overhangs_from_slices(lslices, heights, support_overhang_rule(object));
+            double area_theirs = 0., area_xor = 0.;
+            for (size_t i = 1; i < lslices.size(); ++ i) {
+                const ExPolygons &theirs = object.get_layer(int(i))->support_overhangs;
+                area_theirs += area_mm2(theirs);
+                area_xor    += area_mm2(diff_ex(theirs, ours[i])) + area_mm2(diff_ex(ours[i], theirs));
+            }
+            INFO(type << " threshold " << angle << ": generator " << area_theirs << " mm2, difference " << area_xor << " mm2");
+            CHECK(area_theirs > 0.);
+            // Trees run on the very same lslices; normal supports on the region's slices, which for
+            // one region are the same areas (lslices is their union).
+            CHECK(area_xor < (std::string(type).find("tree") != std::string::npos ? 1e-6 : 1e-4) * area_theirs + 1e-6);
+        }
+    }
+}
+
+TEST_CASE("Support highlight detector: the shared rule pieces", "[SupportHighlight]")
+{
+    CHECK(normal_support_threshold_angle(0) == 0.);
+    CHECK(normal_support_threshold_angle(40) == 41.);
+    CHECK(normal_support_threshold_angle(90) == 89.);
+    CHECK(tree_support_threshold_angle(0) == 30.);
+    CHECK(tree_support_threshold_angle(40) == 41.);
+    const ConfigOptionFloatOrPercent half(50., true);
+    const float fw = float(scale_(0.45));
+    // The first enforce_support_layers layers: everything (offset 0).
+    CHECK(normal_support_lower_layer_offset(1, 3, 0., 0.2, fw, half) == 0.f);
+    // Overlap mode: the wall minus the overlap.
+    CHECK_THAT(double(normal_support_lower_layer_offset(5, 0, 0., 0.2, fw, half)), WithinAbs(scale_(0.225), 2.));
+    // Angle mode: h / tan(angle).
+    CHECK_THAT(double(normal_support_lower_layer_offset(5, 0, M_PI / 4., 0.2, fw, half)), WithinAbs(scale_(0.2), 2.));
+    CHECK_THAT(tree_support_lower_layer_offset(1, 3, 0.4, 0.2, M_PI / 4.), WithinAbs(-0.06, 1e-9));
+    CHECK_THAT(tree_support_lower_layer_offset(5, 3, 0.4, 0.2, M_PI / 4.), WithinAbs(0.2, 1e-6));
+    // The sliver filter drops a band narrower than 0.2 x fw.
+    Polygons band { Polygon({ { 0, 0 }, { scaled<coord_t>(10.), 0 }, { scaled<coord_t>(10.), scaled<coord_t>(0.05) }, { 0, scaled<coord_t>(0.05) } }) };
+    CHECK(normal_support_overhang_too_thin(band, fw));
+    band.front().points[2].y() = band.front().points[3].y() = scaled<coord_t>(1.);
+    CHECK_FALSE(normal_support_overhang_too_thin(band, fw));
 }

@@ -51,6 +51,8 @@ struct SupportOverhangRule
     int    threshold_angle  { 0 };     // support_threshold_angle as configured
     double angle_deg        { 0. };    // the angle the generator really uses (Angle: +1 inclusive, clamped to 89; TreeFallback: 30)
     double overlap_mm       { 0. };    // support_threshold_overlap resolved against outer_wall_width (Overlap only)
+    double overlap_value    { 50. };   // support_threshold_overlap as configured (the generator resolves it itself)
+    bool   overlap_percent  { true };
     double outer_wall_width { 0. };    // mm, external perimeter width normal supports measure with
     double line_width       { 0. };    // mm, line width tree supports measure with
     double layer_height     { 0. };    // mm, layer_height of the config the rule was made from
