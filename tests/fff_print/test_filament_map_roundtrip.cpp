@@ -76,7 +76,8 @@ void build_model(Model &model)
         object->add_volume(mesh(TestMesh::cube_20x20x20));
         object->add_instance()->set_offset(offsets[i]);
         object->ensure_on_bed();
-        object->volumes.front()->config.set("extruder", i + 1);
+        // On the object, as the object list sets it: the 3MF loader drops a lone volume's extruder.
+        object->config.set("extruder", i + 1);
     }
 }
 
