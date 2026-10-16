@@ -32,7 +32,7 @@ namespace BambuConnectStatus {
 
 // AppConfig sections (keyed by the printer's serial, like "access_code"). Never logged.
 extern const char *const STATUS_ONLY_SECTION; // "bambu_status_only": "1" = status only
-extern const char *const SNAPSHOT_SECTION;    // "bambu_status_snapshot": to_json(Snapshot)
+extern const char *const SNAPSHOT_SECTION;    // "bambu_status_snapshot": snapshot_to_json(Snapshot)
 
 // -------------------------------------------------------------------------------------------
 // Status-only printers
@@ -77,8 +77,8 @@ struct Snapshot
 
 // Compact JSON. Tray options are written by type (strings, bools, ints, floats and their vectors);
 // anything else is left out. saved_at is written last so same_content() can ignore it.
-std::string to_json(const Snapshot &snap);
-bool        from_json(const std::string &json_text, Snapshot &out);
+std::string snapshot_to_json(const Snapshot &snap);
+bool        snapshot_from_json(const std::string &json_text, Snapshot &out);
 
 // Same trays and nozzles (the time and names do not count): nothing new to save.
 bool same_content(const Snapshot &a, const Snapshot &b);

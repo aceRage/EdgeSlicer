@@ -163,7 +163,7 @@ json content_json(const Snapshot &snap)
 
 } // namespace
 
-std::string to_json(const Snapshot &snap)
+std::string snapshot_to_json(const Snapshot &snap)
 {
     json j          = content_json(snap);
     j["model"]      = snap.printer_model;
@@ -172,7 +172,7 @@ std::string to_json(const Snapshot &snap)
     return j.dump();
 }
 
-bool from_json(const std::string &json_text, Snapshot &out)
+bool snapshot_from_json(const std::string &json_text, Snapshot &out)
 {
     const json j = json::parse(json_text, nullptr, false);
     if (j.is_discarded() || !j.is_object() || !j.contains("trays") || !j["trays"].is_array())
@@ -279,7 +279,7 @@ std::map<std::string, Snapshot> load_snapshots(const AppConfig &config)
         return out;
     for (const auto &kv : config.get_section(SNAPSHOT_SECTION)) {
         Snapshot snap;
-        if (from_json(kv.second, snap))
+        if (snapshot_from_json(kv.second, snap))
             out.emplace(kv.first, std::move(snap));
     }
     return out;
@@ -292,12 +292,12 @@ bool store_snapshot(AppConfig &config, const std::string &dev_id, const Snapshot
     if (config.has(SNAPSHOT_SECTION, dev_id)) {
         Snapshot old;
         // Unchanged: only move "as of" forward now and then, not on every status push.
-        if (from_json(config.get(SNAPSHOT_SECTION, dev_id), old) && same_content(old, snap) &&
+        if (snapshot_from_json(config.get(SNAPSHOT_SECTION, dev_id), old) && same_content(old, snap) &&
             old.printer_name == snap.printer_name && old.printer_model == snap.printer_model &&
             snap.saved_at - old.saved_at < refresh_after_s)
             return false;
     }
-    config.set(SNAPSHOT_SECTION, dev_id, to_json(snap));
+    config.set(SNAPSHOT_SECTION, dev_id, snapshot_to_json(snap));
     return true;
 }
 

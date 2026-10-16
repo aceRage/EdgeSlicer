@@ -103,7 +103,7 @@ TEST_CASE("snapshot JSON round-trips trays and nozzles", "[BambuConnectStatus]")
 {
     const Snapshot in = sample_snapshot(1'800'000'000);
     Snapshot       out;
-    REQUIRE(from_json(to_json(in), out));
+    REQUIRE(snapshot_from_json(snapshot_to_json(in), out));
     CHECK(out.saved_at == in.saved_at);
     CHECK(out.printer_model == in.printer_model);
     CHECK(out.printer_name == in.printer_name);
@@ -128,14 +128,14 @@ TEST_CASE("snapshot keeps other option types and survives odd input", "[BambuCon
     c.set_key_value("ratio", new ConfigOptionFloat(1.5));
     s.trays.emplace(3, c);
     Snapshot out;
-    REQUIRE(from_json(to_json(s), out));
+    REQUIRE(snapshot_from_json(snapshot_to_json(s), out));
     CHECK(out.trays == s.trays);
 
-    CHECK_FALSE(from_json("", out));
-    CHECK_FALSE(from_json("{}", out));
-    CHECK_FALSE(from_json(R"({"trays":7})", out));
+    CHECK_FALSE(snapshot_from_json("", out));
+    CHECK_FALSE(snapshot_from_json("{}", out));
+    CHECK_FALSE(snapshot_from_json(R"({"trays":7})", out));
     // Unknown option types and broken trays are skipped, the rest is kept.
-    REQUIRE(from_json(R"({"trays":[{"index":0,"options":{"a":{"t":"zz","v":1},"b":{"t":"ss","v":["x"]}}},{"options":{}}],"saved_at":5})", out));
+    REQUIRE(snapshot_from_json(R"({"trays":[{"index":0,"options":{"a":{"t":"zz","v":1},"b":{"t":"ss","v":["x"]}}},{"options":{}}],"saved_at":5})", out));
     REQUIRE(out.trays.size() == 1);
     CHECK(out.trays.at(0).has("b"));
     CHECK_FALSE(out.trays.at(0).has("a"));
