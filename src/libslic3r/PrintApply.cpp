@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 
 namespace Slic3r {
@@ -1405,6 +1406,85 @@ static bool same_layer_pointillism_enabled(const MixedFilamentManager &mixed_mgr
     return false;
 }
 
+// Orca: The shrinkage compensation is baked into the PrintObject transformations, so it has to be known before apply()
+// creates them. Derive it from the filaments the new model prints with instead of from the existing PrintObjects and
+// their regions, which do not exist yet on the first apply(). Every feature filament of every part, height range and
+// modifier counts, whether the feature ends up printing or not, so filaments that disagree switch the compensation
+// off rather than letting a wrong compensation through.
+void Print::update_shrinkage_compensation(size_t num_extruders)
+{
+    const auto set_compensation = [this](unsigned int extruder) {
+        // 100% from the user is the equivalent to 0 in orca.
+        const double xy_compensation = 100.0 / m_config.filament_shrink.get_at(extruder);
+        const double z_compensation  = 100.0 / m_config.filament_shrinkage_compensation_z.get_at(extruder);
+        m_shrinkage_compensation = { xy_compensation, xy_compensation, z_compensation };
+    };
+    const auto same_shrinkage = [this](unsigned int a, unsigned int b) {
+        return m_config.filament_shrink.get_at(a) == m_config.filament_shrink.get_at(b) &&
+               m_config.filament_shrinkage_compensation_z.get_at(a) == m_config.filament_shrinkage_compensation_z.get_at(b);
+    };
+    // Usually all filaments share the same shrinkage, then it does not matter which of them print.
+    bool uniform = true;
+    for (unsigned int extruder = 1; extruder < num_extruders && uniform; ++ extruder)
+        uniform = same_shrinkage(0, extruder);
+    if (uniform) {
+        m_same_shrinkage_compensations = true;
+        set_compensation(0);
+        return;
+    }
+
+    const size_t num_filaments = m_mixed_filament_mgr.total_filaments(num_extruders);
+    std::vector<unsigned int> extruders;
+    const auto append_feature_extruders = [num_filaments, &extruders](const PrintRegionConfig &config) {
+        for (int id : { config.wall_filament.value, config.outer_wall_filament.value,
+                        config.sparse_infill_filament.value, config.solid_infill_filament.value }) {
+            if (id <= 0)
+                continue; // outer_wall_filament 0 follows wall_filament
+            const unsigned int i = (unsigned int)std::max(0, id - 1);
+            extruders.emplace_back(i >= num_filaments ? 0 : i);
+        }
+    };
+    for (const ModelObject *model_object : m_model.objects) {
+        if (std::none_of(model_object->instances.begin(), model_object->instances.end(), [](const ModelInstance *mi) { return mi->is_printable(); }))
+            continue;
+        std::vector<const ModelVolume*> modifiers;
+        std::copy_if(model_object->volumes.begin(), model_object->volumes.end(), std::back_inserter(modifiers), [](const ModelVolume *mv) { return mv->is_modifier(); });
+        for (const ModelVolume *part : model_object->volumes) {
+            if (! part->is_model_part())
+                continue;
+            std::vector<PrintRegionConfig> parents { region_config_from_model_volume(m_default_region_config, nullptr, *part, num_filaments) };
+            for (const auto &[range, range_config] : model_object->layer_config_ranges)
+                parents.emplace_back(region_config_from_model_volume(m_default_region_config, &range_config.get(), *part, num_filaments));
+            for (const PrintRegionConfig &parent : parents) {
+                append_feature_extruders(parent);
+                for (const ModelVolume *modifier : modifiers)
+                    append_feature_extruders(region_config_from_model_volume(parent, nullptr, *modifier, num_filaments));
+            }
+        }
+        append_model_object_extruders(*model_object, extruders);
+        const PrintObjectConfig object_config = PrintObject::object_config_from_model_object(m_default_object_config, *model_object, num_filaments);
+        if (PrintObject::has_support_material(object_config))
+            append_support_extruders(object_config, (unsigned int)num_filaments, extruders);
+        else if (PrintObject::has_stabilizers(object_config) && object_config.support_filament != 0) {
+            // Stabilizers without supports print with the support filament; 0 follows the object.
+            unsigned int i = (unsigned int)object_config.support_filament - 1;
+            extruders.emplace_back((i >= num_filaments) ? 0 : i);
+        }
+    }
+    this->append_tool_change_extruders(extruders);
+    // A mixed slot prints with its physical components.
+    m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, num_extruders);
+    // The wipe tower filament may also be flushed into the objects.
+    this->append_wipe_tower_extruder(extruders);
+    m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, num_extruders);
+
+    m_same_shrinkage_compensations = ! extruders.empty() &&
+        std::all_of(extruders.begin(), extruders.end(), [&](unsigned int extruder) { return same_shrinkage(extruders.front(), extruder); });
+    m_shrinkage_compensation = Vec3d::Ones();
+    if (m_same_shrinkage_compensations)
+        set_compensation(extruders.front());
+}
+
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1937,6 +2017,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     // 4) Generate PrintObjects from ModelObjects and their instances.
     {
+        this->update_shrinkage_compensation(num_extruders);
         PrintObjectPtrs print_objects_new;
         print_objects_new.reserve(std::max(m_objects.size(), m_model.objects.size()));
         bool new_objects = false;
