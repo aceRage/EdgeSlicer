@@ -605,6 +605,88 @@ TEST_CASE("The spiral lift uses the printable area of the extruder the filament 
     }
 }
 
+// Orca #13516: with manual filament change on, a Bambu Lab printer must get the MANUAL_TOOL_CHANGE
+// tag like any other printer. Upstream's regression came from Bambu's "M1020 S<n>" tool change in
+// GCodeWriter::toolchange, which bypassed toolchange_prefix(); our writer never took that change,
+// so the prefix (and the CoolingBuffer / custom G-code checks that read it) already honours the
+// option. This keeps it that way.
+TEST_CASE("Manual filament change emits MANUAL_TOOL_CHANGE on Bambu Lab printers too", "[GCodeWriter][GCode]")
+{
+    const bool bbl = GENERATE(false, true);
+    CAPTURE(bbl);
+
+    GCodeWriter writer;
+    writer.set_is_bbl_machine(bbl);
+    writer.config.manual_filament_change.value = true;
+    writer.set_extruders({0, 1});
+
+    CHECK(writer.toolchange_prefix() == "; MANUAL_TOOL_CHANGE T");
+    const std::string gcode = writer.toolchange(1);
+    CHECK(gcode.find("; MANUAL_TOOL_CHANGE T1") != std::string::npos);
+    CHECK(gcode.find("M1020") == std::string::npos);
+}
+
+// Orca #11582 / #11616: power loss recovery follows the printer profile. Bambu Lab printers keep
+// the exact lines Bambu Studio writes (their profiles enable it), Marlin 2 gets M413, and
+// "printer configuration" or any other firmware gets nothing.
+TEST_CASE("Power loss recovery commands follow the mode and the firmware", "[GCodeWriter][PowerLossRecovery]")
+{
+    GCodeWriter writer;
+    SECTION("Bambu Lab") {
+        writer.set_is_bbl_machine(true);
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Enable) == "; open powerlost recovery\nM1003 S1\n");
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable) == "; close powerlost recovery\nM1003 S0\n");
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::PrinterConfiguration).empty());
+    }
+    SECTION("Marlin 2") {
+        writer.config.gcode_flavor.value = gcfMarlinFirmware;
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Enable).rfind("M413 S1", 0) == 0);
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable).rfind("M413 S0", 0) == 0);
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::PrinterConfiguration).empty());
+    }
+    SECTION("Klipper and legacy Marlin get nothing") {
+        const GCodeFlavor flavor = GENERATE(gcfKlipper, gcfMarlinLegacy, gcfRepRapFirmware);
+        writer.config.gcode_flavor.value = flavor;
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Enable).empty());
+        CHECK(writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable).empty());
+    }
+}
+
+TEST_CASE("The first, boolean form of enable_power_loss_recovery still loads", "[PowerLossRecovery][Config]")
+{
+    DynamicPrintConfig config;
+    config.set_deserialize_strict({{"enable_power_loss_recovery", "1"}});
+    CHECK(config.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::Enable);
+    config.set_deserialize_strict({{"enable_power_loss_recovery", "0"}});
+    CHECK(config.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::Disable);
+    config.set_deserialize_strict({{"enable_power_loss_recovery", "printer_configuration"}});
+    CHECK(config.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::PrinterConfiguration);
+    // a config without the key reads the default: nothing written
+    CHECK(DynamicPrintConfig::full_print_config().opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") ==
+          PowerLossRecoveryMode::PrinterConfiguration);
+}
+
+// Edge: a project or printer preset saved before the option existed keeps what it was sliced with:
+// Bambu Lab printers had M1003 S1, everything else had nothing.
+TEST_CASE("Configs from before enable_power_loss_recovery keep their old behaviour", "[PowerLossRecovery][Config]")
+{
+    DynamicPrintConfig bbl;
+    bbl.set_deserialize_strict({{"printer_model", "Bambu Lab H2D"}});
+    CHECK(upgrade_missing_power_loss_recovery(bbl));
+    CHECK(bbl.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::Enable);
+
+    DynamicPrintConfig other;
+    other.set_deserialize_strict({{"printer_model", "Creality Ender-3 V3 SE"}});
+    CHECK_FALSE(upgrade_missing_power_loss_recovery(other));
+    CHECK_FALSE(other.has("enable_power_loss_recovery"));
+
+    // a value that is there, even "printer configuration", is the user's choice and stays
+    DynamicPrintConfig chosen;
+    chosen.set_deserialize_strict({{"printer_model", "Bambu Lab X1 Carbon"}, {"enable_power_loss_recovery", "printer_configuration"}});
+    CHECK_FALSE(upgrade_missing_power_loss_recovery(chosen));
+    CHECK(chosen.opt_enum<PowerLossRecoveryMode>("enable_power_loss_recovery") == PowerLossRecoveryMode::PrinterConfiguration);
+}
+
 // Snapmaker #993: generated Z travel respects machine_max_speed_z (pure Z travel, lift/unlift, the Z component
 // of XYZ travel and of the spiral lift). Ported from the upstream tests (open PR, head 06583b935f) to this
 // tree's writer, plus the Edge adaptations: the layer-change Z is deferred through defer_z_move(), and the
