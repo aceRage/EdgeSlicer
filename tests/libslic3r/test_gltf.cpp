@@ -777,9 +777,7 @@ SCENARIO("glTF COLOR_0 becomes MMU painting", "[gltf]")
     GIVEN("BoxVertexColors.glb and a dialog that alternates two filaments")
     {
         ColorDialogStub stub;
-        // Phase 5e: the part's own filament is left unpainted now, so give the part a filament no
-        // face was mapped to (1); every face is then painted, which is what this case checks for.
-        stub.first     = 1;
+        stub.first     = 2;
         stub.per_color = [](size_t i) { return (unsigned char) (2 + (i % 2)); };
         Slic3r::Model model = read_gltf_with_colors("BoxVertexColors.glb", stub);
 

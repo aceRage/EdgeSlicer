@@ -1050,6 +1050,20 @@ TEST_CASE("Image Fill: a textured GLB is at least as good through the new path",
         //   - and neither does the worst single leaf.
         CHECK(r.chosen_only);
         CHECK(r.mean_de_new <= r.mean_de_old);
+        // Phase 5e, set deliberately from the measured run (job 237): the palette fix moves no leaf
+        // of these two fixtures, because filament 1 (white, in the spool list above) is not in
+        // either texture, so the error is unchanged - plaque 31.698 / 139.558, medallion 1.903 /
+        // 4.736. What did change is how many leaves are painted: the ones on the part's own
+        // filament are now left unpainted (plaque 192 -> 124, medallion 1024 -> 882), and an
+        // unpainted leaf is scored as that filament. The bounds sit just above the measured values,
+        // so a regression in the importer shows up here instead of passing a loose "not worse".
+        if (std::string(file) == "agent_plaque.glb") {
+            CHECK(r.mean_de_new <= 31.71);
+            CHECK(r.max_de_new <= 139.57);
+        } else {
+            CHECK(r.mean_de_new <= 1.91);
+            CHECK(r.max_de_new <= 4.74);
+        }
         CHECK(r.max_de_new <= r.max_de_old);
         CHECK(r.filaments_new >= 2);
     }
@@ -2492,4 +2506,9 @@ TEST_CASE("Image Fill 5e: with filament 1 in the picture, the new palette prints
     CHECK(new_on_1 > 0);
     CHECK(new_on_1 >= old_on_1);
     CHECK(new_mean < old_mean);
+    // Measured (job 237): OLD 7.305 with no leaf on filament 1, NEW 1.135 with 142 leaves on it.
+    // Pinned just outside those values, both ways, so the comparison cannot quietly collapse.
+    CHECK(old_mean >= 7.29);
+    CHECK(new_mean <= 1.14);
+    CHECK(new_on_1 >= 140);
 }
