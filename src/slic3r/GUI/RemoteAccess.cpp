@@ -1,5 +1,9 @@
 #include "RemoteAccess.hpp"
 
+#include "ArchiveImport.hpp"
+#include "BambuReprint.hpp"
+#include <cstring>
+
 #include "DeviceManager.hpp"
 #include "GcodeArchive.hpp"
 #include "GLCanvas3D.hpp"
@@ -1494,6 +1498,71 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive_preview(const std::string& i
     return r;
 }
 
+// Remote printing (research 2b, A1): a sliced Bambu job another PC sent through the hub becomes a
+// record of this PC's G-code archive, so the Reprint path (/api/archive/{id}/preview and /send,
+// with the mapping sheet and the client's own ams_mapping) sends it unchanged. Form, from the hub
+// only (never proxied for a phone): path=<the file the hub spooled into its uploads folder>
+// &name=<the name the sender gave it>[&printer=<the printer it is meant for>][&client=<the hub
+// client that sent it>]. The file is checked as an untrusted download (ArchiveImport) and then
+// read with the desktop's own reader before anything is stored; the hub removes its spooled copy.
+RemoteAccess::ApiResponse RemoteAccess::api_archive_import(const std::string& form_body)
+{
+    ApiResponse r;
+    auto        get = [&](const char* k) { return query_param(form_body, k); };
+    boost::system::error_code ec;
+    const std::string path_in = get("path");
+    const fs::path    path    = fs::weakly_canonical(fs::path(path_in), ec);
+    const fs::path    uploads = fs::weakly_canonical(fs::path(RemoteHub::uploads_dir()), ec);
+    if (path_in.empty() || !fs::is_regular_file(path, ec)) { r.status = 404; r.body = json_error("no such file"); return r; }
+    if (path.parent_path().parent_path() != uploads) { r.status = 400; r.body = json_error("only files uploaded through the hub can be imported"); return r; }
+    if (!GcodeArchive::enabled()) {
+        r.status = 409;
+        r.body   = json_error("this PC does not store G-code files; turn on Preferences > Ultra > Store G-Code Files on it to print files sent from another PC");
+        return r;
+    }
+    const std::string name = ArchiveImport::clean_name(get("name"));
+    if (name.empty()) { r.status = 400; r.body = json_error("only a sliced Bambu job (.gcode.3mf) can be printed this way"); return r; }
+    const ArchiveImport::Package pkg = ArchiveImport::check_package(path.string());
+    if (!pkg.error.empty()) { r.status = 400; r.body = json_error(pkg.error); return r; }
+    const BambuReprint::Job job = BambuReprint::load_job(path.string());
+    if (!job.error.empty()) { r.status = 400; r.body = json_error(job.error); return r; }
+    const std::string model = job.printer_model.empty() ? job.printer_model_id : job.printer_model;
+    const std::string printer = get("printer");
+    if (model.empty() && printer.empty()) {
+        r.status = 400;
+        r.body   = json_error("the file does not say which printer model it was sliced for; name the printer it is for");
+        return r;
+    }
+
+    GcodeArchive::Meta meta;
+    meta.printer_kind  = "bambu";
+    meta.printer_id    = printer;
+    meta.printer_name  = printer.empty() ? std::string() : GcodeArchive::bambu_printer_name(printer);
+    meta.printer_model = model;
+    meta.source        = "remote";
+    meta.source_client = get("client").substr(0, 60);
+    meta.mode          = "print";
+    meta.file_name     = name;
+    meta.plate         = job.plate - 1;
+    meta.project_title = name.substr(0, name.size() - std::strlen(".gcode.3mf"));
+    meta.estimated_time_s   = job.prediction_s;
+    meta.estimated_weight_g = job.weight_g;
+    meta.thumbnail_png      = pkg.thumbnail_png;
+    for (const BambuReprint::Filament& f : job.filaments) {
+        GcodeArchive::Filament af;
+        af.index  = f.id;
+        af.type   = f.type;
+        af.colour = f.color.size() > 7 ? f.color.substr(0, 7) : f.color; // #RRGGBB, as a desktop send records it
+        af.grams  = f.used_g;
+        meta.filaments.push_back(af);
+    }
+    const GcodeArchive::Record rec = GcodeArchive::archive(path.string(), meta);
+    if (rec.id.empty()) { r.status = 500; r.body = json_error("the file could not be stored in this PC's G-code archive (is its folder writable?)"); return r; }
+    BOOST_LOG_TRIVIAL(info) << "RemoteAccess: archived a job sent from another PC as " << rec.id
+                            << (meta.source_client.empty() ? std::string() : " (client " + meta.source_client + ")");
+    return api_archive_one(rec.id);
+}
+
 // Send the sliced plate to a printer the way the desktop's Print / Send dialogs would, without
 // showing them (RemoteSend). Form: printer=<id>&mode=upload|print[&confirm=1][&force=1][&dry_run=1]
 // [&bed_leveling=&flow_cali=&timelapse=&vibration_cali=&use_ams=][&name=][&mapping=0:1,1:2]
@@ -2561,6 +2630,7 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/archive/{id}/thumbnail.png"}, {"description", "the plate preview stored with that record"} },
             { {"method", "POST"}, {"path", "/api/archive/{id}/send"},     {"description", "form [printer={id}][&mode=upload|print]&confirm=1[&force=1][&dry_run=1][&name=][&mapping=0:1,1:2][&ams_mapping=0:0-2,1:128-0][&use_ams=&bed_leveling=&flow_cali=&timelapse=&nozzle_offset_cali=]: send that archived file to a printer again - the stored bytes are the payload, so nothing is re-sliced and no project has to be open. `printer` and every option not given fall back to the record; confirm=1 is always required. Returns the same job id and progress shape as /api/plates/{index}/send (kind send, followed through /api/jobs/{id}). 404 for an unknown record, 409 when its file is gone or the target printer is of another kind (a .gcode.3mf cannot go to a Moonraker host); reprinting over the PC's Snapmaker connection (\"connect\") is not supported. `printer` may name another printer of the same kind and model as the record's (a sliced file fits any printer of its model); a record with no known model may only go back to its own printer, and a file is started in place only on the very printer it was sent to. A Bambu printer gets the job read back from the .gcode.3mf and sent the way the desktop's send dialog sends a plate: `ams_mapping` is the AMS slot per filament (<filament>:<ams_id>-<slot_id>, what /preview proposes; empty = the automatic mapping), the options default to the dialog's remembered choices, and the send is refused with the reason when the printer is offline, busy, of another model or nozzle diameter, has no usable storage, or a filament has no slot of its type on the side it was sliced for. Every reprint is added to the record's `reprints` history"} },
             { {"method", "POST"}, {"path", "/api/archive/{id}/preview"},  {"description", "form [printer={id}][&mode=print|upload][&ams_mapping=][&use_ams=&bed_leveling=&flow_cali=&timelapse=&nozzle_offset_cali=][&force=1]: a Bambu reprint's mapping sheet, nothing sent. Selects the printer on the PC (connecting it) and answers within ~25 s with {record, mode, file, printer {id, name, model, model_name, dual, has_ams, lan_mode, nozzle_rack}, job {plate, model, model_name, dual, nozzle_diameters, bed_type, estimated_time_s, estimated_weight_g}, filaments [{index, type, colour, grams, side L|R|\"\", tray \"<ams>-<slot>\"|null, auto, problems []}], trays [{id \"<ams>-<slot>\", ams_id, slot_id, name A1|HT-A, side, exists, ready, type, match_type, colour}], mapping (the ams_mapping to send back), problems [{filament, code unmapped|type|side, text}], options {bed_leveling|flow_cali|timelapse|use_ams|nozzle_offset_cali: {value, shown}}, warnings [], nozzle_mapping {applies, state accepted|refused|no_answer, reason?} (H2C, advisory), can_send}. 409 with the reason when the printer cannot take the job at all (offline, busy, another model or nozzle, no storage, no LAN access)"} },
+            { {"method", "POST"}, {"path", "/api/archive/import"},       {"description", "the hub only (never proxied): form path={a .gcode.3mf the hub spooled from another PC}&name=[&printer={id}][&client=] - checks it as an untrusted download, reads it as a sliced Bambu job and stores it as an archive record (source remote), which /api/archive/{id}/preview and /send then print. Answers the record; 400 with the reason when the file is refused, 409 when this PC does not store G-code files"} },
             { {"method", "POST"}, {"path", "/api/archive/{id}/delete"},   {"description", "delete one stored file with its details and preview"} },
             { {"method", "DELETE"}, {"path", "/api/archive/{id}"},        {"description", "delete one stored file with its details and preview (the same as POST /api/archive/{id}/delete)"} }
         });
@@ -2691,6 +2761,9 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     // decoding; GcodeArchive checks it against that alphabet again before touching the folder.
     if (path == "/archive" && method == "GET")
         return api_archive(query_param(query, "printer"));
+    // From the hub only: the hub never proxies this route for a phone (instance_api_allowed).
+    if (path == "/archive/import" && method == "POST")
+        return api_archive_import(body.empty() ? query : body);
     if (path.compare(0, 9, "/archive/") == 0) {
         const std::string rest  = path.substr(9);
         const size_t      slash = rest.find('/');

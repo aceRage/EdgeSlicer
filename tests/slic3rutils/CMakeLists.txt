@@ -35,6 +35,8 @@ add_executable(${_TEST_NAME}_tests
     remote_events_tests.cpp
     remote_hub_tests.cpp
     hub_event_dedupe_tests.cpp
+    hub_clients_tests.cpp
+    archive_import_tests.cpp
     reprint_hosts_tests.cpp
     reprint_printer_names_tests.cpp
     bambu_reprint_tests.cpp
