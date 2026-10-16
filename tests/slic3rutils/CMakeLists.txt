@@ -73,6 +73,7 @@ add_executable(${_TEST_NAME}_tests
     app_update_check_tests.cpp
     bambu_studio_launcher_tests.cpp
     bambu_connect_tests.cpp
+    bambu_connect_status_tests.cpp
     blender_launcher_tests.cpp
     freecad_launcher_tests.cpp
     instance_routing_tests.cpp

@@ -918,6 +918,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/bambu_networking.hpp
     Utils/BambuConnect.cpp
     Utils/BambuConnect.hpp
+    Utils/BambuConnectStatus.cpp
+    Utils/BambuConnectStatus.hpp
     Utils/BambuStudioLauncher.cpp
     Utils/BambuStudioLauncher.hpp
     Utils/BlenderLauncher.cpp

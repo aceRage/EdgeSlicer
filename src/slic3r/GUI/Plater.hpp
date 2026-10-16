@@ -183,6 +183,10 @@ public:
     void load_ams_list(std::string const & device, MachineObject* obj);
     std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list();
+    // No printer connected: offer the last AMS / nozzle snapshot seen for the selected printer (or
+    // the newest one of this printer model) and load it as the AMS list. 1 = loaded (`as_of` is
+    // the "<printer> as of <time>" text), 0 = the user declined, -1 = there is none.
+    int load_ams_snapshot(const std::string &preferred_dev_id, wxString &as_of);
     void show_sync_filament_dialog();
     // Point the "Filaments" row's sync button at the sync that fits the current
     // printer preset (Bambu AMS / Snapmaker dialog), or hide it for other vendors.

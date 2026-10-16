@@ -3,6 +3,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/GUI/BambuSendDiagnosis.hpp"
+#include "slic3r/Utils/BambuConnectStatus.hpp"
 #include "slic3r/GUI/GcodeArchive.hpp"
 #include "slic3r/GUI/PlatePrintHistoryRecorder.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -148,6 +149,12 @@ void PrintJob::process(Ctl &ctl)
     }
 
     ctl.update_status(0, msg);
+    // A status-only printer prints through Bambu Connect; EdgeSlicer only reads its status.
+    if (config != nullptr && BambuConnectStatus::is_status_only(*config, m_dev_id)) {
+        ctl.update_status(0, _u8L("This printer is added for status only and prints through Bambu Connect. "
+                                  "Use Send to Bambu Connect to print on it."));
+        return;
+    }
     ctl.call_on_main_thread([this] { prepare(); }).wait();
 
     int result = -1;
