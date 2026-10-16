@@ -319,6 +319,8 @@ public:
     bool is_presets_dirty() const;
     void set_plater_dirty(bool is_dirty);
     void update_project_dirty_from_presets();
+    // Orca #15916: reset per-plate bed type overrides the selected printer cannot use.
+    void normalize_bed_types(bool multi_bed_changed);
     int  save_project_if_dirty(const wxString& reason);
     void reset_project_dirty_after_save();
     void reset_project_dirty_initial_presets();
@@ -561,6 +563,12 @@ public:
     void schedule_background_process(bool schedule = true);
     bool is_background_process_update_scheduled() const;
     void suppress_background_process(const bool stop_background_process) ;
+    // Called by MainFrame::shutdown (app close, and the old frame of a language / theme rebuild):
+    // from then on the background-process updates and the slice-button sync below are no-ops, so
+    // a timer that still fires while the window tree is torn down cannot touch a dead MainFrame
+    // (EDGESLICER-A).
+    void begin_shutdown();
+    bool is_shutting_down() const;
     /* -1: send current gcode if not specified
      * -2: send all gcode to target machine */
     int send_gcode(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);

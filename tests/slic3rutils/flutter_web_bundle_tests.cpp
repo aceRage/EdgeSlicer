@@ -120,3 +120,39 @@ TEST_CASE("the reported web panel version is the bundled one", "[FlutterWeb]")
     CHECK(common::get_flutter_version((bundle_dir() / "no_such_version.json").string()).empty());
 }
 #endif
+
+// U1 local-first (GUI/U1LanRoute) changes nothing in the page: it serves a cloud session's device
+// topics over the printer's LAN broker underneath the page. It relies on the page using the MQTT
+// bridge commands, on the four device topics being <sn>/request|response|status|notification in
+// both link modes (the LAN endpoint names them, the cloud endpoint falls back to the same names),
+// on the cloud endpoint handing set_engine the pairing access code, and on the printer's two
+// client_manager pairing methods. If a page update moves any of these, this fails and the route
+// must be re-checked against the new page (until then it never engages: the page stays on the
+// cloud).
+TEST_CASE("the web panel still speaks what the U1 local-first route relies on", "[FlutterWeb]")
+{
+    const fs::path    dir   = bundle_dir();
+    const std::string boot  = hashed_name(slurp(dir / "index.html"), "flutter_bootstrap");
+    REQUIRE_FALSE(boot.empty());
+    const std::string main_js = hashed_name(slurp(dir / boot), "main");
+    REQUIRE_FALSE(main_js.empty());
+    const std::string js = slurp(dir / main_js);
+    REQUIRE_FALSE(js.empty());
+
+    for (const char* needle : { "\"sw_create_mqtt_client\"", "\"sw_mqtt_subscribe\"", "\"sw_mqtt_publish\"", "\"sw_mqtt_set_engine\"",
+                                "\"request\",\"/request\"", "\"response\",\"/response\"", "\"status\",\"/status\"",
+                                "\"notification\",\"/notification\"", "\"link_mode\",\"wan\"",
+                                "\"server.client_manager.confirm_lan_status\"", "\"server.client_manager.request_lan_auth\"",
+                                "\"/config/request\"" }) {
+        INFO(needle);
+        CHECK(js.find(needle) != std::string::npos);
+    }
+    // The cloud endpoint's topic defaults (getOrcaWanEndpoint): if(x==null)x="/request" and so on.
+    for (const char* topic : { "request", "response", "status", "notification" }) {
+        INFO(topic);
+        // Built outside CHECK: MSVC cannot stringize a raw string literal inside a macro.
+        const std::regex fallback(std::string("==null\\)[A-Za-z0-9_$]+=\"/") + topic + "\"");
+        const bool       found = std::regex_search(js, fallback);
+        CHECK(found);
+    }
+}

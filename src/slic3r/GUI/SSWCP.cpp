@@ -8,6 +8,7 @@
 #include "DownloadManager.hpp"
 #include "RemoteSnapmaker.hpp" // Ultra: the phone's own connect reuses this connect's credentials
 #include "SnapmakerLan.hpp"    // Ultra: an archived U1 send is recorded under its LAN card
+#include "U1LanRoute.hpp"      // Ultra: U1 local-first
 #include "GcodeArchive.hpp"    // Ultra: the desktop's Snapmaker send is archived when it finishes
 #include "PlatePrintHistoryRecorder.hpp" // the plate's print history
 #include "PartPlate.hpp"
@@ -1553,6 +1554,7 @@ void SSWCP_Instance::update_filament_info(const json& objects, bool send_message
                     std::string sub_type = j_value["filament_sub_type"][i].get<std::string>();
 
                     machineData.filament_type = type;
+                    machineData.filament_vendor = vendor;
 
                     std::string name = "";
 
@@ -6485,6 +6487,11 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         
         client->SetMessageCallback(SSWCP_MqttAgent_Instance::mqtt_msg_cb);
 
+        // Ultra: a U1 bound to the Snapmaker account is served over the LAN (its Moonraker
+        // WebSocket) whenever it answers there, the cloud as the fallback (U1WsRoute.hpp);
+        // app_config snapmaker_local_first = "0" keeps it on the cloud.
+        attach_u1_lan_route_if_cloud(client, server_address);
+
         m_res_data["type"] = type;
         m_res_data["id"]   = std::to_string(int64_t(get_current_engine().get()));
 
@@ -6846,6 +6853,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                         host->m_sn_mtx.lock();
                         host->m_sn = m_param_data["sn"].get<std::string>();
                         host->m_sn_mtx.unlock();
+
+                        {
+                            const std::string code = m_param_data.count("code") && m_param_data["code"].is_string() ?
+                                                         m_param_data["code"].get<std::string>() : std::string();
+                            u1_route_set_device(engine, m_param_data["sn"].get<std::string>(), code);
+                        }
                     } else {
                         handle_general_fail(-1, "param [sn] is required or wrong type");
                         return;

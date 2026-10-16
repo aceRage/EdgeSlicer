@@ -458,6 +458,10 @@ set(lisbslic3r_sources
     NormalUtils.hpp
     NozzleSync.cpp
     NozzleSync.hpp
+    FilamentSyncMatch.cpp
+    FilamentSyncMatch.hpp
+    PlateBedTypes.cpp
+    PlateBedTypes.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
     SvgSplit.cpp

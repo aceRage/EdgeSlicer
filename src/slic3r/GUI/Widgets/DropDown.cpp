@@ -12,6 +12,7 @@
 #endif
 
 wxDEFINE_EVENT(EVT_DISMISS, wxCommandEvent);
+wxDEFINE_EVENT(EVT_DROPDOWN_ITEM_ACTION, wxCommandEvent);
 
 BEGIN_EVENT_TABLE(DropDown, PopupWindow)
 
@@ -204,6 +205,26 @@ static wxSize GetBmpSize(wxBitmap & bmp)
 #endif
 }
 
+const wxBitmap *DropDown::actionIcon(int n) const
+{
+    if (!action_icons || n < 0 || n >= int(action_icons->size()) || !(*action_icons)[n].IsOk())
+        return nullptr;
+    return &(*action_icons)[n];
+}
+
+// The x-range [first, second) of the column at the right of the rows that holds the items' action
+// icons, empty when no item has one. render() draws the icons in it and mouseReleased() hit-tests
+// clicks against it, so the drawn icon and its clickable area always match. (OrcaSlicer #13946)
+std::pair<int, int> DropDown::actionColumn() const
+{
+    if (actionIconWidth <= 0)
+        return {0, 0};
+    int right = rowSize.x;
+    if (rowSize.y * int(texts.size()) > GetSize().y) // position bar
+        right -= 6;
+    return {right - actionIconWidth - FromDIP(16), right};
+}
+
 /*
  * Here we do the actual rendering. I put it in a separate
  * method so that it can work no matter what type of DC
@@ -227,7 +248,7 @@ void DropDown::render(wxDC &dc)
 
     // draw hover rectangle
     wxRect rcContent = {{0, offset.y}, rowSize};
-    if (hover_item >= 0 && (states & StateColor::Hovered)) {
+    if (hover_item >= 0 && (states & StateColor::Hovered) && !IsItemDisabled(hover_item)) {
         rcContent.y += rowSize.y * hover_item;
         if (rcContent.GetBottom() > 0 && rcContent.y < size.y) {
             if (selection == hover_item)
@@ -283,8 +304,14 @@ void DropDown::render(wxDC &dc)
         rcContent.x += szBmp.x + 5;
         rcContent.width -= szBmp.x + 5;
     }
+    const auto action_column = actionColumn();
+    if (action_column.second > action_column.first)
+        rcContent.width = action_column.first - rcContent.x;
     // draw texts & icons
-    dc.SetTextForeground(text_color.colorForStates(states));
+    const wxColour normal_text   = text_color.colorForStates(states);
+    // Header rows (favourites / all filaments) in a mid grey that reads on both themes.
+    const wxColour disabled_text(144, 144, 144);
+    dc.SetTextForeground(normal_text);
     for (int i = 0; i < texts.size(); ++i) {
         if (rcContent.GetBottom() < 0) {
             rcContent.y += rowSize.y;
@@ -307,18 +334,34 @@ void DropDown::render(wxDC &dc)
             pt.x += size2.x + 5;
             pt.y = rcContent.y;
         }
+        if (const wxBitmap *action = actionIcon(i)) {
+            wxBitmap action_bmp = *action;
+            auto     action_size = GetBmpSize(action_bmp);
+            wxPoint  action_pt(action_column.second - action_size.x - FromDIP(8),
+                               rcContent.y + (rcContent.height - action_size.y) / 2);
+            dc.DrawBitmap(action_bmp, action_pt);
+        }
         auto text = texts[i];
         if (!text_off && !text.IsEmpty()) {
             wxSize tSize = dc.GetMultiLineTextExtent(text);
             if (pt.x + tSize.x > rcContent.GetRight()) {
-                if (i == hover_item && tips[i].IsEmpty())
-                    SetToolTip(text);
-                text = wxControl::Ellipsize(text, dc, wxELLIPSIZE_END,
-                                            rcContent.GetRight() - pt.x);
+                int max_text_width = rcContent.GetRight() - pt.x;
+                if (max_text_width <= 0) {
+                    text.clear();
+                } else {
+                    if (i == hover_item && tips[i].IsEmpty())
+                        SetToolTip(text);
+                    text = wxControl::Ellipsize(text, dc, wxELLIPSIZE_END, max_text_width);
+                }
             }
             pt.y += (rcContent.height - textSize.y) / 2;
             dc.SetFont(GetFont());
+            const bool row_disabled = IsItemDisabled(i);
+            if (row_disabled)
+                dc.SetTextForeground(disabled_text);
             dc.DrawText(text, pt);
+            if (row_disabled)
+                dc.SetTextForeground(normal_text);
         }
         rcContent.y += rowSize.y;
     }
@@ -329,6 +372,7 @@ void DropDown::messureSize()
     if (!need_sync) return;
     textSize = wxSize();
     iconSize = wxSize();
+    actionIconWidth = 0;
     wxClientDC dc(GetParent() ? GetParent() : this);
     for (size_t i = 0; i < texts.size(); ++i) {
         wxSize size1 = text_off ? wxSize() : dc.GetMultiLineTextExtent(texts[i]);
@@ -339,8 +383,15 @@ void DropDown::messureSize()
                 size1.x += size2.x + (text_off ? 0 : 5);
             }
         }
+        if (const wxBitmap *action = actionIcon(int(i))) {
+            wxBitmap action_bmp = *action;
+            actionIconWidth = std::max(actionIconWidth, GetBmpSize(action_bmp).x);
+        }
         if (size1.x > textSize.x) textSize = size1;
     }
+    // Every row leaves room for the action column, as render() and actionColumn() lay it out.
+    if (actionIconWidth > 0)
+        textSize.x += actionIconWidth + FromDIP(16);
     if (!align_icon) iconSize.x = 0;
     wxSize szContent = textSize;
     szContent.x += 10;
@@ -486,6 +537,18 @@ void DropDown::mouseReleased(wxMouseEvent& event)
         if (HasCapture())
             ReleaseMouse();
         if (hover_item >= 0) { // not moved
+            // A click on the item's action icon runs the action and keeps the list open.
+            if (actionIcon(hover_item)) {
+                const auto action_column = actionColumn();
+                if (event.GetX() >= action_column.first && event.GetX() < action_column.second) {
+                    sendDropDownActionEvent(hover_item);
+                    paintNow();
+                    return;
+                }
+            }
+            // A header row cannot be picked; the list stays open, as a native list does.
+            if (IsItemDisabled(hover_item))
+                return;
             sendDropDownEvent();
             DismissAndNotify();
         }
@@ -556,6 +619,17 @@ void DropDown::sendDropDownEvent()
     event.SetEventObject(this);
     event.SetInt(hover_item);
     event.SetString(texts[hover_item]);
+    GetEventHandler()->ProcessEvent(event);
+}
+
+void DropDown::sendDropDownActionEvent(int index)
+{
+    if (index < 0 || index >= int(texts.size()) || IsItemDisabled(index))
+        return;
+    wxCommandEvent event(EVT_DROPDOWN_ITEM_ACTION, GetId());
+    event.SetEventObject(this);
+    event.SetInt(index);
+    event.SetString(texts[index]);
     GetEventHandler()->ProcessEvent(event);
 }
 
