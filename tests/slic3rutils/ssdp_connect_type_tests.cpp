@@ -47,7 +47,7 @@ TEST_CASE("A saved LAN printer is never downgraded by an announcement", "[SsdpCo
         CHECK(r.connect_type == "lan");
         CHECK(r.kept_lan);
         CHECK(r.why == Why::SavedLan);
-        CHECK(r.bind_state == "occupied");
+        CHECK(r.bind_state == "free"); // a kept LAN printer is always available (is_avaliable)
     }
     // Saved, but its object was created without a code yet (or the cloud list's copy).
     const Result r = after_announcement("", "cloud", "", true, false, none, 1000 * S);
@@ -143,7 +143,7 @@ TEST_CASE("A printer the user never set up as LAN, and never heard as lan, follo
     Printer free_cloud;
     CHECK(free_cloud.announce("cloud", "free", 1000 * S) == "cloud");
 
-    // A cloud printer that has a code from the account stays whatever it announces.
+    // A cloud printer that has a code from the account stays whatever it announces (signed in).
     const Result r = after_announcement("cloud", "cloud", "occupied", false, true, LanMemory{}, 1000 * S);
     CHECK(r.connect_type == "cloud");
     CHECK_FALSE(r.kept_lan);
@@ -185,4 +185,118 @@ TEST_CASE("The printer picker never offers a bind for a printer heard as lan lat
     h2c.announce("cloud", "free", 1030 * S + CLOUD_SUSTAIN_MS);
     REQUIRE(h2c.current == "cloud");
     CHECK(picker_offer(false, h2c.mem.lan_recently(1030 * S + CLOUD_SUSTAIN_MS)) == PickerOffer::AccessCode);
+}
+
+// --- Owner, 2026-10-15: X1C switched from LAN-only to cloud, gone from the list until sign-out/in ---
+
+TEST_CASE("A saved LAN printer in the signed-in account's list follows a cloud announcement", "[SsdpConnectType]")
+{
+    // The log: six seconds after sign-in the cloud list's copy went "lan" ("kept LAN: saved LAN
+    // printer") and the LAN copy kept "lan" with bind=occupied; neither was listed.
+    Account bound;
+    bound.signed_in = true;
+    bound.bound     = true;
+    for (bool saved : {false, true})
+        for (bool code : {false, true})
+            for (const char* current : {"", "cloud", "lan"}) {
+                INFO("saved " << saved << " code " << code << " current '" << current << "'");
+                const Result r = after_announcement(current, "cloud", "occupied", saved, code, LanMemory{}, 1000 * S, bound);
+                CHECK(r.connect_type == "cloud");
+                CHECK(r.bind_state == "occupied");
+                CHECK_FALSE(r.kept_lan);
+                CHECK(r.why == Why::AccountBound);
+            }
+}
+
+TEST_CASE("Rule 0 needs the account: signed out or not in its list, the LAN rules still apply", "[SsdpConnectType]")
+{
+    Account other; // signed in, but the printer is not in this account's list (someone else's)
+    other.bound = false;
+    const Result o = after_announcement("lan", "cloud", "occupied", true, true, LanMemory{}, 1000 * S, other);
+    CHECK(o.connect_type == "lan");
+    CHECK(o.bind_state == "free");
+    CHECK(o.why == Why::SavedLan);
+
+    // bind=free is never taken as "bound": a stray "cloud/free" from a bound printer's list copy
+    // still rides on the saved-LAN rule.
+    Account bound;
+    bound.bound = true;
+    const Result stray = after_announcement("lan", "cloud", "free", true, true, LanMemory{}, 1000 * S, bound);
+    CHECK(stray.connect_type == "lan");
+    CHECK(stray.why == Why::SavedLan);
+
+    // Rule 0 is for "cloud" only: a lan announcement is a lan announcement.
+    const Result lan = after_announcement("cloud", "lan", "free", false, false, LanMemory{}, 1000 * S, bound);
+    CHECK(lan.connect_type == "lan");
+    CHECK(lan.why == Why::Announced);
+}
+
+TEST_CASE("Signed out, a cloud-mode printer with a known access code is a LAN printer", "[SsdpConnectType]")
+{
+    Account out;
+    out.signed_in = false;
+    // The printer was cloud while the account was signed in; the code is still known.
+    const Result r = after_announcement("cloud", "cloud", "occupied", false, true, LanMemory{}, 1000 * S, out);
+    CHECK(r.connect_type == "lan");
+    CHECK(r.bind_state == "free"); // listed by get_my_machine_list
+    CHECK(r.kept_lan);
+    CHECK(r.why == Why::AccessCode);
+
+    // Without a code it is shown as announced, and the picker lists it for the code (below).
+    const Result none = after_announcement("cloud", "cloud", "occupied", false, false, LanMemory{}, 1000 * S, out);
+    CHECK(none.connect_type == "cloud");
+    CHECK_FALSE(none.kept_lan);
+}
+
+TEST_CASE("LAN-only <-> cloud round trip: the printer is listable in every state", "[SsdpConnectType]")
+{
+    // What the device list needs from a printer: not lan -> in the account's list (user copy);
+    // lan -> bind=free and a code (local copy). Walk the owner's sequence signed in and bound.
+    Account bound;
+    bound.bound = true;
+    LanMemory mem;
+    std::string user_type, local_type, local_bind;
+    long long t = 1000 * S;
+    auto feed = [&](const char* connect, const char* bind, bool saved, bool code) {
+        mem.observe(connect, t);
+        const Result u = after_announcement(user_type, connect, bind, saved, false, mem, t, bound);
+        const Result l = after_announcement(local_type, connect, bind, saved, code, mem, t, bound);
+        user_type  = u.connect_type;
+        local_type = l.connect_type;
+        local_bind = l.bind_state;
+        t += 6 * S;
+    };
+    feed("lan", "free", true, true); // LAN-only, set up with its code
+    CHECK(local_type == "lan");
+    CHECK(local_bind == "free"); // listed as a LAN printer
+    feed("cloud", "occupied", true, true); // switched to cloud for Bambu Connect
+    CHECK(user_type == "cloud"); // in the account's list (not lan)
+    CHECK(local_type == "cloud");
+    feed("cloud", "occupied", true, true); // every later announcement too: no flipping back
+    CHECK(user_type == "cloud");
+    feed("lan", "free", true, true); // and back to LAN-only
+    CHECK(local_type == "lan");
+    CHECK(local_bind == "free");
+    CHECK(user_type == "lan"); // not in the cloud half of the list; the local copy is listed
+}
+
+TEST_CASE("The picker never offers a bind when nobody is signed in", "[SsdpConnectType]")
+{
+    CHECK(picker_offer(false, false, /*signed_in*/ false) == PickerOffer::AccessCode);
+    CHECK(picker_offer(false, false, true) == PickerOffer::Bind);
+    CHECK(picker_offer(true, false, false) == PickerOffer::AccessCode);
+}
+
+TEST_CASE("The picker's Other Device list: what shows, signed in and out", "[SsdpConnectType]")
+{
+    // LAN printers: shown when available (bind free), as before.
+    CHECK(other_devices_entry(true, true, true) == OtherEntry::Lan);
+    CHECK(other_devices_entry(false, true, true) == OtherEntry::Lan);
+    CHECK(other_devices_entry(true, true, false) == OtherEntry::Hide);
+    // Signed in: a free cloud printer can be bound; a bound one belongs in My devices or to someone.
+    CHECK(other_devices_entry(true, false, true) == OtherEntry::Bind);
+    CHECK(other_devices_entry(true, false, false) == OtherEntry::Hide);
+    // Signed out: not hidden - Bambu Studio hides these; here the access code is the way in.
+    CHECK(other_devices_entry(false, false, true) == OtherEntry::Lan);
+    CHECK(other_devices_entry(false, false, false) == OtherEntry::Lan);
 }

@@ -46,6 +46,7 @@ add_executable(${_TEST_NAME}_tests
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
     first_request_gate_tests.cpp
+    bind_list_refresh_tests.cpp
     ssdp_connect_type_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
