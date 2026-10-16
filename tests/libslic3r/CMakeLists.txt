@@ -42,6 +42,7 @@ add_executable(${_TEST_NAME}_tests
 	test_image_fill.cpp
 	test_image_row_transform.cpp
 	test_image_row_dialog.cpp
+	test_obj_texture_p5d.cpp
 	test_clipper_offset.cpp
 	test_clipper_utils.cpp
 	test_config.cpp
