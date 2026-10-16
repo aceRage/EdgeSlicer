@@ -10,15 +10,18 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/cstdio.hpp>
+#include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/ImageFill.hpp"
 #include "libslic3r/MixedFilament.hpp"
@@ -187,4 +190,55 @@ TEST_CASE("Image Row 5b: layer stripes - one filament per wall layer, width foll
         INFO("layer " << i << ": tool " << layer_tool[i - 1] << " then " << layer_tool[i]);
         CHECK(layer_tool[i] == (layer_tool[i - 1] + 1) % 3);
     }
+}
+
+// Not run by default: slicing time on a Benchy with a box-projected picture on its top and walls,
+// against the same Benchy without it (spec criterion M). Run with "[.measure_p5]".
+TEST_CASE("Image Row 5b: measure - Benchy slicing time with and without a picture", "[.measure_p5]")
+{
+    const std::string benchy = std::string(TEST_DATA_DIR) + "/../../resources/handy_models/3DBenchy.3mf";
+    auto run = [&](int mode) -> double {
+        DynamicPrintConfig        cfg;
+        ConfigSubstitutionContext ctx{ForwardCompatibilitySubstitutionRule::EnableSilent};
+        Model model = Model::read_from_file(benchy, &cfg, &ctx, LoadStrategy::LoadModel | LoadStrategy::AddDefaultInstances);
+        REQUIRE(model.objects.size() == 1);
+        ModelVolume         *volume = model.objects[0]->volumes[0];
+        MixedFilamentManager mgr;
+        if (mode > 0) {
+            ImageFillParams p;
+            boost::nowide::ifstream in(std::string(TEST_DATA_DIR) + "/image_fill/quad_rgbw.png", std::ios::binary);
+            p.asset       = model.image_assets.add(std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+            p.projection  = ImageFillProjection::Box;
+            p.allowed     = {1, 2, 3};
+            p.surfaces    = IMAGE_FILL_SURFACE_TOP | IMAGE_FILL_SURFACE_WALLS;
+            p.wall_method = mode == 2 ? IMAGE_FILL_WALL_STRIPES : IMAGE_FILL_WALL_RUNS;
+            mgr.add_custom_filament(1, 2, 50, kColours);
+            MixedFilament &row         = mgr.mixed_filaments().back();
+            row.enabled                = true;
+            row.distribution_mode      = int(MixedFilament::ImageWeighted);
+            row.gradient_component_ids = MixedFilamentManager::encode_gradient_component_ids({1, 2, 3});
+            row.image_fill_ref         = MixedFilamentManager::encode_image_fill_ref(p.to_string());
+            const unsigned int vid     = mgr.filament_id_from_mixed_index(mgr.mixed_filaments().size() - 1, kColours.size());
+            volume->config.set_key_value("wall_filament", new ConfigOptionInt(int(vid)));
+            volume->config.set_key_value("solid_infill_filament", new ConfigOptionInt(int(vid)));
+        }
+        DynamicPrintConfig config = stripe_config();
+        config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+        const auto t0 = std::chrono::steady_clock::now();
+        Print print;
+        print.set_status_silent();
+        print.apply(model, config);
+        print.process();
+        GCodeProcessorResult          result;
+        const boost::filesystem::path out = Slic3r::Test::scratch_path(".gcode");
+        print.export_gcode(out.string(), &result, nullptr);
+        boost::nowide::remove(out.string().c_str());
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+    const double plain   = run(0);
+    const double runs    = run(1);
+    const double stripes = run(2);
+    WARN("Benchy slice + export: plain " << plain << " s, picture with colour runs " << runs << " s ("
+         << runs / plain << "x), picture with layer stripes " << stripes << " s (" << stripes / plain << "x)");
+    CHECK(runs < plain * 3.);
 }
