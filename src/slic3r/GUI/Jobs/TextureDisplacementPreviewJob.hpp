@@ -29,6 +29,9 @@ struct TextureDisplacementPreviewInput
     // Empty unless a layer is colouring, in which case the preview reports the filament per triangle
     // alongside the mesh, so the Normal view shows what the bake will produce - interleaving included.
     TextureColorSettings                  color;
+    // The volume's own UV channel (ModelVolume::texture_uv), so a ModelUV layer previews through the
+    // same layout it will bake through. Empty when the volume has none.
+    std::vector<Vec2f>                    model_uv;
 };
 
 // A preview result: the displaced mesh, and - when the input carried a palette - one filament index

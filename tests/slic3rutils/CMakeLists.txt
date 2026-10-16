@@ -111,6 +111,7 @@ add_executable(${_TEST_NAME}_tests
     gl_core_profile_tests.cpp
     libvgcode_input_tests.cpp
     layer_height_check_tests.cpp
+    test_texture_island_view.cpp
     bind_detect_guard_tests.cpp
     ams_filament_order_tests.cpp
     teardown_join_tests.cpp
