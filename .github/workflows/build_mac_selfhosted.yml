@@ -1,0 +1,487 @@
+# macOS universal build on the owner's self-hosted runner (the Mac mini, M5 Pro).
+#
+# Why this exists: the hosted macos-14 job in build_all.yml builds the universal app with a single
+# job (-1) on a slow runner and takes 4-5 hours. The Mac mini keeps a pre-built arm64 + x86_64
+# dependency tree between runs and builds in parallel, so a release build is a fraction of that.
+# Artifact names match build_orca.yml's macOS job, so the release flow can consume either one.
+#
+# Releases only: it runs on workflow_dispatch, never on fix branches (a local rebuild on the Mac
+# takes minutes). No push trigger: release/* carries the bump PRs (release/bump-<v>), which must not
+# start a build, and ci/** belongs to build_all.yml until the release publisher takes the dmg from
+# this workflow's run instead - dispatch it with `--ref ci/<v>` for a release.
+#
+# Minimum macOS: 11.0, not the hosted job's 10.15. The runner has Xcode 27, whose libc++ refuses
+# any deployment target below 11.0 ("The selected platform is no longer supported by libc++"), so
+# a DMG from this workflow drops Catalina. Owner decision 2026-10-15.
+#
+# Runner setup (one-time, by the owner): a dedicated macOS user `ci` runs the runner as a
+# LaunchDaemon, labels self-hosted, macOS, ARM64, edgeslicer-mac. Xcode (license accepted,
+# xcode-select set), Rosetta, and Homebrew's ninja, pkg-config, automake, autoconf, libtool,
+# texinfo and gettext are installed machine-wide. Homebrew's zstd must NOT be installed: the deps
+# would link against it (the hosted job uninstalls it for its deps build; the `ci` user cannot).
+# CMake 3.x comes from lukka/get-cmake below, as in build_orca.yml.
+#
+# Signing and notarization are gated on the same secrets as build_orca.yml (docs/RELEASING_MACOS.md);
+# without them the job builds the unsigned dmg. The build keychain is created per run and deleted
+# in an always() step, and the user's keychain search list is put back as it was.
+
+name: Build macOS (self-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_label:
+        description: 'Version label for artifact names (blank = read Snapmaker_VERSION from the source)'
+        required: false
+        type: string
+        default: ''
+      refresh_deps:
+        description: 'Force a dependency rebuild even if the stamp matches'
+        required: false
+        type: boolean
+        default: false
+
+# One build at a time: a single work directory and a single shared deps tree. Queue, don't cancel.
+concurrency:
+  group: build-mac-selfhosted
+  cancel-in-progress: false
+
+env:
+  MAC_DEPLOYMENT_TARGET: '11.0'
+  CMAKE_BUILD_PARALLEL_LEVEL: '12'
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  # Opt-in crash reports (docs/privacy.md): "release" for the refs shipped builds come from,
+  # "ci" otherwise. The DSN is handed only to the build step; without the secret it is empty.
+  EDGESLICER_SENTRY_ENVIRONMENT: ${{ (startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/ci/') || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/main') && 'release' || 'ci' }}
+
+jobs:
+  build:
+    name: Build universal dmg
+    runs-on: [self-hosted, macOS, ARM64, edgeslicer-mac]
+    timeout-minutes: 300
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          lfs: 'true'
+          # A clean tree each run: the slicer build directory lives in the workspace, so this is a
+          # from-scratch configure. deps/build is a symlink to the persistent tree (below); git
+          # clean removes the link, never what it points to.
+          clean: true
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          set -euo pipefail
+          label='${{ inputs.version_label }}'
+          if [ -z "$label" ]; then
+            ver_pure=$(grep -E '^#define[[:space:]]+Snapmaker_VERSION[[:space:]]+"' src/common_func/common_func.hpp | cut -d '"' -f2)
+            [ -n "$ver_pure" ] || { echo "::error::could not read Snapmaker_VERSION from src/common_func/common_func.hpp"; exit 1; }
+            ver="V$ver_pure"
+          else
+            ver_pure="${label#[Vv]}"
+            ver="V$ver_pure"
+          fi
+          echo "ver=$ver" >> "$GITHUB_ENV"
+          echo "ver_pure=$ver_pure" >> "$GITHUB_ENV"
+          echo "version: $ver  (pure: $ver_pure)"
+
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -uo pipefail
+          eval "$(/opt/homebrew/bin/brew shellenv)"
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          missing=0
+          for t in xcodebuild clang ninja pkg-config autoconf automake glibtoolize makeinfo xgettext lipo hdiutil; do
+            if p=$(command -v "$t"); then echo "OK      $t  $p"; else echo "MISSING $t"; missing=1; fi
+          done
+          xcodebuild -version | head -1
+          clang --version | head -1
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "::error::Rosetta is not installed (softwareupdate --install-rosetta) - the x86_64 deps and UltraNet loadtest need it"; missing=1
+          fi
+          # The deps' configure steps pick these up from /opt/homebrew instead of the SDK or the deps'
+          # own static copies (seen on this Mac 2026-10-15: Boost.Iostreams enabled LZMA from Homebrew
+          # xz headers; NGHTTP2/OpenVDB/OpenCV found Homebrew OpenSSL). The `ci` user cannot uninstall
+          # them, so refuse instead of building a tree that depends on them.
+          for f in zstd xz openssl@3 openssl@4 python@3.13 python@3.14 python@3.15; do
+            if [ -e "/opt/homebrew/opt/$f" ]; then
+              echo "::error::Homebrew $f is installed; the deps would pick it up. The owner removes it with 'brew uninstall --ignore-dependencies $f'."; missing=1
+            fi
+          done
+          free_gb=$(df -g "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
+          echo "free disk: ${free_gb} GB  cores: $(sysctl -n hw.ncpu)"
+          if [ "$free_gb" -lt 40 ]; then echo "::error::less than 40 GB free"; missing=1; fi
+          exit $missing
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~3.28.0"  # CMake 4 refuses some deps' old CMake files
+
+      - name: Link the persistent deps tree into the workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Outside the workspace so a clean checkout keeps it. The deps' baked-in paths go through
+          # this link ($GITHUB_WORKSPACE/deps/build/<arch>/OrcaSlicer_dep), which stays the same
+          # from run to run because the workspace path does.
+          root="$HOME/edgeslicer-deps/build"
+          mkdir -p "$root"
+          link="$GITHUB_WORKSPACE/deps/build"
+          if [ -e "$link" ] && [ ! -L "$link" ]; then rm -rf "$link"; fi
+          ln -sfn "$root" "$link"
+          echo "MAC_DEPS_ROOT=$root" >> "$GITHUB_ENV"
+          echo "deps/build -> $root"
+
+      - name: Decide whether the deps need a refresh
+        id: deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `git rev-parse HEAD:deps` is the tree object of deps/: a content hash that needs no
+          # history and is identical whenever deps/ is. The deployment target is part of the stamp.
+          want="$(git rev-parse HEAD:deps) target=$MAC_DEPLOYMENT_TARGET"
+          stamp_file="$MAC_DEPS_ROOT/.edgeslicer_deps_stamp"
+          have=$(cat "$stamp_file" 2>/dev/null || true)
+          echo "want : $want"
+          echo "have : ${have:-<none>}"
+          refresh=false
+          if [ "${{ inputs.refresh_deps }}" = "true" ]; then refresh=true; echo "reason: refresh_deps input"
+          elif [ "$want" != "$have" ]; then refresh=true; echo "reason: deps/ or target changed since the tree was built"
+          fi
+          for a in arm64 x86_64; do
+            if [ ! -d "$MAC_DEPS_ROOT/$a/OrcaSlicer_dep/usr/local/lib" ]; then refresh=true; echo "reason: no $a tree"; fi
+          done
+          echo "refresh=$refresh" >> "$GITHUB_OUTPUT"
+          echo "want_stamp=$want" >> "$GITHUB_OUTPUT"
+
+      - name: Build dependencies (only when stale)
+        if: steps.deps.outputs.refresh == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Incremental: the per-arch build trees are kept, so only the deps whose recipes changed
+          # rebuild. A first run builds everything (about 1-2 h on the Mac mini).
+          ./build_release_macos.sh -d -x -a universal -t "$MAC_DEPLOYMENT_TARGET"
+
+      - name: Stamp the rebuilt deps
+        if: steps.deps.outputs.refresh == 'true'
+        shell: bash
+        run: printf '%s' '${{ steps.deps.outputs.want_stamp }}' > "$MAC_DEPS_ROOT/.edgeslicer_deps_stamp"
+
+#   UltraNet: EdgeSlicer's private clean-room Bambu network plug-in, aceRage/ultranet, fetched with
+#   the read-only deploy key and built exactly as build_orca.yml does. The checkout leaves the
+#   workspace before anything else runs and is deleted after the build; compiler output never
+#   reaches this log (scripts/build_ultranet_posix.sh); only the binaries travel on.
+      - name: UltraNet - check for the deploy key
+        id: ultranet
+        shell: bash
+        env:
+          ULTRANET_DEPLOY_KEY: ${{ secrets.ULTRANET_DEPLOY_KEY }}
+        run: |
+          if [ -n "$ULTRANET_DEPLOY_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "ULTRANET_DEPLOY_KEY is set: the UltraNet network plug-in will be built and bundled."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ULTRANET_DEPLOY_KEY is not set - skipping UltraNet; this package carries no network plug-in."
+          fi
+
+      - name: UltraNet - fetch (deploy key)
+        if: steps.ultranet.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: aceRage/ultranet
+          ref: main
+          ssh-key: ${{ secrets.ULTRANET_DEPLOY_KEY }}
+          persist-credentials: false
+          path: .ultranet-src
+
+      - name: UltraNet - build and stage the binaries
+        if: steps.ultranet.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/ultranet-src"
+          OUT="$RUNNER_TEMP/ultranet-bin"
+          rm -rf "$SRC" "$OUT"
+          # Out of the workspace before anything else can see it.
+          mv "$GITHUB_WORKSPACE/.ultranet-src" "$SRC"
+          trap 'rm -rf "$SRC" "$RUNNER_TEMP/ultranet-logs"' EXIT
+          OSX_DEPLOYMENT_TARGET="$MAC_DEPLOYMENT_TARGET" EDGESLICER_VERSION="$ver_pure" ULTRANET_LOG_DIR="$RUNNER_TEMP/ultranet-logs" \
+            bash scripts/build_ultranet_posix.sh "$SRC" "$OUT"
+          echo "ULTRANET_BIN_DIR=$OUT" >> "$GITHUB_ENV"
+
+#   Bambu camera files (libBambuSource.dylib + liblive555.dylib) from the private repo
+#   aceRage/edgeslicer-camera, checked against its SHA256SUMS - as in build_orca.yml.
+      - name: Camera files - check for the deploy key
+        id: camera
+        shell: bash
+        env:
+          CAMERA_DEPLOY_KEY: ${{ secrets.CAMERA_DEPLOY_KEY }}
+        run: |
+          if [ -n "$CAMERA_DEPLOY_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "CAMERA_DEPLOY_KEY is set: Bambu's camera files will be bundled for live view."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CAMERA_DEPLOY_KEY is not set - no camera files in this build."
+          fi
+
+      - name: Camera files - fetch (deploy key)
+        if: steps.camera.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: aceRage/edgeslicer-camera
+          ref: main
+          ssh-key: ${{ secrets.CAMERA_DEPLOY_KEY }}
+          persist-credentials: false
+          path: .camera-src
+
+      - name: Camera files - verify and stage
+        if: steps.camera.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/camera-src"
+          OUT="$RUNNER_TEMP/camera-bin"
+          rm -rf "$SRC" "$OUT"
+          mv "$GITHUB_WORKSPACE/.camera-src" "$SRC"
+          trap 'rm -rf "$SRC"' EXIT
+          (cd "$SRC" && shasum -a 256 -c SHA256SUMS)
+          mkdir -p "$OUT"
+          for f in libBambuSource.dylib liblive555.dylib; do
+            [ -f "$SRC/macos/$f" ] || { echo "::error::aceRage/edgeslicer-camera has no macos/$f"; exit 1; }
+            cp -f "$SRC/macos/$f" "$OUT/"
+          done
+          echo "CAMERA_BIN_DIR=$OUT" >> "$GITHUB_ENV"
+
+      # go2rtc for the remote hub's camera video: the same pinned upstream release and digests as
+      # build_orca.yml (docs/superpowers/specs/2026-10-09-hub-posix-parity.md). Hashed, unzipped and
+      # lipo'd, never run.
+      - name: go2rtc - fetch, verify, make universal
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=v1.9.14
+          ARM64_ZIP_SHA=919b78adc759d6b3883d1e1b2ac915ac0985bb903ff1897b4d228527bd64690c
+          ARM64_BIN_SHA=6e5039d56d652d2d325cb3ce3f7cc20248a34db42fe8abf9bb13488494ac023e
+          AMD64_ZIP_SHA=9b0b9a27a4dc3a5b8b93376e7e8fc2787c6af624a512842622be84aec0171c7a
+          W="$RUNNER_TEMP/go2rtc-mac"
+          rm -rf "$W"; mkdir -p "$W/arm64" "$W/amd64" "$W/ship"
+          for arch in arm64 amd64; do
+            curl -fsSL --retry 3 -o "$W/$arch.zip" "https://github.com/AlexxIT/go2rtc/releases/download/$V/go2rtc_mac_$arch.zip"
+          done
+          echo "$ARM64_ZIP_SHA  $W/arm64.zip" | shasum -a 256 -c -
+          echo "$AMD64_ZIP_SHA  $W/amd64.zip" | shasum -a 256 -c -
+          unzip -q -o "$W/arm64.zip" -d "$W/arm64"
+          unzip -q -o "$W/amd64.zip" -d "$W/amd64"
+          [ -f "$W/arm64/go2rtc" ] || { echo "::error::go2rtc_mac_arm64.zip has no go2rtc in it"; exit 1; }
+          [ -f "$W/amd64/go2rtc" ] || { echo "::error::go2rtc_mac_amd64.zip has no go2rtc in it"; exit 1; }
+          echo "$ARM64_BIN_SHA  $W/arm64/go2rtc" | shasum -a 256 -c -
+          lipo -create -output "$W/ship/go2rtc" "$W/arm64/go2rtc" "$W/amd64/go2rtc"
+          chmod 755 "$W/ship/go2rtc"
+          echo "go2rtc archs: $(lipo -archs "$W/ship/go2rtc")"
+          printf 'go2rtc %s (https://github.com/AlexxIT/go2rtc), MIT License. Bundled unmodified (arm64 and amd64 slices joined with lipo) for the remote hub camera video.\n' "$V" > "$W/ship/LICENSE-NOTE.txt"
+          echo "GO2RTC_BIN_DIR=$W/ship" >> "$GITHUB_ENV"
+
+      - name: Build slicer (universal)
+        shell: bash
+        env:
+          EDGESLICER_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          set -euo pipefail
+          # The hosted job's flags minus -1, so the build stays parallel.
+          ./build_release_macos.sh -s -n -x -a universal -t "$MAC_DEPLOYMENT_TARGET"
+
+      - name: Verify the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/build/universal/Snapmaker_Orca/EdgeSlicer.app"
+          archs=$(lipo -archs "$app/Contents/MacOS/EdgeSlicer")
+          echo "EdgeSlicer: $archs"
+          case "$archs" in *x86_64*arm64*|*arm64*x86_64*) ;; *) echo "::error::main binary is not universal ($archs)"; exit 1 ;; esac
+          f="$app/Contents/Resources/tools/go2rtc/go2rtc"
+          [ -x "$f" ] || { echo "::error::go2rtc was fetched but is not in the app bundle ($f)"; exit 1; }
+          echo "go2rtc: $(lipo -archs "$f")"
+          if [ "${{ steps.ultranet.outputs.enabled }}" = "true" ]; then
+            d="$app/Contents/Resources/ultranet"
+            for n in libbambu_networking.dylib libBambuSource.dylib ultranet.txt; do
+              [ -f "$d/$n" ] || { echo "::error::UltraNet was built but $n is missing from $d"; exit 1; }
+            done
+            echo "ultranet: $(lipo -archs "$d/libbambu_networking.dylib") - $(sed -n 2p "$d/ultranet.txt")"
+          fi
+          echo "LSMinimumSystemVersion: $(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist" 2>/dev/null || echo '<unset>')"
+
+      # Signing and notarization: the same secret gate, scripts and order as build_orca.yml.
+      - name: Check for macOS signing secrets
+        id: signing
+        shell: bash
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_DEV_ACCOUNT: ${{ secrets.APPLE_DEV_ACCOUNT }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PWD: ${{ secrets.APP_PWD }}
+        run: |
+          sign=false
+          notarize=none
+          if [ -n "$BUILD_CERTIFICATE_BASE64" ] && [ -n "$P12_PASSWORD" ] && [ -n "$MACOS_CERTIFICATE_ID" ]; then
+            sign=true
+            if [ -n "$APP_STORE_CONNECT_KEY_P8" ] && [ -n "$APP_STORE_CONNECT_KEY_ID" ] && [ -n "$APP_STORE_CONNECT_ISSUER_ID" ]; then
+              notarize=api-key
+            elif [ -n "$APPLE_DEV_ACCOUNT" ] && [ -n "$TEAM_ID" ] && [ -n "$APP_PWD" ]; then
+              notarize=apple-id
+            else
+              echo "::warning::Developer ID secrets are set but no notarization credentials: the dmg will be signed but not notarized."
+            fi
+          else
+            echo "::notice::No macOS signing secrets - building an unsigned dmg. See docs/RELEASING_MACOS.md."
+          fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          echo "sign=$sign notarize=$notarize"
+
+      - name: Import Developer ID certificate
+        if: steps.signing.outputs.sign == 'true'
+        shell: bash
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
+          # Unlike a hosted runner this machine persists: remember the search list to restore it.
+          security list-keychains -d user | tr -d '"' | sed 's/^ *//' > "$RUNNER_TEMP/keychain_search_list.txt"
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d ' \t\r\n' | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$CERTIFICATE_PATH"
+          for ca in DeveloperIDG2CA DeveloperIDCA; do
+            if curl -fsSL -o "$RUNNER_TEMP/$ca.cer" "https://www.apple.com/certificateauthority/$ca.cer"; then
+              security import "$RUNNER_TEMP/$ca.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+              rm -f "$RUNNER_TEMP/$ca.cer"
+            fi
+          done
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(cat "$RUNNER_TEMP/keychain_search_list.txt")
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+          identities=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
+          if ! echo "$identities" | grep -qF "$MACOS_CERTIFICATE_ID"; then
+            echo "::error::MACOS_CERTIFICATE_ID does not match any Developer ID identity in the imported .p12 (docs/RELEASING_MACOS.md)."
+            exit 1
+          fi
+          SIGN_IDENTITY=$(echo "$identities" | grep -F "$MACOS_CERTIFICATE_ID" | grep -oE '"Developer ID Application: [^"]+"' | head -1 | tr -d '"')
+          [ -n "$SIGN_IDENTITY" ] || { echo "::error::No 'Developer ID Application' identity in the imported .p12"; exit 1; }
+          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo "imported the Developer ID identity"
+
+      - name: Sign app bundles (Developer ID, hardened runtime)
+        if: steps.signing.outputs.sign == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_DIR="$GITHUB_WORKSPACE/build/universal/Snapmaker_Orca"
+          scripts/macos_sign_app.sh "$APP_DIR/EdgeSlicer.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements
+          if [ -f "$APP_DIR/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
+            scripts/macos_sign_app.sh "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements
+          fi
+
+      - name: Create DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          hdiutil_create() {
+            for i in 1 2 3 4 5; do
+              hdiutil create "$@" && return 0
+              echo "hdiutil create failed (attempt $i), retrying in $((i * 10)) s"; sleep $((i * 10))
+            done
+            return 1
+          }
+          U="$GITHUB_WORKSPACE/build/universal"
+          rm -rf "$U/Snapmaker_Orca_dmg"; mkdir -p "$U/Snapmaker_Orca_dmg"
+          cp -R "$U/Snapmaker_Orca/EdgeSlicer.app" "$U/Snapmaker_Orca_dmg/"
+          ln -sfn /Applications "$U/Snapmaker_Orca_dmg/Applications"
+          hdiutil_create -volname "EdgeSlicer" -srcfolder "$U/Snapmaker_Orca_dmg" -ov -format UDZO "$GITHUB_WORKSPACE/EdgeSlicer_Mac_universal_${ver}.dmg"
+          if [ -f "$U/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
+            rm -rf "$U/Snapmaker_Orca_profile_validator_dmg"; mkdir -p "$U/Snapmaker_Orca_profile_validator_dmg"
+            cp -R "$U/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app" "$U/Snapmaker_Orca_profile_validator_dmg/"
+            ln -sfn /Applications "$U/Snapmaker_Orca_profile_validator_dmg/Applications"
+            hdiutil_create -volname "EdgeSlicer Profile Validator" -srcfolder "$U/Snapmaker_Orca_profile_validator_dmg" -ov -format UDZO "$GITHUB_WORKSPACE/EdgeSlicer_profile_validator_Mac_universal_${ver}.dmg"
+          fi
+
+      - name: Sign and notarize DMG
+        if: steps.signing.outputs.sign == 'true'
+        shell: bash
+        env:
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_DEV_ACCOUNT: ${{ secrets.APPLE_DEV_ACCOUNT }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PWD: ${{ secrets.APP_PWD }}
+        run: |
+          for dmg in "$GITHUB_WORKSPACE/EdgeSlicer_Mac_universal_${ver}.dmg" \
+                     "$GITHUB_WORKSPACE/EdgeSlicer_profile_validator_Mac_universal_${ver}.dmg"; do
+            [ -f "$dmg" ] || continue
+            codesign --force --timestamp --sign "$SIGN_IDENTITY" "$dmg"
+            codesign --verify --verbose=2 "$dmg"
+            # One notarization submission per run: the main dmg (its ticket covers the app inside).
+            if [ "$NOTARIZE" != "none" ] && [[ "$(basename "$dmg")" == EdgeSlicer_Mac_universal_* ]]; then
+              rc=0; scripts/macos_notarize.sh "$dmg" || rc=$?
+              if [ "$rc" = 2 ]; then
+                echo "::warning::$(basename "$dmg") is signed but its notarization is still pending - uploaded unstapled"
+              elif [ "$rc" != 0 ]; then
+                exit "$rc"
+              else
+                spctl -a -vv -t open --context context:primary-signature "$dmg" || echo "::warning::spctl did not accept $(basename "$dmg") on the runner (informational)"
+              fi
+            fi
+          done
+
+      - name: Remove signing keychain
+        if: always() && steps.signing.outputs.sign == 'true'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
+          if [ -s "$RUNNER_TEMP/keychain_search_list.txt" ]; then
+            # shellcheck disable=SC2046
+            security list-keychains -d user -s $(cat "$RUNNER_TEMP/keychain_search_list.txt") || true
+          fi
+          rm -f "$RUNNER_TEMP/build_certificate.p12" "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP"/notary_*.json "$RUNNER_TEMP"/*.zip "$RUNNER_TEMP/keychain_search_list.txt"
+
+      - name: Upload artifacts mac
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdgeSlicer_Mac_universal_${{ env.ver }}
+          path: ${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg
+          if-no-files-found: error
+
+      - name: Upload Snapmaker_Orca_profile_validator DMG mac
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdgeSlicer_profile_validator_Mac_universal_DMG_${{ env.ver }}
+          path: ${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          if-no-files-found: ignore
+
+      - name: Upload dSYM artifacts mac
+        uses: actions/upload-artifact@v4
+        with:
+          name: dSYM_Mac_${{ env.ver }}
+          path: ${{ github.workspace }}/build/universal/Snapmaker_Orca/dSYM
