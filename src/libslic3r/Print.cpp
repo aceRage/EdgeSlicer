@@ -1161,7 +1161,10 @@ void Print::append_wipe_tower_extruder(std::vector<unsigned int> &extruders) con
     // The wipe tower extruder can also be set. When the wipe tower is enabled and it will be generated,
     // append its extruder into the list too.
     if (has_wipe_tower() && config().wipe_tower_filament != 0 && extruders.size() > 1) {
-        assert(config().wipe_tower_filament > 0 && config().wipe_tower_filament < int(config().nozzle_diameter.size()));
+        // wipe_tower_filament is 1-based and indexes filaments, not nozzles. A
+        // single-nozzle MMU plate (or fewer nozzles than filaments) used to trip
+        // this from apply() in MSVC Debug.
+        assert(config().wipe_tower_filament > 0 && config().wipe_tower_filament <= int(config().filament_diameter.size()));
         extruders.emplace_back(config().wipe_tower_filament - 1); // the config value is 1-based
     }
 }
