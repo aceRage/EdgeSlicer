@@ -406,6 +406,9 @@ void CalibUtils::emit_get_PA_calib_results(float nozzle_diameter)
     if (obj_ == nullptr)
         return;
 
+    // Polled by the calibration page every second; a secured printer would reject it as unsigned.
+    if (obj_->skip_auto_command_if_secured("extrusion_cali_get_result"))
+        return;
     obj_->command_get_pa_calibration_result(nozzle_diameter);
 }
 
@@ -518,6 +521,9 @@ void CalibUtils::emit_get_flow_ratio_calib_results(float nozzle_diameter)
     if (obj_ == nullptr)
         return;
 
+    // Polled by the calibration page every second; a secured printer would reject it as unsigned.
+    if (obj_->skip_auto_command_if_secured("flowrate_get_result"))
+        return;
     obj_->command_get_flow_ratio_calibration_result(nozzle_diameter);
 }
 
