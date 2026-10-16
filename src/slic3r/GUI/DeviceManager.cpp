@@ -3449,8 +3449,25 @@ void MachineObject::show_secured_mode_message(bool once_per_session)
     if (once_per_session) {
         if (!log_first_time("secured_msg|" + dev_id))
             return;
+    } else if (wxIsMainThread()) {
+        // A button or dialog on the GUI thread: the user pressed something and must see why nothing
+        // happened. A toast hides behind a modal dialog, so this is a modal box over the active
+        // window, every press. One at a time: a press that lands while it is open is swallowed by it.
+        static bool s_open = false;
+        if (s_open)
+            return;
+        s_open = true;
+        BOOST_LOG_TRIVIAL(warning) << "secured mode: " << dev_id << " " << GUI::bambu_secured_mode_message(false);
+        wxWindow* parent = wxGetTopLevelParent(wxGetActiveWindow());
+        if (!parent)
+            parent = GUI::wxGetApp().GetTopWindow();
+        GUI::MessageDialog dlg(parent, wxString::FromUTF8(GUI::bambu_secured_mode_message().c_str()), _L("Developer Mode is off"),
+                               wxOK | wxICON_WARNING);
+        dlg.ShowModal();
+        s_open = false;
+        return;
     } else {
-        // A user action shows it each time, but a poll that keeps retrying must not stack toasts.
+        // Not from a button (another thread): a toast, and a retry loop must not stack them.
         static std::mutex s_mutex;
         static std::map<std::string, std::chrono::steady_clock::time_point> s_last;
         const auto now = std::chrono::steady_clock::now();
