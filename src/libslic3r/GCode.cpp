@@ -3140,12 +3140,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             if (!full_config.empty())
                 file.write(full_config);
 
-            // SoftFever: write compatiple image
+            // SoftFever: write compatible image. Bed stays the max of used filaments
+            // (Edge always heats to the highest bed temp). Nozzle is the first printing
+            // filament when tool ordering already exists; otherwise filament 0. The U1
+            // trailer (non-BBL) uses the captured initial_extruder_id below.
             int first_layer_bed_temperature = get_bed_temperature_max(print, true);
+            unsigned int bbl_first_filament = 0;
+            if (const unsigned int fe = print.tool_ordering().first_extruder(); fe != (unsigned int) -1)
+                bbl_first_filament = fe;
             file.write_format("; first_layer_bed_temperature = %d\n", first_layer_bed_temperature);
             file.write_format("; first_layer_temperature = %d\n",
                               get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
-                                           ConfigFlowDomain::Filament, 0));
+                                           ConfigFlowDomain::Filament, bbl_first_filament));
             file.write("; CONFIG_BLOCK_END\n\n");
         } else if (thumbnail_cb != nullptr) {
             // generate the thumbnails
@@ -3336,6 +3342,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         assert(final_extruder_id != (unsigned int) -1);
     }
     print.throw_if_canceled();
+
+    // Taken before the object loop, which reassigns initial_extruder_id when printing by object.
+    // Bed stays the max of used filaments (Edge always heats to the highest bed temp).
+    // U1 / non-BBL writes these at the end of the file; BBL already wrote its CONFIG_BLOCK.
+    int compat_first_layer_bed_temp    = 0;
+    int compat_first_layer_nozzle_temp = 0;
+    if (!is_bbl_printers) {
+        compat_first_layer_bed_temp = get_bed_temperature_max(print, true);
+        compat_first_layer_nozzle_temp =
+            get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
+                         ConfigFlowDomain::Filament, initial_extruder_id);
+    }
 
     // Ultra: fold the first printing filament's Z offset into the job's Z offset
     // (per-filament squish / plate-surface compensation, OrcaSlicer #4660).
@@ -4316,13 +4334,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         if (!full_config.empty())
             file.write(full_config);
 
-        // SoftFever: write compatiple info
-        int first_layer_bed_temperature = get_bed_temperature_max(print, true);
-        file.write_format("; first_layer_bed_temperature = %d\n", first_layer_bed_temperature);
+        // SoftFever: write compatible info. Nozzle temp of the filament the plate starts with,
+        // captured before the by-object loop reassigns initial_extruder_id (Orca #16422).
+        file.write_format("; first_layer_bed_temperature = %d\n", compat_first_layer_bed_temp);
         file.write_format("; bed_shape = %s\n", print.full_print_config().opt_serialize("printable_area").c_str());
-        file.write_format("; first_layer_temperature = %d\n",
-                          get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
-                                       ConfigFlowDomain::Filament, 0));
+        file.write_format("; first_layer_temperature = %d\n", compat_first_layer_nozzle_temp);
         file.write_format("; first_layer_height = %.3f\n", print.config().initial_layer_print_height.value);
 
         // SF TODO
