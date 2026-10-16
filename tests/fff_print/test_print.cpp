@@ -1669,3 +1669,71 @@ TEST_CASE("Tree supports re-slice to the same support layers", "[Print][TreeSupp
     for (const SupportLayer *layer : print.objects().front()->support_layers())
         CHECK(layer->height >= EPSILON);
 }
+
+// Orca #16313: generate_object_layers() already applies Z shrinkage; comparing that height
+// against printable_height / shrinkage counted the compensation twice. The raft is also
+// missing from layers.back() (those start at object_print_z_min).
+TEST_CASE("The build height check counts the Z shrinkage compensation once", "[Print][validate][Regression]")
+{
+    struct Case { double height; const char *expected; };
+    const Case cases[] = {
+        { 92.,  "" },
+        { 97.,  "because of material shrinkage compensation" },
+        { 101., "exceeds the maximum build volume height." },
+    };
+    for (const Case &test_case : cases) {
+        DYNAMIC_SECTION("height " << test_case.height)
+        {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({
+                { "printable_height", 100. },
+                { "filament_shrinkage_compensation_z", "95%" },
+                { "layer_height", 0.2 },
+                { "initial_layer_print_height", 0.2 },
+                { "layer_change_gcode", "G92 E0\n" },
+            });
+
+            Print print;
+            Model model;
+            init_print({ make_cube(20., 20., test_case.height) }, print, model, config);
+            const std::string error = print.validate().string;
+            INFO(error);
+            if (test_case.expected[0] == '\0')
+                CHECK(error.empty());
+            else
+                CHECK(error.find(test_case.expected) != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("The build height check counts the raft", "[Print][validate][Regression]")
+{
+    struct Case { double height; bool fits; };
+    const Case cases[] = { { 98.8, true }, { 99.8, false } };
+    for (const Case &test_case : cases) {
+        DYNAMIC_SECTION("height " << test_case.height)
+        {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({
+                { "printable_height", 100. },
+                { "raft_layers", 3 },
+                { "layer_height", 0.2 },
+                { "initial_layer_print_height", 0.2 },
+                { "layer_change_gcode", "G92 E0\n" },
+            });
+
+            Print print;
+            Model model;
+            init_print({ make_cube(20., 20., test_case.height) }, print, model, config);
+            const SlicingParameters &slicing_params = print.objects().front()->slicing_parameters();
+            // Edge's raft with these settings puts the object at 1.0 mm (raft layers plus the object gap).
+            REQUIRE_THAT(slicing_params.object_print_z_min, Catch::Matchers::WithinAbs(1.0, EPSILON));
+            const std::string error = print.validate().string;
+            INFO(error);
+            if (test_case.fits)
+                CHECK(error.empty());
+            else
+                CHECK(error.find("maximum build volume height") != std::string::npos);
+        }
+    }
+}
