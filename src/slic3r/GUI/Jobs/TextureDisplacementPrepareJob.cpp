@@ -47,7 +47,7 @@ void TextureDisplacementPrepareJob::process(Ctl &ctl)
     // idle loop.
     int last_reported = 1;
     m_result = GLGizmoTextureDisplacement::prepare_mesh(m_input.base_mesh, m_input.masks, m_input.layers,
-                                                        m_input.params, m_input.color.palette,
+                                                        m_input.model_uv, m_input.params, m_input.color.palette,
                                                         [&ctl, &status, &last_reported](int percent) {
                                                             if (ctl.was_canceled())
                                                                 return false;
@@ -108,6 +108,10 @@ void TextureDisplacementPrepareJob::finalize(bool canceled, std::exception_ptr &
         for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
             volume->texture_displacement_facet(i).set_data(std::move(m_result.masks[size_t(i)]));
         detach_mesh_recipes_after_texture_displacement(*volume);
+        // The model's own UV channel, resampled onto the new mesh by the run. Also put back after
+        // restore_painting(), which resets it along with the extra facets for the same reason: it is
+        // indexed by triangle and the triangles have changed.
+        volume->texture_uv = std::move(m_result.uv);
 
         if (ObjectList *obj_list = wxGetApp().obj_list()) {
             const ModelObjectPtrs &objs = plater->model().objects;

@@ -1440,6 +1440,8 @@ wxDEFINE_EVENT(EVT_GLCANVAS_SMOOTH_LAYER_HEIGHT_PROFILE, HeightProfileSmoothEven
 const double GLCanvas3D::DefaultCameraZoomToBoxMarginFactor = 1.25;
 const double GLCanvas3D::DefaultCameraZoomToBedMarginFactor = 2.00;
 const double GLCanvas3D::DefaultCameraZoomToPlateMarginFactor = 1.25;
+// Main-thread only: _render_frame never runs off it, so no atomic is needed.
+int GLCanvas3D::s_frames_in_progress = 0;
 
 void GLCanvas3D::load_arrange_settings()
 {
@@ -3307,7 +3309,8 @@ void GLCanvas3D::render(bool only_init)
     }
 
     m_in_render = true;
-    Slic3r::ScopeGuard in_render_guard([this]() { m_in_render = false; });
+    ++s_frames_in_progress;
+    Slic3r::ScopeGuard in_render_guard([this]() { m_in_render = false; --s_frames_in_progress; });
     (void)in_render_guard;
 
     if (m_canvas == nullptr)
@@ -3661,10 +3664,28 @@ void GLCanvas3D::render(bool only_init)
     // logged too, so a user log shows the renderer came up without errors.
     report_frame_gl_errors("frame");
 
-    m_canvas->SwapBuffers();
-    if (show_render_stats)
-        m_frame_profiler->end_frame();
-    m_render_stats.increment_fps_counter();
+    // Code run from inside this frame - a modal dialog a gizmo opened from its ImGui panel, a
+    // synchronous paint of another canvas - may have made a different surface current. Bind this one
+    // again before presenting, so the swap is not issued against a window the context no longer
+    // belongs to: on Mesa/X11 that is a fatal BadMatch, not the no-op it is on other platforms. Draws
+    // already issued before this point cannot be redirected - only this swap is protected.
+    if (_set_current()) {
+        m_canvas->SwapBuffers();
+        if (show_render_stats)
+            m_frame_profiler->end_frame();
+        m_render_stats.increment_fps_counter();
+    } else {
+        // Logged once: if the rebind fails it does so every frame, and a warning per frame would
+        // bury everything else.
+        static bool rebind_failure_logged = false;
+        if (!rebind_failure_logged) {
+            rebind_failure_logged = true;
+            BOOST_LOG_TRIVIAL(warning) << "GLCanvas3D: could not rebind the GL context to this canvas before "
+                                          "SwapBuffers(); the frame is not presented";
+        }
+        if (show_render_stats)
+            m_frame_profiler->end_frame();
+    }
 }
 
 static const char* gl_canvas_type_name(GLCanvas3D::ECanvasType type)
