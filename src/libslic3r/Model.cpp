@@ -3532,9 +3532,9 @@ bool Model::import_volume_color_deal(const std::vector<unsigned char> &volume_fi
     obj->config.set("extruder", first_extruder_id);
     for (size_t i = 0; i < obj->volumes.size(); i++) {
         const unsigned char id = volume_filament_ids[i];
-        // Phase 5e: a part on the object's own filament needs no override; any other one - filament
-        // 1 included, when the object's filament is not 1 - does.
-        if (id == 0 || id == first_extruder_id)
+        // Phase 5e: every part gets the filament the dialog chose for it - filament 1 included, which
+        // the old "id <= 1" skip left on the object's filament whatever that was.
+        if (id == 0)
             continue;
         obj->volumes[i]->config.set("extruder", (int) id);
     }
