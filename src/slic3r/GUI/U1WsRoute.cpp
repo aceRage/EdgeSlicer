@@ -18,6 +18,7 @@ namespace GUI {
 
 using nlohmann::json;
 
+namespace u1ws {
 static long long steady_ms()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -55,11 +56,7 @@ static std::map<std::string, WsPace>& paces()
     return p;
 }
 
-void U1WsRoute::reset_pacing()
-{
-    std::lock_guard<std::mutex> lk(pace_mutex());
-    paces().clear();
-}
+} // namespace u1ws
 
 struct U1WsRoute::State
 {
@@ -101,7 +98,7 @@ struct U1WsRoute::State
     long long   next_try { 0 };
     std::string last_reason;
 
-    long long now() const { return deps.now_ms ? deps.now_ms() : steady_ms(); }
+    long long now() const { return deps.now_ms ? deps.now_ms() : u1ws::steady_ms(); }
     bool      sleep(long long ms)
     {
         std::unique_lock<std::mutex> lk(mtx);
@@ -111,6 +108,7 @@ struct U1WsRoute::State
 };
 
 using WsStatePtr = std::shared_ptr<U1WsRoute::State>;
+namespace u1ws {
 
 // Lock order: State::mtx, then pace_mutex().
 static void load_pace(U1WsRoute::State& s)
@@ -495,7 +493,15 @@ static void run(WsStatePtr s)
     s->cv.notify_all();
 }
 
+} // namespace u1ws
+
 // ------------------------------------------------------------------ route ----
+
+void U1WsRoute::reset_pacing()
+{
+    std::lock_guard<std::mutex> lk(u1ws::pace_mutex());
+    u1ws::paces().clear();
+}
 
 std::shared_ptr<U1WsRoute> U1WsRoute::attach(const std::shared_ptr<MqttClient>& owner, U1WsDeps deps)
 {
@@ -507,7 +513,7 @@ std::shared_ptr<U1WsRoute> U1WsRoute::attach(const std::shared_ptr<MqttClient>& 
     r->m->number = ++count;
     owner->SetRoute(r);
     WsStatePtr s = r->m;
-    std::thread([s]() { run(s); }).detach();
+    std::thread([s]() { u1ws::run(s); }).detach();
     return r;
 }
 
@@ -531,6 +537,7 @@ bool U1WsRoute::stop_and_wait(int timeout_ms)
     return m->cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [this] { return m->finished; });
 }
 
+namespace u1ws {
 static void learn(const WsStatePtr& s, const std::string& sn)
 {
     if (sn.empty())
@@ -547,11 +554,12 @@ static void learn(const WsStatePtr& s, const std::string& sn)
     if (learned)
         s->cv.notify_all();
 }
+} // namespace u1ws
 
 // Subscriptions stay with the cloud session: it is the fallback, and its messages are filtered.
 MqttRoute::Result U1WsRoute::subscribe(const std::string& topic, int, std::string&)
 {
-    learn(m, U1LocalFirst::serial_of_topic(topic));
+    u1ws::learn(m, U1LocalFirst::serial_of_topic(topic));
     return Result::NotMine;
 }
 MqttRoute::Result U1WsRoute::unsubscribe(const std::string&, std::string&) { return Result::NotMine; }
@@ -562,7 +570,7 @@ MqttRoute::Result U1WsRoute::publish(const std::string& topic, const std::string
     if (U1LocalFirst::device_topic_kind(topic) != U1LocalFirst::DeviceTopic::Request)
         return Result::NotMine;
     const std::string sn = U1LocalFirst::serial_of_topic(topic);
-    learn(m, sn);
+    u1ws::learn(m, sn);
     const json j = json::parse(payload, nullptr, false);
     if (j.is_discarded() || !j.is_object())
         return Result::NotMine;
@@ -575,7 +583,7 @@ MqttRoute::Result U1WsRoute::publish(const std::string& topic, const std::string
             m->last_subscribe = payload;
         if (m->stop || !m->active || sn != m->sn)
             return Result::NotMine;
-        if (key.empty() || method.empty() || is_cloud_method(sn, method)) {
+        if (key.empty() || method.empty() || u1ws::is_cloud_method(sn, method)) {
             if (!key.empty())
                 m->cloud_ids.insert(key);
             return Result::NotMine; // the cloud session's own publish
@@ -640,7 +648,7 @@ bool U1WsRoute::accept_own_message(const std::string& topic, const std::string& 
     }
 }
 
-void U1WsRoute::set_device(const std::string& sn) { learn(m, sn); }
+void U1WsRoute::set_device(const std::string& sn) { u1ws::learn(m, sn); }
 
 bool U1WsRoute::on_lan() const
 {
@@ -670,9 +678,9 @@ std::vector<std::string> U1WsRoute::cloud_methods() const
         std::lock_guard<std::mutex> lk(m->mtx);
         sn = m->sn;
     }
-    std::lock_guard<std::mutex> lk(pace_mutex());
-    auto                        it = paces().find(sn);
-    if (it == paces().end())
+    std::lock_guard<std::mutex> lk(u1ws::pace_mutex());
+    auto                        it = u1ws::paces().find(sn);
+    if (it == u1ws::paces().end())
         return {};
     return std::vector<std::string>(it->second.cloud_methods.begin(), it->second.cloud_methods.end());
 }
