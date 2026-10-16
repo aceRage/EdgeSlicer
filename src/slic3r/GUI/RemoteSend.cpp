@@ -466,13 +466,16 @@ static std::pair<int, std::string> prepare_bambu(const Request& req, PartPlate* 
                 ps.ams_mapping_info = a.dump();
             }
         }
+        // A printer that prints from its internal storage needs no card (Bambu Studio's could_emmc_print).
+        const bool can_print_lan = has_sdcard || obj->is_support_print_with_emmc;
         if (ps.connection_type == "lan") {
-            if (!has_sdcard) return { 409, "An SD card needs to be inserted before printing via LAN." };
+            if (!can_print_lan) return { 409, "An SD card needs to be inserted before printing via LAN." };
             p->call               = "start_local_print";
-            p->verify_access_code = true;
+            // The check is a small upload to the card: none to check against without one.
+            p->verify_access_code = has_sdcard;
         } else {
             const bool        lan_only = wxGetApp().app_config->get("lan_mode_only") == "1";
-            const std::string refusal  = choose_cloud_bound_print_call(*p, lan_only, obj->is_support_cloud_print_only, has_sdcard);
+            const std::string refusal  = choose_cloud_bound_print_call(*p, lan_only, obj->is_support_cloud_print_only, can_print_lan);
             if (!refusal.empty()) return { 409, refusal };
         }
     } else {
@@ -1052,7 +1055,7 @@ static std::pair<int, std::string> prepare_bambu_record(const Request& req, cons
         ps.ams_mapping2              = ev->ams_mapping2;
         ps.ams_mapping_info          = ev->ams_mapping_info;
         ps.nozzle_mapping_request    = ev->nozzle_mapping_request;
-        ps.extruder_cali_manual_mode = 1; // no PA-value switch in this fork: automatic
+        ps.extruder_cali_manual_mode = 0; // no PA-mode switch in this fork: Bambu Studio's default
         if (ps.connection_type == "lan") {
             if (!has_sdcard) return { 409, "An SD card needs to be inserted before printing via LAN." };
             p->call               = "start_local_print";

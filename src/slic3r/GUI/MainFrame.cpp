@@ -82,6 +82,7 @@
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
 #include "NetworkTestDialog.hpp"
+#include "U1LanRoute.hpp" // the read-only U1 Moonraker probe
 #include "FirewallCheckDialog.hpp"
 #include "BambuSetupNoticeDialog.hpp"
 #include "ConfigWizard.hpp"
@@ -1119,6 +1120,10 @@ void MainFrame::shutdown(bool isRecreate)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "MainFrame::shutdown enter";
     m_shutting_down = true;
+    // EDGESLICER-A: this frame's Plater stops updating the background process and the slice/print
+    // buttons now; its timer could otherwise fire while the window tree is destroyed.
+    if (m_plater != nullptr)
+        m_plater->begin_shutdown();
     // First of all: no phone/agent request, send or control job may queue work for the GUI thread
     // any more, and what is already queued is dropped. The Plater is torn down below and freed
     // with this frame, and a request that ran after that crashed (c2a7d4de, 2026-09-22). A quit
@@ -2602,12 +2607,16 @@ void MainFrame::update_slice_print_status_impl(SlicePrintEventType event, bool c
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" m_slice_select %1%: can_slice= %2%, can_print %3%, enable_slice %4%, enable_print %5% ")%m_slice_select % can_slice %can_print %enable_slice %enable_print;
-    m_print_btn->Enable(enable_print);
-    m_slice_btn->Enable(enable_slice);
+    // Enable() re-renders the buttons' bitmaps (the EDGESLICER-A crash site); the buttons do not
+    // exist yet early in the constructor and are gone once the frame is being destroyed.
+    if (m_print_btn != nullptr && !m_print_btn->IsBeingDeleted())
+        m_print_btn->Enable(enable_print);
+    if (m_slice_btn != nullptr && !m_slice_btn->IsBeingDeleted())
+        m_slice_btn->Enable(enable_slice);
     m_slice_enable = enable_slice;
     m_print_enable = enable_print;
 
-    if (wxGetApp().mainframe)
+    if (wxGetApp().mainframe && wxGetApp().plater())
         wxGetApp().plater()->update_title_dirty_status();
 }
 
@@ -2812,6 +2821,13 @@ static wxMenu* generate_help_menu()
     append_menu_item(helpMenu, wxID_ANY, _L("Import Profile"), _L("Import Profile"), [](wxCommandEvent&) {
         wxGetApp().import_presets();
     });
+
+    // Owner diagnostic (tests/design_u1_local_first.md, Plan B): does a cloud-bound U1's Moonraker
+    // answer on the LAN? Read-only; only with EDGESLICER_U1_PROBE=1 in the environment.
+    if (u1_moonraker_probe_enabled())
+        append_menu_item(helpMenu, wxID_ANY, _L("Diagnostic: U1 local Moonraker probe (read-only)..."),
+                         _L("Ask a U1 on the LAN for its status over HTTP and its WebSocket, read-only"),
+                         [](wxCommandEvent&) { run_u1_moonraker_probe_dialog(wxGetApp().mainframe); });
 
     append_menu_item(helpMenu, wxID_ANY, _L("Open Network Test"), _L("Open Network Test"), [](wxCommandEvent&) {
         // Plain modal dialog: its test threads never touch the dialog itself (they keep only
@@ -4129,6 +4145,9 @@ bool MainFrame::load_config_file(const std::string &path)
         return false;
     }
     wxGetApp().load_current_presets();
+    // Orca #15916: the loaded printer may not take the plates' bed types.
+    if (Plater *plater = wxGetApp().plater())
+        plater->normalize_bed_types(false);
     return true;
 }
 

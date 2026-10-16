@@ -506,7 +506,7 @@ wxArrayString NewCalibrationHistoryDialog::get_all_filaments(const MachineObject
     std::set<std::string> filament_id_set;
     std::set<std::string> printer_names;
     std::ostringstream    stream;
-    stream << std::fixed << std::setprecision(1) << obj->m_extder_data.extders[0].current_nozzle_diameter;
+    stream << std::fixed << std::setprecision(1) << obj->nozzle_diameter_or_preset(MAIN_NOZZLE_ID); // Orca #13255
     std::string nozzle_diameter_str = stream.str();
 
     for (auto printer_it = preset_bundle->printers.begin(); printer_it != preset_bundle->printers.end(); printer_it++) {
@@ -548,6 +548,7 @@ wxArrayString NewCalibrationHistoryDialog::get_all_filaments(const MachineObject
                         // name matched
                         if (filament_it->is_system) {
                             filament_items.push_back(filament_it->alias);
+                            m_favorite_keys[filament_it->alias] = FavoriteFilamentsUI::key_for(*filament_it);
                             FilamentInfos filament_infos;
                             filament_infos.filament_id             = filament_it->filament_id;
                             filament_infos.setting_id              = filament_it->setting_id;
@@ -561,6 +562,7 @@ wxArrayString NewCalibrationHistoryDialog::get_all_filaments(const MachineObject
                                 user_preset_alias                = wx_user_preset_alias.ToStdString();
 
                                 filament_items.push_back(user_preset_alias);
+                                m_favorite_keys[user_preset_alias] = FavoriteFilamentsUI::key_for(*filament_it);
                                 FilamentInfos filament_infos;
                                 filament_infos.filament_id            = filament_it->filament_id;
                                 filament_infos.setting_id             = filament_it->setting_id;
@@ -611,8 +613,15 @@ NewCalibrationHistoryDialog::NewCalibrationHistoryDialog(wxWindow *parent, const
     m_comboBox_filament = new ::ComboBox(top_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, NEW_HISTORY_DIALOG_INPUT_SIZE, 0, nullptr, wxCB_READONLY);
 
     wxArrayString filament_items = get_all_filaments(obj);
-    m_comboBox_filament->Set(filament_items);
-    m_comboBox_filament->SetSelection(-1);
+    // The rows keep their plain names (the stars are icons), so GetValue() still finds the filament.
+    m_filament_list = std::make_unique<FavoriteFilamentsUI::FavoriteComboList>(m_comboBox_filament);
+    std::vector<FavoriteFilamentsUI::FavoriteComboList::Entry> filament_entries;
+    for (const wxString &item : filament_items) {
+        const std::string name = item.ToStdString();
+        auto              key  = m_favorite_keys.find(name);
+        filament_entries.push_back({item, key != m_favorite_keys.end() ? key->second : name});
+    }
+    m_filament_list->set_entries(std::move(filament_entries), -1);
 
     // Filament
     flex_sizer->Add(preset_name_title);
