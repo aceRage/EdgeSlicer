@@ -211,6 +211,30 @@ public:
         RequestLoad(url);
     }
 
+    // wxWebViewWebKit::AddScriptMessageHandler() registers the handler, adds the
+    // "window.wx = ..." alias as a document-start user script, and then also runs that alias
+    // through RunScript(), which waits for WebKit in a wxYield() loop (RunScriptSync). When the
+    // handler is installed while a modal dialog runs (Send dialog -> app switches to the Device
+    // page, whose view is created then), WebKit never completes the script, the loop spins at
+    // 100% CPU and the app hangs. Keep wx's registration and user script, and only turn that
+    // one immediate run into a fire-and-forget evaluation. Loads are gated until the handler is
+    // installed, so the view is still on about:blank and the user script covers the real page.
+    bool AddScriptMessageHandler(const wxString &name) override
+    {
+        m_addingScriptMessageHandler = true;
+        const bool ok = wxWebViewWebKit::AddScriptMessageHandler(name);
+        m_addingScriptMessageHandler = false;
+        return ok;
+    }
+
+    bool RunScript(const wxString &javascript, wxString *output = nullptr) const override
+    {
+        if (!m_addingScriptMessageHandler)
+            return wxWebViewWebKit::RunScript(javascript, output);
+        Slic3r::GUI::WKWebView_evaluateJavaScript(GetNativeBackend(), javascript, nullptr);
+        return true;
+    }
+
     void SetScriptMessageHandlerInstalled()
     {
         m_scriptMessageHandlerInstalled = true;
@@ -300,6 +324,7 @@ private:
     }
 
     bool     m_scriptMessageHandlerInstalled = false;
+    bool     m_addingScriptMessageHandler    = false;
     wxString m_pendingUrl;
     wxString m_inFlightUrl;
     wxString m_queuedUrl;
