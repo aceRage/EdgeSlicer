@@ -9175,10 +9175,35 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 // project keeps the dual-nozzle grouping. Falls back to 1 (single nozzle) per filament when
                 // filament_map is absent/short (classic machines, or not yet grouped).
                 const auto* fmap_opt = plate_manual ? plate_map_opt : dynamic_cast<const ConfigOptionInts*>(config.option("filament_map"));
-                for (int i = 0; i < filaments_count; ++i) {
-                    int v = (fmap_opt && i < (int)fmap_opt->values.size() && fmap_opt->values[i] >= 1) ? fmap_opt->values[i] : 1;
-                    stream << v;
-                    if (i != (filaments_count - 1))
+                std::vector<int> filament_map;
+                filament_map.reserve(filaments_count);
+                for (int i = 0; i < (int)filaments_count; ++i)
+                    filament_map.push_back(
+                        (fmap_opt && i < (int)fmap_opt->values.size() && fmap_opt->values[i] >= 1) ? fmap_opt->values[i] : 1);
+
+                // A machine with several identical independent toolheads (Snapmaker U1, Flashforge
+                // Creator 5) never runs ToolOrdering's grouping engine, so filament_map stays at its
+                // all-1s preset default while the G-code actually drives T0..T3. slice_info.config
+                // already substitutes the real per-toolhead assignment here (see
+                // _add_slice_info_config_file_to_archive and identity_filament_map's comment); without
+                // the same substitution this file claimed every filament sat in toolhead 1, so the two
+                // metadata files disagreed and Bambu-derived firmware that resolves a filament to a
+                // physical nozzle from model_settings read the wrong map. Reported metadata only: the
+                // live config is untouched, so routing, flush volumes and the emitted G-code are
+                // unchanged. Skipped for a hand-grouped plate (plate_manual), whose explicit map wins.
+                if (!plate_manual) {
+                    const std::vector<int> identity = identity_filament_map(config, filaments_count);
+                    if (!identity.empty()) {
+                        const bool map_is_trivial = std::all_of(filament_map.begin(), filament_map.end(),
+                                                                [](int v) { return v <= 1; });
+                        if (map_is_trivial)
+                            filament_map = identity;
+                    }
+                }
+
+                for (int i = 0; i < (int)filaments_count; ++i) {
+                    stream << filament_map[i];
+                    if (i != (int)(filaments_count - 1))
                         stream << " ";
                 }
                 stream << "\"/>\n";
