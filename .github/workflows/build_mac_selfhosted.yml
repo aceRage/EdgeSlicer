@@ -107,10 +107,12 @@ jobs:
           # The deps' configure steps pick these up from /opt/homebrew instead of the SDK or the deps'
           # own static copies (seen on this Mac 2026-10-15: Boost.Iostreams enabled LZMA from Homebrew
           # xz headers; NGHTTP2/OpenVDB/OpenCV found Homebrew OpenSSL). The `ci` user cannot uninstall
-          # them, so refuse instead of building a tree that depends on them.
-          for f in zstd xz openssl@3 openssl@4 python@3.13 python@3.14 python@3.15; do
-            if [ -e "/opt/homebrew/opt/$f" ]; then
-              echo "::error::Homebrew $f is installed; the deps would pick it up. The owner removes it with 'brew uninstall --ignore-dependencies $f'."; missing=1
+          # them, so refuse instead of building a tree that depends on them. Only a linked keg leaks (its
+          # headers, libs and .pc files under /opt/homebrew/include|lib); an unlinked one kept for ffmpeg or
+          # node is not seen. Homebrew records linked kegs in var/homebrew/linked.
+          for f in zstd xz lz4 brotli openssl@3 openssl@4 python@3.13 python@3.14 python@3.15; do
+            if [ -L "/opt/homebrew/var/homebrew/linked/$f" ]; then
+              echo "::error::Homebrew $f is linked; the deps would pick it up. The owner unlinks it with 'brew unlink $f'."; missing=1
             fi
           done
           free_gb=$(df -g "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
