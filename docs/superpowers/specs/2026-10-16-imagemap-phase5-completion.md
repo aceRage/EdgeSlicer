@@ -44,7 +44,7 @@ Legend: **OK** = works on main today; **GAP** = missing or broken, fixed in the 
 | 15 | ImportedTexture: OBJ + PNG/JPG (`map_Kd`) | The parser reads `map_Kd`, but the colour branch in Model.cpp is commented out: a textured OBJ comes in with no colour. GLB/glTF works. | **GAP** | 5d |
 | 16 | 2D gradient / linear gradient sources | 2- and 3-stop gradients along u, v or radial | OK (subset) | - |
 | 17 | Dithering methods (Floyd-Steinberg, Bayer, halftone) | 1-D error diffusion on rows; nearest per leaf on facets | OK (subset) | - |
-| 18 | Contoning (ordered translucent stacks on top surfaces, TD models) | Dropped in Phase 1 | OUT | - |
+| 18 | Contoning (ordered translucent stacks on top surfaces, TD models) | Dropped in Phase 1 | DEFERRED to ChromaStack (owner, 2026-10-16) | - |
 | 19 | TrueColor RGB painting gizmo | None | OUT | - |
 | 20 | Interactive projection gizmo with 3D preview | Dialog with a 2D quantised preview | OUT (5c adds numeric placement instead) | - |
 | 21 | Seam hiding hint from the texture | None | OUT | - |
@@ -106,7 +106,7 @@ same Benchy without the image (measured with the CLI and reported in 5a and 5b).
 
 | Item | Why |
 | --- | --- |
-| Contoning | It needs a per-filament transmission distance that no profile carries (a new filament key, calibration data, and a profile pass), and ImageMap's implementation is about 13k lines of fill geometry. The flat-face form of the idea is Orca #16551 (ChromaStack), still a draft upstream; the research note recommends porting that when it leaves draft rather than reviving Contoning. Decision for the owner if wanted sooner. |
+| Contoning | It needs a per-filament transmission distance that no profile carries (a new filament key, calibration data, and a profile pass), and ImageMap's implementation is about 13k lines of fill geometry. The flat-face form of the idea is Orca #16551 (ChromaStack), still a draft upstream. **Owner decision 2026-10-16: deferred - Contoning waits for ChromaStack (Orca #16551), to be ported as its own package when it leaves draft.** |
 | TrueColor RGB painting gizmo | A second painting gizmo (ImageMap copied a 1 MB MMU gizmo for it). Image Fill plus the existing colour painting and texture displacement colours already cover "put a picture on it"; the cost is high and the overlap large. |
 | Interactive projection gizmo | Phase 5c gives the same placement as numbers in the dialog. A canvas gizmo can reuse texture displacement's adjust handles later if the owner wants it. |
 | Seam hiding from the texture | Small visual gain, touches SeamPlacer for every print path. |
@@ -152,17 +152,19 @@ independent of the others and starts from origin/main.
 ### 5c - `feat/imagemap-p5c-placement`: placement and staying in place
 
 - Params: offset (u, v), scale, rotation, tile, keep aspect ratio; dialog controls.
-- A per-volume projection frame recorded at apply time, carried through cut, split to parts and
-  merge so a half keeps sampling the picture where it was.
+- A per-volume projection frame recorded at apply time, carried through a cut (planar, curved,
+  drawn) and split to parts so a piece keeps sampling the picture where it was. Merging parts and
+  the flexi-joint cut are not covered and keep today's re-stretch.
 
 ### 5d - `feat/imagemap-p5d-obj-texture`: textured OBJ import
 
 - Decode the `map_Kd` image and sample it per sub-facet in UV space, then
   `image_fill_from_face_colors`, the path GLB already uses.
 
-## 5. Owner decisions (none blocking)
+## 5. Owner decisions (2026-10-16)
 
-1. Contoning / ChromaStack: stays OUT here; port ChromaStack when it leaves draft (research note),
-   or ask for a fork-native flat-face version sooner.
-2. Layer stripes is opt-in and marked experimental until the owner's print shows whether width
-   modulation reads well on his filaments; its defaults may change after that print.
+1. Contoning is deferred: it waits for ChromaStack (Orca #16551), ported as its own package once
+   that leaves draft upstream.
+2. Layer stripes keep the 40 % width swing; it is adjusted only after a test print.
+3. The GLB/OBJ face-colour import paints every filament except the part's own (the first
+   filament was left out of the sub-facet palette): package 5e, its own PR from main.
