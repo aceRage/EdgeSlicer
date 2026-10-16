@@ -530,6 +530,36 @@ TEST_CASE("The G-code header names the first layer temperatures of the filament 
     CHECK(header_int(gcode, "first_layer_temperature") == 250);
 }
 
+TEST_CASE("The BBL G-code header names the first layer temperatures on a single-filament plate", "[GCode][U1]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_prime_tower",                     "0" },
+        { "nozzle_temperature_initial_layer",       "215" },
+        { "nozzle_temperature",                     "215" },
+        { "supertack_plate_temp_initial_layer",     "55" },
+        { "cool_plate_temp_initial_layer",          "55" },
+        { "textured_cool_plate_temp_initial_layer", "55" },
+        { "eng_plate_temp_initial_layer",           "55" },
+        { "hot_plate_temp_initial_layer",           "55" },
+        { "textured_plate_temp_initial_layer",      "55" },
+        { "skirt_loops",                            "0" },
+        { "brim_type",                              "no_brim" },
+        { "enable_support",                         "0" },
+        { "layer_change_gcode",                     "G92 E0\n" },
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    print.is_BBL_printer() = true;
+    REQUIRE(print.extruders(true).size() == 1);
+
+    const std::string gcode = Test::gcode(print);
+    CHECK(header_int(gcode, "first_layer_bed_temperature") == 55);
+    CHECK(header_int(gcode, "first_layer_temperature") == 215);
+}
+
 TEST_CASE("The G-code header names the first object's filament when printing by object", "[GCode][U1]")
 {
     DynamicPrintConfig config = two_filament_header_config();

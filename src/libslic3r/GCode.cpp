@@ -3142,12 +3142,17 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
             // SoftFever: write compatible image. Bed stays the max of used filaments
             // (Edge always heats to the highest bed temp). Nozzle is the first printing
-            // filament when tool ordering already exists; otherwise filament 0. The U1
-            // trailer (non-BBL) uses the captured initial_extruder_id below.
+            // filament when tool ordering already exists. On a single-filament plate
+            // (no wipe tower; by-object skips ToolOrdering) first_extruder() is empty
+            // / unsigned(-1), so fall back to the first used filament. The U1 trailer
+            // (non-BBL) uses the captured initial_extruder_id below.
             int first_layer_bed_temperature = get_bed_temperature_max(print, true);
             unsigned int bbl_first_filament = 0;
-            if (const unsigned int fe = print.tool_ordering().first_extruder(); fe != (unsigned int) -1)
+            if (const unsigned int fe = print.tool_ordering().first_extruder();
+                !print.tool_ordering().empty() && fe != (unsigned int) -1)
                 bbl_first_filament = fe;
+            else if (const std::vector<unsigned int> used = print.extruders(true); !used.empty())
+                bbl_first_filament = used.front();
             file.write_format("; first_layer_bed_temperature = %d\n", first_layer_bed_temperature);
             file.write_format("; first_layer_temperature = %d\n",
                               get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
