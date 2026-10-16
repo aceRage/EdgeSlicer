@@ -18,7 +18,9 @@
 //   - while the LAN serves, the cloud's own answers, notifications and status for this printer are
 //     dropped (only answers to requests the route sent through the cloud get through), so the page
 //     sees every message once;
-//   - when the WebSocket drops (keep-alive pings), or two LAN answers in a row time out, everything
+//   - a write (not read-only) sent again while the first still runs is not run twice: the new id is
+//     answered with the first one's answer; a slow write never counts as a lost answer;
+//   - when the WebSocket drops (keep-alive pings), or two reads in a row time out, everything
 //     goes through the cloud again at once; the LAN is retried after 5/15/30/60 s, then every 2 min.
 // Uploads are unchanged: the page already sends files to the printer's HTTP port 80.
 //
@@ -39,7 +41,8 @@ namespace GUI {
 struct U1WsDeps
 {
     U1LocalFirst::Timing timing;
-    long long request_timeout_ms { 10000 }; // a LAN answer later than this counts as lost
+    long long request_timeout_ms { 10000 }; // a read answered later than this counts as lost
+    long long write_max_ms { 600000 };      // a write still unanswered after this is forgotten
     int       connect_timeout_ms { 4000 };
     int       idle_timeout_ms { 8000 };      // WebSocket keep-alive: silent this long = gone
     int       ws_port { 80 };

@@ -84,6 +84,12 @@ struct U1WsRoute::State
         std::string payload, method;
         long long   sent_at { 0 };
         bool        own { false }; // the route's own request (probe, subscribe replay)
+        // A write (anything not read-only): method + params, so the same write sent again while
+        // this one still runs is not run twice (the page re-sends after its own 3 s timeout, and a
+        // G-code like a tool change answers only when it has finished).
+        std::string              signature;
+        std::vector<std::string> extra_ids; // ids of the same write sent again (JSON text)
+        bool                     late_logged { false };
     };
     std::map<std::string, Pending> pending;   // sent over the LAN, waiting for the answer
     std::set<std::string>          cloud_ids; // sent through the cloud while the LAN serves
@@ -235,8 +241,15 @@ static void on_ws_message(const WsStatePtr& s, int generation, const std::string
         publish_cloud(s, sn + "/request", p.payload);
         return;
     }
-    if (active)
-        deliver(s, sn + "/response", text);
+    if (!active)
+        return;
+    deliver(s, sn + "/response", text);
+    // The same write sent again while it ran: every id the page used gets the answer.
+    for (const std::string& extra : p.extra_ids) {
+        json copy  = j;
+        copy["id"] = json::parse(extra, nullptr, false);
+        deliver(s, sn + "/response", copy.dump());
+    }
 }
 
 static void on_ws_closed(const WsStatePtr& s, int generation, const std::string& why)
@@ -396,7 +409,8 @@ static void attempt(const WsStatePtr& s, const std::string& sn)
 
 static void check_timeouts(const WsStatePtr& s)
 {
-    std::vector<U1WsRoute::State::Pending> late;
+    std::vector<U1WsRoute::State::Pending> late_reads;
+    std::vector<std::string>               slow_writes;
     std::string                            sn;
     bool                                   give_up = false;
     {
@@ -406,31 +420,47 @@ static void check_timeouts(const WsStatePtr& s)
         sn                = s->sn;
         const long long t = s->now();
         for (auto it = s->pending.begin(); it != s->pending.end();) {
-            if (t - it->second.sent_at < s->deps.request_timeout_ms) {
+            U1WsRoute::State::Pending& p   = it->second;
+            const long long            age = t - p.sent_at;
+            if (age < s->deps.request_timeout_ms) {
                 ++it;
                 continue;
             }
-            if (!it->second.own) {
-                late.push_back(it->second);
-                ++s->timeouts_in_row;
-                if (U1LocalFirst::is_idempotent_method(it->second.method)) {
-                    const json j = json::parse(it->second.payload, nullptr, false);
-                    s->cloud_ids.insert(U1LocalFirst::rpc_id_key(j));
-                }
+            if (p.own) {
+                it = s->pending.erase(it);
+                continue;
             }
-            it = s->pending.erase(it);
+            if (U1LocalFirst::is_idempotent_method(p.method)) {
+                // A read that never came back: ask the cloud (safe twice), and count it.
+                late_reads.push_back(p);
+                ++s->timeouts_in_row;
+                const json j = json::parse(p.payload, nullptr, false);
+                s->cloud_ids.insert(U1LocalFirst::rpc_id_key(j));
+                it = s->pending.erase(it);
+                continue;
+            }
+            // A write is still running on the printer (a tool change, homing, a long macro): its
+            // answer comes when it is done and is delivered then. It never counts towards the
+            // fallback and is never sent again. Forgotten only after write_max_ms.
+            if (age >= s->deps.write_max_ms) {
+                it = s->pending.erase(it);
+                continue;
+            }
+            if (!p.late_logged) {
+                p.late_logged = true;
+                slow_writes.push_back(p.method);
+            }
+            ++it;
         }
         give_up = s->timeouts_in_row >= 2;
     }
-    for (const auto& p : late) {
-        if (U1LocalFirst::is_idempotent_method(p.method))
-            publish_cloud(s, sn + "/request", p.payload); // only reads: safe to ask twice
-        else
-            BOOST_LOG_TRIVIAL(warning) << "[U1WsRoute] route #" << s->number << ": no LAN answer to " << p.method
-                                       << "; not sent again (it may have run)";
-    }
+    for (const auto& p : late_reads)
+        publish_cloud(s, sn + "/request", p.payload); // only reads: safe to ask twice
+    for (const auto& m : slow_writes)
+        BOOST_LOG_TRIVIAL(info) << "[U1WsRoute] route #" << s->number << ": " << m
+                                << " is still running on the printer; its answer is delivered when it comes";
     if (give_up)
-        fall_back(s, "LAN answers timed out");
+        fall_back(s, "LAN answers to reads timed out");
 }
 
 static void run(WsStatePtr s)
@@ -588,9 +618,27 @@ MqttRoute::Result U1WsRoute::publish(const std::string& topic, const std::string
                 m->cloud_ids.insert(key);
             return Result::NotMine; // the cloud session's own publish
         }
-        ws              = m->ws;
-        m->pending[key] = { payload, method, m->now(), false };
+        const bool  write     = !U1LocalFirst::is_idempotent_method(method);
+        std::string signature;
+        if (write) {
+            signature = method + "|" + (j.contains("params") ? j["params"].dump() : std::string());
+            for (auto& kv : m->pending)
+                if (!kv.second.own && kv.second.signature == signature) {
+                    // Still running on the printer: do not run it twice; answer this id too.
+                    kv.second.extra_ids.push_back(j["id"].dump());
+                    BOOST_LOG_TRIVIAL(info) << "[U1WsRoute] route #" << m->number << ": " << method
+                                            << " sent again while it still runs; not repeated";
+                    return Result::Ok;
+                }
+        }
+        ws                      = m->ws;
+        m->pending[key]         = { payload, method, m->now(), false };
+        m->pending[key].signature = signature;
     }
+    // EARLY-ACK HOOK (owner, 2026-10-15: not yet): a write the page times out on quickly (its
+    // printer.gcode.script waits 3 s, a tool change takes longer) could be answered here with an
+    // early "ok" for the page while the real answer is swallowed. Decide after checking whether
+    // the cloud path times out on the same button.
     if (ws && ws->send(payload))
         return Result::Ok;
     {

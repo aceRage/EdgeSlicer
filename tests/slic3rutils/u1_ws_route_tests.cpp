@@ -129,6 +129,12 @@ struct WsPage
         std::string msg;
         return cloud->Publish(sn + "/request", json({ { "jsonrpc", "2.0" }, { "method", method }, { "id", id } }).dump(), 1, msg);
     }
+    bool ask_with(const std::string& method, const json& params, long long id)
+    {
+        std::string msg;
+        const json  req = { { "jsonrpc", "2.0" }, { "method", method }, { "params", params }, { "id", id } };
+        return cloud->Publish(sn + "/request", req.dump(), 1, msg);
+    }
     std::vector<json> answers(long long id) const
     {
         std::lock_guard<std::mutex> lk(*mtx);
@@ -278,5 +284,40 @@ TEST_CASE("U1 WebSocket route end to end: the LAN drops, the cloud takes over, t
     REQUIRE(wait_until([&] { return page.route->on_lan(); }, 10000));
     REQUIRE(page.ask("server.info", 33));
     CHECK(page.via(33) == "local");
+    close_ws_page(page);
+}
+
+TEST_CASE("U1 WebSocket route end to end: a slow G-code re-sent by the page runs once and is not a fallback", "[.][U1LocalFirstE2E]")
+{
+    GUI::U1WsRoute::reset_pacing();
+    const Ports p = ports();
+    REQUIRE(p.ok());
+    get(p.moonraker, "/fake/up");
+    const int ran_before = method_count(p, "printer.gcode.script");
+    WsPage    page       = open_ws_page(p, "U1WSSLOW01");
+    REQUIRE(wait_until([&] { return page.route->on_lan(); }, 10000));
+
+    // The page's toolhead button: printer.gcode.script "T0 A0" with its own 3 s timeout, sent again
+    // twice. The fake printer answers after 5 s (the route's own read timeout here is 3 s).
+    const json params = { { "script", "T0 A0" } };
+    REQUIRE(page.ask_with("printer.gcode.script", params, 41));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE(page.ask_with("printer.gcode.script", params, 42));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE(page.ask_with("printer.gcode.script", params, 43));
+
+    // Every id gets the one answer, once; the printer ran it once; the route stayed on the LAN.
+    for (long long id : { 41LL, 42LL, 43LL }) {
+        INFO("id " << id);
+        CHECK(page.via(id, 9000) == "local");
+        CHECK(page.answers(id).size() == 1);
+    }
+    CHECK(method_count(p, "printer.gcode.script") == ran_before + 1);
+    CHECK(page.route->on_lan());
+    // A different script is a different write: it runs.
+    REQUIRE(page.ask_with("printer.gcode.script", json({ { "script", "T1 A0" } }), 44));
+    CHECK(page.via(44, 9000) == "local");
+    CHECK(method_count(p, "printer.gcode.script") == ran_before + 2);
+    CHECK(page.route->on_lan());
     close_ws_page(page);
 }

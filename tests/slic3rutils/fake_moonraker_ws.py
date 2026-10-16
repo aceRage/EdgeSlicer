@@ -10,7 +10,8 @@ on one port, for testing the read-only probe (Utils/U1MoonrakerProbe) without a 
   GET /fake/drop                                            close every WebSocket and refuse new ones (503)
   GET /fake/up                                              accept WebSockets again
 
-Every answer carries "via": "local" in its result. printer.objects.subscribe also starts a
+Every answer carries "via": "local" in its result. printer.gcode.script answers only after
+--gcode-delay seconds (default 5), as a tool change does. printer.objects.subscribe also starts a
 notify_status_update. Any other method answers -32601 "Method not found" (an MQTT-only method).
 
   --no-ws   answer the WebSocket upgrade with 404 (a printer whose WebSocket is not reachable)
@@ -138,14 +139,20 @@ class Handler(socketserver.StreamRequestHandler):
     def websocket(self):
         with LOCK:
             SOCKETS.add(self.request)
+        wlock = threading.Lock()  # answers can come from the slow-G-code timer threads too
+
+        def send(opcode, payload):
+            with wlock:
+                send_frame(self.wfile, opcode, payload)
+
         try:
             while True:
                 opcode, data = read_frame(self.rfile)
                 if opcode == 8:
-                    send_frame(self.wfile, 8, data[:2])
+                    send(8, data[:2])
                     return
                 if opcode == 9:
-                    send_frame(self.wfile, 10, data)
+                    send(10, data)
                     continue
                 if opcode != 1:
                     continue
@@ -154,16 +161,27 @@ class Handler(socketserver.StreamRequestHandler):
                 with LOCK:
                     METHODS.append(method)
                 note = {"jsonrpc": "2.0", "method": "notify_proc_stat_update", "params": [{"cpu_temp": 40.0}]}
-                send_frame(self.wfile, 1, json.dumps(note).encode())
+                send(1, json.dumps(note).encode())
+                if method == "printer.gcode.script":
+                    # Like a tool change: Moonraker answers only when the G-code has finished.
+                    res = {"jsonrpc": "2.0", "id": req.get("id"), "result": {"via": "local", "script": "ok"}}
+
+                    def later(res=res):
+                        try:
+                            send(1, json.dumps(res).encode())
+                        except OSError:
+                            pass
+                    threading.Timer(ARGS.gcode_delay, later).start()
+                    continue
                 if method in ANSWERS:
                     res = {"jsonrpc": "2.0", "id": req.get("id"), "result": ANSWERS[method]}
                 else:
                     res = {"jsonrpc": "2.0", "id": req.get("id"), "error": {"code": -32601, "message": "Method not found"}}
-                send_frame(self.wfile, 1, json.dumps(res).encode())
+                send(1, json.dumps(res).encode())
                 if method == "printer.objects.subscribe":
                     update = {"jsonrpc": "2.0", "method": "notify_status_update",
                               "params": [{"print_stats": {"state": "standby"}, "via": "local"}, 2.0]}
-                    send_frame(self.wfile, 1, json.dumps(update).encode())
+                    send(1, json.dumps(update).encode())
         except (EOFError, ConnectionError, OSError, ValueError):
             return
         finally:
@@ -181,6 +199,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--no-ws", action="store_true")
+    ap.add_argument("--gcode-delay", type=float, default=5.0, help="seconds before printer.gcode.script answers")
     ARGS = ap.parse_args()
     srv = Server(("127.0.0.1", ARGS.port), Handler)
     print("READY %d" % ARGS.port, flush=True)
