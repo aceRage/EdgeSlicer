@@ -8,10 +8,10 @@
         "Hot Plate"
     ],
     "cool_plate_temp": [
-        "0"
+        "40"
     ],
     "cool_plate_temp_initial_layer": [
-        "0"
+        "40"
     ],
     "filament_end_gcode": [
         ""
