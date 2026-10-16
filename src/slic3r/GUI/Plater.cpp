@@ -13928,6 +13928,15 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
 {
     Plater::TakeSnapshot snapshot(q, "Reset Project", UndoRedo::SnapshotType::ProjectSeparator);
 
+    // Stop the background slicing / G-code export first, before anything below touches what it is
+    // working on: the GCodeProcessorResult it may still be filling (freed below), and the plates and
+    // prints partplate_list.reinit() deletes. PartPlateList::clear() deletes the plates before the
+    // prints, and only ~Print cancels the background thread - while it waited, the export's status
+    // callback (PartPlate::update_slice_context, which captures the plate) ran on a deleted
+    // PartPlate: EXC_BAD_ACCESS on macOS when the window was closed mid-export, since the close
+    // handler resets the project. The background_process.reset() further down is then a no-op stop.
+    this->background_process.stop();
+
     clear_warnings();
 
     set_project_filename("");
