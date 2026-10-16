@@ -393,8 +393,14 @@ TEST_CASE("a failed removal is counted and reported, not hidden", "[WinFirewall]
 
 TEST_CASE("the helper only writes its log to a file it recognises", "[WinFirewall]")
 {
+#ifdef _WIN32
     CHECK(is_valid_fix_log_path("C:\\Users\\me\\AppData\\Local\\Temp\\edgeslicer_firewall_fix_1234.log"));
     CHECK(is_valid_fix_log_path("C:\\Temp\\EdgeSlicer_Firewall_Fix_9.LOG"));
+#else
+    // "C:\..." is not an absolute path outside Windows; the file name rules are the same.
+    CHECK(is_valid_fix_log_path("/var/folders/xy/T/edgeslicer_firewall_fix_1234.log"));
+    CHECK(is_valid_fix_log_path("/tmp/EdgeSlicer_Firewall_Fix_9.LOG"));
+#endif
     CHECK_FALSE(is_valid_fix_log_path("edgeslicer_firewall_fix_1234.log"));                 // relative
     CHECK_FALSE(is_valid_fix_log_path("C:\\Windows\\System32\\drivers\\etc\\hosts"));
     CHECK_FALSE(is_valid_fix_log_path("C:\\Temp\\edgeslicer_firewall_fix_.log"));
