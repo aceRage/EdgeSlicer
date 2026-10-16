@@ -189,6 +189,24 @@ HubIdentity  identity_from_seed_hex(const std::string& private_hex);
 // looks at them.
 bool trusted_proxy_headers(bool peer_is_loopback, bool via_relay);
 
+// What a request on the main listener is, as far as Tailscale Serve goes. Serve always marks what
+// it forwards (X-Forwarded-Host / -For, X-Forwarded-Proto on HTTPS, Tailscale-Funnel-Request on a
+// Funnel request) and adds Tailscale-User-Login only for a signed-in tailnet user - never for a
+// tagged device and never for Funnel. So a request with Serve's marks and no login is somebody the
+// allow-list cannot check, and it is refused (it used to fall through to the token alone).
+//   Local   - not through Serve (or headers not trusted): the LAN / loopback rules apply
+//   Tailnet - through Serve with a login: the allow-list decides
+//   NoLogin - through Serve with no login (tagged device, Funnel): refused, except a tagged device
+//             presenting a client token whose owner allowed that (HubClients::Client::tagged_ok);
+//             Funnel is refused always
+// `headers_trusted` is trusted_proxy_headers(); when false everything else is ignored.
+enum class ServeRequest { Local, Tailnet, NoLogin };
+
+// ---- per-client tokens (HubClients.hpp) ----
+// The hex SHA-256 settings.json keeps instead of a client's token. "" for "".
+std::string client_token_hash(const std::string& token);
+ServeRequest classify_serve_request(bool headers_trusted, const std::string& ts_login, bool forwarded, bool funnel);
+
 // ---- the pairing document's identity and origins ----
 // The part of pair_json() that is pure: the three named origins and this hub's identity. Pulled
 // out so the shape the apps read generically can be exercised without a running hub. `relay` is
