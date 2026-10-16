@@ -28,6 +28,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -36,6 +37,13 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace Slic3r;
 using namespace Slic3r::untrusted;
@@ -714,6 +722,27 @@ TEST_CASE("archive entry names may not leave the extraction folder", "[Untrusted
         CHECK_FALSE(is_safe_archive_relative_path(p));
 }
 
+TEST_CASE("archive entry names refuse a trailing dot or space and DOS device names", "[Untrusted][ZipSlip]")
+{
+    // Windows strips a trailing dot or space, so "foo." / "foo " would collide with "foo".
+    for (const char *p : {"foo.", "foo ", "a/foo.", "a/foo ", "foo.bar.", "dir /x", "x/dir."})
+        CHECK_FALSE(is_safe_archive_relative_path(p));
+    // Device names, including with an extension: "nul.txt" opens the null device.
+    for (const char *p : {"CON", "con", "PRN", "AUX", "NUL", "nul.txt", "NUL.3mf", "COM1", "com1.stl", "LPT9",
+                          "lpt1.gcode", "a/NUL", "a/nul.txt", "COM9.x", "aux.foo.bar"})
+        CHECK_FALSE(is_safe_archive_relative_path(p));
+    // Ordinary names that only look similar stay allowed.
+    for (const char *p : {"console.stl", "Auxiliaries/cover.png", "connection.json", "prntr.3mf", "COM10", "LPT0",
+                          "COM0.txt", "nulish.txt", "a..b", "..a"})
+        CHECK(is_safe_archive_relative_path(p));
+
+    std::string out;
+    for (const char *p : {"foo.", "foo ", "nul.txt", "CON", "a\\nul.txt", "./COM1.stl", "..a/b.."}) {
+        INFO(p);
+        CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
+    }
+}
+
 // The Windows ANSI code page maps these look-alikes to '.', '/', '\\' and ':' when a UTF-8 name is
 // narrowed (WideCharToMultiByte best-fit), so a name made of them is "../x" to a narrow fopen.
 // The validator refuses them on every platform; ordinary non-ASCII names stay fine.
@@ -753,7 +782,7 @@ TEST_CASE("archive entry names are normalised before they are judged", "[Untrust
     CHECK(normalized("dir/") == "dir");
     CHECK(normalized("dir\\") == "dir");
     CHECK(normalized(".//a/") == "a");
-    CHECK(normalized("..a/b..") == "..a/b..");
+    CHECK(normalized("..a/b") == "..a/b");
     CHECK(normalized("caf\xC3\xA9\\\xE6\xB5\x8B.json") == "caf\xC3\xA9/\xE6\xB5\x8B.json");
 
     // Nothing to extract.
@@ -765,7 +794,8 @@ TEST_CASE("archive entry names are normalised before they are judged", "[Untrust
     for (const char *p : {"", "..", "../x", "a/../x", "a/..", ".\\..\\x", "a\\..\\..\\x", "./../x", "a//../../x",
                           "/x", "//x", "\\x", "\\\\x", "\\\\server\\share\\x", "//server/share/x", "\\\\?\\C:\\x", "/C:/x",
                           "C:", "C:x", "C:/x", "C:\\x", ".\\C:\\x", "a/b:stream", "a\\b:stream",
-                          "a/.../b", "a/.. /b", "a/. /b", "x\x01y", "x\ty",
+                          "a/.../b", "a/.. /b", "a/. /b", "x\x01y", "x\ty", "foo.", "foo ", "..a/b..",
+                          "nul.txt", "CON", "a\\NUL.3mf",
                           "\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\x8F" "x", "a\\\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\xBC" "x"}) {
         INFO(p);
         CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
@@ -2030,6 +2060,59 @@ TEST_CASE("is_path_within_root confines a candidate to the extraction root", "[U
 #endif
 
     boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("is_path_within_root canonicalizes a dest path longer than MAX_PATH", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_within_root_long_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path root = dir / std::string(240, 'r');
+    REQUIRE(root.string().size() > 260);
+    fs::create_directories(extended_path(root));
+
+    CHECK(is_path_within_root(root, root / "a"));
+    CHECK(is_path_within_root(root, root / "a" / "b.json"));
+    CHECK(is_path_within_root(root, root));
+    CHECK_FALSE(is_path_within_root(root, root / ".." / "x"));
+    CHECK_FALSE(is_path_within_root(root, dir / "x"));
+
+    // A junction (or directory symlink) under that long root must be followed the same way
+    // prefixed I/O follows it, so a hop that lands outside is rejected.
+    const fs::path outside  = dir / "outside";
+    const fs::path junction = root / "escape";
+    fs::create_directories(outside);
+    bool linked = false;
+#ifdef _WIN32
+    {
+        const std::string cmd = "cmd /c mklink /J \"" + junction.string() + "\" \"" + outside.string() + "\" >nul 2>&1";
+        linked                = (std::system(cmd.c_str()) == 0);
+        if (!linked) {
+            const std::wstring link_w   = extended_path(junction).wstring();
+            const std::wstring target_w = extended_path(outside).wstring();
+            DWORD              flags    = SYMBOLIC_LINK_FLAG_DIRECTORY;
+#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+            flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+            linked = CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(), flags) != 0;
+        }
+    }
+#else
+    {
+        boost::system::error_code lec;
+        fs::create_directory_symlink(outside, junction, lec);
+        linked = !lec;
+    }
+#endif
+    if (linked) {
+        CHECK_FALSE(is_path_within_root(root, junction / "secret.txt"));
+        CHECK(is_path_within_root(root, root / "safe.txt"));
+        boost::system::error_code rec;
+        fs::remove(extended_path(junction), rec);
+    }
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(root), ec);
     fs::remove_all(dir, ec);
 }
 
