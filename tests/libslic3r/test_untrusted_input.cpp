@@ -1934,7 +1934,11 @@ void write_zip_entries(const fs::path &zip_file, const std::vector<std::pair<std
 {
     mz_zip_archive zip;
     mz_zip_zero_struct(&zip);
+#ifdef _WIN32
+    REQUIRE(open_zip_writer(&zip, boost::nowide::narrow(zip_file.wstring())));
+#else
     REQUIRE(open_zip_writer(&zip, zip_file.string()));
+#endif
     for (const auto &entry : entries)
         REQUIRE(mz_zip_writer_add_mem(&zip, entry.first.c_str(), entry.second.data(), entry.second.size(), MZ_DEFAULT_COMPRESSION));
     REQUIRE(mz_zip_writer_finalize_archive(&zip));
@@ -2049,6 +2053,75 @@ TEST_CASE("extract_archive_confined writes a well-formed nested archive under th
     CHECK(read_text_file(target / "vendor" / "machine" / "printer.json") == "{\"b\":2}");
 
     boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+std::string read_text_file_io(const fs::path &file)
+{
+    const fs::path io = extended_path(file);
+#ifdef _WIN32
+    boost::nowide::ifstream in(boost::nowide::narrow(io.wstring()), std::ios::binary);
+#else
+    boost::nowide::ifstream in(io.string(), std::ios::binary);
+#endif
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("extract_archive_confined writes files under a target path longer than MAX_PATH", "[Untrusted][ZipSlip][MinizExtension]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_long_dest_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path zip_file = dir / "bundle.zip";
+    // Directory entries are explicit: extract_archive_confined recreates directories only for them.
+    write_zip_entries(zip_file, {{"vendor/", ""}, {"vendor/machine/", ""}, {"vendor.json", "{\"a\":1}"},
+                                 {"vendor/machine/printer.json", "{\"b\":2}"}});
+
+    // One 240-char component keeps every name below the NTFS 255 limit while pushing the full
+    // target path past the 260-char MAX_PATH the Win32 APIs enforce when LongPathsEnabled is off.
+    const fs::path target = dir / std::string(240, 'd');
+    REQUIRE(target.string().size() > 260);
+    fs::create_directories(extended_path(target));
+
+    std::string err;
+    REQUIRE(extract_archive_confined(zip_file, target, err));
+    CHECK(err.empty());
+    // Verify through extended-length paths, otherwise the checks themselves are bounded by MAX_PATH.
+    CHECK(fs::is_directory(extended_path(target / "vendor")));
+    CHECK(read_text_file_io(target / "vendor.json") == "{\"a\":1}");
+    CHECK(read_text_file_io(target / "vendor" / "machine" / "printer.json") == "{\"b\":2}");
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(target), ec);
+    CHECK_FALSE(ec);
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("A zip archive under a path longer than MAX_PATH can be written and read", "[Untrusted][ZipSlip][MinizExtension]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_long_zip_%%%%%%%%");
+    fs::create_directories(dir);
+
+    const fs::path long_dir = dir / std::string(240, 'z');
+    fs::create_directories(extended_path(long_dir));
+    const fs::path zip_file = long_dir / "bundle.zip";
+    REQUIRE(zip_file.string().size() > 260);
+
+    write_zip_entries(zip_file, {{"vendor.json", "{\"a\":1}"}});
+
+    const fs::path target = dir / "out";
+    fs::create_directories(target);
+    std::string err;
+    REQUIRE(extract_archive_confined(zip_file, target, err));
+    CHECK(err.empty());
+    CHECK(read_text_file(target / "vendor.json") == "{\"a\":1}");
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(long_dir), ec);
+    CHECK_FALSE(ec);
     fs::remove_all(dir, ec);
 }
 
