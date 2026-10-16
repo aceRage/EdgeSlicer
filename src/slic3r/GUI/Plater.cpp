@@ -9580,16 +9580,21 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
 
     auto list = obj->amsList;
     for (auto ams : list) {
-        char n = ams.first.front() - '0' + 'A';
         for (auto tray : ams.second->trayList) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__
                 << boost::format(": ams %1% tray %2% id %3% color %4%") % ams.first % tray.first % tray.second->setting_id % tray.second->color;
-            char t = tray.first.front() - '0' + '1';
+            // Keyed by the whole ams id: keying by its first digit put an AMS HT (ams "128") on
+            // the key of AMS "1" slot 1, and an H2C with two AMS 2 Pro units lost its HT.
+            const BambuExtruderMap::AmsListEntry entry = BambuExtruderMap::ams_list_entry(ams.first, tray.first);
+            if (entry.key < 0) {
+                BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": invalid ams " << ams.first << " tray " << tray.first;
+                continue;
+            }
             DynamicPrintConfig tray_config;
             tray_config.set_key_value("filament_id", new ConfigOptionStrings{ tray.second->setting_id });
             tray_config.set_key_value("tag_uid", new ConfigOptionStrings{ tray.second->tag_uid });
             tray_config.set_key_value("filament_type", new ConfigOptionStrings{ tray.second->type });
-            tray_config.set_key_value("tray_name", new ConfigOptionStrings{ std::string(1, n) + std::string(1, t) });
+            tray_config.set_key_value("tray_name", new ConfigOptionStrings{ entry.tray_name });
             tray_config.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + tray.second->color).GetAsString(wxC2S_HTML_SYNTAX)) });
             tray_config.set_key_value("filament_exist", new ConfigOptionBools{ tray.second->is_exists });
 
@@ -9597,7 +9602,7 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
             for (int i = 0; i < tray.second->cols.size(); ++i) {
                 tray_config.opt<ConfigOptionStrings>("filament_multi_colors")->values.push_back(into_u8(wxColour("#" + tray.second->cols[i]).GetAsString(wxC2S_HTML_SYNTAX)));
             }
-            filament_ams_list.emplace(((n - 'A') * 4 + t - '1'), std::move(tray_config));
+            filament_ams_list.emplace(entry.key, std::move(tray_config));
         }
     }
     return filament_ams_list;
