@@ -18,7 +18,9 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Support/SupportOverhangHighlight.hpp"
+#include "libslic3r/Support/TreeSupport.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include "test_data.hpp"
@@ -465,6 +467,289 @@ TEST_CASE("Support highlight benchmark: preview overlay build", "[.][SupportOver
                 run("3DBenchy", model, type);
             else
                 std::cout << "3DBenchy: could not load " << path << std::endl;
+            release_PlateData_list(plate_data);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 3: before slicing (support_overhang_preview(), overhang_facets_from_layers()).
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// Object layers as generate_object_layers() returns them: low, high pairs from z = 0.
+std::vector<double> uniform_layer_zs(const indexed_triangle_set &its, double first_layer_height, double layer_height)
+{
+    float zmax = 0.f;
+    for (const stl_vertex &v : its.vertices)
+        zmax = std::max(zmax, v.z());
+    std::vector<double> zs;
+    double bottom = 0., h = first_layer_height;
+    while (bottom + 0.5 * h < double(zmax)) {
+        zs.push_back(bottom);
+        zs.push_back(bottom + h);
+        bottom += h;
+        h = layer_height;
+    }
+    return zs;
+}
+
+SupportOverhangPreview preview_of(const indexed_triangle_set &its, const SupportOverhangRule &rule, double layer_height,
+                                  bool plate_only = false, const indexed_triangle_set *negative = nullptr)
+{
+    SupportOverhangPreviewInput in;
+    in.parts.push_back({ std::make_shared<const indexed_triangle_set>(its), Transform3d::Identity(), false });
+    if (negative != nullptr)
+        in.parts.push_back({ std::make_shared<const indexed_triangle_set>(*negative), Transform3d::Identity(), true });
+    in.layer_zs         = uniform_layer_zs(its, layer_height, layer_height);
+    in.rule             = rule;
+    in.build_plate_only = plate_only;
+    return support_overhang_preview(in);
+}
+
+// Option (b) per facet, for comparison: a downward facet flatter than the rule's angle, not on the bed.
+std::vector<uint8_t> angle_overhang_facets(const indexed_triangle_set &its, double first_layer_height, double layer_height,
+                                           const SupportOverhangRule &rule)
+{
+    std::vector<uint8_t> flags(its.indices.size(), 0);
+    const double limit = -std::cos(rule.effective_angle_deg(layer_height) * M_PI / 180.);
+    for (size_t f = 0; f < its.indices.size(); ++ f) {
+        const stl_triangle_vertex_indices &idx = its.indices[f];
+        const Vec3f a = its.vertices[idx(0)], b = its.vertices[idx(1)], c = its.vertices[idx(2)];
+        if (std::max({ a.z(), b.z(), c.z() }) <= 0.5 * first_layer_height)
+            continue;
+        const Vec3f nrm = (b - a).cross(c - a);
+        const float len = nrm.norm();
+        if (len > 0.f && double(nrm.z() / len) < limit)
+            flags[f] = 1;
+    }
+    return flags;
+}
+
+} // namespace
+
+TEST_CASE("Support highlight core: overhangs from the object's slices match TreeSupport::detect_overhangs", "[SupportHighlight]")
+{
+    struct ModelCase { const char *name; TriangleMesh mesh; };
+    std::vector<ModelCase> models;
+    models.push_back({ "frustum 30 deg", TriangleMesh(inverted_frustum_its(30.)) });
+    models.push_back({ "frustum 50 deg", TriangleMesh(inverted_frustum_its(50.)) });
+    models.push_back({ "sphere r15", make_sphere(15., 2. * PI / 120.) });
+
+    for (ModelCase &m : models) {
+        DynamicPrintConfig config = support_config("tree(auto)", 40, 0.2);
+        Print print;
+        Model model;
+        init_print({ m.mesh }, print, model, config);
+        print.process();
+
+        PrintObject *object = print.get_object(size_t(0));
+        // The generator's own overhangs: run its detection again on the finished slices (after
+        // print.process() Layer::loverhangs holds the auto-lift overhangs instead).
+        TreeSupport tree_support(*object, object->slicing_parameters());
+        tree_support.support_type = stTreeAuto;
+        tree_support.detect_overhangs();
+
+        std::vector<ExPolygons> lslices;
+        std::vector<double>     heights;
+        for (const Layer *layer : object->layers()) {
+            lslices.push_back(layer->lslices);
+            heights.push_back(layer->height);
+        }
+        const std::vector<ExPolygons> ours = support_overhangs_from_slices(lslices, heights, support_overhang_rule(*object));
+
+        double area_theirs = 0., area_ours = 0., area_xor = 0.;
+        for (size_t i = 1; i < lslices.size(); ++ i) {
+            const ExPolygons &theirs = object->get_layer(int(i))->loverhangs;
+            area_theirs += area_mm2(theirs);
+            area_ours   += area_mm2(ours[i]);
+            area_xor    += area_mm2(diff_ex(theirs, ours[i])) + area_mm2(diff_ex(ours[i], theirs));
+        }
+        const double denom    = std::max(area_theirs, area_ours);
+        const double mismatch = denom > 0. ? area_xor / denom : 0.;
+        INFO(m.name << ": generator " << area_theirs << " mm2, ours " << area_ours << " mm2, mismatch " << mismatch);
+        if (std::string(m.name).find("sphere") == std::string::npos)
+            CHECK(mismatch < 0.01);
+        else
+            // The generator adds sharp tails at the sphere's foot; the rest must agree.
+            CHECK(mismatch < 0.15);
+    }
+}
+
+TEST_CASE("Support highlight preview: convex corners are found by the layer core", "[SupportHighlight]")
+{
+    // The 50 degree frustum of the rule test: no facet is flatter than the 41 degree rule, but
+    // the corner edges slope at 40.1 degrees and both generators support them. The layer-based
+    // preview finds those layers.
+    for (const char *type : { "normal(auto)", "tree(auto)" }) {
+        const SupportOverhangRule    rule = support_overhang_rule(support_config(type, 40, 0.2));
+        const SupportOverhangPreview p    = preview_of(inverted_frustum_its(50.), rule, 0.2);
+        INFO(type);
+        CHECK(p.layers_with_overhangs() > 10);
+    }
+}
+
+TEST_CASE("Support highlight preview: facets mapped from the layer overhangs", "[SupportHighlight]")
+{
+    for (const double slope : { 30., 50. }) {
+        const indexed_triangle_set   its  = inverted_frustum_its(slope);
+        const SupportOverhangRule    rule = support_overhang_rule(support_config("tree(auto)", 40, 0.2));
+        const SupportOverhangPreview p    = preview_of(its, rule, 0.2);
+        REQUIRE(p.part_facets.size() == 1);
+        const std::vector<uint8_t> &by_layer = p.part_facets.front();
+        const std::vector<uint8_t>  by_angle = angle_overhang_facets(its, 0.2, 0.2, rule);
+        REQUIRE(by_layer.size() == 12);
+        const bool expect_sides = slope < 41.;
+        for (size_t f = 0; f < 12; ++ f) {
+            INFO("slope " << slope << " facet " << f);
+            const bool side = f >= 4;
+            CHECK(bool(by_layer[f]) == (side && expect_sides));
+            CHECK(bool(by_layer[f]) == bool(by_angle[f]));
+        }
+    }
+}
+
+TEST_CASE("Support highlight preview: layer mapping vs angle on a sphere", "[SupportHighlight]")
+{
+    // How far the two per-facet answers drift apart on a curved surface. The layer answer follows
+    // the generator; the angle answer is phase 1.
+    indexed_triangle_set its = its_make_sphere(15., 2. * PI / 180.);
+    for (stl_vertex &v : its.vertices) v.z() += 15.f;
+    for (const char *type : { "normal(auto)", "tree(auto)" }) {
+        const SupportOverhangRule    rule     = support_overhang_rule(support_config(type, 40, 0.2));
+        const std::vector<uint8_t>   by_layer = preview_of(its, rule, 0.2).part_facets.front();
+        const std::vector<uint8_t>   by_angle = angle_overhang_facets(its, 0.2, 0.2, rule);
+        size_t n_layer = 0, n_angle = 0, n_diff = 0;
+        for (size_t f = 0; f < by_layer.size(); ++ f) {
+            n_layer += by_layer[f] != 0;
+            n_angle += by_angle[f] != 0;
+            n_diff  += (by_layer[f] != 0) != (by_angle[f] != 0);
+        }
+        INFO(type << ": facets " << by_layer.size() << ", by layer " << n_layer << ", by angle " << n_angle << ", differ " << n_diff);
+        CHECK(n_layer > 0);
+        CHECK(double(n_diff) < 0.1 * double(std::max(n_layer, n_angle)));
+    }
+}
+
+TEST_CASE("Support highlight preview: build plate only, supports off, negative volumes, transforms", "[SupportHighlight]")
+{
+    // The base / column / cap of the overlay test: the cap's underside hangs over the base.
+    indexed_triangle_set its = box_its(-10., -10., 0., 20., 20., 4.);
+    its_merge(its, box_its(-2., -2., 4., 4., 4., 6.));
+    its_merge(its, box_its(-8., -8., 10., 16., 16., 2.));
+    const SupportOverhangRule on = support_overhang_rule(support_config("normal(auto)", 40, 0.2));
+
+    auto count = [](const std::vector<uint8_t> &flags, uint8_t v) { return size_t(std::count(flags.begin(), flags.end(), v)); };
+    {
+        const SupportOverhangPreview p = preview_of(its, on, 0.2);
+        CHECK(count(p.part_facets.front(), 1) > 0);
+        CHECK(count(p.part_facets.front(), 2) == 0);
+    }
+    {
+        // On build plate only: the cap is over the base, so amber.
+        const SupportOverhangPreview p = preview_of(its, on, 0.2, true);
+        CHECK(count(p.part_facets.front(), 1) == 0);
+        CHECK(count(p.part_facets.front(), 2) > 0);
+    }
+    {
+        // Supports off: the same overhang, amber.
+        const SupportOverhangRule off = support_overhang_rule(support_config("normal(auto)", 40, 0.2, { { "enable_support", 0 } }));
+        const SupportOverhangPreview p = preview_of(its, off, 0.2);
+        CHECK(count(p.part_facets.front(), 1) == 0);
+        CHECK(count(p.part_facets.front(), 2) > 0);
+    }
+    {
+        // A negative volume taking the whole cap away leaves nothing to hold up.
+        const indexed_triangle_set cut = box_its(-9., -9., 9.9, 18., 18., 3.);
+        const SupportOverhangPreview p = preview_of(its, on, 0.2, false, &cut);
+        CHECK(count(p.part_facets.front(), 1) == 0);
+        CHECK(p.part_facets.back().empty());
+    }
+    {
+        // Placed by a mirroring transformation (X): the windings flip, the same facets overhang.
+        Transform3d mirror = Transform3d::Identity();
+        mirror.scale(Vec3d(-1., 1., 1.));
+        SupportOverhangPreviewInput in;
+        in.parts.push_back({ std::make_shared<const indexed_triangle_set>(inverted_frustum_its(30.)), mirror, false });
+        in.layer_zs = uniform_layer_zs(inverted_frustum_its(30.), 0.2, 0.2);
+        in.rule     = on;
+        const SupportOverhangPreview p = support_overhang_preview(in);
+        const std::vector<uint8_t> &f = p.part_facets.front();
+        REQUIRE(f.size() == 12);
+        for (size_t k = 0; k < 12; ++ k) {
+            INFO("facet " << k);
+            CHECK(bool(f[k]) == (k >= 4));
+        }
+    }
+}
+
+TEST_CASE("Support highlight preview: cancel stops the run", "[SupportHighlight]")
+{
+    SupportOverhangPreviewInput in;
+    in.parts.push_back({ std::make_shared<const indexed_triangle_set>(inverted_frustum_its(30.)), Transform3d::Identity(), false });
+    in.layer_zs = uniform_layer_zs(inverted_frustum_its(30.), 0.2, 0.2);
+    in.rule     = support_overhang_rule(support_config("normal(auto)", 40, 0.2));
+    struct Cancelled {};
+    CHECK_THROWS_AS(support_overhang_preview(in, []() { throw Cancelled(); }), Cancelled);
+}
+
+TEST_CASE("Support highlight benchmark: pre-slice preview (slice + detect + map)", "[.][SupportHighlightBench]")
+{
+    auto run = [](const char *name, const SupportOverhangPreviewInput &in) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const SupportOverhangPreview p = support_overhang_preview(in);
+        const double total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        size_t facets = 0, flagged = 0;
+        for (const std::vector<uint8_t> &f : p.part_facets) {
+            facets += f.size();
+            for (uint8_t v : f) flagged += v != 0;
+        }
+        std::cout << name << ": " << facets << " facets, " << p.slice_z.size() << " layers: slice " << p.slice_ms << " ms, detect " << p.detect_ms
+                  << " ms, map " << p.map_ms << " ms, total " << total << " ms, flagged " << flagged << std::endl;
+    };
+    for (const char *type : { "normal(auto)", "tree(auto)" }) {
+        for (const double h : { 0.2, 0.1 }) {
+            const SupportOverhangRule rule = support_overhang_rule(support_config(type, 30, h));
+            for (const int steps : { 180, 1000 }) {
+                indexed_triangle_set its = its_make_sphere(40., 2. * PI / double(steps));
+                for (stl_vertex &v : its.vertices) v.z() += 40.f;
+                SupportOverhangPreviewInput in;
+                in.parts.push_back({ std::make_shared<const indexed_triangle_set>(std::move(its)), Transform3d::Identity(), false });
+                in.layer_zs = uniform_layer_zs(*in.parts.front().its, h, h);
+                in.rule     = rule;
+                run((std::string("sphere r40 ") + type + " " + std::to_string(h)).c_str(), in);
+            }
+            // 3DBenchy from the handy models, on the bed.
+            Model model;
+            DynamicPrintConfig cfg;
+            ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
+            PlateDataPtrs plate_data;
+            std::vector<Preset*> presets;
+            bool is_bbl = false;
+            Semver version;
+            const std::string path = std::string(TEST_DATA_DIR) + "/../../resources/handy_models/3DBenchy.3mf";
+            if (load_bbs_3mf(path.c_str(), &cfg, &ctxt, &model, &plate_data, &presets, &is_bbl, &version, nullptr, LoadStrategy::LoadModel) &&
+                ! model.objects.empty()) {
+                ModelObject *mo = model.objects.front();
+                if (mo->instances.empty())
+                    mo->add_instance();
+                mo->ensure_on_bed();
+                SupportOverhangPreviewInput in;
+                for (const ModelVolume *mv : mo->volumes)
+                    if (mv->is_model_part())
+                        in.parts.push_back({ std::make_shared<const indexed_triangle_set>(mv->mesh().its),
+                                             mo->instances.front()->get_matrix() * mv->get_matrix(), false });
+                indexed_triangle_set world;
+                for (const auto &part : in.parts) {
+                    indexed_triangle_set t = *part.its;
+                    for (stl_vertex &v : t.vertices) v = (part.trafo * v.cast<double>()).cast<float>();
+                    its_merge(world, t);
+                }
+                in.layer_zs = uniform_layer_zs(world, h, h);
+                in.rule     = rule;
+                run((std::string("3DBenchy ") + type + " " + std::to_string(h)).c_str(), in);
+            }
             release_PlateData_list(plate_data);
         }
     }

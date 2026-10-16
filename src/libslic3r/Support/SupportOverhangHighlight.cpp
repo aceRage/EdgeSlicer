@@ -11,10 +11,13 @@
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
 #include "../Tesselate.hpp"
+#include "../TriangleMeshSlicer.hpp"
 
 #include <tbb/parallel_for.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 
 namespace Slic3r {
@@ -293,6 +296,324 @@ std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObj
     for (SupportOverhangOverlayLayer &l : layers)
         if (! l.supported.empty() || ! l.unsupported.empty())
             out.emplace_back(std::move(l));
+    return out;
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Phase 3: before slicing
+// ---------------------------------------------------------------------------------------------
+
+namespace support_hl_detail {
+
+// Clip a triangle to lo <= z <= hi and return the XY outline of the remainder (Sutherland-Hodgman
+// against the two planes; at most 5 points).
+static void clip_triangle_to_slab(const Vec3f (&tri)[3], float lo, float hi, std::vector<Vec2d> &out)
+{
+    std::vector<Vec3d> poly { tri[0].cast<double>(), tri[1].cast<double>(), tri[2].cast<double>() };
+    std::vector<Vec3d> next;
+    auto clip = [&](double plane, bool keep_above) {
+        next.clear();
+        const size_t m = poly.size();
+        for (size_t k = 0; k < m; ++ k) {
+            const Vec3d &a = poly[k];
+            const Vec3d &b = poly[(k + 1) % m];
+            const bool   ina = keep_above ? a.z() >= plane : a.z() <= plane;
+            const bool   inb = keep_above ? b.z() >= plane : b.z() <= plane;
+            if (ina)
+                next.push_back(a);
+            if (ina != inb) {
+                const double t = (plane - a.z()) / (b.z() - a.z());
+                next.push_back(a + t * (b - a));
+            }
+        }
+        poly.swap(next);
+    };
+    clip(lo, true);
+    if (poly.size() >= 3)
+        clip(hi, false);
+    out.clear();
+    if (poly.size() >= 3)
+        for (const Vec3d &p : poly)
+            out.emplace_back(p.x(), p.y());
+}
+
+// Point-in-polygons (nonzero winding) with the edges bucketed in horizontal rows, so one query
+// only looks at the few edges crossing its row. A Clipper intersection per facet piece walks the
+// whole layer outline every time and was the bottleneck on large meshes.
+struct RowLocator
+{
+    BoundingBox bbox;
+    double      y0 { 0. }, row_h { 1. };
+    std::vector<std::vector<std::array<double, 4>>> rows;
+
+    void build(const Polygons &polys)
+    {
+        rows.clear();
+        bbox = get_extents(polys);
+        if (! bbox.defined)
+            return;
+        y0 = double(bbox.min.y());
+        const double height = double(bbox.max.y() - bbox.min.y()) + 1.;
+        size_t nedges = 0;
+        for (const Polygon &p : polys)
+            nedges += p.points.size();
+        const size_t nrows = std::clamp<size_t>(nedges / 4, 1, 4096);
+        row_h = height / double(nrows);
+        rows.assign(nrows, {});
+        for (const Polygon &p : polys) {
+            const size_t m = p.points.size();
+            for (size_t k = 0; k < m; ++ k) {
+                const Point &a = p.points[k];
+                const Point &b = p.points[(k + 1) % m];
+                if (a.y() == b.y())
+                    continue;
+                const double ylo = double(std::min(a.y(), b.y())), yhi = double(std::max(a.y(), b.y()));
+                const size_t r0 = size_t(std::max(0., std::floor((ylo - y0) / row_h)));
+                const size_t r1 = std::min(nrows - 1, size_t(std::max(0., std::floor((yhi - y0) / row_h))));
+                for (size_t r = r0; r <= r1; ++ r)
+                    rows[r].push_back({ double(a.x()), double(a.y()), double(b.x()), double(b.y()) });
+            }
+        }
+    }
+
+    bool inside(double x, double y) const
+    {
+        if (rows.empty() || x < bbox.min.x() || x > bbox.max.x() || y < bbox.min.y() || y > bbox.max.y())
+            return false;
+        const size_t r = std::min(rows.size() - 1, size_t(std::max(0., std::floor((y - y0) / row_h))));
+        int winding = 0;
+        for (const std::array<double, 4> &e : rows[r]) {
+            const double ax = e[0], ay = e[1], bx = e[2], by = e[3];
+            const double side = (bx - ax) * (y - ay) - (x - ax) * (by - ay);
+            if (ay <= y) {
+                if (by > y && side > 0.)
+                    ++ winding;
+            } else if (by <= y && side < 0.)
+                -- winding;
+        }
+        return winding != 0;
+    }
+};
+
+} // namespace support_hl_detail
+
+std::vector<uint8_t> overhang_facets_from_layers(const indexed_triangle_set    &its,
+                                                 const Transform3d             &trafo,
+                                                 const std::vector<float>      &slice_z,
+                                                 const std::vector<ExPolygons> &areas,
+                                                 const std::vector<double>     &grow,
+                                                 double                         min_coverage)
+{
+    std::vector<uint8_t> flags(its.indices.size(), 0);
+    const size_t         n = std::min(slice_z.size(), areas.size());
+    if (n < 2)
+        return flags;
+
+    bool any = false;
+    for (size_t i = 1; i < n && ! any; ++ i)
+        any = ! areas[i].empty();
+    if (! any)
+        return flags;
+
+    std::vector<support_hl_detail::RowLocator> locators(n);
+    tbb::parallel_for(tbb::blocked_range<size_t>(1, n), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i) {
+            if (areas[i].empty())
+                continue;
+            const double g = i < grow.size() ? grow[i] : 0.;
+            locators[i].build(g > 0. ? offset(areas[i], float(scale_(g)), SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS) : to_polygons(areas[i]));
+        }
+    });
+
+    // World vertices once; a mirroring transformation flips the winding, so the normal too.
+    std::vector<Vec3f> vertices(its.vertices.size());
+    for (size_t k = 0; k < its.vertices.size(); ++ k)
+        vertices[k] = (trafo * its.vertices[k].cast<double>()).cast<float>();
+    const bool mirrored = trafo.matrix().block<3, 3>(0, 0).determinant() < 0.;
+
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, its.indices.size()), [&](const tbb::blocked_range<size_t> &range) {
+        std::vector<Vec2d> piece;
+        for (size_t f = range.begin(); f < range.end(); ++ f) {
+            const stl_triangle_vertex_indices &idx = its.indices[f];
+            const Vec3f tri[3] = { vertices[idx(0)], vertices[idx(1)], vertices[idx(2)] };
+            Vec3f       nrm    = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+            if (mirrored)
+                nrm = -nrm;
+            const float len = nrm.norm();
+            if (len <= 0.f || nrm.z() >= -1e-6f * len)
+                continue; // degenerate, upward or vertical
+            const float zmin = std::min({ tri[0].z(), tri[1].z(), tri[2].z() });
+            const float zmax = std::max({ tri[0].z(), tri[1].z(), tri[2].z() });
+            const bool  horizontal = zmax - zmin < 1e-5f;
+
+            // Layer i's overhang is made by the facets between slice_z[i-1] and slice_z[i]. A
+            // downward horizontal facet lying on a slicing plane belongs to the slab above it
+            // (TriangleMeshSlicer convention).
+            size_t i0 = size_t(std::upper_bound(slice_z.begin(), slice_z.begin() + n, zmin) - slice_z.begin());
+            size_t i1 = horizontal ? i0 : size_t(std::lower_bound(slice_z.begin(), slice_z.begin() + n, zmax) - slice_z.begin());
+            i0 = std::max<size_t>(i0, 1);
+            i1 = std::min(i1, n - 1);
+            double total = 0., covered = 0.;
+            for (size_t i = i0; i <= i1 && i0 <= i1; ++ i) {
+                if (horizontal) {
+                    piece = { tri[0].head<2>().cast<double>(), tri[1].head<2>().cast<double>(), tri[2].head<2>().cast<double>() };
+                } else {
+                    support_hl_detail::clip_triangle_to_slab(tri, slice_z[i - 1], slice_z[i], piece);
+                    if (piece.size() < 3)
+                        continue;
+                }
+                // Area of the (convex) piece and its sample points: the centroid and the midpoints
+                // between the centroid and each corner.
+                double a = 0.;
+                Vec2d  c = Vec2d::Zero();
+                for (size_t k = 0; k < piece.size(); ++ k) {
+                    const Vec2d &p = piece[k], &q = piece[(k + 1) % piece.size()];
+                    a += p.x() * q.y() - q.x() * p.y();
+                    c += p;
+                }
+                a = std::abs(0.5 * a);
+                if (a <= 0.)
+                    continue;
+                total += a;
+                const support_hl_detail::RowLocator &loc = locators[i];
+                if (loc.rows.empty())
+                    continue;
+                c /= double(piece.size());
+                size_t hits = 0;
+                auto test = [&](const Vec2d &p) { hits += loc.inside(scale_(p.x()), scale_(p.y())) ? 1 : 0; };
+                test(c);
+                for (const Vec2d &p : piece)
+                    test(0.5 * (c + p));
+                covered += a * double(hits) / double(piece.size() + 1);
+            }
+            if (total > 0. && covered >= min_coverage * total)
+                flags[f] = 1;
+        }
+    });
+    return flags;
+}
+
+size_t SupportOverhangPreview::layers_with_overhangs() const
+{
+    size_t cnt = 0;
+    for (size_t i = 0; i < supported.size(); ++ i)
+        cnt += (! supported[i].empty() || (i < unsupported.size() && ! unsupported[i].empty())) ? 1 : 0;
+    return cnt;
+}
+
+SupportOverhangPreview support_overhang_preview(const SupportOverhangPreviewInput &input, const std::function<void()> &throw_on_cancel)
+{
+    using clock = std::chrono::steady_clock;
+    auto ms = [](clock::time_point a, clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    auto cancel = [&throw_on_cancel]() { if (throw_on_cancel) throw_on_cancel(); };
+
+    SupportOverhangPreview out;
+    out.part_facets.assign(input.parts.size(), {});
+    const size_t n = input.layer_zs.size() / 2;
+    if (n < 2)
+        return out;
+
+    std::vector<double> heights(n);
+    out.slice_z.resize(n);
+    out.print_z.resize(n);
+    for (size_t i = 0; i < n; ++ i) {
+        const double lo = input.layer_zs[2 * i], hi = input.layer_zs[2 * i + 1];
+        heights[i]     = hi - lo;
+        out.slice_z[i] = float(0.5 * (lo + hi));
+        out.print_z[i] = hi;
+    }
+
+    // 1. Slice the parts at the object's own layers, negative volumes cut away.
+    const auto t0 = clock::now();
+    std::vector<ExPolygons> lslices(n), negative(n);
+    bool has_negative = false;
+    MeshSlicingParamsEx params;
+    params.closing_radius = input.closing_radius;
+    for (const SupportOverhangPreviewInput::Part &part : input.parts) {
+        if (! part.its || part.its->indices.empty())
+            continue;
+        params.trafo = part.trafo;
+        std::vector<ExPolygons> s = slice_mesh_ex(*part.its, out.slice_z, params, [&cancel]() { cancel(); });
+        std::vector<ExPolygons> &dst = part.negative ? negative : lslices;
+        has_negative |= part.negative;
+        for (size_t i = 0; i < n && i < s.size(); ++ i)
+            append(dst[i], std::move(s[i]));
+    }
+    cancel();
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i) {
+            lslices[i] = union_ex(lslices[i]);
+            if (has_negative && ! negative[i].empty())
+                lslices[i] = diff_ex(lslices[i], union_ex(negative[i]));
+        }
+    });
+    const auto t1 = clock::now();
+    cancel();
+
+    // 2. The rule, floating islands, then who holds what up.
+    std::vector<ExPolygons> overhangs = support_overhangs_from_slices(lslices, heights, input.rule);
+    cancel();
+    std::vector<Polygons> covered;
+    if (input.build_plate_only && input.rule.auto_support) {
+        covered.assign(n, {});
+        for (size_t i = 1; i < n; ++ i)
+            covered[i] = union_(covered[i - 1], to_polygons(lslices[i - 1]));
+    }
+    out.supported.assign(n, {});
+    out.unsupported.assign(n, {});
+    tbb::parallel_for(tbb::blocked_range<size_t>(1, n), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i) {
+            ExPolygons o = std::move(overhangs[i]);
+            // Sharp tails: an island with nothing under it falls without support, whatever its slope.
+            bool floating = false;
+            for (const ExPolygon &island : lslices[i])
+                if (intersection_ex(ExPolygons{ island }, lslices[i - 1]).empty()) {
+                    o.push_back(island);
+                    floating = true;
+                }
+            if (floating)
+                o = union_ex(o);
+            if (o.empty())
+                continue;
+            if (! input.rule.auto_support) {
+                out.unsupported[i] = std::move(o);
+            } else if (! covered.empty() && ! covered[i].empty()) {
+                out.unsupported[i] = intersection_ex(o, covered[i]);
+                out.supported[i]   = diff_ex(o, covered[i]);
+            } else {
+                out.supported[i] = std::move(o);
+            }
+        }
+    });
+    const auto t2 = clock::now();
+    cancel();
+
+    // 3. Back onto the facets. A tree overhang is the band past the grown lower layer: grow it
+    // back so the whole facet strip that makes it is covered.
+    std::vector<double> grow;
+    if (input.rule.tree) {
+        grow.assign(n, 0.);
+        for (size_t i = 1; i < n; ++ i)
+            grow[i] = std::max(0., input.rule.lower_layer_offset(heights[i - 1]));
+    }
+    for (size_t p = 0; p < input.parts.size(); ++ p) {
+        const SupportOverhangPreviewInput::Part &part = input.parts[p];
+        if (part.negative || ! part.its)
+            continue;
+        std::vector<uint8_t> flags = overhang_facets_from_layers(*part.its, part.trafo, out.slice_z, out.supported, grow);
+        cancel();
+        const std::vector<uint8_t> amber = overhang_facets_from_layers(*part.its, part.trafo, out.slice_z, out.unsupported, grow);
+        for (size_t f = 0; f < flags.size(); ++ f)
+            if (flags[f] == 0 && amber[f] != 0)
+                flags[f] = 2;
+        out.part_facets[p] = std::move(flags);
+        cancel();
+    }
+    const auto t3 = clock::now();
+    out.slice_ms  = ms(t0, t1);
+    out.detect_ms = ms(t1, t2);
+    out.map_ms    = ms(t2, t3);
     return out;
 }
 

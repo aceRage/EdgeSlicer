@@ -6,8 +6,14 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/ObjectID.hpp"
 #include "slic3r/GUI/3DScene.hpp"
+#include "slic3r/GUI/GLModel.hpp"
+#include "libslic3r/Support/SupportOverhangHighlight.hpp"
 
 #include <boost/thread.hpp>
+
+#include <atomic>
+#include <memory>
+#include <thread>
 
 namespace Slic3r::GUI {
 
@@ -15,6 +21,7 @@ class GLGizmoFdmSupports : public GLGizmoPainterBase
 {
 public:
     GLGizmoFdmSupports(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
+    ~GLGizmoFdmSupports() override;
 
     void render_painter_gizmo() override;
 
@@ -83,6 +90,40 @@ private:
 
     bool   m_highlight_reset_pending = true;  // set the slider to the rule's angle on the next frame
     bool   m_highlight_like_auto     = true;  // remembered in AppConfig "support_paint_highlight_mode"
+
+    // Phase 3, "By layer (before slicing)": a background quick slice of the object at its real
+    // layer heights runs the support rule plus the slice-only extras (support_overhang_preview())
+    // and the result is drawn over the facets (red: automatic supports hold it up, amber: an
+    // overhang they leave alone). A layer stepper cuts the object at one layer and draws that
+    // layer's overhang areas on the cut. Remembered in AppConfig "support_paint_highlight_by_layer".
+    struct LayerPreviewJob
+    {
+        std::atomic<bool>                       cancel { false };
+        std::atomic<bool>                       done   { false };
+        std::unique_ptr<SupportOverhangPreview> result;
+        std::string                             error;
+    };
+    void   update_layer_preview();
+    void   stop_layer_preview_job();
+    void   clear_layer_preview();
+    void   rebuild_layer_preview_models();
+    void   set_layer_preview_layer(int layer);
+    void   render_layer_preview() const;
+    void   paint_layer_preview_facets(bool block);
+    std::string layer_preview_key(const ModelObject &mo, int instance_idx) const;
+
+    bool                                    m_highlight_by_layer = false;
+    std::shared_ptr<LayerPreviewJob>        m_layer_preview_job;
+    std::thread                             m_layer_preview_thread;
+    std::string                             m_layer_preview_key;      // the inputs of the job started last
+    std::unique_ptr<SupportOverhangPreview> m_layer_preview;          // the result on screen
+    std::vector<int>                        m_layer_preview_volumes;  // model volume index per result part (-1: negative)
+    std::vector<std::pair<GLModel, GLModel>> m_layer_preview_models;  // per model part (mesh_id): red, amber
+    GLModel                                 m_layer_cut_supported;    // the stepped layer's areas, world
+    GLModel                                 m_layer_cut_unsupported;
+    int                                     m_layer_preview_layer = 0; // 0: whole object, else 1-based layer
+    size_t                                  m_layer_preview_facets = 0;
+    bool                                    m_layer_preview_too_big = false;
 
     //BBS: add support preview logic
     void init_print_instance();
