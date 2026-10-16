@@ -3274,7 +3274,7 @@ void MachineObject::note_status_received()
         BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " first status " << ms << " ms after selection";
 }
 
-// The top-level namespace and command of a payload ({"print":{"command":...}}), "" when it has none.
+// Whether a payload ({"print":{"command":...}}) is a command a secured printer rejects unsigned.
 static bool payload_needs_signature(const std::string& json_str)
 {
     const json parsed = json::parse(json_str, nullptr, false);
