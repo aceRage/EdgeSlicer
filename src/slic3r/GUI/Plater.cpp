@@ -185,6 +185,7 @@
 #include "InstanceCheck.hpp"
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include "MsgDialog.hpp"
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
@@ -3419,25 +3420,32 @@ Sidebar::Sidebar(Plater *parent)
             }
             return out;
         };
-        auto populate_all_combo = [all_combo, mixed_nozzles, filament_choices]() {
+        // Favourite filaments on top, with stars (Orca #13946, extended). The list lives as long as the
+        // handlers bound to the combo that hold it.
+        auto all_list = std::make_shared<FavoriteFilamentsUI::FavoriteComboList>(all_combo);
+        auto populate_all_combo = [all_list, mixed_nozzles, filament_choices]() {
             PresetBundle* pb = wxGetApp().preset_bundle;
             if (pb == nullptr)
                 return;
-            wxString cur = all_combo->GetStringSelection();
-            all_combo->Clear();
+            const int      cur_entry = all_list->selected_entry();
+            const wxString cur       = cur_entry >= 0 ? all_list->entries()[cur_entry].text : wxString();
+            std::vector<FavoriteFilamentsUI::FavoriteComboList::Entry> entries;
             if (mixed_nozzles()) {
+                // A family is named like a system filament's alias, which is its favourite key.
                 for (const std::string& family : NozzleSync::families(filament_choices()))
-                    all_combo->AppendString(wxString::FromUTF8(family));
+                    entries.push_back({ wxString::FromUTF8(family), family });
             } else {
                 for (const Preset& preset : pb->filaments) {
                     if (!preset.is_visible || !preset.is_compatible)
                         continue;
-                    all_combo->AppendString(wxString::FromUTF8(preset.name));
+                    entries.push_back({ wxString::FromUTF8(preset.name), FavoriteFilamentsUI::key_for(preset) });
                 }
             }
-            int idx = all_combo->FindString(cur);
-            if (idx != wxNOT_FOUND)
-                all_combo->SetSelection(idx);
+            int sel = -1;
+            for (size_t i = 0; i < entries.size() && sel < 0; ++i)
+                if (entries[i].text == cur)
+                    sel = int(i);
+            all_list->set_entries(std::move(entries), sel);
         };
         populate_all_combo();
         // Repopulate on every open so printer/preset changes are always reflected.
@@ -13970,6 +13978,15 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
 {
     Plater::TakeSnapshot snapshot(q, "Reset Project", UndoRedo::SnapshotType::ProjectSeparator);
 
+    // Stop the background slicing / G-code export first, before anything below touches what it is
+    // working on: the GCodeProcessorResult it may still be filling (freed below), and the plates and
+    // prints partplate_list.reinit() deletes. PartPlateList::clear() deletes the plates before the
+    // prints, and only ~Print cancels the background thread - while it waited, the export's status
+    // callback (PartPlate::update_slice_context, which captures the plate) ran on a deleted
+    // PartPlate: EXC_BAD_ACCESS on macOS when the window was closed mid-export, since the close
+    // handler resets the project. The background_process.reset() further down is then a no-op stop.
+    this->background_process.stop();
+
     clear_warnings();
 
     set_project_filename("");
@@ -22089,9 +22106,10 @@ void Plater::fill_bed_with_instances()
     // clearance uses - and pass the two separately.
     double tmpl_brim = 0.;
     {
-        const auto *bt = mo->get_config_value<ConfigOptionEnum<BrimType>>(global_config, "brim_type");
+        // Base option + virtual getInt(): a typed ConfigOptionEnum downcast of a generic enum is UB.
+        const ConfigOption *bt = mo->config.has("brim_type") ? mo->config.option("brim_type") : global_config.option("brim_type");
         const auto *bw = mo->get_config_value<ConfigOptionFloat>(global_config, "brim_width");
-        if (bt != nullptr && bw != nullptr && bt->value != btNoBrim)
+        if (bt != nullptr && bt->type() == coEnum && bw != nullptr && static_cast<BrimType>(bt->getInt()) != btNoBrim)
             tmpl_brim = std::max(0., bw->value);
     }
 

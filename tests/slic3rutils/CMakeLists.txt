@@ -46,6 +46,7 @@ add_executable(${_TEST_NAME}_tests
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
     first_request_gate_tests.cpp
+    bind_list_refresh_tests.cpp
     ssdp_connect_type_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
@@ -114,6 +115,7 @@ add_executable(${_TEST_NAME}_tests
     test_texture_island_view.cpp
     bind_detect_guard_tests.cpp
     ams_filament_order_tests.cpp
+    favorite_filaments_tests.cpp
     teardown_join_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
