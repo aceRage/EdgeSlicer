@@ -6253,8 +6253,12 @@ void MachineObject::parse_new_info(json print)
     /*fun2 - may be longer than 64 bits, read without a border (Bambu DevUtil::get_flag_bits_no_border)*/
     if (print.contains("fun2") && print["fun2"].is_string()) {
         const std::string fun2 = print["fun2"].get<std::string>();
-        if (!fun2.empty())
+        if (!fun2.empty()) {
             is_support_remote_dry = GUI::AmsDual::fun2_supports_remote_dry(fun2);
+            // Bambu Studio: is_support_print_with_emmc = fun2 bit 0 (H2 series, P2S). A LAN print
+            // may then go to the printer's internal storage when no card is inserted.
+            is_support_print_with_emmc = GUI::AmsDual::flag_bits_no_border(fun2, 0) == 1;
+        }
     }
 
     /*aux*/
