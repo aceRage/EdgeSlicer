@@ -3274,8 +3274,31 @@ void MachineObject::note_status_received()
         BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " first status " << ms << " ms after selection";
 }
 
+// The top-level namespace and command of a payload ({"print":{"command":...}}), "" when it has none.
+static bool payload_needs_signature(const std::string& json_str)
+{
+    const json parsed = json::parse(json_str, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object())
+        return false;
+    for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+        if (!it.value().is_object()) continue;
+        auto cmd = it.value().find("command");
+        if (cmd == it.value().end() || !cmd->is_string()) continue;
+        return GUI::bambu_command_needs_signature(it.key(), cmd->get<std::string>());
+    }
+    return false;
+}
+
 int MachineObject::publish_json(std::string json_str, int qos, int flag)
 {
+    // Secured printer (Developer Mode off): it rejects every command that is not signed by Bambu and
+    // EdgeSlicer does not sign. Commands the host fires on its own never get here (they check
+    // skip_auto_command_if_secured first), so one that does is the user's: say why it is not sent.
+    if (is_secured_mode() && payload_needs_signature(json_str)) {
+        BOOST_LOG_TRIVIAL(info) << "publish_json: " << dev_id << " is in secured mode, not sending an unsigned command";
+        show_secured_mode_message(false);
+        return -1;
+    }
     // This selection's session is still being dialled: the plug-in has nothing to publish on and
     // would refuse the command (-1). Keep it and send it once the session is up
     // (note_session_up). The caller gets 0 - the command is accepted, it just waits.
@@ -3341,6 +3364,10 @@ void MachineObject::note_agent_command_sent(const std::string& command)
 
 std::string MachineObject::command_get_auto_nozzle_mapping(const std::string& request_json)
 {
+    // Fired by the send dialog on its own; a secured printer would reject it as unsigned. "" is the
+    // "could not publish" answer, which the callers already treat as "ask again at send time".
+    if (skip_auto_command_if_secured("get_auto_nozzle_mapping"))
+        return "";
     try {
         json j = json::parse(request_json);
         const std::string seq = std::to_string(MachineObject::m_sequence_id++);
@@ -3384,6 +3411,68 @@ static bool log_first_time(const std::string &key)
     if (s_seen.size() > 1024)
         s_seen.clear();
     return s_seen.insert(key).second;
+}
+
+bool MachineObject::is_secured_mode() const
+{
+    const int state = m_secured_state.load();
+    if (state != 0)
+        return state == 2;
+    return m_unsigned_refused.load();
+}
+
+void MachineObject::update_secured_mode_from_fun(const std::string& fun)
+{
+    bool secured = false;
+    if (!GUI::bambu_fun_secured_bit(fun, secured))
+        return;
+    const int next = secured ? 2 : 1;
+    const int prev = m_secured_state.exchange(next);
+    if (prev != next)
+        BOOST_LOG_TRIVIAL(info) << "secured mode: " << dev_id << " reports "
+                                << (secured ? "secured (Developer Mode off), unsigned control commands are not sent"
+                                            : "Developer Mode on")
+                                << (prev == 0 ? " (first report)" : " (changed)");
+}
+
+bool MachineObject::skip_auto_command_if_secured(const char* what) const
+{
+    if (!is_secured_mode())
+        return false;
+    if (log_first_time(std::string("secured_skip|") + dev_id + "|" + what))
+        BOOST_LOG_TRIVIAL(info) << "secured mode: " << dev_id << " not sending " << what << " (printer rejects unsigned commands)";
+    return true;
+}
+
+void MachineObject::show_secured_mode_message(bool once_per_session)
+{
+    if (once_per_session) {
+        if (!log_first_time("secured_msg|" + dev_id))
+            return;
+    } else {
+        // A user action shows it each time, but a poll that keeps retrying must not stack toasts.
+        static std::mutex s_mutex;
+        static std::map<std::string, std::chrono::steady_clock::time_point> s_last;
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(s_mutex);
+        auto it = s_last.find(dev_id);
+        if (it != s_last.end() && now - it->second < std::chrono::seconds(20))
+            return;
+        s_last[dev_id] = now;
+    }
+    BOOST_LOG_TRIVIAL(warning) << "secured mode: " << dev_id << " " << GUI::bambu_secured_mode_message(false);
+    const wxString text = wxString::FromUTF8(GUI::bambu_secured_mode_message().c_str());
+    GUI::wxGetApp().CallAfter([text] { GUI::wxGetApp().push_notification(text); });
+}
+
+void MachineObject::note_unsigned_refusal(const std::string& command, int err_code)
+{
+    m_unsigned_refused = true;
+    const int state = m_secured_state.load();
+    BOOST_LOG_TRIVIAL(info) << "secured mode: " << dev_id << " refused \"" << command << "\" as unsigned (err_code "
+                            << err_code << "), print.fun says "
+                            << (state == 2 ? "secured" : state == 1 ? "Developer Mode on" : "nothing yet");
+    show_secured_mode_message(true);
 }
 
 std::string MachineObject::setting_id_to_type(std::string setting_id, std::string tray_type)
@@ -3924,7 +4013,16 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                     int         command_err = 0;
                     json        action_json;
                     std::string refused_command;
-                    if (GUI::accept_command_refusal(jj, m_sent_commands, GUI::SentCommandTracker::Clock::now(),
+                    // An unsigned-command refusal from a secured printer (err_code 84033543..84033548 /
+                    // "mqtt message verify failed") is not an error to dig into: say once that
+                    // Developer Mode is off, and do not open the raw error dialog for it.
+                    const int         reply_err    = jj.contains("err_code") && jj["err_code"].is_number_integer() ? jj["err_code"].get<int>() : 0;
+                    const std::string reply_result = jj.contains("result") && jj["result"].is_string() ? jj["result"].get<std::string>() : std::string();
+                    const std::string reply_reason = jj.contains("reason") && jj["reason"].is_string() ? jj["reason"].get<std::string>() : std::string();
+                    if (GUI::bambu_reply_is_unsigned_refusal(reply_err, reply_result, reply_reason)) {
+                        const std::string reply_cmd = jj.contains("command") && jj["command"].is_string() ? jj["command"].get<std::string>() : std::string();
+                        note_unsigned_refusal(reply_cmd, reply_err);
+                    } else if (GUI::accept_command_refusal(jj, m_sent_commands, GUI::SentCommandTracker::Clock::now(),
                                                     command_err, action_json, refused_command)) {
                         add_command_error_code_dlg(command_err, action_json, refused_command);
                     } else if (!refused_command.empty() && !GUI::is_status_or_info_command(refused_command)) {
@@ -6217,6 +6315,8 @@ void MachineObject::parse_new_info(json print)
 
     if (!fun.empty()) {
 
+        update_secured_mode_from_fun(fun);
+
         is_support_agora    = get_flag_bits(fun, 1);
         if (is_support_agora) is_support_tunnel_mqtt = false;
 
@@ -6625,6 +6725,9 @@ void MachineObject::update_printer_preset_name()
 
 void MachineObject::check_ams_filament_valid()
 {
+    // Resets AMS slots on its own when a preset is unknown; a secured printer rejects that as unsigned.
+    if (skip_auto_command_if_secured("ams_filament_setting"))
+        return;
     PresetBundle * preset_bundle = Slic3r::GUI::wxGetApp().preset_bundle;
     auto printer_model = MachineObject::get_preset_printer_model_name(this->printer_type);
     std::map<std::string, std::set<std::string>> need_checked_filament_id;

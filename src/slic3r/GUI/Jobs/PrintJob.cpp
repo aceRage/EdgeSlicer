@@ -466,6 +466,15 @@ void PrintJob::process(Ctl &ctl)
     // while refusals of anybody else's commands are not.
     if (obj) obj->note_agent_command_sent("project_file");
 
+    // A secured printer (Developer Mode off) rejects the unsigned project_file command, and
+    // EdgeSlicer never signs. Say so now instead of uploading the file and waiting for the refusal.
+    if (obj && obj->is_secured_mode()) {
+        const std::string secured_text = bambu_secured_mode_message();
+        BOOST_LOG_TRIVIAL(error) << "print_job: " << m_dev_id << " is in secured mode (Developer Mode off), not sending the print";
+        ctl.show_error_info(secured_text, 0, "", "");
+        return;
+    }
+
     auto wait_fn = [this, curr_percent, &obj](int state, std::string job_info) {
             BOOST_LOG_TRIVIAL(info) << "print_job: get_job_info = " << job_info;
 

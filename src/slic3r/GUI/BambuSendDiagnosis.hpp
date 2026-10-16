@@ -55,6 +55,34 @@ bool bambu_cloud_print_supported(bool ultranet_plugin);
 // software unless LAN Only Mode and Developer Mode are both on.
 bool bambu_reply_is_auth_refusal(const std::string& result, const std::string& reason);
 
+// ---- Secured mode (Developer Mode off) ----
+//
+// Bambu firmware with Authorization Control requires Bambu's signature on control commands. EdgeSlicer
+// cannot and never will sign, so a printer in that mode answers every unsigned print-namespace command
+// with result "failed", reason "mqtt message verify failed" and an err_code of 84033543..84033548
+// (0x05024007..0x0502400C). Status reads (pushall, info.get_version) still work.
+//
+// The printer's push_status reports which mode it is in: "fun" is a hex-string bitmask whose bit 29 is
+// clear in Developer Mode and set when secured.
+//
+// Sets `secured` and returns true when `fun` parsed; returns false (secured untouched) for an empty or
+// non-hex string, i.e. "mode not known". Only the leading hex digits are read, as stoull does.
+bool bambu_fun_secured_bit(const std::string& fun, bool& secured);
+
+// The err_code range the firmware uses for "unsigned command refused".
+bool bambu_err_code_is_unsigned_refusal(int err_code);
+
+// A reply to a command is the printer refusing it as unsigned: the err_code range, or the "verify
+// failed" wording, with a failed result. `err_code` is 0 when the reply carried none.
+bool bambu_reply_is_unsigned_refusal(int err_code, const std::string& result, const std::string& reason);
+
+// Whether a command in this top-level MQTT namespace is one a secured printer rejects when unsigned.
+// pushall ("pushing"), get_version ("info") and get_access_code are reads and still work.
+bool bambu_command_needs_signature(const std::string& ns, const std::string& command);
+
+// The one message every secured-printer path shows. translate=false keeps the English text.
+std::string bambu_secured_mode_message(bool translate = true);
+
 // What went wrong on a LAN attempt, from its result code, the last error text the plug-in reported
 // through the status callback, and whether the printer's own reply refused the command.
 enum class BambuLanFailure {

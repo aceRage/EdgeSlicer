@@ -2786,7 +2786,8 @@ void StatusPanel::update_ams(MachineObject *obj)
     }
     if (m_filament_setting_dlg) { m_filament_setting_dlg->obj = obj; }
 
-    if (obj && (obj->last_cali_version != obj->cali_version)) {
+    // Fired by the panel on its own (extrusion_cali_get); a secured printer would reject it as unsigned.
+    if (obj && (obj->last_cali_version != obj->cali_version) && !obj->skip_auto_command_if_secured("extrusion_cali_get")) {
         last_cali_version = obj->cali_version;
         PACalibExtruderInfo cali_info;
         cali_info.nozzle_diameter = obj->nozzle_diameter_or_preset(MAIN_NOZZLE_ID); // Orca #13255

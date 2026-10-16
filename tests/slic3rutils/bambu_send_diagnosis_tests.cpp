@@ -298,3 +298,76 @@ TEST_CASE("Abnormal storage is usable for a LAN send only when the user allowed 
     for (int state = -1; state <= 4; ++state)
         CHECK(bambu_storage_usable_for_lan(state, false) == (state == 1));
 }
+
+// Secured mode: a Bambu printer with Developer Mode off rejects every unsigned control command.
+// print.fun bit 29 tells the two modes apart; unknown (no report yet) must never count as secured.
+TEST_CASE("print.fun bit 29 tells secured mode from Developer Mode", "[BambuSendDiagnosis][Secured]")
+{
+    using Slic3r::GUI::bambu_fun_secured_bit;
+
+    bool secured = false;
+    REQUIRE(bambu_fun_secured_bit("20000000", secured));
+    CHECK(secured);                       // bit 29 set: 0x20000000
+    REQUIRE(bambu_fun_secured_bit("1FFFFFFF", secured));
+    CHECK_FALSE(secured);                 // every lower bit set, bit 29 clear
+    REQUIRE(bambu_fun_secured_bit("0", secured));
+    CHECK_FALSE(secured);
+    REQUIRE(bambu_fun_secured_bit("1FFFFFFFFFFFFFFF", secured)); // bits 30 and up do not matter...
+    CHECK(secured);                                              // ...but 0x1FFF... has bit 29 set
+    REQUIRE(bambu_fun_secured_bit("DFFFFFFFDFFFFFFF", secured)); // bit 29 cleared in a mostly-full mask
+    CHECK_FALSE(secured);
+    REQUIRE(bambu_fun_secured_bit("3ffeffff", secured)); // lower-case hex digits read the same
+    CHECK(secured);
+
+    // Not known: the flag is left alone and the call says so.
+    secured = false;
+    CHECK_FALSE(bambu_fun_secured_bit("", secured));
+    CHECK_FALSE(bambu_fun_secured_bit("zz", secured));
+    CHECK_FALSE(bambu_fun_secured_bit("-1", secured));
+    CHECK_FALSE(secured);
+    secured = true;
+    CHECK_FALSE(bambu_fun_secured_bit("", secured));
+    CHECK(secured);
+}
+
+TEST_CASE("The firmware's unsigned-command refusal is recognised", "[BambuSendDiagnosis][Secured]")
+{
+    using Slic3r::GUI::bambu_err_code_is_unsigned_refusal;
+    using Slic3r::GUI::bambu_reply_is_unsigned_refusal;
+
+    CHECK_FALSE(bambu_err_code_is_unsigned_refusal(84033542));
+    for (int code = 84033543; code <= 84033548; ++code)
+        CHECK(bambu_err_code_is_unsigned_refusal(code));
+    CHECK_FALSE(bambu_err_code_is_unsigned_refusal(84033549));
+    CHECK_FALSE(bambu_err_code_is_unsigned_refusal(0));
+
+    // The reply the owner's H2C sent to extrusion_cali_get.
+    CHECK(bambu_reply_is_unsigned_refusal(84033543, "failed", "mqtt message verify failed"));
+    CHECK(bambu_reply_is_unsigned_refusal(0, "failed", "mqtt message verify failed")); // wording alone
+    CHECK(bambu_reply_is_unsigned_refusal(84033545, "fail", ""));                       // code alone
+    CHECK_FALSE(bambu_reply_is_unsigned_refusal(84033543, "success", ""));              // not a failure
+    CHECK_FALSE(bambu_reply_is_unsigned_refusal(0, "failed", "nozzle too cold"));
+    CHECK_FALSE(bambu_reply_is_unsigned_refusal(0, "", ""));
+}
+
+TEST_CASE("Only control namespaces need a signature; reads still go out", "[BambuSendDiagnosis][Secured]")
+{
+    using Slic3r::GUI::bambu_command_needs_signature;
+
+    CHECK(bambu_command_needs_signature("print", "extrusion_cali_get"));
+    CHECK(bambu_command_needs_signature("print", "project_file"));
+    CHECK(bambu_command_needs_signature("print", "get_auto_nozzle_mapping"));
+    CHECK(bambu_command_needs_signature("system", "ledctrl"));
+    CHECK(bambu_command_needs_signature("upgrade", "start"));
+    CHECK_FALSE(bambu_command_needs_signature("pushing", "pushall"));
+    CHECK_FALSE(bambu_command_needs_signature("info", "get_version"));
+    CHECK_FALSE(bambu_command_needs_signature("system", "get_access_code"));
+    CHECK_FALSE(bambu_command_needs_signature("", ""));
+}
+
+TEST_CASE("The secured-mode message is the one agreed wording", "[BambuSendDiagnosis][Secured]")
+{
+    CHECK(Slic3r::GUI::bambu_secured_mode_message(false) ==
+          "This printer is not in Developer Mode, so it rejects commands from EdgeSlicer. "
+          "Turn on LAN Only + Developer Mode on the printer.");
+}
