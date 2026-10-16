@@ -96,7 +96,7 @@ bool is_idempotent_method(const std::string& method)
     };
     if (method.empty())
         return false;
-    if (ends(".info") || ends(".query") || ends(".list") || ends(".list_page") || ends(".metadata") || ends(".roots") ||
+    if (ends(".info") || ends("_info") || ends(".query") || ends(".list") || ends(".list_page") || ends(".metadata") || ends(".roots") ||
         ends(".get_directory") || ends(".heartbeat") || ends(".thumbnails") || ends(".thumbnails_base64") || ends("get_device_info") ||
         ends(".status") || ends(".objects.list"))
         return true;
