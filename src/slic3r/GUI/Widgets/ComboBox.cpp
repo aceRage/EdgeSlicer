@@ -47,6 +47,7 @@ ComboBox::ComboBox(wxWindow *parent,
     TextInput::Create(parent, "", value, (style & CB_NO_DROP_ICON) ? "" : "drop_down", pos, size,
                       style | wxTE_PROCESS_ENTER);
     drop.Create(this, style & DD_STYLE_MASK);
+    drop.SetItemExtras(&action_icons, &disabled);
 
     if (style & wxCB_READONLY) {
         GetTextCtrl()->Hide();
@@ -65,6 +66,11 @@ ComboBox::ComboBox(wxWindow *parent,
         scroll->Bind(wxEVT_MOVE, &ComboBox::onMove, this);
     drop.Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) {
         SetSelection(e.GetInt());
+        e.SetEventObject(this);
+        e.SetId(GetId());
+        GetEventHandler()->ProcessEvent(e);
+    });
+    drop.Bind(EVT_DROPDOWN_ITEM_ACTION, [this](wxCommandEvent &e) {
         e.SetEventObject(this);
         e.SetId(GetId());
         GetEventHandler()->ProcessEvent(e);
@@ -160,6 +166,8 @@ int ComboBox::Append(const wxString &item,
     icons.push_back(bitmap);
     datas.push_back(clientData);
     types.push_back(wxClientData_None);
+    action_icons.push_back(wxNullBitmap);
+    disabled.push_back(0);
     drop.Invalidate();
     return texts.size() - 1;
 }
@@ -172,6 +180,8 @@ void ComboBox::DoClear()
     icons.clear();
     datas.clear();
     types.clear();
+    action_icons.clear();
+    disabled.clear();
     drop.Invalidate(true);
 }
 
@@ -183,6 +193,8 @@ void ComboBox::DoDeleteOneItem(unsigned int pos)
     icons.erase(icons.begin() + pos);
     datas.erase(datas.begin() + pos);
     types.erase(types.begin() + pos);
+    action_icons.erase(action_icons.begin() + pos);
+    disabled.erase(disabled.begin() + pos);
     drop.Invalidate(true);
 }
 
@@ -222,6 +234,29 @@ void ComboBox::SetItemBitmap(unsigned int n, wxBitmap const &bitmap)
     drop.Invalidate();
 }
 
+void ComboBox::SetItemActionBitmap(unsigned int n, wxBitmap const &bitmap)
+{
+    if (n >= texts.size()) return;
+    action_icons[n] = bitmap.IsOk() ? bitmap : wxNullBitmap;
+    drop.Invalidate();
+    // An open list keeps its measurements (a star swaps for a star of the same size); just repaint.
+    if (drop.IsShown())
+        drop.Refresh();
+}
+
+void ComboBox::SetItemDisabled(unsigned int n, bool disable)
+{
+    if (n >= texts.size()) return;
+    disabled[n] = disable ? 1 : 0;
+    drop.Refresh();
+}
+
+void ComboBox::CloseDropdown()
+{
+    if (drop.IsShown())
+        drop.DismissAndNotify();
+}
+
 int ComboBox::DoInsertItems(const wxArrayStringsAdapter &items,
                             unsigned int                 pos,
                             void **                      clientData,
@@ -234,6 +269,8 @@ int ComboBox::DoInsertItems(const wxArrayStringsAdapter &items,
         icons.insert(icons.begin() + pos, wxNullBitmap);
         datas.insert(datas.begin() + pos, clientData ? clientData[i] : NULL);
         types.insert(types.begin() + pos, type);
+        action_icons.insert(action_icons.begin() + pos, wxNullBitmap);
+        disabled.insert(disabled.begin() + pos, 0);
         ++pos;
     }
     drop.Invalidate(true);
@@ -292,16 +329,18 @@ void ComboBox::keyDown(wxKeyEvent& event)
         case WXK_UP:
         case WXK_DOWN:
         case WXK_LEFT:
-        case WXK_RIGHT:
-            if ((event.GetKeyCode() == WXK_UP || event.GetKeyCode() == WXK_LEFT) && GetSelection() > 0) {
-                SetSelection(GetSelection() - 1);
-            } else if ((event.GetKeyCode() == WXK_DOWN || event.GetKeyCode() == WXK_RIGHT) && GetSelection() + 1 < texts.size()) {
-                SetSelection(GetSelection() + 1);
-            } else {
+        case WXK_RIGHT: {
+            // Step over disabled (header) rows: the mouse cannot select them either. (OrcaSlicer #13946)
+            const int step = (event.GetKeyCode() == WXK_UP || event.GetKeyCode() == WXK_LEFT) ? -1 : 1;
+            int       n    = GetSelection() + step;
+            while (n >= 0 && n < int(texts.size()) && IsItemDisabled(unsigned(n)))
+                n += step;
+            if (n < 0 || n >= int(texts.size()))
                 break;
-            }
+            SetSelection(n);
             sendComboBoxEvent();
             break;
+        }
         case WXK_TAB:
             HandleAsNavigationKey(event);
             break;

@@ -532,12 +532,13 @@ TEST_CASE("Loading selections with empty flush volumes does not throw and keeps 
 
 // Snapmaker #759 + #920: the U1 has no Cool Steel Plate (btSuperTack). It stays available only
 // through support_multi_bed_types (the "ex" list), and the start G-code never branches on it.
-TEST_CASE("The U1 plate list has three plates and no Cool Steel Plate", "[Preset][U1][BedType]")
+// Edge (owner 2026-10-15): Cool Plate (btPC) is the fourth U1 plate.
+TEST_CASE("The U1 plate list has its three plates plus Cool Plate and no Cool Steel Plate", "[Preset][U1][BedType]")
 {
     const ConfigOptionDef *def = print_config_def.get("curr_bed_type");
     REQUIRE(def != nullptr);
 
-    CHECK(def->enum_values_u1 == std::vector<std::string>{ "Textured PEI Plate", "High Temp Plate", "Graphic Effect Plate" });
+    CHECK(def->enum_values_u1 == std::vector<std::string>{ "Textured PEI Plate", "High Temp Plate", "Graphic Effect Plate", "Cool Plate" });
     REQUIRE(def->enum_labels_u1.size() == def->enum_values_u1.size());
     for (const std::string &label : def->enum_labels_u1)
         CHECK(label != "Cool Steel Plate");
@@ -558,4 +559,33 @@ TEST_CASE("The U1 start G-code does not branch on the Cool Steel Plate", "[Prese
         CHECK(start.find("Supertack") == std::string::npos);
         CHECK(start.find("Cool Steel") == std::string::npos);
     }
+}
+
+// Edge (owner 2026-10-15): Cool Plate is on the U1 list, so every @U1 PLA, PLA support, PVA and TPU
+// preset can print on it at a cool-plate temperature (30-45 C), not 0 (unsupported) or 60 C.
+TEST_CASE("U1 PLA, PVA and TPU presets have Cool Plate bed temperatures", "[Preset][U1][BedType]")
+{
+    size_t checked = 0;
+    for (const Preset &preset : tree().bundle->filaments) {
+        if (!preset.is_system || preset.name.find("@U1") == std::string::npos)
+            continue;
+        const auto *type = preset.config.option<ConfigOptionStrings>("filament_type");
+        if (type == nullptr || type->values.empty())
+            continue;
+        const std::string &t = type->values.front();
+        if (t != "PLA" && t != "PVA" && t != "TPU")
+            continue;
+        ++checked;
+        INFO(preset.name);
+        for (const char *key : { "cool_plate_temp", "cool_plate_temp_initial_layer" }) {
+            const auto *temp = preset.config.option<ConfigOptionInts>(key);
+            REQUIRE(temp != nullptr);
+            for (int v : temp->values) {
+                INFO(key);
+                CHECK(v >= 30);
+                CHECK(v <= 45);
+            }
+        }
+    }
+    CHECK(checked > 50);
 }

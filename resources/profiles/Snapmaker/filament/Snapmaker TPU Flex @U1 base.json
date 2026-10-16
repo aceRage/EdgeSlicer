@@ -162,7 +162,7 @@
         "0.01"
     ],
     "cool_plate_temp": [
-        "0"
+        "30"
     ],
     "eng_plate_temp": [
         "0"
@@ -171,7 +171,7 @@
         "0"
     ],
     "cool_plate_temp_initial_layer": [
-        "0"
+        "30"
     ],
     "eng_plate_temp_initial_layer": [
         "0"

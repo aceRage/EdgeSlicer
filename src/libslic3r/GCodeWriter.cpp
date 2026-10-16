@@ -648,6 +648,24 @@ std::string GCodeWriter::reset_e(bool force)
     }
 }
 
+std::string GCodeWriter::enable_power_loss_recovery(PowerLossRecoveryMode mode) const
+{
+    if (mode == PowerLossRecoveryMode::PrinterConfiguration)
+        return std::string();
+    const bool enable = mode == PowerLossRecoveryMode::Enable;
+    if (m_is_bbl_printers)
+        // Edge: the comment lines Bambu Studio has always written, so a Bambu Lab slice with the
+        // option on (the BBL profile default) is unchanged by the option's arrival.
+        return enable ? "; open powerlost recovery\nM1003 S1\n" : "; close powerlost recovery\nM1003 S0\n";
+    if (FLAVOR_IS(gcfMarlinFirmware)) {
+        std::string gcode = enable ? "M413 S1" : "M413 S0";
+        if (GCodeWriter::full_gcode_comment)
+            gcode += " ; set Power-loss Recovery";
+        return gcode + "\n";
+    }
+    return std::string();
+}
+
 std::string GCodeWriter::update_progress(unsigned int num, unsigned int tot, bool allow_100) const
 {
     if (FLAVOR_IS_NOT(gcfMakerWare) && FLAVOR_IS_NOT(gcfSailfish))

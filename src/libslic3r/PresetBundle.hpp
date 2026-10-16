@@ -37,6 +37,8 @@ struct ConnectMachineInfo
 {
     std::string filament_info {""};
     std::string filament_type {""};
+    // Orca #13265: the vendor the printer reports, for the closest-colour preset match.
+    std::string filament_vendor {""};
     std::string nozzle_info {""};
     std::string nozzle_volume_type {""};
     std::string color_info{""};

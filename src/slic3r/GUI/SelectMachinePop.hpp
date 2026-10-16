@@ -185,6 +185,7 @@ private:
     wxHyperlinkCtrl*                  m_hyperlink{nullptr};
     wxStaticText*                     m_firewall_link{nullptr}; // Windows: opens Help > Check Windows Firewall
     wxStaticText*                     m_setup_link{nullptr};    // opens Help > Bambu printer setup
+    wxStaticText*                     m_refresh_link{nullptr};  // re-reads discovery and the account's printer list
     Label*                            m_ping_code_text{nullptr};
     wxStaticBitmap*                   m_img_ping_code{nullptr};
     wxBoxSizer *                      m_sizer_body{nullptr};
@@ -208,6 +209,8 @@ private:
 private:
     void OnLeftUp(wxMouseEvent &event);
     void on_timer(wxTimerEvent &event);
+    // "Refresh printers": DeviceManager::refresh_printers, then redraw the lists when it is done.
+    void on_refresh_printers();
 
     // A machine panel is created once and reused for whichever printer sits in its row at the
     // next refresh (every MACHINE_LIST_REFRESH_INTERVAL). Its handlers are bound once, here, at
