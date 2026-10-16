@@ -564,6 +564,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/BambuSendDiagnosis.cpp
     GUI/DeviceModelCode.hpp
     GUI/DeviceModelCode.cpp
+    GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
@@ -1045,6 +1046,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/SimplyPrint.hpp
     Utils/TCPConsole.cpp
     Utils/TCPConsole.hpp
+    Utils/TeardownJoin.hpp
     Utils/UndoRedo.cpp
     Utils/UndoRedo.hpp
     Utils/WebSocketClient.hpp

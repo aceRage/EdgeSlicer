@@ -506,7 +506,7 @@ wxArrayString NewCalibrationHistoryDialog::get_all_filaments(const MachineObject
     std::set<std::string> filament_id_set;
     std::set<std::string> printer_names;
     std::ostringstream    stream;
-    stream << std::fixed << std::setprecision(1) << obj->m_extder_data.extders[0].current_nozzle_diameter;
+    stream << std::fixed << std::setprecision(1) << obj->nozzle_diameter_or_preset(MAIN_NOZZLE_ID); // Orca #13255
     std::string nozzle_diameter_str = stream.str();
 
     for (auto printer_it = preset_bundle->printers.begin(); printer_it != preset_bundle->printers.end(); printer_it++) {
