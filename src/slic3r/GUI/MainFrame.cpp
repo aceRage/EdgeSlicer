@@ -689,19 +689,6 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         update_autosave_timer();
 ;    }
     this->Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent &evt) {
-        // ImGui draws its text fields (the text tool's box, a sketch value field) on the GL canvas, so
-        // while one of them is typed into the focused wx window is that canvas or an in-canvas frame:
-        // neither is a wxControl, so IsTextEntryFocused() cannot see it and CHAR_HOOK takes the chord
-        // here first -- Ctrl+P opened Preferences, Ctrl+N a new project, and the field never saw the
-        // key. ImGui raises WantCaptureKeyboard while one of its items owns the keyboard, so leave
-        // the key to it then. A focused wxControl (text field, list, web view) is untouched: those
-        // keep their own keys, and ImGui's flag can outlive the focus moving to one of them.
-        wxWindow* const focus = wxWindow::FindFocus();
-        ImGuiWrapper* const imgui = wxGetApp().imgui();
-        if (focus != nullptr && imgui != nullptr && imgui->want_keyboard() && dynamic_cast<wxControl*>(focus) == nullptr) {
-            evt.Skip();
-            return;
-        }
 #ifdef __APPLE__
         if (evt.CmdDown() && (evt.GetKeyCode() == 'H')) {
             //call parent_menu hide behavior
@@ -720,6 +707,20 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
             }
             return;}
 #endif
+        // ImGui draws its text fields (the text tool's box, a sketch value field) on the GL canvas, so
+        // while one of them is typed into the focused wx window is that canvas or an in-canvas frame:
+        // neither is a wxControl, so IsTextEntryFocused() cannot see it and CHAR_HOOK takes the chord
+        // here first -- Ctrl+P opened Preferences, Ctrl+N a new project, and the field never saw the
+        // key. ImGui raises WantCaptureKeyboard while one of its items owns the keyboard, so leave
+        // the key to it then. A focused wxControl (text field, list, web view) is untouched: those
+        // keep their own keys, and ImGui's flag can outlive the focus moving to one of them.
+        // macOS system chords above (Cmd+H/M/Q, Ctrl+Cmd+F) still run while a field is active.
+        wxWindow* const focus = wxWindow::FindFocus();
+        ImGuiWrapper* const imgui = wxGetApp().imgui();
+        if (focus != nullptr && imgui != nullptr && imgui->want_keyboard() && dynamic_cast<wxControl*>(focus) == nullptr) {
+            evt.Skip();
+            return;
+        }
         if (evt.CmdDown() && evt.GetKeyCode() == 'R')
         {
             if (m_slice_enable)
