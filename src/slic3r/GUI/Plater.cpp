@@ -10733,6 +10733,8 @@ struct Plater::priv
     std::string                 delayed_error_message;
 
     wxTimer                     background_process_timer;
+    // Set by Plater::begin_shutdown(); see Plater::is_shutting_down().
+    bool                        gui_shutting_down { false };
     // Bambu two-extruder printers: marks plates for re-slice when the selected printer changes.
     std::unique_ptr<DualNozzle::Watcher> dual_nozzle_watcher;
     // "Edit in Blender" sessions; created on first use.
@@ -11360,6 +11362,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     this->dual_nozzle_watcher = std::make_unique<DualNozzle::Watcher>(this->q);
     this->q->Bind(wxEVT_TIMER, [this](wxTimerEvent &evt)
     {
+        // EDGESLICER-A: the frame is closing or being replaced; never restart the timer either.
+        if (this->q->is_shutting_down())
+            return;
         // At startup this timer can fire from a nested event loop (the macOS splash screen and WebView
         // creation yield) before MainFrame is assigned to the app; try again once start-up is done.
         if (wxGetApp().mainframe == nullptr) {
@@ -14364,6 +14369,12 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // If the update_background_process() was not called by the timer, kill the timer,
     // so the update_restart_background_process() will not be called again in vain.
     background_process_timer.Stop();
+    // EDGESLICER-A: validation below syncs notifications and the MainFrame's slice/print buttons;
+    // while the frame is closing or being replaced those may already be half destroyed.
+    if (q->is_shutting_down()) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": skipped, the GUI is shutting down";
+        return return_state;
+    }
     // Update the "out of print bed" state of ModelInstances.
     update_print_volume_state();
     // Apply new config to the possibly running background task.
@@ -15169,6 +15180,9 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 }
 unsigned int Plater::priv::update_restart_background_process(bool force_update_scene, bool force_update_preview)
 {
+    // EDGESLICER-A: reached from background_process_timer while the window tree was being torn down.
+    if (q->is_shutting_down())
+        return 0;
     bool switch_print = true;
     //BBS: judge whether can switch print or not
     if ((partplate_list.get_plate_count() > 1) && !this->background_process.can_switch_print())
@@ -16543,7 +16557,8 @@ void Plater::priv::on_slicing_completed(wxCommandEvent & evt)
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": event_type %1%, string %2%") % evt.GetEventType() % evt.GetString();
 
     // Snapmaker #753: a slice finishing while the GUI is being recreated (language / theme change) must not touch the half-built UI.
-    if (GUI::wxGetApp().is_recreating_gui())
+    // EDGESLICER-A: nor while this frame is closing, or is the old frame of such a rebuild.
+    if (GUI::wxGetApp().is_recreating_gui() || q->is_shutting_down())
         return;
 
     //BBS: add slice project logic
@@ -21988,9 +22003,10 @@ void Plater::fill_bed_with_instances()
     // clearance uses - and pass the two separately.
     double tmpl_brim = 0.;
     {
-        const auto *bt = mo->get_config_value<ConfigOptionEnum<BrimType>>(global_config, "brim_type");
+        // Base option + virtual getInt(): a typed ConfigOptionEnum downcast of a generic enum is UB.
+        const ConfigOption *bt = mo->config.has("brim_type") ? mo->config.option("brim_type") : global_config.option("brim_type");
         const auto *bw = mo->get_config_value<ConfigOptionFloat>(global_config, "brim_width");
-        if (bt != nullptr && bw != nullptr && bt->value != btNoBrim)
+        if (bt != nullptr && bt->type() == coEnum && bw != nullptr && static_cast<BrimType>(bt->getInt()) != btNoBrim)
             tmpl_brim = std::max(0., bw->value);
     }
 
@@ -24967,6 +24983,11 @@ int Plater::find_next_sliceable_plate_for_slice_all(int start_plate_index)
 
 bool Plater::sync_filament_temp_mixing_notification()
 {
+    // EDGESLICER-A: ends in MainFrame::update_slice_print_status, which repaints the slice/print
+    // buttons - a crash while the frame is being destroyed.
+    if (is_shutting_down())
+        return true;
+
     // 1. Always close the previously-pushed notifications using their exact
     //    cached text. NotificationManager::close_validate_* matches on text,
     //    so we cannot use a freshly regenerated template string here — it
@@ -25060,7 +25081,8 @@ bool Plater::sync_filament_temp_mixing_notification()
     p->filament_temp_mixing_notification_state = mixing_state;
 
     const bool can_slice = curr_plate->can_slice() && slicing_allowed;
-    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
+    if (p->main_frame != nullptr)
+        p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
     return slicing_allowed;
 }
 
@@ -25176,6 +25198,8 @@ bool Plater::is_plate_blocked_by_flow_ratio_zero(int plate_index)
 
 bool Plater::sync_flow_ratio_zero_notification()
 {
+    if (is_shutting_down()) // EDGESLICER-A: see sync_filament_temp_mixing_notification
+        return true;
     PartPlate* curr_plate = get_partplate_list().get_curr_plate();
     if (curr_plate == nullptr) {
         BOOST_LOG_TRIVIAL(warning) << "[Plater] sync_flow_ratio_zero_notification: curr_plate is null";
@@ -25211,7 +25235,8 @@ bool Plater::sync_flow_ratio_zero_notification()
     }
 
     const bool can_slice = curr_plate->can_slice() && slicing_allowed;
-    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
+    if (p->main_frame != nullptr)
+        p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
     return slicing_allowed;
 }
 
@@ -25302,6 +25327,8 @@ bool Plater::is_plate_blocked_by_cold_plate(int plate_index) const
 
 bool Plater::sync_cold_plate_notification()
 {
+    if (is_shutting_down()) // EDGESLICER-A: see sync_filament_temp_mixing_notification
+        return true;
     PartPlate* curr_plate = get_partplate_list().get_curr_plate();
     if (curr_plate == nullptr) {
         BOOST_LOG_TRIVIAL(warning) << "[Plater] sync_cold_plate_notification: curr_plate is null";
@@ -25364,7 +25391,8 @@ bool Plater::sync_cold_plate_notification()
     // is_plate_blocked_by_cold_plate() directly. The can_slice arg is ignored for
     // eEventPlateUpdate — pass true to match filament_temp_mixing's contract.
     const bool can_slice = curr_plate->can_slice() && slicing_allowed;
-    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
+    if (p->main_frame != nullptr)
+        p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
     return slicing_allowed;
 }
 
@@ -26089,6 +26117,21 @@ void Plater::suppress_background_process(const bool stop_background_process)
         this->p->background_process_timer.Stop();
 
     this->p->suppressed_backround_processing_update = true;
+}
+
+void Plater::begin_shutdown()
+{
+    p->gui_shutting_down = true;
+    p->background_process_timer.Stop();
+}
+
+bool Plater::is_shutting_down() const
+{
+    // gui_shutting_down covers both the app close and the old frame of a GUI rebuild (whose
+    // destruction runs after GUI_App::is_recreating_gui() is false again); the others catch a
+    // teardown that did not go through MainFrame::shutdown.
+    return p->gui_shutting_down || wxGetApp().is_closing() || IsBeingDeleted() ||
+           (p->main_frame != nullptr && (p->main_frame->is_shutting_down() || p->main_frame->IsBeingDeleted()));
 }
 
 void Plater::center_selection()     { p->center_selection(); }

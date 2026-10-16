@@ -281,6 +281,23 @@ Model Model::read_from_file(const std::string&                                  
     else if (boost::algorithm::iends_with(input_file, ".obj")) {
         ObjInfo                 obj_info;
         result = load_obj(input_file.c_str(), &model, obj_info, message);
+        // Keep the model's own UV channel on the volume, whatever the colour import then does with
+        // the mesh: it is what TextureProjectionMethod::ModelUV maps a texture-displacement layer
+        // through, so a model that arrives with a UV layout is textured on that layout instead of on
+        // a fresh unwrap. load_obj() fills obj_info.uvs per face of the mesh it built, in the same
+        // order (and only when every face named a known material, hence the size check). V is flipped
+        // on the way in, to the convention DecodedHeightTexture samples in.
+        if (result && !obj_info.uvs.empty() && !model.objects.empty() && !model.objects.back()->volumes.empty()) {
+            ModelVolume                &volume = *model.objects.back()->volumes[0];
+            const indexed_triangle_set &its    = volume.mesh().its;
+            if (obj_info.uvs.size() == its.indices.size()) {
+                volume.texture_uv.resize(its.indices.size() * 3);
+                for (size_t fi = 0; fi < obj_info.uvs.size(); ++fi)
+                    for (int k = 0; k < 3; ++k)
+                        volume.texture_uv[fi * 3 + size_t(k)] =
+                            Vec2f(obj_info.uvs[fi][size_t(k)].x(), 1.f - obj_info.uvs[fi][size_t(k)].y());
+            }
+        }
         if (result){
             unsigned char first_extruder_id;
             if (obj_info.vertex_colors.size() > 0) {
@@ -2226,6 +2243,10 @@ void ModelVolume::reset_extra_facets()
     // than left referring to a mesh that no longer matches it.
     for (int i = 0; i < int(TEXTURE_DISPLACEMENT_MAX_LAYERS); ++i)
         this->texture_displacement_facet(i).reset();
+    // Same reasoning for the model's own UV channel: it is indexed by triangle, so against a mesh
+    // this no longer matches it would map the texture by another mesh's triangle numbering. A caller
+    // that can carry it across - see transfer_uv_channel() - puts it back after this.
+    this->reset_texture_uv();
 }
 
 // OrcaSlicer #13472 (Keep painting after cut), merge 1c0d0b89cc: save the painting of a model
@@ -3920,8 +3941,10 @@ void ModelInstance::get_arrange_polygon(void *ap, const Slic3r::DynamicPrintConf
         // id==0 means follow previous material, so need not be recorded
         if (op1 && (extruder_id = op1->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
         if (op2 && (extruder_id = op2->getInt()) > 0) ret.extrude_ids.push_back(extruder_id);
-    } else if (auto stab = object->get_config_value<ConfigOptionEnum<StabilizerMode>>(config_global, "stabilizer_supports");
-               stab && stab->value != smOff) {
+    } else if (const ConfigOption *stab = object->config.has("stabilizer_supports") ? object->config.option("stabilizer_supports") :
+                                                                                     config_global.option("stabilizer_supports");
+               // Base option + virtual getInt(): a typed ConfigOptionEnum downcast of a generic enum is UB.
+               stab && stab->type() == coEnum && static_cast<StabilizerMode>(stab->getInt()) != smOff) {
         // Side stabilizers print with the support filament even with supports off.
         auto op1 = object->get_config_value<ConfigOptionInt>(config_global, "support_filament");
         int extruder_id;
