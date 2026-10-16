@@ -11,6 +11,7 @@
 #include "Plater.hpp"
 #include "OptionsGroup.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include "RemoteControl.hpp"
 #include "RemoteEvents.hpp"
 #include "RemoteHub.hpp"
@@ -1806,13 +1807,23 @@ static nlohmann::json combo_items(PresetComboBox* combo, Preset::Type type)
     if (!combo)
         return items;
     const int sel = combo->GetSelection();
+    // The sidebar repeats favourite filaments in a group on top; the phone gets each preset once, with
+    // "favorite" set, and groups them itself (older pages and clients just see the plain list).
+    const wxString sel_text = sel >= 0 ? combo->GetString(unsigned(sel)) : wxString();
+    bool           sel_seen = false;
+    const std::set<std::string> favorites = type == Preset::TYPE_FILAMENT ? FavoriteFilamentsUI::load() : std::set<std::string>();
     for (unsigned int i = 0; i < combo->GetCount(); ++i) {
-        if (is_label_item(combo, i))
+        if (is_label_item(combo, i) || combo->is_favorite_group_row(i))
             continue;
         nlohmann::json it;
         it["name"]     = combo->GetString(i).ToUTF8().data();
         it["value"]    = combo_item_value(combo, i, type);
-        it["selected"] = ((int) i == sel);
+        const bool selected = type == Preset::TYPE_FILAMENT ? (!sel_seen && sel >= 0 && combo->GetString(i) == sel_text)
+                                                            : (int(i) == sel);
+        sel_seen = sel_seen || selected;
+        it["selected"] = selected;
+        if (type == Preset::TYPE_FILAMENT)
+            it["favorite"] = favorites.count(combo->favorite_key_of_row(i)) > 0;
         items.push_back(it);
     }
     return items;

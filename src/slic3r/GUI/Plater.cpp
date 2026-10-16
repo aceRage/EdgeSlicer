@@ -183,6 +183,7 @@
 #include "InstanceCheck.hpp"
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include "MsgDialog.hpp"
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
@@ -3391,25 +3392,32 @@ Sidebar::Sidebar(Plater *parent)
             }
             return out;
         };
-        auto populate_all_combo = [all_combo, mixed_nozzles, filament_choices]() {
+        // Favourite filaments on top, with stars (Orca #13946, extended). The list lives as long as the
+        // handlers bound to the combo that hold it.
+        auto all_list = std::make_shared<FavoriteFilamentsUI::FavoriteComboList>(all_combo);
+        auto populate_all_combo = [all_list, mixed_nozzles, filament_choices]() {
             PresetBundle* pb = wxGetApp().preset_bundle;
             if (pb == nullptr)
                 return;
-            wxString cur = all_combo->GetStringSelection();
-            all_combo->Clear();
+            const int      cur_entry = all_list->selected_entry();
+            const wxString cur       = cur_entry >= 0 ? all_list->entries()[cur_entry].text : wxString();
+            std::vector<FavoriteFilamentsUI::FavoriteComboList::Entry> entries;
             if (mixed_nozzles()) {
+                // A family is named like a system filament's alias, which is its favourite key.
                 for (const std::string& family : NozzleSync::families(filament_choices()))
-                    all_combo->AppendString(wxString::FromUTF8(family));
+                    entries.push_back({ wxString::FromUTF8(family), family });
             } else {
                 for (const Preset& preset : pb->filaments) {
                     if (!preset.is_visible || !preset.is_compatible)
                         continue;
-                    all_combo->AppendString(wxString::FromUTF8(preset.name));
+                    entries.push_back({ wxString::FromUTF8(preset.name), FavoriteFilamentsUI::key_for(preset) });
                 }
             }
-            int idx = all_combo->FindString(cur);
-            if (idx != wxNOT_FOUND)
-                all_combo->SetSelection(idx);
+            int sel = -1;
+            for (size_t i = 0; i < entries.size() && sel < 0; ++i)
+                if (entries[i].text == cur)
+                    sel = int(i);
+            all_list->set_entries(std::move(entries), sel);
         };
         populate_all_combo();
         // Repopulate on every open so printer/preset changes are always reflected.
