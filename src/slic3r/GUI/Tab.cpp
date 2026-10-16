@@ -37,6 +37,7 @@
 #include "slic3r/GUI/OptionsGroup.hpp"
 #include "wxExtensions.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include <wx/wupdlock.h>
 
 #include "GUI_App.hpp"
@@ -315,6 +316,16 @@ void Tab::create_preset_tab()
     //add_scaled_button(panel, &m_btn_compare_preset, "compare");
     add_scaled_button(m_top_panel, &m_btn_save_preset, "save");
     add_scaled_button(m_top_panel, &m_btn_delete_preset, "cross");
+    if (m_type == Preset::TYPE_FILAMENT) {
+        // Favourite filaments: the star toggles the selected filament; the combo's context menu
+        // (right-click, context-menu key, Shift+F10) and the stars in its list do the same.
+        add_scaled_button(m_top_panel, &m_btn_favorite_filament, into_u8(FavoriteFilamentsUI::star_icon_name(false)));
+        m_btn_favorite_filament->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+            FavoriteFilamentsUI::toggle(FavoriteFilamentsUI::key_for(m_presets->get_selected_preset()));
+            update_favorite_button();
+        });
+        m_favorite_subscription = FavoriteFilamentsUI::subscribe([this]() { update_favorite_button(); });
+    }
     //if (m_type == Preset::Type::TYPE_PRINTER)
     //    add_scaled_button(panel, &m_btn_edit_ph_printer, "cog");
 
@@ -388,6 +399,8 @@ void Tab::create_preset_tab()
 
         m_btn_save_preset->Show();
         m_btn_delete_preset->Show(); // ORCA: fixes delete preset button visible while search box focused
+        if (m_btn_favorite_filament)
+            m_btn_favorite_filament->Show();
         m_undo_btn->Show();          // ORCA: fixes revert preset button visible while search box focused
         m_btn_search->Show();
         m_search_item->Hide();
@@ -418,6 +431,8 @@ void Tab::create_preset_tab()
 
          m_btn_save_preset->Hide();
          m_btn_delete_preset->Hide(); // ORCA: fixes delete preset button visible while search box focused
+         if (m_btn_favorite_filament)
+             m_btn_favorite_filament->Hide();
          m_undo_btn->Hide();          // ORCA: fixes revert preset button visible while search box focused
          m_btn_search->Hide();
          m_search_item->Show();
@@ -458,6 +473,8 @@ void Tab::create_preset_tab()
     m_top_sizer->Add(m_undo_to_sys_btn, 0, wxALIGN_CENTER_VERTICAL);
     m_top_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
 #endif
+    if (m_btn_favorite_filament)
+        m_top_sizer->Add(m_btn_favorite_filament, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_save_preset, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_delete_preset, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_search, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
@@ -3120,6 +3137,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
+        optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
         // Tower interface options (per-filament values on the filament Multimaterial page).
         optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
@@ -5422,6 +5440,7 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("gcode_flavor");
         optgroup->append_single_option_line("pellet_modded_printer", "pellet-flow-coefficient");
         optgroup->append_single_option_line("bbl_use_printhost");
+        optgroup->append_single_option_line("enable_power_loss_recovery"); // Orca #11582
         optgroup->append_single_option_line("disable_m73");
         option = optgroup->get_option("thumbnails");
         option.opt.full_width = true;
@@ -6486,6 +6505,10 @@ void TabPrinter::toggle_options()
         for (auto el : {"use_firmware_retraction", "use_relative_e_distances", "support_multi_bed_types", "pellet_modded_printer", "bed_mesh_max", "bed_mesh_min", "bed_mesh_probe_distance", "adaptive_bed_mesh_margin", "thumbnails"})
           toggle_line(el, !is_BBL_printer);
 
+        // Orca #11582: power loss recovery G-code exists for Bambu Lab printers and Marlin 2 only.
+        const auto *flavor = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+        toggle_line("enable_power_loss_recovery", is_BBL_printer || (flavor && flavor->value == gcfMarlinFirmware));
+
         // "Unload filaments after print" is a Snapmaker tool-changer preference: the flag goes
         // to the printer with the print start, and only that firmware's PRINT_END acts on it.
         toggle_line("unload_filaments_at_end", is_snapmaker_toolchanger(*m_config));
@@ -6897,10 +6920,27 @@ void Tab::update_btns_enabling()
     const Preset& preset = m_presets->get_edited_preset();
     m_btn_delete_preset->Show((m_type == Preset::TYPE_PRINTER && m_preset_bundle->physical_printers.has_selection())
                               || (!preset.is_default && !preset.is_system));
+    update_favorite_button();
 
     //if (m_btn_edit_ph_printer)
     //    m_btn_edit_ph_printer->SetToolTip( m_preset_bundle->physical_printers.has_selection() ?
     //                                       _L("Edit physical printer") : _L("Add physical printer"));
+}
+
+Tab::~Tab()
+{
+    if (m_favorite_subscription)
+        FavoriteFilamentsUI::unsubscribe(m_favorite_subscription);
+}
+
+void Tab::update_favorite_button()
+{
+    if (!m_btn_favorite_filament || !m_presets)
+        return;
+    const bool fav = FavoriteFilamentsUI::is_favorite(m_presets->get_selected_preset());
+    m_btn_favorite_filament->SetBitmap_(into_u8(FavoriteFilamentsUI::star_icon_name(fav)));
+    m_btn_favorite_filament->SetToolTip(fav ? _L("Remove this filament from your favorite filaments")
+                                            : _L("Add this filament to your favorite filaments (they are listed first in every filament list)"));
 }
 
 void Tab::update_preset_choice()
@@ -7268,8 +7308,9 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         load_current_preset();
 
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
-        // Deferred so it runs after this switch settles; sync_bambu_user_presets only reloads the UI
-        // when new/updated files were actually copied (copied==0 -> no-op), so it's self-limiting.
+        // Deferred so it runs after this switch settles. sync_bambu_user_presets only lists the Bambu
+        // Studio folder here (no reads) and returns when nothing changed since the last clean sync;
+        // otherwise the mirror runs on a worker thread and the UI reloads only when files were copied.
         if (m_type == Preset::TYPE_PRINTER)
             wxGetApp().CallAfter([]() { wxGetApp().sync_bambu_user_presets(false); });
 

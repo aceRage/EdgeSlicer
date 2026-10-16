@@ -1323,6 +1323,9 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id, tcr.print_z); // TODO: toolchange_z vs print_z
         if (gcodegen.config().enable_prime_tower) {
             deretraction_str += gcodegen.writer().travel_to_z(z, "Force restore layer Z", true);
+            // Snapmaker #993 (Edge): the tower G-code after this may travel without an F word (U1: "G1 Y..."
+            // after the start position); keep the feedrate it inherited before the Z speed cap.
+            deretraction_str += gcodegen.writer().restore_uncapped_z_feedrate();
             Vec3d position{gcodegen.writer().get_position()};
             position.z() = z;
             gcodegen.writer().set_position(position);
@@ -1353,7 +1356,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // A phony move to the end position at the wipe tower.
     gcodegen.writer().travel_to_xy((end_pos + plate_origin_2d).cast<double>());
     gcodegen.set_last_pos(wipe_tower_point_to_object_point(gcodegen, end_pos + plate_origin_2d));
-    if (!is_approx(z, current_z)) {
+    if (z + EPSILON < current_z) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(current_z, "Travel back up to the topmost object layer.");
         gcode += gcodegen.writer().unretract();
@@ -1838,12 +1841,55 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
 std::string WipeTowerIntegration::finalize(GCode& gcodegen)
 {
     std::string gcode;
-    if (!gcodegen.is_BBL_Printer()) {
-        if (std::abs(gcodegen.writer().get_position().z() - m_final_purge.print_z) > EPSILON)
-            gcode += gcodegen.change_layer(m_final_purge.print_z);
-        gcode += append_tcr2(gcodegen, m_final_purge, -1);
+    if (gcodegen.is_BBL_Printer() || m_final_purge.gcode.empty())
+        return gcode;
+
+    // Edge's change_layer is lazy: it rewrites the writer's Z (and m_nominal_z) without
+    // emitting a move. A subsequent travel_to_xyz(force_z) would then combine the XY travel
+    // to the tower with that Z drop and drive the nozzle through the finished object.
+    // Travel XY at the current (safe) height first, then let append_tcr2 descend with a
+    // dedicated travel_to_z. Do not call change_layer here.
+    const double current_z = gcodegen.writer().get_position().z();
+    double       purge_z   = m_final_purge.print_z;
+    if (m_sparse_layers_skipped) {
+        // Non-BBL always prints sparse layer 0, so the last actually-printed tower Z is
+        // m_last_wipe_tower_print_z — one first-layer height above compute_compacted_wipe_tower_z
+        // when layer 0 has no toolchange. The extra set_layer sits one layer on top of that.
+        const double layer_height = m_final_purge.layer_height > 0.f ? double(m_final_purge.layer_height)
+                                                                    : (!m_tool_changes.empty() && !m_tool_changes.back().empty() ?
+                                                                           double(m_tool_changes.back().front().layer_height) :
+                                                                           0.);
+        purge_z = m_last_wipe_tower_print_z + layer_height;
+    } else {
+        // The object-space print_z from WipeTower2 does not include z_offset.
+        purge_z += gcodegen.config().z_offset.value;
     }
 
+    if (purge_z + EPSILON < current_z) {
+        // select_final_purge_variant() ran just before this WipeTowerIntegration was
+        // constructed, so m_final_purge / m_final_purge_drop are the fresh pick.
+        // Do not replace print.wipe_tower_data().final_purge after construction:
+        // m_final_purge is a reference into that unique_ptr.
+        if (!m_final_purge_drop) {
+            // Tall object near the tower, or SEMM with ramming off: unload at the current
+            // (object-top) height. The TCR was generated without on-tower ramming.
+            purge_z = current_z;
+        } else {
+            float alpha     = m_wipe_tower_rotation / 180.f * float(M_PI);
+            Vec2f start_pos = m_final_purge.start_pos;
+            if (!m_final_purge.priming) {
+                start_pos = Eigen::Rotation2Df(alpha) * start_pos;
+                start_pos += m_wipe_tower_pos;
+            }
+            const Vec2f plate_origin_2d(m_plate_origin(0), m_plate_origin(1));
+            gcode += gcodegen.retract();
+            gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
+            gcode += gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
+                                        "Travel to final purge", current_z);
+        }
+    }
+
+    gcode += append_tcr2(gcodegen, m_final_purge, -1, purge_z);
     return gcode;
 }
 
@@ -4065,13 +4111,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     m_printed_objects.emplace_back(&object);
                 this->process_layers(print, tool_ordering, collect_layers_to_print(object),
                                      *print_object_instance_sequential_active - object.instances().data(), file, prime_extruder);
-                // BBS: close powerlost recovery
-                {
-                    if (is_bbl_printers && m_second_layer_things_done) {
-                        file.write("; close powerlost recovery\n");
-                        file.write("M1003 S0\n");
-                    }
-                }
+                // Orca #11582 / #11616: turn power loss recovery off again if this print turned it on
+                // (Bambu Lab printers do by default).
+                if (m_second_layer_things_done && print.config().enable_power_loss_recovery.value == PowerLossRecoveryMode::Enable)
+                    file.write(m_writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable));
                 ++finished_objects;
                 // Flag indicating whether the nozzle temperature changes from 1st to 2nd layer were performed.
                 // Reset it when starting another object from 1st layer.
@@ -4084,11 +4127,17 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> layers_to_print = collect_layers_to_print(print);
             // Prusa Multi-Material wipe tower.
             if (has_wipe_tower && !layers_to_print.empty()) {
+                // Fresh pick immediately before construction. WipeTowerIntegration holds a
+                // reference to final_purge; replacing that unique_ptr after this point
+                // would dangle. process() already picked, but export can run after a
+                // clearance / z_offset / position change that only invalidates G-code.
+                print.select_final_purge_variant();
                 m_wipe_tower.reset(new WipeTowerIntegration(print.config(), print.get_plate_index(), print.get_plate_origin(),
                                                             *print.wipe_tower_data().priming.get(), print.wipe_tower_data().tool_changes,
                                                             print.wipe_tower_data().local_z_tool_changes,
                                                             print.wipe_tower_data().local_z_reserve_boxes,
-                                                            *print.wipe_tower_data().final_purge.get()));
+                                                            *print.wipe_tower_data().final_purge.get(),
+                                                            print.wipe_tower_data().final_purge_drop));
                 // BBS
                 file.write(m_writer.travel_to_z(initial_layer_print_height + m_config.z_offset.value, "Move to the first layer height"));
 
@@ -4133,13 +4182,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
             // and export G-code into file.
             this->process_layers(print, tool_ordering, print_object_instances_ordering, layers_to_print, file);
-            // BBS: close powerlost recovery
-            {
-                if (is_bbl_printers && m_second_layer_things_done) {
-                    file.write("; close powerlost recovery\n");
-                    file.write("M1003 S0\n");
-                }
-            }
+            // Orca #11582 / #11616: turn power loss recovery off again if this print turned it on.
+            if (m_second_layer_things_done && print.config().enable_power_loss_recovery.value == PowerLossRecoveryMode::Enable)
+                file.write(m_writer.enable_power_loss_recovery(PowerLossRecoveryMode::Disable));
             if (m_wipe_tower)
                 // Purge the extruder, pull out the active filament.
                 file.write(m_wipe_tower->finalize(*this));
@@ -6505,8 +6550,11 @@ LayerResult GCode::process_layer(const Print& print,
 
     PrinterStructure printer_structure                           = m_config.printer_structure.value;
     bool             need_insert_timelapse_gcode_for_traditional = false;
+    // Orca #11444: only when there is a timelapse to take. A non-Bambu i3 printer with no timelapse
+    // G-code got the photo's retract and lift anyway, mid-layer after the walls and again at the
+    // layer end; Bambu Lab printers write their photo command themselves.
     if (printer_structure == PrinterStructure::psI3 && !m_spiral_vase && (!m_wipe_tower || !m_wipe_tower->enable_timelapse_print()) &&
-        print.config().print_sequence == PrintSequence::ByLayer) {
+        print.config().print_sequence == PrintSequence::ByLayer && (is_BBL_Printer() || !m_config.time_lapse_gcode.value.empty())) {
         need_insert_timelapse_gcode_for_traditional = true;
     }
     // Every BBL machine that is not an i3 (X1/P1 family excepted, whose older profiles still carry
@@ -6735,12 +6783,10 @@ LayerResult GCode::process_layer(const Print& print,
     }
 
     if (!first_layer && !m_second_layer_things_done) {
+        // Orca #11582 / #11616: set power loss recovery as the printer profile asks (Bambu Lab
+        // profiles enable it, as Bambu Studio always did; Marlin 2 gets M413).
+        gcode += m_writer.enable_power_loss_recovery(print.config().enable_power_loss_recovery.value);
         if (print.is_BBL_printer()) {
-            // BBS: open powerlost recovery
-            {
-                gcode += "; open powerlost recovery\n";
-                gcode += "M1003 S1\n";
-            }
             // BBS: open first layer inspection at second layer
             if (print.config().scan_first_layer.value) {
                 // BBS: retract first to avoid droping when scan model
@@ -9235,8 +9281,12 @@ std::string GCode::change_layer(coordf_t print_z)
 
     m_need_change_layer_lift_z = true;
 
-    m_nominal_z                 = z;
-    m_writer.get_position().z() = z;
+    m_nominal_z = z;
+    // Snapmaker #993 (Edge adaptation): the writer takes the new layer's Z as before, but remembers the Z the
+    // head is still at, so the deferred layer-change travel is capped by machine_max_speed_z from there.
+    // Upstream instead keeps the writer at the old Z; our wipe tower, Local-Z, timelapse and ZAA code read the
+    // writer's Z right after the layer change and expect the new one, so the geometry stays as it was.
+    m_writer.defer_z_move(z);
 
     // forget last wiping path as wiping after raising Z is pointless
     // BBS. Dont forget wiping path to reduce stringing.

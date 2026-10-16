@@ -45,6 +45,8 @@
 #include "../Utils/ColorSpaceConvert.hpp"
 #include "BitmapCache.hpp"
 #include "SavePresetDialog.hpp"
+#include "FavoriteFilaments.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include "MsgDialog.hpp"
 #include "ParamsDialog.hpp"
 
@@ -248,6 +250,154 @@ void PresetComboBox::OnSelect(wxCommandEvent& evt)
 
 PresetComboBox::~PresetComboBox()
 {
+    if (m_favorites_subscription)
+        FavoriteFilamentsUI::unsubscribe(m_favorites_subscription);
+}
+
+// ---------------------------------
+// Favourite filaments (Orca #13946, extended to every filament picker)
+// ---------------------------------
+
+bool PresetComboBox::is_label_row(unsigned int n) const
+{
+    const Marker marker = reinterpret_cast<Marker>(this->GetClientData(n));
+    return marker >= LABEL_ITEM_PHYSICAL_PRINTER && marker < LABEL_ITEM_MAX;
+}
+
+// The preset a row shows: rows carry a full name (Tab, "(modified)" marked when dirty) or a system
+// preset's alias (sidebar, calibration). Null for an alias with no visible preset behind it.
+static const Preset *preset_of_shown_name(const PresetCollection &collection, const std::string &shown)
+{
+    const Preset *preset = collection.find_preset(shown, false);
+    if (!preset) {
+        const std::string &name = collection.get_preset_name_by_alias(shown);
+        if (name != shown)
+            preset = collection.find_preset(name, false);
+    }
+    return preset;
+}
+
+std::string PresetComboBox::favorite_key_of_row(unsigned int n) const
+{
+    if (n >= GetCount() || is_label_row(n) || !m_collection)
+        return {};
+    const std::string shown  = Preset::remove_suffix_modified(into_u8(GetString(n)));
+    const Preset     *preset = preset_of_shown_name(*m_collection, shown);
+    // An alias with no visible preset behind it is still the system key.
+    return preset ? FavoriteFilamentsUI::key_for(*preset) : shown;
+}
+
+void PresetComboBox::enable_favorites(bool live)
+{
+    if (m_type != Preset::TYPE_FILAMENT)
+        return;
+    if (!m_favorites_enabled) {
+        m_favorites_enabled = true;
+        // A star click: toggle, redraw the stars at once, regroup when the list closes.
+        Bind(EVT_DROPDOWN_ITEM_ACTION, [this](wxCommandEvent &e) {
+            const std::string key = favorite_key_of_row(unsigned(e.GetInt()));
+            if (key.empty())
+                return;
+            FavoriteFilamentsUI::toggle(key);
+            update_favorite_stars();
+            m_favorites_regroup = true;
+        });
+        Bind(wxEVT_COMBOBOX_CLOSEUP, [this](wxCommandEvent &e) {
+            e.Skip();
+            if (!m_favorites_regroup)
+                return;
+            m_favorites_regroup = false;
+            CallAfter([this]() { update(); });
+        });
+        // The keyboard and screen-reader path (context-menu key, Shift+F10) and right-click.
+        Bind(wxEVT_CONTEXT_MENU, [this](wxContextMenuEvent &e) {
+            const int         sel = GetSelection();
+            const std::string key = sel >= 0 ? favorite_key_of_row(unsigned(sel)) : std::string();
+            if (key.empty()) {
+                e.Skip();
+                return;
+            }
+            wxMenu menu;
+            FavoriteFilamentsUI::append_toggle_item(menu, key);
+            PopupMenu(&menu);
+        });
+    }
+    if (live && !m_favorites_subscription) {
+        m_favorites_subscription = FavoriteFilamentsUI::subscribe([this]() {
+            if (is_drop_down()) {
+                update_favorite_stars();
+                m_favorites_regroup = true;
+            } else {
+                update();
+            }
+        });
+    } else if (!live && m_favorites_subscription) {
+        FavoriteFilamentsUI::unsubscribe(m_favorites_subscription);
+        m_favorites_subscription = 0;
+    }
+}
+
+void PresetComboBox::append_favorite_group(const std::vector<std::pair<wxString, wxBitmap*>>& candidates,
+                                           const std::map<wxString, wxString>* tooltips)
+{
+    m_favorites_first = m_favorites_end = -1;
+    if (!m_favorites_enabled || !m_collection)
+        return;
+    const std::set<std::string> favorites = FavoriteFilamentsUI::load();
+    if (favorites.empty())
+        return;
+    std::map<wxString, wxBitmap*> rows; // sorted by name, one row per shown name
+    for (const auto &[name, bmp] : candidates) {
+        const std::string shown  = Preset::remove_suffix_modified(into_u8(name));
+        const Preset     *preset = preset_of_shown_name(*m_collection, shown);
+        const std::string key    = preset ? FavoriteFilamentsUI::key_for(*preset) : shown;
+        if (favorites.count(key) > 0)
+            rows.emplace(name, bmp);
+    }
+    if (rows.empty())
+        return;
+    set_label_marker(Append(separator(L("Favorite filaments")), wxNullBitmap));
+    m_favorites_first = int(GetCount());
+    for (const auto &[name, bmp] : rows) {
+        const int item = Append(name, bmp ? *bmp : wxNullBitmap);
+        if (tooltips) {
+            auto it = tooltips->find(name);
+            if (it != tooltips->end())
+                SetItemTooltip(item, it->second);
+        }
+    }
+    m_favorites_end = int(GetCount());
+}
+
+void PresetComboBox::update_favorite_stars()
+{
+    if (!m_favorites_enabled)
+        return;
+    const std::set<std::string> favorites = FavoriteFilamentsUI::load();
+    const wxBitmap on  = create_scaled_bitmap(into_u8(FavoriteFilamentsUI::star_icon_name(true)), this, 16);
+    const wxBitmap off = create_scaled_bitmap(into_u8(FavoriteFilamentsUI::star_icon_name(false)), this, 16);
+    for (unsigned int i = 0; i < GetCount(); ++i) {
+        const std::string key = favorite_key_of_row(i);
+        SetItemActionBitmap(i, key.empty() ? wxNullBitmap : (favorites.count(key) > 0 ? on : off));
+    }
+}
+
+void PresetComboBox::finish_favorites()
+{
+    if (!m_favorites_enabled)
+        return;
+    update_favorite_stars();
+    // Select the favourites copy of the selected preset: the list then opens at the top.
+    if (m_favorites_first < 0 || m_last_selected == INT_MAX || m_last_selected < 0 || m_last_selected >= int(GetCount()))
+        return;
+    if (is_favorite_group_row(unsigned(m_last_selected)))
+        return;
+    const wxString selected = GetString(m_last_selected);
+    for (int i = m_favorites_first; i < m_favorites_end; ++i)
+        if (GetString(i) == selected) {
+            m_last_selected = i;
+            break;
+        }
 }
 
 BitmapCache& PresetComboBox::bitmap_cache()
@@ -912,6 +1062,7 @@ PlaterPresetComboBox::PlaterPresetComboBox(wxWindow *parent, Preset::Type preset
         clr_picker->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             ChangeExtruderColor();
         });
+        enable_favorites();
     }
     else {
         edit_btn = new ScalableButton(parent, wxID_ANY, "cog");
@@ -1444,6 +1595,12 @@ void PlaterPresetComboBox::update()
             }
         }
     }
+    if (m_type == Preset::TYPE_FILAMENT) {
+        std::vector<std::pair<wxString, wxBitmap*>> candidates;
+        for (const auto *group : { &project_embedded_presets, &nonsys_presets, &system_presets })
+            candidates.insert(candidates.end(), group->begin(), group->end());
+        append_favorite_group(candidates, &preset_descriptions);
+    }
     if (m_type == Preset::TYPE_FILAMENT && m_preset_bundle->is_bbl_vendor())
         add_ams_filaments(into_u8(selected_user_preset), true);
 
@@ -1553,6 +1710,7 @@ void PlaterPresetComboBox::update()
         }
     }
 
+    finish_favorites();
     update_selection();
     Thaw();
 
@@ -1895,6 +2053,7 @@ TabPresetComboBox::TabPresetComboBox(wxWindow* parent, Preset::Type preset_type)
     // BBS: new layout
     PresetComboBox(parent, preset_type, wxSize(20 * wxGetApp().em_unit(), 30 * wxGetApp().em_unit() / 10))
 {
+    enable_favorites();
 }
 
 void TabPresetComboBox::OnSelect(wxCommandEvent &evt)
@@ -2016,6 +2175,14 @@ void TabPresetComboBox::update()
         }
     }
 
+    if (m_type == Preset::TYPE_FILAMENT) {
+        std::vector<std::pair<wxString, wxBitmap*>> candidates;
+        for (const auto *group : { &project_embedded_presets, &nonsys_presets, &system_presets })
+            for (const auto &[name, bmp_enabled] : *group)
+                if (bmp_enabled.second)
+                    candidates.emplace_back(name, bmp_enabled.first);
+        append_favorite_group(candidates, &preset_descriptions);
+    }
     if (m_type == Preset::TYPE_FILAMENT && m_preset_bundle->is_bbl_vendor())
         add_ams_filaments(into_u8(selected));
     
@@ -2120,6 +2287,7 @@ void TabPresetComboBox::update()
         }
     }
 
+    finish_favorites();
     update_selection();
     Thaw();
 }
@@ -2183,6 +2351,9 @@ GUI::CalibrateFilamentComboBox::CalibrateFilamentComboBox(wxWindow *parent)
     clr_picker->SetBitmap(*get_extruder_color_icon("#FFFFFFFF", "", FromDIP(20), FromDIP(20)));
     clr_picker->SetToolTip("");
     clr_picker->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {});
+    // Stars and the group, but no rebuild on a change elsewhere: this list follows the printer's
+    // calibration filaments and only its page rebuilds it.
+    enable_favorites(false);
 }
 
 GUI::CalibrateFilamentComboBox::~CalibrateFilamentComboBox()
@@ -2285,6 +2456,13 @@ void GUI::CalibrateFilamentComboBox::update()
 
     }
 
+    {
+        std::vector<std::pair<wxString, wxBitmap*>> candidates;
+        for (const auto *group : { &m_nonsys_presets, &m_system_presets })
+            for (const auto &[name, preset_bmp] : *group)
+                candidates.emplace_back(name, preset_bmp.second);
+        append_favorite_group(candidates);
+    }
     if (!m_nonsys_presets.empty())
     {
         set_label_marker(Append(separator(L("User presets")), wxNullBitmap));
@@ -2302,6 +2480,7 @@ void GUI::CalibrateFilamentComboBox::update()
         }
     }
 
+    finish_favorites();
     update_selection();
     Thaw();
 
