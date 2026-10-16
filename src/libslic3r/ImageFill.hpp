@@ -193,11 +193,20 @@ struct ImageFillParams
     // Restrict the fill to facets already painted with this 1-based id (a face selection made
     // with the existing MMU paint tool). 0 = the whole part.
     int                 selection_state = 0;
+    // Phase 5a: which surfaces an image row bound to this part re-samples at nozzle resolution -
+    // a bitmask of IMAGE_FILL_SURFACE_TOP and IMAGE_FILL_SURFACE_WALLS (key `rs`). 0 is a params
+    // string from before phase 5a: the binding alone decides (a row named by wall_filament colours
+    // the walls, one named by solid_infill_filament the top). See ImageRowWalls.hpp.
+    int                 surfaces = 0;
 
     std::string to_string() const;
     static bool from_string(const std::string &s, ImageFillParams &out);
     bool        operator==(const ImageFillParams &r) const { return to_string() == r.to_string(); }
 };
+
+// ImageFillParams::surfaces bits.
+static constexpr int IMAGE_FILL_SURFACE_TOP   = 1;
+static constexpr int IMAGE_FILL_SURFACE_WALLS = 2;
 
 static constexpr int IMAGE_FILL_MAX_SUBDIVISION = 6;
 // A hard ceiling on leaves per volume, so a dense mesh at depth 6 cannot allocate for ever.
@@ -498,10 +507,19 @@ struct ImageRowRun
 // own candidate colour is closer to its own (the edge run has only one neighbour), repeated until
 // every run meets the floor or only one run is left; adjacent runs merged down to the same id are
 // then joined, so the output never has two consecutive entries with the same filament_id.
+//
+// Phase 5a: when `fallback_id` is non-zero, a sample with `has_color == false` is NOT carried on
+// from its neighbour - it is printed with `fallback_id` (the part's own filament, whose colour is
+// `fallback_color`), and the carried error is reset, because the dither never reached that point.
+// That is how a wall the image does not land on keeps the part's own colour instead of the
+// image's nearest edge colour. `fallback_id` takes part in the minimum-run folding like any
+// candidate. 0 keeps the behaviour above exactly.
 std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSample>       &samples,
                                                    const std::vector<std::array<float, 3>> &candidate_colors,
                                                    const std::vector<int>                  &candidate_ids,
-                                                   float                                     min_run_len_mm);
+                                                   float                                     min_run_len_mm,
+                                                   int                                       fallback_id    = 0,
+                                                   const std::array<float, 3>               &fallback_color = {0.f, 0.f, 0.f});
 
 } // namespace Slic3r
 

@@ -57,7 +57,7 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                                  const indexed_triangle_set                    &mesh,
                                  const TriangleSelector::TriangleSplittingData &existing,
                                  const std::vector<int>                        &painted_states,
-                                 bool                                            initial_image_row)
+                                 int                                             initial_row_surfaces)
     : DPIDialog(parent, wxID_ANY, _L("Apply image fill"), wxDefaultPosition, wxDefaultSize,
                 wxDEFAULT_DIALOG_STYLE)
     , m_params(initial)
@@ -200,21 +200,29 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                             "more detail and more triangles. 0 keeps the model's own triangles."));
     row(_L("Detail (mm)") + ":", m_detail);
 
-    // ---- Phase 3: the image row ----------------------------------------------------------------
-    // This does not replace the facet painting above - image_fill_apply() always runs on Apply, so
+    // ---- Phases 3-5a: the image row ------------------------------------------------------------
+    // These do not replace the facet painting above - image_fill_apply() always runs on Apply, so
     // a printer/slicer that never reads image_row_extruder_1based still gets a correct, if coarser,
-    // result. Ticking this ALSO creates (or updates) an ImageWeighted MixedFilament row bound to
-    // this part's solid_infill_filament, so top solid infill is additionally re-sampled directly at
-    // extrusion-width resolution instead of being limited to the model's own facet size.
-    m_image_row = new wxCheckBox(this, wxID_ANY, _L("Nozzle-resolution dither (top surfaces)"));
-    m_image_row->SetValue(initial_image_row);
-    m_image_row->SetToolTip(_L("Re-samples the image directly along each top solid infill line, at "
-                               "nozzle-extrusion-width resolution, instead of the facet-size limit above. "
-                               "Top solid infill only: ironing and any top surface pattern that is not "
-                               "Rectilinear or Monotonic (Concentric-family patterns, in particular) are "
-                               "not affected by this option and keep using the coarser per-layer colour "
-                               "cycle a mixed filament normally uses."));
-    left->Add(m_image_row, 0, wxEXPAND | wxTOP, FromDIP(10));
+    // result. Ticking either ALSO creates (or updates) an ImageWeighted MixedFilament row for this
+    // part, so the surfaces ticked are re-sampled directly at extrusion-width resolution instead of
+    // being limited to the model's own facet size.
+    left->Add(new wxStaticText(this, wxID_ANY, _L("Nozzle-resolution colour") + ":"), 0, wxEXPAND | wxTOP, FromDIP(10));
+    wxBoxSizer *row_boxes = new wxBoxSizer(wxHORIZONTAL);
+    m_row_top   = new wxCheckBox(this, wxID_ANY, _L("Top surfaces"));
+    m_row_walls = new wxCheckBox(this, wxID_ANY, _L("Side walls"));
+    m_row_top->SetValue((initial_row_surfaces & IMAGE_FILL_SURFACE_TOP) != 0);
+    m_row_walls->SetValue((initial_row_surfaces & IMAGE_FILL_SURFACE_WALLS) != 0);
+    m_row_top->SetToolTip(_L("Re-samples the image along each line of the top surfaces (and the bottom, when the "
+                             "picture lands there) and along the top edge of the outer wall, at the nozzle's "
+                             "line width, instead of the facet size above. Ironing follows the same picture."));
+    m_row_walls->SetToolTip(_L("Re-samples the image along the outer wall of every layer, at the nozzle's line "
+                               "width, so a picture projected onto the sides (a box or a wrap, or a flat "
+                               "projection along X or Y) prints at full resolution. Each layer changes "
+                               "filament only for the colours the picture puts on that layer. Where the "
+                               "picture does not land, the wall keeps the part's own filament."));
+    row_boxes->Add(m_row_top, 0, wxRIGHT, FromDIP(12));
+    row_boxes->Add(m_row_walls, 0);
+    left->Add(row_boxes, 0, wxEXPAND | wxTOP, FromDIP(4));
 
     cols->Add(left, 1, wxEXPAND | wxALL, FromDIP(10));
 
@@ -324,6 +332,10 @@ void ImageFillDialog::collect()
     // so 0 has to zero the depth too, or the tooltip would be lying by six levels.
     m_params.subdivision = m_params.detail_mm > 0.f ? IMAGE_FILL_MAX_SUBDIVISION : 0;
 
+    // Phase 5a: the row's surfaces travel in the params, so the row's own reference says what it
+    // was asked to colour (ImageRowWalls.cpp reads it at slice time).
+    m_params.surfaces = image_row_surfaces();
+
     m_params.allowed.clear();
     for (size_t i = 0; i < m_filaments.size(); ++i)
         if (m_filament_list->IsChecked((unsigned) i))
@@ -349,9 +361,14 @@ ImageFillParams ImageFillDialog::params()
     return m_params;
 }
 
-bool ImageFillDialog::image_row_dither() const
+int ImageFillDialog::image_row_surfaces() const
 {
-    return m_image_row != nullptr && m_image_row->GetValue();
+    int surfaces = 0;
+    if (m_row_top != nullptr && m_row_top->GetValue())
+        surfaces |= IMAGE_FILL_SURFACE_TOP;
+    if (m_row_walls != nullptr && m_row_walls->GetValue())
+        surfaces |= IMAGE_FILL_SURFACE_WALLS;
+    return surfaces;
 }
 
 void ImageFillDialog::refresh_preview()
