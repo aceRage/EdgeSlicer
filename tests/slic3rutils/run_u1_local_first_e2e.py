@@ -47,9 +47,10 @@ def main():
         line = mock.stdout.readline().strip()
         if not line.startswith("READY"):
             raise SystemExit("the mock did not start: %r" % line)
-        # Two fake Moonrakers for the read-only probe: one with its WebSocket, one without.
-        mr_ports = [free_port(), free_port()]
-        for port, extra in ((mr_ports[0], []), (mr_ports[1], ["--no-ws"])):
+        # Fake Moonrakers: two for the read-only probe (with and without a WebSocket), and one the
+        # WebSocket route talks to (its own, so the probe's method counts stay exact).
+        mr_ports = [free_port(), free_port(), free_port()]
+        for port, extra in ((mr_ports[0], []), (mr_ports[1], ["--no-ws"]), (mr_ports[2], [])):
             fake = subprocess.Popen([sys.executable, "-u", os.path.join(HERE, "fake_moonraker_ws.py"), "--port", str(port)] + extra,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             procs.append(fake)

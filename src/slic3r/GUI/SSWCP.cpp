@@ -6486,8 +6486,9 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         
         client->SetMessageCallback(SSWCP_MqttAgent_Instance::mqtt_msg_cb);
 
-        // Ultra: with app_config snapmaker_local_first = "1" (off by default) a U1 bound to the
-        // Snapmaker account is served over the LAN when it pairs there (U1LanRoute.hpp).
+        // Ultra: a U1 bound to the Snapmaker account is served over the LAN (its Moonraker
+        // WebSocket) whenever it answers there, the cloud as the fallback (U1WsRoute.hpp);
+        // app_config snapmaker_local_first = "0" keeps it on the cloud.
         attach_u1_lan_route_if_cloud(client, server_address);
 
         m_res_data["type"] = type;
@@ -6852,10 +6853,10 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                         host->m_sn = m_param_data["sn"].get<std::string>();
                         host->m_sn_mtx.unlock();
 
-                        if (auto route = u1_lan_route_of(engine)) {
+                        {
                             const std::string code = m_param_data.count("code") && m_param_data["code"].is_string() ?
                                                          m_param_data["code"].get<std::string>() : std::string();
-                            route->set_device(m_param_data["sn"].get<std::string>(), code);
+                            u1_route_set_device(engine, m_param_data["sn"].get<std::string>(), code);
                         }
                     } else {
                         handle_general_fail(-1, "param [sn] is required or wrong type");

@@ -1,4 +1,5 @@
 #include "U1LanRoute.hpp"
+#include "U1WsRoute.hpp"
 
 #include "GUI.hpp" // into_u8
 #include "GUI_App.hpp"
@@ -1026,13 +1027,30 @@ U1LanSlotStore& U1LanSlotStore::app()
 
 // ---------------------------------------------------------------- the app ----
 
-bool u1_local_first_enabled()
+std::string u1_local_first_mode()
 {
-    // Off unless asked for: on U1 firmware up to at least 1.5.x the pairing port refuses every
-    // client while the printer is in cloud (WAN) mode ("link mode is not LAN", owner hand test
-    // 2026-10-15), and LAN mode switches the cloud off, so a cloud-bound U1 can never pair. The
-    // route stays for printers or firmware that allow both.
-    return wxGetApp().app_config && wxGetApp().app_config->get("snapmaker_local_first") == "1";
+    const std::string v = wxGetApp().app_config ? wxGetApp().app_config->get("snapmaker_local_first") : std::string();
+    if (v == "0")
+        return "off";
+    // The LAN-MQTT route only on request: on U1 firmware up to at least 1.5.x the pairing port
+    // refuses every client while the printer is in cloud (WAN) mode ("link mode is not LAN", owner
+    // hand test 2026-10-15), and LAN mode switches the cloud off.
+    if (v == "lan-mqtt")
+        return "lan-mqtt";
+    return "ws";
+}
+
+bool u1_local_first_enabled() { return u1_local_first_mode() != "off"; }
+
+void u1_route_set_device(const std::shared_ptr<MqttClient>& engine, const std::string& sn, const std::string& access_code)
+{
+    if (!engine)
+        return;
+    const std::shared_ptr<MqttRoute> route = engine->GetRoute();
+    if (auto lan = std::dynamic_pointer_cast<U1LanRoute>(route))
+        lan->set_device(sn, access_code);
+    else if (auto ws = std::dynamic_pointer_cast<U1WsRoute>(route))
+        ws->set_device(sn);
 }
 
 std::shared_ptr<U1LanRoute> u1_lan_route_of(const std::shared_ptr<MqttClient>& engine)
@@ -1042,10 +1060,20 @@ std::shared_ptr<U1LanRoute> u1_lan_route_of(const std::shared_ptr<MqttClient>& e
 
 void attach_u1_lan_route_if_cloud(const std::shared_ptr<MqttClient>& engine, const std::string& server_address)
 {
-    if (!engine || !SnapmakerLan::is_cloud_host(server_address) || !u1_local_first_enabled())
+    if (!engine || !SnapmakerLan::is_cloud_host(server_address))
         return;
-    U1LanRoute::attach(engine, make_app_u1_lan_deps());
-    BOOST_LOG_TRIVIAL(info) << "[U1LanRoute] local-first route attached to a cloud session";
+    const std::string mode = u1_local_first_mode();
+    if (mode == "off") {
+        BOOST_LOG_TRIVIAL(info) << "[U1WsRoute] local-first is off (snapmaker_local_first = 0): cloud only";
+        return;
+    }
+    if (mode == "lan-mqtt") {
+        U1LanRoute::attach(engine, make_app_u1_lan_deps());
+        BOOST_LOG_TRIVIAL(info) << "[U1LanRoute] LAN-MQTT route attached to a cloud session";
+        return;
+    }
+    U1WsRoute::attach(engine, make_app_u1_ws_deps());
+    BOOST_LOG_TRIVIAL(info) << "[U1WsRoute] local-first route attached to a cloud session";
 }
 
 static bool http_answers(const std::string& ip)

@@ -60,6 +60,24 @@ private:
     Via                        m_via { Via::Cloud };
 };
 
+// ------------------------------------------- JSON-RPC over the WebSocket ----
+//
+// Plan B (tests/design_u1_local_first.md section 6): the page's JSON-RPC requests go to the
+// printer's own Moonraker WebSocket, and come back as if the cloud had carried them.
+
+// The key that matches a response to its request: the "id" as JSON text (numbers and strings
+// alike); "" when there is none.
+std::string rpc_id_key(const nlohmann::json& message);
+// Moonraker's answer for a method it does not have (JSON-RPC -32601, or a 404 / "not found"
+// message): that method is sent through the cloud instead.
+bool        is_method_not_found(const nlohmann::json& response);
+// Safe to send a second time through the cloud when the LAN answer never came: methods that only
+// read (…info, …query, …list, …get…, metadata, heartbeat). Anything else may already have run.
+bool        is_idempotent_method(const std::string& method);
+// Where a Moonraker notification goes for the page: notify_status_update (the stream a
+// printer.objects.subscribe starts) on <sn>/status, everything else on <sn>/notification.
+std::string topic_for_notification(const std::string& sn, const std::string& method);
+
 // ----------------------------------------------------------- addresses ----
 
 bool is_private_ipv4(const std::string& ip);

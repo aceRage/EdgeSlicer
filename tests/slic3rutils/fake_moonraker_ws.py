@@ -7,6 +7,11 @@ on one port, for testing the read-only probe (Utils/U1MoonrakerProbe) without a 
                                                             preceded by a notify_proc_stat_update
                                                             notification, as Moonraker sends them
   GET /fake/methods                                         {"methods": [every JSON-RPC method received]}
+  GET /fake/drop                                            close every WebSocket and refuse new ones (503)
+  GET /fake/up                                              accept WebSockets again
+
+Every answer carries "via": "local" in its result. printer.objects.subscribe also starts a
+notify_status_update. Any other method answers -32601 "Method not found" (an MQTT-only method).
 
   --no-ws   answer the WebSocket upgrade with 404 (a printer whose WebSocket is not reachable)
 
@@ -17,6 +22,7 @@ import argparse
 import base64
 import hashlib
 import json
+import socket
 import socketserver
 import struct
 import sys
@@ -27,11 +33,15 @@ METHODS = []
 LOCK = threading.Lock()
 ARGS = None
 
+DROPPED = {"on": False}
+SOCKETS = set()
+
 ANSWERS = {
-    "server.info": {"klippy_connected": True, "klippy_state": "ready", "components": ["webcam"]},
-    "printer.info": {"state": "ready", "state_message": "Printer is ready", "hostname": "fake-u1"},
+    "server.info": {"klippy_connected": True, "klippy_state": "ready", "components": ["webcam"], "via": "local"},
+    "printer.info": {"state": "ready", "state_message": "Printer is ready", "hostname": "fake-u1", "via": "local"},
     "printer.objects.query": {"eventtime": 1.0, "status": {"print_stats": {"state": "standby"},
-                                                            "extruder": {"temperature": 25.0, "target": 0.0}}},
+                                                            "extruder": {"temperature": 25.0, "target": 0.0}}, "via": "local"},
+    "printer.objects.subscribe": {"eventtime": 1.0, "status": {"print_stats": {"state": "standby"}}, "via": "local"},
 }
 HTTP = {"/server/info": "server.info", "/printer/info": "printer.info", "/printer/objects/query": "printer.objects.query"}
 
@@ -99,6 +109,8 @@ class Handler(socketserver.StreamRequestHandler):
         if base == "/websocket" and headers.get("upgrade", "").lower() == "websocket":
             if ARGS.no_ws:
                 return http_reply(self.wfile, 404, {"error": {"code": 404, "message": "Not Found"}})
+            if DROPPED["on"]:
+                return http_reply(self.wfile, 503, {"error": {"code": 503, "message": "Unavailable"}})
             accept = base64.b64encode(hashlib.sha1((headers.get("sec-websocket-key", "") + GUID).encode()).digest()).decode()
             self.wfile.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                               "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
@@ -106,11 +118,26 @@ class Handler(socketserver.StreamRequestHandler):
         if base == "/fake/methods":
             with LOCK:
                 return http_reply(self.wfile, 200, {"methods": list(METHODS)})
+        if base == "/fake/drop":
+            DROPPED["on"] = True
+            with LOCK:
+                socks = list(SOCKETS)
+            for s in socks:
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            return http_reply(self.wfile, 200, {"dropped": len(socks)})
+        if base == "/fake/up":
+            DROPPED["on"] = False
+            return http_reply(self.wfile, 200, {"up": True})
         if base in HTTP:
             return http_reply(self.wfile, 200, {"result": ANSWERS[HTTP[base]]})
         http_reply(self.wfile, 404, {"error": {"code": 404, "message": "Not Found"}})
 
     def websocket(self):
+        with LOCK:
+            SOCKETS.add(self.request)
         try:
             while True:
                 opcode, data = read_frame(self.rfile)
@@ -133,8 +160,15 @@ class Handler(socketserver.StreamRequestHandler):
                 else:
                     res = {"jsonrpc": "2.0", "id": req.get("id"), "error": {"code": -32601, "message": "Method not found"}}
                 send_frame(self.wfile, 1, json.dumps(res).encode())
-        except (EOFError, ConnectionError, OSError):
+                if method == "printer.objects.subscribe":
+                    update = {"jsonrpc": "2.0", "method": "notify_status_update",
+                              "params": [{"print_stats": {"state": "standby"}, "via": "local"}, 2.0]}
+                    send_frame(self.wfile, 1, json.dumps(update).encode())
+        except (EOFError, ConnectionError, OSError, ValueError):
             return
+        finally:
+            with LOCK:
+                SOCKETS.discard(self.request)
 
 
 class Server(socketserver.ThreadingTCPServer):

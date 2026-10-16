@@ -61,6 +61,53 @@ bool RouteTable::accept(Via source, const std::string& topic) const
     return source == m_via;
 }
 
+// ------------------------------------------- JSON-RPC over the WebSocket ----
+
+std::string rpc_id_key(const json& message)
+{
+    if (!message.is_object() || !message.contains("id") || message["id"].is_null())
+        return {};
+    return message["id"].dump();
+}
+
+bool is_method_not_found(const json& response)
+{
+    if (!response.is_object() || !response.contains("error") || !response["error"].is_object())
+        return false;
+    const json& e = response["error"];
+    if (e.contains("code") && e["code"].is_number_integer()) {
+        const long long code = e["code"].get<long long>();
+        if (code == -32601 || code == 404)
+            return true;
+    }
+    if (e.contains("message") && e["message"].is_string()) {
+        std::string msg = e["message"].get<std::string>();
+        std::transform(msg.begin(), msg.end(), msg.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+        return msg.find("method not found") != std::string::npos || msg.find("not registered") != std::string::npos;
+    }
+    return false;
+}
+
+bool is_idempotent_method(const std::string& method)
+{
+    auto ends = [&method](const char* s) {
+        const std::string t(s);
+        return method.size() >= t.size() && method.compare(method.size() - t.size(), t.size(), t) == 0;
+    };
+    if (method.empty())
+        return false;
+    if (ends(".info") || ends(".query") || ends(".list") || ends(".list_page") || ends(".metadata") || ends(".roots") ||
+        ends(".get_directory") || ends(".heartbeat") || ends(".thumbnails") || ends(".thumbnails_base64") || ends("get_device_info") ||
+        ends(".status") || ends(".objects.list"))
+        return true;
+    return method.find(".get_") != std::string::npos;
+}
+
+std::string topic_for_notification(const std::string& sn, const std::string& method)
+{
+    return sn + (method == "notify_status_update" ? "/status" : "/notification");
+}
+
 // ----------------------------------------------------------- addresses ----
 
 static bool parse_ipv4(const std::string& s, int out[4])
