@@ -94,6 +94,9 @@ public:
     std::string set_input_shaping(char axis, float damp, float freq, std::string type) const;
     std::string reset_e(bool force = false);
     std::string update_progress(unsigned int num, unsigned int tot, bool allow_100 = false) const;
+    // Orca #11582 / #11616: the power loss recovery command for mode, or nothing when mode is
+    // PrinterConfiguration or the printer is neither a Bambu Lab one nor Marlin 2.
+    std::string enable_power_loss_recovery(PowerLossRecoveryMode mode) const;
     // return false if this extruder was already selected
     bool        need_toolchange(unsigned int extruder_id) const 
         { return m_extruder == nullptr || m_extruder->id() != extruder_id; }
