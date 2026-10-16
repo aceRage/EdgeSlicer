@@ -3091,10 +3091,20 @@ size_t ModelVolume::split(unsigned int max_extruders)
     unsigned int extruder_counter = 0;
     const Vec3d offset = this->get_offset();
 
+    // ImageMap phase 5c: each piece is re-centred below, so an image fill on this volume would be
+    // re-stretched over each piece's own box. Carry the picture's box and frame instead.
+    ImageFillParams      image_params;
+    const bool           has_image = image_fill_params_of(*this, image_params);
+    indexed_triangle_set image_old_its;
+    if (has_image)
+        image_old_its = this->mesh().its;
+
     for (TriangleMesh &mesh : meshes) {
         if (mesh.empty())
             // Repair may have removed unconnected triangles, thus emptying the mesh.
             continue;
+        // What center_geometry_after_creation() below will move this piece's mesh by.
+        const Vec3d piece_shift = mesh.bounding_box().center();
 
         if (idx == 0) {
             this->set_mesh(std::move(mesh));
@@ -3123,6 +3133,11 @@ size_t ModelVolume::split(unsigned int max_extruders)
         this->object->volumes[ivolume]->config.set("extruder", this->extruder_id());
         //this->object->volumes[ivolume]->config.set("extruder", auto_extruder_id(max_extruders, extruder_counter));
         this->object->volumes[ivolume]->m_is_splittable = 0;
+        if (has_image) {
+            ImageFillParams p = image_params;
+            image_fill_rebase(p, image_old_its, Geometry::translation_transform(-piece_shift));
+            this->object->volumes[ivolume]->config.set_key_value("image_fill_params", new ConfigOptionString(p.to_string()));
+        }
         ++ idx;
     }
 

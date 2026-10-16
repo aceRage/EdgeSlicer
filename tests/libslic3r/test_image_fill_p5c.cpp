@@ -225,3 +225,44 @@ TEST_CASE("Image Fill 5c: after a cut each half's frame maps it back onto the pi
         }
     }
 }
+
+TEST_CASE("Image Fill 5c: split to parts keeps each part on its own piece of the picture", "[imagefill][p5c][split]")
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    TriangleMesh two    = make_cube(10., 10., 10.);
+    TriangleMesh other  = make_cube(10., 10., 10.);
+    other.translate(30.f, 0.f, 0.f);
+    two.merge(other);
+    ModelVolume *volume = object->add_volume(std::move(two));
+    object->add_instance();
+
+    ImageFillParams p;
+    p.asset      = model.image_assets.add(read_fixture("quad_rgbw.png"));
+    p.projection = ImageFillProjection::Planar;
+    p.axis       = ImageFillAxis::Z;
+    p.allowed    = {1, 2};
+    REQUIRE(image_fill_apply(*volume, p, model.image_assets, {{0.f, 0.f, 0.f}, {1.f, 1.f, 1.f}}, {1, 2}).ok);
+    ImageFillParams before;
+    REQUIRE(image_fill_params_of(*volume, before));
+    REQUIRE(before.has_box);
+
+    REQUIRE(volume->split(4) == 2);
+    REQUIRE(object->volumes.size() == 2);
+    BoundingBoxf3 all;
+    for (const ModelVolume *v : object->volumes) {
+        ImageFillParams after;
+        REQUIRE(image_fill_params_of(*v, after));
+        REQUIRE(after.has_box);
+        for (size_t i = 0; i < 6; ++i)
+            CHECK(after.box[i] == Approx(before.box[i]));
+        BoundingBoxf3 mapped;
+        for (const Vec3f &vtx : v->mesh().its.vertices)
+            mapped.merge(after.frame * vtx.cast<double>());
+        // Each piece maps back to ONE cube's place in the original, not to the whole box.
+        CHECK(mapped.size().x() == Approx(10.).margin(1e-3));
+        all.merge(mapped);
+    }
+    CHECK(all.min.x() == Approx(before.box[0]).margin(1e-3));
+    CHECK(all.max.x() == Approx(before.box[3]).margin(1e-3));
+}
