@@ -152,8 +152,9 @@ independent of the others and starts from origin/main.
 ### 5c - `feat/imagemap-p5c-placement`: placement and staying in place
 
 - Params: offset (u, v), scale, rotation, tile, keep aspect ratio; dialog controls.
-- A per-volume projection frame recorded at apply time, carried through cut, split to parts and
-  merge so a half keeps sampling the picture where it was.
+- A per-volume projection frame recorded at apply time, carried through a cut (planar, curved,
+  drawn) and split to parts so a piece keeps sampling the picture where it was. Merging parts and
+  the flexi-joint cut are not covered and keep today's re-stretch.
 
 ### 5d - `feat/imagemap-p5d-obj-texture`: textured OBJ import
 
