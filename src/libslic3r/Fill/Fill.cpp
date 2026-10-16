@@ -1067,8 +1067,19 @@ bool image_row_context_for_region(const PrintObject &object, const PrintRegion &
 
     // Same box image_fill_compute() itself computes (ImageFill.cpp) - from the raw mesh, so a
     // point that lands in a facet's own plane samples exactly where Phase 2's facet painting did.
-    for (const Vec3f &v : mv->mesh().its.vertices)
-        ctx.mesh_box.merge(v.cast<double>());
+    // Phase 5c: the box and frame the picture was laid over, when the part's own params record
+    // them (they follow the part through a cut); otherwise the mesh's own box, as before.
+    ImageFillParams placed = ctx.params;
+    {
+        ImageFillParams vp;
+        if (image_fill_params_of(*mv, vp) && vp.has_box) {
+            placed.has_box   = true;
+            placed.box       = vp.box;
+            placed.has_frame = vp.has_frame;
+            placed.frame     = vp.frame;
+        }
+    }
+    ctx.mesh_box = image_fill_projection_box(placed, mv->mesh().its);
     if (!ctx.mesh_box.defined)
         return false;
 
@@ -1079,7 +1090,7 @@ bool image_row_context_for_region(const PrintObject &object, const PrintRegion &
     // slicing composes them (see PrintObject.cpp's slice_mesh_slabs() calls: trafo_centered() *
     // mv->get_matrix()). A volume moved/rotated/scaled independently of its object is now sampled
     // in the right place instead of silently falling back to the un-split resolve() cycle.
-    ctx.mesh_from_print = (object.trafo_centered() * mv->get_matrix()).inverse();
+    ctx.mesh_from_print = image_fill_projection_frame(placed) * (object.trafo_centered() * mv->get_matrix()).inverse();
     const Vec3f up_mesh = (ctx.mesh_from_print.linear().cast<float>() * Vec3f(0.f, 0.f, 1.f));
     ctx.facet_normal_mesh = up_mesh.norm() > 1e-9f ? Vec3f(up_mesh.normalized()) : Vec3f(0.f, 0.f, 1.f);
 
