@@ -22012,9 +22012,10 @@ void Plater::fill_bed_with_instances()
     // clearance uses - and pass the two separately.
     double tmpl_brim = 0.;
     {
-        const auto *bt = mo->get_config_value<ConfigOptionEnum<BrimType>>(global_config, "brim_type");
+        // Base option + virtual getInt(): a typed ConfigOptionEnum downcast of a generic enum is UB.
+        const ConfigOption *bt = mo->config.has("brim_type") ? mo->config.option("brim_type") : global_config.option("brim_type");
         const auto *bw = mo->get_config_value<ConfigOptionFloat>(global_config, "brim_width");
-        if (bt != nullptr && bw != nullptr && bt->value != btNoBrim)
+        if (bt != nullptr && bt->type() == coEnum && bw != nullptr && static_cast<BrimType>(bt->getInt()) != btNoBrim)
             tmpl_brim = std::max(0., bw->value);
     }
 
