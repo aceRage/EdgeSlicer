@@ -126,13 +126,23 @@ bool looks_like_ipv4(const std::string &host)
 const char *const MODEL_EXTENSIONS[] = {".3mf", ".stl", ".step", ".stp", ".obj", ".zip"};
 
 // Windows reserved device names, including with an extension: "nul.txt" opens the null device.
+// Superscript digits ¹ ² ³ (U+00B9/B2/B3) are the same as 1/2/3: COM¹ is COM1.
 bool is_windows_reserved_device_name(const std::string &seg)
 {
-    std::string stem = seg.substr(0, seg.find('.'));
-    std::string upper;
+    const std::string stem = seg.substr(0, seg.find('.'));
+    std::string       upper;
     upper.reserve(stem.size());
-    for (char c : stem)
-        upper.push_back(char(std::toupper(static_cast<unsigned char>(c))));
+    for (size_t i = 0; i < stem.size();) {
+        const unsigned char c = static_cast<unsigned char>(stem[i]);
+        if (c == 0xC2 && i + 1 < stem.size()) {
+            const unsigned char n = static_cast<unsigned char>(stem[i + 1]);
+            if (n == 0xB9) { upper.push_back('1'); i += 2; continue; } // ¹
+            if (n == 0xB2) { upper.push_back('2'); i += 2; continue; } // ²
+            if (n == 0xB3) { upper.push_back('3'); i += 2; continue; } // ³
+        }
+        upper.push_back(char(std::toupper(c)));
+        ++i;
+    }
     while (!upper.empty() && upper.back() == ' ')
         upper.pop_back();
     static const char *const reserved[] = {"CON",  "PRN",  "AUX",  "NUL",  "CONIN$", "CONOUT$", "COM1", "COM2", "COM3",
@@ -881,15 +891,19 @@ bool is_safe_archive_relative_path(const std::string &path)
         const std::string seg = path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
         if (seg.empty() || seg == "." || seg == "..")
             return false;
+#ifdef _WIN32
         // Windows strips trailing dots/spaces, so "..." or ".. " would still climb, and
         // "foo." / "foo " would collide with "foo". Refuse both the all-dot/space case and
-        // an otherwise-valid name that only ends in a dot or space.
+        // an otherwise-valid name that only ends in a dot or space. DOS device names
+        // (CON, AUX, nul.txt, COM¹, …) open the device; on POSIX they are ordinary names
+        // (Auxiliaries/aux.png, con.jpg in a 3MF).
         if (seg.find_first_not_of(". ") == std::string::npos)
             return false;
         if (seg.back() == '.' || seg.back() == ' ')
             return false;
         if (is_windows_reserved_device_name(seg))
             return false;
+#endif
         if (slash == std::string::npos)
             break;
         start = slash + 1;
