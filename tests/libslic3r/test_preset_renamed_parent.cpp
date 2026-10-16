@@ -614,8 +614,10 @@ TEST_CASE("A detached copy of a system filament keeps every value and has no par
     CHECK(nozzle_temperature(*preset) == 250);
     CHECK(flow_ratio(*preset) == Approx(0.95));
 
-    // The whole config is in the file, not a difference to a parent.
-    const nlohmann::json j = nlohmann::json::parse(read_file(temp_dir.path() / PRESET_FILAMENT_NAME / "My detached PETG.json"));
+    // The whole config is in the file, not a difference to a parent. A preset with no parent is a base
+    // preset, which PresetCollection::path_for_preset() keeps in the "base" folder.
+    CHECK(fs::equivalent(fs::path(preset->file), temp_dir.path() / PRESET_FILAMENT_NAME / "base" / "My detached PETG.json"));
+    const nlohmann::json j = nlohmann::json::parse(read_file(fs::path(preset->file)));
     CHECK(j.value("inherits", std::string()).empty());
     CHECK(j.at("nozzle_temperature") == nlohmann::json::array({ "250" }));
     CHECK(j.contains("filament_flow_ratio"));
