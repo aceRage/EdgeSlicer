@@ -1016,23 +1016,74 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     // reports both ports here; streams then keep running after this window is closed.
     // go2rtcPort is the hub's port once the relay runs (the page never talks to go2rtc itself);
     // hubSecret lets the PC page open the player through the hub.
+    //
+    // Keeping that handshake current. The tiles carry the hub's per-run secret (`lt`) and the relay
+    // port. A hub that restarts - another EdgeSlicer install took it over, or it stopped and a window
+    // started it again - comes back with a new secret, usually on the same port, and every tile still
+    // holding the old one gets the hub's plain-text "not found" for good. Owner, 2026-10-16: every
+    // Bambu tile "not found" while the U1 tiles (straight to the printer, no hub) played, and only a
+    // slicer restart helped. So the page asks the slicer again which hub runs - soon after a change
+    // or a failure, backing off to a slow heartbeat - and rebuilds the hub's tiles when the answer
+    // differs (hubCheck() below). A failed relay cell also offers Retry, which asks at once.
+    var HUB_CHECK_MIN_MS = 2000, HUB_CHECK_MAX_MS = 30000;
+    function hubIdentity(hub, relay, secret) { return (hub || 0) + '|' + (relay || 0) + '|' + (secret || ''); }
+    // The wait before the next check: the minimum after a change (or the first time), then doubling
+    // up to the heartbeat. A hub that is down stays on the doubling retry until it answers.
+    function hubNextCheckMs(prevMs, changed) {
+        if (changed || !(prevMs > 0)) return HUB_CHECK_MIN_MS;
+        return Math.min(HUB_CHECK_MAX_MS, prevMs * 2);
+    }
     var go2rtcPort = 0, hubSecret = '', hubAsked = false, hubAnswered = false, go2rtcFailed = false, go2rtcStreams = {};
+    var hubKey = '', hubCheckMs = 0;
     window.__hubReady = function(hub, relay, secret) {
+        var key = hubIdentity(hub, relay, secret);
+        var first = !hubAnswered, changed = !first && key !== hubKey;
+        hubKey = key;
         go2rtcPort = hub || 0;
         hubSecret = secret || '';
         relayPort = relay || 0;
         go2rtcFailed = !go2rtcPort;
         hubAnswered = true;
-        render();
+        hubCheckMs = hubNextCheckMs(hubCheckMs, changed);
+        scheduleHubCheck();
+        if (changed) {
+            // A new hub run: its go2rtc registers the saved cameras itself, and the rebuilt tiles
+            // push this window's list once more, as on page open, in case that registration failed.
+            go2rtcStreams = {};
+            dropHubTiles();
+        }
+        if (first || changed) render();
     };
-    window.__go2rtcReady = function(p) { window.__hubReady(p, relayPort); };
+    window.__go2rtcReady = function(p) { window.__hubReady(p, relayPort, hubSecret); };
     function ensureGo2rtc() {
         if (hubAsked) return;
         hubAsked = true;
         postToSlicer('hub_start');
     }
     var ensureHub = ensureGo2rtc;
+    var hubCheckTimer = 0;
+    function scheduleHubCheck() {
+        if (REMOTE) return; // the phone's page reaches the hub through its own link, not this handshake
+        if (hubCheckTimer) clearTimeout(hubCheckTimer);
+        hubCheckTimer = setTimeout(function() { hubCheckTimer = 0; hubCheck(false); }, hubCheckMs || HUB_CHECK_MIN_MS);
+    }
+    // Asks the slicer which hub runs (it starts one if none does); __hubReady answers. Skipped while
+    // no hub tile is on screen - showing the tab again asks at once (__snorcaTilesActive).
+    function hubCheck(now) {
+        if (REMOTE || !hubAsked) return;
+        if (!now && (!tilesShowing() || !document.querySelector('#grid .cell[data-hub]'))) { scheduleHubCheck(); return; }
+        if (now) hubCheckMs = HUB_CHECK_MIN_MS;
+        postToSlicer('hub_start');
+        // The answer reschedules (and backs off); this one only covers a slicer that never answers.
+        scheduleHubCheck();
+    }
+    // Hub tiles are rebuilt by the next render(): one with no id is not kept.
+    function dropHubTiles() {
+        var cells = document.querySelectorAll('#grid .cell[data-hub]');
+        for (var i = 0; i < cells.length; i++) cells[i].dataset.id = '';
+    }
     function go2rtcCell(cell, src) {
+        cell.dataset.hub = '1';
         var name = 's' + hashStr(src);
         // The hub registers streams from the pushed state; go2rtc's API is the hub's alone.
         if (!go2rtcStreams[name]) { go2rtcStreams[name] = true; pushState(); }
@@ -1043,9 +1094,18 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     }
     function relayWaitCell(cell, failed) {
         ensureHub();
+        cell.dataset.hub = '1';
         var wait = document.createElement('div');
-        wait.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:' + (failed ? 'var(--err2-fg)' : 'var(--mute5)') + ';font-size:13px;text-align:center;padding:8px;';
+        wait.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;color:' + (failed ? 'var(--err2-fg)' : 'var(--mute5)') + ';font-size:13px;text-align:center;padding:8px;';
         wait.textContent = failed ? 'Stream relay failed to start - check <data dir>/hub/hub.log.' : 'Starting stream relay…';
+        if (failed) {
+            // The page also retries by itself (hubCheck), backing off; this asks now.
+            var retry = document.createElement('button');
+            retry.type = 'button';
+            retry.textContent = 'Retry';
+            retry.onclick = function(e) { e.stopPropagation(); hubCheck(true); };
+            wait.appendChild(retry);
+        }
         cell.appendChild(wait);
         cell.dataset.id = ''; // rebuild this cell once the relay reports in
     }
@@ -1899,7 +1959,13 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     window.addEventListener('pageshow', function() { tilesPageGone = false; tilesSweep(); });
     // The hosts that cannot send visibilitychange (the slicer's tab, the app's WebView while a
     // tab is hidden or the app is in the background) call this.
-    window.__snorcaTilesActive = function(on) { tilesHostActive = !!on; tilesSweep(); };
+    window.__snorcaTilesActive = function(on) {
+        var was = tilesShowing();
+        tilesHostActive = !!on;
+        tilesSweep();
+        // Back on screen: make sure the hub the tiles point at is still the one running.
+        if (!was && tilesShowing() && hubAnswered) hubCheck(true);
+    };
     function render() {
         var chips = document.getElementById('chips');
         var chipFocus = focusKey(chips); // a chip redraws on every toggle; keep the keyboard where it was
@@ -2038,6 +2104,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                         // The hub's relay serves MJPEG, which renders in a plain <img>.
                         if (!relayPort) relayWaitCell(cell, hubAnswered && !relayPort);
                         else {
+                            cell.dataset.hub = '1';
                             var im = document.createElement('img');
                             im.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
                             im.src = streamSrc(hh);
