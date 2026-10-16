@@ -591,6 +591,65 @@ TEST_CASE("Every renamed U1 filament takes over user presets made on each of its
     }
 }
 
+// Orca #7071 / #15173: "Detach from parent" in the Save preset dialog. A detached preset keeps every value
+// and has no parent, so the renamed-parent lookups and the filament preset migration leave it alone.
+TEST_CASE("A detached copy of a system filament keeps every value and has no parent", "[Preset][RenamedParent][Detach]")
+{
+    ScopedTemporaryDir  temp_dir;
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    fs::create_directories(temp_dir.path() / PRESET_FILAMENT_NAME);
+    load_user_filaments(filaments, temp_dir.path());
+    REQUIRE(filaments.select_preset_by_name(k1_parent, true));
+    filaments.get_edited_preset().config.option<ConfigOptionInts>("nozzle_temperature")->values = { 250 };
+
+    filaments.save_current_preset("My detached PETG", /*detach*/ true);
+
+    const Preset *preset = filaments.find_preset("My detached PETG", false, true);
+    REQUIRE(preset != nullptr);
+    CHECK_FALSE(preset->is_system);
+    CHECK(preset->inherits().empty());
+    CHECK(preset->renamed_from.empty());
+    CHECK(filaments.get_preset_parent(*preset) == nullptr);
+    CHECK(nozzle_temperature(*preset) == 250);
+    CHECK(flow_ratio(*preset) == Approx(0.95));
+
+    // The whole config is in the file, not a difference to a parent. A preset with no parent is a base
+    // preset, which PresetCollection::path_for_preset() keeps in the "base" folder.
+    CHECK(fs::equivalent(fs::path(preset->file), temp_dir.path() / PRESET_FILAMENT_NAME / "base" / "My detached PETG.json"));
+    const nlohmann::json j = nlohmann::json::parse(read_file(fs::path(preset->file)));
+    CHECK(j.value("inherits", std::string()).empty());
+    CHECK(j.at("nozzle_temperature") == nlohmann::json::array({ "250" }));
+    CHECK(j.contains("filament_flow_ratio"));
+
+    // The migration only looks at presets with a parent.
+    CHECK(filaments.legacy_user_filament_presets({ { k1_parent, { "Creality K1C 0.4 nozzle" } },
+                                                   { k1_old_parent, { "Creality K1C 0.4 nozzle" } } }).empty());
+}
+
+TEST_CASE("Detaching a user filament on a renamed parent drops the parent and keeps its values", "[Preset][RenamedParent][Detach]")
+{
+    ScopedTemporaryDir  temp_dir;
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    const fs::path file = write_user_filament(temp_dir.path(), "My PETG", k1_old_parent, R"(,"nozzle_temperature":["245"])");
+    load_user_filaments(filaments, temp_dir.path());
+    REQUIRE(filaments.select_preset_by_name("My PETG", true));
+
+    filaments.save_current_preset("My PETG", /*detach*/ true);
+
+    const Preset *preset = filaments.find_preset("My PETG", false, true);
+    REQUIRE(preset != nullptr);
+    CHECK(preset->inherits().empty());
+    CHECK(filaments.get_preset_parent(*preset) == nullptr);
+    CHECK(nozzle_temperature(*preset) == 245);
+    CHECK(flow_ratio(*preset) == Approx(0.95));
+    const nlohmann::json j = nlohmann::json::parse(read_file(file));
+    CHECK(j.value("inherits", std::string()).empty());
+    CHECK(j.contains("filament_flow_ratio"));
+    CHECK(filaments.legacy_user_filament_presets({ { k1_old_parent, { "Creality K1C 0.4 nozzle" } } }).empty());
+}
+
 // Orca #12816: the 3MF reader allocates a project preset's loading_substitutions with new, and
 // load_project_embedded_presets released it with free() - a heap mismatch a crafted 3MF (one whose
 // embedded preset needs a substitution) reaches. Under ASan / the MSVC debug heap the old code
@@ -623,4 +682,91 @@ TEST_CASE("A project preset's loading substitutions are reported and released", 
     CHECK(substitutions.front().substitutions.front().old_value == "NOT-A-FILAMENT-TYPE");
     CHECK(preset->loading_substitutions == nullptr);
     CHECK(filaments.find_preset("Project PETG", false, true) != nullptr);
+}
+
+
+// Owner hand test of #549: "Detach from parent" in the Save preset dialog. The dialog offers it when
+// PresetCollection::detach_parent_name() is not empty and saves with detach = true; check both for process,
+// filament and printer presets, saved from a system preset and from a user preset.
+namespace {
+struct DetachCase
+{
+    Preset::Type type;
+    const char  *folder;
+    const char  *edited_key;
+    const char  *edited_value;
+    const char  *other_key; // left alone: a detached preset's file still has it
+};
+
+void check_detach_from_parent(PresetCollection &presets, const DetachCase &c)
+{
+    ScopedTemporaryDir temp_dir;
+    // A system preset, and the user folder the collection saves into.
+    presets.load_preset("", "System preset", presets.default_preset().config, false);
+    Preset *system = presets.find_preset("System preset", false, true);
+    REQUIRE(system != nullptr);
+    system->is_system  = true;
+    system->is_visible = true;
+    fs::create_directories(temp_dir.path() / c.folder);
+    PresetsConfigSubstitutions substitutions;
+    presets.load_presets(temp_dir.path().string(), c.folder, substitutions, ForwardCompatibilitySubstitutionRule::EnableSilent);
+
+    // From the system preset the dialog offers to detach from that system preset.
+    REQUIRE(presets.select_preset_by_name("System preset", true));
+    CHECK(PresetCollection::detach_parent_name(presets.get_selected_preset()) == "System preset");
+
+    SECTION("A detached copy of the system preset") {
+        presets.get_edited_preset().config.set_deserialize_strict({{c.edited_key, c.edited_value}});
+        presets.save_current_preset("Detached copy", /*detach*/ true);
+        const Preset *saved = presets.find_preset("Detached copy", false, true);
+        REQUIRE(saved != nullptr);
+        CHECK(saved->inherits().empty());
+        CHECK(presets.get_preset_parent(*saved) == nullptr);
+        CHECK(PresetCollection::detach_parent_name(*saved).empty());
+        CHECK(saved->config.opt_serialize(c.edited_key) == presets.get_edited_preset().config.opt_serialize(c.edited_key));
+        const nlohmann::json j = nlohmann::json::parse(read_file(fs::path(saved->file)));
+        CHECK(j.value("inherits", std::string()).empty());
+        CHECK(j.contains(c.edited_key));
+        CHECK(j.contains(c.other_key));
+    }
+    SECTION("A user preset, then detached") {
+        presets.get_edited_preset().config.set_deserialize_strict({{c.edited_key, c.edited_value}});
+        presets.save_current_preset("User preset");
+        const Preset *user = presets.find_preset("User preset", false, true);
+        REQUIRE(user != nullptr);
+        CHECK(user->inherits() == "System preset");
+        // From the user preset the dialog offers to detach from its parent.
+        REQUIRE(presets.select_preset_by_name("User preset", true));
+        CHECK(PresetCollection::detach_parent_name(presets.get_selected_preset()) == "System preset");
+        const nlohmann::json before = nlohmann::json::parse(read_file(fs::path(user->file)));
+        CHECK_FALSE(before.contains(c.other_key)); // only its difference to the parent
+
+        presets.save_current_preset("User preset", /*detach*/ true);
+        const Preset *detached = presets.find_preset("User preset", false, true);
+        REQUIRE(detached != nullptr);
+        CHECK(detached->inherits().empty());
+        CHECK(PresetCollection::detach_parent_name(*detached).empty());
+        const nlohmann::json after = nlohmann::json::parse(read_file(fs::path(detached->file)));
+        CHECK(after.value("inherits", std::string()).empty());
+        CHECK(after.contains(c.edited_key));
+        CHECK(after.contains(c.other_key));
+    }
+}
+} // namespace
+
+TEST_CASE("Detach from parent works for process, filament and printer presets", "[Preset][Detach]")
+{
+    const auto &defaults = static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults());
+    SECTION("process") {
+        PresetCollection prints(Preset::TYPE_PRINT, Preset::print_options(), defaults);
+        check_detach_from_parent(prints, {Preset::TYPE_PRINT, PRESET_PRINT_NAME, "layer_height", "0.28", "wall_loops"});
+    }
+    SECTION("filament") {
+        PresetCollection filaments(Preset::TYPE_FILAMENT, Preset::filament_options(), defaults, "Default Filament");
+        check_detach_from_parent(filaments, {Preset::TYPE_FILAMENT, PRESET_FILAMENT_NAME, "nozzle_temperature", "250", "filament_flow_ratio"});
+    }
+    SECTION("printer") {
+        PrinterPresetCollection printers(Preset::TYPE_PRINTER, Preset::printer_options(), defaults, "Default Printer");
+        check_detach_from_parent(printers, {Preset::TYPE_PRINTER, PRESET_PRINTER_NAME, "printable_height", "300", "nozzle_diameter"});
+    }
 }

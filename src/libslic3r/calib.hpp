@@ -40,9 +40,48 @@ struct Calib_Params
     std::string shaper_type;
     std::vector<double> accelerations;
     std::vector<double> speeds;
+    // Orca #14759: resolved layer height for the VFA tower (0 = auto: nozzle_diameter / 2). Each speed block is a
+    // fixed number of layers tall, so this also sets the physical block height / tower height.
+    double vfa_layer_height = 0.0;
+    // Orca #14759: scale the VFA model to the nozzle diameter and set the layer height to match. When false the
+    // 0.4 mm / 0.2 mm reference model is printed as-is. (Edge: our temperature tower has no nozzle scaling.)
+    bool nozzle_based_resize = true;
 
     CalibMode mode;
 };
+
+// Orca #14759: number of printed layers per speed block in the VFA tower. The base model has 5 mm blocks designed
+// for a 0.2 mm layer height (0.4 mm nozzle), i.e. 25 layers per block.
+static constexpr int    vfa_layers_per_block     = 25;
+static constexpr double vfa_base_block_height    = 5.0;
+static constexpr double vfa_base_nozzle_diameter = 0.4;
+
+// Orca #14759: the value of a stepped calibration (PA tower, VFA tower) at a layer. The range start..end (both
+// inclusive) is split into equal-width bands of `step`, spread evenly over the layers; layers 0 and 1 print the
+// start value. layer_index counts from 0 (the first layer).
+float calib_stepped_layer_value(int layer_index, unsigned int layer_count, float start_value, float end_value, float step);
+
+// Orca #14759: the fastest outer wall speed (mm/s) the filament's max volumetric speed allows at a layer height.
+double calib_vfa_speed_limit(double max_volumetric_speed, double line_width, double layer_height, double nozzle_diameter);
+
+// Orca #14759: when the VFA end speed is over the filament's volumetric limit at the default layer height, the
+// dialog lowers the layer height to one the printer's process profiles use (the largest that still reaches the end
+// speed), or else lowers the end speed. Edge: the decision is here so it can be tested; the dialog shows it.
+struct CalibVfaPlan
+{
+    enum class Result {
+        Fits,               // the end speed is reachable at the default layer height
+        LayerHeightReduced, // layer_height reaches the end speed
+        EndSpeedLowered,    // even the smallest layer height is too thick: end_speed is lowered (snapped to a step)
+        NoCandidates,       // no usable process layer heights
+    };
+    Result result       = Result::Fits;
+    double layer_height = 0.;
+    double end_speed    = 0.;
+};
+CalibVfaPlan calib_vfa_plan(double start, double end, double step, double default_layer_height, std::vector<double> candidate_layer_heights,
+                            double machine_min_layer_height, double machine_max_layer_height, double max_volumetric_speed,
+                            double line_width, double nozzle_diameter);
 
 enum FlowRatioCalibrationType {
     COMPLETE_CALIBRATION = 0,
@@ -236,6 +275,9 @@ public:
     CalibPressureAdvanceLine(GCode* gcodegen);
     ~CalibPressureAdvanceLine(){};
 
+    // Orca #14440: the X bounds of the pattern on the given bed (Y spans the bed).
+    BoundingBoxf print_extents(const BoundingBoxf &bed_ext) const;
+
     std::string generate_test(double start_pa = 0, double step_pa = 0.002, int count = 50);
 
     void set_speed(double fast = 100.0, double slow = 20.0)
@@ -269,11 +311,24 @@ private:
     bool   m_draw_numbers{true};
 };
 
+// Orca #11493: the PA calibration's batch accelerations and speeds look swapped when an acceleration is
+// not above every speed. Empty lists are fine.
+bool calib_pa_batch_values_plausible(const std::vector<double> &accelerations, const std::vector<double> &speeds);
+
+// Orca #13658: the speed and acceleration the input shaping and cornering towers print at, the machine's
+// limits (the slower of the X/Y max speeds, the max extruding acceleration) so a calibration is never slowed
+// below what the printer can do. Edge: a limit that is not set (missing or 0) falls back to the given value.
+struct CalibMotionLimits
+{
+    double speed;
+    double acceleration;
+};
+CalibMotionLimits calib_machine_motion_limits(const ConfigBase &printer_config, double fallback_speed, double fallback_acceleration);
+
 struct SuggestedConfigCalibPAPattern
 {
-    const std::vector<std::pair<std::string, double>> float_pairs{{"initial_layer_print_height", 0.25},
-                                                                  {"layer_height", 0.2},
-                                                                  {"initial_layer_speed", 30}};
+    // Orca #11835: the pattern keeps the process layer heights.
+    const std::vector<std::pair<std::string, double>> float_pairs{{"initial_layer_speed", 30}};
 
     const std::vector<std::pair<std::string, double>> nozzle_ratio_pairs{{"line_width", 112.5}, {"initial_layer_line_width", 140}};
 

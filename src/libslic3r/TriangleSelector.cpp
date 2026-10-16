@@ -2632,4 +2632,41 @@ TriangleSelector::TriangleSplittingData TriangleSelector::remap_painting(
     return target_selector.serialize();
 }
 
+// ORCA: Helper to extract used states from serialized data
+std::vector<EnforcerBlockerType> TriangleSelector::extract_used_facet_states(const TriangleSplittingData &data)
+{
+    std::vector<EnforcerBlockerType> out;
+    for (size_t i = 0; i < data.used_states.size(); ++i) {
+        if (data.used_states[i])
+            out.push_back(static_cast<EnforcerBlockerType>(i));
+    }
+    return out;
+}
+
+bool TriangleSelector::build_filament_remap_state_map(const std::vector<unsigned int> &display_filament_ids,
+                                                      const std::vector<size_t>       &remap,
+                                                      EnforcerBlockerStateMap         &state_map)
+{
+    constexpr size_t MAX_EBT = size_t(EnforcerBlockerType::ExtruderMax);
+    for (size_t i = 0; i <= MAX_EBT; ++i)
+        state_map[i] = static_cast<EnforcerBlockerType>(i);
+
+    const size_t n_slots    = std::min({remap.size(), display_filament_ids.size(), MAX_EBT});
+    bool         any_change = false;
+    for (size_t src = 0; src < n_slots; ++src) {
+        const size_t dst = remap[src];
+        if (dst >= display_filament_ids.size())
+            continue;
+        const unsigned int src_state = display_filament_ids[src];
+        const unsigned int dst_state = display_filament_ids[dst];
+        if (src_state == 0 || dst_state == 0 || src_state > MAX_EBT || dst_state > MAX_EBT || src_state == dst_state)
+            continue;
+        // Orca #12437: unpainted triangles (state 0) stay unpainted; they follow the volume's filament,
+        // which the gizmo remaps separately.
+        state_map[src_state] = static_cast<EnforcerBlockerType>(dst_state);
+        any_change = true;
+    }
+    return any_change;
+}
+
 } // namespace Slic3r

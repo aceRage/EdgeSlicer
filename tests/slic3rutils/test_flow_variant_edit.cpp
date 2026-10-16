@@ -557,3 +557,41 @@ TEST_CASE("a U1 calibration with High Flow selected sizes from the High-Flow col
     CHECK(v.flow_ratio == Approx(0.97));
     CHECK(v.max_volumetric_speed == Approx(18.0));
 }
+
+// Orca #11178: the input shaping and cornering calibrations turn pressure advance on only when the
+// filament has it off for the flow type the calibration slices with.
+TEST_CASE("Motion calibrations keep a filament's own pressure advance", "[FlowVariantEdit][Calib][PressureAdvance]")
+{
+    SECTION("PA off (every U1 filament): on at 0, adaptive off") {
+        DynamicPrintConfig filament = DynamicPrintConfig::full_print_config();
+        filament.set_key_value("filament_flow_support", new ConfigOptionStrings{FLOW_MODE_STANDARD});
+        filament.set_key_value("enable_pressure_advance", new ConfigOptionBools{false});
+        filament.set_key_value("pressure_advance", new ConfigOptionFloats{0.04});
+        filament.set_key_value("adaptive_pressure_advance", new ConfigOptionBools{true});
+        CHECK(calib_enable_pressure_advance_if_off(filament, fvtStandard));
+        CHECK(filament.option<ConfigOptionBools>("enable_pressure_advance")->values == std::vector<unsigned char>{1});
+        CHECK(filament.option<ConfigOptionFloats>("pressure_advance")->values == std::vector<double>{0.0});
+        CHECK(filament.option<ConfigOptionBools>("adaptive_pressure_advance")->values == std::vector<unsigned char>{0});
+    }
+    SECTION("PA on: the filament's PA and adaptive PA are kept") {
+        DynamicPrintConfig filament = DynamicPrintConfig::full_print_config();
+        filament.set_key_value("filament_flow_support", new ConfigOptionStrings{FLOW_MODE_STANDARD});
+        filament.set_key_value("enable_pressure_advance", new ConfigOptionBools{true});
+        filament.set_key_value("pressure_advance", new ConfigOptionFloats{0.035});
+        filament.set_key_value("adaptive_pressure_advance", new ConfigOptionBools{true});
+        CHECK_FALSE(calib_enable_pressure_advance_if_off(filament, fvtStandard));
+        CHECK(filament.option<ConfigOptionFloats>("pressure_advance")->values == std::vector<double>{0.035});
+        CHECK(filament.option<ConfigOptionBools>("adaptive_pressure_advance")->values == std::vector<unsigned char>{1});
+    }
+    SECTION("Flow variants: the column the calibration slices with decides") {
+        DynamicPrintConfig filament = DynamicPrintConfig::full_print_config();
+        filament.set_key_value("filament_flow_support", new ConfigOptionStrings{FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW});
+        filament.set_key_value("enable_pressure_advance", new ConfigOptionBools{false, true});
+        filament.set_key_value("pressure_advance", new ConfigOptionFloats{0.04, 0.02});
+        DynamicPrintConfig hf = filament;
+        CHECK_FALSE(calib_enable_pressure_advance_if_off(hf, fvtHighFlow));
+        CHECK(hf.option<ConfigOptionFloats>("pressure_advance")->values == std::vector<double>{0.04, 0.02});
+        CHECK(calib_enable_pressure_advance_if_off(filament, fvtStandard));
+        CHECK(filament.option<ConfigOptionFloats>("pressure_advance")->values == std::vector<double>{0.0});
+    }
+}

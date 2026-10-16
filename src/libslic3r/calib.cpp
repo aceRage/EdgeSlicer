@@ -2,9 +2,103 @@
 #include "BoundingBox.hpp"
 #include "Config.hpp"
 #include "Model.hpp"
+#include "Flow.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace Slic3r {
+
+float calib_stepped_layer_value(int layer_index, unsigned int layer_count, float start_value, float end_value, float step)
+{
+    if (layer_index <= 1 || layer_count < 2)
+        return start_value;
+    const float ratio = std::min(1.f, float(layer_index) / (float(layer_count) - 1.f));
+    if (step > 0.f) {
+        // Discrete equal-width bands. The band is clamped to the last one so the value can't overshoot the range:
+        // at the top layer ratio * n_bands == n_bands, which would otherwise index one band past the end.
+        const int n_bands = int(std::lround(std::abs(end_value - start_value) / step)) + 1;
+        const int band    = std::min(n_bands - 1, static_cast<int>(ratio * n_bands));
+        return start_value + (end_value >= start_value ? 1.f : -1.f) * band * step;
+    }
+    return start_value + ratio * (end_value - start_value);
+}
+
+double calib_vfa_speed_limit(double max_volumetric_speed, double line_width, double layer_height, double nozzle_diameter)
+{
+    const double mm3_per_mm = Flow(float(line_width), float(layer_height), float(nozzle_diameter)).mm3_per_mm();
+    return mm3_per_mm > 0.0 ? max_volumetric_speed / mm3_per_mm : 1e9;
+}
+
+CalibVfaPlan calib_vfa_plan(double start, double end, double step, double default_layer_height, std::vector<double> candidates,
+                            double machine_min_layer_height, double machine_max_layer_height, double max_volumetric_speed,
+                            double line_width, double nozzle_diameter)
+{
+    CalibVfaPlan plan;
+    plan.layer_height = default_layer_height;
+    plan.end_speed    = end;
+    auto limit = [&](double lh) { return calib_vfa_speed_limit(max_volumetric_speed, line_width, lh, nozzle_diameter); };
+    if (max_volumetric_speed <= 0.0 || nozzle_diameter <= 0.0 || end <= limit(default_layer_height))
+        return plan;
+
+    // Candidate layer heights within the machine's layer-height limits (when set), sorted and unique.
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](double lh) {
+                         return lh <= 0.0 || (machine_min_layer_height > 0.0 && lh < machine_min_layer_height - 1e-6) ||
+                                (machine_max_layer_height > 0.0 && lh > machine_max_layer_height + 1e-6);
+                     }),
+                     candidates.end());
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end(), [](double a, double b) { return std::abs(a - b) < 1e-6; }),
+                     candidates.end());
+    if (candidates.empty()) {
+        plan.result = CalibVfaPlan::Result::NoCandidates;
+        return plan;
+    }
+
+    // Largest candidate <= the default layer height that still reaches the end speed (smallest change).
+    for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+        if (*it > default_layer_height + 1e-6)
+            continue; // never increase the layer height above the default
+        if (limit(*it) >= end) {
+            plan.result       = CalibVfaPlan::Result::LayerHeightReduced;
+            plan.layer_height = *it;
+            return plan;
+        }
+    }
+
+    // Even the smallest layer height is too thick: lower the end speed, snapped down to a step multiple.
+    const double min_lh = candidates.front();
+    double       new_end = step > 0.0 ? std::floor(limit(min_lh) / step) * step : limit(min_lh);
+    if (new_end < start + step)
+        new_end = start + step;
+    plan.result       = CalibVfaPlan::Result::EndSpeedLowered;
+    plan.layer_height = min_lh;
+    plan.end_speed    = new_end;
+    return plan;
+}
+
+bool calib_pa_batch_values_plausible(const std::vector<double> &accelerations, const std::vector<double> &speeds)
+{
+    if (accelerations.empty() || speeds.empty())
+        return true;
+    const double min_accel = *std::min_element(accelerations.begin(), accelerations.end());
+    const double max_speed = *std::max_element(speeds.begin(), speeds.end());
+    return min_accel > max_speed;
+}
+
+CalibMotionLimits calib_machine_motion_limits(const ConfigBase &printer_config, double fallback_speed, double fallback_acceleration)
+{
+    auto first = [&printer_config](const char *key) {
+        const auto *opt = printer_config.option<ConfigOptionFloats>(key);
+        return opt != nullptr && !opt->values.empty() ? opt->values.front() : 0.;
+    };
+    const double speed_x = first("machine_max_speed_x");
+    const double speed_y = first("machine_max_speed_y");
+    const double accel   = first("machine_max_acceleration_extruding");
+    CalibMotionLimits limits;
+    limits.speed        = speed_x > 0. && speed_y > 0. ? std::min(speed_x, speed_y) : fallback_speed;
+    limits.acceleration = accel > 0. ? accel : fallback_acceleration;
+    return limits;
+}
 
 // Calculate the optimal Pressure Advance speed
 float CalibPressureAdvance::find_optimal_PA_speed(const DynamicPrintConfig &config, double line_width, double layer_height, int filament_idx)
@@ -482,6 +576,31 @@ std::string CalibPressureAdvanceLine::generate_test(double start_pa /*= 0*/, dou
     return print_pa_lines(startx, starty, start_pa, step_pa, count);
 }
 
+// Orca #14440: the X extent of the PA line pattern on the given bed (Y spans the bed), for the bed mesh area.
+BoundingBoxf CalibPressureAdvanceLine::print_extents(const BoundingBoxf &bed_ext) const
+{
+    BoundingBoxf adjusted_bed = bed_ext;
+    if (is_delta()) {
+        CalibPressureAdvanceLine::delta_scale_bed_ext(adjusted_bed);
+    }
+
+    const double bed_width      = adjusted_bed.size().x();
+    // m_length_long adjusts for narrow beds, exactly as in generate_test()
+    const double line_long      = 40.0 + std::min(bed_width - 120.0, 0.0);
+    const double total_line_len = m_length_short * 2 + line_long;
+    const double start_x        = adjusted_bed.min.x() + (bed_width - 2 * m_length_short - line_long - 20.0) / 2.0;
+    const double box_width      = m_draw_numbers ? (number_spacing() * 8) : 0.0;
+
+    BoundingBoxf extent;
+    extent.min.x() = start_x;
+    extent.max.x() = start_x + total_line_len + m_line_width + box_width;
+    // Y bounds are the full bed (the caller insets them by 25 mm)
+    extent.min.y() = adjusted_bed.min.y();
+    extent.max.y() = adjusted_bed.max.y();
+    extent.defined = true;
+    return extent;
+}
+
 bool CalibPressureAdvanceLine::is_delta() const { return mp_gcodegen->config().printable_area.values.size() > 4; }
 
 std::string CalibPressureAdvanceLine::print_pa_lines(double start_x, double start_y, double start_pa, double step_pa, int num)
@@ -504,9 +623,11 @@ std::string CalibPressureAdvanceLine::print_pa_lines(double start_x, double star
     const double      slow = CalibPressureAdvance::speed_adjust(m_slow_speed);
     std::stringstream gcode;
     gcode << mp_gcodegen->writer().travel_to_z(m_height_layer + z_offset);
+    gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) << (m_height_layer + z_offset) << "\n";
     double y_pos = start_y;
 
-    // prime line
+    // Purge/first perimeter - acts as an anchor to the rest of the model
+    gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Custom\n";
     gcode << writer.set_pressure_advance(0.0);
     auto prime_x = start_x;
     gcode << move_to(Vec2d(prime_x, y_pos + (num) * m_space_y), writer);
@@ -516,10 +637,13 @@ std::string CalibPressureAdvanceLine::print_pa_lines(double start_x, double star
     for (int i = 0; i < num; ++i) {
         gcode << writer.set_pressure_advance(start_pa + i * step_pa);
         gcode << move_to(Vec2d(start_x, y_pos + i * m_space_y), writer);
+        gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Custom\n";
         gcode << writer.set_speed(slow);
         gcode << writer.extrude_to_xy(Vec2d(start_x + m_length_short, y_pos + i * m_space_y), e_per_mm * m_length_short);
+        gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Outer wall\n";
         gcode << writer.set_speed(fast);
         gcode << writer.extrude_to_xy(Vec2d(start_x + m_length_short + m_length_long, y_pos + i * m_space_y), e_per_mm * m_length_long);
+        gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Custom\n";
         gcode << writer.set_speed(slow);
         gcode << writer.extrude_to_xy(Vec2d(start_x + m_length_short + m_length_long + m_length_short, y_pos + i * m_space_y),
                                       e_per_mm * m_length_short);
@@ -543,9 +667,15 @@ std::string CalibPressureAdvanceLine::print_pa_lines(double start_x, double star
 
         const auto     box_start_x = start_x + m_length_short + m_length_long + m_length_short + m_line_width;
         DrawBoxOptArgs default_box_opt_args(2, m_height_layer, m_line_width, fast);
+        // Draw box
         default_box_opt_args.is_filled = true;
+        gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Bottom surface\n";
         gcode << draw_box(writer, box_start_x, start_y - m_space_y,
                           number_spacing() * 8, (num + 1) * m_space_y, default_box_opt_args);
+        // The numbers print on the next layer: show them there in the G-code viewer too
+        gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) << "\n";
+        gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) << (m_height_layer * 2 + z_offset) << "\n";
+        gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Top surface\n";
         gcode << writer.travel_to_z(m_height_layer*2 + z_offset);
         for (int i = 0; i < num; i += 2) {
             gcode << draw_number(box_start_x + 3 + m_line_width, y_pos + i * m_space_y + m_space_y / 2, start_pa + i * step_pa, m_draw_digit_mode,
@@ -607,13 +737,16 @@ CustomGCode::Info CalibPressureAdvancePattern::generate_custom_gcodes(const Dyna
     const DrawBoxOptArgs default_box_opt_args(wall_count(), height_first_layer(), line_width_first_layer(),
                                               speed_adjust(speed_first_layer()));
 
-    // create anchoring frame
+    // create anchoring frame; the pattern uses the outer wall speed and width
+    gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Outer wall\n";
     gcode << draw_box(m_writer, m_starting_point.x(), m_starting_point.y(), print_size_x(), frame_size_y(), default_box_opt_args);
 
     // create tab for numbers
     DrawBoxOptArgs draw_box_opt_args = default_box_opt_args;
     draw_box_opt_args.is_filled      = true;
     draw_box_opt_args.num_perimeters = wall_count();
+    // the tab prints as a bottom surface, so the numbers on top of it show clearly
+    gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Bottom surface\n";
     gcode << draw_box(m_writer, m_starting_point.x(), m_starting_point.y() + frame_size_y() + line_spacing_first_layer(),
                       print_size_x(),
                       max_numbering_height() + line_spacing_first_layer() + m_glyph_padding_vertical * 2, draw_box_opt_args);
@@ -624,7 +757,8 @@ CustomGCode::Info CalibPressureAdvancePattern::generate_custom_gcodes(const Dyna
     const double zhop_config_value = m_config.option<ConfigOptionFloats>("z_hop")->get_at(0);
     const auto accel = accel_perimeter();
 
-    // draw pressure advance pattern
+    // Draw pressure advance pattern; it uses the outer wall speed, so label it as such
+    gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Outer wall\n";
     for (int i = 0; i < m_num_layers; ++i) {
         const double layer_height = height_first_layer() + height_z_offset() + (i * height_layer());
         const double zhop_height = layer_height + zhop_config_value;
@@ -656,6 +790,7 @@ CustomGCode::Info CalibPressureAdvancePattern::generate_custom_gcodes(const Dyna
                                               filament_flow_ratio_at(m_config));
 
             // glyph on every other line
+            gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Outer wall\n";
             for (int j = 0; j < num_patterns; j += 2) {
                 gcode << draw_number(glyph_start_x(j), m_starting_point.y() + frame_size_y() + m_glyph_padding_vertical + line_width(),
                                      m_params.start + (j * m_params.step), m_draw_digit_mode, line_width(), number_e_per_mm,
@@ -705,7 +840,7 @@ CustomGCode::Info CalibPressureAdvancePattern::generate_custom_gcodes(const Dyna
         for (int j = 0; j < num_patterns; ++j) {
             // increment pressure advance
             gcode << m_writer.set_pressure_advance(m_params.start + (j * m_params.step));
-
+            gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << "Outer wall\n";
             for (int k = 0; k < wall_count(); ++k) {
                 to_x += std::cos(to_radians(m_corner_angle) / 2) * side_length;
                 to_y += std::sin(to_radians(m_corner_angle) / 2) * side_length;

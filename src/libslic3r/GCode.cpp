@@ -3439,10 +3439,27 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         BoundingBoxf bbox;
         auto         pts = std::make_unique<ConfigOptionPoints>();
-        if (print.calib_mode() == CalibMode::Calib_PA_Line || print.calib_mode() == CalibMode::Calib_PA_Pattern) {
+        if (print.calib_mode() == CalibMode::Calib_PA_Pattern) {
+            // PA_Pattern can have any size or arrangement - not dependent on 3mf model size
             bbox = bbox_bed;
             bbox.offset(-25.0);
             // add 4 corner points of bbox into pts
+            pts->values.reserve(4);
+            pts->values.emplace_back(bbox.min.x(), bbox.min.y());
+            pts->values.emplace_back(bbox.max.x(), bbox.min.y());
+            pts->values.emplace_back(bbox.max.x(), bbox.max.y());
+            pts->values.emplace_back(bbox.min.x(), bbox.max.y());
+
+        } else if (print.calib_mode() == CalibMode::Calib_PA_Line) {
+            // Orca #14440: derive the X bounds from the actual calibration geometry (less bed mesh probing).
+            CalibPressureAdvanceLine temp_pa_line_forsize(this);
+            const BoundingBoxf       pattern_extents = temp_pa_line_forsize.print_extents(bbox_bed);
+
+            bbox = bbox_bed;
+            bbox.offset(-25.0);
+            bbox.min.x() = std::max(pattern_extents.min.x(), bbox.min.x());
+            bbox.max.x() = std::min(pattern_extents.max.x(), bbox.max.x());
+
             pts->values.reserve(4);
             pts->values.emplace_back(bbox.min.x(), bbox.min.y());
             pts->values.emplace_back(bbox.max.x(), bbox.min.y());
@@ -6702,7 +6719,10 @@ LayerResult GCode::process_layer(const Print& print,
     // Calibration Layer-specific GCode
     switch (print.calib_mode()) {
     case CalibMode::Calib_PA_Tower: {
-        gcode += writer().set_pressure_advance(print.calib_params().start + static_cast<int>(print_z) * print.calib_params().step);
+        // Orca #14759: equal bands of `step` from start to end, spread over the tower's layers.
+        gcode += writer().set_pressure_advance(this->interpolate_value_across_layers(static_cast<float>(print.calib_params().start),
+                                                                                     static_cast<float>(print.calib_params().end),
+                                                                                     static_cast<float>(print.calib_params().step)));
         break;
     }
     case CalibMode::Calib_Temp_Tower: {
@@ -6711,7 +6731,12 @@ LayerResult GCode::process_layer(const Print& print,
         break;
     }
     case CalibMode::Calib_VFA_Tower: {
-        auto _speed = print.calib_params().start + std::floor(print_z / 5.0) * print.calib_params().step;
+        // Orca #14759: step the outer wall speed from start to end across the tower's layers. Plater::calib_VFA sizes
+        // the geometry so each speed step spans one block (a fixed number of layers), so the layer-based stepping
+        // stays aligned with the blocks whatever the nozzle size / layer height.
+        const float _speed = this->interpolate_value_across_layers(static_cast<float>(print.calib_params().start),
+                                                                   static_cast<float>(print.calib_params().end),
+                                                                   static_cast<float>(print.calib_params().step));
         m_calib_config.set_key_value("outer_wall_speed", new ConfigOptionFloats { std::round(_speed) });
         break;
     }
@@ -11091,6 +11116,12 @@ std::string GCode::extrusion_role_to_string_for_parser(const ExtrusionRole& role
     }
 }
 
+// Orca #14759: stepped value for the current layer (see calib_stepped_layer_value).
+float GCode::interpolate_value_across_layers(float start_value, float end_value, float step) const
+{
+    return calib_stepped_layer_value(m_layer_index, m_layer_count, start_value, end_value, step);
+}
+
 // Calculate the interpolated value for the current layer between start_value and end_value
 float GCode::interpolate_value_across_layers(float start_value, float end_value) const {
     if (m_layer_index == 1) {
@@ -11998,7 +12029,7 @@ std::string GCode::set_object_info(Print* print)
         return "";
     std::ostringstream gcode;
     // Orca: check if we are in pa calib mode
-    if (print->calib_mode() == CalibMode::Calib_PA_Line || print->calib_mode() == CalibMode::Calib_PA_Pattern) {
+    if (print->calib_mode() == CalibMode::Calib_PA_Pattern) {
         BoundingBoxf bbox_bed(print->config().printable_area.values);
         bbox_bed.offset(-25.0);
         Polygon polygon_bed;
@@ -12009,6 +12040,8 @@ std::string GCode::set_object_info(Print* print)
         gcode << "EXCLUDE_OBJECT_DEFINE NAME="
               << "Orca-PA-Calibration-Test"
               << " CENTER=" << 0 << "," << 0 << " POLYGON=" << polygon_to_string(polygon_bed, print, true) << "\n";
+    } else if (print->calib_mode() == CalibMode::Calib_PA_Line) {
+        // Orca #14440: PA_Line has only one object, no EXCLUDE_OBJECT_DEFINE needed
     } else {
         m_instance_names.clear();
         for (PrintObject* object : print->objects()) {

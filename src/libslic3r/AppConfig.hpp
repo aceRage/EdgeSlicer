@@ -309,6 +309,10 @@ public:
 	// stays dropped. So a printer unticked in the Printer Selection dialog is not brought back
 	// by the copy on disk, and one another instance unticked is not brought back by this one.
 	static VendorMap merge_vendor_maps(const VendorMap &base, const VendorMap &mine, const VendorMap &disk);
+
+	// Orca #11407: the "auto_slice_change_delay_seconds" value as whole seconds. Empty, unreadable or
+	// negative values give 0; large ones are capped so the delay in milliseconds still fits an int.
+	static int auto_slice_delay_seconds(const std::string &value);
 	const VendorMap&    vendors() const { return m_vendors; }
 
 	// Orca printer settings

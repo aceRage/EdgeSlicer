@@ -10828,6 +10828,9 @@ struct Plater::priv
     bool m_ignore_event{false};
     bool m_slice_all{false};
     bool m_is_slicing {false};
+    // Orca #11407: auto slice after changes
+    bool auto_reslice_pending {false};
+    bool auto_reslice_after_cancel {false};
     bool m_is_publishing {false};
     int m_is_RightClickInLeftUI{-1};
     int m_cur_slice_plate;
@@ -10880,6 +10883,7 @@ struct Plater::priv
     std::string                 delayed_error_message;
 
     wxTimer                     background_process_timer;
+    wxTimer                     auto_reslice_timer;
     // Set by Plater::begin_shutdown(); see Plater::is_shutting_down().
     bool                        gui_shutting_down { false };
     // Bambu two-extruder printers: marks plates for re-slice when the selected printer changes.
@@ -11118,6 +11122,8 @@ struct Plater::priv
     }
     void update_print_volume_state();
     void schedule_background_process();
+    void schedule_auto_reslice_if_needed();
+    void trigger_auto_reslice_now();
     // Update background processing thread from the current config and Model.
     enum UpdateBackgroundProcessReturnState {
         // update_background_process() reports, that the Print / SLAPrint was updated in a way,
@@ -11509,6 +11515,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panels.push_back(assemble_view);
 
     this->background_process_timer.SetOwner(this->q, 0);
+    this->auto_reslice_timer.SetOwner(this->q, 0);
     // Own event handler and timer: q's wxEVT_TIMER binding below takes every timer event of q.
     this->dual_nozzle_watcher = std::make_unique<DualNozzle::Watcher>(this->q);
     this->q->Bind(wxEVT_TIMER, [this](wxTimerEvent &evt)
@@ -11516,6 +11523,12 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         // EDGESLICER-A: the frame is closing or being replaced; never restart the timer either.
         if (this->q->is_shutting_down())
             return;
+        // Orca #11407: the auto slice delay has its own timer on q.
+        if (&evt.GetTimer() == &this->auto_reslice_timer) {
+            this->auto_reslice_timer.Stop();
+            this->trigger_auto_reslice_now();
+            return;
+        }
         // At startup this timer can fire from a nested event loop (the macOS splash screen and WebView
         // creation yield) before MainFrame is assigned to the app; try again once start-up is done.
         if (wxGetApp().mainframe == nullptr) {
@@ -14322,6 +14335,83 @@ void Plater::priv::schedule_background_process()
     this->background_process_timer.Start(500, wxTIMER_ONE_SHOT);
     // Notify the Canvas3D that something has changed, so it may invalidate some of the layer editing stuff.
     this->view3D->get_canvas3d()->set_config(this->config);
+}
+
+// Orca #11407 / #12153: re-slice by itself after a slicing setting changes, while the Preview tab is shown, after "auto_slice_change_delay_seconds"
+// (edits within the delay are grouped into one slice).
+void Plater::priv::schedule_auto_reslice_if_needed()
+{
+    AppConfig* cfg = wxGetApp().app_config;
+    if (cfg == nullptr || !cfg->get_bool("auto_slice_after_change"))
+        return;
+
+    // Edge: a hidden hub instance slices only when asked.
+    if (wxGetApp().is_hub_managed() && RemoteAccess::get().hidden())
+        return;
+
+    // Orca #12153: only while the Preview tab is shown.
+    if (!is_preview_shown())
+        return;
+
+    if (model.objects.empty())
+        return;
+
+    PartPlate* plate = partplate_list.get_curr_plate();
+    if (plate == nullptr || !plate->has_printable_instances())
+        return;
+
+    if (background_process.running() || m_is_slicing) {
+        // Remember to restart once the current slice stops and cancel it now.
+        auto_reslice_after_cancel = true;
+        background_process.stop();
+        return;
+    }
+
+    const int delay_seconds = AppConfig::auto_slice_delay_seconds(cfg->get("auto_slice_change_delay_seconds"));
+    if (delay_seconds > 0) {
+        auto_reslice_pending = true;
+        auto_reslice_timer.Stop();
+        auto_reslice_timer.Start(delay_seconds * 1000, wxTIMER_ONE_SHOT);
+        return;
+    }
+
+    if (auto_reslice_pending)
+        return;
+
+    auto_reslice_pending = true;
+    auto_reslice_timer.Stop();
+    wxGetApp().CallAfter([this]() { this->trigger_auto_reslice_now(); });
+}
+
+void Plater::priv::trigger_auto_reslice_now()
+{
+    this->auto_reslice_pending = false;
+
+    // Edge: a delayed CallAfter can land while the frame is closing.
+    if (this->q->is_shutting_down())
+        return;
+
+    AppConfig* cfg = wxGetApp().app_config;
+    if (cfg == nullptr || !cfg->get_bool("auto_slice_after_change"))
+        return;
+
+    if (wxGetApp().is_hub_managed() && RemoteAccess::get().hidden())
+        return;
+
+    if (!is_preview_shown())
+        return;
+
+    if (this->model.objects.empty())
+        return;
+
+    if (this->background_process.running() || this->m_is_slicing)
+        return;
+
+    PartPlate* plate = this->partplate_list.get_curr_plate();
+    if (plate == nullptr || !plate->has_printable_instances())
+        return;
+
+    this->q->reslice();
 }
 
 void Plater::priv::update_print_volume_state()
@@ -17175,6 +17265,12 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
             }
         }
     }
+    // Orca #11407: a change came in while slicing; that slice was stopped, slice again now.
+    if (auto_reslice_after_cancel) {
+        auto_reslice_after_cancel = false;
+        schedule_auto_reslice_if_needed();
+    }
+
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", exit.");
 }
 
@@ -19910,6 +20006,10 @@ void Plater::calib_pa(const Calib_Params& params)
     const auto calib_pa_name = wxString::Format(L"Pressure Advance Test");
     new_project(false, false, calib_pa_name);
     wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
+    auto print_config   = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    print_config->set_key_value("overhang_reverse", new ConfigOptionBool(false));
+    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
     switch (params.mode) {
         case CalibMode::Calib_PA_Line:
             add_model(false, Slic3r::resources_dir() + "/calib/pressure_advance/pressure_advance_test.stl");
@@ -19922,9 +20022,6 @@ void Plater::calib_pa(const Calib_Params& params)
             break;
         default: break;
     }
-    auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
     print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
     p->background_process.fff_print()->set_calib_params(params);
 }
@@ -20484,6 +20581,7 @@ void Plater::calib_temp(const Calib_Params& params) {
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
     model().objects[0]->config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
     model().objects[0]->config.set_key_value("seam_slope_type", new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
+    model().objects[0]->config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
 
     changed_objects({ 0 });
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
@@ -20548,7 +20646,9 @@ void Plater::calib_max_vol_speed(const Calib_Params& params)
     if (max_lh->values[0] < layer_height)
         max_lh->values[0] = { layer_height };
 
-    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats { 200 });
+    // Orca #13658: never lower the filament's own limit.
+    const double filament_max_volumetric_speed = calib_filament_flow_values(*filament_config, plater_calib_filament_volume_type()).max_volumetric_speed;
+    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats { std::max(filament_max_volumetric_speed, 200.0) });
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats{0.0});
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
     obj_cfg.set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
@@ -20611,7 +20711,15 @@ void Plater::calib_retraction(const Calib_Params& params)
 
     print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
 
-    double layer_height = 0.2;
+    // Orca #11835: a layer height the nozzle can print.
+    const double nozzle_diameter = printer_config->option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
+    double       layer_height;
+    if (nozzle_diameter <= 0.1)
+        layer_height = 0.05;
+    else if (nozzle_diameter <= 0.2)
+        layer_height = 0.1;
+    else
+        layer_height = 0.2;
 
     auto max_lh = printer_config->option<ConfigOptionFloats>("max_layer_height");
     if (max_lh->values[0] < layer_height)
@@ -20626,6 +20734,9 @@ void Plater::calib_retraction(const Calib_Params& params)
     print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(layer_height));
     obj->config.set_key_value("layer_height", new ConfigOptionFloat(layer_height));
     obj->config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
+    obj->config.set_key_value("seam_position", new ConfigOptionEnum<SeamPosition>(spAligned));
+    obj->config.set_key_value("wall_sequence", new ConfigOptionEnum<WallSequence>(WallSequence::InnerOuter));
+    obj->config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
 
     changed_objects({ 0 });
 
@@ -20652,6 +20763,43 @@ void Plater::calib_VFA(const Calib_Params& params)
     auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
     auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
+
+    // Orca #14759: size the tower to the nozzle.
+    const ConfigOptionFloats* nozzle_diameter_config = printer_config->option<ConfigOptionFloats>("nozzle_diameter");
+    size_t nozzle_id = static_cast<size_t>(std::max(params.extruder_id, 0));
+    double nozzle_diameter = vfa_base_nozzle_diameter;
+    if (nozzle_diameter_config && !nozzle_diameter_config->values.empty()) {
+        nozzle_id = std::min(nozzle_id, nozzle_diameter_config->values.size() - 1);
+        nozzle_diameter = nozzle_diameter_config->values[nozzle_id];
+    }
+    if (nozzle_diameter <= 0.0)
+        nozzle_diameter = vfa_base_nozzle_diameter;
+
+    // Resolved layer height: the (possibly auto-adjusted) value from the dialog, else nozzle/2.
+    const double layer_height = params.vfa_layer_height > 0.0 ? params.vfa_layer_height : nozzle_diameter / 2.0;
+
+    // Cut upper (on the unscaled model, using the base block height); the scaling below keeps the physical block
+    // height (vfa_layers_per_block * layer_height) in sync with the speed stepping in GCode::process_layer.
+    // Subtract EPSILON (as the temperature tower does) so the cut lands just below the flat block surface instead
+    // of exactly on it, which would otherwise add a degenerate extra layer.
+    {
+        const auto obj_bb = model().objects[0]->bounding_box_exact();
+        const auto height = vfa_base_block_height * ((params.end - params.start) / params.step + 1) - EPSILON;
+        if (height < obj_bb.size().z())
+            cut_horizontal(0, 0, height, ModelObjectCutAttribute::KeepLower);
+    }
+
+    // When resizing is on, XY scales with the nozzle (footprint / line width) and Z so that each base block becomes
+    // vfa_layers_per_block layers of the resolved layer height. When off, the 0.4 mm / 0.2 mm reference model is
+    // printed as-is (preset layer height kept).
+    if (params.nozzle_based_resize) {
+        const double xy_scale = nozzle_diameter / vfa_base_nozzle_diameter;
+        const double z_scale  = (vfa_layers_per_block * layer_height) / vfa_base_block_height;
+        if (std::abs(xy_scale - 1.0) > EPSILON || std::abs(z_scale - 1.0) > EPSILON)
+            model().objects[0]->scale(xy_scale, xy_scale, z_scale);
+    }
+    model().objects[0]->ensure_on_bed();
+
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
@@ -20664,6 +20812,10 @@ void Plater::calib_VFA(const Calib_Params& params)
     print_config->set_key_value("overhang_reverse", new ConfigOptionBool(false));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
+    if (params.nozzle_based_resize) {
+        print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(layer_height));
+        model().objects[0]->config.set_key_value("layer_height", new ConfigOptionFloat(layer_height));
+    }
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -20674,14 +20826,11 @@ void Plater::calib_VFA(const Calib_Params& params)
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_ui_from_settings();
     wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_ui_from_settings();
 
-    // cut upper
-    auto obj_bb = model().objects[0]->bounding_box_exact();
-    auto height = 5 * ((params.end - params.start) / params.step + 1);
-    if (height < obj_bb.size().z()) {
-        cut_horizontal(0, 0, height, ModelObjectCutAttribute::KeepLower);
-    }
-
-    p->background_process.fff_print()->set_calib_params(params);
+    // Pass the resolved layer height on (only meaningful when resized). The G-code's VFA stepping is layer-based,
+    // so it does not need it, but keep it consistent with the geometry.
+    Calib_Params calib_params     = params;
+    calib_params.vfa_layer_height = params.nozzle_based_resize ? layer_height : 0.0;
+    p->background_process.fff_print()->set_calib_params(calib_params);
 }
 
 void Plater::calib_input_shaping_freq(const Calib_Params& params)
@@ -20712,10 +20861,8 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
-    filament_config->set_key_value("enable_pressure_advance", new ConfigOptionBools {true});
-    filament_config->set_key_value("pressure_advance", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("adaptive_pressure_advance", new ConfigOptionBools{false});
-    print_config->set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    // Orca #11178: keep the filament's own pressure advance when it is on.
+    calib_enable_pressure_advance_if_off(*filament_config, plater_calib_filament_volume_type());
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
@@ -20726,9 +20873,11 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
-    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 20000 });
-    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 20000 });
+    // Orca #13658: print the tower at the machine's limits rather than a fixed 200 mm/s and 20000 mm/s².
+    const CalibMotionLimits motion_limits = calib_machine_motion_limits(*printer_config, 200., 20000.);
+    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { motion_limits.speed });
+    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
+    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -20770,10 +20919,8 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
-    filament_config->set_key_value("enable_pressure_advance", new ConfigOptionBools {true});
-    filament_config->set_key_value("pressure_advance", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("adaptive_pressure_advance", new ConfigOptionBools{false});
-    print_config->set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    // Orca #11178: keep the filament's own pressure advance when it is on.
+    calib_enable_pressure_advance_if_off(*filament_config, plater_calib_filament_volume_type());
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
@@ -20784,9 +20931,11 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
-    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 20000 });
-    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 20000 });
+    // Orca #13658: print the tower at the machine's limits rather than a fixed 200 mm/s and 20000 mm/s².
+    const CalibMotionLimits motion_limits = calib_machine_motion_limits(*printer_config, 200., 20000.);
+    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { motion_limits.speed });
+    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
+    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -20836,11 +20985,11 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
     filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
-    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats{200});
-    filament_config->set_key_value("enable_pressure_advance", new ConfigOptionBools {true});
-    filament_config->set_key_value("pressure_advance", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("adaptive_pressure_advance", new ConfigOptionBools{false});
-    print_config->set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    // Orca #13658: never lower the filament's own limit.
+    const double filament_max_volumetric_speed = calib_filament_flow_values(*filament_config, plater_calib_filament_volume_type()).max_volumetric_speed;
+    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats{std::max(filament_max_volumetric_speed, 200.0)});
+    // Orca #11178: keep the filament's own pressure advance when it is on.
+    calib_enable_pressure_advance_if_off(*filament_config, plater_calib_filament_volume_type());
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
@@ -20851,9 +21000,11 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
     print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
     print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { 200 });
-    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { 2000 });
-    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { 2000 });
+    // Orca #13658: print the tower at the machine's limits rather than a fixed 200 mm/s and 2000 mm/s².
+    const CalibMotionLimits motion_limits = calib_machine_motion_limits(*printer_config, 200., 2000.);
+    print_config->set_key_value("outer_wall_speed", new ConfigOptionFloats { motion_limits.speed });
+    print_config->set_key_value("default_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
+    print_config->set_key_value("outer_wall_acceleration", new ConfigOptionFloats { motion_limits.acceleration });
     model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
@@ -26040,6 +26191,7 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
     if (p->main_frame->is_loaded()) {
         this->p->schedule_background_process();
         update_title_dirty_status();
+        p->schedule_auto_reslice_if_needed();
     }
 
     // Gate on the diff so unrelated option edits never resurrect the yellow
@@ -26495,6 +26647,7 @@ void Plater::begin_shutdown()
 {
     p->gui_shutting_down = true;
     p->background_process_timer.Stop();
+    p->auto_reslice_timer.Stop();
 }
 
 bool Plater::is_shutting_down() const

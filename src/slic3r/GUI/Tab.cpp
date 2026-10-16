@@ -4791,6 +4791,16 @@ void TabFilament::build()
         option.opt.is_code = true;
         option.opt.height = 15;
         optgroup->append_single_option_line(option);
+        // Orca #14198: check the adaptive PA model when it is edited.
+        optgroup->m_on_change = [this](const t_config_option_key& opt_key, const boost::any& value) {
+            DynamicPrintConfig& filament_config = m_preset_bundle->filaments.get_edited_preset().config;
+
+            update_dirty();
+            if (opt_key.substr(0, opt_key.find('#')) == "adaptive_pressure_advance_model")
+                m_config_manipulation.check_adaptive_pressure_advance_model(&filament_config);
+
+            on_value_change(opt_key, value);
+        };
         //
 
         optgroup = page->new_optgroup(L("Print chamber temperature"), L"param_chamber_temp");
@@ -7828,13 +7838,15 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
     // focus currently.is there anything better than this ?
 //!	m_tabctrl->OnSetFocus();
     if (from_input) {
-        SavePresetDialog dlg(m_parent, m_type, detach ? _u8L("Detached") : "");
+        SavePresetDialog dlg(m_parent, m_type, m_mode, detach ? _u8L("Detached") : "");
         dlg.Show(false);
         dlg.input_name_from_other(input_name);
         wxCommandEvent evt(wxEVT_TEXT, GetId());
         dlg.GetEventHandler()->ProcessEvent(evt);
         dlg.confirm_from_other();
         name = input_name;
+        // Edge: the detach button asked for a detached copy already; the dialog only adds to that.
+        detach = detach || dlg.get_detach_value(m_type);
     }
 
     // Ultra: instead of prompting for a name when saving a modified system preset,
@@ -7845,7 +7857,7 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
     }
 
     if (name.empty()) {
-        SavePresetDialog dlg(m_parent, m_type, detach ? _u8L("Detached") : "");
+        SavePresetDialog dlg(m_parent, m_type, m_mode, detach ? _u8L("Detached") : "");
         if (!m_just_edit) {
             if (dlg.ShowModal() != wxID_OK)
                 return;
@@ -7854,6 +7866,8 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         //BBS: add project embedded preset relate logic
         save_to_project = dlg.get_save_to_project_selection(m_type);
         project_printers = dlg.get_project_printers_selection(m_type);
+        // Edge: the detach button asked for a detached copy already; the dialog only adds to that.
+        detach           = detach || dlg.get_detach_value(m_type);
     }
 
     //BBS record current preset name

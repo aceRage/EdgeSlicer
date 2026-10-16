@@ -87,4 +87,20 @@ inline CalibFlowValues calib_filament_flow_values(const ConfigBase &filament_pre
     return out;
 }
 
+// Orca #11178: the input shaping and cornering towers print with pressure advance on. A filament with
+// PA on for the flow type the calibration slices with keeps its own PA settings; one with PA off (every
+// U1 filament: owner rule) gets PA on at 0, with adaptive PA off, for the test. This edits only the
+// filament preset being calibrated, never a profile file. Returns true when it changed the preset.
+inline bool calib_enable_pressure_advance_if_off(DynamicPrintConfig &filament_preset, FilamentVolumeType type)
+{
+    const auto *enabled = filament_preset.option<ConfigOptionBools>("enable_pressure_advance");
+    if (enabled != nullptr && !enabled->values.empty() &&
+        get_preset_value_at(filament_preset, *enabled, ConfigFlowDomain::Filament, type))
+        return false;
+    filament_preset.set_key_value("enable_pressure_advance", new ConfigOptionBools{true});
+    filament_preset.set_key_value("pressure_advance", new ConfigOptionFloats{0.0});
+    filament_preset.set_key_value("adaptive_pressure_advance", new ConfigOptionBools{false});
+    return true;
+}
+
 } // namespace Slic3r

@@ -80,6 +80,7 @@ public:
     void    check_nozzle_recommended_temperature_range(DynamicPrintConfig *config);
     void    check_nozzle_temperature_range(DynamicPrintConfig* config, int variant_index = 0);
     void    check_nozzle_temperature_initial_layer_range(DynamicPrintConfig* config, int variant_index = 0);
+    void    check_adaptive_pressure_advance_model(DynamicPrintConfig* config);
     void    check_filament_max_volumetric_speed(DynamicPrintConfig *config);
     void    check_chamber_temperature(DynamicPrintConfig* config);
     void    check_chamber_minimal_temperature(DynamicPrintConfig* config);
