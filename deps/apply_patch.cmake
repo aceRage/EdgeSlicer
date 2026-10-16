@@ -55,6 +55,31 @@
 # Each case was verified BOTH ways against the pinned upstream tarball/zip by counting
 # the marker the patch is meant to remove, so a patch that silently does nothing cannot
 # pass as success. Do not "harmonise" these flags without re-running that check.
+#
+# Idempotent: a patch that is ALREADY applied is skipped, not re-applied
+# ---------------------------------------------------------------------
+# ExternalProject re-runs a dep's patch step whenever the patch command changes (an edit
+# to the recipe's PATCH_COMMAND, as #573 made), but it does NOT re-extract the source
+# first while the download/extract steps are still up to date.
+# The Windows VM and the self-hosted Mac runner both keep a persistent deps tree between
+# builds (VM: C:\Dev\EdgeSlicer\deps\build, inside a work tree; Mac:
+# $HOME/edgeslicer-deps/build linked in as deps/build, outside one), so a recipe change
+# re-runs `git apply` on sources the previous build already patched, and git fails with
+# "patch does not apply" (VM run 38968919248: OpenCV and OCCT, after #573 touched their
+# recipes). So each patch is first dry-run, with the SAME --directory and whitespace
+# flags as the real apply. That matters on the VM, where the patches are checked out CRLF (text=auto; the
+# "?" line ends in that run's log) and only match the LF sources through LOOSE_WS's
+# --ignore-space-change - in either direction:
+#
+#   forward `git apply --check` clean                  ->  apply it, as below
+#   forward fails, `git apply --reverse --check` clean ->  "already applied", skip it
+#   both fail                                          ->  apply anyway, which fails loudly
+#                                                          (mismatched, or half applied)
+#
+# "Clean" for a dry run means exit 0 AND no "Skipped patch" AND at least one "Checking
+# patch" line: --check exits 0 on skipped files just like the real apply does, so a
+# wrong --directory must not be able to pass as "already applied" either. Forward is
+# tried first so a patch that would apply is always applied, never guessed to be present.
 
 if (NOT GIT)
     message(FATAL_ERROR "apply_patch: GIT not set")
@@ -110,6 +135,25 @@ if (LOOSE_WS)
     set(_ws_flags --ignore-space-change --whitespace=fix)
 endif ()
 
+# Dry run of the patch with the flags the real apply uses plus ARGN (--directory,
+# --reverse). Sets <out_ok> TRUE only for a clean result - exit 0, nothing skipped, at
+# least one file checked (see "Idempotent" at the top) - and <out_log> to git's output.
+function(_apply_patch_check _patch _out_ok _out_log)
+    execute_process(
+        COMMAND "${GIT}" apply ${ARGN} --check --verbose ${_ws_flags} "${_patch}"
+        RESULT_VARIABLE _rc
+        OUTPUT_VARIABLE _out
+        ERROR_VARIABLE  _err
+    )
+    set(_log "${_out}${_err}")
+    set(_ok FALSE)
+    if (_rc EQUAL 0 AND NOT _log MATCHES "Skipped patch" AND _log MATCHES "Checking patch")
+        set(_ok TRUE)
+    endif ()
+    set(${_out_ok}  ${_ok}    PARENT_SCOPE)
+    set(${_out_log} "${_log}" PARENT_SCOPE)
+endfunction ()
+
 foreach (_patch IN LISTS _patches)
     if (NOT EXISTS "${_patch}")
         message(FATAL_ERROR "apply_patch: patch file not found: ${_patch}")
@@ -130,6 +174,24 @@ foreach (_patch IN LISTS _patches)
         endif ()
     endif ()
 
+    # Already applied by an earlier build of a persistent tree? Only asked when the
+    # forward dry run fails; see "Idempotent" at the top.
+    set(_not_reversed_note "")
+    _apply_patch_check("${_patch}" _fwd_ok _fwd_log ${_dir_flag})
+    if (NOT _fwd_ok)
+        _apply_patch_check("${_patch}" _rev_ok _rev_log ${_dir_flag} --reverse)
+        if (_rev_ok)
+            message(STATUS "apply_patch: already applied: ${_patch}")
+            message("${_rev_log}")
+            continue ()
+        endif ()
+        # One paragraph, no inner newlines: FATAL_ERROR rewraps the text itself.
+        set(_not_reversed_note
+            "\nIt is not already applied either: `git apply --reverse --check` with the same "
+            "flags failed too, so the tree matches neither the unpatched nor the patched "
+            "source (a mismatched patch, or one left half applied).")
+    endif ()
+
     # --verbose makes git print "Checking patch <p>..." / "Applied patch <p> cleanly."
     # per file, which is what we inspect below.
     execute_process(
@@ -145,7 +207,7 @@ foreach (_patch IN LISTS _patches)
     endif ()
 
     if (NOT _rc EQUAL 0)
-        message(FATAL_ERROR "apply_patch: git apply failed (exit ${_rc}) for ${_patch}")
+        message(FATAL_ERROR "apply_patch: git apply failed (exit ${_rc}) for ${_patch}" ${_not_reversed_note})
     endif ()
 
     # The whole point: git exits 0 after skipping every hunk.
@@ -166,4 +228,4 @@ foreach (_patch IN LISTS _patches)
     endif ()
 endforeach ()
 
-message(STATUS "apply_patch: all patches applied: ${_patches}")
+message(STATUS "apply_patch: all patches applied (or already present): ${_patches}")
