@@ -1073,6 +1073,22 @@ public:
     // and Developer Mode are not both on. Written on the GUI thread, read by the send jobs, which
     // compare it before and after a send (BambuSendDiagnosis).
     std::atomic<int> project_file_refusals { 0 };
+
+    // Secured mode (Developer Mode off). Bambu firmware with Authorization Control rejects every
+    // control command that is not signed by Bambu, and EdgeSlicer never signs. The push_status
+    // field print.fun carries the mode in bit 29 (clear: Developer Mode, set: secured). Unknown
+    // until the first report that carries "fun"; unknown is never treated as secured. When no report
+    // has carried the bit, a printer's own "mqtt message verify failed" answer stands in for it.
+    bool is_secured_mode() const;
+    void update_secured_mode_from_fun(const std::string& fun);
+    // A reply to a command was the printer refusing it as unsigned (err_code 84033543..84033548 /
+    // "mqtt message verify failed"). Shows the Developer Mode message once per printer per session.
+    void note_unsigned_refusal(const std::string& command, int err_code);
+    // For commands the host fires on its own: true when the printer is secured and the command must
+    // not be sent (logged once per command per printer, no message to the user).
+    bool skip_auto_command_if_secured(const char* what) const;
+    // Tells the user why a user-initiated command was not sent (rate limited per printer).
+    void show_secured_mode_message(bool once_per_session);
     BBLSliceInfo* slice_info {nullptr};
     boost::thread* get_slice_info_thread { nullptr };
     boost::thread* get_model_task_thread { nullptr };
@@ -1343,6 +1359,8 @@ public:
     // lookup finds nothing and empties the filament lists).
     float nozzle_diameter_or_preset(int extder_id) const;
     int  get_flag_bits(std::string str, int start, int count = 1) const;
+    std::atomic<int>  m_secured_state { 0 };        // 0 unknown, 1 Developer Mode, 2 secured (print.fun bit 29)
+    std::atomic<bool> m_unsigned_refused { false }; // the printer refused an unsigned command (used while the bit is unknown)
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
 
     /* Device Filament Check */
