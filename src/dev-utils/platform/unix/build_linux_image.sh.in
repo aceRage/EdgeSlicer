@@ -396,7 +396,8 @@ if [ "\$ZINK_FORCE_OVERRIDE" = "1" ]; then
     export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
     export MESA_LOADER_DRIVER_OVERRIDE=zink
     export GALLIUM_DRIVER=zink
-    export WEBKIT_DISABLE_DMABUF_RENDERER=1
+    # WebKit's NVIDIA DMABUF workaround is applied by the binary itself,
+    # gated on the runtime WebKitGTK version (src/Snapmaker_Orca.cpp).
 fi
 exec "\$DIR/libexec/@SLIC3R_APP_CMD@-env" "\$DIR/bin/@SLIC3R_APP_CMD@" "\$@"
 EOF
