@@ -2010,6 +2010,187 @@ SCENARIO("thumbnail relationships are declared only for thumbnails that were wri
     }
 }
 
+// ---- Orca #16341: painter gizmos reset out-of-range paint states at load --------------------------
+//
+// A 3MF can carry any paint state in paint_seam / paint_fuzzy_skin / paint_supports. The seam,
+// fuzzy skin and support gizmos colour each facet by indexing a table that only has entries up to
+// the states they paint (seam BLOCKER, fuzzy skin FUZZY_SKIN, supports the Edge STABILIZER point
+// state), so they now deserialize with that bound. These tests pin what the gizmos rely on: the
+// loader keeps the crafted state as data, and deserialize() at each gizmo's bound drops it to NONE.
+
+// The paint string a facet painted `state` is written as.
+static std::string paint_string_for(EnforcerBlockerType state)
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *volume = object->add_volume(make_cube(10., 10., 10.));
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, state);
+    REQUIRE(volume->seam_facets.set(selector));
+    const std::string out = volume->seam_facets.get_triangle_as_string(0);
+    REQUIRE_FALSE(out.empty());
+    return out;
+}
+
+TEST_CASE("Out-of-range seam, fuzzy skin and support paint states are dropped at each gizmo's bound", "[3mf][Regression][PaintBounds]")
+{
+    const std::string path    = make_temp_3mf_path("paint_state_out_of_range.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+    store_painted_cube(path);
+
+    // store_painted_cube() paints one ENFORCER facet in each of the three streams.
+    const std::string enforcer = paint_string_for(EnforcerBlockerType::ENFORCER);
+    const std::string state3   = paint_string_for(static_cast<EnforcerBlockerType>(3));
+    const std::string state4   = paint_string_for(static_cast<EnforcerBlockerType>(4));
+    const std::string blocker  = paint_string_for(EnforcerBlockerType::BLOCKER);
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_seam=\"" + enforcer + "\"", "paint_seam=\"" + state3 + "\""));
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_fuzzy_skin=\"" + enforcer + "\"", "paint_fuzzy_skin=\"" + blocker + "\""));
+    REQUIRE(replace_in_3mf_entry(path, ".model", "paint_supports=\"" + enforcer + "\"", "paint_supports=\"" + state4 + "\""));
+
+    Model model;
+    REQUIRE(load_project(path, model));
+    REQUIRE(model.objects.size() == 1);
+    const ModelVolume &volume = *model.objects.front()->volumes.front();
+
+    // The loader keeps the states as data; it is the gizmo that must not trust them.
+    REQUIRE(volume.seam_facets.get_data().used_states[3]);
+    REQUIRE(volume.fuzzy_skin_facets.get_data().used_states[size_t(EnforcerBlockerType::BLOCKER)]);
+    REQUIRE(volume.supported_facets.get_data().used_states[4]);
+
+    SECTION("seam (colour table NONE/ENFORCER/BLOCKER)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.seam_facets.get_data(), true, EnforcerBlockerType::BLOCKER));
+        CHECK(selector.num_facets(static_cast<EnforcerBlockerType>(3)) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::ENFORCER) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 0);
+    }
+    SECTION("fuzzy skin (single state FUZZY_SKIN)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.fuzzy_skin_facets.get_data(), true, EnforcerBlockerType::FUZZY_SKIN));
+        CHECK(selector.num_facets(EnforcerBlockerType::BLOCKER) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::FUZZY_SKIN) == 0);
+    }
+    SECTION("supports (Edge: up to the STABILIZER point state)")
+    {
+        TriangleSelector selector(volume.mesh());
+        REQUIRE_NOTHROW(selector.deserialize(volume.supported_facets.get_data(), true, EnforcerBlockerType::STABILIZER));
+        CHECK(selector.num_facets(static_cast<EnforcerBlockerType>(4)) == 0);
+        CHECK(selector.num_facets(EnforcerBlockerType::STABILIZER) == 0);
+    }
+}
+
+// Edge adaptation: the support gizmo's bound is STABILIZER, not upstream's BLOCKER, so painted
+// stabilizer points still load into the gizmo.
+TEST_CASE("Support paint keeps STABILIZER points at the support gizmo's bound", "[3mf][Regression][PaintBounds]")
+{
+    const TriangleMesh mesh = make_cube(10., 10., 10.);
+    TriangleSelector   painted(mesh);
+    painted.set_facet(0, EnforcerBlockerType::ENFORCER);
+    painted.set_facet(1, EnforcerBlockerType::BLOCKER);
+    painted.set_facet(2, EnforcerBlockerType::STABILIZER);
+
+    TriangleSelector restored(mesh);
+    REQUIRE_NOTHROW(restored.deserialize(painted.serialize(), true, EnforcerBlockerType::STABILIZER));
+    CHECK(restored.num_facets(EnforcerBlockerType::ENFORCER) == 1);
+    CHECK(restored.num_facets(EnforcerBlockerType::BLOCKER) == 1);
+    CHECK(restored.num_facets(EnforcerBlockerType::STABILIZER) == 1);
+}
+
+// ---- Orca #16307: the no-light thumbnail has its own status flag ---------------------------------
+//
+// The no-light pass used to mark thumbnail_status, so a plate whose own thumbnail was not rendered
+// (only on disk) lost Metadata/plate_N.png, and a rendered no-light thumbnail was written a second
+// time from no_light_thumbnail_file.
+
+static int count_zip_entries_named(const std::string &zip_path, const std::string &entry_name)
+{
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    if (!open_zip_reader(&archive, zip_path))
+        return -1;
+    int           count = 0;
+    const mz_uint n     = mz_zip_reader_get_num_files(&archive);
+    for (mz_uint i = 0; i < n; ++i) {
+        mz_zip_archive_file_stat st;
+        if (mz_zip_reader_file_stat(&archive, i, &st) && entry_name == st.m_filename)
+            ++count;
+    }
+    close_zip_reader(&archive);
+    return count;
+}
+
+static void write_binary_file(const std::string &path, const std::string &body)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << body;
+}
+
+SCENARIO("A rendered no-light thumbnail does not suppress the plate thumbnail", "[3mf][thumbnail]")
+{
+    GIVEN("a plate whose no-light thumbnail is rendered and whose plate thumbnail is only on disk") {
+        prepare_3mf_temp_dir();
+        Model model;
+        build_multi_object_model(model);
+        // Same store config as the thumbnail-relationship scenario above.
+        DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+        for (const std::string &key : cfg.keys())
+            if (const ConfigOption *opt = cfg.option(key); opt != nullptr && opt->type() == coEnums) {
+                cfg.erase(key);
+                cfg.option(key, true);
+            }
+
+        // Only the bytes matter: the exporter copies these files into the archive verbatim.
+        const std::string plate_png         = make_temp_3mf_path("no_light_plate_1.png");
+        const std::string no_light_png      = make_temp_3mf_path("no_light_disk_1.png");
+        const ScopeGuard  cleanup_plate     = remove_file_guard(plate_png);
+        const ScopeGuard  cleanup_no_light  = remove_file_guard(no_light_png);
+        const std::string plate_png_body    = std::string("\x89PNG\r\n\x1a\n", 8) + "plate-1-thumbnail-from-disk";
+        const std::string no_light_png_body = std::string("\x89PNG\r\n\x1a\n", 8) + "no-light-thumbnail-from-disk";
+        write_binary_file(plate_png, plate_png_body);
+        write_binary_file(no_light_png, no_light_png_body);
+        REQUIRE(boost::filesystem::exists(plate_png));
+        REQUIRE(boost::filesystem::exists(no_light_png));
+
+        PlateData plate;
+        plate.plate_index             = 0;
+        plate.thumbnail_file          = plate_png;
+        plate.no_light_thumbnail_file = no_light_png;
+
+        ThumbnailData plate_thumbnail; // nothing was rendered for the plate itself
+        ThumbnailData no_light_thumbnail;
+        no_light_thumbnail.set(16, 16);
+        no_light_thumbnail.pixels.assign(16 * 16 * 4, static_cast<unsigned char>(0xff));
+        REQUIRE_FALSE(plate_thumbnail.is_valid());
+        REQUIRE(no_light_thumbnail.is_valid());
+
+        WHEN("the project is written") {
+            const std::string test_file = make_temp_3mf_path("no_light_thumbnail_status.3mf");
+            const ScopeGuard  cleanup   = remove_file_guard(test_file);
+            StoreParams       sp;
+            sp.path                    = test_file.c_str();
+            sp.model                   = &model;
+            sp.config                  = &cfg;
+            sp.plate_data_list         = { &plate };
+            sp.thumbnail_data          = { &plate_thumbnail };
+            sp.no_light_thumbnail_data = { &no_light_thumbnail };
+            sp.strategy                = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+            REQUIRE(store_bbs_3mf(sp));
+
+            THEN("the plate thumbnail is still copied in from disk") {
+                CHECK(extract_zip_entry(test_file, "Metadata/plate_1.png") == plate_png_body);
+            }
+            THEN("the rendered no-light thumbnail is written once, not again from disk") {
+                CHECK(count_zip_entries_named(test_file, "Metadata/plate_no_light_1.png") == 1);
+                const std::string got = extract_zip_entry(test_file, "Metadata/plate_no_light_1.png");
+                CHECK_FALSE(got.empty());
+                CHECK(got != no_light_png_body);
+            }
+        }
+    }
+}
+
 namespace {
 
 struct TempBackupDir

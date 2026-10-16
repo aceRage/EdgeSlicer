@@ -641,7 +641,9 @@ void GLGizmoFdmSupports::update_from_model_object(bool first_update)
         const TriangleMesh* mesh = &mv->mesh();
         m_triangle_selectors.emplace_back(std::make_unique<TriangleSelectorPatch>(*mesh, ebt_colors));
         // Reset of TriangleSelector is done inside TriangleSelectorGUI's constructor, so we don't need it to perform it again in deserialize().
-        m_triangle_selectors.back()->deserialize(mv->supported_facets.get_data(), false);
+        // The colour table has NONE/ENFORCER/BLOCKER and the Edge STABILIZER point state only: a higher
+        // state in the file is reset to NONE instead of indexing past ebt_colors.
+        m_triangle_selectors.back()->deserialize(mv->supported_facets.get_data(), false, EnforcerBlockerType::STABILIZER);
         m_triangle_selectors.back()->request_update_render_data();
 
         //BBS: add timestamp logic
