@@ -16,7 +16,10 @@ using namespace Slic3r;
 // Golden serialisations captured from the shared paint helper - see the two [golden] scenarios
 // at the end of this file for what they pin and why.
 static const char *GOLDEN_VERTEX_COLOR_SERIALISATION = "8|0C88A|0C1C80C893|80C0C6|80C0C2|0C886|0C886|8|1C88A|81C0C1C813|80C0C6|1C0C0CA|";
-static const char *GOLDEN_FACE_COLOR_SERIALISATION   = "|8|0C|1C||8|0C|1C||8|0C|1C|";
+// Phase 5e: the faces cycle filaments 1, 2, 3, 4 on a part whose own filament is 2. Filament 2's
+// faces are now the unpainted ones (they print filament 2 anyway) and filament 1's are painted
+// ("4"). Before, filament 1's faces were the unpainted ones - so they printed filament 2.
+static const char *GOLDEN_FACE_COLOR_SERIALISATION   = "4||0C|1C|4||0C|1C|4||0C|1C|";
 
 static inline std::string gltf_path(const char *path)
 {
@@ -713,9 +716,15 @@ SCENARIO("A baseColorTexture becomes per-face colours", "[gltf]")
             // per-triangle string is no longer the right question. Count LEAVES instead: three box
             // faces are wholly in the red half of the texture and three wholly in the blue half, so
             // 6 x 16 = 96 leaves of each.
+            //
+            // Phase 5e: the dialog made filament 2 the PART's filament (stub.first = 2), so the red
+            // half is now left unpainted - it prints filament 2 either way - and only the blue
+            // half is painted. Before, the red half was painted with 2 as well: the same print,
+            // with paint that changed nothing.
             TriangleSelector sel(v->mesh());
             sel.deserialize(v->mmu_segmentation_facets.get_data(), /*needs_reset=*/true);
-            REQUIRE(sel.num_facets(EnforcerBlockerType(2)) == 96);
+            REQUIRE(model.objects.front()->config.option("extruder")->getInt() == 2);
+            REQUIRE(sel.num_facets(EnforcerBlockerType(2)) == 0);
             REQUIRE(sel.num_facets(EnforcerBlockerType(3)) == 96);
             REQUIRE(sel.num_facets(EnforcerBlockerType(1)) == 0);
         }
@@ -740,7 +749,8 @@ SCENARIO("A baseColorTexture becomes per-face colours", "[gltf]")
                 if (t == "8") ++painted_2;
                 else if (t == "0C") ++painted_3;
             }
-            REQUIRE(painted_2 == 6);
+            // Phase 5e: the red faces are on the part's own filament (2), so they stay unpainted.
+            REQUIRE(painted_2 == 0);
             REQUIRE(painted_3 == 6);
         }
     }
@@ -855,7 +865,7 @@ SCENARIO("obj_import_face_color_deal serialisation is unchanged", "[gltf][golden
 
         std::vector<unsigned char> ids;
         for (size_t i = 0; i < volume->mesh().its.indices.size(); ++i)
-            ids.push_back((unsigned char) (1 + (i % 4)));   // includes 1, which must be skipped
+            ids.push_back((unsigned char) (1 + (i % 4)));   // includes 1, which must be painted
 
         THEN("every painted triangle serialises to its recorded golden string")
         {

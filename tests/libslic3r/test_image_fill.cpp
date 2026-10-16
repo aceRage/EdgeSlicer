@@ -887,6 +887,8 @@ struct GlbBeforeAfter
     size_t filaments_old = 0, filaments_new = 0;
     double mean_de_old = 0., mean_de_new = 0.;
     double max_de_old  = 0., max_de_new  = 0.;
+    // Phase 5e: every leaf prints a filament the colour dialog chose.
+    bool   chosen_only = true;
 };
 
 bool measure_glb(const std::string &file, GlbBeforeAfter &out)
@@ -938,8 +940,10 @@ bool measure_glb(const std::string &file, GlbBeforeAfter &out)
         std::vector<int> used;
         double sum = 0.;
         for (size_t t = 0; t < out.triangles; ++t) {
+            // What the face PRINTS: its own filament; a face on the part's own filament is the
+            // one left unpainted (Phase 5e - the rule used to be "id 1", whatever the part's was).
             const int id = int(match.filament_ids[t]);
-            if (id > 1) {
+            if (id != int(match.first_extruder_id)) {
                 ++out.painted_old;
                 if (std::find(used.begin(), used.end(), id) == used.end()) used.push_back(id);
             }
@@ -973,8 +977,14 @@ bool measure_glb(const std::string &file, GlbBeforeAfter &out)
         std::vector<int> used;
         double           sum = 0.;
         for (size_t i = 0; i < out.leaves; ++i) {
-            const int id = states[i];
-            if (id > 1) {
+            // An unpainted leaf prints the part's own filament, which is what it is measured
+            // against (Phase 5e: until now no leaf was ever left unpainted by this path, and an
+            // unpainted one was mis-measured as a grey slot that does not exist).
+            const int id = states[i] > 0 ? states[i] : int(match.first_extruder_id);
+            out.chosen_only = out.chosen_only &&
+                              std::find(match.filament_ids.begin(), match.filament_ids.end(), (unsigned char) id) !=
+                                  match.filament_ids.end();
+            if (states[i] > 0) {
                 ++out.painted_new;
                 if (std::find(used.begin(), used.end(), id) == used.end()) used.push_back(id);
             }
@@ -1033,10 +1043,12 @@ TEST_CASE("Image Fill: a textured GLB is at least as good through the new path",
         // "At least as good" means the colour error, not the filament count: a search that
         // reproduces a texture with SIX spools where the incumbent needed eight has done better,
         // not worse, so counting filaments is not the bar. What is:
-        //   - every leaf still gets a filament (nothing is left unpainted that used to be),
+        //   - every leaf prints a filament the colour dialog chose (Phase 5e: a leaf left
+        //     unpainted prints the part's own filament, which is one of them - so "painted" is no
+        //     longer the same question as "has a filament", and the old painted-count bar is gone),
         //   - the mean error against the true texture colour does not rise,
         //   - and neither does the worst single leaf.
-        CHECK(r.painted_new >= r.painted_old);
+        CHECK(r.chosen_only);
         CHECK(r.mean_de_new <= r.mean_de_old);
         CHECK(r.max_de_new <= r.max_de_old);
         CHECK(r.filaments_new >= 2);
@@ -2319,4 +2331,69 @@ TEST_CASE("Image Fill: the box face a normal belongs to", "[imagefill][box]")
     REQUIRE(image_fill_project(p, box, Vec3f(2.f, 8.f, 10.f), u, v, &up));
     CHECK(u == Approx(0.2f));   // +Z: u = x, v = y
     CHECK(v == Approx(0.8f));
+}
+
+// =============================================================================================
+// Phase 5e: the part's own filament is the one left unpainted - not filament 1
+// =============================================================================================
+//
+// The colour dialog sets the part's filament to its first cluster's slot, which need not be 1.
+// The face-colour importers used to leave filament 1 out (unpainted, and out of the sub-facet
+// palette) whatever the part's filament was: with the part on filament 3, faces meant for
+// filament 1 printed filament 3, and a sub-facet whose colour was filament 1's could only be
+// painted with the nearest OTHER filament.
+TEST_CASE("Image Fill 5e: face-colour imports leave the part's own filament unpainted, and paint filament 1",
+          "[imagefill][glb][p5e]")
+{
+    const RGBA white{1.f, 1.f, 1.f, 1.f}, red{0.9f, 0.1f, 0.1f, 1.f};
+    auto make = [](Model &model) {
+        ModelObject *object = model.add_object();
+        object->add_volume(TriangleMesh(its_make_cube(10., 10., 10.)), ModelVolumeType::MODEL_PART);
+        object->add_instance();
+        return object->volumes.front();
+    };
+    // The first six triangles are white (filament 1), the other six red (filament 3, the part's).
+    std::vector<unsigned char> ids;
+    std::vector<RGBA>          faces, subs;
+    for (int t = 0; t < 12; ++t) {
+        const bool w = t < 6;
+        ids.push_back(w ? 1 : 3);
+        faces.push_back(w ? white : red);
+        for (int k = 0; k < 4; ++k)
+            subs.push_back(w ? white : red);
+    }
+    auto facets_of = [](const ModelVolume &v, int state) {
+        TriangleSelector sel(v.mesh());
+        sel.deserialize(v.mmu_segmentation_facets.get_data(), true);
+        return sel.get_facets(EnforcerBlockerType(state)).indices.size();
+    };
+
+    SECTION("sub-facet path")
+    {
+        Model        model;
+        ModelVolume *v = make(model);
+        REQUIRE(Model::import_multi_volume_face_color_deal(ids, faces, subs, 1, 3, &model));
+        CHECK(model.objects.front()->config.option("extruder")->getInt() == 3);
+        CHECK(facets_of(*v, 1) > 0);    // white is painted with filament 1
+        CHECK(facets_of(*v, 3) == 0);   // red is the part's own filament: left unpainted
+    }
+    SECTION("per-face path")
+    {
+        Model        model;
+        ModelVolume *v = make(model);
+        REQUIRE(Model::obj_import_face_color_deal(ids, 3, &model));
+        CHECK(facets_of(*v, 1) > 0);
+        CHECK(facets_of(*v, 3) == 0);
+    }
+    SECTION("with the part on filament 1 the white faces are the unpainted ones")
+    {
+        Model                      model;
+        ModelVolume               *v = make(model);
+        std::vector<unsigned char> ids1 = ids;
+        for (unsigned char &id : ids1)
+            id = id == 3 ? 2 : id;   // red on filament 2 now
+        REQUIRE(Model::import_multi_volume_face_color_deal(ids1, faces, subs, 1, 1, &model));
+        CHECK(facets_of(*v, 1) == 0);
+        CHECK(facets_of(*v, 2) > 0);
+    }
 }
