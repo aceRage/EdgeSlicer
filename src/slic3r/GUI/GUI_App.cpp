@@ -7330,6 +7330,9 @@ void GUI_App::reload_settings()
         preset_bundle->load_user_presets(*app_config, user_presets, ForwardCompatibilitySubstitutionRule::Enable);
         preset_bundle->save_user_presets(*app_config, get_delete_cache_presets());
         mainframe->update_side_preset_ui();
+        // Orca #15916: the synced printer preset may no longer take the plates' bed types.
+        if (plater_)
+            plater_->normalize_bed_types(false);
     }
 }
 

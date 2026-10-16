@@ -1977,6 +1977,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_stamping_distance))
     ((ConfigOptionBool,                purge_in_prime_tower))
     ((ConfigOptionBool,                enable_filament_ramming))
+    ((ConfigOptionBool,                tool_change_on_wipe_tower))
     ((ConfigOptionFloat,                ramming_line_width_ratio))
     ((ConfigOptionBool,                enable_change_pressure_when_wiping))
     ((ConfigOptionFloat,                ramming_pressure_advance_value))
