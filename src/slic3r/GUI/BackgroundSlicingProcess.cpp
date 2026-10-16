@@ -700,10 +700,11 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 	// time_cost here and only here, so the slice, its G-code and the statistics agree while presets, projects and every
 	// other export keep the preset prices. A change re-runs only the G-code export. Not in the
 	// G-code viewer mode, whose G-code is a file that is never exported again.
-	// mainframe can still be null here: on macOS the splash screen and the WebView creation run nested
-	// event loops during MainFrame construction, and the reslice timer can fire from them.
+	// Use the app's plater accessor instead of going through mainframe. During MainFrame
+	// construction (splash / WebView nested loops) and CLI startup, mainframe can still be
+	// null while plater_ is already set; dereferencing mainframe would crash (Orca #15367).
 	if (m_print->technology() == ptFFF) {
-		const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+		const auto plater = GUI::wxGetApp().plater();
 		if (!(plater && plater->only_gcode_mode()))
 			CostOverrides::apply(new_config, *CostOverrides::global(), &GUI::wxGetApp().preset_bundle->filaments,
 			                    &GUI::wxGetApp().preset_bundle->printers);
@@ -714,7 +715,7 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 	// a change re-runs only the G-code export. Left alone in the G-code viewer mode, whose G-code
 	// is a file that is never exported again.
 	if (m_print->technology() == ptFFF) {
-		const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+		const auto plater = GUI::wxGetApp().plater();
 		if (!(plater && plater->only_gcode_mode()) &&
 			m_fff_print->set_gcode_filament_prices(GUI::wxGetApp().app_config->get_bool("gcode_include_filament_prices")))
 			invalidated = PrintBase::APPLY_STATUS_INVALIDATED;
@@ -722,7 +723,7 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 
 	// Orca: prevent resetting under gcode viewer mode
     if (invalidated != PrintBase::APPLY_STATUS_UNCHANGED) {
-        const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+        const auto plater = GUI::wxGetApp().plater();
         if (plater && plater->only_gcode_mode()) {
             invalidated = PrintBase::APPLY_STATUS_UNCHANGED;
         }
