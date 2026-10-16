@@ -5546,12 +5546,20 @@ TEST_CASE("Dual-color primary drops invalid tokens and falls back on empty", "[M
 
 TEST_CASE("Automatic mixed colour match uses count-dependent ratio caps", "[MixedFilament][ColorMatch]")
 {
-    // Snap #1008: 15% floor on every participating component. Search passes the
-    // two-color cap (85%); three-color recipes then top out at 70% because the
-    // other two keep the floor. Recipes land in MixedFilamentManager.
+    // Snap #1008: 15% floor on every participating component. Automatic search
+    // passes the two-color cap (85%); three-color recipes then top out at 70%
+    // because the other two keep the floor. Recipes land in MixedFilamentManager.
     CHECK(kMixedColorMatchMinComponentPercent == 15);
     CHECK(kMixedColorMatchMaxPairComponentPercent == 85);
     CHECK(kMixedColorMatchMaxMultiComponentPercent == 70);
+    CHECK(kMixedColorMatchManualMinComponentPercent == 0);
+    CHECK(kMixedColorMatchManualMaxComponentPercent == 100);
+    CHECK(kMixedColorMatchMultiColorComponentCount == 3);
+
+    CHECK(mixed_color_match_search_min_percent(false) == 15);
+    CHECK(mixed_color_match_search_max_percent(false) == 85);
+    CHECK(mixed_color_match_search_min_percent(true) == 0);
+    CHECK(mixed_color_match_search_max_percent(true) == 100);
 
     CHECK(mixed_color_match_max_component_percent(0) == 85);
     CHECK(mixed_color_match_max_component_percent(1) == 85);
@@ -5565,6 +5573,33 @@ TEST_CASE("Automatic mixed colour match uses count-dependent ratio caps", "[Mixe
     // Advisory: a valid 85% two-color recipe is in range; 85% of a three-color is not.
     CHECK(85 <= mixed_color_match_max_component_percent(2));
     CHECK(85 > mixed_color_match_max_component_percent(3));
+}
+
+TEST_CASE("Manual mixed colour match keeps 0-100 search and warns on recommended bounds", "[MixedFilament][ColorMatch]")
+{
+    // Snap #1008 later commits: manual search is 0–100; the 15–85 / 15–70
+    // recommended range is advisory only. Zero weight is an excluded color.
+    CHECK_FALSE(mixed_color_match_weight_outside_recommended(0, 2));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({15, 85}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({50, 50}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({15, 15, 70}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({20, 20, 60}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({15, 85, 0, 0}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({85, 15, 0}));
+
+    CHECK(mixed_color_match_weights_outside_recommended({10, 90}));
+    CHECK(mixed_color_match_weights_outside_recommended({5, 95}));
+    CHECK(mixed_color_match_weights_outside_recommended({10, 20, 70}));
+    CHECK(mixed_color_match_weights_outside_recommended({20, 10, 70}));
+    CHECK(mixed_color_match_weights_outside_recommended({20, 20, 85}));
+    CHECK(mixed_color_match_weights_outside_recommended({90, 10, 0, 0}));
+    CHECK(mixed_color_match_weights_outside_recommended({15, 15, 85, 0}));
+
+    // Remapped component IDs can exceed the current physical-slot count.
+    CHECK(mixed_color_match_advisory_weight_count(4, 1, 2) == 4);
+    CHECK(mixed_color_match_advisory_weight_count(4, 12, 2) == 12);
+    CHECK(mixed_color_match_advisory_weight_count(4, 1, 2, {3, 12}) == 12);
+    CHECK(mixed_color_match_advisory_weight_count(4, 1, 2, {}) == 4);
 }
 
 // ============================================================================
