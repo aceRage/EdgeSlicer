@@ -383,6 +383,9 @@ public:
     //BBS: add only gcode mode
     bool only_gcode_mode() { return m_only_gcode; }
     void set_only_gcode(bool only_gcode) { m_only_gcode = only_gcode; }
+    // The previewed G-code's own settings were loaded into the presets, as a .gcode.3mf's are: the bed already is the
+    // one it was sliced for, and the sidebar shows them.
+    bool gcode_settings_loaded() const { return m_only_gcode && m_gcode_settings_loaded; }
 
     //BBS: add only gcode mode
     bool using_exported_file() { return m_exported_file; }
@@ -1091,6 +1094,8 @@ private:
     wxString m_last_loaded_gcode;
     //BBS: add only gcode mode
     bool m_only_gcode { false };
+    // Set by load_gcode() for the file it previews, so it means nothing once m_only_gcode is cleared.
+    bool m_gcode_settings_loaded { false };
     bool m_exported_file { false };
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };
