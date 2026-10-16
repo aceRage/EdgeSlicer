@@ -10,6 +10,8 @@
 #include "libslic3r/FilamentColorLibrary.hpp" // kFullSpectrumSlotCount (recommended slot write-back)
 #include "libslic3r/Config.hpp"
 #include "libslic3r/NozzleSync.hpp"
+#include "libslic3r/FilamentSyncMatch.hpp"
+#include "libslic3r/PlateBedTypes.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
 #include "libslic3r/MixedFilament.hpp"
@@ -183,6 +185,7 @@
 #include "InstanceCheck.hpp"
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include "MsgDialog.hpp"
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
@@ -746,8 +749,11 @@ std::string extract_base_filament_name(const std::string& full_name)
 // e.g. "Generic PA-CF @U1 0.4 nozzle".  Split by '@' to extract the
 // base name, trim, and compare exactly — so "Generic PA" does NOT
 // accidentally match "Generic PA-CF".
+// Orca #13265: with no exact name, the preset of the reported vendor and type whose default colour
+// is closest to the reported colour wins, before the "Generic <type>" fallback.
 Preset* resolve_filament_preset(PresetBundle* preset_bundle, 
-    const std::string& filament_name, const std::string& filament_type)
+    const std::string& filament_name, const std::string& filament_type,
+    const std::string& filament_vendor = {}, const std::string& filament_colour = {})
 {
     if (!preset_bundle || filament_name.empty())
         return nullptr;
@@ -764,6 +770,28 @@ Preset* resolve_filament_preset(PresetBundle* preset_bundle,
         std::string base = extract_base_filament_name(preset.name);
         if (to_lower(base) == to_lower(filament_name)) {
             return &preset;
+        }
+    }
+
+    // Orca #13265: closest colour among the presets of this vendor and type. A user preset only
+    // counts when it is detached from its parent (its own base), as upstream.
+    if (!filament_vendor.empty() && !filament_colour.empty()) {
+        std::vector<Preset*>     candidates;
+        std::vector<std::string> colours;
+        for (auto& preset : preset_bundle->filaments) {
+            if (!preset.is_compatible || preset_bundle->filaments.get_preset_base(preset) != &preset)
+                continue;
+            if (to_lower(preset.config.opt_string("filament_vendor", 0u)) != to_lower(filament_vendor) ||
+                to_lower(preset.config.opt_string("filament_type", 0u)) != to_lower(filament_type))
+                continue;
+            candidates.push_back(&preset);
+            colours.push_back(preset.config.opt_string("default_filament_colour", 0u));
+        }
+        const int best = FilamentSyncMatch::closest_colour_index(filament_colour, colours);
+        if (best >= 0) {
+            BOOST_LOG_TRIVIAL(info) << "Filament sync: closest-colour preset for " << filament_vendor << " " << filament_type
+                                    << " " << filament_colour << ": " << candidates[best]->name;
+            return candidates[best];
         }
     }
 
@@ -844,6 +872,7 @@ void build_machine_filament_list(PresetBundle* preset_bundle, std::vector<Filame
         fd.m_index = info.index;
         fd.m_name  = info.filament_info;
         fd.m_type  = info.filament_type;
+        fd.m_vendor = info.filament_vendor;
         
         if (!info.color_info.empty() || !info.multiColors.empty()) {
             fd.m_color = FilamentColor::FromColors(info.multiColors, info.colorMode, info.color_info);
@@ -3391,25 +3420,32 @@ Sidebar::Sidebar(Plater *parent)
             }
             return out;
         };
-        auto populate_all_combo = [all_combo, mixed_nozzles, filament_choices]() {
+        // Favourite filaments on top, with stars (Orca #13946, extended). The list lives as long as the
+        // handlers bound to the combo that hold it.
+        auto all_list = std::make_shared<FavoriteFilamentsUI::FavoriteComboList>(all_combo);
+        auto populate_all_combo = [all_list, mixed_nozzles, filament_choices]() {
             PresetBundle* pb = wxGetApp().preset_bundle;
             if (pb == nullptr)
                 return;
-            wxString cur = all_combo->GetStringSelection();
-            all_combo->Clear();
+            const int      cur_entry = all_list->selected_entry();
+            const wxString cur       = cur_entry >= 0 ? all_list->entries()[cur_entry].text : wxString();
+            std::vector<FavoriteFilamentsUI::FavoriteComboList::Entry> entries;
             if (mixed_nozzles()) {
+                // A family is named like a system filament's alias, which is its favourite key.
                 for (const std::string& family : NozzleSync::families(filament_choices()))
-                    all_combo->AppendString(wxString::FromUTF8(family));
+                    entries.push_back({ wxString::FromUTF8(family), family });
             } else {
                 for (const Preset& preset : pb->filaments) {
                     if (!preset.is_visible || !preset.is_compatible)
                         continue;
-                    all_combo->AppendString(wxString::FromUTF8(preset.name));
+                    entries.push_back({ wxString::FromUTF8(preset.name), FavoriteFilamentsUI::key_for(preset) });
                 }
             }
-            int idx = all_combo->FindString(cur);
-            if (idx != wxNOT_FOUND)
-                all_combo->SetSelection(idx);
+            int sel = -1;
+            for (size_t i = 0; i < entries.size() && sel < 0; ++i)
+                if (entries[i].text == cur)
+                    sel = int(i);
+            all_list->set_entries(std::move(entries), sel);
         };
         populate_all_combo();
         // Repopulate on every open so printer/preset changes are always reflected.
@@ -3893,7 +3929,8 @@ void Sidebar::remove_unused_filament_combos(const size_t current_extruder_count)
 }
 
 // Snapmaker #759/#920: the U1 has no Cool Steel Plate (btSuperTack) unless support_multi_bed_types is on.
-// A project saved with it falls back to Textured PEI (global bed type) or "same as global" (per plate).
+// Edge (owner 2026-10-15): the U1 list has Cool Plate, so a project saved with Cool Steel maps to Cool Plate,
+// the other low-temperature plate (global bed type and per-plate overrides alike).
 static bool u1_has_no_cool_steel_plate()
 {
     const auto &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
@@ -3911,7 +3948,7 @@ static void reset_u1_unsupported_plate_bed_types(PartPlateList &plate_list)
         return;
     for (PartPlate *plate : plate_list.get_plate_list())
         if (plate != nullptr && plate->get_bed_type(false) == btSuperTack)
-            plate->set_bed_type(btDefault);
+            plate->set_bed_type(btPC);
 }
 
 void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
@@ -4167,8 +4204,9 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             
             // Orca: Update proj_config directly to avoid callback context issues
             if (is_snapmaker_u1 && !support_multi_bed_types) {
-                if (bed_type_to_use != btPTE && bed_type_to_use != btPEI && bed_type_to_use != btGESP) {
-                    bed_type_to_use = btPTE;
+                // Edge: Cool Plate is a U1 plate too; a remembered Cool Steel Plate maps to it.
+                if (bed_type_to_use != btPTE && bed_type_to_use != btPEI && bed_type_to_use != btGESP && bed_type_to_use != btPC) {
+                    bed_type_to_use = bed_type_to_use == btSuperTack ? btPC : btPTE;
                     wxGetApp().app_config->set("curr_bed_type", std::to_string(int(bed_type_to_use)));
                     wxGetApp().app_config->set_printer_setting(printer_name, "curr_bed_type", std::to_string(int(bed_type_to_use)));
                 }
@@ -4180,9 +4218,10 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
         } else {
             if (is_snapmaker_u1 && !support_multi_bed_types) {
                 BedType curr = wxGetApp().preset_bundle->project_config.opt_enum<BedType>("curr_bed_type");
-                if (curr != btPTE && curr != btPEI && curr != btGESP) {
-                    wxGetApp().preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(btPTE));
-                    m_bed_type_list->SetSelection(0);
+                if (curr != btPTE && curr != btPEI && curr != btGESP && curr != btPC) {
+                    wxGetApp().preset_bundle->project_config.set_key_value("curr_bed_type",
+                        new ConfigOptionEnum<BedType>(curr == btSuperTack ? btPC : btPTE));
+                    m_bed_type_list->SetSelection(get_selection_index());
                 } else
                     m_bed_type_list->SetSelection(get_selection_index());
             } else
@@ -9851,7 +9890,9 @@ void Sidebar::show_sync_filament_dialog()
         ConfigOptionInts*    cmo = preset_bundle->project_config.option<ConfigOptionInts>("filament_colour_mode");
 
         for (size_t i = 0; i < effective_size; ++i) {
-            Preset* matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type);
+            const std::string synced_colour = into_u8(getMainColor(syncedData[i].m_color).GetAsString(wxC2S_HTML_SYNTAX));
+            Preset* matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
+                                                      syncedData[i].m_vendor, synced_colour);
             if (matched) {
                 preset_bundle->set_filament_preset(i, matched->name);
             }
@@ -10746,6 +10787,8 @@ struct Plater::priv
     std::string                 delayed_error_message;
 
     wxTimer                     background_process_timer;
+    // Set by Plater::begin_shutdown(); see Plater::is_shutting_down().
+    bool                        gui_shutting_down { false };
     // Bambu two-extruder printers: marks plates for re-slice when the selected printer changes.
     std::unique_ptr<DualNozzle::Watcher> dual_nozzle_watcher;
     // "Edit in Blender" sessions; created on first use.
@@ -10894,7 +10937,8 @@ struct Plater::priv
     BoundingBox scaled_bed_shape_bb() const;
 
     // BBS: backup & restore
-    std::vector<size_t> load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi = false);
+    std::vector<size_t> load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi = false,
+                                   bool* config_loaded_out = nullptr);
     std::vector<size_t> load_model_objects(const ModelObjectPtrs& model_objects, bool allow_negative_z = false, bool split_object = false);
 
     fs::path get_export_file_path(GUI::FileType file_type);
@@ -11373,6 +11417,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     this->dual_nozzle_watcher = std::make_unique<DualNozzle::Watcher>(this->q);
     this->q->Bind(wxEVT_TIMER, [this](wxTimerEvent &evt)
     {
+        // EDGESLICER-A: the frame is closing or being replaced; never restart the timer either.
+        if (this->q->is_shutting_down())
+            return;
         // At startup this timer can fire from a nested event loop (the macOS splash screen and WebView
         // creation yield) before MainFrame is assigned to the app; try again once start-up is done.
         if (wxGetApp().mainframe == nullptr) {
@@ -12205,8 +12252,14 @@ static void log_substitutions(const PresetsConfigSubstitutions &substitutions, c
 }
 
 // BBS: backup & restore
-std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi)
+std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi,
+                                             bool* config_loaded_out)
 {
+    // Orca #15916: tells Plater::load_files that a project config was loaded, so the plates'
+    // bed types are checked against the (possibly new) printer.
+    if (config_loaded_out != nullptr)
+        *config_loaded_out = false;
+
     std::vector<size_t> empty_result;
     bool dlg_cont = true;
     bool is_user_cancel = false;
@@ -12797,12 +12850,14 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 file_wipe_tower_y = *wipe_tower_y_opt;
 
                             preset_bundle->load_config_model(filename.string(), std::move(config), file_version);
+                            if (config_loaded_out != nullptr)
+                                *config_loaded_out = true;
 
                             ConfigOption* bed_type_opt = preset_bundle->project_config.option("curr_bed_type");
                             if (bed_type_opt != nullptr) {
                                 BedType bed_type = (BedType)bed_type_opt->getInt();
                                 if (bed_type == btSuperTack && u1_has_no_cool_steel_plate()) {
-                                    bed_type = btPTE;
+                                    bed_type = btPC; // Edge: Cool Plate, the U1's low-temperature plate in its list
                                     preset_bundle->project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(bed_type));
                                 }
                                 // update app config for bed type
@@ -13936,6 +13991,15 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
 {
     Plater::TakeSnapshot snapshot(q, "Reset Project", UndoRedo::SnapshotType::ProjectSeparator);
 
+    // Stop the background slicing / G-code export first, before anything below touches what it is
+    // working on: the GCodeProcessorResult it may still be filling (freed below), and the plates and
+    // prints partplate_list.reinit() deletes. PartPlateList::clear() deletes the plates before the
+    // prints, and only ~Print cancels the background thread - while it waited, the export's status
+    // callback (PartPlate::update_slice_context, which captures the plate) ran on a deleted
+    // PartPlate: EXC_BAD_ACCESS on macOS when the window was closed mid-export, since the close
+    // handler resets the project. The background_process.reset() further down is then a no-op stop.
+    this->background_process.stop();
+
     clear_warnings();
 
     set_project_filename("");
@@ -14377,6 +14441,12 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // If the update_background_process() was not called by the timer, kill the timer,
     // so the update_restart_background_process() will not be called again in vain.
     background_process_timer.Stop();
+    // EDGESLICER-A: validation below syncs notifications and the MainFrame's slice/print buttons;
+    // while the frame is closing or being replaced those may already be half destroyed.
+    if (q->is_shutting_down()) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": skipped, the GUI is shutting down";
+        return return_state;
+    }
     // Update the "out of print bed" state of ModelInstances.
     update_print_volume_state();
     // Apply new config to the possibly running background task.
@@ -15182,6 +15252,9 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 }
 unsigned int Plater::priv::update_restart_background_process(bool force_update_scene, bool force_update_preview)
 {
+    // EDGESLICER-A: reached from background_process_timer while the window tree was being torn down.
+    if (q->is_shutting_down())
+        return 0;
     bool switch_print = true;
     //BBS: judge whether can switch print or not
     if ((partplate_list.get_plate_count() > 1) && !this->background_process.can_switch_print())
@@ -16281,6 +16354,9 @@ void Plater::priv::on_select_bed_type(wxCommandEvent &evt)
 
                 // update plater with new config
                 q->on_config_change(wxGetApp().preset_bundle->full_config());
+                // Orca #15916/#16344: rebuild the plate tab from the current selection; its cached
+                // plates may be gone after a reset.
+                wxGetApp().obj_list()->update_and_show_object_settings_item();
 
                 // update app_config
                 AppConfig* app_config = wxGetApp().app_config;
@@ -16556,7 +16632,8 @@ void Plater::priv::on_slicing_completed(wxCommandEvent & evt)
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": event_type %1%, string %2%") % evt.GetEventType() % evt.GetString();
 
     // Snapmaker #753: a slice finishing while the GUI is being recreated (language / theme change) must not touch the half-built UI.
-    if (GUI::wxGetApp().is_recreating_gui())
+    // EDGESLICER-A: nor while this frame is closing, or is the old frame of such a rebuild.
+    if (GUI::wxGetApp().is_recreating_gui() || q->is_shutting_down())
         return;
 
     //BBS: add slice project logic
@@ -19055,6 +19132,39 @@ void Plater::reset_project_dirty_initial_presets() { p->reset_project_dirty_init
 void Plater::render_project_state_debug_window() const { p->render_project_state_debug_window(); }
 #endif // ENABLE_PROJECT_DIRTY_STATE_DEBUG_WINDOW
 
+// Orca #15916: per-plate bed type overrides are cleared when the selected printer cannot use them.
+// Edge: the capability is PlateBedTypes::allowed_bed_types - the U1 keeps its three plates (#502)
+// rather than "all or nothing".
+void Plater::normalize_bed_types(bool multi_bed_changed)
+{
+    if (only_gcode_mode() || using_exported_file())
+        return;
+
+    auto &preset_bundle = *wxGetApp().preset_bundle;
+    // Keep FFF plate settings intact while an SLA printer is selected.
+    if (preset_bundle.printers.get_edited_preset().printer_technology() != ptFFF)
+        return;
+
+    const PlateBedTypes::Allowed allowed =
+        PlateBedTypes::allowed_bed_types(preset_bundle.printers.get_edited_preset().config, preset_bundle.is_bbl_vendor());
+    const bool overrides_reset = !allowed.any && !p->partplate_list.check_all_plate_local_bed_type(allowed.types);
+
+    if (overrides_reset) {
+        set_plater_dirty(true);
+        show_info(this,
+                  allowed.types.empty() ?
+                      _L("The selected printer does not support multiple bed types.\nBed type overrides were reset to the global bed type.") :
+                      _L("The selected printer does not have some of the plates' bed types.\nThose bed type overrides were reset to the global bed type."),
+                  _L("Plate bed types reset"));
+    }
+
+    // Refresh the controls after a capability change, even when no override was reset.
+    if (multi_bed_changed || overrides_reset) {
+        sidebar().update_all_preset_comboboxes();
+        wxGetApp().obj_list()->update_and_show_object_settings_item();
+    }
+}
+
 Sidebar&        Plater::sidebar()           { return *p->sidebar; }
 const Model&    Plater::model() const       { return p->model; }
 Model&          Plater::model()             { return p->model; }
@@ -19265,6 +19375,9 @@ void Plater::load_project(wxString const& filename2,
     else
         p->dirty_state.update_from_undo_redo_stack(true);
     up_to_date(true, true);
+
+    // Orca #15916: clear plate overrides that are incompatible with the selected printer.
+    normalize_bed_types(false);
 
     wxGetApp().params_panel()->switch_to_object_if_has_object_configs();
 
@@ -20880,7 +20993,12 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_
     p->m_slice_all_only_has_gcode = false;
     //BBS: wish to reset all plates stats item selected state when load a new file
     p->preview->get_canvas3d()->reset_select_plate_toolbar_selection();
-    std::vector<size_t> loaded = p->load_files(input_files, strategy, ask_multi);
+    bool config_loaded = false;
+    std::vector<size_t> loaded = p->load_files(input_files, strategy, ask_multi, &config_loaded);
+    // Orca #15916: clear plate bed type overrides the loaded printer cannot use (load_project does
+    // its own after the load).
+    if (config_loaded && !is_loading_project())
+        normalize_bed_types(false);
     if (!loaded.empty())
     {
         // After loading a project, initialize the filament temp mixing state
@@ -22001,9 +22119,10 @@ void Plater::fill_bed_with_instances()
     // clearance uses - and pass the two separately.
     double tmpl_brim = 0.;
     {
-        const auto *bt = mo->get_config_value<ConfigOptionEnum<BrimType>>(global_config, "brim_type");
+        // Base option + virtual getInt(): a typed ConfigOptionEnum downcast of a generic enum is UB.
+        const ConfigOption *bt = mo->config.has("brim_type") ? mo->config.option("brim_type") : global_config.option("brim_type");
         const auto *bw = mo->get_config_value<ConfigOptionFloat>(global_config, "brim_width");
-        if (bt != nullptr && bw != nullptr && bt->value != btNoBrim)
+        if (bt != nullptr && bt->type() == coEnum && bw != nullptr && static_cast<BrimType>(bt->getInt()) != btNoBrim)
             tmpl_brim = std::max(0., bw->value);
     }
 
@@ -24980,6 +25099,11 @@ int Plater::find_next_sliceable_plate_for_slice_all(int start_plate_index)
 
 bool Plater::sync_filament_temp_mixing_notification()
 {
+    // EDGESLICER-A: ends in MainFrame::update_slice_print_status, which repaints the slice/print
+    // buttons - a crash while the frame is being destroyed.
+    if (is_shutting_down())
+        return true;
+
     // 1. Always close the previously-pushed notifications using their exact
     //    cached text. NotificationManager::close_validate_* matches on text,
     //    so we cannot use a freshly regenerated template string here — it
@@ -25073,7 +25197,8 @@ bool Plater::sync_filament_temp_mixing_notification()
     p->filament_temp_mixing_notification_state = mixing_state;
 
     const bool can_slice = curr_plate->can_slice() && slicing_allowed;
-    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
+    if (p->main_frame != nullptr)
+        p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
     return slicing_allowed;
 }
 
@@ -25189,6 +25314,8 @@ bool Plater::is_plate_blocked_by_flow_ratio_zero(int plate_index)
 
 bool Plater::sync_flow_ratio_zero_notification()
 {
+    if (is_shutting_down()) // EDGESLICER-A: see sync_filament_temp_mixing_notification
+        return true;
     PartPlate* curr_plate = get_partplate_list().get_curr_plate();
     if (curr_plate == nullptr) {
         BOOST_LOG_TRIVIAL(warning) << "[Plater] sync_flow_ratio_zero_notification: curr_plate is null";
@@ -25224,7 +25351,8 @@ bool Plater::sync_flow_ratio_zero_notification()
     }
 
     const bool can_slice = curr_plate->can_slice() && slicing_allowed;
-    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
+    if (p->main_frame != nullptr)
+        p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
     return slicing_allowed;
 }
 
@@ -25315,6 +25443,8 @@ bool Plater::is_plate_blocked_by_cold_plate(int plate_index) const
 
 bool Plater::sync_cold_plate_notification()
 {
+    if (is_shutting_down()) // EDGESLICER-A: see sync_filament_temp_mixing_notification
+        return true;
     PartPlate* curr_plate = get_partplate_list().get_curr_plate();
     if (curr_plate == nullptr) {
         BOOST_LOG_TRIVIAL(warning) << "[Plater] sync_cold_plate_notification: curr_plate is null";
@@ -25377,7 +25507,8 @@ bool Plater::sync_cold_plate_notification()
     // is_plate_blocked_by_cold_plate() directly. The can_slice arg is ignored for
     // eEventPlateUpdate — pass true to match filament_temp_mixing's contract.
     const bool can_slice = curr_plate->can_slice() && slicing_allowed;
-    p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
+    if (p->main_frame != nullptr)
+        p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
     return slicing_allowed;
 }
 
@@ -26102,6 +26233,21 @@ void Plater::suppress_background_process(const bool stop_background_process)
         this->p->background_process_timer.Stop();
 
     this->p->suppressed_backround_processing_update = true;
+}
+
+void Plater::begin_shutdown()
+{
+    p->gui_shutting_down = true;
+    p->background_process_timer.Stop();
+}
+
+bool Plater::is_shutting_down() const
+{
+    // gui_shutting_down covers both the app close and the old frame of a GUI rebuild (whose
+    // destruction runs after GUI_App::is_recreating_gui() is false again); the others catch a
+    // teardown that did not go through MainFrame::shutdown.
+    return p->gui_shutting_down || wxGetApp().is_closing() || IsBeingDeleted() ||
+           (p->main_frame != nullptr && (p->main_frame->is_shutting_down() || p->main_frame->IsBeingDeleted()));
 }
 
 void Plater::center_selection()     { p->center_selection(); }

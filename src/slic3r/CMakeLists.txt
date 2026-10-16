@@ -23,6 +23,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/AMSMaterialsSetting.cpp
     GUI/AMSMaterialsSetting.hpp
     GUI/AmsFilamentOrder.hpp
+    GUI/FavoriteFilaments.hpp
+    GUI/FavoriteFilamentsUI.hpp
     GUI/AMSSetting.cpp
     GUI/AMSSetting.hpp
     GUI/AmsWidgets.cpp
@@ -541,6 +543,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/LanReconnectLadder.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
+    GUI/BindListRefresh.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
@@ -568,6 +571,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/BambuSendDiagnosis.cpp
     GUI/DeviceModelCode.hpp
     GUI/DeviceModelCode.cpp
+    GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
@@ -1051,6 +1055,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/SimplyPrint.hpp
     Utils/TCPConsole.cpp
     Utils/TCPConsole.hpp
+    Utils/TeardownJoin.hpp
     Utils/UndoRedo.cpp
     Utils/UndoRedo.hpp
     Utils/WebSocketClient.hpp
@@ -1068,6 +1073,9 @@ set(SLIC3R_GUI_SOURCES
     Utils/WinFirewall.hpp
     Utils/BambuSetupNotice.cpp
     Utils/BambuSetupNotice.hpp
+    # Last on purpose: a new source in the middle of the list reshuffles the unity batches (HomeVaults.cpp
+    # and HomeVendors.cpp share file-local names and must not land in one batch).
+    GUI/FavoriteFilamentsUI.cpp
 )
 
 add_subdirectory(GUI/DeviceTab)

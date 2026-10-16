@@ -84,6 +84,9 @@ public:
     bool        task_layer_inspect;
     bool        cloud_print_only { false };
     bool        has_sdcard { false };
+    // The printer can print from its internal storage (fun2 bit 0): a LAN print needs no card then,
+    // as in Bambu Studio (PrintJob::could_emmc_print).
+    bool        could_emmc_print { false };
     // MachineObject::SdcardState of the printer's storage (0 none, 1 normal, 2 abnormal, 3 read-only);
     // only used to say why has_sdcard is false.
     int         sdcard_state { 0 };
@@ -93,8 +96,8 @@ public:
     int         auto_flow_cali{0};
     int         auto_offset_cali{0};
     /* Ultra (dual-nozzle): BBL::PrintParams::extruder_cali_manual_mode. This fork has no
-     * PA-value switch; the default 1 (automatic calibration) is always used. */
-    int         extruder_cali_manual_mode{1};
+     * PA-mode switch; Bambu Studio's default (its switch ON -> 0) is always used. */
+    int         extruder_cali_manual_mode{0};
 
     void set_print_config(std::string bed_type, bool bed_leveling, bool flow_cali, bool vabration_cali, bool record_timelapse, bool layer_inspect,
         int auto_bed_levelingt,

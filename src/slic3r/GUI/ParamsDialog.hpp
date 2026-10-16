@@ -7,6 +7,7 @@
 
 #include "GUI_Utils.hpp"
 #include "wxExtensions.hpp"
+#include "libslic3r/PlateBedTypes.hpp"
 
 namespace Slic3r { 
 namespace GUI {
@@ -38,6 +39,7 @@ protected:
 
 private:
     std::string       m_editing_filament_id;
+    PlateBedTypes::Allowed m_initial_bed_types;
     ParamsPanel * m_panel;
     wxWindowDisabler *m_winDisabler = nullptr;
 };
