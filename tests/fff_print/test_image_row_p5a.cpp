@@ -64,6 +64,12 @@ DynamicPrintConfig p5a_config(bool prime_tower)
     // A tool changer, so GCodeWriter emits T<n> (see test_image_row_walls.cpp).
     config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
     config.option<ConfigOptionBool>("enable_prime_tower")->value             = prime_tower;
+    if (prime_tower) {
+        // Well clear of the part (which sits near the origin) and inside the default 200 mm bed.
+        config.option<ConfigOptionFloats>("wipe_tower_x")->values    = {140.};
+        config.option<ConfigOptionFloats>("wipe_tower_y")->values    = {140.};
+        config.option<ConfigOptionFloat>("prime_tower_width")->value = 35.;
+    }
     return config;
 }
 
