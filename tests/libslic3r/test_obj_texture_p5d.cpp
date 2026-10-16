@@ -7,6 +7,7 @@
 #include <boost/nowide/fstream.hpp>
 
 #include <array>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -25,18 +26,25 @@ const char *kCubeObj =
     "v 0 0 20\nv 20 0 20\nv 20 20 20\nv 0 20 20\n"
     "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
     "usemtl tex\n"
+    // Every other face starts its UVs one corner on, so its two triangles' centroids land on the
+    // texture's other diagonal: across the part all four quadrants are some triangle's centroid
+    // colour, and the colour dialog is offered all four.
     "f 1/1 4/4 3/3 2/2\n"   // bottom
-    "f 5/1 6/2 7/3 8/4\n"   // top
+    "f 5/2 6/3 7/4 8/1\n"   // top
     "f 1/1 2/2 6/3 5/4\n"   // -Y
-    "f 2/1 3/2 7/3 6/4\n"   // +X
+    "f 2/2 3/3 7/4 6/1\n"   // +X
     "f 3/1 4/2 8/3 7/4\n"   // +Y
-    "f 4/1 1/2 5/3 8/4\n";  // -X
+    "f 4/2 1/3 5/4 8/1\n";  // -X
 
 void write_text(const boost::filesystem::path &p, const std::string &text)
 {
     boost::nowide::ofstream out(p.string(), std::ios::binary);
     out << text;
 }
+
+// What the last "colour dialog" call was handed and answered, for the failure messages.
+std::vector<RGBA>          g_seen_colors;
+std::vector<unsigned char> g_answered_ids;
 
 // Four filaments - red, green, blue, white - and a "colour dialog" that picks the nearest.
 ObjImportColorFn nearest_of_four()
@@ -54,6 +62,8 @@ ObjImportColorFn nearest_of_four()
             }
             ids.push_back((unsigned char) (best + 1));
         }
+        g_seen_colors  = colors;
+        g_answered_ids = ids;
         first = 1;
     };
 }
@@ -69,12 +79,14 @@ boost::filesystem::path make_case_dir(const char *name, const char *map_kd)
     return dir;
 }
 
+// How many filaments the part's painting actually uses, read back through TriangleSelector.
 size_t painted_states(const ModelVolume &v)
 {
-    const auto &used = v.mmu_segmentation_facets.get_data().used_states;
+    TriangleSelector sel(v.mesh());
+    sel.deserialize(v.mmu_segmentation_facets.get_data(), false);
     size_t n = 0;
-    for (size_t s = 1; s < used.size(); ++s)
-        if (used[s])
+    for (int s = 1; s <= 4; ++s)
+        if (!sel.get_facets(EnforcerBlockerType(s)).indices.empty())
             ++n;
     return n;
 }
@@ -92,7 +104,9 @@ TEST_CASE("OBJ 5d: a map_Kd texture paints the part from the picture", "[obj][im
     REQUIRE(model.objects.size() == 1);
     REQUIRE(model.objects[0]->volumes.size() == 1);
     const ModelVolume &v = *model.objects[0]->volumes[0];
-    INFO("warning: " << warning);
+    std::set<int> answered(g_answered_ids.begin(), g_answered_ids.end());
+    INFO("warning: " << warning << " dialog saw " << g_seen_colors.size() << " colours, answered " << answered.size()
+                     << " distinct filaments");
     CHECK(warning.empty());
     CHECK(v.is_mm_painted());
     // The four quadrants land on every face, at sub-facet resolution: more than the one or two
