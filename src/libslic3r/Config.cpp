@@ -220,6 +220,32 @@ bool unescape_strings_cstyle(const std::string &str, std::vector<std::string> &o
     }
 }
 
+// Reads the number the text starts with, as `std::istream >> double` does in the C locale: leading white space and a '+'
+// are skipped, and text after the number (such as the optional '%' of a percent) is ignored.
+// Unlike the stream it reads the same on every platform. libc++ fails a subnormal (strtod reports ERANGE), though it
+// stores the value, while MSVC reads it; Bambu Studio writes subnormals such as 1.04632e-311 into flush_volumes_matrix,
+// so a stream check dropped those projects' settings on macOS only. A value that underflows reads as the nearest double.
+// Fails, setting value to 0, when the text does not start with a number or is not finite: "inf", "nan", or an overflow
+// such as 1e999, which MSVC's stream fails too.
+bool deserialize_float_value(const std::string &str, double &value)
+{
+    size_t i = 0;
+    while (i < str.size() && std::isspace((unsigned char)str[i]))
+        ++ i;
+    // fast_float takes no '+'; the stream fails "+-1".
+    if (i < str.size() && str[i] == '+' && ++ i < str.size() && str[i] == '-') {
+        value = 0.;
+        return false;
+    }
+    size_t pos = 0;
+    value = string_to_double_decimal_point(std::string_view(str).substr(i), &pos);
+    if (pos == 0 || ! std::isfinite(value)) {
+        value = 0.;
+        return false;
+    }
+    return true;
+}
+
 std::string escape_ampersand(const std::string& str)
 {
     // Allocate a buffer 2 times the input string length,
