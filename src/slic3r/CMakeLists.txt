@@ -556,6 +556,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteSnapmaker.cpp
     GUI/RemoteSnapmaker.hpp
     GUI/SnapmakerLan.cpp
+    GUI/U1LanRoute.cpp
+    GUI/U1LanRoute.hpp
+    GUI/U1WsRoute.cpp
+    GUI/U1WsRoute.hpp
     GUI/SnapmakerTaskConfig.hpp
     GUI/SnapmakerTaskConfig.cpp
     GUI/WizardNetworking.hpp
@@ -1057,6 +1061,12 @@ set(SLIC3R_GUI_SOURCES
     Utils/MQTT.hpp
     Utils/MQTT.cpp
     Utils/MqttReconnectPolicy.hpp
+    Utils/U1LocalFirst.cpp
+    Utils/U1LocalFirst.hpp
+    Utils/U1MoonrakerProbe.cpp
+    Utils/U1MoonrakerProbe.hpp
+    Utils/MoonrakerWs.cpp
+    Utils/MoonrakerWs.hpp
     Utils/MoonRaker.cpp
     Utils/MoonRaker.hpp
     Utils/TimeSyncManager.cpp
