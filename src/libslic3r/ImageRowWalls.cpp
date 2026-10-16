@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
 #include <boost/log/trivial.hpp>
 
@@ -311,6 +312,10 @@ bool build_context_for_row(const PrintObject &object, const PrintRegion &region,
     // A params string from before phase 5a names no surfaces: the binding is the request, and a
     // wall binding asked for the walls.
     ctx.surfaces = ctx.params.surfaces != 0 ? ctx.params.surfaces : IMAGE_FILL_SURFACE_WALLS;
+    // Phase 5b: layer stripes are a WALL method; a row that only asked for the top keeps runs, so
+    // its top-edge colouring still works.
+    ctx.wall_method  = (ctx.surfaces & IMAGE_FILL_SURFACE_WALLS) != 0 ? ctx.params.wall_method : IMAGE_FILL_WALL_RUNS;
+    ctx.stripe_depth = float(ctx.params.stripe_depth_pct) / 100.f;
 
     ctx.row = mf;
     // Nozzle-bounded resolution, the same rule phase 3 applies to top surfaces: a run shorter
@@ -398,8 +403,11 @@ ImageRowSample sample_point(const ImageAssetStore &assets, const ImageRowWallCon
 
 // The wall's runs, and the paths they cut. false when the entity is not a wall this can sample
 // (or, in phase 4's legacy mode, when the projection declined a colour everywhere).
-bool compute_wall_runs(const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity,
-                       double print_z, const Layer *layer, ExtrusionPaths &paths, std::vector<ImageRowRun> &runs)
+// The wall's samples along its whole length (arc length in `s`), each coloured or not by the
+// phase 5a rules, and the paths they were taken along. false when the entity is not a wall.
+bool compute_wall_samples(const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity,
+                          double print_z, const Layer *layer, ExtrusionPaths &paths,
+                          std::vector<ImageRowSample> &samples, bool &any_color)
 {
     if (!collect_wall_paths(entity, paths))
         return false;
@@ -424,9 +432,9 @@ bool compute_wall_runs(const ImageAssetStore &assets, const ImageRowWallContext 
     // corners: each segment of the loop faces a different direction, and on a box that means
     // different segments belong to different BOX FACES. So the normal is recomputed per segment
     // and sampled segment by segment, rather than once for the entity.
-    std::vector<ImageRowSample> samples;
+    samples.clear();
+    any_color = false;
     float                       cumulative = 0.f;
-    bool                        any_color  = false;
     const Points               &pts        = whole.points;
     for (size_t i = 0; i + 1 < pts.size(); ++i) {
         const Vec3d p0_print(unscale<double>(pts[i].x()), unscale<double>(pts[i].y()), print_z);
@@ -496,6 +504,16 @@ bool compute_wall_runs(const ImageAssetStore &assets, const ImageRowWallContext 
         if (!seg.empty())
             cumulative += seg.back().s;
     }
+    return !samples.empty();
+}
+
+bool compute_wall_runs(const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity,
+                       double print_z, const Layer *layer, ExtrusionPaths &paths, std::vector<ImageRowRun> &runs)
+{
+    std::vector<ImageRowSample> samples;
+    bool                        any_color = false;
+    if (!compute_wall_samples(assets, ctx, entity, print_z, layer, paths, samples, any_color))
+        return false;
     if (ctx.base_filament <= 0) {
         // Phase 4 behaviour: nothing to fall back on but the row itself.
         if (!any_color) {
@@ -509,6 +527,94 @@ bool compute_wall_runs(const ImageAssetStore &assets, const ImageRowWallContext 
     }
     return !runs.empty();
 }
+
+// Cuts a wall's paths by arc length. The wall is walked as a flat list of (segment, owning path)
+// pairs so that every piece keeps the attributes of the ExtrusionPath it came from - an outer
+// loop's overhang sub-paths keep printing as overhangs at overhang speed, which is why
+// PerimeterGenerator retagged them in the first place. Cutting the concatenated polyline alone
+// would lose that.
+class WallCutter
+{
+public:
+    explicit WallCutter(const ExtrusionPaths &paths) : m_paths(paths)
+    {
+        for (size_t pi = 0; pi < paths.size(); ++pi) {
+            const Points &pp = paths[pi].polyline.points;
+            for (size_t k = 0; k + 1 < pp.size(); ++k) {
+                const Vec2d  a(unscale<double>(pp[k].x()), unscale<double>(pp[k].y()));
+                const Vec2d  b(unscale<double>(pp[k + 1].x()), unscale<double>(pp[k + 1].y()));
+                const double len = (b - a).norm();
+                if (len > EPSILON)
+                    m_segs.push_back(WallSeg{pp[k], pp[k + 1], pi, len});
+            }
+        }
+    }
+    bool empty() const { return m_segs.empty(); }
+
+    // Takes `want_mm` of wall from the cursor, appending one ExtrusionPath per contiguous run of
+    // segments that share a source path (so attributes never mix inside one emitted path).
+    void take(double want_mm, ExtrusionPaths &dst)
+    {
+        Polyline cur;
+        size_t   cur_src = size_t(-1);
+        auto flush = [&]() {
+            if (cur.points.size() >= 2 && cur_src < m_paths.size()) {
+                ExtrusionPath ep(m_paths[cur_src]);
+                ep.polyline = cur;
+                dst.push_back(std::move(ep));
+            }
+            cur.points.clear();
+        };
+        while (want_mm > EPSILON && m_seg_idx < m_segs.size()) {
+            const WallSeg &s     = m_segs[m_seg_idx];
+            const double   avail = s.len_mm - m_seg_off;
+            if (avail <= EPSILON) {
+                ++m_seg_idx;
+                m_seg_off = 0.;
+                continue;
+            }
+            if (cur_src != s.path_idx) {
+                flush();
+                cur_src = s.path_idx;
+            }
+            if (cur.points.empty())
+                cur.points.push_back(point_at(s, m_seg_off));
+            if (avail <= want_mm + EPSILON) {
+                cur.points.push_back(s.b);
+                want_mm -= avail;
+                ++m_seg_idx;
+                m_seg_off = 0.;
+            } else {
+                m_seg_off += want_mm;
+                cur.points.push_back(point_at(s, m_seg_off));
+                want_mm = 0.;
+            }
+        }
+        flush();
+    }
+
+private:
+    struct WallSeg
+    {
+        Point  a, b;
+        size_t path_idx;   // index into `m_paths`, i.e. which attributes this segment prints with
+        double len_mm;
+    };
+    static Point point_at(const WallSeg &s, double off_mm)
+    {
+        const Vec2d a(unscale<double>(s.a.x()), unscale<double>(s.a.y()));
+        const Vec2d b(unscale<double>(s.b.x()), unscale<double>(s.b.y()));
+        const double t = s.len_mm > EPSILON ? std::min(1.0, std::max(0.0, off_mm / s.len_mm)) : 0.;
+        const Vec2d  p = a + (b - a) * t;
+        return Point(scale_(p.x()), scale_(p.y()));
+    }
+
+    const ExtrusionPaths &m_paths;
+    std::vector<WallSeg>  m_segs;
+    // The cursor: which segment, and how far along it (mm) the previous piece ended.
+    size_t m_seg_idx = 0;
+    double m_seg_off = 0.;
+};
 
 } // namespace
 
@@ -575,84 +681,11 @@ std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_ent
         return out;
     }
 
-    // --- cut the wall at the run boundaries ---------------------------------------------------
-    //
-    // The wall is walked as a flat list of (segment, owning path) pairs so that every piece keeps
-    // the attributes of the ExtrusionPath it came from - an outer loop's overhang sub-paths keep
-    // printing as overhangs at overhang speed, which is why PerimeterGenerator retagged them in
-    // the first place. Cutting the concatenated polyline alone would lose that.
-    struct WallSeg
-    {
-        Point  a, b;
-        size_t path_idx;   // index into `paths`, i.e. which attributes this segment prints with
-        double len_mm;
-    };
-    std::vector<WallSeg> segs;
-    for (size_t pi = 0; pi < paths.size(); ++pi) {
-        const Points &pp = paths[pi].polyline.points;
-        for (size_t k = 0; k + 1 < pp.size(); ++k) {
-            const Vec2d  a(unscale<double>(pp[k].x()), unscale<double>(pp[k].y()));
-            const Vec2d  b(unscale<double>(pp[k + 1].x()), unscale<double>(pp[k + 1].y()));
-            const double len = (b - a).norm();
-            if (len > EPSILON)
-                segs.push_back(WallSeg{pp[k], pp[k + 1], pi, len});
-        }
-    }
-    if (segs.empty())
+    // --- cut the wall at the run boundaries (WallCutter keeps each piece's own path attributes) --
+    WallCutter cutter(paths);
+    if (cutter.empty())
         return out;
-
-    // The cursor: which segment, and how far along it (mm) the previous run ended.
-    size_t seg_idx = 0;
-    double seg_off = 0.;
-
-    auto point_at = [](const WallSeg &s, double off_mm) -> Point {
-        const Vec2d a(unscale<double>(s.a.x()), unscale<double>(s.a.y()));
-        const Vec2d b(unscale<double>(s.b.x()), unscale<double>(s.b.y()));
-        const double t = s.len_mm > EPSILON ? std::min(1.0, std::max(0.0, off_mm / s.len_mm)) : 0.;
-        const Vec2d  p = a + (b - a) * t;
-        return Point(scale_(p.x()), scale_(p.y()));
-    };
-
-    // Takes `want_mm` of wall from the cursor, appending one ExtrusionPath per contiguous run of
-    // segments that share a source path (so attributes never mix inside one emitted path).
-    auto take = [&](double want_mm, ExtrusionPaths &dst) {
-        Polyline cur;
-        size_t   cur_src = size_t(-1);
-        auto flush = [&]() {
-            if (cur.points.size() >= 2 && cur_src < paths.size()) {
-                ExtrusionPath ep(paths[cur_src]);
-                ep.polyline = cur;
-                dst.push_back(std::move(ep));
-            }
-            cur.points.clear();
-        };
-        while (want_mm > EPSILON && seg_idx < segs.size()) {
-            const WallSeg &s     = segs[seg_idx];
-            const double   avail = s.len_mm - seg_off;
-            if (avail <= EPSILON) {
-                ++seg_idx;
-                seg_off = 0.;
-                continue;
-            }
-            if (cur_src != s.path_idx) {
-                flush();
-                cur_src = s.path_idx;
-            }
-            if (cur.points.empty())
-                cur.points.push_back(point_at(s, seg_off));
-            if (avail <= want_mm + EPSILON) {
-                cur.points.push_back(s.b);
-                want_mm -= avail;
-                ++seg_idx;
-                seg_off = 0.;
-            } else {
-                seg_off += want_mm;
-                cur.points.push_back(point_at(s, seg_off));
-                want_mm = 0.;
-            }
-        }
-        flush();
-    };
+    auto take = [&cutter](double want_mm, ExtrusionPaths &dst) { cutter.take(want_mm, dst); };
 
     double cut_at = 0.;   // arc length of the previous run boundary
     for (size_t r = 0; r < runs.size(); ++r) {
@@ -702,6 +735,167 @@ std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_ent
     if (out.size() < 2 && ctx.base_filament <= 0)
         out.clear(); // phase 4: nothing usefully split - let the caller keep the original loop.
     return out;
+}
+
+std::unique_ptr<ExtrusionEntityCollection> image_row_stripe_wall_entity(const ImageAssetStore      &assets,
+                                                                        const ImageRowWallContext  &ctx,
+                                                                        const ExtrusionEntity      &entity,
+                                                                        double                      print_z,
+                                                                        const Layer                *layer,
+                                                                        int                         layer_filament)
+{
+    const auto cand = std::find(ctx.candidate_ids.begin(), ctx.candidate_ids.end(), layer_filament);
+    if (cand == ctx.candidate_ids.end() || ctx.stripe_depth <= 0.f)
+        return nullptr;
+    const size_t component = size_t(cand - ctx.candidate_ids.begin());
+
+    ExtrusionPaths              paths;
+    std::vector<ImageRowSample> samples;
+    bool                        any_color = false;
+    if (!compute_wall_samples(assets, ctx, entity, print_z, layer, paths, samples, any_color) || !any_color)
+        return nullptr;
+
+    // --- one width level per sample ---------------------------------------------------------------
+    // The swing is quantised to kLevels steps each side of nominal: finer than a printer can show,
+    // and it keeps a smooth gradient from turning into one path per sample. The level is memoised
+    // per 5-bit colour, so a photo costs one solve per distinct colour, not one per sample.
+    constexpr int kLevels = 8;
+    std::unordered_map<uint32_t, int> level_of;
+    auto q5 = [](float c) -> uint32_t { return uint32_t(std::lround(std::min(1.f, std::max(0.f, c)) * 31.f)); };
+    std::vector<int> level(samples.size(), 0);
+    bool any_level = false;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!samples[i].has_color)
+            continue;   // where the picture does not land, the wall keeps its nominal width
+        const uint32_t key = (q5(samples[i].color[0]) << 10) | (q5(samples[i].color[1]) << 5) | q5(samples[i].color[2]);
+        auto it = level_of.find(key);
+        if (it == level_of.end()) {
+            const std::vector<float> w   = image_fill_mix_weights(samples[i].color, ctx.candidate_colors);
+            const float              f   = image_fill_stripe_width_factor(w, component, ctx.stripe_depth);
+            const int                lvl = int(std::lround((f - 1.f) / ctx.stripe_depth * float(kLevels)));
+            it = level_of.emplace(key, std::max(-kLevels, std::min(kLevels, lvl))).first;
+        }
+        level[i]  = it->second;
+        any_level = any_level || level[i] != 0;
+    }
+    if (!any_level)
+        return nullptr;
+
+    // --- coalesce into spans, then fold spans shorter than the nozzle into a neighbour ------------
+    struct Span
+    {
+        float s0, s1;
+        int   level;
+    };
+    std::vector<Span> spans;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!spans.empty() && spans.back().level == level[i])
+            spans.back().s1 = samples[i].s;
+        else
+            spans.push_back(Span{samples[i].s, samples[i].s, level[i]});
+    }
+    while (spans.size() > 1) {
+        size_t worst     = size_t(-1);
+        float  worst_len = ctx.min_run_len_mm;
+        for (size_t i = 0; i < spans.size(); ++i)
+            if (spans[i].s1 - spans[i].s0 < worst_len) {
+                worst_len = spans[i].s1 - spans[i].s0;
+                worst     = i;
+            }
+        if (worst == size_t(-1))
+            break;
+        // Into the neighbour whose width is closer.
+        size_t into;
+        if (worst == 0)
+            into = 1;
+        else if (worst + 1 == spans.size())
+            into = worst - 1;
+        else
+            into = std::abs(spans[worst - 1].level - spans[worst].level) <= std::abs(spans[worst + 1].level - spans[worst].level) ?
+                       worst - 1 :
+                       worst + 1;
+        const size_t lo = std::min(worst, into), hi = std::max(worst, into);
+        spans[lo] = Span{std::min(spans[lo].s0, spans[hi].s0), std::max(spans[lo].s1, spans[hi].s1), spans[into].level};
+        spans.erase(spans.begin() + hi);
+        // Neighbours that ended up at the same level join.
+        for (size_t i = 1; i < spans.size();) {
+            if (spans[i].level == spans[i - 1].level) {
+                spans[i - 1].s1 = spans[i].s1;
+                spans.erase(spans.begin() + i);
+            } else
+                ++i;
+        }
+    }
+    if (spans.size() == 1 && spans.front().level == 0)
+        return nullptr;
+
+    // --- cut at the span boundaries, then widen or narrow each piece --------------------------------
+    bool ccw = true;
+    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity))
+        ccw = loop->polygon().is_counter_clockwise();
+    WallCutter cutter(paths);
+    if (cutter.empty())
+        return nullptr;
+    ExtrusionPaths out_paths;
+    double         cut_at = 0.;
+    for (size_t k = 0; k < spans.size(); ++k) {
+        double want = std::numeric_limits<double>::max() / 4.;
+        if (k + 1 < spans.size()) {
+            const double boundary = 0.5 * (double(spans[k].s1) + double(spans[k + 1].s0));
+            want   = std::max(0.0, boundary - cut_at);
+            cut_at = boundary;
+        }
+        ExtrusionPaths piece;
+        cutter.take(want, piece);
+        const float factor = 1.f + ctx.stripe_depth * float(spans[k].level) / float(kLevels);
+        for (ExtrusionPath &path : piece) {
+            if (spans[k].level != 0 && path.role() == erExternalPerimeter && path.polyline.points.size() >= 2) {
+                const double w0 = double(path.width);
+                const double h  = double(path.height);
+                const double w1 = w0 * double(factor);
+                // The bead's cross-section, the same rounded rectangle Flow uses.
+                auto area = [h](double w) { return std::max(1e-6, h * (w - h * (1. - 0.25 * PI))); };
+                if (w1 > h * (1. - 0.25 * PI) + 1e-3) {
+                    path.mm3_per_mm = path.mm3_per_mm * area(w1) / area(w0);
+                    path.width      = float(w1);
+                    // Inner edge fixed: the centre line moves out by half the change in width.
+                    const double shift = 0.5 * (w1 - w0);
+                    Points      &pts   = path.polyline.points;
+                    Points       moved(pts.size());
+                    for (size_t j = 0; j < pts.size(); ++j) {
+                        Vec2d n(0., 0.);
+                        if (j > 0) {
+                            const Vec3d a = wall_outward_normal_print(pts[j - 1], pts[j], ccw);
+                            n += Vec2d(a.x(), a.y());
+                        }
+                        if (j + 1 < pts.size()) {
+                            const Vec3d b = wall_outward_normal_print(pts[j], pts[j + 1], ccw);
+                            n += Vec2d(b.x(), b.y());
+                        }
+                        if (n.squaredNorm() > 1e-12)
+                            n.normalize();
+                        moved[j] = Point(pts[j].x() + coord_t(scale_(n.x() * shift)), pts[j].y() + coord_t(scale_(n.y() * shift)));
+                    }
+                    pts = std::move(moved);
+                }
+            }
+            // One continuous line: each piece starts where the last one ended, so a width step is
+            // a short diagonal in the extrusion, never a travel move.
+            if (!out_paths.empty() && !out_paths.back().polyline.points.empty() && !path.polyline.points.empty())
+                path.polyline.points.front() = out_paths.back().polyline.points.back();
+            out_paths.push_back(std::move(path));
+        }
+    }
+    if (out_paths.empty())
+        return nullptr;
+
+    auto coll     = std::make_unique<ExtrusionEntityCollection>();
+    coll->no_sort = false;   // see image_row_split_wall_entity(): a perimeter collection must splat
+    if (out_paths.size() == 1)
+        coll->entities.push_back(new ExtrusionPath(out_paths.front()));
+    else
+        coll->entities.push_back(new ExtrusionMultiPath(out_paths));
+    return coll;
 }
 
 } // namespace Slic3r

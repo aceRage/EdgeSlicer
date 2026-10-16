@@ -18,6 +18,7 @@ class wxBitmapButton;
 class wxCheckBox;
 class wxCheckListBox;
 class wxChoice;
+class wxSpinCtrl;
 class wxSpinCtrlDouble;
 class wxStaticBitmap;
 class wxStaticText;
@@ -106,6 +107,8 @@ private:
     wxSpinCtrlDouble *m_detail          = nullptr;
     wxCheckBox       *m_row_top         = nullptr;   // "Nozzle-resolution colour: Top surfaces"
     wxCheckBox       *m_row_walls       = nullptr;   // "Nozzle-resolution colour: Side walls"
+    wxChoice         *m_wall_method     = nullptr;   // Phase 5b: colour runs / layer stripes
+    wxSpinCtrl       *m_stripe_depth    = nullptr;   // Phase 5b: width swing, percent
     wxStaticBitmap   *m_preview         = nullptr;
     wxStaticText     *m_summary         = nullptr;
     wxButton         *m_ok              = nullptr;

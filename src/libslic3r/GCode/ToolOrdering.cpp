@@ -878,8 +878,11 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                     image_row_wall_configured_virtual_id(object, region) != 0 && object.model_object() != nullptr &&
                     object.model_object()->get_model() != nullptr) {
                     ImageRowWallContext wall_ctx;
+                    // Phase 5b: layer stripes keep the whole wall on the row's per-layer
+                    // filament, which the ordinary branch below registers (resolve_mixed()).
                     if (image_row_wall_context_for_region(object, region, float(layerm->flow(frExternalPerimeter).width()),
-                                                          wall_ctx, layerCount, float(layer->print_z), float(layer->height))) {
+                                                          wall_ctx, layerCount, float(layer->print_z), float(layer->height)) &&
+                        wall_ctx.wall_method != IMAGE_FILL_WALL_STRIPES) {
                         image_row_wall = true;
                         const ImageAssetStore &assets = object.model_object()->get_model()->image_assets;
                         auto add_id = [&image_row_wall_ids](int id) {
