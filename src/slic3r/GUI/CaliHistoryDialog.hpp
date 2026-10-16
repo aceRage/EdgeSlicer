@@ -5,6 +5,8 @@
 #include "wxExtensions.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "DeviceManager.hpp"
+#include "FavoriteFilamentsUI.hpp"
+#include <memory>
 
 namespace Slic3r { 
 namespace GUI {
@@ -88,6 +90,9 @@ protected:
         std::string setting_id;
     };
     std::map<std::string, FilamentInfos> map_filament_items;
+    // Favourite filaments on top of the filament list (shown name -> favourite key).
+    std::map<std::string, std::string>                      m_favorite_keys;
+    std::unique_ptr<FavoriteFilamentsUI::FavoriteComboList> m_filament_list;
 };
 
 } // namespace GUI
