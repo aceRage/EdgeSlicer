@@ -5,6 +5,7 @@
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
+#include "slic3r/GUI/Widgets/Button.hpp"
 #include "common_func/common_func.hpp"
 
 #include <wx/sizer.h>
@@ -85,6 +86,13 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
         evt.Skip();
         if (evt.IsShown())
             release_startup_hold("the Device tab was opened");
+        // The Storage tab reads the printer only while it is on screen.
+        if (m_storage) {
+            if (evt.IsShown() && m_storage_shown)
+                m_storage->activate();
+            else if (!evt.IsShown())
+                m_storage->deactivate();
+        }
     });
 
     // Panel bind so WebViewWebKit's navigation gate (also on the webview) still sees LOADED/ERROR.
@@ -94,11 +102,25 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
     m_retry_timer.SetOwner(this);
     Bind(wxEVT_TIMER, &PrinterWebView::OnRetryTimer, this, m_retry_timer.GetId());
 
-    // The device picker, above the page. Created empty and hidden; Sidebar::update_all_preset_
-    // comboboxes fills it in for a print-host printer whose model has devices.
+    // The bar above the page: the Storage tab's two buttons (the printer's page / its files) and
+    // the device picker. Created empty and hidden; Sidebar::update_all_preset_comboboxes fills the
+    // picker in for a print-host printer whose model has devices, and sets the Storage tab's printer.
     m_device_bar   = new wxPanel(this, wxID_ANY);
     auto* bar_sizer = new wxBoxSizer(wxHORIZONTAL);
-    bar_sizer->Add(new wxStaticText(m_device_bar, wxID_ANY, _L("Printer") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
+    m_tab_page      = new ::Button(m_device_bar, _L("Printer page"));
+    m_tab_page->SetToolTip(_L("The printer's own page"));
+    m_tab_page->SetName(_L("Printer page"));
+    m_tab_page->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { show_storage(false); });
+    m_tab_storage = new ::Button(m_device_bar, _L("Storage"));
+    m_tab_storage->SetToolTip(_L("The G-code files on the printer"));
+    m_tab_storage->SetName(_L("Storage"));
+    m_tab_storage->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { show_storage(true); });
+    bar_sizer->Add(m_tab_page, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP | wxBOTTOM, FromDIP(4));
+    bar_sizer->Add(m_tab_storage, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP | wxBOTTOM, FromDIP(4));
+    m_tab_page->Hide();
+    m_tab_storage->Hide();
+    m_device_label = new wxStaticText(m_device_bar, wxID_ANY, _L("Printer") + ":");
+    bar_sizer->Add(m_device_label, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
     m_device_choice = new wxChoice(m_device_bar, wxID_ANY);
     bar_sizer->Add(m_device_choice, 0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, FromDIP(4));
     m_device_bar->SetSizer(bar_sizer);
@@ -178,7 +200,9 @@ void PrinterWebView::navigate(const wxString& url, const wxString& apikey, bool 
         }
     }
 
-    m_browser->Show();
+    // The page loads behind the Storage tab when that is the one on screen.
+    if (!m_storage_shown)
+        m_browser->Show();
     m_browser->LoadURL(url);
     const std::string u = url.ToUTF8().data();
     m_load_gate.started(u, device_page_now_ms());
@@ -200,10 +224,7 @@ void PrinterWebView::set_devices(const std::string& model_key, const std::vector
     m_devices   = devices;
     if (devices.empty()) {
         m_device_choice->Clear();
-        if (m_device_bar->IsShown()) {
-            m_device_bar->Hide();
-            Layout();
-        }
+        update_bar();
         return;
     }
     if (!same) {
@@ -220,10 +241,7 @@ void PrinterWebView::set_devices(const std::string& model_key, const std::vector
         if (!select_id.empty() && devices[i].id == select_id)
             sel = (int) i;
     m_device_choice->SetSelection(sel);
-    if (!m_device_bar->IsShown()) {
-        m_device_bar->Show();
-        Layout();
-    }
+    update_bar();
 }
 
 std::string PrinterWebView::picked_device() const
@@ -265,6 +283,99 @@ void PrinterWebView::load_picked_device()
     wxString wurl   = from_u8(url);
     wxString apikey = from_u8(d.apikey);
     load_url(wurl, apikey);
+    // The Storage tab follows the picker.
+    set_storage_device(d, "ph:" + d.id);
+}
+
+void PrinterWebView::set_storage_device(const PrintHostDevices::Device& device, const std::string& key)
+{
+    const PrinterStorage::Target t = PrinterStorage::target_for_host(device.host_type, device.address, device.apikey,
+                                                                     device.display_name(), key);
+    set_storage_source(t.kind == PrinterStorage::Target::Kind::None ? PrinterStoragePanel::Source() :
+                                                                     PrinterStoragePanel::fixed_source(t));
+}
+
+void PrinterWebView::set_storage_source(PrinterStoragePanel::Source source)
+{
+    const bool has       = (bool) source;
+    m_storage_has_source = has;
+    if (has && !m_storage) {
+        m_storage = new PrinterStoragePanel(this);
+        m_storage->Hide();
+        GetSizer()->Add(m_storage, wxSizerFlags().Expand().Proportion(1));
+    }
+    if (m_storage)
+        m_storage->set_source(has ? std::move(source) : PrinterStoragePanel::Source());
+    if (!has && m_storage_shown)
+        show_storage(false);
+    else
+        update_bar();
+}
+
+void PrinterWebView::show_storage(bool show)
+{
+    if (show && (!m_storage || !m_storage_has_source))
+        show = false;
+    m_storage_shown = show;
+    if (m_storage) {
+        m_storage->Show(show);
+        if (show && IsShownOnScreen())
+            m_storage->activate();
+        else if (!show)
+            m_storage->deactivate();
+    }
+    if (m_browser)
+        m_browser->Show(!show);
+    update_bar();
+    if (show && m_storage)
+        m_storage->SetFocus();
+}
+
+void PrinterWebView::update_bar()
+{
+    if (!m_device_bar)
+        return;
+    const bool has_devices = !m_devices.empty();
+    const bool storage_tab = m_storage != nullptr && m_storage_has_source;
+    // The preset comboboxes call in here often: lay out only when something changed.
+    const int state = (has_devices ? 1 : 0) | (storage_tab ? 2 : 0) | (m_storage_shown ? 4 : 0);
+    if (state == m_bar_state)
+        return;
+    m_bar_state = state;
+    m_device_label->Show(has_devices);
+    m_device_choice->Show(has_devices);
+    m_tab_page->Show(storage_tab);
+    m_tab_storage->Show(storage_tab);
+    // The tab on screen is the highlighted one.
+    m_tab_page->SetStyle(m_storage_shown ? ButtonStyle::Regular : ButtonStyle::Confirm, ButtonType::Window);
+    m_tab_storage->SetStyle(m_storage_shown ? ButtonStyle::Confirm : ButtonStyle::Regular, ButtonType::Window);
+    m_device_bar->Show(has_devices || storage_tab);
+    m_device_bar->Layout();
+    Layout();
+}
+
+void PrinterWebView::sys_color_changed()
+{
+    if (m_tab_page) {
+        m_tab_page->Rescale();
+        m_tab_storage->Rescale();
+        m_bar_state = -1;
+        update_bar();
+    }
+    if (m_storage)
+        m_storage->sys_color_changed();
+}
+
+void PrinterWebView::msw_rescale()
+{
+    if (m_tab_page) {
+        m_tab_page->Rescale();
+        m_tab_storage->Rescale();
+        m_bar_state = -1;
+        update_bar();
+    }
+    if (m_storage)
+        m_storage->msw_rescale();
 }
 
 void PrinterWebView::reload()

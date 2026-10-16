@@ -110,6 +110,7 @@ add_executable(${_TEST_NAME}_tests
     emboss_font_search_tests.cpp
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
+    printer_storage_tests.cpp
     u1_local_first_tests.cpp
     u1_moonraker_probe_tests.cpp
     u1_ws_route_tests.cpp

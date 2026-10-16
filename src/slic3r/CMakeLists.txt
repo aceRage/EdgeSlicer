@@ -507,6 +507,11 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrinterCloudAuthDialog.hpp
     GUI/Printer/PrinterFileSystem.cpp
     GUI/Printer/PrinterFileSystem.h
+    GUI/Printer/IFileGridModel.h
+    GUI/Printer/RemoteFileGridModel.cpp
+    GUI/Printer/RemoteFileGridModel.h
+    GUI/PrinterStoragePanel.cpp
+    GUI/PrinterStoragePanel.hpp
     GUI/PrinterWebView.cpp
     GUI/PrinterWebView.hpp
     GUI/StreamPanel.cpp
@@ -1038,6 +1043,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintHostDeviceStatus.hpp
     Utils/MoonrakerProgress.cpp
     Utils/MoonrakerProgress.hpp
+    Utils/PrinterStorage.cpp
+    Utils/PrinterStorage.hpp
     Utils/PrusaLinkStatus.cpp
     Utils/PrusaLinkStatus.hpp
     Utils/Process.cpp
@@ -1195,6 +1202,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/IconManager.cpp                           # defines STB_RECT_PACK_IMPLEMENTATION before its include
     GUI/Search.cpp                                # defines FTS_FUZZY_MATCH_IMPLEMENTATION before its include
     GUI/DualNozzleSliceDialog.cpp                 # namespace-scope using namespace DualNozzleSync
+    GUI/HomeVaults.cpp                            # lower/read_file/write_atomic/LIST_LIMIT also in HomeVendors.cpp
     GUI/DualNozzleState.cpp                       # namespace-scope using namespace DualNozzleSync
     GUI/Gizmos/GLGizmoCut.cpp                     # namespace-scope using namespace Geometry
     GUI/Gizmos/GLGizmosCommon.cpp                 # namespace-scope using-directives for the gizmo data objects
