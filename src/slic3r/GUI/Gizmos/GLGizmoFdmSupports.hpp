@@ -73,10 +73,16 @@ private:
     PainterGizmoType get_painter_type() const override;
 
     void select_facets_by_angle(float threshold, bool block);
-    // BBS
-    int get_selection_support_threshold_angle();
+    // "Highlight overhang areas": the angle comes from the automatic supports' layer rule for the
+    // selected object (support_overhang_rule_for(), Support/SupportOverhangHighlight.hpp) - the
+    // threshold angle, or the threshold overlap at this layer height and outer wall width, or the
+    // tree 30 degree fallback. "Like auto supports" keeps it there (slider read-only, follows
+    // config changes); off, the slider starts there and the user moves it.
+    void   update_highlight_angle_from_rule();
+    wxString highlight_rule_description() const;
 
-    int m_support_threshold_angle = -1;
+    bool   m_highlight_reset_pending = true;  // set the slider to the rule's angle on the next frame
+    bool   m_highlight_like_auto     = true;  // remembered in AppConfig "support_paint_highlight_mode"
 
     //BBS: add support preview logic
     void init_print_instance();
