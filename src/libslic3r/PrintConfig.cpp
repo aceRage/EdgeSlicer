@@ -493,6 +493,14 @@ static t_config_enum_values s_keys_map_NozzleVolumeType {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NozzleVolumeType)
 
+// Orca #11616
+static t_config_enum_values s_keys_map_PowerLossRecoveryMode {
+    { "printer_configuration", int(PowerLossRecoveryMode::PrinterConfiguration) },
+    { "enable",                int(PowerLossRecoveryMode::Enable) },
+    { "disable",               int(PowerLossRecoveryMode::Disable) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PowerLossRecoveryMode)
+
 // Ultra: dual-nozzle enums (BBS-faithful label maps; fmmDefault/etMax* are sentinels, not serialized).
 static t_config_enum_values s_keys_map_ExtruderType {
     { "Direct Drive", int(ExtruderType::etDirectDrive) },
@@ -3744,6 +3752,21 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable this to enable the camera on printer to check the quality of first layer.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // Orca #11582 / #11616. Bambu Lab printers turn it on in fdm_machine_common, which is what
+    // they always did (M1003 S1 at the second layer, S0 at the end).
+    def = this->add("enable_power_loss_recovery", coEnum);
+    def->label = L("Power Loss Recovery");
+    def->tooltip = L("Choose how to control power loss recovery. When set to Printer configuration, the slicer will not emit power loss recovery G-code and will leave the printer's configuration unchanged. Applicable to Bambu Lab or Marlin 2 firmware based printers.");
+    def->mode = comAdvanced;
+    def->enum_keys_map = &ConfigOptionEnum<PowerLossRecoveryMode>::get_enum_values();
+    def->enum_values.push_back("printer_configuration");
+    def->enum_values.push_back("enable");
+    def->enum_values.push_back("disable");
+    def->enum_labels.push_back(L("Printer configuration"));
+    def->enum_labels.push_back(L("Enable"));
+    def->enum_labels.push_back(L("Disable"));
+    def->set_default_value(new ConfigOptionEnum<PowerLossRecoveryMode>(PowerLossRecoveryMode::PrinterConfiguration));
 
 
     //BBS
@@ -9706,6 +9729,17 @@ size_t printer_extruder_variant_value_index(const ConfigBase &config, const std:
     return sources[extruder_idx];
 }
 
+bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config)
+{
+    if (config.has("enable_power_loss_recovery"))
+        return false;
+    const auto *model = config.option<ConfigOptionString>("printer_model");
+    if (model == nullptr || !boost::starts_with(model->value, "Bambu Lab"))
+        return false;
+    config.set_key_value("enable_power_loss_recovery", new ConfigOptionEnum<PowerLossRecoveryMode>(PowerLossRecoveryMode::Enable));
+    return true;
+}
+
 void resolve_printer_extruder_variants(DynamicPrintConfig &config)
 {
     const std::vector<size_t> sources = printer_extruder_variant_sources(config);
@@ -9958,6 +9992,13 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         } else {
             opt_key = "wall_sequence";
         }
+    }
+    else if (opt_key == "enable_power_loss_recovery") {
+        // Orca #11616: the first form of the option (#11582) was a bool.
+        if (value == "1" || boost::iequals(value, "true"))
+            value = "enable";
+        else if (value == "0" || boost::iequals(value, "false"))
+            value = "disable";
     }
     else if(opt_key == "ensure_vertical_shell_thickness") {
         if(value == "1") {
@@ -10260,8 +10301,11 @@ double sequential_clearance_radius(const ConfigBase &cfg)
 
 double min_object_distance(const ConfigBase &cfg)
 {
-    const ConfigOptionEnum<PrinterTechnology> *opt_printer_technology = cfg.option<ConfigOptionEnum<PrinterTechnology>>("printer_technology");
-    auto printer_technology = opt_printer_technology ? opt_printer_technology->value : ptUnknown;
+    // Read through the base option + virtual getInt(): a DynamicConfig stores enums as
+    // ConfigOptionEnumGeneric, where a typed downcast would be UB.
+    const ConfigOption *opt_printer_technology = cfg.option("printer_technology");
+    auto printer_technology = (opt_printer_technology != nullptr && opt_printer_technology->type() == coEnum) ?
+        static_cast<PrinterTechnology>(opt_printer_technology->getInt()) : ptUnknown;
 
     double ret = 0.;
 
@@ -10271,14 +10315,14 @@ double min_object_distance(const ConfigBase &cfg)
         //BBS: duplicate_distance seam to be useless
         constexpr double duplicate_distance = 6.;
         auto ecr_opt = cfg.option<ConfigOptionFloat>("extruder_clearance_radius");
-        auto co_opt  = cfg.option<ConfigOptionEnum<PrintSequence>>("print_sequence");
+        const ConfigOption *co_opt = cfg.option("print_sequence");
 
-        if (!ecr_opt || !co_opt)
+        if (!ecr_opt || !co_opt || co_opt->type() != coEnum)
             ret = 0.;
         else {
             // min object distance is max(duplicate_distance, clearance_radius)
             const double clearance = sequential_clearance_radius(cfg);
-            ret = ((co_opt->value == PrintSequence::ByObject) && clearance > duplicate_distance) ?
+            ret = ((static_cast<PrintSequence>(co_opt->getInt()) == PrintSequence::ByObject) && clearance > duplicate_distance) ?
                       clearance : duplicate_distance;
         }
     }
@@ -10348,11 +10392,11 @@ void DynamicPrintConfig::normalize_fdm(int used_filaments)
     if (used_filaments > 0 && ept_opt != nullptr) {
         ConfigOptionBool* islh_opt = this->option<ConfigOptionBool>("independent_support_layer_height", true);
         //ConfigOptionBool* alh_opt = this->option<ConfigOptionBool>("adaptive_layer_height");
-        ConfigOptionEnum<PrintSequence>* ps_opt = this->option<ConfigOptionEnum<PrintSequence>>("print_sequence");
-
-        ConfigOptionEnum<TimelapseType>* timelapse_opt = this->option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
-        bool is_smooth_timelapse = timelapse_opt != nullptr && timelapse_opt->value == TimelapseType::tlSmooth;
-        if (!is_smooth_timelapse && (used_filaments == 1 || ps_opt->value == PrintSequence::ByObject)) {
+        // Read enums via opt_enum() (virtual getInt()): this DynamicConfig may store them
+        // as ConfigOptionEnumGeneric, where a typed downcast would be UB.
+        const bool by_object = this->has("print_sequence") && this->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject;
+        const bool is_smooth_timelapse = this->has("timelapse_type") && this->opt_enum<TimelapseType>("timelapse_type") == TimelapseType::tlSmooth;
+        if (!is_smooth_timelapse && (used_filaments == 1 || by_object)) {
             ept_opt->value = false;
         }
 
@@ -10429,11 +10473,11 @@ t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int us
     if (used_filaments > 0 && ept_opt != nullptr) {
         ConfigOptionBool* islh_opt = this->option<ConfigOptionBool>("independent_support_layer_height", true);
         //ConfigOptionBool* alh_opt = this->option<ConfigOptionBool>("adaptive_layer_height");
-        ConfigOptionEnum<PrintSequence>* ps_opt = this->option<ConfigOptionEnum<PrintSequence>>("print_sequence");
-
-        ConfigOptionEnum<TimelapseType>* timelapse_opt = this->option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
-        bool is_smooth_timelapse = timelapse_opt != nullptr && timelapse_opt->value == TimelapseType::tlSmooth;
-        if (!is_smooth_timelapse && (used_filaments == 1 || (ps_opt->value == PrintSequence::ByObject && num_objects > 1))) {
+        // Read enums via opt_enum() (virtual getInt()): this DynamicConfig may store them
+        // as ConfigOptionEnumGeneric, where a typed downcast would be UB.
+        const bool by_object = this->has("print_sequence") && this->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject;
+        const bool is_smooth_timelapse = this->has("timelapse_type") && this->opt_enum<TimelapseType>("timelapse_type") == TimelapseType::tlSmooth;
+        if (!is_smooth_timelapse && (used_filaments == 1 || (by_object && num_objects > 1))) {
             if (ept_opt->value) {
                 ept_opt->value = false;
                 changed_keys.push_back("enable_prime_tower");
