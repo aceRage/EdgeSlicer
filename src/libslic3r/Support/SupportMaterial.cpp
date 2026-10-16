@@ -2403,6 +2403,11 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
 #endif // SLIC3R_DEBUG
             );
 
+        // Edge (support highlight): keep a copy of what this layer's support holds up (overhangs
+        // after every filter, enforcers included) for the preview overlay. Layer 0 is the raft's.
+        if (layer_id > 0 && ! overhang_polygons.empty())
+            layer.support_overhangs = union_ex(overhang_polygons);
+
         // Now apply the contact areas to the layer where they need to be made.
         if (!contact_polygons.empty() || !overhang_polygons.empty()) {
             // Allocate the two empty layers.
