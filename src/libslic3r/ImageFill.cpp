@@ -891,8 +891,13 @@ ImageFillResult image_fill_from_face_colors(const indexed_triangle_set          
     image_fill_solve(res.palette, filament_colors, filament_ids);
 
     std::vector<int> states(face_colors.size(), background);
-    for (size_t i = 0; i < face_colors.size(); ++i)
-        states[i] = res.palette.filament[nearest_palette(res.palette, face_colors[i])];
+    for (size_t i = 0; i < face_colors.size(); ++i) {
+        const int f = res.palette.filament[nearest_palette(res.palette, face_colors[i])];
+        // Phase 5e: a leaf whose nearest filament IS the background (the part's own filament) is
+        // left unpainted - it prints with that filament anyway - exactly as the header promises.
+        // Before, `background` only seeded the vector and every leaf was overwritten.
+        states[i] = (background > 0 && f == background) ? 0 : f;
+    }
     for (int s : states)
         if (s > 0) ++res.facets_painted;
     res.leaves_total     = face_colors.size();
