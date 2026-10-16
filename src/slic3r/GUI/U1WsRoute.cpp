@@ -635,10 +635,10 @@ MqttRoute::Result U1WsRoute::publish(const std::string& topic, const std::string
         m->pending[key]         = { payload, method, m->now(), false };
         m->pending[key].signature = signature;
     }
-    // EARLY-ACK HOOK (owner, 2026-10-15: not yet): a write the page times out on quickly (its
+    // EARLY-ACK HOOK (dormant on purpose): a write the page times out on quickly (its
     // printer.gcode.script waits 3 s, a tool change takes longer) could be answered here with an
-    // early "ok" for the page while the real answer is swallowed. Decide after checking whether
-    // the cloud path times out on the same button.
+    // early "ok". Owner, 2026-10-15: no - the cloud path (main) shows the same "timeout" for a
+    // toolhead change, so the LAN keeps parity with Snapmaker's page behaviour.
     if (ws && ws->send(payload))
         return Result::Ok;
     {
