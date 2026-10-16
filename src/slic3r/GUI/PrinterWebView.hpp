@@ -31,9 +31,11 @@
 
 #include "../Utils/PrintHostDevices.hpp"
 #include "../Utils/DevicePageLoad.hpp"
+#include "PrinterStoragePanel.hpp"
 
 class wxChoice;
 class wxStaticText;
+class Button;
 
 
 namespace Slic3r {
@@ -72,6 +74,17 @@ public:
     // The device the picker is on, "" when there is none.
     std::string picked_device() const;
 
+    // The Storage tab (PrinterStoragePanel) beside the printer's page: the files on the printer the
+    // page is for. A print host device (`key` "host" for the preset's own address, "ph:<id>" for a
+    // device of the model's list) gets one when it has an address; whether that printer speaks a
+    // file API the tab knows is the tab's business (it says so when it does not). An empty source
+    // hides the tab and goes back to the page.
+    void set_storage_device(const PrintHostDevices::Device& device, const std::string& key);
+    void set_storage_source(PrinterStoragePanel::Source source);
+
+    void sys_color_changed();
+    void msw_rescale();
+
 private:
     void SendAPIKey();
     // Loads the picked device's web UI. Uses the preset's print_host_webui only for the device that
@@ -81,12 +94,23 @@ private:
     void OnRetryTimer(wxTimerEvent& evt);
     // The actual navigation behind load_url() and release_startup_hold().
     void navigate(const wxString& url, const wxString& apikey, bool register_view, DevicePageLoad::Kind kind);
+    // Page or Storage, and the bar above them: tab buttons when there is a Storage tab, the
+    // device picker when the model has devices, nothing at all when neither.
+    void show_storage(bool show);
+    void update_bar();
 
     wxWebView* m_browser;
     long m_zoomFactor;
     wxString m_apikey;
     wxPanel*      m_device_bar { nullptr };
+    wxStaticText* m_device_label { nullptr };
     wxChoice*     m_device_choice { nullptr };
+    ::Button*     m_tab_page { nullptr };
+    ::Button*     m_tab_storage { nullptr };
+    PrinterStoragePanel* m_storage { nullptr };
+    bool          m_storage_shown { false };
+    bool          m_storage_has_source { false };
+    int           m_bar_state { 0 }; // what update_bar() last laid out (all hidden at first)
     std::string   m_model_key;
     std::vector<PrintHostDevices::Device> m_devices;
     wxTimer       m_retry_timer;
