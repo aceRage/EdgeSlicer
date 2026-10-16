@@ -363,9 +363,15 @@ jobs:
           MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
         run: |
           set -euo pipefail
+          # The signing identity's name is the owner's legal name and this log is public. GitHub masks
+          # the secret itself, not the values derived from it below (the identity name, its team id,
+          # its SHA-1) - they are masked as soon as they are known, before any security/codesign
+          # output, and find-identity output is never printed. Masks hold for the rest of the job.
+          echo "::add-mask::${MACOS_CERTIFICATE_ID}"
           CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
           KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
+          echo "::add-mask::${KEYCHAIN_PASSWORD}"
           # Unlike a hosted runner this machine persists: remember the search list to restore it.
           security list-keychains -d user | tr -d '"' | sed 's/^ *//' > "$RUNNER_TEMP/keychain_search_list.txt"
           printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d ' \t\r\n' | base64 --decode > "$CERTIFICATE_PATH"
@@ -380,18 +386,51 @@ jobs:
               rm -f "$RUNNER_TEMP/$ca.cer"
             fi
           done
+          # The user-domain search list is set for tools that read it, but codesign does not rely on it:
+          # the runner is a LaunchDaemon (UserName=ci, no login session), and a process in that root
+          # security session searches the *system*-domain list, which `-d user` does not change and
+          # the ci user cannot change, so the build keychain was invisible to codesign (run 38953860436:
+          # "no identity found" one step after find-identity had found the identity in this keychain).
+          # Every codesign call below therefore names the keychain explicitly (--keychain, SIGN_KEYCHAIN).
           # shellcheck disable=SC2046
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(cat "$RUNNER_TEMP/keychain_search_list.txt")
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
           identities=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
-          if ! echo "$identities" | grep -qF "$MACOS_CERTIFICATE_ID"; then
-            echo "::error::MACOS_CERTIFICATE_ID does not match any Developer ID identity in the imported .p12 (docs/RELEASING_MACOS.md)."
+          match=$(printf '%s\n' "$identities" | grep -F "$MACOS_CERTIFICATE_ID" | grep -E '"Developer ID Application: [^"]+"' | head -1 || true)
+          if [ -z "$match" ]; then
+            echo "::error::MACOS_CERTIFICATE_ID does not match any valid Developer ID Application identity in the imported .p12 ($(printf '%s\n' "$identities" | grep -cE '^ *[0-9]+\)' || true) valid code-signing identities found; docs/RELEASING_MACOS.md)."
             exit 1
           fi
-          SIGN_IDENTITY=$(echo "$identities" | grep -F "$MACOS_CERTIFICATE_ID" | grep -oE '"Developer ID Application: [^"]+"' | head -1 | tr -d '"')
-          [ -n "$SIGN_IDENTITY" ] || { echo "::error::No 'Developer ID Application' identity in the imported .p12"; exit 1; }
-          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
-          echo "imported the Developer ID identity"
+          # find-identity lines read:  1) <40-hex SHA-1> "Developer ID Application: <name> (<team id>)"
+          sign_hash=$(printf '%s\n' "$match" | awk '{print $2}')
+          sign_name=$(printf '%s\n' "$match" | grep -oE '"Developer ID Application: [^"]+"' | tr -d '"')
+          sign_person=${sign_name#Developer ID Application: }
+          sign_person=${sign_person% (*}
+          sign_team=$(printf '%s\n' "$sign_name" | sed -nE 's/.*\(([A-Z0-9]+)\)$/\1/p')
+          for v in "$sign_name" "$sign_person" "$sign_team" "$sign_hash"; do
+            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          done
+          printf '%s' "$sign_hash" | grep -qE '^[0-9A-F]{40}$' || { echo "::error::could not read the identity's SHA-1 from find-identity"; exit 1; }
+          # Diagnostics only (no identity printed): does the default search list see the build keychain?
+          if security find-identity -p codesigning 2>/dev/null | grep -qF "$sign_hash"; then
+            echo "default keychain search list: sees the build keychain"
+          else
+            echo "default keychain search list: does not see the build keychain (LaunchDaemon session) - codesign gets --keychain"
+          fi
+          # Fail here, in seconds, rather than after the bundle walk: can codesign use the identity
+          # from this keychain? (A throwaway copy of /usr/bin/true, no timestamp, deleted at once.)
+          probe="$RUNNER_TEMP/codesign-probe"
+          cp /usr/bin/true "$probe"
+          if ! codesign --force --keychain "$KEYCHAIN_PATH" --sign "$sign_hash" "$probe"; then
+            rm -f "$probe"
+            echo "::error::codesign cannot use the imported Developer ID identity from the build keychain."
+            exit 1
+          fi
+          rm -f "$probe"
+          # The SHA-1, not the name: it selects exactly this identity and keeps the name out of the env.
+          echo "SIGN_IDENTITY=$sign_hash" >> "$GITHUB_ENV"
+          echo "SIGN_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "imported the Developer ID identity; codesign can use it from the build keychain"
 
       - name: Sign app bundles (Developer ID, hardened runtime)
         if: steps.signing.outputs.sign == 'true'
@@ -399,9 +438,10 @@ jobs:
         run: |
           set -euo pipefail
           APP_DIR="$GITHUB_WORKSPACE/build/universal/Snapmaker_Orca"
-          scripts/macos_sign_app.sh "$APP_DIR/EdgeSlicer.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements
+          # SIGN_KEYCHAIN: codesign must be pointed at the build keychain on this runner (import step).
+          scripts/macos_sign_app.sh "$APP_DIR/EdgeSlicer.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements "$SIGN_KEYCHAIN"
           if [ -f "$APP_DIR/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
-            scripts/macos_sign_app.sh "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements
+            scripts/macos_sign_app.sh "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements "$SIGN_KEYCHAIN"
           fi
 
       - name: Create DMG
@@ -442,7 +482,7 @@ jobs:
           for dmg in "$GITHUB_WORKSPACE/EdgeSlicer_Mac_universal_${ver}.dmg" \
                      "$GITHUB_WORKSPACE/EdgeSlicer_profile_validator_Mac_universal_${ver}.dmg"; do
             [ -f "$dmg" ] || continue
-            codesign --force --timestamp --sign "$SIGN_IDENTITY" "$dmg"
+            codesign --force --timestamp --keychain "$SIGN_KEYCHAIN" --sign "$SIGN_IDENTITY" "$dmg"
             codesign --verify --verbose=2 "$dmg"
             # One notarization submission per run: the main dmg (its ticket covers the app inside).
             if [ "$NOTARIZE" != "none" ] && [[ "$(basename "$dmg")" == EdgeSlicer_Mac_universal_* ]]; then
