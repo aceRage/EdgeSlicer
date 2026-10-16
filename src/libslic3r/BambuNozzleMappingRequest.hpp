@@ -35,7 +35,7 @@ struct FilamentNozzle
 struct RequestInput
 {
     int calibration{ 0 };              // flow calibration option (1/0)
-    int extrude_cali_manual_mode{ 1 }; // no PA switch in this fork: automatic
+    int extrude_cali_manual_mode{ 0 }; // no PA switch in this fork: Bambu Studio's default (switch ON -> 0)
     std::vector<int>            filament_change_sequence; // 0-based filament ids in print order
     std::vector<MappedFilament> mapped;
     std::vector<FilamentNozzle> filament_nozzles;

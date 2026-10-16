@@ -1052,7 +1052,7 @@ static std::pair<int, std::string> prepare_bambu_record(const Request& req, cons
         ps.ams_mapping2              = ev->ams_mapping2;
         ps.ams_mapping_info          = ev->ams_mapping_info;
         ps.nozzle_mapping_request    = ev->nozzle_mapping_request;
-        ps.extruder_cali_manual_mode = 1; // no PA-value switch in this fork: automatic
+        ps.extruder_cali_manual_mode = 0; // no PA-mode switch in this fork: Bambu Studio's default
         if (ps.connection_type == "lan") {
             if (!has_sdcard) return { 409, "An SD card needs to be inserted before printing via LAN." };
             p->call               = "start_local_print";
