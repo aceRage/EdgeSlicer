@@ -1,5 +1,6 @@
 
 #include "CutUtils.hpp"
+#include "ImageFill.hpp"
 #include "Geometry.hpp"
 #include "libslic3r.h"
 #include "Model.hpp"
@@ -48,7 +49,18 @@ static void apply_tolerance(ModelVolume* vol)
     vol->set_offset(vol->get_offset() + rot_norm * z_offset);
 }
 
-static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART)
+// ImageMap phase 5c: what process_volume_cut() and its curved / drawn siblings do to a volume's
+// mesh before slicing it (into the cut's own frame), so add_cut_volume() can tell the volume's
+// image fill where its picture went.
+static Transform3d cut_pre_transform(const Transform3d& cut_matrix, const Transform3d& instance_matrix, const ModelVolume* volume)
+{
+    const Transformation cut_transformation = Transformation(cut_matrix);
+    const Transform3d invert_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1 * cut_transformation.get_offset());
+    return invert_cut_matrix * instance_matrix * volume->get_matrix();
+}
+
+static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART,
+                           const Transform3d* pre_transform = nullptr)
 {
     if (mesh.empty())
         return;
@@ -64,6 +76,12 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
     assert(vol->config.id() != src_volume->config.id());
     vol->set_material(src_volume->material_id(), *src_volume->material());
     vol->cut_info = src_volume->cut_info;
+    // ImageMap phase 5c: the half's mesh is the source mesh carried into the cut's frame
+    // (pre_transform), back out of it (cut_matrix), and re-centred by add_volume() - which moved it
+    // by -offset. An image fill on the source keeps sampling the picture where it was.
+    if (pre_transform != nullptr)
+        image_fill_rebase_volume(*vol, src_volume->mesh().its,
+                                 translation_transform(-1 * vol->get_offset()) * cut_matrix * *pre_transform);
 }
 
 // PHASE 3: `thickness` is the kerf. A flat cut with a kerf is TWO half-space
@@ -201,6 +219,7 @@ static void process_solid_part_cut(ModelVolume* volume, const Transform3d& insta
                             ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower,
                             double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     // Perform cut
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh, thickness, offset);
@@ -208,19 +227,19 @@ static void process_solid_part_cut(ModelVolume* volume, const Transform3d& insta
     // Add required cut parts to the objects
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 static void reset_instance_transformation(ModelObject* object, size_t src_instance_idx, 
@@ -562,23 +581,24 @@ static void process_solid_part_curved_cut(ModelVolume* volume, const Transform3d
                                           ModelObject* upper, ModelObject* lower, double thickness = 0.0,
                                           CutThicknessOffset offset = CutThicknessOffset::Centred)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_curved_cut(volume, instance_matrix, cut_matrix, attributes, sheet, upper_mesh, lower_mesh, thickness, offset);
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& sheet, double thickness, CutThicknessOffset offset)
@@ -738,23 +758,24 @@ static void process_solid_part_draw_cut(ModelVolume* volume, const Transform3d& 
                                         ModelObjectCutAttributes attributes, const DrawCutStroke& stroke,
                                         const DrawCutParams& params, ModelObject* upper, ModelObject* lower)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_draw_cut(volume, instance_matrix, cut_matrix, attributes, stroke, params, upper_mesh, lower_mesh);
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke, const DrawCutParams& params)
