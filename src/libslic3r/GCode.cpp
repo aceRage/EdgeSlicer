@@ -7829,6 +7829,39 @@ LayerResult GCode::process_layer(const Print& print,
                                     return run_extruder;
                                 };
 
+                                if (wall_ctx->wall_method == IMAGE_FILL_WALL_STRIPES) {
+                                    // Phase 5b, layer stripes: the whole wall stays on this
+                                    // layer's filament (correct_extruder_id is the row's
+                                    // per-layer filament, MixedFilamentManager::resolve()), and
+                                    // only the OUTER wall's width follows the picture. Pieces go
+                                    // out in the island's original order, like phase 5a's.
+                                    const unsigned int layer_extruder = unsigned(std::max(0, correct_extruder_id));
+                                    for (const ExtrusionEntity* e : filtered_extrusions->entities) {
+                                        if (e == nullptr)
+                                            continue;
+                                        std::unique_ptr<ExtrusionEntityCollection> piece;
+                                        if (image_row_wall_entity_is_claimed(*e, false)) {
+                                            const ExtrusionEntity* to_modulate = e;
+                                            ExtrusionLoop          seam_loop;
+                                            if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(e)) {
+                                                Point seam_anchor = loop->first_point();
+                                                if (local_z_loop_seam_placer(*loop, seam_loop, seam_anchor))
+                                                    to_modulate = &seam_loop;
+                                            }
+                                            piece = image_row_stripe_wall_entity(image_row_wall_assets, *wall_ctx, *to_modulate,
+                                                                                 print_z, &layer, int(layer_extruder) + 1);
+                                        }
+                                        if (!piece) {
+                                            piece          = std::make_unique<ExtrusionEntityCollection>();
+                                            piece->no_sort = false;
+                                            piece->append(*e);
+                                        }
+                                        dispatch(piece.get(), layer_extruder);
+                                        local_z_clipped_collections.emplace_back(std::move(piece));
+                                    }
+                                    continue;
+                                }
+
                                 if (wall_ctx->base_filament > 0) {
                                     // Phase 5a: every piece is dispatched in the ORIGINAL order of
                                     // the island's perimeters, so a layer printed inner-to-outer
