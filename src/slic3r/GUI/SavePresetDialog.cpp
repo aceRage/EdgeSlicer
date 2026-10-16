@@ -127,7 +127,7 @@ SavePresetDialog::Item::Item(Preset::Type type, const std::string &suffix, wxBox
 
     if (parent->m_mode == comDevelop) {
         // A new user copy of a system preset inherits from the selected system preset.
-        const std::string parent_name = sel_preset.is_system ? sel_preset.name : sel_preset.inherits();
+        const std::string parent_name = PresetCollection::detach_parent_name(sel_preset);
         const bool        can_detach  = !parent_name.empty();
 
         wxBoxSizer *detach_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -163,7 +163,13 @@ SavePresetDialog::Item::Item(Preset::Type type, const std::string &suffix, wxBox
             // Set initial state (unchecked by default)
             detach_checkbox->SetValue(m_detach);
             // Bind the checkbox event to update the detach state for this item
-            detach_checkbox->Bind(wxEVT_TOGGLEBUTTON, [this, detach_checkbox](wxCommandEvent&) { m_detach = detach_checkbox->GetValue(); });
+            // Edge: Skip() so CheckBox's own wxEVT_TOGGLEBUTTON handler runs too. The handler bound last runs
+            // first; without Skip() the CheckBox never redrew its tick, so a click flipped the value but the box
+            // still looked unticked, and the next click flipped it back.
+            detach_checkbox->Bind(wxEVT_TOGGLEBUTTON, [this, detach_checkbox](wxCommandEvent& e) {
+                m_detach = detach_checkbox->GetValue();
+                e.Skip();
+            });
 
             detach_label->SetForegroundColour(wxColour("#363636"));
 
