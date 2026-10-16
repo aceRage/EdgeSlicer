@@ -967,6 +967,9 @@ struct Request
     // can tell it apart from a genuine Serve connection. Always false today; the rule is already
     // written to honour it (Testing::trusted_proxy_headers).
     bool        via_relay { false };
+    // Serve's own marks on what it forwards (X-Forwarded-For / -Host / -Proto) and on a Funnel
+    // request (Tailscale-Funnel-Request). Only believed from loopback, like ts_login.
+    bool        forwarded { false }, funnel { false };
     size_t      content_length { 0 };
 };
 
@@ -1007,7 +1010,9 @@ static bool read_request(tcp::socket& client, Request& r)
             else if (key == "sec-fetch-site") r.sec_fetch_site = lower(val);
             else if (key == "content-type") r.content_type = lower(val);
             else if (key == "tailscale-user-login") r.ts_login = val;
-            else if (key == "x-forwarded-proto") r.fwd_proto = lower(val);
+            else if (key == "x-forwarded-proto") { r.fwd_proto = lower(val); r.forwarded = true; }
+            else if (key == "x-forwarded-for" || key == "x-forwarded-host") r.forwarded = true;
+            else if (key == "tailscale-funnel-request") r.funnel = true;
         }
         pos = nl + 2;
     }
@@ -1583,6 +1588,15 @@ bool identity_verify(const std::string& public_hex, const std::string& message, 
 bool Testing::trusted_proxy_headers(bool peer_is_loopback, bool via_relay)
 {
     return peer_is_loopback && !via_relay;
+}
+
+Testing::ServeRequest Testing::classify_serve_request(bool headers_trusted, const std::string& ts_login, bool forwarded, bool funnel)
+{
+    if (!headers_trusted) return ServeRequest::Local;
+    // Serve never names a user on a Funnel request; one that claims both is not believed.
+    if (funnel) return ServeRequest::NoLogin;
+    if (!ts_login.empty()) return ServeRequest::Tailnet;
+    return forwarded ? ServeRequest::NoLogin : ServeRequest::Local;
 }
 
 // summary_json's "camera" field: the camera's own id first (a camera someone added *as* this
@@ -2890,6 +2904,7 @@ private:
     bool  set_remote(bool on, std::string& error);     // tailscale serve on/off for this hub
     void  remote_logins(const std::string& add, const std::string& remove);
     bool  login_allowed(const std::string& login);
+    void  note_refused_no_login(bool funnel);          // counts and logs (at most once a minute) a Serve request with no login
     json  remote_json_locked() const;                  // m_mutex held
     void  remember_old_token_locked(const std::string& token); // m_mutex held
     static Instance probe_instance(Instance inst);
@@ -2929,6 +2944,9 @@ private:
     TailscaleState                 m_ts;                         // last tailscale_query()
     std::string                    m_last_login;                 // most recent remote visitor
     long long                      m_last_login_at { 0 };
+    long long                      m_refused_no_login { 0 };      // Serve requests with no tailnet login refused this run
+    long long                      m_refused_no_login_at { 0 };   // ... the latest one (unix seconds)
+    long long                      m_refused_no_login_logged { 0 }; // when the log last said so
     int                            m_go2rtc_port { 0 };
     // What register_streams() has put into this go2rtc (name -> source). Only its single worker
     // touches it; go2rtc lives exactly as long as this server, so it never goes stale.
@@ -5004,6 +5022,8 @@ json HubServer::remote_json_locked() const
     r["allowed_logins"] = m_allowed_logins;
     r["last_login"]     = m_last_login;
     r["last_login_at"]  = m_last_login_at;
+    r["refused_no_login"]    = m_refused_no_login;
+    r["refused_no_login_at"] = m_refused_no_login_at;
     std::string err = m_ts.error;
     if (err.empty() && m_remote_on && m_ts.installed && !m_ts.serving) err = "Tailscale is no longer serving this hub; turn remote access off and on again";
     r["error"] = err;
@@ -5013,13 +5033,12 @@ json HubServer::remote_json_locked() const
                         { "message", st.message },
                         { "action", st.action },
                         { "action_url", st.action_url } };
-    // The `tailscale funnel` line the card's advanced note shows verbatim. Documented, never run:
-    // Funnel publishes the hub to the whole internet with only the path token in front of it, which
-    // is a deliberate choice nobody should make by clicking a button (design section 3).
+    // The `tailscale funnel ... off` line the card's advanced note shows verbatim, for somebody who
+    // switched Funnel on for an older version: Funnel requests carry no tailnet login and are
+    // refused now (classify_serve_request), so the hub no longer documents turning it on.
     // The CLI as it is typed in a terminal: the path that was found when that is not simply
     // "tailscale" on PATH (a Mac without the app's "Install CLI" shim has no `tailscale` command).
     const std::string ts_cli = HubPlatform::cli_for_terminal(TailscaleCli::current_platform(), tailscale_exe());
-    r["funnel_command"]     = ts_cli + " funnel --bg --https=443 http://127.0.0.1:" + std::to_string(m_port);
     r["funnel_off_command"] = ts_cli + " funnel --https=443 off";
     return r;
 }
@@ -5099,6 +5118,23 @@ bool HubServer::login_allowed(const std::string& login)
         BOOST_LOG_TRIVIAL(info) << "RemoteHub: remote visit by " << l;
     }
     return ok;
+}
+
+void HubServer::note_refused_no_login(bool funnel)
+{
+    const long long now = (long long) std::time(nullptr);
+    long long       count;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        count                 = ++m_refused_no_login;
+        m_refused_no_login_at = now;
+        // A Funnel URL scanned by the whole internet must not turn into a log line per request.
+        if (count > 1 && now - m_refused_no_login_logged < 60) return;
+        m_refused_no_login_logged = now;
+    }
+    BOOST_LOG_TRIVIAL(warning) << "RemoteHub: refused a Tailscale Serve request with no tailnet login ("
+                               << (funnel ? "Funnel" : "tagged device or other unsigned-in source") << "; " << count
+                               << " refused so far this run)";
 }
 
 long HubServer::spawn_slicer(const std::string& file, bool hidden)
@@ -5911,8 +5947,22 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
                 BOOST_LOG_TRIVIAL(warning) << "RemoteHub: ignoring a Tailscale-User-Login header from a non-loopback peer";
             r.ts_login.clear();
             r.fwd_proto.clear();
+            r.forwarded = r.funnel = false;
         }
-        const bool via_serve = peer.is_loopback() && !r.ts_login.empty();
+        // Through Serve with no tailnet login at all - a tagged device, or a Funnel visitor from
+        // the public internet. The allow-list cannot check them, so they get nothing; before this
+        // they fell through to the token alone. Plain loopback (the PC's own pages and tools)
+        // carries none of Serve's marks and is unaffected.
+        const Testing::ServeRequest serve_kind =
+            Testing::classify_serve_request(Testing::trusted_proxy_headers(peer.is_loopback(), r.via_relay), r.ts_login, r.forwarded, r.funnel);
+        if (serve_kind == Testing::ServeRequest::NoLogin) {
+            note_refused_no_login(r.funnel);
+            respond(client, 403, "text/plain; charset=utf-8",
+                    "This printer hub only answers people signed in to its owner's tailnet. Requests through Tailscale Funnel "
+                    "or from tagged devices are refused.");
+            return;
+        }
+        const bool via_serve = serve_kind == Testing::ServeRequest::Tailnet;
         if (via_serve && !login_allowed(r.ts_login)) {
             BOOST_LOG_TRIVIAL(warning) << "RemoteHub: tailnet login not allowed: " << r.ts_login;
             respond(client, 403, "text/plain; charset=utf-8", "This printer hub is not shared with " + r.ts_login + ". Ask its owner to add you on the hub page.");

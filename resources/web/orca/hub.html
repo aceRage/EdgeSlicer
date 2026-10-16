@@ -239,16 +239,20 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         var wrap = document.createElement('span'); wrap.appendChild(b); wrap.appendChild(live);
         return wrap;
     }
-    // Funnel is documented and never automated. It publishes this hub to the entire public
-    // internet with nothing but the path token in front of it - a deliberate trade for somebody
-    // who cannot put Tailscale on the phone, and not something that should have a button.
+    // Funnel and tagged devices reach the hub through Tailscale with no tailnet sign-in, so the
+    // allow-list cannot check them and the hub refuses them (RemoteHub.cpp,
+    // Testing::classify_serve_request). Somebody who switched Funnel on for an older version gets
+    // the command that turns it off, and the page says when such requests were refused.
     function funnelNote(body, rm) {
         var d = document.createElement('details'); d.className = 'adv';
-        var sum = document.createElement('summary'); sum.textContent = 'Advanced: no Tailscale app on the phone (Funnel)';
+        var sum = document.createElement('summary'); sum.textContent = 'Advanced: Tailscale Funnel and tagged devices are refused';
         d.appendChild(sum);
-        d.appendChild(el('div', 'note', 'Tailscale Funnel publishes this hub on the public internet under your tailnet\'s name, so any phone or browser can open it with no Tailscale app at all. The only thing guarding it is then the secret token in the link - there is no tailnet sign-in in front of it any more, and the allow-list below stops applying.'));
-        d.appendChild(el('div', 'cmd', rm.funnel_command || 'tailscale funnel --bg --https=443 http://127.0.0.1:13640'));
-        d.appendChild(el('div', 'note', 'Not recommended, and EdgeSlicer never runs it for you: run it yourself in a terminal if you accept that trade, and `' + (rm.funnel_off_command || 'tailscale funnel --https=443 off') + '` to undo it. Turning remote access off here does not turn Funnel off.'));
+        d.appendChild(el('div', 'note', 'Requests that reach this hub through Tailscale without a tailnet sign-in - Tailscale Funnel visitors from the public internet, and tagged devices - are refused, because the allow-list below cannot check who they are. Use a device signed in to an allowed Tailscale account instead.'));
+        d.appendChild(el('div', 'note', 'If you switched Funnel on for an older version, turn it off in a terminal with:'));
+        d.appendChild(el('div', 'cmd', rm.funnel_off_command || 'tailscale funnel --https=443 off'));
+        if (rm.refused_no_login)
+            d.appendChild(el('div', 'note', 'Refused since this hub started: ' + rm.refused_no_login + ' request(s) with no tailnet sign-in, the latest ' + new Date(rm.refused_no_login_at * 1000).toLocaleString() + '.'));
+        if (rm.refused_no_login) d.open = true;
         body.appendChild(d);
     }
     function renderRemote() {
