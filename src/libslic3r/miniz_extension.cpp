@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cstdio>
 #include <exception>
 #include <set>
+#include <string>
 #include <vector>
 
 #include "miniz_extension.hpp"
@@ -59,8 +61,12 @@ bool open_zip(mz_zip_archive *zip, const char *fname, bool isread)
     const char *mode = isread ? "rb" : "wb";
 
     FILE *f = nullptr;
-#if defined(_MSC_VER) || defined(__MINGW64__)
-    f = boost::nowide::fopen(fname, mode);
+#if defined(_WIN32)
+    // fname is UTF-8 (the nowide contract). Route it through the shared extended-path helper so an
+    // archive stored past MAX_PATH opens even with LongPathsEnabled off.
+    const std::wstring wide_path = boost::nowide::widen(fname);
+    const std::string  extended  = boost::nowide::narrow(extended_path(boost::filesystem::path(wide_path)).wstring());
+    f = boost::nowide::fopen(extended.c_str(), mode);
 #elif defined(__GNUC__) && defined(_LARGEFILE64_SOURCE)
     f = fopen64(fname, mode);
 #else
@@ -99,6 +105,14 @@ bool close_zip(mz_zip_archive *zip, bool isread)
     }
     return ret;
 }
+
+#ifdef _WIN32
+// mz_file_write_func writing an extracted entry into an already-open FILE*.
+size_t mz_write_to_cfile(void *opaque, mz_uint64 /*file_ofs*/, const void *buffer, size_t size)
+{
+    return std::fwrite(buffer, 1, size, static_cast<FILE *>(opaque));
+}
+#endif
 }
 
 bool open_zip_reader(mz_zip_archive *zip, const std::string &fname)
@@ -133,9 +147,27 @@ bool zip_entry_is_symlink(const mz_zip_archive_file_stat &stat)
 bool extract_entry_to_file(mz_zip_archive &archive, mz_uint file_index, const boost::filesystem::path &dest_path)
 {
 #ifdef _WIN32
-    // path::c_str() is a wchar_t* here. No narrowing: the ANSI code page maps U+FF0E / U+FF0F
-    // (and other look-alikes) to '.' and '/', which would defeat every check done on the UTF-8 name.
-    return mz_zip_reader_extract_to_file_w(&archive, file_index, dest_path.c_str(), 0) != MZ_FALSE;
+    // Open the destination ourselves with a Windows extended-length path: miniz's narrow
+    // extract_to_file cannot be relied on past MAX_PATH with LongPathsEnabled off, and its wide
+    // variant takes a plain (unprefixed) path and a text-mode stream. This keeps the write binary
+    // and never goes through the ANSI code page (U+FF0E / U+FF0F look-alikes).
+    FILE *file = ::_wfopen(extended_path(dest_path).wstring().c_str(), L"wb");
+    if (!file) {
+        archive.m_last_error = MZ_ZIP_FILE_OPEN_FAILED;
+        return false;
+    }
+
+    const bool written = mz_zip_reader_extract_to_callback(&archive, file_index, mz_write_to_cfile, file, 0) != 0;
+    const bool closed  = std::fclose(file) == 0;
+    if (!written || !closed) {
+        if (written && !closed)
+            archive.m_last_error = MZ_ZIP_FILE_CLOSE_FAILED;
+        // Drop the partial entry rather than leave a truncated file behind.
+        boost::system::error_code ec;
+        boost::filesystem::remove(extended_path(dest_path), ec);
+        return false;
+    }
+    return true;
 #else
     return mz_zip_reader_extract_to_file(&archive, file_index, dest_path.string().c_str(), 0) != MZ_FALSE;
 #endif
@@ -144,8 +176,7 @@ bool extract_entry_to_file(mz_zip_archive &archive, mz_uint file_index, const bo
 bool extract_entry_to_file(mz_zip_archive &archive, mz_uint file_index, const std::string &dest_path_utf8)
 {
 #ifdef _WIN32
-    const std::wstring dest_w = boost::nowide::widen(dest_path_utf8);
-    return mz_zip_reader_extract_to_file_w(&archive, file_index, dest_w.c_str(), 0) != MZ_FALSE;
+    return extract_entry_to_file(archive, file_index, boost::filesystem::path(boost::nowide::widen(dest_path_utf8)));
 #else
     return mz_zip_reader_extract_to_file(&archive, file_index, dest_path_utf8.c_str(), 0) != MZ_FALSE;
 #endif
@@ -242,20 +273,20 @@ boost::filesystem::path normalize_dir_path(boost::filesystem::path p)
 bool leaf_exists(const boost::filesystem::path &p)
 {
     boost::system::error_code ec;
-    const auto                st = boost::filesystem::symlink_status(p, ec);
+    const auto                st = boost::filesystem::symlink_status(extended_path(p), ec);
     return !ec && boost::filesystem::exists(st);
 }
 
 bool is_dir_or_dir_symlink(const boost::filesystem::path &p)
 {
     boost::system::error_code ec;
-    const auto                st = boost::filesystem::symlink_status(p, ec);
+    const auto                st = boost::filesystem::symlink_status(extended_path(p), ec);
     if (ec || !boost::filesystem::exists(st))
         return false;
     if (boost::filesystem::is_directory(st))
         return true;
     if (boost::filesystem::is_symlink(st))
-        return boost::filesystem::is_directory(p, ec);
+        return boost::filesystem::is_directory(extended_path(p), ec);
     return false;
 }
 
@@ -286,7 +317,7 @@ bool ensure_dirs(const boost::filesystem::path &root,
             return false;
         }
         boost::system::error_code ec;
-        fs::create_directory(p, ec);
+        fs::create_directory(extended_path(p), ec);
         if (ec) {
             err = "create directory failed: " + path_utf8(p) + " (" + ec.message() + ")";
             return false;
@@ -333,7 +364,7 @@ bool commit_part(const boost::filesystem::path &part, const boost::filesystem::p
     boost::system::error_code ec;
     // boost::filesystem::rename replaces an existing file (Windows: MoveFileEx REPLACE).
     // A dest-file symlink is replaced rather than followed.
-    fs::rename(part, dest, ec);
+    fs::rename(extended_path(part), extended_path(dest), ec);
     if (ec) {
         err = "rename failed: " + path_utf8(part) + " -> " + path_utf8(dest) + " (" + ec.message() + ")";
         return false;
@@ -355,17 +386,17 @@ void rollback_extract(std::vector<StagedFile>                 &staged,
     boost::system::error_code ec;
     for (const StagedFile &s : staged) {
         if (!s.part.empty())
-            fs::remove(s.part, ec);
+            fs::remove(extended_path(s.part), ec);
         // A dest that did not exist before this call and was already committed (rename
         // succeeded) is ours to remove. A pre-existing dest is never deleted.
         if (!s.dest_existed)
-            fs::remove(s.dest, ec);
+            fs::remove(extended_path(s.dest), ec);
     }
     std::sort(created_dirs.begin(), created_dirs.end(), [](const fs::path &a, const fs::path &b) {
         return a.generic_string().size() > b.generic_string().size();
     });
     for (const fs::path &d : created_dirs)
-        fs::remove(d, ec);
+        fs::remove(extended_path(d), ec);
 }
 
 } // namespace
@@ -384,7 +415,7 @@ bool extract_archive_confined(mz_zip_archive &archive, const boost::filesystem::
                 return false;
             }
             boost::system::error_code ec;
-            fs::create_directories(dest_root, ec);
+            fs::create_directories(extended_path(dest_root), ec);
             if (ec) {
                 err = "create directory failed: " + path_utf8(dest_root) + " (" + ec.message() + ")";
                 return false;
@@ -497,8 +528,13 @@ bool extract_archive_confined(const boost::filesystem::path &zip_path, const boo
 {
     mz_zip_archive archive;
     mz_zip_zero_struct(&archive);
+#ifdef _WIN32
+    if (!open_zip_reader(&archive, boost::nowide::narrow(zip_path.wstring()))) {
+        err = "unable to open zip reader for " + boost::nowide::narrow(zip_path.wstring());
+#else
     if (!open_zip_reader(&archive, zip_path.string())) {
         err = "unable to open zip reader for " + zip_path.string();
+#endif
         BOOST_LOG_TRIVIAL(error) << err;
         return false;
     }
