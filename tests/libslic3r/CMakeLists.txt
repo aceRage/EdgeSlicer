@@ -54,6 +54,7 @@ add_executable(${_TEST_NAME}_tests
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
 	test_default_bed_type.cpp
+	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp
 	test_ec_retraction.cpp
 	test_bed_exclude_area.cpp
