@@ -767,7 +767,7 @@ void DeviceListPanel::build()
         std::string jsonStr      = json.dump();
         wxString    strJS        = wxString::Format("window.postMessage(%s)", wxString::FromUTF8(jsonStr));
         CallAfter([this, strJS]() { 
-            m_webBanner->RunScript(strJS); 
+            WebView::RunScript(m_webBanner, strJS); 
         });
     });
 

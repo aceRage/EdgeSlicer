@@ -50,8 +50,29 @@ public:
     }
 };
 
+// A second path for some of a client's topics (GUI/U1LanRoute: a cloud-bound Snapmaker U1's device
+// topics carried over the printer's LAN broker). With a route set, Subscribe / Unsubscribe /
+// Publish / IsSubscribed ask it first; NotMine sends the call down this client's own session as
+// before. The route delivers what its own session receives through MqttClient::Deliver, so the
+// owner's callbacks see it as this client's message.
+class MqttRoute
+{
+public:
+    enum class Result { NotMine, Ok, Failed };
+    virtual ~MqttRoute() = default;
+    virtual Result subscribe(const std::string& topic, int qos, std::string& msg)                          = 0;
+    virtual Result unsubscribe(const std::string& topic, std::string& msg)                                 = 0;
+    virtual Result publish(const std::string& topic, const std::string& payload, int qos, std::string& msg) = 0;
+    // Ok = subscribed, Failed = not subscribed, NotMine = ask the client's own session.
+    virtual Result is_subscribed(const std::string& topic) const                                           = 0;
+    // Every message this client's own session receives, before its callbacks: false drops it.
+    virtual bool   accept_own_message(const std::string& topic, const std::string& payload)                = 0;
+    // The owner is disconnecting for good: close whatever the route opened.
+    virtual void   owner_closing()                                                                         = 0;
+};
+
 // Main MQTT client class implementing both callback and action listener interfaces
-class MqttClient : public mqtt::callback, 
+class MqttClient : public mqtt::callback,
                   public virtual mqtt::iaction_listener,
                   public std::enable_shared_from_this<MqttClient>
 {
@@ -158,7 +179,26 @@ public:
     static size_t live_client_count();
 
     std::string get_client_id() {return client_id_;}
+    const std::string& get_server_address() const { return server_address_; }
+
+    // ---- routing (see MqttRoute) ----
+    void                       SetRoute(std::shared_ptr<MqttRoute> route);
+    std::shared_ptr<MqttRoute> GetRoute() const;
+    // This client's own session, past any route.
+    bool SubscribeDirect(const std::string& topic, int qos, std::string& msg);
+    bool UnsubscribeDirect(const std::string& topic, std::string& msg);
+    bool PublishDirect(const std::string& topic, const std::string& payload, int qos, std::string& msg);
+    bool IsSubscribedDirect(const std::string& topic) const;
+    // Put `topic` on the list this client subscribes again after a reconnect, without asking the
+    // broker now (a route handing its topics back while this session is down).
+    void KeepSubscription(const std::string& topic, int qos) { add_topic_to_resubscribe(topic, qos); }
+    // Run the message callbacks as if this client's session had received the message.
+    void Deliver(const std::string& topic, const std::string& payload);
 private:
+    void dispatch(const std::string& topic, const std::string& payload);
+    mutable std::mutex         route_mtx_;
+    std::shared_ptr<MqttRoute> route_;
+
     // The registry of live clients: weak_ptrs populated by create(), pruned by
     // ~MqttClient, so a system-resume trigger can reach every open session.
     static void register_live(const std::shared_ptr<MqttClient>& client);

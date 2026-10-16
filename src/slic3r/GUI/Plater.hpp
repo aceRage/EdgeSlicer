@@ -183,6 +183,10 @@ public:
     void load_ams_list(std::string const & device, MachineObject* obj);
     std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list();
+    // No printer connected: offer the last AMS / nozzle snapshot seen for the selected printer (or
+    // the newest one of this printer model) and load it as the AMS list. 1 = loaded (`as_of` is
+    // the "<printer> as of <time>" text), 0 = the user declined, -1 = there is none.
+    int load_ams_snapshot(const std::string &preferred_dev_id, wxString &as_of);
     void show_sync_filament_dialog();
     // Point the "Filaments" row's sync button at the sync that fits the current
     // printer preset (Bambu AMS / Snapmaker dialog), or hide it for other vendors.
@@ -319,6 +323,8 @@ public:
     bool is_presets_dirty() const;
     void set_plater_dirty(bool is_dirty);
     void update_project_dirty_from_presets();
+    // Orca #15916: reset per-plate bed type overrides the selected printer cannot use.
+    void normalize_bed_types(bool multi_bed_changed);
     int  save_project_if_dirty(const wxString& reason);
     void reset_project_dirty_after_save();
     void reset_project_dirty_initial_presets();
@@ -515,6 +521,10 @@ public:
     // File > Export > Export & Open in Bambu Studio: same export as export_bambu_3mf(), then
     // launch the installed Bambu Studio with the exported file (Utils/BambuStudioLauncher.hpp).
     void export_and_open_in_bambu_studio();
+    // Send to Bambu Connect (Bambu printers): export the current plate, or all plates, as .gcode.3mf
+    // into <temp>/EdgeSlicer/bambu-connect and open it in the user's own Bambu Connect app through
+    // its bambu-connect:// URL scheme (Utils/BambuConnect.hpp). Connect does the printing.
+    void send_to_bambu_connect(bool all_plates);
     static TriangleMesh combine_mesh_fff(const ModelObject& mo, int instance_id, std::function<void(const std::string&)> notify_func = {});
     void export_stl(bool extended = false, bool selection_only = false, bool multi_stls = false);
     // Export just the one selected part (ModelVolume) as a binary STL, in world coordinates.

@@ -3,6 +3,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/GUI/BambuSendDiagnosis.hpp"
+#include "slic3r/Utils/BambuConnectStatus.hpp"
 #include "slic3r/GUI/GcodeArchive.hpp"
 #include "slic3r/GUI/PlatePrintHistoryRecorder.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -148,6 +149,12 @@ void PrintJob::process(Ctl &ctl)
     }
 
     ctl.update_status(0, msg);
+    // A status-only printer prints through Bambu Connect; EdgeSlicer only reads its status.
+    if (config != nullptr && BambuConnectStatus::is_status_only(*config, m_dev_id)) {
+        ctl.update_status(0, _u8L("This printer is added for status only and prints through Bambu Connect. "
+                                  "Use Send to Bambu Connect to print on it."));
+        return;
+    }
     ctl.call_on_main_thread([this] { prepare(); }).wait();
 
     int result = -1;
@@ -207,8 +214,12 @@ void PrintJob::process(Ctl &ctl)
     params.username = "bblp";
     params.password = m_access_code;
 
-    // check access code and ip address
-    if (this->connection_type == "lan" && m_print_type == "from_normal") {
+    // check access code and ip address. The check is a small upload to the printer's card, so a
+    // printer without one that prints from its internal storage skips it, as Bambu Studio does (it
+    // checks the access code over the internal-storage service instead).
+    if (this->connection_type == "lan" && m_print_type == "from_normal" && !this->has_sdcard && this->could_emmc_print) {
+        BOOST_LOG_TRIVIAL(info) << "print_job: no usable card, the printer prints from internal storage: no FTPS access-code check";
+    } else if (this->connection_type == "lan" && m_print_type == "from_normal") {
         params.dev_id = m_dev_id;
         params.project_name = "verify_job";
         params.filename = job_data._temp_path.string();
@@ -579,7 +590,8 @@ void PrintJob::process(Ctl &ctl)
     auto             printer_refused = [&obj, refusals_before]() { return obj && obj->project_file_refusals.load() != refusals_before; };
 
     if (params.connection_type != "lan") {
-        const BambuLanSkip lan_skip = bambu_lan_skip_reason(!params.dev_ip.empty(), this->cloud_print_only, this->has_sdcard,
+        const BambuLanSkip lan_skip = bambu_lan_skip_reason(!params.dev_ip.empty(), this->cloud_print_only,
+                                                            this->has_sdcard || this->could_emmc_print,
                                                             !params.password.empty());
         params.comments = bambu_lan_skip_tag(lan_skip);
 
@@ -673,8 +685,10 @@ void PrintJob::process(Ctl &ctl)
         } 
     } else {
         diag.cloud_bound = false;
-        if (this->has_sdcard) {
-            BOOST_LOG_TRIVIAL(info) << "print_job: LAN printer, send over LAN";
+        // Bambu Studio: a card, or a printer that prints from its internal storage.
+        if (this->has_sdcard || (this->could_emmc_print && m_print_type != "from_sdcard_view")) {
+            BOOST_LOG_TRIVIAL(info) << "print_job: LAN printer, send over LAN"
+                                    << (this->has_sdcard ? "" : " (no usable card: the printer prints from internal storage)");
             ctl.update_status(curr_percent, _u8L("Sending print job over LAN"));
             const std::string job_id_before       = obj ? obj->job_id_ : std::string();
             const bool        was_printing_before = obj && obj->is_in_printing_status(obj->print_status);

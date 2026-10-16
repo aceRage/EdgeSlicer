@@ -26,6 +26,8 @@ struct FilamentData
     unsigned int m_index   = 0;
     std::string  m_name;
     std::string  m_type;
+    // Orca #13265: vendor reported by the printer (machine filaments only), for the closest-colour preset match.
+    std::string  m_vendor;
     FilamentColor m_color;
 };
 

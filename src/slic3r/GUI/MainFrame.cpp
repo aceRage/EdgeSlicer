@@ -82,6 +82,7 @@
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
 #include "NetworkTestDialog.hpp"
+#include "U1LanRoute.hpp" // the read-only U1 Moonraker probe
 #include "FirewallCheckDialog.hpp"
 #include "BambuSetupNoticeDialog.hpp"
 #include "ConfigWizard.hpp"
@@ -1931,6 +1932,14 @@ bool MainFrame::can_export_all_gcode() const
     return part_plate_list.is_all_slice_results_ready_for_print();
 }
 
+bool MainFrame::can_send_to_bambu_connect(bool all_plates) const
+{
+    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
+    if (preset_bundle == nullptr || !preset_bundle->is_bbl_vendor())
+        return false;
+    return all_plates ? can_export_all_gcode() : can_export_gcode();
+}
+
 bool MainFrame::can_print_3mf() const
 {
     if (m_plater && !m_plater->model().objects.empty()) {
@@ -2033,6 +2042,7 @@ static_assert(static_cast<int>(MainFrame::eSendToPrinterAll) == PrintSelectKeys:
 static_assert(static_cast<int>(MainFrame::eUploadGcode) == PrintSelectKeys::eUploadGcode);
 static_assert(static_cast<int>(MainFrame::eExportAllSlicedFile) == PrintSelectKeys::eExportAllSlicedFile);
 static_assert(static_cast<int>(MainFrame::ePrintMultiMachine) == PrintSelectKeys::ePrintMultiMachine);
+static_assert(static_cast<int>(MainFrame::eSendToBambuConnect) == PrintSelectKeys::eSendToBambuConnect);
 
 const char *print_select_type_key(MainFrame::PrintSelectType type)
 {
@@ -2053,6 +2063,7 @@ wxString print_select_type_label(MainFrame::PrintSelectType type)
     case MainFrame::eSendToPrinter:       return _L("Send");
     case MainFrame::eSendToPrinterAll:    return _L("Send all");
     case MainFrame::ePrintMultiMachine:   return _L("Send to Multi-device");
+    case MainFrame::eSendToBambuConnect:  return _L("Send to Bambu Connect");
     case MainFrame::eUploadGcode:         break; // no dropdown entry
     }
     return _L("Print plate");
@@ -2088,6 +2099,9 @@ std::vector<MainFrame::PrintSelectType> MainFrame::available_print_actions() con
     actions.push_back(eExportSlicedFile);
     actions.push_back(eExportAllSlicedFile);
     actions.push_back(eExportGcode);
+    // Hand the sliced file to the user's own Bambu Connect app (bambu-connect:// URL scheme), which
+    // prints via their Bambu account or LAN. Bambu printers only (Utils/BambuConnect.hpp).
+    actions.push_back(eSendToBambuConnect);
     return actions;
 }
 
@@ -2240,6 +2254,11 @@ wxBoxSizer* MainFrame::create_side_tools()
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_PRINTER));
             else if (m_print_select == eSendToPrinterAll)
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_PRINTER_ALL));
+            else if (m_print_select == eSendToBambuConnect) {
+                // In the all-plates view the whole project goes (Connect lets the user pick a plate).
+                const bool all_plates = wxGetApp().plater()->get_preview_canvas3D()->is_all_plates_selected();
+                wxPostEvent(m_plater, SimpleEvent(all_plates ? EVT_GLTOOLBAR_SEND_ALL_TO_BAMBU_CONNECT : EVT_GLTOOLBAR_SEND_TO_BAMBU_CONNECT));
+            }
             /* else if (m_print_select == ePrintMultiMachine)
                  wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_MULTI_MACHINE));*/
         });
@@ -2470,6 +2489,15 @@ bool MainFrame::get_enable_print_status()
             enable = false;
         }
         enable = enable && !is_all_plates;
+    }
+    else if (m_print_select == eSendToBambuConnect)
+    {
+        // Same readiness as the sliced-file exports it reuses: the current plate, or every plate
+        // in the all-plates view.
+        if (is_all_plates)
+            enable = part_plate_list.is_all_slice_result_ready_for_export();
+        else
+            enable = current_plate->is_slice_result_ready_for_export();
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": m_print_select %1%, enable= %2% ")%m_print_select %enable;
@@ -2793,6 +2821,13 @@ static wxMenu* generate_help_menu()
     append_menu_item(helpMenu, wxID_ANY, _L("Import Profile"), _L("Import Profile"), [](wxCommandEvent&) {
         wxGetApp().import_presets();
     });
+
+    // Owner diagnostic (tests/design_u1_local_first.md, Plan B): does a cloud-bound U1's Moonraker
+    // answer on the LAN? Read-only; only with EDGESLICER_U1_PROBE=1 in the environment.
+    if (u1_moonraker_probe_enabled())
+        append_menu_item(helpMenu, wxID_ANY, _L("Diagnostic: U1 local Moonraker probe (read-only)..."),
+                         _L("Ask a U1 on the LAN for its status over HTTP and its WebSocket, read-only"),
+                         [](wxCommandEvent&) { run_u1_moonraker_probe_dialog(wxGetApp().mainframe); });
 
     append_menu_item(helpMenu, wxID_ANY, _L("Open Network Test"), _L("Open Network Test"), [](wxCommandEvent&) {
         // Plain modal dialog: its test threads never touch the dialog itself (they keep only
@@ -3142,9 +3177,27 @@ void MainFrame::init_menubar_as_editor()
             [this](wxCommandEvent&) { if (m_plater) wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_ALL_SLICED_FILE)); }, "menu_export_sliced_file", nullptr,
             [this]() {return can_export_all_gcode(); }, this);
 
-        append_menu_item(export_menu, wxID_ANY, _L("Export G-code") + dots/* + "\t" + ctrl + "G"*/, _L("Export current plate as G-code"),
+        // Bambu printers: hand the sliced file to the user's own Bambu Connect app. Hidden for other
+        // vendors: show_bambu_connect_menu_items() detaches them on a printer switch (wx menu items
+        // cannot be hidden), like the print-button dropdown entry.
+        m_export_menu = export_menu;
+        m_bambu_connect_items.clear();
+        m_bambu_connect_items.push_back(append_menu_item(export_menu, wxID_ANY, _L("Send plate to Bambu Connect"),
+            _L("Export the current plate's sliced file and open it in Bambu Connect, which prints it with your Bambu account or over LAN"),
+            [this](wxCommandEvent&) { if (m_plater) wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_BAMBU_CONNECT)); }, "menu_export_sliced_file", nullptr,
+            [this]() { return can_send_to_bambu_connect(false); }, this));
+        m_bambu_connect_items.push_back(append_menu_item(export_menu, wxID_ANY, _L("Send all plates to Bambu Connect"),
+            _L("Export the sliced file of all plates and open it in Bambu Connect, where you pick the plate to print"),
+            [this](wxCommandEvent&) { if (m_plater) wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_ALL_TO_BAMBU_CONNECT)); }, "menu_export_sliced_file", nullptr,
+            [this]() { return can_send_to_bambu_connect(true); }, this));
+        m_bambu_connect_items_shown = true;
+
+        wxMenuItem *export_gcode_item = append_menu_item(export_menu, wxID_ANY, _L("Export G-code") + dots/* + "\t" + ctrl + "G"*/, _L("Export current plate as G-code"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_gcode(false); }, "menu_export_gcode", nullptr,
             [this]() {return can_export_gcode(); }, this);
+        m_bambu_connect_anchor_id = export_gcode_item ? export_gcode_item->GetId() : wxID_NONE;
+        // Sidebar::update_all_preset_comboboxes() re-applies this on every printer switch.
+        show_bambu_connect_menu_items(wxGetApp().preset_bundle != nullptr && wxGetApp().preset_bundle->is_bbl_vendor());
         append_menu_item(
             export_menu, wxID_ANY, _L("Export Preset Bundle") + dots /* + "\t" + ctrl + "E"*/, _L("Export current configuration to files"),
             [this](wxCommandEvent &) { export_config(); },
@@ -3914,6 +3967,25 @@ void MainFrame::init_menubar_as_gcodeviewer()
 #endif
 }
 
+void MainFrame::show_bambu_connect_menu_items(bool show)
+{
+    if (m_export_menu == nullptr || m_bambu_connect_items.empty() || show == m_bambu_connect_items_shown)
+        return;
+    if (show) {
+        // Back in front of "Export G-code", where init_menubar_as_editor() put them.
+        size_t pos = m_export_menu->GetMenuItemCount();
+        if (m_bambu_connect_anchor_id != wxID_NONE)
+            m_export_menu->FindChildItem(m_bambu_connect_anchor_id, &pos);
+        for (wxMenuItem *item : m_bambu_connect_items)
+            m_export_menu->Insert(pos++, item);
+    } else {
+        // Remove() detaches without deleting; the items are kept for a later switch back to a Bambu printer.
+        for (wxMenuItem *item : m_bambu_connect_items)
+            m_export_menu->Remove(item);
+    }
+    m_bambu_connect_items_shown = show;
+}
+
 void MainFrame::update_menubar()
 {
     if (wxGetApp().is_gcode_viewer())
@@ -4073,6 +4145,9 @@ bool MainFrame::load_config_file(const std::string &path)
         return false;
     }
     wxGetApp().load_current_presets();
+    // Orca #15916: the loaded printer may not take the plates' bed types.
+    if (Plater *plater = wxGetApp().plater())
+        plater->normalize_bed_types(false);
     return true;
 }
 
@@ -4425,6 +4500,7 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
     case eExportSlicedFile:
     case eExportAllSlicedFile:
     case ePrintMultiMachine:
+    case eSendToBambuConnect:
         apply_print_select_state(select_type);
         // Only the print-host flow (eSendGcode) needs a host. Export actions, eExportGcode
         // included, never depend on one: with "remember last print action" on, a restored
