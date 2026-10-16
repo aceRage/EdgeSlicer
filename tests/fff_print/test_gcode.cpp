@@ -478,3 +478,109 @@ TEST_CASE("Tool change on wipe tower forces the travel to the Type 2 tower befor
     // Every tool change after the first one now goes through the tower.
     CHECK(travels_on + 1 >= tools_on);
 }
+
+// Orca #16422: firmwares read the compatibility header lines, so they must describe the filament
+// the plate prints, not filament 1. Edge keeps first_layer_bed_temperature as the max of used
+// filaments (U1 always heats to the highest bed temp).
+static DynamicPrintConfig two_filament_header_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "nozzle_diameter",                   "0.4,0.4" },
+        { "filament_diameter",                 "1.75,1.75" },
+        { "enable_prime_tower",                "0" },
+        { "single_extruder_multi_material",    "1" },
+        { "nozzle_temperature_initial_layer",  "200,250" },
+        { "nozzle_temperature",                "200,250" },
+        { "supertack_plate_temp_initial_layer","60,100" },
+        { "cool_plate_temp_initial_layer",     "60,100" },
+        { "textured_cool_plate_temp_initial_layer", "60,100" },
+        { "eng_plate_temp_initial_layer",      "60,100" },
+        { "hot_plate_temp_initial_layer",      "60,100" },
+        { "textured_plate_temp_initial_layer", "60,100" },
+        { "skirt_loops",                       "0" },
+        { "brim_type",                         "no_brim" },
+        { "enable_support",                    "0" },
+        { "layer_change_gcode",                "G92 E0\n" },
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#0000FF" };
+    return config;
+}
+
+static int header_int(const std::string &gcode, const std::string &key)
+{
+    const std::string token = "; " + key + " = ";
+    const size_t pos = gcode.find(token);
+    REQUIRE(pos != std::string::npos);
+    return std::stoi(gcode.substr(pos + token.size()));
+}
+
+TEST_CASE("The G-code header names the first layer temperatures of the filament the plate prints", "[GCode][U1]")
+{
+    DynamicPrintConfig config = two_filament_header_config();
+    config.set_deserialize_strict({
+        { "wall_filament",          "2" },
+        { "sparse_infill_filament", "2" },
+        { "solid_infill_filament",  "2" },
+    });
+    const std::string gcode = slice({ TestMesh::cube_20x20x20 }, config);
+    CHECK(header_int(gcode, "first_layer_bed_temperature") == 100);
+    CHECK(header_int(gcode, "first_layer_temperature") == 250);
+}
+
+TEST_CASE("The BBL G-code header names the first layer temperatures on a single-filament plate", "[GCode][U1]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_prime_tower",                     "0" },
+        { "nozzle_temperature_initial_layer",       "215" },
+        { "nozzle_temperature",                     "215" },
+        { "supertack_plate_temp_initial_layer",     "55" },
+        { "cool_plate_temp_initial_layer",          "55" },
+        { "textured_cool_plate_temp_initial_layer", "55" },
+        { "eng_plate_temp_initial_layer",           "55" },
+        { "hot_plate_temp_initial_layer",           "55" },
+        { "textured_plate_temp_initial_layer",      "55" },
+        { "skirt_loops",                            "0" },
+        { "brim_type",                              "no_brim" },
+        { "enable_support",                         "0" },
+        { "layer_change_gcode",                     "G92 E0\n" },
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    print.is_BBL_printer() = true;
+    REQUIRE(print.extruders(true).size() == 1);
+
+    const std::string gcode = Test::gcode(print);
+    CHECK(header_int(gcode, "first_layer_bed_temperature") == 55);
+    CHECK(header_int(gcode, "first_layer_temperature") == 215);
+}
+
+TEST_CASE("The G-code header names the first object's filament when printing by object", "[GCode][U1]")
+{
+    DynamicPrintConfig config = two_filament_header_config();
+    config.set_deserialize_strict({ { "print_sequence", "by object" } });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[0]->config.set("extruder", 2);
+    model.objects[1]->config.set("extruder", 1);
+    print.apply(model, config);
+
+    const std::string gcode = Test::gcode(print);
+
+    const size_t first_t1 = gcode.find("\nT1");
+    const size_t first_t0 = gcode.find("\nT0");
+    REQUIRE(first_t1 != std::string::npos);
+    REQUIRE(first_t0 != std::string::npos);
+    REQUIRE(first_t1 < first_t0);
+
+    CHECK(header_int(gcode, "first_layer_bed_temperature") == 100);
+    CHECK(header_int(gcode, "first_layer_temperature") == 250);
+}
