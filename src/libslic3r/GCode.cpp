@@ -1262,9 +1262,15 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                             (!gcodegen.config().single_extruder_multi_material &&
                              get_value_at(gcodegen.config(), gcodegen.config().filament_multitool_ramming,
                                           ConfigFlowDomain::Filament, (unsigned int) tcr.initial_tool));
+    // Orca #13703: user-facing override (Printer Settings > Multimaterial > Wipe tower > "Tool change on wipe tower").
+    // Forces the toolhead to travel over the wipe tower before issuing Tx even on multi-toolhead
+    // printers without ramming, where the tool change would otherwise be emitted in place (potentially over the part).
+    // Default off; the U1 profiles keep it off (owner, 2026-10-14).
+    const bool tool_change_on_wipe_tower = gcodegen.config().tool_change_on_wipe_tower.value;
     const bool should_travel_to_tower = !tcr.priming && (tcr.force_travel     // wipe tower says so
                                                          || !needs_toolchange // this is just finishing the tower with no toolchange
-                                                         || is_ramming);
+                                                         || is_ramming
+                                                         || tool_change_on_wipe_tower);
 
     if (should_travel_to_tower || gcodegen.m_need_change_layer_lift_z) {
         // FIXME: It would be better if the wipe tower set the force_travel flag for all toolchanges,

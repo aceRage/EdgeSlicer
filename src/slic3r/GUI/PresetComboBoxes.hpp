@@ -90,6 +90,13 @@ public:
     virtual void sys_color_changed();
     virtual void OnSelect(wxCommandEvent& evt);
 
+    // Favourite filaments (the sidebar, Filament tab and calibration filament lists).
+    // The key of a row's preset (FavoriteFilamentsUI::key_for), empty for a header or a non-preset row.
+    std::string favorite_key_of_row(unsigned int n) const;
+    // The row is the second copy of a preset, in the "Favorite filaments" group at the top.
+    bool        is_favorite_group_row(unsigned int n) const
+    { return m_favorites_first >= 0 && int(n) >= m_favorites_first && int(n) < m_favorites_end; }
+
 protected:
     typedef std::size_t Marker;
     std::function<void(int)>    on_selection_changed { nullptr };
@@ -134,6 +141,25 @@ protected:
 
     // BBS: ams
     int  update_ams_color();
+
+    // Favourite filaments: a star on every preset row, a "Favorite filaments" group on top and a
+    // context-menu toggle. live: rebuild when a favourite changes anywhere else in the app.
+    void enable_favorites(bool live = true);
+    // From update(), before the other groups: the header and the favourites among the candidates
+    // (shown name, icon), sorted by name. Resets the group when there is none.
+    void append_favorite_group(const std::vector<std::pair<wxString, wxBitmap*>>& candidates,
+                               const std::map<wxString, wxString>* tooltips = nullptr);
+    // From update(), just before update_selection(): the stars, and the selection on the favourites
+    // copy of the selected preset.
+    void finish_favorites();
+    void update_favorite_stars();
+    bool is_label_row(unsigned int n) const;
+
+    bool m_favorites_enabled { false };
+    bool m_favorites_regroup { false };
+    int  m_favorites_subscription { 0 };
+    int  m_favorites_first { -1 };
+    int  m_favorites_end { -1 };
 
 #ifdef __linux__
     static const char* separator_head() { return "------- "; }

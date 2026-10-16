@@ -1409,7 +1409,7 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
     // and falls back to the preset's two nozzles when the printer has not reported any.
     BambuNozzleMapping::RequestInput in;
     in.calibration              = m_checkbox_list["flow_cali"] && m_checkbox_list["flow_cali"]->GetValue() ? 1 : 0;
-    in.extrude_cali_manual_mode = 1; // no PA-value switch in this fork: automatic, as the payload sends
+    in.extrude_cali_manual_mode = 0; // no PA-mode switch in this fork: Bambu Studio's default, as the payload sends
     if (gcode_result)
         for (auto f : gcode_result->filament_change_sequence)
             in.filament_change_sequence.push_back(int(f));
@@ -2595,11 +2595,13 @@ void SelectMachineDialog::on_send_print()
     else
         BOOST_LOG_TRIVIAL(info) << "build_nozzle_mapping_request: none for this job";
 
-    // No PA-value switch in this fork: automatic extruder calibration (1), per the payload docs.
-    m_print_job->extruder_cali_manual_mode = 1;
+    // No PA-mode switch in this fork: send Bambu Studio's default. Its switch "Nozzles and
+    // filaments of the same type share the same PA profile" defaults to ON, which sends 0.
+    m_print_job->extruder_cali_manual_mode = 0;
 
     m_print_job->sdcard_state = (int) obj_->get_sdcard_state();
     m_print_job->has_sdcard   = bambu_storage_usable_for_lan(m_print_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));
+    m_print_job->could_emmc_print = obj_->is_support_print_with_emmc;
 
 
     bool timelapse_option = select_timelapse->IsShown() ? m_checkbox_list["timelapse"]->GetValue() : true;
@@ -2696,6 +2698,10 @@ void SelectMachineDialog::update_user_machine_list()
 void SelectMachineDialog::on_refresh(wxCommandEvent &event)
 {
     BOOST_LOG_TRIVIAL(info) << "m_printer_last_select: on_refresh";
+    // Search the network again as well (rate-limited): the list below is rebuilt from the account's
+    // printers (fetched next) and from what discovery has heard.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        dev->restart_discovery("send dialog refresh", /* rate_limited */ true);
     show_status(PrintDialogStatus::PrintStatusRefreshingMachineList);
 
     update_user_machine_list();
@@ -3303,9 +3309,9 @@ void SelectMachineDialog::update_show_status()
         return;
     }
 
-    // check sdcard when if lan mode printer
+    // check sdcard when if lan mode printer (a printer that prints from internal storage needs none, as in Bambu Studio)
     if (obj_->is_lan_mode_printer()) {
-        if (obj_->get_sdcard_state() == MachineObject::SdcardState::NO_SDCARD) {
+        if (obj_->get_sdcard_state() == MachineObject::SdcardState::NO_SDCARD && !obj_->is_support_print_with_emmc) {
             show_status(PrintDialogStatus::PrintStatusLanModeNoSdcard);
             return;
         }

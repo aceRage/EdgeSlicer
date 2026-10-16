@@ -37,11 +37,14 @@
 #include "slic3r/GUI/OptionsGroup.hpp"
 #include "wxExtensions.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include <wx/wupdlock.h>
 
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
 #include "Plater.hpp"
+#include "ParamsDialog.hpp"
+#include "libslic3r/PlateBedTypes.hpp"
 #include "MainFrame.hpp"
 #include "format.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -315,6 +318,16 @@ void Tab::create_preset_tab()
     //add_scaled_button(panel, &m_btn_compare_preset, "compare");
     add_scaled_button(m_top_panel, &m_btn_save_preset, "save");
     add_scaled_button(m_top_panel, &m_btn_delete_preset, "cross");
+    if (m_type == Preset::TYPE_FILAMENT) {
+        // Favourite filaments: the star toggles the selected filament; the combo's context menu
+        // (right-click, context-menu key, Shift+F10) and the stars in its list do the same.
+        add_scaled_button(m_top_panel, &m_btn_favorite_filament, into_u8(FavoriteFilamentsUI::star_icon_name(false)));
+        m_btn_favorite_filament->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+            FavoriteFilamentsUI::toggle(FavoriteFilamentsUI::key_for(m_presets->get_selected_preset()));
+            update_favorite_button();
+        });
+        m_favorite_subscription = FavoriteFilamentsUI::subscribe([this]() { update_favorite_button(); });
+    }
     //if (m_type == Preset::Type::TYPE_PRINTER)
     //    add_scaled_button(panel, &m_btn_edit_ph_printer, "cog");
 
@@ -388,6 +401,8 @@ void Tab::create_preset_tab()
 
         m_btn_save_preset->Show();
         m_btn_delete_preset->Show(); // ORCA: fixes delete preset button visible while search box focused
+        if (m_btn_favorite_filament)
+            m_btn_favorite_filament->Show();
         m_undo_btn->Show();          // ORCA: fixes revert preset button visible while search box focused
         m_btn_search->Show();
         m_search_item->Hide();
@@ -418,6 +433,8 @@ void Tab::create_preset_tab()
 
          m_btn_save_preset->Hide();
          m_btn_delete_preset->Hide(); // ORCA: fixes delete preset button visible while search box focused
+         if (m_btn_favorite_filament)
+             m_btn_favorite_filament->Hide();
          m_undo_btn->Hide();          // ORCA: fixes revert preset button visible while search box focused
          m_btn_search->Hide();
          m_search_item->Show();
@@ -458,6 +475,8 @@ void Tab::create_preset_tab()
     m_top_sizer->Add(m_undo_to_sys_btn, 0, wxALIGN_CENTER_VERTICAL);
     m_top_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
 #endif
+    if (m_btn_favorite_filament)
+        m_top_sizer->Add(m_btn_favorite_filament, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_save_preset, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_delete_preset, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_search, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
@@ -3646,6 +3665,13 @@ void TabPrint::toggle_options()
 
     m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT, flow_variant_view_index());
 
+    if (m_type == Preset::TYPE_PLATE) {
+        // Orca #15916: the plate bed type is editable only when the printer takes per-plate bed types
+        // (Edge: the U1 takes its three plates).
+        toggle_option("curr_bed_type", PlateBedTypes::supports_bed_type_choice(PlateBedTypes::allowed_bed_types(
+                                           m_preset_bundle->printers.get_edited_preset().config, m_preset_bundle->is_bbl_vendor())));
+    }
+
     Field *field = m_active_page->get_field("support_style");
     auto   support_type = m_config->opt_enum<SupportType>("support_type");
     if (auto choice = dynamic_cast<Choice*>(field)) {
@@ -5232,11 +5258,11 @@ void TabFilament::toggle_options()
             supertack_line->label_tooltip = _L("Bed temperature when this plate is installed. A value of 0 means the filament does not support printing on this plate.");
         }
         if (is_snapmaker_u1 && !support_multi_bed_types) {
-            // U1 default show 3 plates; Cool Steel Plate only appears with support_multi_bed_types
+            // U1 default shows its 3 plates + Cool Plate (Edge); Cool Steel Plate only appears with support_multi_bed_types
             toggle_line("supertack_plate_temp_initial_layer", false);
             toggle_line("supertack_plate_temp", false);
-            toggle_line("cool_plate_temp_initial_layer", false);
-            toggle_line("cool_plate_temp", false);
+            toggle_line("cool_plate_temp_initial_layer", true);
+            toggle_line("cool_plate_temp", true);
             toggle_line("textured_cool_plate_temp_initial_layer", false);
             toggle_line("textured_cool_plate_temp", false);
             toggle_line("eng_plate_temp_initial_layer", false);
@@ -5977,6 +6003,7 @@ if (is_marlin_flavor)
         optgroup = page->new_optgroup(L("Wipe tower"), "param_tower");
         optgroup->append_single_option_line("purge_in_prime_tower", "semm");
         optgroup->append_single_option_line("enable_filament_ramming", "semm");
+        optgroup->append_single_option_line("tool_change_on_wipe_tower", "semm");
         optgroup->append_single_option_line("ramming_line_width_ratio");
         optgroup->append_single_option_line("enable_change_pressure_when_wiping");
         optgroup->append_single_option_line("ramming_pressure_advance_value");
@@ -6528,6 +6555,12 @@ void TabPrinter::toggle_options()
         toggle_option("extruders_count", !bSEMM);
         toggle_option("manual_filament_change", bSEMM);
         toggle_option("purge_in_prime_tower", bSEMM && !is_BBL_printer);
+
+        // Orca #13703: "Tool change on wipe tower" only makes sense for multi-extruder (multi-toolhead) printers
+        // using the Type 2 wipe tower (here: every non-BBL printer). SEMM already always travels to the tower
+        // as part of the purge, so the option is irrelevant there.
+        const size_t extruders_count = m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
+        toggle_option("tool_change_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
     }
     wxString extruder_number;
     long val = 1;
@@ -6913,10 +6946,27 @@ void Tab::update_btns_enabling()
     const Preset& preset = m_presets->get_edited_preset();
     m_btn_delete_preset->Show((m_type == Preset::TYPE_PRINTER && m_preset_bundle->physical_printers.has_selection())
                               || (!preset.is_default && !preset.is_system));
+    update_favorite_button();
 
     //if (m_btn_edit_ph_printer)
     //    m_btn_edit_ph_printer->SetToolTip( m_preset_bundle->physical_printers.has_selection() ?
     //                                       _L("Edit physical printer") : _L("Add physical printer"));
+}
+
+Tab::~Tab()
+{
+    if (m_favorite_subscription)
+        FavoriteFilamentsUI::unsubscribe(m_favorite_subscription);
+}
+
+void Tab::update_favorite_button()
+{
+    if (!m_btn_favorite_filament || !m_presets)
+        return;
+    const bool fav = FavoriteFilamentsUI::is_favorite(m_presets->get_selected_preset());
+    m_btn_favorite_filament->SetBitmap_(into_u8(FavoriteFilamentsUI::star_icon_name(fav)));
+    m_btn_favorite_filament->SetToolTip(fav ? _L("Remove this filament from your favorite filaments")
+                                            : _L("Add this filament to your favorite filaments (they are listed first in every filament list)"));
 }
 
 void Tab::update_preset_choice()
@@ -7282,6 +7332,15 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
             }
         }
         load_current_preset();
+
+        // Orca #15916: wait for the settings dialog to close; its edits are still provisional.
+        if (printer_tab && is_selected) {
+            Plater *plater = wxGetApp().plater();
+            ParamsDialog *dialog = wxGetApp().params_dialog();
+            if (plater && !plater->is_loading_project() &&
+                (!dialog || !dialog->IsShown()))
+                plater->normalize_bed_types(false);
+        }
 
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
         // Deferred so it runs after this switch settles. sync_bambu_user_presets only lists the Bambu

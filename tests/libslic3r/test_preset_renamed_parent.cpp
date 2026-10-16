@@ -649,3 +649,37 @@ TEST_CASE("Detaching a user filament on a renamed parent drops the parent and ke
     CHECK(j.contains("filament_flow_ratio"));
     CHECK(filaments.legacy_user_filament_presets({ { k1_old_parent, { "Creality K1C 0.4 nozzle" } } }).empty());
 }
+
+// Orca #12816: the 3MF reader allocates a project preset's loading_substitutions with new, and
+// load_project_embedded_presets released it with free() - a heap mismatch a crafted 3MF (one whose
+// embedded preset needs a substitution) reaches. Under ASan / the MSVC debug heap the old code
+// fails here; in a release build this pins the hand-over and the release.
+TEST_CASE("A project preset's loading substitutions are reported and released", "[Preset][ProjectPreset][Regression]")
+{
+    RenameTestFilaments filaments;
+    add_renamed_parent(filaments);
+    std::unique_ptr<Preset> preset = project_filament("Project PETG", k1_parent);
+
+    preset->loading_substitutions = new ConfigSubstitutions();
+    {
+        ConfigSubstitution sub;
+        sub.opt_def   = print_config_def.get("filament_type");
+        sub.old_value = "NOT-A-FILAMENT-TYPE";
+        sub.new_value.reset(new ConfigOptionStrings({ "PLA" }));
+        preset->loading_substitutions->emplace_back(std::move(sub));
+    }
+    REQUIRE(preset->loading_substitutions->front().opt_def != nullptr);
+
+    PresetsConfigSubstitutions substitutions;
+    std::vector<Preset *>      project_presets{ preset.get() };
+    filaments.load_project_embedded_presets(project_presets, PRESET_FILAMENT_NAME, substitutions,
+                                            ForwardCompatibilitySubstitutionRule::EnableSilent);
+
+    REQUIRE(substitutions.size() == 1);
+    CHECK(substitutions.front().preset_name == "Project PETG");
+    CHECK(substitutions.front().preset_source == PresetConfigSubstitutions::Source::ProjectFile);
+    REQUIRE(substitutions.front().substitutions.size() == 1);
+    CHECK(substitutions.front().substitutions.front().old_value == "NOT-A-FILAMENT-TYPE");
+    CHECK(preset->loading_substitutions == nullptr);
+    CHECK(filaments.find_preset("Project PETG", false, true) != nullptr);
+}

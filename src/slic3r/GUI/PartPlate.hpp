@@ -814,6 +814,9 @@ public:
     void set_filament_group_dirty(bool dirty) { m_filament_group_dirty = dirty; }
 
     std::vector<PartPlate*>& get_plate_list() { return m_plate_list; };
+    // Orca #15916 / BBS: reset every plate's local bed type that is not in cur_bed_types to
+    // "same as global". False when one was reset.
+    bool check_all_plate_local_bed_type(const std::vector<BedType>& cur_bed_types);
 
     PartPlate* get_selected_plate();
 

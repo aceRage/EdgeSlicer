@@ -4419,6 +4419,24 @@ void PartPlateList::delete_selected_plate()
 }
 
 //get a plate pointer by index
+bool PartPlateList::check_all_plate_local_bed_type(const std::vector<BedType>& cur_bed_types)
+{
+    const std::string bed_type_key = "curr_bed_type";
+    bool              is_ok        = true;
+    for (PartPlate *plate : m_plate_list) {
+        if (plate == nullptr || !plate->config() || !plate->config()->has(bed_type_key))
+            continue;
+        const BedType bed_type = plate->config()->opt_enum<BedType>(bed_type_key);
+        if (bed_type == BedType::btDefault)
+            continue;
+        if (std::find(cur_bed_types.begin(), cur_bed_types.end(), bed_type) == cur_bed_types.end()) {
+            plate->set_bed_type(BedType::btDefault);
+            is_ok = false;
+        }
+    }
+    return is_ok;
+}
+
 PartPlate* PartPlateList::get_plate(int index)
 {
 	PartPlate* plate = NULL;

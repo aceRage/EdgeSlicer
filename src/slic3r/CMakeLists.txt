@@ -23,6 +23,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/AMSMaterialsSetting.cpp
     GUI/AMSMaterialsSetting.hpp
     GUI/AmsFilamentOrder.hpp
+    GUI/FavoriteFilaments.hpp
+    GUI/FavoriteFilamentsUI.hpp
     GUI/AMSSetting.cpp
     GUI/AMSSetting.hpp
     GUI/AmsWidgets.cpp
@@ -536,6 +538,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/LanReconnectLadder.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
+    GUI/BindListRefresh.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
@@ -553,6 +556,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteSnapmaker.cpp
     GUI/RemoteSnapmaker.hpp
     GUI/SnapmakerLan.cpp
+    GUI/U1LanRoute.cpp
+    GUI/U1LanRoute.hpp
+    GUI/U1WsRoute.cpp
+    GUI/U1WsRoute.hpp
     GUI/SnapmakerTaskConfig.hpp
     GUI/SnapmakerTaskConfig.cpp
     GUI/WizardNetworking.hpp
@@ -1054,6 +1061,12 @@ set(SLIC3R_GUI_SOURCES
     Utils/MQTT.hpp
     Utils/MQTT.cpp
     Utils/MqttReconnectPolicy.hpp
+    Utils/U1LocalFirst.cpp
+    Utils/U1LocalFirst.hpp
+    Utils/U1MoonrakerProbe.cpp
+    Utils/U1MoonrakerProbe.hpp
+    Utils/MoonrakerWs.cpp
+    Utils/MoonrakerWs.hpp
     Utils/MoonRaker.cpp
     Utils/MoonRaker.hpp
     Utils/TimeSyncManager.cpp
@@ -1063,6 +1076,9 @@ set(SLIC3R_GUI_SOURCES
     Utils/WinFirewall.hpp
     Utils/BambuSetupNotice.cpp
     Utils/BambuSetupNotice.hpp
+    # Last on purpose: a new source in the middle of the list reshuffles the unity batches (HomeVaults.cpp
+    # and HomeVendors.cpp share file-local names and must not land in one batch).
+    GUI/FavoriteFilamentsUI.cpp
 )
 
 add_subdirectory(GUI/DeviceTab)
