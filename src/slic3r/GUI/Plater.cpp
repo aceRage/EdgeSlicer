@@ -95,6 +95,7 @@
 #include "libslic3r/Format/BambuExport.hpp"
 #include "../Utils/BambuStudioLauncher.hpp"
 #include "../Utils/BambuConnect.hpp"
+#include "../Utils/BambuConnectStatus.hpp"
 #include "BlenderBridge.hpp"
 #include "FreeCADBridge.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
@@ -9549,9 +9550,35 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
     return filament_ams_list;
 }
 
+// Keep the last AMS trays and nozzles seen for this printer (BambuConnectStatus::Snapshot in the
+// app config), so the AMS sync can still offer them when the printer is not connected - a printer
+// that prints through Bambu Connect reports nothing back to EdgeSlicer.
+static void remember_ams_snapshot(const std::string &dev_id, MachineObject *obj, const std::map<int, DynamicPrintConfig> &trays)
+{
+    AppConfig *cfg = wxGetApp().app_config;
+    if (cfg == nullptr || obj == nullptr || dev_id.empty() || trays.empty() || !obj->is_connected())
+        return;
+    BambuConnectStatus::Snapshot snap;
+    snap.saved_at      = std::time(nullptr);
+    snap.printer_model = MachineObject::get_preset_printer_model_name(obj->printer_type);
+    snap.printer_name  = obj->dev_name;
+    snap.trays         = trays;
+    const bool dual    = obj->m_extder_data.extders.size() > 1;
+    for (const Extder &e : obj->m_extder_data.extders) {
+        BambuConnectStatus::ExtruderSnap x;
+        x.id          = e.id;
+        x.has_nozzle  = !dual || e.nozzle_id != 0xff;
+        x.volume_type = int(e.current_nozzle_flow);
+        x.diameter    = e.current_nozzle_diameter;
+        snap.extruders.push_back(x);
+    }
+    BambuConnectStatus::store_snapshot(*cfg, dev_id, snap);
+}
+
 void Sidebar::load_ams_list(std::string const &device, MachineObject* obj)
 {
     std::map<int, DynamicPrintConfig> filament_ams_list = build_filament_ams_list(obj);
+    remember_ams_snapshot(device, obj, filament_ams_list);
 
     p->ams_list_device = device;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": %1% items") % filament_ams_list.size();
@@ -9571,6 +9598,13 @@ void Sidebar::sync_ams_list()
         GUI::wxGetApp().sidebar().load_ams_list(obj->dev_id, obj);
 
     auto & list = wxGetApp().preset_bundle->filament_ams_list;
+    // Not connected (a printer used through Bambu Connect, or one that is off): the last AMS seen.
+    wxString snapshot_as_of;
+    if (obj == nullptr || !obj->is_connected()) {
+        const int from_snapshot = load_ams_snapshot(obj ? obj->dev_id : std::string(), snapshot_as_of);
+        if (from_snapshot == 0)
+            return;
+    }
     if (list.empty()) {
         MessageDialog dlg(this,
             _L("No AMS filaments. Please select a printer in 'Device' page to load AMS info."),
@@ -9644,6 +9678,11 @@ void Sidebar::sync_ams_list()
     update_dynamic_filament_list();
     // Expand filament list
     p->m_panel_filament_content->SetMaxSize({-1, -1});
+    if (!snapshot_as_of.empty())
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+            into_u8(wxString::Format(_L("Filaments synced from the AMS of %s. Change any filament in the list if the AMS has changed since."),
+                                     snapshot_as_of)));
     // BBS:Synchronized consumables information
     // auto calculation of flushing volumes
     for (int i = 0; i < p->combos_filament.size(); ++i) {
@@ -9664,6 +9703,55 @@ void Sidebar::sync_ams_list()
         }
     }
     Layout();
+}
+
+int Sidebar::load_ams_snapshot(const std::string &preferred_dev_id, wxString &as_of)
+{
+    AppConfig    *cfg = wxGetApp().app_config;
+    PresetBundle *pb  = wxGetApp().preset_bundle;
+    if (cfg == nullptr || pb == nullptr || !pb->is_bbl_vendor())
+        return -1;
+    const std::map<std::string, BambuConnectStatus::Snapshot> all = BambuConnectStatus::load_snapshots(*cfg);
+    const ConfigOptionString *model_opt = pb->printers.get_edited_preset().config.option<ConfigOptionString>("printer_model");
+    const std::string dev_id = BambuConnectStatus::pick_snapshot(all, preferred_dev_id, model_opt ? model_opt->value : std::string());
+    if (dev_id.empty())
+        return -1;
+    const BambuConnectStatus::Snapshot &snap = all.at(dev_id);
+    as_of = wxString::Format(_L("%s as of %s"), from_u8(snap.printer_name),
+                             from_u8(BambuConnectStatus::time_label(snap.saved_at, std::time(nullptr))));
+    MessageDialog ask(this,
+        wxString::Format(_L("No printer is connected. Use the AMS of %s? It may have changed since; you can change any "
+                            "filament in the list afterwards."), as_of),
+        _L("Sync filaments with AMS"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
+    if (ask.ShowModal() != wxID_YES)
+        return 0;
+
+    pb->filament_ams_list = snap.trays;
+    p->ams_list_device    = dev_id;
+    for (auto c : p->combos_filament)
+        c->update();
+
+    // The nozzles the printer had then, as the pre-slice auto-match takes them from a connected one.
+    if (!snap.extruders.empty()) {
+        const bool       dual = GUI::DualNozzle::preset_is_dual_nozzle_bambu();
+        std::vector<int> physical_of_logical;
+        if (dual) {
+            const std::vector<int> pem = GUI::DualNozzle::preset_physical_extruder_map();
+            for (int logical = 0; logical < 2; ++logical)
+                physical_of_logical.push_back(BambuExtruderMap::logical_to_physical(pem, logical));
+        } else {
+            physical_of_logical.push_back(snap.extruders.front().id);
+        }
+        const auto      *cur  = pb->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+        std::vector<int> want = BambuConnectStatus::nozzle_volume_types_for(snap.extruders, physical_of_logical,
+                                                                           cur ? cur->values : std::vector<int>());
+        want.resize(physical_of_logical.size());
+        if (GUI::FlowType::adopt_device_nozzle_volume_types(want))
+            sync_nozzle_flow_combos();
+    }
+    BOOST_LOG_TRIVIAL(info) << "AMS sync: using the stored AMS snapshot (" << snap.trays.size() << " trays, "
+                            << snap.extruders.size() << " nozzles)";
+    return 1;
 }
 
 void Sidebar::update_filament_sync_button()

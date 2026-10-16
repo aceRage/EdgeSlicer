@@ -32,6 +32,7 @@
 #include <boost/uuid/uuid_io.hpp>
 #include "fast_float/fast_float.h"
 #include <wx/dir.h>
+#include "slic3r/Utils/BambuConnectStatus.hpp"
 
 #define CALI_DEBUG
 #define MINUTE_30 1800000    //ms
@@ -3276,6 +3277,13 @@ void MachineObject::note_status_received()
 
 int MachineObject::publish_json(std::string json_str, int qos, int flag)
 {
+    // A status-only printer (bound to a Bambu account, printing through Bambu Connect) is sent the
+    // two status requests and nothing else (Utils/BambuConnectStatus.hpp).
+    if (const AppConfig *cfg = Slic3r::GUI::wxGetApp().app_config;
+        cfg != nullptr && BambuConnectStatus::is_status_only(*cfg, dev_id) && !BambuConnectStatus::status_only_allows(json_str)) {
+        BOOST_LOG_TRIVIAL(info) << "publish_json: status-only printer, " << BambuConnectStatus::command_label(json_str) << " not sent";
+        return -1;
+    }
     // This selection's session is still being dialled: the plug-in has nothing to publish on and
     // would refuse the command (-1). Keep it and send it once the session is up
     // (note_session_up). The caller gets 0 - the command is accepted, it just waits.
@@ -7320,6 +7328,11 @@ void DeviceManager::apply_ssdp_connect_type(MachineObject* obj, const char* list
                                                                                    has_access_code, mem, now_ms);
     obj->dev_connection_type = r.connect_type;
     obj->bind_state          = r.bind_state;
+    // A status-only printer announces "occupied" (it is bound to the account Bambu Connect uses);
+    // for EdgeSlicer it is a saved LAN printer, which the LAN lists only show while "free".
+    if (r.connect_type == "lan" && Slic3r::GUI::wxGetApp().app_config &&
+        BambuConnectStatus::is_status_only(*Slic3r::GUI::wxGetApp().app_config, obj->dev_id))
+        obj->bind_state = "free";
 
     // Warning level: the release build logs nothing below it, and this is what the "Log in
     // printer" question is decided on. Written whenever the outcome for this printer and list
