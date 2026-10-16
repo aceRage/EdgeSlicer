@@ -122,6 +122,15 @@ enum class WallDirection
     Count,
 };
 
+// Orca #11582 / #11616: what the slicer does about the printer's power loss recovery.
+// PrinterConfiguration writes nothing and leaves the printer's own setting; Enable / Disable write
+// M1003 S1 / S0 (Bambu Lab) or M413 S1 / S0 (Marlin 2) at the start of the second layer.
+enum class PowerLossRecoveryMode {
+    PrinterConfiguration,
+    Enable,
+    Disable,
+};
+
 //BBS
 enum class PrintSequence {
     ByLayer,
@@ -621,6 +630,13 @@ std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extr
 class DynamicPrintConfig;
 void resolve_printer_extruder_variants(DynamicPrintConfig &config);
 
+// Edge (Orca #11582 / #11616): a 3MF project (or its embedded printer preset) written before
+// enable_power_loss_recovery existed has no value for it, and the default ("printer configuration",
+// nothing written) would drop the M1003 S1 a Bambu Lab printer was always sliced with. Such a config
+// gets "enable" when its printer_model is a Bambu Lab one, which is what it was sliced with before.
+// Returns true when it set the value.
+bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config);
+
 // The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
 
@@ -899,6 +915,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 // Ultra: nozzle flow variant declared to Bambu printers (metadata only in this fork).
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
@@ -1849,6 +1866,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                required_nozzle_HRC))
     // BBS
     ((ConfigOptionBool,                scan_first_layer))
+    ((ConfigOptionEnum<PowerLossRecoveryMode>, enable_power_loss_recovery)) // Orca #11582 / #11616
     ((ConfigOptionPoints,              thumbnail_size))
     // ((ConfigOptionBool,                spaghetti_detector))
     ((ConfigOptionBool,                gcode_add_line_number))
@@ -2179,6 +2197,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_rib_width))
     ((ConfigOptionBool,               wipe_tower_fillet_wall))
     ((ConfigOptionBool,               wipe_tower_wall_gap))
+    ((ConfigOptionBool,               wipe_tower_stagger_toolchange_start))
     // Tower interface options (GCode/WipeTowerInterface.hpp), each off by default.
     ((ConfigOptionBool,               wipe_tower_interface_temp))
     ((ConfigOptionBool,               wipe_tower_interface_run_in))

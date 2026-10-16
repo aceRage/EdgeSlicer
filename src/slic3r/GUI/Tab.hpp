@@ -157,6 +157,10 @@ protected:
 	ScalableButton*		m_btn_compare_preset;
 	ScalableButton*		m_btn_save_preset;
 	ScalableButton*		m_btn_delete_preset;
+	// Filament tab only: stars the selected filament (favourite filaments), next to the preset combo.
+	ScalableButton*		m_btn_favorite_filament {nullptr};
+	int					m_favorite_subscription {0};
+	void				update_favorite_button();
 	//ScalableButton*		m_btn_edit_ph_printer {nullptr};
 	//ScalableButton*		m_btn_hide_incompatible_presets;
 	//wxBoxSizer*			m_hsizer;
@@ -335,7 +339,7 @@ public:
 	// BBS
 	Tab(ParamsPanel* parent, const wxString& title, Preset::Type type);
 
-    ~Tab() {}
+    ~Tab();
 
 	wxWindow*	parent() const { return m_parent; }
 	wxString	title()	 const { return m_title; }

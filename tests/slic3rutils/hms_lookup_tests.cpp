@@ -385,3 +385,14 @@ TEST_CASE("an entry with an empty description counts as no description", "[HmsLo
     CHECK(q.query_hms_msg_local(H2C, "0C00010000020015", "en").IsEmpty());
     CHECK(q.describe_error(H2C, "0C00010000020015", true).StartsWith("Printer error"));
 }
+
+// Orca #11225: stealth mode keeps the error dialog from downloading its picture from Bambu.
+TEST_CASE("stealth mode drops the error picture's web URL", "[HmsLookup]")
+{
+    const wxString web = "https://e.bambulab.com/hms/image.png";
+    CHECK(HMSQuery::stealth_image_url(web, false) == web);
+    CHECK(HMSQuery::stealth_image_url(web, true).IsEmpty());
+    CHECK(HMSQuery::stealth_image_url(wxEmptyString, true).IsEmpty());
+    // a local picture (no web address) is kept either way
+    CHECK(HMSQuery::stealth_image_url("hms/0300_8003.png", true) == "hms/0300_8003.png");
+}

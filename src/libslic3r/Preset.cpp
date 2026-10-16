@@ -1233,7 +1233,7 @@ static std::vector<std::string> s_Preset_print_options {
      "toolchange_ordering",
      "toolchange_cyclic_order",
      "toolchange_cyclic_first_layer",
-     "wipe_tower_rotation_angle", "wipe_tower_wall_gap",
+     "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "wipe_tower_stagger_toolchange_start",
      "wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime", "wipe_tower_interface_trigger",
      "enable_tower_interface_features",
      "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
@@ -1332,7 +1332,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "nozzle_height",
     "default_print_profile", "inherits",
     "silent_mode",
-    "scan_first_layer", "machine_load_filament_time", "machine_unload_filament_time", "machine_tool_change_time", "machine_prepare_time", "tool_change_temprature_wait", "time_cost", "machine_pause_gcode", "template_custom_gcode",
+    "scan_first_layer", "enable_power_loss_recovery", "machine_load_filament_time", "machine_unload_filament_time", "machine_tool_change_time", "machine_prepare_time", "tool_change_temprature_wait", "time_cost", "machine_pause_gcode", "template_custom_gcode",
     "nozzle_type", "nozzle_hrc","auxiliary_fan", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","printer_structure","farthest_point_timelapse",
     "best_object_pos","head_wrap_detect_zone",
     "host_type", "print_host", "printhost_apikey", "flashforge_serial_number", "bbl_use_printhost",
@@ -1859,8 +1859,9 @@ void PresetCollection::load_project_embedded_presets(std::vector<Preset*>& proje
             DynamicPrintConfig config = preset->config;
             if (preset->loading_substitutions && ! preset->loading_substitutions->empty()) {
                 substitutions.push_back({ preset->name, m_type, PresetConfigSubstitutions::Source::ProjectFile, preset->name, std::move(*(preset->loading_substitutions))});
-                free(preset->loading_substitutions);
-                preset->loading_substitutions = NULL;
+                // Allocated with new in the 3MF reader (_BBS_3MF_Importer): free() here was a heap mismatch.
+                delete preset->loading_substitutions;
+                preset->loading_substitutions = nullptr;
             }
             //BBS: use inherit config as the base
             Preset* inherit_preset = nullptr;

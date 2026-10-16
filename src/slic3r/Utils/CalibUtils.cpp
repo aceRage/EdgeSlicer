@@ -142,7 +142,8 @@ static bool is_same_nozzle_diameters(const DynamicPrintConfig &full_config, cons
         auto opt_nozzle_diameters = full_config.option<ConfigOptionFloats>("nozzle_diameter");
         if (opt_nozzle_diameters != nullptr) {
             float preset_nozzle_diameter = opt_nozzle_diameters->get_at(0);
-            if (preset_nozzle_diameter != obj->m_extder_data.extders[0].current_nozzle_diameter) {
+            // Orca #13330: a diameter the printer has not reported does not block calibration.
+            if (!obj->nozzle_diameter_matches_or_unknown(MAIN_NOZZLE_ID, preset_nozzle_diameter)) {
                 wxString nozzle_in_preset  = wxString::Format(_L("nozzle in preset: %s %s"), wxString::Format("%.1f", preset_nozzle_diameter).ToStdString(), to_wstring_name(nozzle_type));
                 wxString nozzle_in_printer = wxString::Format(_L("nozzle memorized: %.1f %s"), obj->m_extder_data.extders[0].current_nozzle_diameter, to_wstring_name(NozzleTypeEumnToStr[obj->m_extder_data.extders[0].current_nozzle_type]));
 

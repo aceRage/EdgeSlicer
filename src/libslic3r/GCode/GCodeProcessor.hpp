@@ -883,6 +883,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
         size_t m_last_default_color_id;
         bool m_detect_layer_based_on_tag {false};
         int m_seams_count;
+        bool m_g29_time_added {false};
         bool m_single_extruder_multi_material;
         float m_preheat_time;
         int m_delta_temperature;

@@ -2664,6 +2664,32 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             sel.insertBefore(o2, sel.firstChild);
         }
     }
+    // Filament lists: the slicer's favourite filaments (item.favorite) in their own group on top,
+    // then every filament, as the sidebar shows them. Without favourites it is the plain list.
+    function fillFilamentSelect(sel, items, current) {
+        var favs = (items || []).filter(function(it) { return it.favorite; });
+        if (!favs.length) { fillSelect(sel, items, current); return; }
+        sel.innerHTML = '';
+        var found = false;
+        function group(label, list) {
+            var g = document.createElement('optgroup');
+            g.label = label;
+            list.forEach(function(it) {
+                var o = el('option', '', (it.favorite ? '★ ' : '') + it.name);
+                o.value = it.value;
+                if (!found && it.value === current) { o.selected = true; found = true; }
+                g.appendChild(o);
+            });
+            sel.appendChild(g);
+        }
+        group('Favorite filaments', favs);
+        group('All filaments', items);
+        if (!found && current) {
+            var o2 = el('option', '', current);
+            o2.value = current; o2.selected = true;
+            sel.insertBefore(o2, sel.firstChild);
+        }
+    }
     function buildSetup(pr, data) {
         var setup = el('div', 'setup presets');
         var file = el('div', 'file');
@@ -2698,7 +2724,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             color.onchange = function() { postPreset('/presets/filament_color?index=' + f.index + '&color=' + encodeURIComponent(color.value)); };
             row.appendChild(color);
             var sf = el('select');
-            fillSelect(sf, pr.filament_choices, f.value);
+            fillFilamentSelect(sf, pr.filament_choices, f.value);
             sf.onchange = function() { postPreset('/presets/select?type=filament&index=' + f.index + '&name=' + encodeURIComponent(sf.value)); };
             row.appendChild(sf);
             setup.appendChild(row);
