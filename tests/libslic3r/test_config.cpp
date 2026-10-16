@@ -419,6 +419,60 @@ TEST_CASE("prime_tower_brim_width accepts the -1 auto sentinel shipped by BBL/Qi
     CHECK(config.validate(true).count("prime_tower_brim_width") == 1);
 }
 
+// Bambu Studio writes subnormals such as 1.04632e-311 into flush_volumes_matrix. libc++'s stream fails them (strtod's
+// ERANGE) while MSVC's reads them, so a stream check dropped those projects' settings on macOS only.
+TEST_CASE("Float options read a subnormal on every platform and still reject garbage", "[Config][FloatParse]")
+{
+    const double subnormal = 1.04632e-311;
+    REQUIRE(std::fpclassify(subnormal) == FP_SUBNORMAL);
+
+    SECTION("vectors keep the subnormal's value") {
+        ConfigOptionFloats floats;
+        REQUIRE(floats.deserialize("0, 1.04632e-311, 0.5"));
+        CHECK(floats.values == std::vector<double>{ 0., subnormal, 0.5 });
+
+        ConfigOptionFloatsNullable nullable;
+        REQUIRE(nullable.deserialize("nil,1.04632e-311"));
+        REQUIRE(nullable.values.size() == 2);
+        CHECK(std::isnan(nullable.values[0]));
+        CHECK(nullable.values[1] == subnormal);
+
+        DynamicPrintConfig config;
+        CHECK_NOTHROW(config.set_deserialize_strict("flush_volumes_matrix", "0,1.04632e-311,280,0"));
+        CHECK(config.opt<ConfigOptionFloats>("flush_volumes_matrix")->values == std::vector<double>{ 0., subnormal, 280., 0. });
+    }
+    SECTION("scalars and percents keep it too") {
+        ConfigOptionFloat f;
+        REQUIRE(f.deserialize("1.04632e-311"));
+        CHECK(f.value == subnormal);
+        ConfigOptionPercent p;
+        REQUIRE(p.deserialize("1.04632e-311%"));
+        CHECK(p.value == subnormal);
+        ConfigOptionFloatOrPercent fp;
+        REQUIRE(fp.deserialize("1.04632e-311%"));
+        CHECK(fp.value == subnormal);
+        CHECK(fp.percent);
+    }
+    SECTION("the stream's leading-number reading is kept") {
+        ConfigOptionFloats floats;
+        REQUIRE(floats.deserialize(" +1.5 ,-2e1,250%"));
+        CHECK(floats.values == std::vector<double>{ 1.5, -20., 250. });
+    }
+    SECTION("garbage, infinities and overflow are still rejected") {
+        for (const char *bad : { "zzzz", "1e999", "-1e999", "inf", "nan", "+-1", "+", "%" }) {
+            INFO(bad);
+            ConfigOptionFloats floats;
+            CHECK(! floats.deserialize(bad));
+            ConfigOptionFloat f;
+            CHECK(! f.deserialize(bad));
+        }
+        ConfigOptionFloats floats;
+        CHECK(! floats.deserialize("1,zzzz"));
+        DynamicPrintConfig config;
+        CHECK_THROWS_AS(config.set_deserialize_strict("flush_volumes_matrix", "0,abc"), BadOptionValueException);
+    }
+}
+
 // Orca #13812: the printer tab keeps Wipe on with firmware retraction when the whole retraction is done before
 // the wipe, so the config check that the CLI and the 3MF loader run has to accept that state too.
 TEST_CASE("Firmware retraction allows wipe only with the whole retraction before the wipe", "[Config]")
