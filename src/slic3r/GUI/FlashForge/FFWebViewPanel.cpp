@@ -1522,7 +1522,7 @@ void FFWebViewPanel::OnMainNavigated(wxWebViewEvent &evt)
             }, 100)
             console.log("googleJs injure success")
         )";
-        CallAfter([=]() { m_mainBrowser->RunScript(jsCode); });
+        CallAfter([=]() { WebView::RunScript(m_mainBrowser, jsCode); });
     }
 }
 
