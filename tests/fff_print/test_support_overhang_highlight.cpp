@@ -823,3 +823,209 @@ TEST_CASE("Support highlight detector: the shared rule pieces", "[SupportHighlig
     band.front().points[2].y() = band.front().points[3].y() = scaled<coord_t>(1.);
     CHECK_FALSE(normal_support_overhang_too_thin(band, fw));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phase 5: the pre-slice highlight runs the generator's own detection
+// (support_overhang_preview_exact()) and must match the slice exactly.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// 3DBenchy from the handy models, on the bed, one instance. False when the file is not there.
+bool load_benchy(Model &model)
+{
+    DynamicPrintConfig cfg;
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    PlateDataPtrs plate_data;
+    std::vector<Preset*> presets;
+    bool is_bbl = false;
+    Semver version;
+    const std::string path = std::string(TEST_DATA_DIR) + "/../../resources/handy_models/3DBenchy.3mf";
+    const bool ok = load_bbs_3mf(path.c_str(), &cfg, &ctxt, &model, &plate_data, &presets, &is_bbl, &version, nullptr, LoadStrategy::LoadModel) &&
+                    ! model.objects.empty();
+    release_PlateData_list(plate_data);
+    if (! ok)
+        return false;
+    while (model.objects.size() > 1)
+        model.delete_object(model.objects.size() - 1);
+    ModelObject *mo = model.objects.front();
+    if (mo->instances.empty())
+        mo->add_instance();
+    while (mo->instances.size() > 1)
+        mo->delete_instance(mo->instances.size() - 1);
+    mo->config.reset();
+    mo->ensure_on_bed();
+    return true;
+}
+
+struct LayerAreas { std::vector<ExPolygons> supported; double total { 0. }; };
+
+// What the slice holds up per layer, in world XY like the preview: the after-slicing overlay's
+// supported areas (Layer::support_overhangs, with trees on the build plate only trimmed as there).
+LayerAreas sliced_support_overhangs(const Model &model, const DynamicPrintConfig &config)
+{
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.apply(config);
+    Print print;
+    print.apply(model, full);
+    print.set_status_silent();
+    print.process();
+    LayerAreas out;
+    const PrintObject &object = *print.objects().front();
+    const Point shift = object.instances().front().shift;
+    out.supported.assign(object.layer_count(), {});
+    for (SupportOverhangOverlayLayer &l : support_overhang_overlay(object))
+        for (size_t i = 0; i < object.layer_count(); ++ i)
+            if (object.get_layer(int(i))->print_z == l.print_z) {
+                for (ExPolygon &e : l.supported)
+                    e.translate(shift);
+                out.total += area_mm2(l.supported);
+                out.supported[i] = std::move(l.supported);
+                break;
+            }
+    return out;
+}
+
+SupportOverhangPreview exact_preview(const Model &model, const DynamicPrintConfig &config)
+{
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.apply(config);
+    Print print;
+    return support_overhang_preview_exact(print, model, full);
+}
+
+// The per-layer difference between the highlight and the slice, relative to the slice's area.
+double layer_mismatch(const LayerAreas &slice, const std::vector<ExPolygons> &highlight)
+{
+    double xor_area = 0.;
+    const size_t n = std::max(slice.supported.size(), highlight.size());
+    for (size_t i = 0; i < n; ++ i) {
+        const ExPolygons empty;
+        const ExPolygons &a = i < slice.supported.size() ? slice.supported[i] : empty;
+        const ExPolygons &b = i < highlight.size() ? highlight[i] : empty;
+        xor_area += area_mm2(diff_ex(a, b)) + area_mm2(diff_ex(b, a));
+    }
+    return slice.total > 0. ? xor_area / slice.total : xor_area;
+}
+
+size_t count_facets(const SupportOverhangPreview &p, uint8_t cls)
+{
+    size_t n = 0;
+    for (const std::vector<uint8_t> &f : p.part_facets)
+        n += size_t(std::count(f.begin(), f.end(), cls));
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("Support highlight exact: the highlight holds up exactly what the slice does on a Benchy", "[SupportHighlight]")
+{
+    Model model;
+    if (! load_benchy(model)) {
+        WARN("3DBenchy.3mf not found, skipped");
+        return;
+    }
+    const std::vector<std::pair<const char*, DynamicPrintConfig>> cases = {
+        { "normal(auto)", support_config("normal(auto)", 30, 0.2, { { "max_bridge_length", 10 } }) },
+        { "normal(auto) bridge_no_support", support_config("normal(auto)", 30, 0.2, { { "bridge_no_support", 1 } }) },
+        { "tree slim", support_config("tree(auto)", 30, 0.2, { { "support_style", "tree_slim" }, { "max_bridge_length", 10 } }) },
+        { "organic", support_config("tree(auto)", 30, 0.2, { { "support_style", "tree_organic" }, { "max_bridge_length", 10 } }) },
+        { "organic angle 0, build plate only", support_config("tree(auto)", 0, 0.2, { { "support_style", "tree_organic" }, { "max_bridge_length", 10 },
+                                                                                       { "support_on_build_plate_only", 1 } }) },
+    };
+    double normal_area = 0., tree_area = 0.;
+    for (const auto &[name, config] : cases) {
+        const LayerAreas             slice     = sliced_support_overhangs(model, config);
+        const SupportOverhangPreview highlight = exact_preview(model, config);
+        const double                 mismatch  = layer_mismatch(slice, highlight.supported);
+        INFO(name << ": the slice holds up " << slice.total << " mm2 over " << slice.supported.size() << " layers, the highlight "
+                  << highlight.supported.size() << " layers, mismatch " << mismatch << ", red faces " << count_facets(highlight, 1)
+                  << ", amber faces " << count_facets(highlight, 2));
+        CHECK(slice.supported.size() == highlight.supported.size());
+        CHECK(slice.total > 0.);
+        CHECK(mismatch < 1e-6);
+        CHECK(count_facets(highlight, 1) > 0);
+        if (std::string(name) == "normal(auto)")
+            normal_area = slice.total;
+        if (std::string(name) == "tree slim")
+            tree_area = slice.total;
+    }
+    // Normal and tree supports decide differently (trees bridge short gaps such as the door and
+    // window tops): the highlight follows each.
+    INFO("normal " << normal_area << " mm2, tree " << tree_area << " mm2");
+    CHECK(std::abs(normal_area - tree_area) > 0.05 * std::max(normal_area, tree_area));
+}
+
+TEST_CASE("Support highlight exact: object overrides and supports switched off", "[SupportHighlight]")
+{
+    // The process says normal supports; the object says tree. The highlight follows the object,
+    // as the slice does.
+    Model model;
+    model.add_object()->add_volume(TriangleMesh(inverted_frustum_its(30.)));
+    model.objects.front()->add_instance();
+    model.objects.front()->ensure_on_bed();
+    {
+        DynamicPrintConfig object_config;
+        object_config.set_deserialize_strict({ { "support_type", "tree(auto)" }, { "support_style", "tree_slim" } });
+        model.objects.front()->config.assign_config(std::move(object_config));
+    }
+    const DynamicPrintConfig config = support_config("normal(auto)", 40, 0.2);
+    {
+        const LayerAreas slice = sliced_support_overhangs(model, config);
+        const SupportOverhangPreview highlight = exact_preview(model, config);
+        INFO("slice " << slice.total << " mm2, mismatch " << layer_mismatch(slice, highlight.supported));
+        CHECK(slice.total > 0.);
+        CHECK(layer_mismatch(slice, highlight.supported) < 1e-6);
+    }
+    {
+        // Supports off for the object: the highlight simulates automatic supports, which then hold
+        // up what the slice with supports on would.
+        Model off = model;
+        DynamicPrintConfig object_config = off.objects.front()->config.get();
+        object_config.set_deserialize_strict({ { "enable_support", 0 } });
+        off.objects.front()->config.assign_config(std::move(object_config));
+        const LayerAreas on_slice = sliced_support_overhangs(model, config);
+        const SupportOverhangPreview highlight = exact_preview(off, config);
+        CHECK(layer_mismatch(on_slice, highlight.supported) < 1e-6);
+    }
+}
+
+TEST_CASE("Support highlight exact: cancel ends the run", "[SupportHighlight]")
+{
+    Model model;
+    model.add_object()->add_volume(TriangleMesh(inverted_frustum_its(30.)));
+    model.objects.front()->add_instance();
+    model.objects.front()->ensure_on_bed();
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.apply(support_config("normal(auto)", 40, 0.2));
+    Print print;
+    print.cancel();
+    CHECK_THROWS_AS(support_overhang_preview_exact(print, model, full), CanceledException);
+}
+
+TEST_CASE("Support highlight benchmark: exact pre-slice preview", "[.][SupportHighlightBench]")
+{
+    auto run = [](const char *name, const Model &model, const char *type, const char *style) {
+        DynamicPrintConfig config = support_config(type, 30, 0.2, { { "support_style", style }, { "max_bridge_length", 10 } });
+        const auto t0 = std::chrono::steady_clock::now();
+        const SupportOverhangPreview p = exact_preview(model, config);
+        const double total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::cout << "exact " << name << " " << type << " " << style << ": " << p.slice_z.size() << " layers, steps " << p.slice_ms << " ms, detect "
+                  << p.detect_ms << " ms, map " << p.map_ms << " ms, total " << total << " ms, red " << count_facets(p, 1) << ", amber "
+                  << count_facets(p, 2) << std::endl;
+    };
+    Model benchy;
+    const bool have_benchy = load_benchy(benchy);
+    Model sphere;
+    {
+        indexed_triangle_set its = its_make_sphere(40., 2. * PI / 1000.);
+        sphere.add_object()->add_volume(TriangleMesh(std::move(its)));
+        sphere.objects.front()->add_instance();
+        sphere.objects.front()->ensure_on_bed();
+    }
+    for (const auto &[type, style] : { std::pair<const char*, const char*>{ "normal(auto)", "default" }, { "tree(auto)", "tree_slim" }, { "tree(auto)", "tree_organic" } }) {
+        if (have_benchy)
+            run("3DBenchy", benchy, type, style);
+        run("sphere r40 998k", sphere, type, style);
+    }
+}

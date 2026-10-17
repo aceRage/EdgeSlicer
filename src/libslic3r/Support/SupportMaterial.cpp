@@ -385,6 +385,15 @@ static constexpr const std::initializer_list<SupporLayerType> support_types_inte
     SupporLayerType::RaftInterface, SupporLayerType::BottomContact, SupporLayerType::BottomInterface, SupporLayerType::TopContact, SupporLayerType::TopInterface
 };
 
+// Edge (support highlight, phase 5): see SupportMaterial.hpp.
+void PrintObjectSupportMaterial::detect_overhangs_only(const PrintObject &object)
+{
+    SupportGeneratorLayerStorage layer_storage;
+    std::vector<Polygons> buildplate_covered = this->buildplate_covered(object);
+    // Fills Layer::support_overhangs as a side effect; the contact layers are dropped with the storage.
+    this->top_contact_layers(object, buildplate_covered, layer_storage);
+}
+
 void PrintObjectSupportMaterial::generate(PrintObject &object)
 {
     BOOST_LOG_TRIVIAL(info) << "Support generator - Start";

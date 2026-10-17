@@ -80,26 +80,46 @@ private:
     PainterGizmoType get_painter_type() const override;
 
     void select_facets_by_angle(float threshold, bool block);
-    // "Highlight overhang areas": the angle comes from the automatic supports' layer rule for the
-    // selected object (support_overhang_rule_for(), Support/SupportOverhangHighlight.hpp) - the
-    // threshold angle, or the threshold overlap at this layer height and outer wall width, or the
-    // tree 30 degree fallback. "Like auto supports" keeps it there (slider read-only, follows
-    // config changes); off, the slider starts there and the user moves it.
+    // "Threshold Angle" / "Threshold Overlap": the support settings the highlight uses. With
+    // "Simulate Auto Supports" they mirror the effective settings of the selected object (its own
+    // override, else the process) and follow them; off, they are free preview values. The face
+    // tint angle is the automatic supports' layer rule for those values
+    // (support_overhang_rule_for(), Support/SupportOverhangHighlight.hpp): the threshold angle
+    // (+1, inclusive, as the generators), or the overlap at this layer height and outer wall width,
+    // or the tree 30 degree fallback.
+    struct ThresholdSource
+    {
+        int    angle { 0 };
+        double overlap_pct { 50. };   // percent of the outer wall width
+        bool   angle_from_object { false };
+        bool   overlap_from_object { false };
+        bool   overlap_absolute { false }; // the setting is in mm; shown converted to percent
+    };
+    ThresholdSource effective_thresholds(const ModelObject &mo) const;
+    SupportOverhangRule current_rule(const ModelObject &mo) const;
     void   update_highlight_angle_from_rule();
     wxString highlight_rule_description() const;
+    wxString threshold_source_text(const ModelObject &mo) const;
 
-    bool   m_highlight_reset_pending = true;  // set the slider to the rule's angle on the next frame
-    bool   m_highlight_like_auto     = true;  // remembered in AppConfig "support_paint_highlight_mode"
+    bool   m_highlight_reset_pending = true;  // set the sliders from the settings on the next frame
+    bool   m_simulate_auto           = true;  // remembered in AppConfig "support_paint_highlight_mode"
+    float  m_threshold_angle         = 30.f;  // degrees, as support_threshold_angle
+    float  m_threshold_overlap       = 50.f;  // percent, as support_threshold_overlap
 
-    // Phase 3, "By layer (before slicing)": a background quick slice of the object at its real
-    // layer heights runs the support rule plus the slice-only extras (support_overhang_preview())
-    // and the result is drawn over the facets (red: automatic supports hold it up, amber: an
-    // overhang they leave alone). A layer stepper cuts the object at one layer and draws that
-    // layer's overhang areas on the cut. Remembered in AppConfig "support_paint_highlight_by_layer".
+    // "By layer (before slicing)": a background job runs the support generator's own overhang
+    // detection on a private copy of the object (phase 5: support_overhang_preview_exact(); the
+    // support type, the object's overrides, bridges, small-overhang removal, build plate only,
+    // painted enforcers / blockers all as the slice will have them) and the result is drawn over
+    // the facets (red: the generator holds it up, amber: an overhang it leaves). A layer stepper
+    // cuts the object at one layer and draws that layer's areas on the cut. Remembered in AppConfig
+    // "support_paint_highlight_by_layer".
     struct LayerPreviewJob
     {
         std::atomic<bool>                       cancel { false };
         std::atomic<bool>                       done   { false };
+        std::unique_ptr<Model>                  model;   // the object alone, one instance
+        DynamicPrintConfig                      config;  // the full config
+        std::unique_ptr<Print>                  print;   // private, so cancel() reaches it
         std::unique_ptr<SupportOverhangPreview> result;
         std::string                             error;
     };
@@ -111,13 +131,21 @@ private:
     void   render_layer_preview() const;
     void   paint_layer_preview_facets(bool block);
     std::string layer_preview_key(const ModelObject &mo, int instance_idx) const;
+    bool   layer_preview_settings_changed(const ModelObject &mo);
 
     bool                                    m_highlight_by_layer = false;
     std::shared_ptr<LayerPreviewJob>        m_layer_preview_job;
     std::thread                             m_layer_preview_thread;
     std::string                             m_layer_preview_key;      // the inputs of the job started last
+    std::string                             m_layer_preview_pending_key; // changed inputs waiting for the debounce
+    long long                               m_layer_preview_pending_ms = 0;
+    unsigned int                            m_layer_preview_settings_rev = 0; // bumped when a setting changes
+    DynamicPrintConfig                      m_layer_preview_print_cfg;   // the settings the last job saw
+    DynamicPrintConfig                      m_layer_preview_printer_cfg;
+    DynamicPrintConfig                      m_layer_preview_project_cfg;
+    DynamicPrintConfig                      m_layer_preview_object_cfg;
+    std::vector<std::string>                m_layer_preview_filaments;
     std::unique_ptr<SupportOverhangPreview> m_layer_preview;          // the result on screen
-    std::vector<int>                        m_layer_preview_volumes;  // model volume index per result part (-1: negative)
     std::vector<std::pair<GLModel, GLModel>> m_layer_preview_models;  // per model part (mesh_id): red, amber
     GLModel                                 m_layer_cut_supported;    // the stepped layer's areas, world
     GLModel                                 m_layer_cut_unsupported;

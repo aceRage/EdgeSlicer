@@ -27,6 +27,7 @@
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
 
+#include <chrono>
 #include <sstream>
 
 namespace Slic3r::GUI {
@@ -117,7 +118,8 @@ bool GLGizmoFdmSupports::on_init()
     m_desc["remove_caption"]        = shift + _L("Left mouse button");
     m_desc["remove"]                = _L("Erase");
     m_desc["remove_all"]            = _L("Erase all painting");
-    m_desc["highlight_by_angle"]    = _L("Highlight overhang areas");
+    m_desc["highlight_by_angle"]    = _L("Threshold Angle");
+    m_desc["threshold_overlap"]     = _L("Threshold Overlap");
     m_desc["gap_fill"]              = _L("Gap fill");
     m_desc["perform"]               = _L("Perform");
     m_desc["gap_area_caption"]      = ctrl + _L("Mouse wheel");
@@ -131,7 +133,7 @@ bool GLGizmoFdmSupports::on_init()
     m_desc["stabilizer"]            = _L("Paint stabilizer points");
     m_desc["unpaint_caption"]       = _L("Right mouse button");
     m_desc["unpaint"]               = _L("Erase");
-    m_desc["highlight_like_auto"]   = _L("Like auto supports");
+    m_desc["highlight_like_auto"]   = _L("Simulate Auto Supports");
     m_desc["highlight_by_layer"]    = _L("By layer (before slicing)");
     m_desc["layer_preview_layer"]   = _L("Layer");
     m_desc["enforce_highlighted"]   = _L("Enforce highlighted");
@@ -194,7 +196,7 @@ void GLGizmoFdmSupports::on_set_state()
 
     if (get_state() == On) {
         m_highlight_reset_pending = true;
-        m_highlight_like_auto     = wxGetApp().app_config->get("support_paint_highlight_mode") != "angle";
+        m_simulate_auto           = wxGetApp().app_config->get("support_paint_highlight_mode") != "angle";
         m_highlight_by_layer      = wxGetApp().app_config->get_bool("support_paint_highlight_by_layer");
         m_layer_preview_layer     = 0;
     }
@@ -213,11 +215,14 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     // BBS
     wchar_t old_tool = m_current_tool;
 
-    // When the gizmo opens the highlight starts at the automatic supports' angle; in "Like auto
-    // supports" mode it follows the rule while the gizmo is open (layer height, support type,
-    // threshold, wall width, object overrides).
+    // When the gizmo opens the sliders start at the object's support settings; with "Simulate Auto
+    // Supports" they follow them while the gizmo is open (threshold, overlap, layer height, support
+    // type, wall width, object overrides).
     update_highlight_angle_from_rule();
     update_layer_preview();
+    // A setting changed in the sidebar does not redraw this canvas: look again twice a second.
+    if (m_simulate_auto && !m_highlight_by_layer)
+        m_parent.schedule_extra_frame(500);
 
     dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
 
@@ -235,7 +240,8 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     const float clipping_slider_left    = m_imgui->calc_text_size(m_desc.at("clipping_of_view")).x + m_imgui->scaled(1.5f);
     const float cursor_slider_left      = m_imgui->calc_text_size(m_desc.at("cursor_size")).x + m_imgui->scaled(1.5f);
     const float gap_fill_slider_left    = m_imgui->calc_text_size(m_desc.at("gap_fill")).x + m_imgui->scaled(1.5f);
-    const float highlight_slider_left   = m_imgui->calc_text_size(m_desc.at("highlight_by_angle")).x + m_imgui->scaled(1.5f);
+    const float highlight_slider_left   = std::max(m_imgui->calc_text_size(m_desc.at("highlight_by_angle")).x,
+                                                   m_imgui->calc_text_size(m_desc.at("threshold_overlap")).x) + m_imgui->scaled(1.5f);
     const float reset_button_slider_left = m_imgui->calc_text_size(m_desc.at("reset_direction")).x + m_imgui->scaled(1.5f) + ImGui::GetStyle().FramePadding.x * 2;
     const float on_overhangs_only_width  = m_imgui->calc_text_size(m_desc["on_overhangs_only"]).x + m_imgui->scaled(1.5f);
     const float remove_btn_width        = m_imgui->calc_text_size(m_desc.at("remove_all")).x + m_imgui->scaled(1.5f);
@@ -389,63 +395,78 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
         ImGui::BBLDragFloat("##gap_area_input", &TriangleSelectorPatch::gap_area, 0.05f, 0.0f, 0.0f, "%.2f");
     }
 
-    float position_before_text_y = ImGui::GetCursorPos().y;
-    ImGui::AlignTextToFramePadding();
-    m_imgui->text(m_desc["highlight_by_angle"]);
-    ImGui::AlignTextToFramePadding();
-    float position_after_text_y = ImGui::GetCursorPos().y;
-    ImGui::SameLine(sliders_left_width);
-
-    float slider_height = m_imgui->get_slider_float_height();
-    // Makes slider to be aligned to bottom of the multi-line text.
-    float slider_start_position_y = std::max(position_before_text_y, position_after_text_y - slider_height);
-    ImGui::SetCursorPosY(slider_start_position_y);
-
-    std::string format_str = std::string("%.f");
-    ImGui::PushItemWidth(sliders_width);
-    wxString tooltip = _L("Highlight faces according to overhang angle.");
-    // "Like auto supports": the rule sets the angle, so the slider and the input are read-only.
-    const bool highlight_read_only = m_highlight_like_auto;
-    if (highlight_read_only) {
-        ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
-    }
-    bool highlight_angle_changed = m_imgui->bbl_slider_float_style("##angle_threshold_deg", &m_highlight_by_angle_threshold_deg, 0.f, 90.f, format_str.data(), 1.0f, true, wxString());
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        m_imgui->tooltip(tooltip + "\n\n" + highlight_rule_description(), max_tooltip_width);
-    ImGui::SameLine(drag_left_width);
-    ImGui::PushItemWidth(1.5 * slider_icon_width);
-    highlight_angle_changed |= ImGui::BBLDragFloat("##angle_threshold_deg_input", &m_highlight_by_angle_threshold_deg, 0.05f, 0.0f, 0.0f, "%.2f");
-    if (highlight_read_only) {
-        ImGui::PopStyleVar();
-        ImGui::PopItemFlag();
-    }
-    if (highlight_angle_changed && ! highlight_read_only) {
-        m_highlight_by_angle_threshold_deg = std::clamp(m_highlight_by_angle_threshold_deg, 0.f, 90.f);
-        m_parent.set_slope_normal_angle(90.f - m_highlight_by_angle_threshold_deg);
-        if (!m_parent.is_using_slope())
+    // "Threshold Angle" and "Threshold Overlap": the support settings the highlight uses. With
+    // "Simulate Auto Supports" they mirror the object's effective settings and are read-only;
+    // otherwise they are free preview values.
+    const bool thresholds_read_only = m_simulate_auto;
+    const ModelObject *highlight_mo = m_c->selection_info()->model_object();
+    const SupportOverhangRule highlight_rule = current_rule(*highlight_mo);
+    const wxString source_text = threshold_source_text(*highlight_mo);
+    bool thresholds_changed = false;
+    auto threshold_row = [&](const wxString &label, const char *id, float *value, float vmax, const char *fmt, const char *drag_fmt,
+                             bool dimmed, const wxString &tip) {
+        float position_before_text_y = ImGui::GetCursorPos().y;
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(label);
+        ImGui::AlignTextToFramePadding();
+        float position_after_text_y = ImGui::GetCursorPos().y;
+        ImGui::SameLine(sliders_left_width);
+        // Makes slider to be aligned to bottom of the multi-line text.
+        float slider_start_position_y = std::max(position_before_text_y, position_after_text_y - m_imgui->get_slider_float_height());
+        ImGui::SetCursorPosY(slider_start_position_y);
+        ImGui::PushItemWidth(sliders_width);
+        const bool disabled = thresholds_read_only;
+        if (disabled)
+            ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+        if (disabled || dimmed)
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        bool changed = m_imgui->bbl_slider_float_style(std::string("##") + id, value, 0.f, vmax, fmt, 1.0f, true, wxString());
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            m_imgui->tooltip(tip + "\n\n" + source_text + "\n\n" + highlight_rule_description(), max_tooltip_width);
+        ImGui::SameLine(drag_left_width);
+        ImGui::PushItemWidth(1.5 * slider_icon_width);
+        changed |= ImGui::BBLDragFloat((std::string("##") + id + "_input").c_str(), value, 0.1f, 0.0f, vmax, drag_fmt);
+        if (disabled || dimmed)
+            ImGui::PopStyleVar();
+        if (disabled)
+            ImGui::PopItemFlag();
+        if (changed && ! disabled) {
+            *value = std::clamp(std::round(*value), 0.f, vmax);
+            thresholds_changed = true;
+        }
+    };
+    threshold_row(m_desc["highlight_by_angle"], "threshold_angle", &m_threshold_angle, 90.f, "%.0f", "%.0f", false,
+                  _L("The support threshold angle (support_threshold_angle). 0 means: normal supports use the threshold overlap, "
+                     "tree supports 30°. Faces get the tint the automatic supports' layer rule gives this value."));
+    // The overlap only counts for normal supports with a threshold angle of 0.
+    const bool overlap_applies = highlight_rule.source == SupportOverhangRule::Source::Overlap;
+    threshold_row(m_desc["threshold_overlap"], "threshold_overlap", &m_threshold_overlap, 100.f, "%.0f%%", "%.0f", ! overlap_applies,
+                  _L("The support threshold overlap (support_threshold_overlap), in percent of the outer wall width. Only used by "
+                     "normal supports when the threshold angle is 0."));
+    if (thresholds_changed) {
+        update_highlight_angle_from_rule();
+        if (!m_parent.is_using_slope() && !(m_highlight_by_layer && m_layer_preview))
             m_parent.use_slope(true);
         m_parent.set_as_dirty();
     }
 
-    if (m_imgui->bbl_checkbox(m_desc["highlight_like_auto"], m_highlight_like_auto)) {
-        wxGetApp().app_config->set("support_paint_highlight_mode", m_highlight_like_auto ? "auto" : "angle");
-        if (m_highlight_like_auto) {
-            m_highlight_reset_pending = true;
-            update_highlight_angle_from_rule();
-            if (!m_parent.is_using_slope())
-                m_parent.use_slope(true);
-        }
+    if (m_imgui->bbl_checkbox(m_desc["highlight_like_auto"], m_simulate_auto)) {
+        wxGetApp().app_config->set("support_paint_highlight_mode", m_simulate_auto ? "auto" : "angle");
+        update_highlight_angle_from_rule();
+        if (!m_parent.is_using_slope() && !(m_highlight_by_layer && m_layer_preview))
+            m_parent.use_slope(true);
         m_parent.set_as_dirty();
     }
     if (ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("Highlight what automatic supports will hold up for this object: the threshold angle, or the threshold "
-                            "overlap at this layer height and outer wall width, or the 30° fallback of tree supports. Off, the "
-                            "slider starts there and can be moved.") +
-                             "\n\n" + highlight_rule_description(),
+        m_imgui->tooltip(_L("Use the support settings in effect for this object (its own override, else the process) and follow them "
+                            "when they change. Off, the threshold angle and overlap above are free preview values.") +
+                             "\n\n" + source_text + "\n\n" + highlight_rule_description(),
                          max_tooltip_width);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.7f);
+    m_imgui->text_wrapped(source_text, max_tooltip_width);
+    ImGui::PopStyleVar();
 
-    // Phase 3: "By layer (before slicing)".
+    // "By layer (before slicing)": the generator's own decision.
     if (m_imgui->bbl_checkbox(m_desc["highlight_by_layer"], m_highlight_by_layer)) {
         wxGetApp().app_config->set_bool("support_paint_highlight_by_layer", m_highlight_by_layer);
         if (m_highlight_by_layer) {
@@ -457,10 +478,11 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
         m_parent.set_as_dirty();
     }
     if (ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("Slice the object in the background at its layer heights and mark what automatic supports would hold "
-                            "up on each layer: red is supported, amber is an overhang left without support (supports off or "
-                            "manual, or above the object with \"On build plate only\"). Catches corners and floating islands a "
-                            "face angle cannot see. Not modelled: bridges, small overhang removal and painted areas."),
+        m_imgui->tooltip(_L("Run the support generator's own overhang detection on this object in the background, with the support "
+                            "type and settings in effect for it (its overrides, bridges, small overhang removal, build plate only, "
+                            "painted enforcers and blockers), and mark the result on the faces: red is held up by the support, amber is "
+                            "an overhang the generator leaves (a bridge, a small overhang, above the object with \"On build plate only\"). "
+                            "Supports switched off or manual are simulated as automatic."),
                          max_tooltip_width);
     if (m_highlight_by_layer) {
         if (m_layer_preview_too_big) {
@@ -637,15 +659,76 @@ void GLGizmoFdmSupports::show_tooltip_information(float caption_max, float x, fl
     ImGui::PopStyleVar(2);
 }
 
+// The threshold angle and overlap the object's supports really use: its own override, else the process.
+GLGizmoFdmSupports::ThresholdSource GLGizmoFdmSupports::effective_thresholds(const ModelObject &mo) const
+{
+    ThresholdSource out;
+    const DynamicPrintConfig &process = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    const DynamicPrintConfig &object  = mo.config.get();
+    if (const auto *opt = object.option<ConfigOptionInt>("support_threshold_angle")) {
+        out.angle             = opt->value;
+        out.angle_from_object = true;
+    } else if (const auto *process_angle = process.option<ConfigOptionInt>("support_threshold_angle"))
+        out.angle = process_angle->value;
+    const ConfigOptionFloatOrPercent *overlap = object.option<ConfigOptionFloatOrPercent>("support_threshold_overlap");
+    out.overlap_from_object = overlap != nullptr;
+    if (overlap == nullptr)
+        overlap = process.option<ConfigOptionFloatOrPercent>("support_threshold_overlap");
+    if (overlap != nullptr) {
+        if (overlap->percent)
+            out.overlap_pct = overlap->value;
+        else {
+            // An absolute overlap, shown as the share of this object's outer wall.
+            out.overlap_absolute = true;
+            const double wall    = support_overhang_rule_for(&mo).outer_wall_width;
+            out.overlap_pct      = wall > 0. ? 100. * overlap->value / wall : 50.;
+        }
+    }
+    return out;
+}
+
+SupportOverhangRule GLGizmoFdmSupports::current_rule(const ModelObject &mo) const
+{
+    const PresetBundle &bundle = *wxGetApp().preset_bundle;
+    DynamicPrintConfig cfg = support_overhang_rule_config(bundle.prints.get_edited_preset().config, bundle.printers.get_edited_preset().config,
+                                                          bundle.project_config, bundle.filament_presets.size(), &mo.config.get());
+    if (! m_simulate_auto) {
+        // Free preview values in place of the settings.
+        cfg.set_key_value("support_threshold_angle", new ConfigOptionInt(int(std::lround(m_threshold_angle))));
+        cfg.set_key_value("support_threshold_overlap", new ConfigOptionFloatOrPercent(double(m_threshold_overlap), true));
+    }
+    return support_overhang_rule(cfg);
+}
+
+wxString GLGizmoFdmSupports::threshold_source_text(const ModelObject &mo) const
+{
+    if (! m_simulate_auto)
+        return _L("Preview values, not saved to the settings");
+    const ThresholdSource src = effective_thresholds(mo);
+    if (src.angle_from_object && src.overlap_from_object)
+        return _L("From this object's settings");
+    if (src.angle_from_object)
+        return _L("Angle from this object's settings, overlap from the process");
+    if (src.overlap_from_object)
+        return _L("Angle from the process, overlap from this object's settings");
+    return _L("From the process settings");
+}
+
 void GLGizmoFdmSupports::update_highlight_angle_from_rule()
 {
-    if (! m_highlight_reset_pending && ! m_highlight_like_auto)
-        return;
     const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
     if (mo == nullptr)
         return;
+    // Simulate Auto Supports mirrors the settings; otherwise the sliders start there once.
+    if (m_simulate_auto || m_highlight_reset_pending) {
+        const ThresholdSource src = effective_thresholds(*mo);
+        m_threshold_angle   = float(src.angle);
+        m_threshold_overlap = float(src.overlap_pct);
+    }
     m_highlight_reset_pending = false;
-    const float angle = float(std::clamp(support_overhang_rule_for(mo).effective_angle_deg(), 0., 90.));
+    // The face tint: the angle a planar slope needs to get support under those settings. The
+    // sliders show the settings themselves (no +1); the rule adds the generators' +1.
+    const float angle = float(std::clamp(current_rule(*mo).effective_angle_deg(), 0., 90.));
     if (std::abs(angle - m_highlight_by_angle_threshold_deg) > 1e-3f) {
         m_highlight_by_angle_threshold_deg = angle;
         m_parent.set_slope_normal_angle(90.f - angle);
@@ -658,7 +741,7 @@ wxString GLGizmoFdmSupports::highlight_rule_description() const
     const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
     if (mo == nullptr)
         return {};
-    const SupportOverhangRule rule = support_overhang_rule_for(mo);
+    const SupportOverhangRule rule = current_rule(*mo);
     const double h     = rule.layer_height;
     const double angle = rule.effective_angle_deg();
     auto deg = [](double v) { return wxString::Format("%.1f", v); };
@@ -709,25 +792,27 @@ wxString GLGizmoFdmSupports::highlight_rule_description() const
         out += "\n" + _L("Supports are off for this object: this shows what automatic supports would hold up.");
     else if (! rule.auto_support)
         out += "\n" + _L("The support type is manual: only painted areas get support. This shows what automatic supports would hold up.");
-    out += "\n" + _L("Not shown: bridges, sharp tails, small overhang removal, build plate only and convex corners.");
+    out += "\n" + _L("Not shown by a face angle: bridges, sharp tails, small overhang removal, build plate only and convex "
+                     "corners. \"By layer (before slicing)\" shows the generator's own decision.");
     return out;
 }
 
 // ---------------------------------------------------------------------------------------------
-// Phase 3: "By layer (before slicing)"
+// "By layer (before slicing)" (phase 3; since phase 5 the generator's own detection)
 // ---------------------------------------------------------------------------------------------
 
-// Above this many faces the background slice is skipped and the angle highlight stays.
+// Above this many faces the background job is skipped and the angle highlight stays.
 static constexpr size_t LAYER_PREVIEW_MAX_FACETS = 3000000;
 static const ColorRGBA  LAYER_PREVIEW_SUPPORTED_COLOR   = { 0.90f, 0.12f, 0.12f, 0.55f };
 static const ColorRGBA  LAYER_PREVIEW_UNSUPPORTED_COLOR = { 1.00f, 0.66f, 0.00f, 0.60f };
 
-namespace {
-struct LayerPreviewCancelled {};
+static long long layer_preview_now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// What the preview depends on: the object's parts, their placement, the slicing and the support
-// rule. A change starts a new background job.
+// The geometry and the highlight's own inputs: the object's parts, their placement, the painted
+// enforcers / blockers, the layer height profile and ranges, and the free threshold values.
 std::string GLGizmoFdmSupports::layer_preview_key(const ModelObject &mo, int instance_idx) const
 {
     std::ostringstream ss;
@@ -740,42 +825,54 @@ std::string GLGizmoFdmSupports::layer_preview_key(const ModelObject &mo, int ins
     if (instance_idx >= 0 && size_t(instance_idx) < mo.instances.size())
         matrix(mo.instances[instance_idx]->get_matrix());
     for (const ModelVolume *mv : mo.volumes) {
-        if (!mv->is_model_part() && !mv->is_negative_volume())
-            continue;
-        ss << '|' << int(mv->type()) << ':' << mv->get_mesh_shared_ptr().get() << ':';
+        ss << '|' << int(mv->type()) << ':' << mv->get_mesh_shared_ptr().get() << ':' << mv->supported_facets.timestamp() << ':';
         matrix(mv->get_matrix());
-    }
-    const PresetBundle &bundle = *wxGetApp().preset_bundle;
-    const DynamicPrintConfig rule_cfg = support_overhang_rule_config(bundle.prints.get_edited_preset().config, bundle.printers.get_edited_preset().config,
-                                                                     bundle.project_config, bundle.filament_presets.size(), &mo.config.get());
-    ss << '|' << rule_cfg.opt_serialize("support_type");
-    for (const std::string &key : rule_cfg.keys())
-        ss << key << '=' << rule_cfg.opt_serialize(key) << ';';
-    for (const char *key : { "initial_layer_print_height", "raft_layers", "support_on_build_plate_only", "slice_closing_radius",
-                             "precise_z_height", "min_layer_height", "max_layer_height" }) {
-        const ConfigOption *opt = mo.config.get().option(key);
-        if (opt == nullptr)
-            opt = bundle.prints.get_edited_preset().config.option(key);
-        if (opt == nullptr)
-            opt = bundle.printers.get_edited_preset().config.option(key);
-        if (opt != nullptr)
-            ss << key << '=' << opt->serialize() << ';';
+        // A part's own settings (wall widths, filaments) change its slices' flow.
+        for (const std::string &key : mv->config.keys())
+            ss << key << '=' << mv->config.option(key)->serialize() << ';';
     }
     ss << "|profile:";
     for (coordf_t v : mo.layer_height_profile.get())
         ss << v << ',';
     for (const auto &range : mo.layer_config_ranges) {
         ss << "|range:" << range.first.first << '-' << range.first.second << ':';
-        if (const ConfigOption *opt = range.second.get().option("layer_height"))
-            ss << opt->serialize();
+        for (const std::string &key : range.second.keys())
+            ss << key << '=' << range.second.option(key)->serialize() << ';';
     }
+    ss << "|simulate:" << m_simulate_auto;
+    if (! m_simulate_auto)
+        ss << ':' << std::lround(m_threshold_angle) << ':' << std::lround(m_threshold_overlap);
     return ss.str();
+}
+
+// Any print / printer / project / object setting may change the generator's decision (support
+// type and style, thresholds, bridges, small-overhang removal, wall widths, layer heights ...):
+// compare them with what the last job saw. A few hundred option compares, cheap per frame.
+bool GLGizmoFdmSupports::layer_preview_settings_changed(const ModelObject &mo)
+{
+    const PresetBundle &bundle = *wxGetApp().preset_bundle;
+    const bool changed = bundle.prints.get_edited_preset().config != m_layer_preview_print_cfg ||
+                         bundle.printers.get_edited_preset().config != m_layer_preview_printer_cfg ||
+                         bundle.project_config != m_layer_preview_project_cfg || mo.config.get() != m_layer_preview_object_cfg ||
+                         bundle.filament_presets != m_layer_preview_filaments;
+    if (changed) {
+        ++ m_layer_preview_settings_rev;
+        m_layer_preview_print_cfg   = bundle.prints.get_edited_preset().config;
+        m_layer_preview_printer_cfg = bundle.printers.get_edited_preset().config;
+        m_layer_preview_project_cfg = bundle.project_config;
+        m_layer_preview_object_cfg  = mo.config.get();
+        m_layer_preview_filaments   = bundle.filament_presets;
+    }
+    return changed;
 }
 
 void GLGizmoFdmSupports::stop_layer_preview_job()
 {
-    if (m_layer_preview_job)
+    if (m_layer_preview_job) {
         m_layer_preview_job->cancel = true;
+        if (m_layer_preview_job->print)
+            m_layer_preview_job->print->cancel();
+    }
     if (m_layer_preview_thread.joinable())
         m_layer_preview_thread.join();
     m_layer_preview_job.reset();
@@ -788,11 +885,12 @@ void GLGizmoFdmSupports::clear_layer_preview()
         m_c->object_clipper()->set_position_by_ratio(0., false);
     m_layer_preview_layer = 0;
     m_layer_preview.reset();
-    m_layer_preview_volumes.clear();
     m_layer_preview_models.clear();
     m_layer_cut_supported.reset();
     m_layer_cut_unsupported.reset();
     m_layer_preview_key.clear();
+    m_layer_preview_pending_key.clear();
+    m_layer_preview_print_cfg.clear();
     m_layer_preview_too_big = false;
 }
 
@@ -821,7 +919,7 @@ void GLGizmoFdmSupports::update_layer_preview()
             else
                 set_layer_preview_layer(m_layer_preview_layer);
             const SupportOverhangPreview &p = *m_layer_preview;
-            BOOST_LOG_TRIVIAL(info) << "Support layer preview: " << p.slice_z.size() << " layers, slice " << p.slice_ms << " ms, detect "
+            BOOST_LOG_TRIVIAL(info) << "Support layer preview: " << p.slice_z.size() << " layers, steps " << p.slice_ms << " ms, detect "
                                     << p.detect_ms << " ms, map " << p.map_ms << " ms";
         } else if (!m_layer_preview_job->error.empty()) {
             BOOST_LOG_TRIVIAL(error) << "Support layer preview failed: " << m_layer_preview_job->error;
@@ -830,28 +928,24 @@ void GLGizmoFdmSupports::update_layer_preview()
         m_parent.set_as_dirty();
     }
 
-    const std::string key = layer_preview_key(*mo, instance_idx);
-    if (key != m_layer_preview_key) {
-        m_layer_preview_key = key;
+    // Any change of the object, its settings or the highlight's own values starts a new job after
+    // a short pause (a dragged slider does not restart it every frame). The settings are compared
+    // every frame, so a change in the sidebar shows up without touching the gizmo.
+    layer_preview_settings_changed(*mo);
+    const std::string key = layer_preview_key(*mo, instance_idx) + "|settings:" + std::to_string(m_layer_preview_settings_rev);
+    if (key != m_layer_preview_key && key != m_layer_preview_pending_key) {
+        m_layer_preview_pending_key = key;
+        m_layer_preview_pending_ms  = layer_preview_now_ms();
+    }
+    const bool pending = ! m_layer_preview_pending_key.empty() && m_layer_preview_pending_key != m_layer_preview_key;
+    if (pending && layer_preview_now_ms() - m_layer_preview_pending_ms >= 250) {
+        m_layer_preview_key = m_layer_preview_pending_key;
         stop_layer_preview_job();
 
-        SupportOverhangPreviewInput in;
-        const Transform3d instance_trafo = mo->instances[instance_idx]->get_matrix();
-        m_layer_preview_volumes.clear();
         m_layer_preview_facets = 0;
-        for (size_t v = 0; v < mo->volumes.size(); ++ v) {
-            const ModelVolume *mv = mo->volumes[v];
-            if (!mv->is_model_part() && !mv->is_negative_volume())
-                continue;
-            const std::shared_ptr<const TriangleMesh> &mesh = mv->get_mesh_shared_ptr();
-            if (!mesh)
-                continue;
-            // Shares the volume's immutable mesh with the job, no copy.
-            in.parts.push_back({ std::shared_ptr<const indexed_triangle_set>(mesh, &mesh->its), instance_trafo * mv->get_matrix(), mv->is_negative_volume() });
-            m_layer_preview_volumes.push_back(mv->is_negative_volume() ? -1 : int(v));
+        for (const ModelVolume *mv : mo->volumes)
             if (mv->is_model_part())
-                m_layer_preview_facets += mesh->its.indices.size();
-        }
+                m_layer_preview_facets += mv->mesh().its.indices.size();
         m_layer_preview_too_big = m_layer_preview_facets > LAYER_PREVIEW_MAX_FACETS;
         if (m_layer_preview_too_big) {
             m_layer_preview.reset();
@@ -860,41 +954,37 @@ void GLGizmoFdmSupports::update_layer_preview()
             return;
         }
 
-        // The object's real layers (layer height, first layer, variable layer height, layer ranges).
-        DynamicPrintConfig full = wxGetApp().preset_bundle->full_config();
-        const BoundingBoxf3 bb = mo->instance_bounding_box(size_t(instance_idx));
-        const SlicingParameters sp = PrintObject::slicing_parameters(full, *mo, float(bb.max.z()), Vec3d::Ones());
-        std::vector<coordf_t> profile;
-        PrintObject::update_layer_height_profile(*mo, sp, profile);
-        const ConfigOptionBool *precise = full.option<ConfigOptionBool>("precise_z_height");
-        in.layer_zs = generate_object_layers(sp, profile, precise != nullptr && precise->value);
-        in.rule     = support_overhang_rule_for(mo);
-        DynamicPrintConfig object_full = full;
-        object_full.apply(mo->config.get(), true);
-        if (const ConfigOptionBool *opt = object_full.option<ConfigOptionBool>("support_on_build_plate_only"))
-            in.build_plate_only = opt->value;
-        if (const ConfigOptionFloat *opt = object_full.option<ConfigOptionFloat>("slice_closing_radius"))
-            in.closing_radius = float(opt->value);
-
-        auto job = std::make_shared<LayerPreviewJob>();
+        // A private copy of the object alone (its config carries its overrides; meshes are shared,
+        // immutable), placed by the shown instance, and the full config. With free threshold values
+        // they replace the object's own.
+        auto job   = std::make_shared<LayerPreviewJob>();
+        job->model = std::make_unique<Model>();
+        ModelObject *copy = job->model->add_object(*mo);
+        copy->clear_instances();
+        copy->add_instance(*mo->instances[instance_idx]);
+        job->config = wxGetApp().preset_bundle->full_config();
+        if (! m_simulate_auto) {
+            DynamicPrintConfig object_config = copy->config.get();
+            object_config.set_key_value("support_threshold_angle", new ConfigOptionInt(int(std::lround(m_threshold_angle))));
+            object_config.set_key_value("support_threshold_overlap", new ConfigOptionFloatOrPercent(double(m_threshold_overlap), true));
+            copy->config.assign_config(std::move(object_config));
+        }
+        job->print = std::make_unique<Print>();
         m_layer_preview_job = job;
-        m_layer_preview_thread = std::thread([job, in = std::move(in)]() {
+        m_layer_preview_thread = std::thread([job]() {
             try {
-                SupportOverhangPreview result = support_overhang_preview(in, [&job]() {
-                    if (job->cancel)
-                        throw LayerPreviewCancelled();
-                });
-                job->result = std::make_unique<SupportOverhangPreview>(std::move(result));
-            } catch (const LayerPreviewCancelled &) {
+                SupportOverhangPreview result = support_overhang_preview_exact(*job->print, *job->model, job->config);
+                if (! job->cancel)
+                    job->result = std::make_unique<SupportOverhangPreview>(std::move(result));
+            } catch (const CanceledException &) {
             } catch (const std::exception &ex) {
                 job->error = ex.what();
             }
             job->done = true;
         });
     }
-    // Look again for the result while the job runs.
-    if (m_layer_preview_job)
-        m_parent.schedule_extra_frame(100);
+    // Look again for the result, the debounce and changes made outside the gizmo.
+    m_parent.schedule_extra_frame(m_layer_preview_job || pending ? 100 : 500);
 }
 
 void GLGizmoFdmSupports::rebuild_layer_preview_models()
@@ -906,15 +996,14 @@ void GLGizmoFdmSupports::rebuild_layer_preview_models()
     // One pair of models per model part, in the order render_triangles() walks them (mesh_id).
     // Reserved up front: a GLModel must not be copied once it owns GPU buffers.
     m_layer_preview_models.reserve(size_t(std::count_if(mo->volumes.begin(), mo->volumes.end(), [](const ModelVolume *v) { return v->is_model_part(); })));
-    for (const ModelVolume *mv : mo->volumes) {
+    for (size_t v = 0; v < mo->volumes.size(); ++ v) {
+        const ModelVolume *mv = mo->volumes[v];
         if (!mv->is_model_part())
             continue;
         m_layer_preview_models.emplace_back();
-        const size_t v = size_t(std::find(mo->volumes.begin(), mo->volumes.end(), mv) - mo->volumes.begin());
-        const auto   it = std::find(m_layer_preview_volumes.begin(), m_layer_preview_volumes.end(), int(v));
-        if (it == m_layer_preview_volumes.end())
+        if (v >= m_layer_preview->part_facets.size())
             continue;
-        const std::vector<uint8_t> &flags = m_layer_preview->part_facets[size_t(it - m_layer_preview_volumes.begin())];
+        const std::vector<uint8_t> &flags = m_layer_preview->part_facets[v];
         const indexed_triangle_set &its   = mv->mesh().its;
         if (flags.size() != its.indices.size())
             continue;
@@ -1051,10 +1140,9 @@ void GLGizmoFdmSupports::paint_layer_preview_facets(bool block)
         ++ mesh_id;
         if (size_t(mesh_id) >= m_triangle_selectors.size())
             break;
-        const auto it = std::find(m_layer_preview_volumes.begin(), m_layer_preview_volumes.end(), int(v));
-        if (it == m_layer_preview_volumes.end())
+        if (v >= m_layer_preview->part_facets.size())
             continue;
-        const std::vector<uint8_t> &flags = m_layer_preview->part_facets[size_t(it - m_layer_preview_volumes.begin())];
+        const std::vector<uint8_t> &flags = m_layer_preview->part_facets[v];
         if (flags.size() != mv->mesh().its.indices.size())
             continue;
         bool changed = false;

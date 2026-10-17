@@ -34,6 +34,8 @@ namespace Slic3r {
 
 class ConfigBase;
 class DynamicPrintConfig;
+class Model;
+class Print;
 class PrintObject;
 
 struct SupportOverhangRule
@@ -182,5 +184,26 @@ struct SupportOverhangPreview
 // critical regions only, painted enforcers / blockers (the gizmo shows those itself).
 SupportOverhangPreview support_overhang_preview(const SupportOverhangPreviewInput &input,
                                                 const std::function<void()>       &throw_on_cancel = {});
+
+// ---------------------------------------------------------------------------------------------
+// Phase 5: the generators' own decision before slicing.
+// ---------------------------------------------------------------------------------------------
+
+// Forces "automatic supports on" into a config (and an object's config): enable_support on and the
+// auto variant of the support type, keeping normal vs tree. Simulating automatic supports this way
+// keeps every other support setting as it is.
+void support_overhang_simulate_auto(DynamicPrintConfig &config, bool add_missing = true);
+
+// The overhang areas the support generator decides to hold up, before slicing, by running the
+// generator itself: `print` (a fresh Print the caller keeps, so another thread can cancel() it)
+// takes `model` (one object with the one instance to show; its config carries the object's
+// overrides) and the full `config`, runs the object steps the detection reads and the detection of
+// the support type in effect (PrintObject::detect_support_overhangs_only()), then maps the result
+// onto the faces. supported = Layer::support_overhangs (exactly what the generator holds up),
+// unsupported = the support rule's overhang the generator leaves (bridges, small overhangs, build
+// plate only, blockers ...), as the preview overlay of phase 2 shows them. Areas are world XY,
+// print_z without the raft; part_facets has one entry per model volume (empty unless a model part).
+// Runs on the caller's thread; Print::cancel() ends it with CanceledException.
+SupportOverhangPreview support_overhang_preview_exact(Print &print, const Model &model, const DynamicPrintConfig &config);
 
 } // namespace Slic3r

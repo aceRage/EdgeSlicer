@@ -9,6 +9,7 @@
 #include "../Flow.hpp"
 #include "../Geometry.hpp"
 #include "../Layer.hpp"
+#include "../Model.hpp"
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
 #include "../Tesselate.hpp"
@@ -250,12 +251,12 @@ std::vector<ExPolygons> support_overhangs_from_slices(const std::vector<ExPolygo
     return out;
 }
 
-std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObject &object)
+// Every object layer (index = layer id; layer 0 empty), triangulated or not.
+static std::vector<SupportOverhangOverlayLayer> support_overhang_layers(const PrintObject &object, bool triangulate)
 {
-    std::vector<SupportOverhangOverlayLayer> out;
     const size_t n = object.layer_count();
     if (n < 2)
-        return out;
+        return {};
 
     const SupportOverhangRule rule = support_overhang_rule(object);
     std::vector<ExPolygons>   lslices(n);
@@ -290,13 +291,21 @@ std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObj
                 if (! l.unsupported.empty())
                     l.unsupported = opening_ex(l.unsupported, tol);
             }
-            if (! l.supported.empty())
+            if (triangulate && ! l.supported.empty())
                 l.supported_triangles = triangulate_expolygons_2f(l.supported, NORMALS_UP);
-            if (! l.unsupported.empty())
+            if (triangulate && ! l.unsupported.empty())
                 l.unsupported_triangles = triangulate_expolygons_2f(l.unsupported, NORMALS_UP);
         }
     });
-    for (SupportOverhangOverlayLayer &l : layers)
+    if (n > 0)
+        layers.front().print_z = object.get_layer(0)->print_z;
+    return layers;
+}
+
+std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObject &object)
+{
+    std::vector<SupportOverhangOverlayLayer> out;
+    for (SupportOverhangOverlayLayer &l : support_overhang_layers(object, true))
         if (! l.supported.empty() || ! l.unsupported.empty())
             out.emplace_back(std::move(l));
     return out;
@@ -612,6 +621,109 @@ SupportOverhangPreview support_overhang_preview(const SupportOverhangPreviewInpu
                 flags[f] = 2;
         out.part_facets[p] = std::move(flags);
         cancel();
+    }
+    const auto t3 = clock::now();
+    out.slice_ms  = ms(t0, t1);
+    out.detect_ms = ms(t1, t2);
+    out.map_ms    = ms(t2, t3);
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 5: the generators' own decision before slicing
+// ---------------------------------------------------------------------------------------------
+
+void support_overhang_simulate_auto(DynamicPrintConfig &config, bool add_missing)
+{
+    if (add_missing || config.has("enable_support"))
+        config.set_key_value("enable_support", new ConfigOptionBool(true));
+    if (const auto *type = config.option<ConfigOptionEnum<SupportType>>("support_type")) {
+        if (! is_auto(type->value))
+            config.set_key_value("support_type", new ConfigOptionEnum<SupportType>(is_tree(type->value) ? stTreeAuto : stNormalAuto));
+    } else if (add_missing)
+        config.set_key_value("support_type", new ConfigOptionEnum<SupportType>(stNormalAuto));
+}
+
+SupportOverhangPreview support_overhang_preview_exact(Print &print, const Model &model_in, const DynamicPrintConfig &config_in)
+{
+    using clock = std::chrono::steady_clock;
+    auto ms = [](clock::time_point a, clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+
+    SupportOverhangPreview out;
+    if (model_in.objects.empty() || model_in.objects.front()->instances.empty())
+        return out;
+
+    // Simulate automatic supports with every other support setting as configured, the object's
+    // overrides included: the generators run their detection only when supports are on and auto.
+    Model model(model_in);
+    DynamicPrintConfig config = config_in;
+    support_overhang_simulate_auto(config, true);
+    for (ModelObject *mo : model.objects) {
+        DynamicPrintConfig object_config = mo->config.get();
+        support_overhang_simulate_auto(object_config, false);
+        mo->config.assign_config(std::move(object_config));
+    }
+
+    const auto t0 = clock::now();
+    print.apply(model, config);
+    print.set_status_silent();
+    if (print.objects().empty())
+        return out;
+    PrintObject &object = *print.objects().front();
+    object.detect_support_overhangs_only();
+    const auto t1 = clock::now();
+
+    // What the generator holds up and what the rule flags that it leaves, as the preview overlay.
+    std::vector<SupportOverhangOverlayLayer> layers = support_overhang_layers(object, false);
+    const size_t n = object.layer_count();
+    const double zmin = object.slicing_parameters().object_print_z_min;
+    const Point  shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift;
+    out.slice_z.resize(n);
+    out.print_z.resize(n);
+    out.supported.assign(n, {});
+    out.unsupported.assign(n, {});
+    std::vector<double> heights(n);
+    for (size_t i = 0; i < n; ++ i) {
+        const Layer &layer = *object.get_layer(int(i));
+        out.slice_z[i] = float(layer.slice_z);
+        out.print_z[i] = layer.print_z - zmin;
+        heights[i]     = layer.height;
+        if (i < layers.size()) {
+            out.supported[i]   = std::move(layers[i].supported);
+            out.unsupported[i] = std::move(layers[i].unsupported);
+            for (ExPolygon &e : out.supported[i])
+                e.translate(shift);
+            for (ExPolygon &e : out.unsupported[i])
+                e.translate(shift);
+        }
+    }
+    const auto t2 = clock::now();
+    if (print.canceled()) throw CanceledException();
+
+    // Back onto the faces of every model part, placed by the one instance.
+    const SupportOverhangRule rule = support_overhang_rule(object);
+    std::vector<double> grow;
+    if (rule.tree) {
+        // A tree overhang is the band past the grown lower layer: grow it back over its facet strip.
+        grow.assign(n, 0.);
+        for (size_t i = 1; i < n; ++ i)
+            grow[i] = std::max(0., rule.lower_layer_offset(heights[i - 1]));
+    }
+    const ModelObject   &mo       = *model_in.objects.front();
+    const Transform3d    instance = mo.instances.front()->get_matrix();
+    out.part_facets.assign(mo.volumes.size(), {});
+    for (size_t v = 0; v < mo.volumes.size(); ++ v) {
+        const ModelVolume *mv = mo.volumes[v];
+        if (! mv->is_model_part())
+            continue;
+        const Transform3d trafo = instance * mv->get_matrix();
+        std::vector<uint8_t> flags = overhang_facets_from_layers(mv->mesh().its, trafo, out.slice_z, out.supported, grow);
+        const std::vector<uint8_t> amber = overhang_facets_from_layers(mv->mesh().its, trafo, out.slice_z, out.unsupported, grow);
+        for (size_t f = 0; f < flags.size(); ++ f)
+            if (flags[f] == 0 && amber[f] != 0)
+                flags[f] = 2;
+        out.part_facets[v] = std::move(flags);
+        if (print.canceled()) throw CanceledException();
     }
     const auto t3 = clock::now();
     out.slice_ms  = ms(t0, t1);
