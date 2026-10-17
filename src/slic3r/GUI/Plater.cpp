@@ -28075,27 +28075,52 @@ void Plater::apply_image_fill(const wxString &image_path)
         initial.gradient.enabled = false;
     }
 
-    // Phase 3 (image row): whether this part is ALREADY bound to an enabled ImageWeighted row,
-    // so re-opening the dialog starts with the checkbox ticked - the same promise `initial` makes
-    // for the projection settings above. `filaments.size()` is the physical filament count (see
-    // the loop that built `filaments`, off filament_colour, above).
+    // Phases 3-5a (image row): which surfaces this part is ALREADY re-sampling through an enabled
+    // ImageWeighted row, so re-opening the dialog starts with the same boxes ticked - the same
+    // promise `initial` makes for the projection settings above. `filaments.size()` is the
+    // physical filament count (see the loop that built `filaments`, off filament_colour, above).
+    //
+    // The top binding is solid_infill_filament; the walls binding is wall_filament. Phase 5a binds
+    // wall_filament for "Top surfaces" too (the top edge of the outer wall is part of the top
+    // picture), so which boxes were ticked is read from the row's own params (`rs`), and only a
+    // row from before phase 5a (rs absent) falls back to "the key it is bound to".
     const size_t num_physical = filaments.size();
     PresetBundle *preset_bundle = wxGetApp().preset_bundle;
-    bool initial_image_row = false;
-    if (preset_bundle != nullptr) {
-        if (const ConfigOptionInt *sif = volume->config.get().option<ConfigOptionInt>("solid_infill_filament")) {
-            const unsigned int vid = unsigned(std::max(0, sif->value));
-            const MixedFilament *mf = preset_bundle->mixed_filaments.mixed_filament_from_id(vid, num_physical);
-            initial_image_row = mf != nullptr && mf->enabled && mf->distribution_mode == int(MixedFilament::ImageWeighted);
-        }
+    auto bound_image_row_idx = [&](const char *key) -> int {
+        if (preset_bundle == nullptr)
+            return -1;
+        const ConfigOptionInt *opt = volume->config.get().option<ConfigOptionInt>(key);
+        if (opt == nullptr || opt->value <= 0)
+            return -1;
+        MixedFilamentManager &mgr = preset_bundle->mixed_filaments;
+        const int idx = mgr.mixed_index_from_filament_id(unsigned(opt->value), num_physical);
+        if (idx < 0 || mgr.mixed_filaments()[size_t(idx)].distribution_mode != int(MixedFilament::ImageWeighted))
+            return -1;
+        return idx;
+    };
+    const int top_row_idx  = bound_image_row_idx("solid_infill_filament");
+    const int wall_row_idx = bound_image_row_idx("wall_filament");
+    int initial_row_surfaces = 0;
+    {
+        const int bound_idx = top_row_idx >= 0 ? top_row_idx : wall_row_idx;
+        ImageFillParams row_params;
+        if (bound_idx >= 0 && preset_bundle->mixed_filaments.mixed_filaments()[size_t(bound_idx)].enabled &&
+            ImageFillParams::from_string(MixedFilamentManager::decode_image_fill_ref(
+                                             preset_bundle->mixed_filaments.mixed_filaments()[size_t(bound_idx)].image_fill_ref),
+                                         row_params) &&
+            row_params.surfaces != 0)
+            initial_row_surfaces = row_params.surfaces;
+        else
+            initial_row_surfaces = (top_row_idx >= 0 ? IMAGE_FILL_SURFACE_TOP : 0) |
+                                   (wall_row_idx >= 0 ? IMAGE_FILL_SURFACE_WALLS : 0);
     }
 
     GUI::ImageFillDialog dlg(this, filaments, initial, &model().image_assets, volume->mesh().its,
-                             volume->mmu_segmentation_facets.get_data(), painted, initial_image_row);
+                             volume->mmu_segmentation_facets.get_data(), painted, initial_row_surfaces);
     if (dlg.ShowModal() != wxID_OK)
         return;
-    const ImageFillParams params = dlg.params();
-    const bool image_row = dlg.image_row_dither();
+    const ImageFillParams params       = dlg.params();
+    const int             row_surfaces = dlg.image_row_surfaces();
 
     std::vector<std::array<float, 3>> colors;
     std::vector<int>                  ids;
@@ -28106,8 +28131,8 @@ void Plater::apply_image_fill(const wxString &image_path)
         }
 
     take_snapshot("Apply image fill");
-    // Phase 2's facet painting always runs, whether or not the image-row checkbox is ticked - the
-    // dialog's own tooltip explains why (a printer/slicer that never reads the row still gets a
+    // Phase 2's facet painting always runs, whether or not the image-row boxes are ticked - the
+    // dialog's own tooltips explain why (a printer/slicer that never reads the row still gets a
     // correct, if coarser, result).
     const ImageFillResult res = image_fill_apply(*volume, params, model().image_assets, colors, ids);
     if (!res.ok) {
@@ -28115,25 +28140,21 @@ void Plater::apply_image_fill(const wxString &image_path)
         return;
     }
 
-    // Phase 3 (image row): create-or-update the part's ImageWeighted MixedFilament row and bind
-    // solid_infill_filament to it, or drop the binding (leaving the row itself alone) - see
-    // Fill.cpp's image_row_configured_virtual_id() for the key this reads at slice time, and
-    // docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md's step 5 for the design.
+    // Phases 3-5a (image row): create-or-update the part's ImageWeighted MixedFilament row and bind
+    // it, or drop the bindings (leaving the row itself alone). Fill.cpp's
+    // image_row_configured_virtual_id() reads solid_infill_filament (top and bottom surfaces);
+    // ImageRowWalls.cpp's image_row_wall_configured_virtual_id() reads wall_filament (the outer wall,
+    // including its top edge). See docs/superpowers/specs/2026-10-16-imagemap-phase5-completion.md.
     if (preset_bundle != nullptr) {
         MixedFilamentManager &mixed_mgr = preset_bundle->mixed_filaments;
-        const ConfigOptionInt *existing_opt = volume->config.get().option<ConfigOptionInt>("solid_infill_filament");
-        const unsigned int existing_vid = existing_opt != nullptr ? unsigned(std::max(0, existing_opt->value)) : 0;
-        const int existing_idx = existing_vid != 0 ? mixed_mgr.mixed_index_from_filament_id(existing_vid, num_physical) : -1;
-        const bool existing_is_image_row = existing_idx >= 0 &&
-            mixed_mgr.mixed_filaments()[size_t(existing_idx)].distribution_mode == int(MixedFilament::ImageWeighted);
+        const int existing_idx = top_row_idx >= 0 ? top_row_idx : wall_row_idx;
 
         bool mixed_definitions_changed = false;
-        if (image_row && !ids.empty()) {
-            int row_idx = existing_is_image_row ? existing_idx : -1;
+        if (row_surfaces != 0 && !ids.empty()) {
+            int row_idx = existing_idx;
             if (row_idx < 0) {
-                // add_custom_filament() needs two distinct component ids (they are otherwise
-                // unused by ImageWeighted's own sampling - see the [barb3] test's own comment,
-                // test_image_fill.cpp) and the current physical colours, to seed a valid row.
+                // add_custom_filament() needs two distinct component ids and the current physical
+                // colours, to seed a valid row.
                 const unsigned int a = unsigned(ids.front());
                 const unsigned int b = ids.size() > 1 ? unsigned(ids[1]) : a;
                 std::vector<std::string> colour_strings;
@@ -28148,18 +28169,34 @@ void Plater::apply_image_fill(const wxString &image_path)
                 row.distribution_mode   = int(MixedFilament::ImageWeighted);
                 row.gradient_component_ids = MixedFilamentManager::encode_gradient_component_ids(
                     std::vector<unsigned int>(ids.begin(), ids.end()));
+                // Phase 5a: keep the pair in step with the allowed list. The plate's used-filament
+                // count, Print::extruders() and the wipe-tower estimate expand a row with two or
+                // fewer ids through component_a/component_b, so a re-apply with a different pair
+                // must move them too.
+                row.component_a = unsigned(ids.front());
+                row.component_b = ids.size() > 1 ? unsigned(ids[1]) : unsigned(ids.front());
                 row.image_fill_ref = MixedFilamentManager::encode_image_fill_ref(params.to_string());
 
                 const unsigned int virtual_id = mixed_mgr.filament_id_from_mixed_index(size_t(row_idx), num_physical);
                 if (virtual_id != 0) {
-                    volume->config.set_key_value("solid_infill_filament", new ConfigOptionInt(int(virtual_id)));
+                    // Top surfaces: solid_infill_filament. The walls are bound for either box: for
+                    // "Side walls" the whole outer wall samples the picture; for "Top surfaces" only
+                    // the stretch seen from above does, and the rest keeps the part's own filament.
+                    if ((row_surfaces & IMAGE_FILL_SURFACE_TOP) != 0)
+                        volume->config.set_key_value("solid_infill_filament", new ConfigOptionInt(int(virtual_id)));
+                    else if (top_row_idx >= 0)
+                        volume->config.erase("solid_infill_filament");
+                    volume->config.set_key_value("wall_filament", new ConfigOptionInt(int(virtual_id)));
                     mixed_definitions_changed = true;
                 }
             }
-        } else if (existing_is_image_row) {
-            // Unticked: remove the BINDING only. The row itself is left alone - it may still be
-            // referenced by another part, or the user may just want to keep it around.
-            volume->config.erase("solid_infill_filament");
+        } else {
+            // Nothing ticked: remove the BINDINGS only. The row itself is left alone - it may still
+            // be referenced by another part, or the user may just want to keep it around.
+            if (top_row_idx >= 0)
+                volume->config.erase("solid_infill_filament");
+            if (wall_row_idx >= 0)
+                volume->config.erase("wall_filament");
         }
 
         if (mixed_definitions_changed) {

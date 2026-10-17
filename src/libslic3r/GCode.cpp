@@ -7592,7 +7592,12 @@ LayerResult GCode::process_layer(const Print& print,
                             ext_width = float(lr->flow(frExternalPerimeter).width());
                             break;
                         }
-                    if (image_row_wall_context_for_region(*image_row_wall_object, region, ext_width, *ctx))
+                    // Phase 5a: the same layer index ToolOrdering builds its context with
+                    // (LayerTools::layer_index), so the part's own filament - resolved per layer
+                    // when it is a mixed one - is the one ToolOrdering registered.
+                    if (image_row_wall_context_for_region(*image_row_wall_object, region, ext_width, *ctx,
+                                                          layer_tools.layer_index, float(layer.print_z),
+                                                          float(layer.height)))
                         built = std::move(ctx);
                 }
                 image_row_wall_ctx_cache.emplace_back(&region, std::move(built));
@@ -7782,8 +7787,120 @@ LayerResult GCode::process_layer(const Print& print,
                         if (!is_anything_overridden &&
                             entity_type == ObjectByExtruder::Island::Region::PERIMETERS &&
                             layer_tools.extruder_override == 0) {
-                            const ImageRowWallContext* wall_ctx = image_row_wall_ctx_for(region);
+                            // Phase 5a: the PrintObject's own region (layerm->region()), not the
+                            // print-wide one, so the owning volume and a painted sub-region's
+                            // extruder are looked up on the object that owns them.
+                            const ImageRowWallContext* wall_ctx = image_row_wall_ctx_for(layerm->region());
                             if (wall_ctx != nullptr) {
+                                // One island bucket per piece, dispatched exactly the way the
+                                // outer/inner wall splitter just below dispatches its two buckets.
+                                auto dispatch = [&](const ExtrusionEntityCollection* coll, unsigned int extruder) {
+                                    if (coll == nullptr || coll->entities.empty())
+                                        return;
+                                    if (!layer_tools.has_extruder(extruder))
+                                        extruder = layer_tools.extruders.back();
+                                    std::vector<ObjectByExtruder::Island>& islands =
+                                        object_islands_by_extruder(by_extruder, extruder, layer_to_print_idx, layers.size(), n_slices + 1);
+                                    for (size_t i = 0; i <= n_slices; ++i) {
+                                        const bool   last       = i == n_slices;
+                                        const size_t island_idx = last ? n_slices : slices_test_order[i];
+                                        if (last || entity_matches_surface(island_idx, *coll)) {
+                                            if (islands[island_idx].by_region.empty())
+                                                islands[island_idx].by_region.assign(print.num_print_regions(), ObjectByExtruder::Island::Region());
+                                            islands[island_idx].by_region[region.print_region_id()].append(entity_type, coll, nullptr);
+                                            break;
+                                        }
+                                    }
+                                };
+                                // image_row_extruder_1based is 1-BASED; the island bucket key is
+                                // 0-BASED, like correct_extruder_id (LayerTools::wall_filament()).
+                                auto run_extruder_of = [&](const ExtrusionEntityCollection& c) -> unsigned int {
+                                    unsigned int run_extruder = c.image_row_extruder_1based - 1;
+                                    // Phase 5a: ToolOrdering registered the filaments its own pass
+                                    // over this layer's walls used. A run at a margin can still
+                                    // come out differently here, because the loop now starts at
+                                    // its seam and the dither's carried error starts there too:
+                                    // such a run takes the NEAREST registered colour, rather than
+                                    // extruders.back().
+                                    if (wall_ctx->base_filament > 0)
+                                        run_extruder = image_row_nearest_registered(run_extruder, layer_tools.extruders,
+                                                                                    print.config().filament_colour.values,
+                                                                                    run_extruder);
+                                    return run_extruder;
+                                };
+
+                                if (wall_ctx->wall_method == IMAGE_FILL_WALL_STRIPES) {
+                                    // Phase 5b, layer stripes: the whole wall stays on this
+                                    // layer's filament (correct_extruder_id is the row's
+                                    // per-layer filament, MixedFilamentManager::resolve()), and
+                                    // only the OUTER wall's width follows the picture. Pieces go
+                                    // out in the island's original order, like phase 5a's.
+                                    const unsigned int layer_extruder = unsigned(std::max(0, correct_extruder_id));
+                                    for (const ExtrusionEntity* e : filtered_extrusions->entities) {
+                                        if (e == nullptr)
+                                            continue;
+                                        std::unique_ptr<ExtrusionEntityCollection> piece;
+                                        if (image_row_wall_entity_is_claimed(*e, false)) {
+                                            const ExtrusionEntity* to_modulate = e;
+                                            ExtrusionLoop          seam_loop;
+                                            if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(e)) {
+                                                Point seam_anchor = loop->first_point();
+                                                if (local_z_loop_seam_placer(*loop, seam_loop, seam_anchor))
+                                                    to_modulate = &seam_loop;
+                                            }
+                                            piece = image_row_stripe_wall_entity(image_row_wall_assets, *wall_ctx, *to_modulate,
+                                                                                 print_z, &layer, int(layer_extruder) + 1);
+                                        }
+                                        if (!piece) {
+                                            piece          = std::make_unique<ExtrusionEntityCollection>();
+                                            piece->no_sort = false;
+                                            piece->append(*e);
+                                        }
+                                        dispatch(piece.get(), layer_extruder);
+                                        local_z_clipped_collections.emplace_back(std::move(piece));
+                                    }
+                                    continue;
+                                }
+
+                                if (wall_ctx->base_filament > 0) {
+                                    // Phase 5a: every piece is dispatched in the ORIGINAL order of
+                                    // the island's perimeters, so a layer printed inner-to-outer
+                                    // still is (phase 4 dispatched all runs first, which put the
+                                    // outer wall ahead of the inner ones). What the row does not
+                                    // split - inner perimeters, gap fill - prints with the part's
+                                    // own filament, not the row's per-layer cycle colour.
+                                    const unsigned int base_extruder = unsigned(wall_ctx->base_filament - 1);
+                                    for (const ExtrusionEntity* e : filtered_extrusions->entities) {
+                                        if (e == nullptr)
+                                            continue;
+                                        std::vector<std::unique_ptr<ExtrusionEntityCollection>> split;
+                                        if (image_row_wall_entity_is_claimed(*e, wall_ctx->split_first_inner)) {
+                                            const ExtrusionEntity* to_split = e;
+                                            ExtrusionLoop          seam_loop;
+                                            if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(e)) {
+                                                Point seam_anchor = loop->first_point();
+                                                if (local_z_loop_seam_placer(*loop, seam_loop, seam_anchor))
+                                                    to_split = &seam_loop;
+                                            }
+                                            split = image_row_split_wall_entity(image_row_wall_assets, *wall_ctx, *to_split, print_z, &layer);
+                                        }
+                                        if (split.empty()) {
+                                            auto solo     = std::make_unique<ExtrusionEntityCollection>();
+                                            solo->no_sort = false;
+                                            solo->append(*e);
+                                            dispatch(solo.get(), base_extruder);
+                                            local_z_clipped_collections.emplace_back(std::move(solo));
+                                        } else {
+                                            for (auto& c : split) {
+                                                dispatch(c.get(), run_extruder_of(*c));
+                                                local_z_clipped_collections.emplace_back(std::move(c));
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+
+                                // Phase 4's dispatch, kept for a context with no base filament.
                                 std::vector<std::unique_ptr<ExtrusionEntityCollection>> run_colls;
                                 auto untouched = std::make_unique<ExtrusionEntityCollection>();
                                 untouched->no_sort = filtered_extrusions->no_sort;
@@ -7797,7 +7914,7 @@ LayerResult GCode::process_layer(const Print& print,
                                             if (local_z_loop_seam_placer(*loop, seam_loop, seam_anchor))
                                                 to_split = &seam_loop;
                                         }
-                                        split = image_row_split_wall_entity(image_row_wall_assets, *wall_ctx, *to_split, print_z);
+                                        split = image_row_split_wall_entity(image_row_wall_assets, *wall_ctx, *to_split, print_z, &layer);
                                     }
                                     if (split.empty()) {
                                         if (e != nullptr)
@@ -7808,56 +7925,12 @@ LayerResult GCode::process_layer(const Print& print,
                                     }
                                 }
                                 if (!run_colls.empty()) {
-                                    // One island bucket per run, dispatched exactly the way the
-                                    // outer/inner wall splitter just below dispatches its two
-                                    // buckets, plus one for everything that stayed unsplit.
-                                    auto dispatch = [&](const ExtrusionEntityCollection* coll, unsigned int extruder) {
-                                        if (coll == nullptr || coll->entities.empty())
-                                            return;
-                                        if (!layer_tools.has_extruder(extruder))
-                                            extruder = layer_tools.extruders.back();
-                                        std::vector<ObjectByExtruder::Island>& islands =
-                                            object_islands_by_extruder(by_extruder, extruder, layer_to_print_idx, layers.size(), n_slices + 1);
-                                        for (size_t i = 0; i <= n_slices; ++i) {
-                                            const bool   last       = i == n_slices;
-                                            const size_t island_idx = last ? n_slices : slices_test_order[i];
-                                            if (last || entity_matches_surface(island_idx, *coll)) {
-                                                if (islands[island_idx].by_region.empty())
-                                                    islands[island_idx].by_region.assign(print.num_print_regions(), ObjectByExtruder::Island::Region());
-                                                islands[island_idx].by_region[region.print_region_id()].append(entity_type, coll, nullptr);
-                                                break;
-                                            }
-                                        }
-                                    };
                                     for (auto& c : run_colls) {
-                                        // image_row_extruder_1based is 1-BASED; the island
-                                        // bucket key is 0-BASED - the canonical dispatch
-                                        // further down this function keys it on
-                                        // correct_extruder_id, i.e. on
-                                        // LayerTools::wall_filament(), which returns a
-                                        // zero-based extruder. Convert once, here.
-                                        //
-                                        // NOTE, found while writing this and deliberately
-                                        // NOT 'fixed' here: layer_tools.extruders is
-                                        // 1-based (ToolOrdering.cpp:938 and :941 register
-                                        // solid_infill_filament()/sparse_infill_filament()
-                                        // + 1), so every has_extruder() call on this path -
-                                        // the canonical one included - tests a 0-based id
-                                        // against a 1-based list and usually misses,
-                                        // falling back to extruders.back(). That is a
-                                        // pre-existing, file-wide off-by-one, not something
-                                        // this feature introduces; matching the canonical
-                                        // path's convention is what keeps image-row runs
-                                        // behaving exactly like every other entity here,
-                                        // and correcting it belongs in its own change with
-                                        // its own Bar A.
-                                        dispatch(c.get(), c->image_row_extruder_1based - 1);
+                                        dispatch(c.get(), run_extruder_of(*c));
                                         local_z_clipped_collections.emplace_back(std::move(c));
                                     }
                                     if (!untouched->entities.empty()) {
-                                        // correct_extruder_id is already 0-based
-                                        // (configured_extruder_id returns
-                                        // layer_tools.wall_filament(region)).
+                                        // correct_extruder_id is already 0-based.
                                         dispatch(untouched.get(), unsigned(std::max(0, correct_extruder_id)));
                                         local_z_clipped_collections.emplace_back(std::move(untouched));
                                     }

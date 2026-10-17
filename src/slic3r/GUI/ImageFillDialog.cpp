@@ -57,7 +57,7 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                                  const indexed_triangle_set                    &mesh,
                                  const TriangleSelector::TriangleSplittingData &existing,
                                  const std::vector<int>                        &painted_states,
-                                 bool                                            initial_image_row)
+                                 int                                             initial_row_surfaces)
     : DPIDialog(parent, wxID_ANY, _L("Apply image fill"), wxDefaultPosition, wxDefaultSize,
                 wxDEFAULT_DIALOG_STYLE)
     , m_params(initial)
@@ -200,21 +200,99 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                             "more detail and more triangles. 0 keeps the model's own triangles."));
     row(_L("Detail (mm)") + ":", m_detail);
 
-    // ---- Phase 3: the image row ----------------------------------------------------------------
-    // This does not replace the facet painting above - image_fill_apply() always runs on Apply, so
+    // ---- Phase 5c: where the picture sits ---------------------------------------------------------
+    // Numbers rather than a gizmo: the picture's centre moves by a share of the box, it turns
+    // about its centre, and it covers a share of the box. Keep proportions works the two shares out
+    // from the picture's own width and height, so a logo is not stretched to the part's shape.
+    auto spin = [this](double lo, double hi, double val, double step) {
+        return new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(80), -1),
+                                    wxSP_ARROW_KEYS, lo, hi, val, step);
+    };
+    m_offset_u = spin(-100., 100., double(m_params.offset_u) * 100., 1.);
+    m_offset_v = spin(-100., 100., double(m_params.offset_v) * 100., 1.);
+    // Keep proportions makes the picture's LONG side cover `scale` of the box, so that is the larger
+    // of the two shares it stored.
+    m_scale    = spin(1., 1000., double(std::max(m_params.scale_u, m_params.scale_v)) * 100., 5.);
+    m_rotation = spin(-180., 180., double(m_params.rotation_deg), 5.);
+    m_offset_u->SetToolTip(_L("Moves the picture across the part, as a share of the part's width along the image (%)."));
+    m_offset_v->SetToolTip(_L("Moves the picture up the part, as a share of the part's height along the image (%)."));
+    m_scale->SetToolTip(_L("How much of the part the picture covers: 100 % fills the part's box along the image."));
+    m_rotation->SetToolTip(_L("Turns the picture about its centre."));
+    wxBoxSizer *place1 = new wxBoxSizer(wxHORIZONTAL);
+    place1->Add(new wxStaticText(this, wxID_ANY, _L("Offset (%)") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+    place1->Add(m_offset_u, 0, wxRIGHT, FromDIP(4));
+    place1->Add(m_offset_v, 0, wxRIGHT, FromDIP(12));
+    place1->Add(new wxStaticText(this, wxID_ANY, _L("Scale (%)") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+    place1->Add(m_scale, 0);
+    left->Add(place1, 0, wxEXPAND | wxTOP, FromDIP(6));
+    wxBoxSizer *place2 = new wxBoxSizer(wxHORIZONTAL);
+    place2->Add(new wxStaticText(this, wxID_ANY, _L("Rotation") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+    place2->Add(m_rotation, 0, wxRIGHT, FromDIP(12));
+    m_keep_aspect = new wxCheckBox(this, wxID_ANY, _L("Keep proportions"));
+    m_keep_aspect->SetValue(m_params.keep_aspect);
+    m_keep_aspect->SetToolTip(_L("Keeps the picture's own width-to-height ratio instead of stretching it over the "
+                                 "part. Flat and wrapped projections only; the rest of the part is left as it was."));
+    m_tile = new wxCheckBox(this, wxID_ANY, _L("Repeat"));
+    m_tile->SetValue(m_params.tile);
+    m_tile->SetToolTip(_L("Repeats the picture to cover the whole part when it is smaller than the part."));
+    place2->Add(m_keep_aspect, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(12));
+    place2->Add(m_tile, 0, wxALIGN_CENTER_VERTICAL);
+    left->Add(place2, 0, wxEXPAND | wxTOP, FromDIP(6));
+
+    // ---- Phases 3-5a: the image row ------------------------------------------------------------
+    // These do not replace the facet painting above - image_fill_apply() always runs on Apply, so
     // a printer/slicer that never reads image_row_extruder_1based still gets a correct, if coarser,
-    // result. Ticking this ALSO creates (or updates) an ImageWeighted MixedFilament row bound to
-    // this part's solid_infill_filament, so top solid infill is additionally re-sampled directly at
-    // extrusion-width resolution instead of being limited to the model's own facet size.
-    m_image_row = new wxCheckBox(this, wxID_ANY, _L("Nozzle-resolution dither (top surfaces)"));
-    m_image_row->SetValue(initial_image_row);
-    m_image_row->SetToolTip(_L("Re-samples the image directly along each top solid infill line, at "
-                               "nozzle-extrusion-width resolution, instead of the facet-size limit above. "
-                               "Top solid infill only: ironing and any top surface pattern that is not "
-                               "Rectilinear or Monotonic (Concentric-family patterns, in particular) are "
-                               "not affected by this option and keep using the coarser per-layer colour "
-                               "cycle a mixed filament normally uses."));
-    left->Add(m_image_row, 0, wxEXPAND | wxTOP, FromDIP(10));
+    // result. Ticking either ALSO creates (or updates) an ImageWeighted MixedFilament row for this
+    // part, so the surfaces ticked are re-sampled directly at extrusion-width resolution instead of
+    // being limited to the model's own facet size.
+    left->Add(new wxStaticText(this, wxID_ANY, _L("Nozzle-resolution colour") + ":"), 0, wxEXPAND | wxTOP, FromDIP(10));
+    wxBoxSizer *row_boxes = new wxBoxSizer(wxHORIZONTAL);
+    m_row_top   = new wxCheckBox(this, wxID_ANY, _L("Top surfaces"));
+    m_row_walls = new wxCheckBox(this, wxID_ANY, _L("Side walls"));
+    m_row_top->SetValue((initial_row_surfaces & IMAGE_FILL_SURFACE_TOP) != 0);
+    m_row_walls->SetValue((initial_row_surfaces & IMAGE_FILL_SURFACE_WALLS) != 0);
+    m_row_top->SetToolTip(_L("Re-samples the image along each line of the top surfaces (and the bottom, when the "
+                             "picture lands there) and along the top edge of the outer wall, at the nozzle's "
+                             "line width, instead of the facet size above. Ironing follows the same picture."));
+    m_row_walls->SetToolTip(_L("Re-samples the image along the outer wall of every layer, at the nozzle's line "
+                               "width, so a picture projected onto the sides (a box or a wrap, or a flat "
+                               "projection along X or Y) prints at full resolution. Each layer changes "
+                               "filament only for the colours the picture puts on that layer. Where the "
+                               "picture does not land, the wall keeps the part's own filament."));
+    row_boxes->Add(m_row_top, 0, wxRIGHT, FromDIP(12));
+    row_boxes->Add(m_row_walls, 0);
+    left->Add(row_boxes, 0, wxEXPAND | wxTOP, FromDIP(4));
+
+    // ---- Phase 5b: how the walls carry the picture ----------------------------------------------
+    wxArrayString wall_methods;
+    wall_methods.Add(_L("Colour runs along each layer"));
+    wall_methods.Add(_L("Layer stripes (experimental)"));
+    m_wall_method = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wall_methods);
+    m_wall_method->SetSelection(m_params.wall_method == IMAGE_FILL_WALL_STRIPES ? 1 : 0);
+    m_wall_method->SetToolTip(_L("Colour runs: each layer's outer wall changes filament along its length wherever "
+                                 "the picture changes colour - the sharpest result, at the cost of a tool change "
+                                 "for every filament a layer uses.\n\n"
+                                 "Layer stripes: every layer prints its walls with one filament, taking the "
+                                 "allowed filaments in turn, layer after layer; the outer wall is printed wider "
+                                 "where the picture wants that layer's colour and narrower where it does not, "
+                                 "so each colour shows more or less from the side. At most one tool change per "
+                                 "layer for the walls; softer than colour runs, and best with fine layers. "
+                                 "Experimental: how strongly it reads depends on your filaments."));
+    row(_L("Side wall method") + ":", m_wall_method);
+    m_stripe_depth = new wxSpinCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(100), -1),
+                                    wxSP_ARROW_KEYS, 5, 80, m_params.stripe_depth_pct);
+    m_stripe_depth->SetToolTip(_L("Layer stripes only: how far the outer wall's width swings either side of its "
+                                  "normal width, in percent. 40 prints it between 60 % and 140 % of its width. "
+                                  "Only the outside of the wall moves; the part's inside is unchanged."));
+    row(_L("Stripe width swing (%)") + ":", m_stripe_depth);
+    auto update_wall_controls = [this]() {
+        const bool walls = m_row_walls->GetValue();
+        m_wall_method->Enable(walls);
+        m_stripe_depth->Enable(walls && m_wall_method->GetSelection() == 1);
+    };
+    update_wall_controls();
+    m_row_walls->Bind(wxEVT_CHECKBOX, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
+    m_wall_method->Bind(wxEVT_CHOICE, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
 
     cols->Add(left, 1, wxEXPAND | wxALL, FromDIP(10));
 
@@ -252,6 +330,10 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
     m_flip_v->Bind(wxEVT_CHECKBOX, changed);
     m_filament_list->Bind(wxEVT_CHECKLISTBOX, changed);
     m_detail->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent &evt) { refresh_preview(); evt.Skip(); });
+    for (wxSpinCtrlDouble *sp : {m_offset_u, m_offset_v, m_scale, m_rotation})
+        sp->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent &evt) { refresh_preview(); evt.Skip(); });
+    m_keep_aspect->Bind(wxEVT_CHECKBOX, changed);
+    m_tile->Bind(wxEVT_CHECKBOX, changed);
     pick_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &evt) { on_pick_image(); evt.Skip(); });
 
     if (!m_params.asset.empty() && m_assets != nullptr && m_assets->contains(m_params.asset))
@@ -324,6 +406,57 @@ void ImageFillDialog::collect()
     // so 0 has to zero the depth too, or the tooltip would be lying by six levels.
     m_params.subdivision = m_params.detail_mm > 0.f ? IMAGE_FILL_MAX_SUBDIVISION : 0;
 
+    // Phase 5a: the row's surfaces travel in the params, so the row's own reference says what it
+    // was asked to colour (ImageRowWalls.cpp reads it at slice time).
+    m_params.surfaces = image_row_surfaces();
+    // Phase 5b: the wall method and its swing ride the same params.
+    m_params.wall_method      = (m_wall_method != nullptr && m_wall_method->GetSelection() == 1) ? IMAGE_FILL_WALL_STRIPES
+                                                                                                   : IMAGE_FILL_WALL_RUNS;
+    m_params.stripe_depth_pct = m_stripe_depth != nullptr ? m_stripe_depth->GetValue() : 40;
+
+    // Phase 5c: placement.
+    if (m_offset_u != nullptr) {
+        m_params.offset_u     = float(m_offset_u->GetValue() / 100.);
+        m_params.offset_v     = float(m_offset_v->GetValue() / 100.);
+        m_params.rotation_deg = float(m_rotation->GetValue());
+        m_params.tile         = m_tile->GetValue();
+        const float scale     = float(m_scale->GetValue() / 100.);
+        m_params.scale_u      = scale;
+        m_params.scale_v      = scale;
+        const bool aspect_ok  = m_params.projection == ImageFillProjection::Planar ||
+                                m_params.projection == ImageFillProjection::Cylindrical;
+        m_keep_aspect->Enable(aspect_ok && !m_params.asset.empty());
+        m_params.keep_aspect  = m_keep_aspect->IsEnabled() && m_keep_aspect->GetValue();
+        const ImageAsset *img = (m_params.keep_aspect && m_assets != nullptr) ? m_assets->pixels(m_params.asset) : nullptr;
+        if (img != nullptr && img->width > 0 && img->height > 0) {
+            // The box's extent along the image's u and v, in millimetres.
+            BoundingBoxf3 box;
+            for (const Vec3f &vtx : m_mesh.vertices)
+                box.merge(vtx.cast<double>());
+            const int    ax = int(m_params.axis);
+            const int    a0 = (ax == 0) ? 1 : 0;
+            const int    a1 = (ax == 2) ? 1 : 2;
+            const Vec3d  sz = box.size();
+            double       eu = sz[a0], ev = sz[a1];
+            if (m_params.projection == ImageFillProjection::Cylindrical) {
+                eu = PI * 0.5 * (sz[a0] + sz[a1]);   // once round
+                ev = sz[ax];
+            }
+            if (eu > 1e-6 && ev > 1e-6) {
+                const double r = double(img->width) / double(img->height);   // the picture
+                const double b = eu / ev;                                      // the box
+                // Fit inside: the long side of the picture fills `scale` of the box.
+                if (r >= b) {
+                    m_params.scale_u = scale;
+                    m_params.scale_v = float(double(scale) * b / r);
+                } else {
+                    m_params.scale_u = float(double(scale) * r / b);
+                    m_params.scale_v = scale;
+                }
+            }
+        }
+    }
+
     m_params.allowed.clear();
     for (size_t i = 0; i < m_filaments.size(); ++i)
         if (m_filament_list->IsChecked((unsigned) i))
@@ -349,9 +482,14 @@ ImageFillParams ImageFillDialog::params()
     return m_params;
 }
 
-bool ImageFillDialog::image_row_dither() const
+int ImageFillDialog::image_row_surfaces() const
 {
-    return m_image_row != nullptr && m_image_row->GetValue();
+    int surfaces = 0;
+    if (m_row_top != nullptr && m_row_top->GetValue())
+        surfaces |= IMAGE_FILL_SURFACE_TOP;
+    if (m_row_walls != nullptr && m_row_walls->GetValue())
+        surfaces |= IMAGE_FILL_SURFACE_WALLS;
+    return surfaces;
 }
 
 void ImageFillDialog::refresh_preview()
@@ -392,10 +530,17 @@ void ImageFillDialog::refresh_preview()
 
     std::vector<std::array<float, 3>> samples;
     samples.reserve(PREVIEW_PX * PREVIEW_PX);
+    std::vector<bool> outside(size_t(PREVIEW_PX) * PREVIEW_PX, false);
     for (int y = 0; y < PREVIEW_PX; ++y)
         for (int x = 0; x < PREVIEW_PX; ++x) {
-            const float u = (float(x) + 0.5f) / float(PREVIEW_PX);
-            const float v = 1.f - (float(y) + 0.5f) / float(PREVIEW_PX);
+            float u = (float(x) + 0.5f) / float(PREVIEW_PX);
+            float v = 1.f - (float(y) + 0.5f) / float(PREVIEW_PX);
+            // Phase 5c: the square is the part's box; the picture sits in it as placed.
+            if (!image_fill_place_uv(m_params, u, v)) {
+                outside[size_t(y) * PREVIEW_PX + x] = true;
+                samples.push_back({0.9f, 0.9f, 0.9f});
+                continue;
+            }
             if (img != nullptr) {
                 int px = std::min(int(img->width) - 1, std::max(0, int(u * float(img->width))));
                 int py = std::min(int(img->height) - 1, std::max(0, int((1.f - v) * float(img->height))));
@@ -422,6 +567,11 @@ void ImageFillDialog::refresh_preview()
                                 db = c[2] - palette.colors[i][2];
                     const float d = dr * dr + dg * dg + db * db;
                     if (d < bestd) { bestd = d; best = i; }
+                }
+                if (outside[size_t(y) * PREVIEW_PX + x]) {
+                    // Not covered by the picture: the part keeps its own colour there.
+                    out.SetRGB(x, y, 230, 230, 230);
+                    continue;
                 }
                 const int id = palette.filament[best];
                 std::array<float, 3> shown{0.5f, 0.5f, 0.5f};

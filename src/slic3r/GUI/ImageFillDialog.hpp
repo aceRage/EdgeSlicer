@@ -18,6 +18,7 @@ class wxBitmapButton;
 class wxCheckBox;
 class wxCheckListBox;
 class wxChoice;
+class wxSpinCtrl;
 class wxSpinCtrlDouble;
 class wxStaticBitmap;
 class wxStaticText;
@@ -39,10 +40,11 @@ public:
     // previous application recorded on the part (image_fill_params), so re-opening the dialog on
     // an already-filled part starts where the user left off. `mesh` and `existing` are the part
     // itself, used only for the preview - Apply re-runs the fill on the real volume.
-    // `initial_image_row` is whether the part is ALREADY bound to an enabled ImageWeighted row
-    // (Plater::apply_image_fill works this out from the part's own solid_infill_filament before
-    // constructing the dialog) - so re-opening the dialog on a part using the feature starts with
-    // the checkbox already ticked, the same promise `initial` makes for the projection settings.
+    // `initial_row_surfaces` is which surfaces the part is ALREADY re-sampling through an enabled
+    // ImageWeighted row - a bitmask of IMAGE_FILL_SURFACE_TOP / _WALLS, which
+    // Plater::apply_image_fill works out from the part's own bindings before constructing the
+    // dialog - so re-opening the dialog on a part using the feature starts with the same boxes
+    // ticked, the same promise `initial` makes for the projection settings.
     ImageFillDialog(wxWindow                                      *parent,
                     const std::vector<ImageFillFilament>          &filaments,
                     const ImageFillParams                         &initial,
@@ -50,7 +52,7 @@ public:
                     const indexed_triangle_set                    &mesh,
                     const TriangleSelector::TriangleSplittingData &existing,
                     const std::vector<int>                        &painted_states,
-                    bool                                            initial_image_row = false);
+                    int                                             initial_row_surfaces = 0);
 
     // Valid once ShowModal() returned wxID_OK. The asset, if the user picked a new image, is
     // already in the store this was constructed with.
@@ -63,12 +65,13 @@ public:
     // which is exactly the shape of "I chose Wrapped and got Flat".
     ImageFillParams params();
 
-    // Whether "Nozzle-resolution dither (top surfaces)" is ticked - Plater::apply_image_fill()
-    // reads this AFTER params() (collect() has already run by then) to decide whether to create
-    // or update the part's ImageWeighted MixedFilament row, or drop the part's binding to one.
-    // Phase 2's facet painting (image_fill_apply(), driven by params()) always happens regardless
-    // of this box - see this control's own tooltip in the .cpp for why.
-    bool image_row_dither() const;
+    // Which "Nozzle-resolution colour" boxes are ticked (Phase 5a: "Top surfaces" and "Side
+    // walls"), as a bitmask of IMAGE_FILL_SURFACE_TOP / _WALLS; params().surfaces carries the same
+    // value. Plater::apply_image_fill() reads this AFTER params() to decide whether to create or
+    // update the part's ImageWeighted MixedFilament row and which keys to bind it to, or to drop
+    // the part's bindings. Phase 2's facet painting (image_fill_apply(), driven by params()) always
+    // happens regardless - see the boxes' own tooltips in the .cpp for why.
+    int image_row_surfaces() const;
 
     // Read an image file into the store (as the "Choose image..." button does), so the dialog can
     // start with an image dropped onto the 3D scene. Returns the asset id, empty on failure.
@@ -102,7 +105,17 @@ private:
     wxCheckBox       *m_flip_v          = nullptr;
     wxCheckListBox   *m_filament_list   = nullptr;
     wxSpinCtrlDouble *m_detail          = nullptr;
-    wxCheckBox       *m_image_row       = nullptr;   // "Nozzle-resolution dither (top surfaces)"
+    wxCheckBox       *m_row_top         = nullptr;   // "Nozzle-resolution colour: Top surfaces"
+    wxCheckBox       *m_row_walls       = nullptr;   // "Nozzle-resolution colour: Side walls"
+    wxChoice         *m_wall_method     = nullptr;   // Phase 5b: colour runs / layer stripes
+    wxSpinCtrl       *m_stripe_depth    = nullptr;   // Phase 5b: width swing, percent
+    // Phase 5c: where the picture sits.
+    wxSpinCtrlDouble *m_offset_u        = nullptr;   // percent of the box
+    wxSpinCtrlDouble *m_offset_v        = nullptr;
+    wxSpinCtrlDouble *m_scale           = nullptr;   // percent of the box
+    wxSpinCtrlDouble *m_rotation        = nullptr;   // degrees
+    wxCheckBox       *m_keep_aspect     = nullptr;
+    wxCheckBox       *m_tile            = nullptr;
     wxStaticBitmap   *m_preview         = nullptr;
     wxStaticText     *m_summary         = nullptr;
     wxButton         *m_ok              = nullptr;

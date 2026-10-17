@@ -7,12 +7,14 @@
 #include <atomic>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
 #include <boost/log/trivial.hpp>
 
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "ImageFill.hpp"
+#include "Layer.hpp"
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
@@ -169,6 +171,59 @@ unsigned int image_row_wall_configured_virtual_id(const PrintObject &object, con
     return configured_id;
 }
 
+unsigned int image_row_base_filament(const PrintObject &object, const PrintRegion &region, int layer_index,
+                                     float print_z, float layer_height)
+{
+    const Print *print = object.print();
+    if (print == nullptr)
+        return 1;
+    const size_t num_physical = print->config().filament_diameter.size();
+    if (num_physical == 0)
+        return 1;
+
+    unsigned int id = 0;
+    // A painted sub-region: the paint is the part's own colour there (Phase 2's facet painting is
+    // the coarse image, so this is also the right colour for an inner perimeter under it).
+    //
+    // A painted region whose config came out identical to its parent's is ALIASED to the parent's
+    // PrintRegion (PrintApply's get_create_region() interns configs) - which happens exactly when
+    // an image row keeps both wall_filament and solid_infill_filament on it. Then the pointer
+    // names the unpainted part too, and the paint cannot be told apart: use the volume's own
+    // filament for it, not the first painted id that happens to match.
+    bool is_volume_region = false;
+    if (const PrintObjectRegions *shared = object.shared_regions(); shared != nullptr)
+        for (const PrintObjectRegions::LayerRangeRegions &range : shared->layer_ranges)
+            for (const PrintObjectRegions::VolumeRegion &vr : range.volume_regions)
+                if (vr.region == &region)
+                    is_volume_region = true;
+    if (const PrintObjectRegions *shared = object.shared_regions(); shared != nullptr && !is_volume_region)
+        for (const PrintObjectRegions::LayerRangeRegions &range : shared->layer_ranges) {
+            for (const PrintObjectRegions::PaintedRegion &pr : range.painted_regions)
+                if (pr.region == &region) {
+                    id = pr.extruder_id;
+                    break;
+                }
+            if (id != 0)
+                break;
+        }
+    if (id == 0) {
+        if (const ModelVolume *mv = wall_owning_volume(object, region); mv != nullptr)
+            if (const ConfigOption *opt = mv->config.option("extruder"); opt != nullptr && opt->getInt() > 0)
+                id = unsigned(opt->getInt());
+    }
+    if (id == 0 && object.model_object() != nullptr)
+        if (const ConfigOption *opt = object.model_object()->config.option("extruder"); opt != nullptr && opt->getInt() > 0)
+            id = unsigned(opt->getInt());
+    if (id == 0)
+        id = 1;
+    const MixedFilamentManager &mixed_mgr = print->mixed_filament_manager();
+    if (mixed_mgr.is_mixed(id, num_physical))
+        id = mixed_mgr.resolve(id, num_physical, layer_index, print_z, layer_height, false, &object);
+    if (id < 1 || id > num_physical)
+        id = 1;
+    return id;
+}
+
 std::vector<unsigned int> image_row_wall_candidate_filaments(const PrintObject &object, const PrintRegion &region,
                                                              size_t num_physical)
 {
@@ -203,7 +258,8 @@ namespace {
 // The shared body of both public context builders: everything that depends only on WHICH row was
 // named, not on which config key named it.
 bool build_context_for_row(const PrintObject &object, const PrintRegion &region, unsigned int configured_id,
-                           float flow_width_mm, ImageRowWallContext &ctx)
+                           float flow_width_mm, ImageRowWallContext &ctx, int layer_index, float print_z,
+                           float layer_height)
 {
     const Print *print = object.print();
     if (print == nullptr || configured_id == 0)
@@ -240,12 +296,37 @@ bool build_context_for_row(const PrintObject &object, const PrintRegion &region,
     if (mv == nullptr)
         return false;
 
-    for (const Vec3f &v : mv->mesh().its.vertices)
-        ctx.mesh_box.merge(v.cast<double>());
+    // Phase 5c: the box and frame the picture was laid over, when the part's own params record
+    // them (they follow the part through a cut); otherwise the mesh's own box, as before.
+    ImageFillParams placed = ctx.params;
+    {
+        ImageFillParams vp;
+        if (image_fill_params_of(*mv, vp) && vp.has_box) {
+            placed.has_box   = true;
+            placed.box       = vp.box;
+            placed.has_frame = vp.has_frame;
+            placed.frame     = vp.frame;
+        }
+    }
+    ctx.mesh_box = image_fill_projection_box(placed, mv->mesh().its);
     if (!ctx.mesh_box.defined)
         return false;
 
-    ctx.mesh_from_print = (object.trafo_centered() * mv->get_matrix()).inverse();
+    ctx.mesh_from_print = image_fill_projection_frame(placed) * (object.trafo_centered() * mv->get_matrix()).inverse();
+    const Vec3f up_mesh = (ctx.mesh_from_print.linear().cast<float>() * Vec3f(0.f, 0.f, 1.f));
+    ctx.up_mesh         = up_mesh.norm() > 1e-9f ? Vec3f(up_mesh.normalized()) : Vec3f(0.f, 0.f, 1.f);
+
+    // Phase 5a: the part's own filament, for everything the image does not reach.
+    ctx.base_filament = int(image_row_base_filament(object, region, layer_index, print_z, layer_height));
+    if (size_t(ctx.base_filament) <= filament_colours.size())
+        ctx.base_color = MixedFilamentManager::hex_to_srgb01(filament_colours[size_t(ctx.base_filament) - 1]);
+    // A params string from before phase 5a names no surfaces: the binding is the request, and a
+    // wall binding asked for the walls.
+    ctx.surfaces = ctx.params.surfaces != 0 ? ctx.params.surfaces : IMAGE_FILL_SURFACE_WALLS;
+    // Phase 5b: layer stripes are a WALL method; a row that only asked for the top keeps runs, so
+    // its top-edge colouring still works.
+    ctx.wall_method  = (ctx.surfaces & IMAGE_FILL_SURFACE_WALLS) != 0 ? ctx.params.wall_method : IMAGE_FILL_WALL_RUNS;
+    ctx.stripe_depth = float(ctx.params.stripe_depth_pct) / 100.f;
 
     ctx.row = mf;
     // Nozzle-bounded resolution, the same rule phase 3 applies to top surfaces: a run shorter
@@ -265,14 +346,16 @@ bool build_context_for_row(const PrintObject &object, const PrintRegion &region,
 } // namespace
 
 bool image_row_wall_context_for_region(const PrintObject &object, const PrintRegion &region,
-                                       float flow_width_mm, ImageRowWallContext &ctx)
+                                       float flow_width_mm, ImageRowWallContext &ctx,
+                                       int layer_index, float print_z, float layer_height)
 {
     return build_context_for_row(object, region, image_row_wall_configured_virtual_id(object, region),
-                                 flow_width_mm, ctx);
+                                 flow_width_mm, ctx, layer_index, print_z, layer_height);
 }
 
 bool image_row_wall_iron_context(const PrintObject &object, const PrintRegion &region,
-                                 float flow_width_mm, ImageRowWallContext &ctx)
+                                 float flow_width_mm, ImageRowWallContext &ctx,
+                                 int layer_index, float print_z, float layer_height)
 {
     const Print *print = object.print();
     if (print == nullptr)
@@ -288,7 +371,7 @@ bool image_row_wall_iron_context(const PrintObject &object, const PrintRegion &r
     if (mf == nullptr || !mf->enabled || mf->distribution_mode != int(MixedFilament::ImageWeighted) ||
         mf->image_fill_ref.empty())
         return false;
-    if (!build_context_for_row(object, region, configured_id, flow_width_mm, ctx))
+    if (!build_context_for_row(object, region, configured_id, flow_width_mm, ctx, layer_index, print_z, layer_height))
         return false;
     // An ironed surface is a TOP surface: one plane, facing up. Hand the cutter that normal
     // instead of letting it compute a wall normal from the ironing line's own tangent, which
@@ -298,18 +381,51 @@ bool image_row_wall_iron_context(const PrintObject &object, const PrintRegion &r
     return true;
 }
 
-std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_entity(
-    const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity, double print_z)
-{
-    std::vector<std::unique_ptr<ExtrusionEntityCollection>> out;
+namespace {
 
-    ExtrusionPaths paths;
+// Phase 5a: is this print-space point seen from above, i.e. not covered by the layer above?
+// `layer` null means the caller cannot tell (a top surface or ironing, which have their own
+// normal) - nothing is treated as seen from above then. A layer with no layer above is the top of
+// the object, where everything is.
+bool point_seen_from_above(const Layer *layer, const Point &pt)
+{
+    if (layer == nullptr)
+        return false;
+    const Layer *upper = layer->upper_layer;
+    if (upper == nullptr)
+        return true;
+    for (size_t i = 0; i < upper->lslices.size(); ++i) {
+        if (i < upper->lslices_bboxes.size() && !upper->lslices_bboxes[i].contains(pt))
+            continue;
+        if (upper->lslices[i].contains(pt))
+            return false;
+    }
+    return true;
+}
+
+// One sample of the image at a single mesh-space point, seen along `normal`.
+ImageRowSample sample_point(const ImageAssetStore &assets, const ImageRowWallContext &ctx, const Vec3f &p_mesh,
+                            const Vec3f &normal)
+{
+    std::vector<ImageRowSample> one =
+        image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p_mesh, p_mesh, normal, ctx.sample_spacing_mm);
+    return one.empty() ? ImageRowSample() : one.front();
+}
+
+// The wall's runs, and the paths they cut. false when the entity is not a wall this can sample
+// (or, in phase 4's legacy mode, when the projection declined a colour everywhere).
+// The wall's samples along its whole length (arc length in `s`), each coloured or not by the
+// phase 5a rules, and the paths they were taken along. false when the entity is not a wall.
+bool compute_wall_samples(const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity,
+                          double print_z, const Layer *layer, ExtrusionPaths &paths,
+                          std::vector<ImageRowSample> &samples, bool &any_color)
+{
     if (!collect_wall_paths(entity, paths))
-        return out;
+        return false;
 
     const Polyline whole = concatenated_polyline(paths);
     if (whole.points.size() < 2)
-        return out;
+        return false;
 
     // A hole loop winds clockwise; see wall_outward_normal_print()'s comment for why the sign of
     // the normal matters (it is what a Box projection picks its face from, and what a cylindrical
@@ -327,9 +443,9 @@ std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_ent
     // corners: each segment of the loop faces a different direction, and on a box that means
     // different segments belong to different BOX FACES. So the normal is recomputed per segment
     // and sampled segment by segment, rather than once for the entity.
-    std::vector<ImageRowSample> samples;
+    samples.clear();
+    any_color = false;
     float                       cumulative = 0.f;
-    bool                        any_color  = false;
     const Points               &pts        = whole.points;
     for (size_t i = 0; i + 1 < pts.size(); ++i) {
         const Vec3d p0_print(unscale<double>(pts[i].x()), unscale<double>(pts[i].y()), print_z);
@@ -357,11 +473,41 @@ std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_ent
 
         std::vector<ImageRowSample> seg = image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p0_mesh, p1_mesh,
                                                                    n_mesh, ctx.sample_spacing_mm);
+
+        // Phase 5a: where may the image land along this segment? (Only with a base filament to
+        // fall back on - without one, phase 4's behaviour is kept exactly.)
+        const bool phase5      = ctx.base_filament > 0;
+        const bool fixed       = ctx.fixed_normal_mesh.squaredNorm() > 1e-12f;
+        const bool want_walls  = fixed || (ctx.surfaces & IMAGE_FILL_SURFACE_WALLS) != 0;
+        const bool want_top    = !fixed && (ctx.surfaces & IMAGE_FILL_SURFACE_TOP) != 0 && layer != nullptr;
+        const double seg_len_mesh = double((p1_mesh - p0_mesh).norm());
+
         // seg[0] repeats the previous segment's last sample (the shared corner point): skip it
         // past the first segment so a corner is sampled once, at one arc-length position, rather
         // than twice under two different running error-diffusion states.
         for (size_t k = (i == 0 ? 0 : 1); k < seg.size(); ++k) {
             ImageRowSample s = seg[k];
+            if (phase5) {
+                // The faces rule, per sample: a flat Z picture does not run down the sides, a
+                // wrap does not land on a bore unless asked to, and so on - the same rule the
+                // facet painting applies (image_fill_face_is_painted()).
+                const bool wall_lands =
+                    want_walls && image_fill_face_is_painted(ctx.params, ctx.mesh_box, n_mesh, s.pos);
+                bool from_above = false;
+                if (want_top && image_fill_face_is_painted(ctx.params, ctx.mesh_box, ctx.up_mesh, s.pos)) {
+                    const double t  = seg_len_mesh > 1e-9 ? std::min(1.0, std::max(0.0, double(s.s) / seg_len_mesh)) : 0.;
+                    const Point  pt = pts[i] + ((pts[i + 1] - pts[i]).cast<double>() * t).cast<coord_t>();
+                    from_above      = point_seen_from_above(layer, pt);
+                }
+                if (from_above) {
+                    // Seen from above: colour it the way the top surface next to it is coloured.
+                    const ImageRowSample up = sample_point(assets, ctx, s.pos, ctx.up_mesh);
+                    s.has_color = up.has_color;
+                    s.color     = up.color;
+                } else if (!wall_lands) {
+                    s.has_color = false;
+                }
+            }
             s.s += cumulative;
             any_color = any_color || s.has_color;
             samples.push_back(s);
@@ -369,73 +515,73 @@ std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_ent
         if (!seg.empty())
             cumulative += seg.back().s;
     }
-    if (!any_color) {
-        log_image_row_wall_no_color_once();
-        return out;
+    return !samples.empty();
+}
+
+bool compute_wall_runs(const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity,
+                       double print_z, const Layer *layer, ExtrusionPaths &paths, std::vector<ImageRowRun> &runs)
+{
+    std::vector<ImageRowSample> samples;
+    bool                        any_color = false;
+    if (!compute_wall_samples(assets, ctx, entity, print_z, layer, paths, samples, any_color))
+        return false;
+    if (ctx.base_filament <= 0) {
+        // Phase 4 behaviour: nothing to fall back on but the row itself.
+        if (!any_color) {
+            log_image_row_wall_no_color_once();
+            return false;
+        }
+        runs = image_fill_dither_segment(samples, ctx.candidate_colors, ctx.candidate_ids, ctx.min_run_len_mm);
+    } else {
+        runs = image_fill_dither_segment(samples, ctx.candidate_colors, ctx.candidate_ids, ctx.min_run_len_mm,
+                                         ctx.base_filament, ctx.base_color);
     }
+    return !runs.empty();
+}
 
-    const std::vector<ImageRowRun> runs =
-        image_fill_dither_segment(samples, ctx.candidate_colors, ctx.candidate_ids, ctx.min_run_len_mm);
-    if (runs.size() < 2)
-        return out; // one colour for the whole wall: leave the loop intact, seam and all.
-
-    // --- cut the wall at the run boundaries ---------------------------------------------------
-    //
-    // The wall is walked as a flat list of (segment, owning path) pairs so that every piece keeps
-    // the attributes of the ExtrusionPath it came from - an outer loop's overhang sub-paths keep
-    // printing as overhangs at overhang speed, which is why PerimeterGenerator retagged them in
-    // the first place. Cutting the concatenated polyline alone would lose that.
-    struct WallSeg
+// Cuts a wall's paths by arc length. The wall is walked as a flat list of (segment, owning path)
+// pairs so that every piece keeps the attributes of the ExtrusionPath it came from - an outer
+// loop's overhang sub-paths keep printing as overhangs at overhang speed, which is why
+// PerimeterGenerator retagged them in the first place. Cutting the concatenated polyline alone
+// would lose that.
+class WallCutter
+{
+public:
+    explicit WallCutter(const ExtrusionPaths &paths) : m_paths(paths)
     {
-        Point  a, b;
-        size_t path_idx;   // index into `paths`, i.e. which attributes this segment prints with
-        double len_mm;
-    };
-    std::vector<WallSeg> segs;
-    for (size_t pi = 0; pi < paths.size(); ++pi) {
-        const Points &pp = paths[pi].polyline.points;
-        for (size_t k = 0; k + 1 < pp.size(); ++k) {
-            const Vec2d  a(unscale<double>(pp[k].x()), unscale<double>(pp[k].y()));
-            const Vec2d  b(unscale<double>(pp[k + 1].x()), unscale<double>(pp[k + 1].y()));
-            const double len = (b - a).norm();
-            if (len > EPSILON)
-                segs.push_back(WallSeg{pp[k], pp[k + 1], pi, len});
+        for (size_t pi = 0; pi < paths.size(); ++pi) {
+            const Points &pp = paths[pi].polyline.points;
+            for (size_t k = 0; k + 1 < pp.size(); ++k) {
+                const Vec2d  a(unscale<double>(pp[k].x()), unscale<double>(pp[k].y()));
+                const Vec2d  b(unscale<double>(pp[k + 1].x()), unscale<double>(pp[k + 1].y()));
+                const double len = (b - a).norm();
+                if (len > EPSILON)
+                    m_segs.push_back(WallSeg{pp[k], pp[k + 1], pi, len});
+            }
         }
     }
-    if (segs.empty())
-        return out;
-
-    // The cursor: which segment, and how far along it (mm) the previous run ended.
-    size_t seg_idx = 0;
-    double seg_off = 0.;
-
-    auto point_at = [](const WallSeg &s, double off_mm) -> Point {
-        const Vec2d a(unscale<double>(s.a.x()), unscale<double>(s.a.y()));
-        const Vec2d b(unscale<double>(s.b.x()), unscale<double>(s.b.y()));
-        const double t = s.len_mm > EPSILON ? std::min(1.0, std::max(0.0, off_mm / s.len_mm)) : 0.;
-        const Vec2d  p = a + (b - a) * t;
-        return Point(scale_(p.x()), scale_(p.y()));
-    };
+    bool empty() const { return m_segs.empty(); }
 
     // Takes `want_mm` of wall from the cursor, appending one ExtrusionPath per contiguous run of
     // segments that share a source path (so attributes never mix inside one emitted path).
-    auto take = [&](double want_mm, ExtrusionPaths &dst) {
+    void take(double want_mm, ExtrusionPaths &dst)
+    {
         Polyline cur;
         size_t   cur_src = size_t(-1);
         auto flush = [&]() {
-            if (cur.points.size() >= 2 && cur_src < paths.size()) {
-                ExtrusionPath ep(paths[cur_src]);
+            if (cur.points.size() >= 2 && cur_src < m_paths.size()) {
+                ExtrusionPath ep(m_paths[cur_src]);
                 ep.polyline = cur;
                 dst.push_back(std::move(ep));
             }
             cur.points.clear();
         };
-        while (want_mm > EPSILON && seg_idx < segs.size()) {
-            const WallSeg &s     = segs[seg_idx];
-            const double   avail = s.len_mm - seg_off;
+        while (want_mm > EPSILON && m_seg_idx < m_segs.size()) {
+            const WallSeg &s     = m_segs[m_seg_idx];
+            const double   avail = s.len_mm - m_seg_off;
             if (avail <= EPSILON) {
-                ++seg_idx;
-                seg_off = 0.;
+                ++m_seg_idx;
+                m_seg_off = 0.;
                 continue;
             }
             if (cur_src != s.path_idx) {
@@ -443,27 +589,131 @@ std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_ent
                 cur_src = s.path_idx;
             }
             if (cur.points.empty())
-                cur.points.push_back(point_at(s, seg_off));
+                cur.points.push_back(point_at(s, m_seg_off));
             if (avail <= want_mm + EPSILON) {
                 cur.points.push_back(s.b);
                 want_mm -= avail;
-                ++seg_idx;
-                seg_off = 0.;
+                ++m_seg_idx;
+                m_seg_off = 0.;
             } else {
-                seg_off += want_mm;
-                cur.points.push_back(point_at(s, seg_off));
+                m_seg_off += want_mm;
+                cur.points.push_back(point_at(s, m_seg_off));
                 want_mm = 0.;
             }
         }
         flush();
-    };
+    }
 
+private:
+    struct WallSeg
+    {
+        Point  a, b;
+        size_t path_idx;   // index into `m_paths`, i.e. which attributes this segment prints with
+        double len_mm;
+    };
+    static Point point_at(const WallSeg &s, double off_mm)
+    {
+        const Vec2d a(unscale<double>(s.a.x()), unscale<double>(s.a.y()));
+        const Vec2d b(unscale<double>(s.b.x()), unscale<double>(s.b.y()));
+        const double t = s.len_mm > EPSILON ? std::min(1.0, std::max(0.0, off_mm / s.len_mm)) : 0.;
+        const Vec2d  p = a + (b - a) * t;
+        return Point(scale_(p.x()), scale_(p.y()));
+    }
+
+    const ExtrusionPaths &m_paths;
+    std::vector<WallSeg>  m_segs;
+    // The cursor: which segment, and how far along it (mm) the previous piece ended.
+    size_t m_seg_idx = 0;
+    double m_seg_off = 0.;
+};
+
+} // namespace
+
+std::vector<int> image_row_wall_entity_filaments(const ImageAssetStore &assets, const ImageRowWallContext &ctx,
+                                                 const ExtrusionEntity &entity, double print_z, const Layer *layer)
+{
+    std::vector<int>         out;
+    ExtrusionPaths           paths;
+    std::vector<ImageRowRun> runs;
+    if (compute_wall_runs(assets, ctx, entity, print_z, layer, paths, runs))
+        for (const ImageRowRun &r : runs)
+            if (std::find(out.begin(), out.end(), r.filament_id) == out.end())
+                out.push_back(r.filament_id);
+    if (out.empty() && ctx.base_filament > 0)
+        out.push_back(ctx.base_filament);
+    return out;
+}
+
+unsigned int image_row_nearest_registered(unsigned int wanted, const std::vector<unsigned int> &registered,
+                                          const std::vector<std::string> &filament_colours, unsigned int fallback)
+{
+    if (registered.empty())
+        return fallback;
+    if (std::find(registered.begin(), registered.end(), wanted) != registered.end())
+        return wanted;
+    auto colour = [&filament_colours](unsigned int id0) -> std::array<float, 3> {
+        return id0 < filament_colours.size() ? MixedFilamentManager::hex_to_srgb01(filament_colours[id0])
+                                             : std::array<float, 3>{0.5f, 0.5f, 0.5f};
+    };
+    const std::array<float, 3> w = colour(wanted);
+    unsigned int best = registered.front();
+    float        best_d = std::numeric_limits<float>::max();
+    for (unsigned int r : registered) {
+        const std::array<float, 3> c = colour(r);
+        const float d = (c[0] - w[0]) * (c[0] - w[0]) + (c[1] - w[1]) * (c[1] - w[1]) + (c[2] - w[2]) * (c[2] - w[2]);
+        if (d < best_d) {
+            best_d = d;
+            best   = r;
+        }
+    }
+    return best;
+}
+
+std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_entity(
+    const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity, double print_z,
+    const Layer *layer)
+{
+    std::vector<std::unique_ptr<ExtrusionEntityCollection>> out;
+
+    ExtrusionPaths           paths;
+    std::vector<ImageRowRun> runs;
+    if (!compute_wall_runs(assets, ctx, entity, print_z, layer, paths, runs))
+        return out;
+    if (runs.size() < 2) {
+        if (ctx.base_filament <= 0)
+            return out; // phase 4: one colour for the whole wall - leave the loop intact.
+        // Phase 5a: one colour for the whole wall - still leave the loop intact (seam, scarf and
+        // all), but SAY which filament it is, so it is not left on the row's cycle colour.
+        auto coll = std::make_unique<ExtrusionEntityCollection>();
+        coll->no_sort                   = false;
+        coll->image_row_extruder_1based = unsigned(runs.front().filament_id);
+        coll->entities.push_back(entity.clone());
+        out.push_back(std::move(coll));
+        return out;
+    }
+
+    // --- cut the wall at the run boundaries (WallCutter keeps each piece's own path attributes) --
+    WallCutter cutter(paths);
+    if (cutter.empty())
+        return out;
+    auto take = [&cutter](double want_mm, ExtrusionPaths &dst) { cutter.take(want_mm, dst); };
+
+    double cut_at = 0.;   // arc length of the previous run boundary
     for (size_t r = 0; r < runs.size(); ++r) {
         ExtrusionPaths run_paths;
         // The last run takes everything left, so the pieces reconstruct the original wall exactly
         // rather than leaving a sliver behind from floating-point drift in run.s1.
-        const double want = (r + 1 == runs.size()) ? std::numeric_limits<double>::max() / 4.
-                                                   : std::max(0.0, double(runs[r].length()));
+        //
+        // Phase 5a: a boundary sits half-way between the last sample of one run and the first
+        // sample of the next. Phase 4 cut each run at its own s1 - s0, which dropped one sample
+        // spacing per boundary and pushed every later boundary back by that much around the loop.
+        double want = std::numeric_limits<double>::max() / 4.;
+        if (r + 1 < runs.size()) {
+            const double boundary = ctx.base_filament > 0 ? 0.5 * (double(runs[r].s1) + double(runs[r + 1].s0))
+                                                          : cut_at + std::max(0.0, double(runs[r].length()));
+            want   = std::max(0.0, boundary - cut_at);
+            cut_at = boundary;
+        }
         take(want, run_paths);
         if (run_paths.empty())
             continue;
@@ -493,9 +743,170 @@ std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_ent
         out.push_back(std::move(coll));
     }
 
-    if (out.size() < 2)
-        out.clear(); // nothing usefully split - let the caller keep the original loop.
+    if (out.size() < 2 && ctx.base_filament <= 0)
+        out.clear(); // phase 4: nothing usefully split - let the caller keep the original loop.
     return out;
+}
+
+std::unique_ptr<ExtrusionEntityCollection> image_row_stripe_wall_entity(const ImageAssetStore      &assets,
+                                                                        const ImageRowWallContext  &ctx,
+                                                                        const ExtrusionEntity      &entity,
+                                                                        double                      print_z,
+                                                                        const Layer                *layer,
+                                                                        int                         layer_filament)
+{
+    const auto cand = std::find(ctx.candidate_ids.begin(), ctx.candidate_ids.end(), layer_filament);
+    if (cand == ctx.candidate_ids.end() || ctx.stripe_depth <= 0.f)
+        return nullptr;
+    const size_t component = size_t(cand - ctx.candidate_ids.begin());
+
+    ExtrusionPaths              paths;
+    std::vector<ImageRowSample> samples;
+    bool                        any_color = false;
+    if (!compute_wall_samples(assets, ctx, entity, print_z, layer, paths, samples, any_color) || !any_color)
+        return nullptr;
+
+    // --- one width level per sample ---------------------------------------------------------------
+    // The swing is quantised to kLevels steps each side of nominal: finer than a printer can show,
+    // and it keeps a smooth gradient from turning into one path per sample. The level is memoised
+    // per 5-bit colour, so a photo costs one solve per distinct colour, not one per sample.
+    constexpr int kLevels = 8;
+    std::unordered_map<uint32_t, int> level_of;
+    auto q5 = [](float c) -> uint32_t { return uint32_t(std::lround(std::min(1.f, std::max(0.f, c)) * 31.f)); };
+    std::vector<int> level(samples.size(), 0);
+    bool any_level = false;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!samples[i].has_color)
+            continue;   // where the picture does not land, the wall keeps its nominal width
+        const uint32_t key = (q5(samples[i].color[0]) << 10) | (q5(samples[i].color[1]) << 5) | q5(samples[i].color[2]);
+        auto it = level_of.find(key);
+        if (it == level_of.end()) {
+            const std::vector<float> w   = image_fill_mix_weights(samples[i].color, ctx.candidate_colors);
+            const float              f   = image_fill_stripe_width_factor(w, component, ctx.stripe_depth);
+            const int                lvl = int(std::lround((f - 1.f) / ctx.stripe_depth * float(kLevels)));
+            it = level_of.emplace(key, std::max(-kLevels, std::min(kLevels, lvl))).first;
+        }
+        level[i]  = it->second;
+        any_level = any_level || level[i] != 0;
+    }
+    if (!any_level)
+        return nullptr;
+
+    // --- coalesce into spans, then fold spans shorter than the nozzle into a neighbour ------------
+    struct Span
+    {
+        float s0, s1;
+        int   level;
+    };
+    std::vector<Span> spans;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!spans.empty() && spans.back().level == level[i])
+            spans.back().s1 = samples[i].s;
+        else
+            spans.push_back(Span{samples[i].s, samples[i].s, level[i]});
+    }
+    while (spans.size() > 1) {
+        size_t worst     = size_t(-1);
+        float  worst_len = ctx.min_run_len_mm;
+        for (size_t i = 0; i < spans.size(); ++i)
+            if (spans[i].s1 - spans[i].s0 < worst_len) {
+                worst_len = spans[i].s1 - spans[i].s0;
+                worst     = i;
+            }
+        if (worst == size_t(-1))
+            break;
+        // Into the neighbour whose width is closer.
+        size_t into;
+        if (worst == 0)
+            into = 1;
+        else if (worst + 1 == spans.size())
+            into = worst - 1;
+        else
+            into = std::abs(spans[worst - 1].level - spans[worst].level) <= std::abs(spans[worst + 1].level - spans[worst].level) ?
+                       worst - 1 :
+                       worst + 1;
+        const size_t lo = std::min(worst, into), hi = std::max(worst, into);
+        spans[lo] = Span{std::min(spans[lo].s0, spans[hi].s0), std::max(spans[lo].s1, spans[hi].s1), spans[into].level};
+        spans.erase(spans.begin() + hi);
+        // Neighbours that ended up at the same level join.
+        for (size_t i = 1; i < spans.size();) {
+            if (spans[i].level == spans[i - 1].level) {
+                spans[i - 1].s1 = spans[i].s1;
+                spans.erase(spans.begin() + i);
+            } else
+                ++i;
+        }
+    }
+    if (spans.size() == 1 && spans.front().level == 0)
+        return nullptr;
+
+    // --- cut at the span boundaries, then widen or narrow each piece --------------------------------
+    bool ccw = true;
+    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity))
+        ccw = loop->polygon().is_counter_clockwise();
+    WallCutter cutter(paths);
+    if (cutter.empty())
+        return nullptr;
+    ExtrusionPaths out_paths;
+    double         cut_at = 0.;
+    for (size_t k = 0; k < spans.size(); ++k) {
+        double want = std::numeric_limits<double>::max() / 4.;
+        if (k + 1 < spans.size()) {
+            const double boundary = 0.5 * (double(spans[k].s1) + double(spans[k + 1].s0));
+            want   = std::max(0.0, boundary - cut_at);
+            cut_at = boundary;
+        }
+        ExtrusionPaths piece;
+        cutter.take(want, piece);
+        const float factor = 1.f + ctx.stripe_depth * float(spans[k].level) / float(kLevels);
+        for (ExtrusionPath &path : piece) {
+            if (spans[k].level != 0 && path.role() == erExternalPerimeter && path.polyline.points.size() >= 2) {
+                const double w0 = double(path.width);
+                const double h  = double(path.height);
+                const double w1 = w0 * double(factor);
+                // The bead's cross-section, the same rounded rectangle Flow uses.
+                auto area = [h](double w) { return std::max(1e-6, h * (w - h * (1. - 0.25 * PI))); };
+                if (w1 > h * (1. - 0.25 * PI) + 1e-3) {
+                    path.mm3_per_mm = path.mm3_per_mm * area(w1) / area(w0);
+                    path.width      = float(w1);
+                    // Inner edge fixed: the centre line moves out by half the change in width.
+                    const double shift = 0.5 * (w1 - w0);
+                    Points      &pts   = path.polyline.points;
+                    Points       moved(pts.size());
+                    for (size_t j = 0; j < pts.size(); ++j) {
+                        Vec2d n(0., 0.);
+                        if (j > 0) {
+                            const Vec3d a = wall_outward_normal_print(pts[j - 1], pts[j], ccw);
+                            n += Vec2d(a.x(), a.y());
+                        }
+                        if (j + 1 < pts.size()) {
+                            const Vec3d b = wall_outward_normal_print(pts[j], pts[j + 1], ccw);
+                            n += Vec2d(b.x(), b.y());
+                        }
+                        if (n.squaredNorm() > 1e-12)
+                            n.normalize();
+                        moved[j] = Point(pts[j].x() + coord_t(scale_(n.x() * shift)), pts[j].y() + coord_t(scale_(n.y() * shift)));
+                    }
+                    pts = std::move(moved);
+                }
+            }
+            // One continuous line: each piece starts where the last one ended, so a width step is
+            // a short diagonal in the extrusion, never a travel move.
+            if (!out_paths.empty() && !out_paths.back().polyline.points.empty() && !path.polyline.points.empty())
+                path.polyline.points.front() = out_paths.back().polyline.points.back();
+            out_paths.push_back(std::move(path));
+        }
+    }
+    if (out_paths.empty())
+        return nullptr;
+
+    auto coll     = std::make_unique<ExtrusionEntityCollection>();
+    coll->no_sort = false;   // see image_row_split_wall_entity(): a perimeter collection must splat
+    if (out_paths.size() == 1)
+        coll->entities.push_back(new ExtrusionPath(out_paths.front()));
+    else
+        coll->entities.push_back(new ExtrusionMultiPath(out_paths));
+    return coll;
 }
 
 } // namespace Slic3r
