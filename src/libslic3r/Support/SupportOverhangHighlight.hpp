@@ -21,8 +21,12 @@
 // and this rule drift apart.
 
 #include "../ExPolygon.hpp"
+#include "admesh/stl.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -121,5 +125,60 @@ struct SupportOverhangOverlayLayer
 // the object later, so for them what lies above lower layers moves to the unsupported set, as the
 // normal generator does up front. Layers with neither are left out.
 std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObject &object);
+
+// ---------------------------------------------------------------------------------------------
+// Phase 3: before slicing. A quick slice of the object's parts at its real layer heights, the
+// rule above plus the slice-only extras, mapped back onto the facets.
+// ---------------------------------------------------------------------------------------------
+
+// Map per-layer areas back onto the facets of `its` placed by `trafo` (world: z = 0 on the bed,
+// the same frame as the areas). slice_z[i] is the slicing plane of layer i; layer i's overhang is
+// made by the facets between slice_z[i-1] and slice_z[i]. grow[i] (mm, may be empty) is added to
+// the areas before the test (the tree lower-layer offset, so an overhang band covers its whole
+// facet strip). A downward facet is flagged when at least `min_coverage` of its projected area in
+// the slabs it crosses lies inside the grown areas. Layer 0 (the bed) is never flagged. One flag per
+// facet.
+std::vector<uint8_t> overhang_facets_from_layers(const indexed_triangle_set    &its,
+                                                 const Transform3d             &trafo,
+                                                 const std::vector<float>      &slice_z,
+                                                 const std::vector<ExPolygons> &areas,
+                                                 const std::vector<double>     &grow,
+                                                 double                         min_coverage = 0.5);
+
+struct SupportOverhangPreviewInput
+{
+    struct Part {
+        std::shared_ptr<const indexed_triangle_set> its;      // the volume's mesh (immutable, shared)
+        Transform3d                                 trafo { Transform3d::Identity() }; // volume -> world
+        bool                                        negative { false }; // a negative volume: cut away, not mapped
+    };
+    std::vector<Part>   parts;
+    // Object layers as from generate_object_layers(): low, high pairs from z = 0 (no raft).
+    std::vector<double> layer_zs;
+    SupportOverhangRule rule;
+    bool                build_plate_only { false };
+    float               closing_radius   { 0.049f };
+};
+
+struct SupportOverhangPreview
+{
+    std::vector<float>       slice_z;     // per object layer
+    std::vector<double>      print_z;     // top of each layer (world z, raft not included)
+    std::vector<ExPolygons>  supported;   // per layer, world XY: what automatic supports would hold up
+    std::vector<ExPolygons>  unsupported; // per layer: overhangs that would get none (supports off or
+                                          // manual, build plate only)
+    // Per input part (empty for negative parts), per facet: 0 none, 1 supported, 2 unsupported.
+    std::vector<std::vector<uint8_t>> part_facets;
+    size_t layers_with_overhangs() const;
+    double slice_ms { 0. }, detect_ms { 0. }, map_ms { 0. };
+};
+
+// throw_on_cancel is called between the stages and inside the slicer; whatever it throws ends
+// the run. Extras modelled: floating islands (sharp tails) are supported, "on build plate only"
+// moves overhangs above lower layers to `unsupported`, supports off or a manual type move
+// everything to `unsupported`. Not modelled: bridges, small-overhang removal, cantilevers,
+// critical regions only, painted enforcers / blockers (the gizmo shows those itself).
+SupportOverhangPreview support_overhang_preview(const SupportOverhangPreviewInput &input,
+                                                const std::function<void()>       &throw_on_cancel = {});
 
 } // namespace Slic3r
