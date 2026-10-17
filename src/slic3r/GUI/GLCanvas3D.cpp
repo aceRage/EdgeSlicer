@@ -9606,6 +9606,18 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     else
         m_volumes.set_show_sinking_contours(!m_gizmos.is_hiding_instances());
 
+    // Orca #15770: X-Ray replaces both shaded passes with a single one and reuses the volume state
+    // (print volume, z range, clipping plane) set up above.
+    // Edge: driven from the transparent call rather than Orca's opaque one. X-Ray writes no depth, so
+    // drawn first the bed and plates (rendered between the two calls) would paint over the objects;
+    // drawn last it composites over them like any other translucent geometry.
+    if (_is_xray_view_active()) {
+        if (type == GLVolumeCollection::ERenderType::Transparent)
+            _render_xray_volumes();
+        m_camera_clipping_plane = ClippingPlane::ClipsNothing();
+        return;
+    }
+
     GLShaderProgram* shader = wxGetApp().get_shader("gouraud");
     ECanvasType canvas_type = this->m_canvas_type;
     bool                 partly_inside_enable = canvas_type == ECanvasType::CanvasAssembleView ? false : true;
@@ -9702,6 +9714,59 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     }
 
     m_camera_clipping_plane = ClippingPlane::ClipsNothing();
+}
+
+bool GLCanvas3D::_is_xray_view_active() const
+{
+    if (m_canvas_type == ECanvasType::CanvasPreview || !wxGetApp().plater()->is_show_xray())
+        return false;
+    if (wxGetApp().get_shader("xray") == nullptr)
+        return false;
+
+    // A painting gizmo and the layer height editor draw the object through their own shaders, and
+    // would lose what they draw if X-Ray took the pass over.
+    if (dynamic_cast<const GLGizmoPainterBase*>(m_gizmos.get_current()) != nullptr)
+        return false;
+    // Edge: the cut gizmo colours, ghosts or hides each half through the gouraud shader's colour clip
+    // (flat, curved and drawn cuts), which the X-Ray shader does not know about.
+    if (m_gizmos.get_current_type() == GLGizmosManager::Cut)
+        return false;
+    return !(m_picking_enabled && m_layers_editing.is_enabled() && m_layers_editing.last_object_id != -1 &&
+             m_layers_editing.object_max_z() > 0.0f);
+}
+
+void GLCanvas3D::_render_xray_volumes()
+{
+    if (m_volumes.empty())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("xray");
+    if (shader == nullptr)
+        return;
+
+    const Camera&     camera      = wxGetApp().plater()->get_camera();
+    const ECanvasType canvas_type = m_canvas_type;
+
+    // Depth writes off so every surface along a view ray composites, not just the nearest one, and
+    // back faces kept for the far wall of a hollow part. The low, near-uniform coverage the shader
+    // emits saturates towards the volume color whatever the order, so the volumes are not sorted.
+    // Per-object view modes still apply: Hidden volumes are inactive and skipped, Ghost ones carry
+    // their reduced alpha into the coverage and read fainter.
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    shader->start_using();
+    m_volumes.render(GLVolumeCollection::ERenderType::All, true, camera, get_canvas_size(),
+        [this, canvas_type](const GLVolume& volume) {
+            if (canvas_type == ECanvasType::CanvasAssembleView)
+                return !volume.is_modifier && !volume.is_wipe_tower;
+            return m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0;
+        });
+    shader->stop_using();
+
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDepthMask(GL_TRUE));
 }
 
 //BBS: GUI refactor: add canvas size as parameters
