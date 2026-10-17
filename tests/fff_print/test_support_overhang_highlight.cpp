@@ -291,10 +291,12 @@ double area_mm2(const ExPolygons &expolys)
     return a * SCALING_FACTOR * SCALING_FACTOR;
 }
 
+// The overlay of the generators' detection (use_generated_support false): what each one decides to
+// hold up. Phase 6 trees' contact view is tested with the Benchy below.
 OverlayTotals overlay_totals(const PrintObject &object, double z_min = 0., double z_max = 1e9)
 {
     OverlayTotals t;
-    for (const SupportOverhangOverlayLayer &l : support_overhang_overlay(object)) {
+    for (const SupportOverhangOverlayLayer &l : support_overhang_overlay(object, false)) {
         if (l.print_z < z_min || l.print_z > z_max)
             continue;
         t.supported   += area_mm2(l.supported);
@@ -908,6 +910,17 @@ double layer_mismatch(const LayerAreas &slice, const std::vector<ExPolygons> &hi
     return slice.total > 0. ? xor_area / slice.total : xor_area;
 }
 
+// The area of world triangles seen from above (mm2).
+double projected_area(const std::vector<Vec3f> &tris)
+{
+    double a = 0.;
+    for (size_t k = 0; k + 2 < tris.size(); k += 3) {
+        const Vec3d p0 = tris[k].cast<double>(), p1 = tris[k + 1].cast<double>(), p2 = tris[k + 2].cast<double>();
+        a += 0.5 * std::abs((p1.x() - p0.x()) * (p2.y() - p0.y()) - (p1.y() - p0.y()) * (p2.x() - p0.x()));
+    }
+    return a;
+}
+
 size_t count_facets(const SupportOverhangPreview &p, uint8_t cls)
 {
     size_t n = 0;
@@ -935,16 +948,36 @@ TEST_CASE("Support highlight exact: the highlight holds up exactly what the slic
     };
     double normal_area = 0., tree_area = 0.;
     for (const auto &[name, config] : cases) {
-        const LayerAreas             slice     = sliced_support_overhangs(model, config);
-        const SupportOverhangPreview highlight = exact_preview(model, config);
-        const double                 mismatch  = layer_mismatch(slice, highlight.supported);
+        const bool tree = std::string(name).find("normal") == std::string::npos;
+        const LayerAreas slice = sliced_support_overhangs(model, config);
+        // Trees: the detection comes first (shown while the tree is placed), then the placed tree.
+        std::vector<ExPolygons> detected;
+        DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+        full.apply(config);
+        Print print;
+        const SupportOverhangPreview highlight = support_overhang_preview_exact(print, model, full, true,
+            [&detected](SupportOverhangPreview &&d) { detected = std::move(d.supported); });
+        const double mismatch = layer_mismatch(slice, highlight.supported);
+        double detected_area = 0., surface_area = 0.;
+        for (const ExPolygons &e : detected)
+            detected_area += area_mm2(e);
+        surface_area = projected_area(highlight.supported_surface);
         INFO(name << ": the slice holds up " << slice.total << " mm2 over " << slice.supported.size() << " layers, the highlight "
                   << highlight.supported.size() << " layers, mismatch " << mismatch << ", red faces " << count_facets(highlight, 1)
-                  << ", amber faces " << count_facets(highlight, 2));
+                  << ", yellow faces " << count_facets(highlight, 2) << ", red surface (projected) " << surface_area
+                  << " mm2; the tree's detection alone " << detected_area << " mm2");
         CHECK(slice.supported.size() == highlight.supported.size());
         CHECK(slice.total > 0.);
-        CHECK(mismatch < 1e-6);
+        // Normal supports: the detection, exactly. Trees: what the placed tree reaches, regenerated
+        // in the private print; the tree generators are run twice, so allow 0.1 % of the area.
+        CHECK(mismatch < (tree ? 1e-3 : 1e-6));
+        CHECK(highlight.from_generated_support == tree);
+        CHECK(detected.empty() == ! tree);
         CHECK(count_facets(highlight, 1) > 0);
+        CHECK(surface_area > 0.);
+        // Organic tips land on part of what is detected: red shrinks once the tree is placed.
+        if (std::string(name) == "organic")
+            CHECK(slice.total < detected_area);
         if (std::string(name) == "normal(auto)")
             normal_area = slice.total;
         if (std::string(name) == "tree slim")
@@ -975,7 +1008,7 @@ TEST_CASE("Support highlight exact: object overrides and supports switched off",
         const SupportOverhangPreview highlight = exact_preview(model, config);
         INFO("slice " << slice.total << " mm2, mismatch " << layer_mismatch(slice, highlight.supported));
         CHECK(slice.total > 0.);
-        CHECK(layer_mismatch(slice, highlight.supported) < 1e-6);
+        CHECK(layer_mismatch(slice, highlight.supported) < 1e-3);
     }
     {
         // Supports off for the object: the highlight simulates automatic supports, which then hold
@@ -986,7 +1019,7 @@ TEST_CASE("Support highlight exact: object overrides and supports switched off",
         off.objects.front()->config.assign_config(std::move(object_config));
         const LayerAreas on_slice = sliced_support_overhangs(model, config);
         const SupportOverhangPreview highlight = exact_preview(off, config);
-        CHECK(layer_mismatch(on_slice, highlight.supported) < 1e-6);
+        CHECK(layer_mismatch(on_slice, highlight.supported) < 1e-3);
     }
 }
 
@@ -1007,12 +1040,19 @@ TEST_CASE("Support highlight benchmark: exact pre-slice preview", "[.][SupportHi
 {
     auto run = [](const char *name, const Model &model, const char *type, const char *style) {
         DynamicPrintConfig config = support_config(type, 30, 0.2, { { "support_style", style }, { "max_bridge_length", 10 } });
+        DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+        full.apply(config);
+        Print print;
         const auto t0 = std::chrono::steady_clock::now();
-        const SupportOverhangPreview p = exact_preview(model, config);
+        double first = -1.;
+        const SupportOverhangPreview p = support_overhang_preview_exact(print, model, full, true, [&first, t0](SupportOverhangPreview &&) {
+            first = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        });
         const double total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        std::cout << "exact " << name << " " << type << " " << style << ": " << p.slice_z.size() << " layers, steps " << p.slice_ms << " ms, detect "
-                  << p.detect_ms << " ms, map " << p.map_ms << " ms, total " << total << " ms, red " << count_facets(p, 1) << ", amber "
-                  << count_facets(p, 2) << std::endl;
+        std::cout << "exact " << name << " " << type << " " << style << ": " << p.slice_z.size() << " layers, steps " << p.slice_ms << " ms, tree "
+                  << p.generate_ms << " ms, map " << p.map_ms << " ms, detection shown at " << first << " ms, total " << total << " ms, red "
+                  << count_facets(p, 1) << ", yellow " << count_facets(p, 2) << ", red surface " << p.supported_surface.size() / 3
+                  << " triangles, yellow surface " << p.unsupported_surface.size() / 3 << std::endl;
     };
     Model benchy;
     const bool have_benchy = load_benchy(benchy);
@@ -1029,4 +1069,61 @@ TEST_CASE("Support highlight benchmark: exact pre-slice preview", "[.][SupportHi
             run("3DBenchy", benchy, type, style);
         run("sphere r40 998k", sphere, type, style);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 6: the faces are cut where a layer's area ends.
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Support highlight surface: the red surface covers the supported faces", "[SupportHighlight]")
+{
+    // A 30 degree inverted frustum with normal supports: every side face is held up, so the red cut
+    // surface, seen from above, covers the ring between the foot and the top.
+    Model model;
+    model.add_object()->add_volume(TriangleMesh(inverted_frustum_its(30.)));
+    model.objects.front()->add_instance();
+    model.objects.front()->ensure_on_bed();
+    const SupportOverhangPreview p = exact_preview(model, support_config("normal(auto)", 40, 0.2));
+    double red = 0.;
+    for (size_t k = 0; k + 2 < p.supported_surface.size(); k += 3) {
+        const Vec3d a = p.supported_surface[k].cast<double>(), b = p.supported_surface[k + 1].cast<double>(), c = p.supported_surface[k + 2].cast<double>();
+        red += 0.5 * std::abs((b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x()));
+    }
+    const double g    = 10. / std::tan(30. * M_PI / 180.);
+    const double ring = (10. + 2. * g) * (10. + 2. * g) - 100.;
+    INFO("red surface " << red << " mm2, side ring " << ring << " mm2");
+    // The first layer's slab is never flagged (it prints on the bed): a few percent less.
+    CHECK(red > 0.93 * ring);
+    CHECK(red < 1.01 * ring);
+    // Every red point lies on a side face, between the foot and the top.
+    for (const Vec3f &v : p.supported_surface) {
+        CHECK(v.z() >= -1e-3f);
+        CHECK(v.z() <= 10.001f);
+    }
+    CHECK(p.unsupported_surface.empty());
+}
+
+TEST_CASE("Support highlight surface: a face half on the area is cut in half", "[SupportHighlight]")
+{
+    // One downward face, a 10 x 10 mm square at z = 1 (two triangles); the area covers its left half.
+    indexed_triangle_set its;
+    its.vertices = { { 0.f, 0.f, 1.f }, { 10.f, 0.f, 1.f }, { 10.f, 10.f, 1.f }, { 0.f, 10.f, 1.f } };
+    its.indices  = { { 0, 2, 1 }, { 0, 3, 2 } }; // facing down
+    const std::vector<float> slice_z { 0.1f, 0.3f, 0.5f, 0.7f, 0.9f, 1.1f };
+    std::vector<ExPolygons> areas(slice_z.size());
+    ExPolygon half;
+    half.contour.points = { { scaled<coord_t>(-1.), scaled<coord_t>(-1.) }, { scaled<coord_t>(5.), scaled<coord_t>(-1.) },
+                            { scaled<coord_t>(5.), scaled<coord_t>(11.) }, { scaled<coord_t>(-1.), scaled<coord_t>(11.) } };
+    areas[5].push_back(half);
+    const std::vector<Vec3f> tris = overhang_surface_triangles(its, Transform3d::Identity(), slice_z, areas);
+    double a = 0.;
+    for (size_t k = 0; k + 2 < tris.size(); k += 3) {
+        const Vec3d p0 = tris[k].cast<double>(), p1 = tris[k + 1].cast<double>(), p2 = tris[k + 2].cast<double>();
+        a += 0.5 * std::abs((p1.x() - p0.x()) * (p2.y() - p0.y()) - (p1.y() - p0.y()) * (p2.x() - p0.x()));
+        for (const Vec3d &q : { p0, p1, p2 }) {
+            CHECK(q.x() <= 5.001);
+            CHECK(std::abs(q.z() - 1.) < 1e-4);
+        }
+    }
+    CHECK_THAT(a, WithinAbs(50., 0.01));
 }

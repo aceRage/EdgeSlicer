@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 namespace Slic3r::GUI {
@@ -110,7 +111,7 @@ private:
     // detection on a private copy of the object (phase 5: support_overhang_preview_exact(); the
     // support type, the object's overrides, bridges, small-overhang removal, build plate only,
     // painted enforcers / blockers all as the slice will have them) and the result is drawn over
-    // the facets (red: the generator holds it up, amber: an overhang it leaves). A layer stepper
+    // the facets (red: the generator holds it up, yellow: an overhang it leaves). A layer stepper
     // cuts the object at one layer and draws that layer's areas on the cut. Remembered in AppConfig
     // "support_paint_highlight_by_layer".
     struct LayerPreviewJob
@@ -121,6 +122,11 @@ private:
         DynamicPrintConfig                      config;  // the full config
         std::unique_ptr<Print>                  print;   // private, so cancel() reaches it
         std::unique_ptr<SupportOverhangPreview> result;
+        // Tree supports: the detection, shown while the tree itself is placed (phase 6).
+        std::mutex                              mutex;
+        std::unique_ptr<SupportOverhangPreview> detected;
+        std::atomic<bool>                       detected_ready { false };
+        bool                                    detected_shown { false };  // UI thread only
         std::string                             error;
     };
     void   update_layer_preview();
@@ -146,7 +152,9 @@ private:
     DynamicPrintConfig                      m_layer_preview_object_cfg;
     std::vector<std::string>                m_layer_preview_filaments;
     std::unique_ptr<SupportOverhangPreview> m_layer_preview;          // the result on screen
-    std::vector<std::pair<GLModel, GLModel>> m_layer_preview_models;  // per model part (mesh_id): red, amber
+    GLModel                                 m_layer_surface_supported;   // the faces cut by the layers, world: red
+    GLModel                                 m_layer_surface_unsupported; // yellow
+    bool                                    m_layer_preview_intermediate = false; // a tree's detection, its placement still running
     GLModel                                 m_layer_cut_supported;    // the stepped layer's areas, world
     GLModel                                 m_layer_cut_unsupported;
     int                                     m_layer_preview_layer = 0; // 0: whole object, else 1-based layer

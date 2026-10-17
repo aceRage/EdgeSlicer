@@ -123,12 +123,17 @@ struct SupportOverhangOverlayLayer
     std::vector<Vec2f>  unsupported_triangles;
 };
 
-// Unsupported = the rule's overhang (support_overhangs_from_slices()) minus the supported areas
-// grown by 0.1 x the outer wall width, opened by the same amount so slivers along the edge of a
-// supported area do not show. Tree supports with "on build plate only" drop their branches over
-// the object later, so for them what lies above lower layers moves to the unsupported set, as the
-// normal generator does up front. Layers with neither are left out.
-std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObject &object);
+// Normal supports: supported = what the generator decided to hold up (Layer::support_overhangs).
+// Tree supports (every style) with their support generated (use_generated_support, phase 6):
+// supported = the overhang (detected or flagged by the rule) that lies on the generated support -
+// the support layer just under the object layer (roof, base, tips), grown by the XY distance the
+// support keeps from the object - because a tree does not put a contact under all of what it
+// detects: tips are sampled along the overhang and dropped where they cannot reach. Without the
+// generated support, trees use the detection and, with "on build plate only", move what lies above
+// lower layers to the unsupported set, as the normal generator does up front.
+// Unsupported = the rest of the overhang, opened by 0.1 x the outer wall width so slivers along
+// the edge of a supported area do not show. Layers with neither are left out.
+std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObject &object, bool use_generated_support = true);
 
 // ---------------------------------------------------------------------------------------------
 // Phase 3: before slicing. A quick slice of the object's parts at its real layer heights, the
@@ -173,9 +178,25 @@ struct SupportOverhangPreview
                                           // manual, build plate only)
     // Per input part (empty for negative parts), per facet: 0 none, 1 supported, 2 unsupported.
     std::vector<std::vector<uint8_t>> part_facets;
+    // Phase 6: the supported / unsupported parts of the downward faces themselves (world
+    // coordinates, three points per triangle): a face is cut where a layer's area ends, so a face
+    // only partly on the support shows partly red.
+    std::vector<Vec3f>       supported_surface;
+    std::vector<Vec3f>       unsupported_surface;
+    // Phase 6: true when supported comes from the generated tree support (its contact), false when
+    // it is the detection (normal supports always; trees before their generation has run).
+    bool                     from_generated_support { false };
     size_t layers_with_overhangs() const;
-    double slice_ms { 0. }, detect_ms { 0. }, map_ms { 0. };
+    double slice_ms { 0. }, detect_ms { 0. }, map_ms { 0. }, generate_ms { 0. };
 };
+
+// Phase 6: the parts of the downward faces of `its` placed by `trafo` that lie inside the per-layer
+// `areas` (world XY, already grown as wanted), as world triangles. Each face is clipped to the
+// slabs between the slicing planes and each piece to its layer's area.
+std::vector<Vec3f> overhang_surface_triangles(const indexed_triangle_set    &its,
+                                              const Transform3d             &trafo,
+                                              const std::vector<float>      &slice_z,
+                                              const std::vector<ExPolygons> &areas);
 
 // throw_on_cancel is called between the stages and inside the slicer; whatever it throws ends
 // the run. Extras modelled: floating islands (sharp tails) are supported, "on build plate only"
@@ -204,6 +225,12 @@ void support_overhang_simulate_auto(DynamicPrintConfig &config, bool add_missing
 // plate only, blockers ...), as the preview overlay of phase 2 shows them. Areas are world XY,
 // print_z without the raft; part_facets has one entry per model volume (empty unless a model part).
 // Runs on the caller's thread; Print::cancel() ends it with CanceledException.
-SupportOverhangPreview support_overhang_preview_exact(Print &print, const Model &model, const DynamicPrintConfig &config);
+// Phase 6: for tree supports with generate_tree set, the detection result goes to `on_detected`
+// first (shown at once), then the tree support itself is generated (PrintObject::
+// generate_support_for_preview()) and the returned result counts as supported only what lies on
+// it (support_overhang_overlay()). Normal supports return the detection, which is exact.
+SupportOverhangPreview support_overhang_preview_exact(Print &print, const Model &model, const DynamicPrintConfig &config,
+                                                      bool generate_tree = true,
+                                                      const std::function<void(SupportOverhangPreview &&)> &on_detected = {});
 
 } // namespace Slic3r

@@ -195,7 +195,7 @@ private:
     float m_z_offset{ 0.0f };
 
     // Edge (support highlight, phase 2): each layer's supported overhangs (what the support
-    // generator holds up, red) and unsupported overhangs (amber), drawn over the toolpaths and
+    // generator holds up, red) and unsupported overhangs (yellow), drawn over the toolpaths and
     // following the layer slider. Built from the slice (support_overhang_overlay()) the first time
     // one of the two legend toggles is on after a G-code load.
     struct SupportOverhangOverlay
