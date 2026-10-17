@@ -289,8 +289,11 @@ std::string PresetComboBox::favorite_key_of_row(unsigned int n) const
 
 void PresetComboBox::enable_favorites(bool live)
 {
-    if (m_type != Preset::TYPE_FILAMENT)
+    // Only filament and process lists have favourites; the kind decides which stored set the stars use.
+    FavoritePresets::Kind kind;
+    if (!FavoriteFilamentsUI::kind_of(m_type, kind))
         return;
+    m_favorites_kind = kind;
     if (!m_favorites_enabled) {
         m_favorites_enabled = true;
         // A star click: toggle, redraw the stars at once, regroup when the list closes.
@@ -298,7 +301,7 @@ void PresetComboBox::enable_favorites(bool live)
             const std::string key = favorite_key_of_row(unsigned(e.GetInt()));
             if (key.empty())
                 return;
-            FavoriteFilamentsUI::toggle(key);
+            FavoriteFilamentsUI::toggle(key, m_favorites_kind);
             update_favorite_stars();
             m_favorites_regroup = true;
         });
@@ -318,7 +321,7 @@ void PresetComboBox::enable_favorites(bool live)
                 return;
             }
             wxMenu menu;
-            FavoriteFilamentsUI::append_toggle_item(menu, key);
+            FavoriteFilamentsUI::append_toggle_item(menu, key, m_favorites_kind);
             PopupMenu(&menu);
         });
     }
@@ -330,7 +333,7 @@ void PresetComboBox::enable_favorites(bool live)
             } else {
                 update();
             }
-        });
+        }, m_favorites_kind);
     } else if (!live && m_favorites_subscription) {
         FavoriteFilamentsUI::unsubscribe(m_favorites_subscription);
         m_favorites_subscription = 0;
@@ -343,7 +346,7 @@ void PresetComboBox::append_favorite_group(const std::vector<std::pair<wxString,
     m_favorites_first = m_favorites_end = -1;
     if (!m_favorites_enabled || !m_collection)
         return;
-    const std::set<std::string> favorites = FavoriteFilamentsUI::load();
+    const std::set<std::string> favorites = FavoriteFilamentsUI::load(m_favorites_kind);
     if (favorites.empty())
         return;
     std::map<wxString, wxBitmap*> rows; // sorted by name, one row per shown name
@@ -356,7 +359,9 @@ void PresetComboBox::append_favorite_group(const std::vector<std::pair<wxString,
     }
     if (rows.empty())
         return;
-    set_label_marker(Append(separator(L("Favorite filaments")), wxNullBitmap));
+    set_label_marker(Append(separator(m_favorites_kind == FavoritePresets::Kind::Process ? L("Favorite process presets")
+                                                                                         : L("Favorite filaments")),
+                            wxNullBitmap));
     m_favorites_first = int(GetCount());
     for (const auto &[name, bmp] : rows) {
         const int item = Append(name, bmp ? *bmp : wxNullBitmap);
@@ -373,7 +378,7 @@ void PresetComboBox::update_favorite_stars()
 {
     if (!m_favorites_enabled)
         return;
-    const std::set<std::string> favorites = FavoriteFilamentsUI::load();
+    const std::set<std::string> favorites = FavoriteFilamentsUI::load(m_favorites_kind);
     const wxBitmap on  = create_scaled_bitmap(into_u8(FavoriteFilamentsUI::star_icon_name(true)), this, 16);
     const wxBitmap off = create_scaled_bitmap(into_u8(FavoriteFilamentsUI::star_icon_name(false)), this, 16);
     for (unsigned int i = 0; i < GetCount(); ++i) {
@@ -2175,7 +2180,7 @@ void TabPresetComboBox::update()
         }
     }
 
-    if (m_type == Preset::TYPE_FILAMENT) {
+    if (m_type == Preset::TYPE_FILAMENT || m_type == Preset::TYPE_PRINT) {
         std::vector<std::pair<wxString, wxBitmap*>> candidates;
         for (const auto *group : { &project_embedded_presets, &nonsys_presets, &system_presets })
             for (const auto &[name, bmp_enabled] : *group)
