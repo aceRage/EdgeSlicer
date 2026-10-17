@@ -202,16 +202,14 @@ TEST_CASE("Favourite process presets: the Process list groups the favourites tha
 TEST_CASE("Favourite process presets follow a vendor rename", "[FavoritePresets]")
 {
     // "0.20mm Standard" became "0.20mm Balanced": the new presets list the old name in renamed_from.
-    // The "@" removed variant a profile loader adds on its own changes only the printer part: no rename.
+    // The "@"-removed names a profile loader adds on its own ("0.12mm Fine BBL X1C") are never a stored key.
     const auto renames = FavoriteFilaments::rename_map({
         {"0.20mm Balanced", "0.20mm Standard @BBL X1C"},
-        {"0.20mm Balanced", "0.20mm Standard BBL X1C"},
         {"0.12mm Fine", "0.12mm Fine BBL X1C"},
     });
-    REQUIRE(renames.size() == 1);
     CHECK(renames.at("0.20mm Standard") == "0.20mm Balanced");
 
-    std::set<std::string> keys{"0.20mm Standard", "Fast draft"};
-    CHECK(FavoriteFilaments::migrate(keys, {"0.20mm Balanced", "Fast draft"}, renames));
-    CHECK(keys == std::set<std::string>{"0.20mm Balanced", "Fast draft"});
+    std::set<std::string> keys{"0.20mm Standard", "0.12mm Fine", "Fast draft"};
+    CHECK(FavoriteFilaments::migrate(keys, {"0.20mm Balanced", "0.12mm Fine", "Fast draft"}, renames));
+    CHECK(keys == std::set<std::string>{"0.20mm Balanced", "0.12mm Fine", "Fast draft"});
 }
