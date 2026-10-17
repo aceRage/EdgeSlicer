@@ -630,11 +630,38 @@ wxGLCanvas* OpenGLManager::create_wxglcanvas(wxWindow& parent)
 //        std::cout << "Multisample " << (can_multisample() ? "enabled" : "disabled") << std::endl;
     }
 
+    // Orca #13538: the MSAA level of the 3D canvases comes from Preferences > Graphics (restart needed).
+    // Edge: s_multisample stays what the driver can do with the default 4x request, so thumbnails,
+    // plate / phone captures and the preview keep their multisampled framebuffers whatever the user
+    // picks here; only the canvas pixel format follows the preference.
+    constexpr int sample_buffers_value_idx = 15;
+    constexpr int samples_value_idx        = 17;
+    int antialiasing_samples = 4;
+    if (const AppConfig* app_config = get_app_config(); app_config != nullptr) {
+        const std::string value = app_config->get(SETTING_OPENGL_AA_SAMPLES);
+        if (value == "0" || value == "2" || value == "4" || value == "8" || value == "16")
+            antialiasing_samples = ::atoi(value.c_str());
+    }
+
     if (! can_multisample())
         attribList[12] = 0;
+    else if (antialiasing_samples <= 0) {
+        // MSAA off by choice: keep the stencil buffer (the selection highlight's fallback uses it).
+        attribList[sample_buffers_value_idx] = GL_FALSE;
+        attribList[samples_value_idx]        = 0;
+    } else if (antialiasing_samples != 4) {
+        attribList[samples_value_idx] = antialiasing_samples;
+        if (! wxGLCanvas::IsDisplaySupported(attribList)) {
+            BOOST_LOG_TRIVIAL(warning) << "create_wxglcanvas: " << antialiasing_samples << "x multisample unsupported, using 4x";
+            antialiasing_samples          = 4;
+            attribList[samples_value_idx] = 4;
+        }
+    }
 
     BOOST_LOG_TRIVIAL(info) << "create_wxglcanvas: pixel format requests RGBA 8/8/8/8, depth 24"
-                            << (can_multisample() ? ", stencil 8, 4x multisample" : " (stencil and multisample dropped: multisample unsupported)");
+                            << (! can_multisample() ? std::string(" (stencil and multisample dropped: multisample unsupported)") :
+                                antialiasing_samples <= 0 ? std::string(", stencil 8, multisample off (preference)") :
+                                (boost::format(", stencil 8, %1%x multisample") % antialiasing_samples).str());
 
     return new wxGLCanvas(&parent, wxID_ANY, attribList, wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS);
 }

@@ -1612,6 +1612,10 @@ GLCanvas3D::~GLCanvas3D()
         if (m_frame_profiler)
             m_frame_profiler->reset();
     }
+    if (m_fxaa_texture_id != 0 && m_canvas != nullptr && _set_current()) {
+        glsafe(::glDeleteTextures(1, &m_fxaa_texture_id));
+        m_fxaa_texture_id = 0;
+    }
 
     reset_volumes(ResetVolumesMode::CanvasDestruction);
 
@@ -3540,11 +3544,22 @@ void GLCanvas3D::render(bool only_init)
     if (m_picking_enabled && m_rectangle_selection.is_dragging())
         m_rectangle_selection.render(*this);
 
+    // Orca #13538: screen-space anti-aliasing of the 3D scene, before the ImGui overlays.
+    if (_is_fxaa_enabled()) {
+        FrameProfiler::Scope scope(*m_frame_profiler, "fxaa");
+        _render_fxaa_pass(static_cast<unsigned int>(cnv_size.get_width()), static_cast<unsigned int>(cnv_size.get_height()));
+    }
+
     // draw overlays
     {
         FrameProfiler::Scope scope(*m_frame_profiler, "overlays");
         _render_overlays();
     }
+
+    // Orca #13538: the counter is read once per frame and shared by the overlay and the statistics dialog.
+    const int current_fps = m_render_stats.get_fps_and_reset_if_needed();
+    if (_is_fps_overlay_enabled())
+        _render_fps_overlay(current_fps);
 
     if (show_render_stats) {
         ImGui::ShowMetricsWindow();
@@ -3553,7 +3568,7 @@ void GLCanvas3D::render(bool only_init)
         imgui.begin(std::string("Render statistics"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
         imgui.text("FPS (SwapBuffers() calls per second):");
         ImGui::SameLine();
-        imgui.text(std::to_string(m_render_stats.get_fps_and_reset_if_needed()));
+        imgui.text(std::to_string(current_fps));
         ImGui::Separator();
         imgui.text("Compressed textures:");
         ImGui::SameLine();
@@ -4770,6 +4785,22 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
     // during the render launched by the refresh the value may be set again
     wxGetApp().imgui()->reset_requires_extra_frame();
 #endif // ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
+
+    // Orca #13538: FPS cap. Too early for the next frame: keep m_dirty and let the render timer bring
+    // the next idle event. Edge: no evt.RequestMore() here (Orca has one), which would spin the idle
+    // loop at full CPU until the frame time is up.
+    if (const int fps_cap = _get_effective_fps_cap(); fps_cap > 0) {
+        const auto now            = std::chrono::steady_clock::now();
+        const auto min_frame_time = std::chrono::duration<double>(1.0 / static_cast<double>(fps_cap));
+        const auto elapsed        = now - m_last_frame_start_time;
+        if (elapsed < min_frame_time) {
+            const int wait_ms = std::max(1, static_cast<int>(std::ceil(std::chrono::duration<double, std::milli>(min_frame_time - elapsed).count())));
+            schedule_extra_frame(wait_ms);
+            return;
+        }
+        // Pace by frame-start interval so rendering time is part of the target budget.
+        m_last_frame_start_time = now;
+    }
 
     _refresh_if_shown_on_screen();
 
@@ -9433,6 +9464,102 @@ void GLCanvas3D::_rectangular_selection_picking_pass()
     _update_volumes_hover_state();
 }
 
+bool GLCanvas3D::_is_fxaa_enabled() const
+{
+    return wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool(SETTING_OPENGL_FXAA_ENABLED);
+}
+
+int GLCanvas3D::_get_effective_fps_cap() const
+{
+    if (wxGetApp().app_config == nullptr)
+        return 0;
+
+    int fps_cap = 0;
+    try {
+        fps_cap = std::stoi(wxGetApp().app_config->get(SETTING_OPENGL_FPS_CAP));
+    }
+    catch (...) {
+        fps_cap = 0;
+    }
+    return std::max(0, std::min(fps_cap, 240));
+}
+
+bool GLCanvas3D::_is_fps_overlay_enabled() const
+{
+    return wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool(SETTING_OPENGL_SHOW_FPS_OVERLAY);
+}
+
+void GLCanvas3D::_render_fps_overlay(int fps) const
+{
+    if (fps < 0)
+        return;
+
+    ImGuiWrapper& imgui = *wxGetApp().imgui();
+    const float margin = 10.0f * get_scale();
+    const ImVec2 display_size = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(display_size.x - margin, margin), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.35f);
+    imgui.begin(
+        std::string("###fps_overlay"),
+        ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoInputs);
+    imgui.text(std::string("FPS: ") + std::to_string(fps));
+    imgui.end();
+}
+
+void GLCanvas3D::_render_fxaa_pass(unsigned int width, unsigned int height)
+{
+    if (width == 0 || height == 0 || !m_background.is_initialized())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("fxaa");
+    if (shader == nullptr)
+        return;
+
+    if (m_fxaa_texture_id == 0) {
+        glsafe(::glGenTextures(1, &m_fxaa_texture_id));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_fxaa_texture_id));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        m_fxaa_texture_size = { 0, 0 };
+    }
+
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_fxaa_texture_id));
+    if (m_fxaa_texture_size[0] != width || m_fxaa_texture_size[1] != height) {
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
+        m_fxaa_texture_size = { width, height };
+    }
+
+    // Copy the finished scene out of the back buffer, then draw it back through the FXAA filter.
+    glsafe(::glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height));
+
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDisable(GL_BLEND));
+
+    // Edge: the full-screen quad is m_background (P2, the vertex shader derives the texture
+    // coordinates from the position, as the selection highlight passes do), so the program is
+    // background.vs + fxaa.fs rather than Orca's fxaa.vs, which needs a P2T2 quad.
+    shader->start_using();
+    shader->set_uniform("uniform_texture", 0);
+    shader->set_uniform("inv_tex_size", Vec2f(1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height)));
+    m_background.render();
+    shader->stop_using();
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+}
+
 void GLCanvas3D::_render_background()
 {
     bool use_error_color = false;
@@ -9606,6 +9733,18 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     else
         m_volumes.set_show_sinking_contours(!m_gizmos.is_hiding_instances());
 
+    // Orca #15770: X-Ray replaces both shaded passes with a single one and reuses the volume state
+    // (print volume, z range, clipping plane) set up above.
+    // Edge: driven from the transparent call rather than Orca's opaque one. X-Ray writes no depth, so
+    // drawn first the bed and plates (rendered between the two calls) would paint over the objects;
+    // drawn last it composites over them like any other translucent geometry.
+    if (_is_xray_view_active()) {
+        if (type == GLVolumeCollection::ERenderType::Transparent)
+            _render_xray_volumes();
+        m_camera_clipping_plane = ClippingPlane::ClipsNothing();
+        return;
+    }
+
     GLShaderProgram* shader = wxGetApp().get_shader("gouraud");
     ECanvasType canvas_type = this->m_canvas_type;
     bool                 partly_inside_enable = canvas_type == ECanvasType::CanvasAssembleView ? false : true;
@@ -9702,6 +9841,59 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     }
 
     m_camera_clipping_plane = ClippingPlane::ClipsNothing();
+}
+
+bool GLCanvas3D::_is_xray_view_active() const
+{
+    if (m_canvas_type == ECanvasType::CanvasPreview || !wxGetApp().plater()->is_show_xray())
+        return false;
+    if (wxGetApp().get_shader("xray") == nullptr)
+        return false;
+
+    // A painting gizmo and the layer height editor draw the object through their own shaders, and
+    // would lose what they draw if X-Ray took the pass over.
+    if (dynamic_cast<const GLGizmoPainterBase*>(m_gizmos.get_current()) != nullptr)
+        return false;
+    // Edge: the cut gizmo colours, ghosts or hides each half through the gouraud shader's colour clip
+    // (flat, curved and drawn cuts), which the X-Ray shader does not know about.
+    if (m_gizmos.get_current_type() == GLGizmosManager::Cut)
+        return false;
+    return !(m_picking_enabled && m_layers_editing.is_enabled() && m_layers_editing.last_object_id != -1 &&
+             m_layers_editing.object_max_z() > 0.0f);
+}
+
+void GLCanvas3D::_render_xray_volumes()
+{
+    if (m_volumes.empty())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("xray");
+    if (shader == nullptr)
+        return;
+
+    const Camera&     camera      = wxGetApp().plater()->get_camera();
+    const ECanvasType canvas_type = m_canvas_type;
+
+    // Depth writes off so every surface along a view ray composites, not just the nearest one, and
+    // back faces kept for the far wall of a hollow part. The low, near-uniform coverage the shader
+    // emits saturates towards the volume color whatever the order, so the volumes are not sorted.
+    // Per-object view modes still apply: Hidden volumes are inactive and skipped, Ghost ones carry
+    // their reduced alpha into the coverage and read fainter.
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    shader->start_using();
+    m_volumes.render(GLVolumeCollection::ERenderType::All, true, camera, get_canvas_size(),
+        [this, canvas_type](const GLVolume& volume) {
+            if (canvas_type == ECanvasType::CanvasAssembleView)
+                return !volume.is_modifier && !volume.is_wipe_tower;
+            return m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0;
+        });
+    shader->stop_using();
+
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDepthMask(GL_TRUE));
 }
 
 //BBS: GUI refactor: add canvas size as parameters

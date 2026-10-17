@@ -668,6 +668,8 @@ private:
     bool m_reload_delayed;
 
     RenderStats m_render_stats;
+    // Orca #13538: start of the last frame let through by the FPS cap.
+    std::chrono::time_point<std::chrono::steady_clock> m_last_frame_start_time{ std::chrono::steady_clock::now() };
     // Orca #15884 Stage B: per-pass timings inside the existing Render statistics
     // window. Armed only while that window is visible (no Preferences toggle).
     std::unique_ptr<FrameProfiler> m_frame_profiler;
@@ -791,6 +793,9 @@ public:
     CameraTarget m_camera_target;
 #endif // ENABLE_SHOW_CAMERA_TARGET
     GLModel m_background;
+    // Orca #13538: FXAA copy of the back buffer.
+    unsigned int m_fxaa_texture_id{ 0 };
+    std::array<unsigned int, 2> m_fxaa_texture_size{ 0, 0 };
 public:
     explicit GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed);
     ~GLCanvas3D();
@@ -1392,12 +1397,21 @@ private:
     // (gaps between the glyphs included), so a press there drags it instead of the object behind.
     void _apply_emboss_footprint_hover(bool gizmo_element_hovered);
     void _rectangular_selection_picking_pass();
+    // Orca #13538: graphics preferences.
+    bool _is_fxaa_enabled() const;
+    int _get_effective_fps_cap() const;
+    bool _is_fps_overlay_enabled() const;
+    void _render_fps_overlay(int fps) const;
+    void _render_fxaa_pass(unsigned int width, unsigned int height);
     void _render_background();
     void _render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes);
     //BBS: add part plate related logic
     void _render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true, const std::set<int>& visible_plates = std::set<int>());
     //BBS: add outline drawing logic
     void _render_objects(GLVolumeCollection::ERenderType type, bool with_outline = true);
+    // Orca #15770: X-Ray view.
+    bool _is_xray_view_active() const;
+    void _render_xray_volumes();
     //BBS: GUI refactor: add canvas size as parameters
     void _render_gcode(int canvas_width, int canvas_height);
     //BBS: render a plane for assemble

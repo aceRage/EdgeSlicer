@@ -1572,7 +1572,8 @@ void MenuFactory::append_menu_items_visibility(wxMenu* menu)
     append_menu_item(vis, wxID_ANY, _L("Normal"), _L("Show this object normally"),
         [set_mode](wxCommandEvent&) { set_mode(GLCanvas3D::ObjectViewMode::Normal); }, "", nullptr,
         [selected_object_id]() { return selected_object_id().first; }, m_parent);
-    append_menu_item(vis, wxID_ANY, _L("Ghost (X-ray)"), _L("Render this object see-through; clicks pass through to objects behind it"),
+    // "Ghost", not "X-ray": View > X-Ray is the global see-through view of the whole scene.
+    append_menu_item(vis, wxID_ANY, _L("Ghost"), _L("Render this object see-through; clicks pass through to objects behind it"),
         [set_mode](wxCommandEvent&) { set_mode(GLCanvas3D::ObjectViewMode::Ghost); }, "", nullptr,
         [selected_object_id]() { return selected_object_id().first; }, m_parent);
     append_menu_item(vis, wxID_ANY, _L("Hidden"), _L("Hide this object in the 3D view (it still slices and prints)"),

@@ -3509,6 +3509,15 @@ void MainFrame::init_menubar_as_editor()
             },
             this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_view3D_overhang_shown(); }, this);
 
+        // Orca #15770: global X-Ray view of the Prepare scene. Orca puts the toggle in its canvas menu,
+        // which EdgeSlicer does not have; the per-object Ghost mode stays in the object list.
+        append_menu_check_item(viewMenu, wxID_ANY, _L("X-Ray"), _L("Show every object as a translucent, edge-weighted surface to see inside and behind parts."),
+            [this](wxCommandEvent &) {
+                m_plater->toggle_show_xray();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_show_xray(); }, this);
+
         /*viewMenu->AppendSeparator();
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show &Wireframe") + "\t" + ctrl + shift + _L("Enter"), _L("Show wireframes in 3D scene."),
             [this](wxCommandEvent&) { m_plater->toggle_show_wireframe(); m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT)); }, this,

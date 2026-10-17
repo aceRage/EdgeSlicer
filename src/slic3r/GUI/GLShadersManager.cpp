@@ -37,7 +37,7 @@ std::pair<bool, std::string> GLShadersManager::init()
             return;
 
         error.erase(errorLength);
-        BOOST_LOG_TRIVIAL(warning) << "Selection highlight shader unavailable: " << name;
+        BOOST_LOG_TRIVIAL(warning) << "Optional shader unavailable: " << name;
     };
 
     assert(m_shaders.empty());
@@ -65,6 +65,8 @@ std::pair<bool, std::string> GLShadersManager::init()
     valid &= append_shader("background", { prefix + "background.vs", prefix + "background.fs" });
     // used to composite the selection fill and outline over the completed scene
     appendOptionalShader("selection_composite", { prefix + "background.vs", prefix + "selection_composite.fs" });
+    // Orca #13538: screen-space FXAA pass (background.vs, as the quad is m_background's P2 one).
+    appendOptionalShader("fxaa", { prefix + "background.vs", prefix + "fxaa.fs" });
     // used to extract the selection edge from the low-resolution selection mask
     appendOptionalShader("selection_edge", { prefix + "background.vs", prefix + "selection_edge.fs" });
     // used to area-downsample the full-resolution selection mask before edge extraction
@@ -105,6 +107,9 @@ std::pair<bool, std::string> GLShadersManager::init()
     // no caller can miss it. 3 and 4 are the units the cut gizmo binds its textures to.
     if (GLShaderProgram* gouraud = get_shader("gouraud"); gouraud != nullptr)
         gouraud->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 } });
+    // Orca #15770: used to render objects as translucent, edge weighted surfaces in the X-Ray view.
+    // Optional here: without it the X-Ray toggle just leaves the normal shaded view.
+    appendOptionalShader("xray", { prefix + "xray.vs", prefix + "xray.fs" });
     // used to render variable layers heights in 3d editor
     valid &= append_shader("variable_layer_height", { prefix + "variable_layer_height.vs", prefix + "variable_layer_height.fs" });
     // used to render highlight contour around selected triangles inside the multi-material gizmo
