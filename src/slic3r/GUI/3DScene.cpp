@@ -29,6 +29,7 @@
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Support/SupportOverhangHighlight.hpp"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -974,52 +975,25 @@ GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs&                  vo
     return list;
 }
 
-// ORCA: Compute slope.normal_z for 3D overhang highlight directly from support settings.
-// If support_threshold_angle is 0, use tree fallback angle (30 deg) for tree supports,
-// and derive an equivalent angle from threshold overlap for normal supports.
-float GLVolumeCollection::get_selection_support_normal_z() const
+// ORCA #12650, Edge: slope.normal_z of the 3D view's overhang highlight, from the automatic
+// supports' own layer rule (Support/SupportOverhangHighlight.hpp): the threshold angle (+1,
+// inclusive), the 30 degree tree fallback, normal supports' overlap mode at this layer height and
+// outer wall width, and normal supports' minimum overhang width. Per object, so an object's
+// support, layer height or wall filament overrides show. The support painting gizmo uses the same rule.
+SupportOverhangRule GUI::support_overhang_rule_for(const ModelObject *mo)
 {
-    const DynamicPrintConfig& glb_cfg  = GUI::wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    const auto support_type            = glb_cfg.opt_enum<SupportType>("support_type");
-    const int  support_threshold_angle = glb_cfg.opt_int("support_threshold_angle");
-    double angle_rad;
+    const PresetBundle &bundle = *GUI::wxGetApp().preset_bundle;
+    return support_overhang_rule(support_overhang_rule_config(bundle.prints.get_edited_preset().config,
+                                                              bundle.printers.get_edited_preset().config, bundle.project_config,
+                                                              bundle.filament_presets.size(), mo != nullptr ? &mo->config.get() : nullptr));
+}
 
-    if (support_threshold_angle > 0) {
-        // Match support generation: explicit threshold angles are treated as inclusive.
-        const int effective_support_threshold_angle = std::min(support_threshold_angle + 1, 89);
-        angle_rad = Geometry::deg2rad(static_cast<double>(effective_support_threshold_angle));
-    } else if (is_tree(support_type)) {
-        angle_rad = Geometry::deg2rad(30.0); // fallback value for tree supports
-    } else { // For normal supports, if the angle is set to 0, calculate normal_z from overlap.
-        // Only this branch needs the full config; building it on every render pass for nothing is not free.
-        const DynamicPrintConfig full_cfg = GUI::wxGetApp().preset_bundle->full_config();
-        const double layer_height        = full_cfg.opt_float("layer_height");
-        const auto*  nozzle_diameter_opt = full_cfg.option<ConfigOptionFloats>("nozzle_diameter");
-        const int    wall_filament       = full_cfg.opt_int("wall_filament");
-        const size_t nozzle_count        = nozzle_diameter_opt->values.size();
-        const size_t wall_extruder_idx   = (wall_filament > 0 && wall_filament <= static_cast<int>(nozzle_count))
-            ? static_cast<size_t>(wall_filament - 1)
-            : 0; // Invalid extruder index falls back to extruder 1.
-        
-        // Use wall extruder's nozzle diameter for better estimation of external perimeter width,
-        // which is more relevant to overhang printing than the default nozzle diameter.
-        const double nozzle_diameter = nozzle_diameter_opt->values[wall_extruder_idx];
-
-        double external_perimeter_width = full_cfg.get_abs_value("outer_wall_line_width", nozzle_diameter);
-        if (external_perimeter_width <= 0.0) {
-            external_perimeter_width = full_cfg.get_abs_value("line_width", nozzle_diameter);
-
-            if (external_perimeter_width <= 0.0)
-                external_perimeter_width = nozzle_diameter;
-        }
-
-        const double overlap_width      = full_cfg.get_abs_value("support_threshold_overlap", external_perimeter_width);
-        const double lower_layer_offset = std::max(0.0, external_perimeter_width - overlap_width);
-
-        angle_rad = lower_layer_offset <= EPSILON ? Geometry::deg2rad(89.0) : std::atan(layer_height / lower_layer_offset);
-    }
-
-    return static_cast<float>(-std::cos(std::clamp(angle_rad, 0.0, Geometry::deg2rad(89.0))));
+float GLVolumeCollection::get_support_normal_z(int object_idx)
+{
+    const Model      &model = GUI::wxGetApp().model();
+    const ModelObject *mo   = object_idx >= 0 && size_t(object_idx) < model.objects.size() ? model.objects[object_idx] : nullptr;
+    const double angle_deg  = support_overhang_rule_for(mo).effective_angle_deg();
+    return static_cast<float>(-std::cos(Geometry::deg2rad(std::clamp(angle_deg, 0.0, 89.0))));
 }
 
 // BBS: add outline drawing logic
@@ -1058,8 +1032,18 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         glsafe(::glDisable(GL_CULL_FACE));
 
     // Only the overhang (slope) view reads it; the shader ignores slope.normal_z while slope.actived is off, so
-    // the preset lookups (and, with angle 0 and normal supports, a full config build) run only for that view.
-    const float support_normal_z = m_slope.isGlobalActive ? get_selection_support_normal_z() : 0.f;
+    // the preset lookups run only for that view, once per object and render pass.
+    std::vector<std::pair<int, float>> support_normal_z_cache;
+    auto support_normal_z_for = [this, &support_normal_z_cache](int object_idx) -> float {
+        if (! m_slope.isGlobalActive)
+            return 0.f;
+        for (const std::pair<int, float> &entry : support_normal_z_cache)
+            if (entry.first == object_idx)
+                return entry.second;
+        const float normal_z = get_support_normal_z(object_idx);
+        support_normal_z_cache.emplace_back(object_idx, normal_z);
+        return normal_z;
+    };
 
     // Cut gizmo, phase 2 fix: a GHOSTED half (0 < alpha < 1) has to blend, and it
     // has to stop writing depth - otherwise it would keep occluding the cut sheet
@@ -1213,7 +1197,7 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         shader->set_uniform("slope.volume_world_normal_matrix",
                             static_cast<Matrix3f>(
                                 volume.first->world_matrix().matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>()));
-        shader->set_uniform("slope.normal_z", support_normal_z);
+        shader->set_uniform("slope.normal_z", support_normal_z_for(volume.first->object_idx()));
 
 #if ENABLE_ENVIRONMENT_MAP
         unsigned int environment_texture_id  = GUI::wxGetApp().plater()->get_environment_texture_id();
