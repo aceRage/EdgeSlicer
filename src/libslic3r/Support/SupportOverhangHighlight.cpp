@@ -669,7 +669,7 @@ SupportOverhangPreview support_overhang_preview_exact(Print &print, const Model 
     print.set_status_silent();
     if (print.objects().empty())
         return out;
-    PrintObject &object = *print.objects().front();
+    PrintObject &object = *print.get_object(0);
     object.detect_support_overhangs_only();
     const auto t1 = clock::now();
 

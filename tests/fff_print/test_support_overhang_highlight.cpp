@@ -1023,7 +1023,8 @@ TEST_CASE("Support highlight benchmark: exact pre-slice preview", "[.][SupportHi
         sphere.objects.front()->add_instance();
         sphere.objects.front()->ensure_on_bed();
     }
-    for (const auto &[type, style] : { std::pair<const char*, const char*>{ "normal(auto)", "default" }, { "tree(auto)", "tree_slim" }, { "tree(auto)", "tree_organic" } }) {
+    using TypeStyle = std::pair<const char*, const char*>;
+    for (const auto &[type, style] : std::initializer_list<TypeStyle>{ { "normal(auto)", "default" }, { "tree(auto)", "tree_slim" }, { "tree(auto)", "tree_organic" } }) {
         if (have_benchy)
             run("3DBenchy", benchy, type, style);
         run("sphere r40 998k", sphere, type, style);
