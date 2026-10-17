@@ -320,11 +320,16 @@ static std::vector<SupportOverhangOverlayLayer> support_overhang_layers(const Pr
                 ExPolygons overhang = layer.support_overhangs;
                 append(overhang, by_rule[i]);
                 overhang = union_ex(overhang);
-                // ... is held up where the generated support lies under it.
+                // ... is held up where the generated support lies under it. A tree overhang is the
+                // band past the grown lower layer: grow it back over the layer's whole face strip
+                // first, then keep what lies on the support, so a tip holds up its own spot only.
                 if (! overhang.empty()) {
                     const ExPolygons contact = support_contact_below(object, layer, contact_grow);
-                    if (! contact.empty())
-                        l.supported = intersection_ex(overhang, contact);
+                    if (! contact.empty()) {
+                        const double band = std::max(0., rule.lower_layer_offset(heights[i - 1]));
+                        l.supported = intersection_ex(band > 0. ? offset_ex(overhang, float(scale_(band)), SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS) : overhang,
+                                                      contact);
+                    }
                     l.unsupported = l.supported.empty() ? overhang : diff_ex(overhang, offset(l.supported, tol, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS));
                     if (! l.unsupported.empty())
                         l.unsupported = opening_ex(l.unsupported, tol);
@@ -846,13 +851,17 @@ static SupportOverhangPreview preview_from_object(Print &print, const PrintObjec
         for (size_t i = 1; i < n; ++ i)
             grow[i] = std::max(0., rule.lower_layer_offset(heights[i - 1]));
     }
-    // The cut faces: red where supported (grown like the facet test), yellow where the rest is.
+    // The cut faces: red where supported (grown like the facet test; a placed tree's contact is
+    // grown over its strip already), yellow where the rest is.
+    const std::vector<double> no_grow;
+    const std::vector<double> &grow_supported = use_generated_support && rule.tree ? no_grow : grow;
     std::vector<ExPolygons> red(n), yellow(n);
     tbb::parallel_for(tbb::blocked_range<size_t>(1, n), [&](const tbb::blocked_range<size_t> &range) {
         for (size_t i = range.begin(); i < range.end(); ++ i) {
-            const float g = i < grow.size() ? float(scale_(grow[i])) : 0.f;
+            const float g  = i < grow.size() ? float(scale_(grow[i])) : 0.f;
+            const float gs = i < grow_supported.size() ? float(scale_(grow_supported[i])) : 0.f;
             if (! out.supported[i].empty())
-                red[i] = g > 0.f ? offset_ex(out.supported[i], g, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS) : out.supported[i];
+                red[i] = gs > 0.f ? offset_ex(out.supported[i], gs, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS) : out.supported[i];
             if (! out.unsupported[i].empty()) {
                 ExPolygons y = g > 0.f ? offset_ex(out.unsupported[i], g, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS) : out.unsupported[i];
                 yellow[i] = red[i].empty() ? std::move(y) : diff_ex(y, red[i]);
@@ -866,7 +875,7 @@ static SupportOverhangPreview preview_from_object(Print &print, const PrintObjec
         if (! mv->is_model_part())
             continue;
         const Transform3d trafo = instance * mv->get_matrix();
-        std::vector<uint8_t> flags = overhang_facets_from_layers(mv->mesh().its, trafo, out.slice_z, out.supported, grow);
+        std::vector<uint8_t> flags = overhang_facets_from_layers(mv->mesh().its, trafo, out.slice_z, out.supported, grow_supported);
         const std::vector<uint8_t> flagged_yellow = overhang_facets_from_layers(mv->mesh().its, trafo, out.slice_z, out.unsupported, grow);
         for (size_t f = 0; f < flags.size(); ++ f)
             if (flags[f] == 0 && flagged_yellow[f] != 0)
