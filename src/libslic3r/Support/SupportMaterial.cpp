@@ -1462,6 +1462,8 @@ static inline ExPolygons detect_overhangs(
     const bool   buildplate_only = ! annotations.buildplate_covered.empty();
     // If user specified a custom angle threshold, convert it to radians.
     // Zero means automatic overhang detection.
+    // Edge: the support painting highlight mirrors this layer rule (threshold, overlap, sliver
+    // filter below) in Support/SupportOverhangHighlight.cpp; keep them in step ([SupportHighlight] tests).
     // +1 makes the threshold inclusive
     double thresh_angle = object_config.support_threshold_angle.value > 0 ? object_config.support_threshold_angle.value + 1 : 0;
     thresh_angle = std::min(thresh_angle, 89.); // BBS should be smaller than 90

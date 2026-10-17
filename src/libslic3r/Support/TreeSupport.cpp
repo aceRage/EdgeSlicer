@@ -694,6 +694,8 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     static const double sharp_tail_max_support_height = 16.f;
     // a region is considered well supported if the number of layers below it exceeds this threshold
     const int thresh_layers_below = 10 / config.layer_height;
+    // Edge: the support painting highlight mirrors this layer rule (threshold, 30 degree fallback)
+    // in Support/SupportOverhangHighlight.cpp; keep them in step ([SupportHighlight] tests).
     // +1 makes the threshold inclusive
     double thresh_angle = config.support_threshold_angle.value > EPSILON ? config.support_threshold_angle.value + 1 : 30;
     thresh_angle = std::min(thresh_angle, 89.); // should be smaller than 90

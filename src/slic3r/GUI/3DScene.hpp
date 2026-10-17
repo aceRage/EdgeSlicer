@@ -65,6 +65,14 @@ class GLShaderProgram;
 enum ModelInstanceEPrintVolumeState : unsigned char;
 
 using ModelObjectPtrs = std::vector<ModelObject*>;
+struct SupportOverhangRule;
+
+namespace GUI {
+// The automatic supports' overhang rule (Support/SupportOverhangHighlight.hpp) for an object, from
+// the edited print / printer presets, the project's filament map and the object's overrides. The
+// 3D view's "Show overhang" and the support painting gizmo both use it. mo may be null.
+SupportOverhangRule support_overhang_rule_for(const ModelObject *mo);
+}
 
 // Return appropriate color based on the ModelVolume.
 extern ColorRGBA color_from_model_volume(const ModelVolume& model_volume);
@@ -514,7 +522,9 @@ public:
     GLVolume* new_toolpath_volume(const ColorRGBA& rgba);
     GLVolume* new_nontoolpath_volume(const ColorRGBA& rgba);
 
-    float get_selection_support_normal_z() const;
+    // slope.normal_z of the "Show overhang" highlight for the object with this index in the
+    // plater's model (support_overhang_rule_for()).
+    static float get_support_normal_z(int object_idx);
     // Render the volumes by OpenGL.
     //BBS: add outline drawing logic
     void render(ERenderType                           type,

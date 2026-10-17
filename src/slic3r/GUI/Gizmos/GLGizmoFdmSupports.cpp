@@ -4,6 +4,7 @@
 //BBS
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Thread.hpp"
+#include "libslic3r/Support/SupportOverhangHighlight.hpp"
 
 //#include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -16,6 +17,8 @@
 #include "slic3r/Utils/UndoRedo.hpp"
 
 #include <glad/gl.h>
+
+#include <imgui/imgui_internal.h>
 
 #include <boost/log/trivial.hpp>
 
@@ -114,6 +117,7 @@ bool GLGizmoFdmSupports::on_init()
     m_desc["stabilizer"]            = _L("Paint stabilizer points");
     m_desc["unpaint_caption"]       = _L("Right mouse button");
     m_desc["unpaint"]               = _L("Erase");
+    m_desc["highlight_like_auto"]   = _L("Like auto supports");
 
     memset(&m_print_instance, 0, sizeof(m_print_instance));
     return true;
@@ -170,7 +174,8 @@ void GLGizmoFdmSupports::on_set_state()
     GLGizmoPainterBase::on_set_state();
 
     if (get_state() == On) {
-        m_support_threshold_angle = -1;
+        m_highlight_reset_pending = true;
+        m_highlight_like_auto     = wxGetApp().app_config->get("support_paint_highlight_mode") != "angle";
     }
     else if (get_state() == Off) {
         ModelObject* mo = m_c->selection_info()->model_object();
@@ -187,13 +192,10 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     // BBS
     wchar_t old_tool = m_current_tool;
 
-    int support_threshold_angle = get_selection_support_threshold_angle();
-    // when support painting tool is on, reset highlight threshold angle
-    if (m_support_threshold_angle == -1) {
-        m_highlight_by_angle_threshold_deg = support_threshold_angle;
-        m_parent.set_slope_normal_angle(90.f - m_highlight_by_angle_threshold_deg);
-    }
-    m_support_threshold_angle = support_threshold_angle;
+    // When the gizmo opens the highlight starts at the automatic supports' angle; in "Like auto
+    // supports" mode it follows the rule while the gizmo is open (layer height, support type,
+    // threshold, wall width, object overrides).
+    update_highlight_angle_from_rule();
 
     dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
 
@@ -380,27 +382,46 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     std::string format_str = std::string("%.f");
     ImGui::PushItemWidth(sliders_width);
     wxString tooltip = _L("Highlight faces according to overhang angle.");
-    if (m_imgui->bbl_slider_float_style("##angle_threshold_deg", &m_highlight_by_angle_threshold_deg, 0.f, 90.f, format_str.data(), 1.0f, true, tooltip)) {
-        m_parent.set_slope_normal_angle(90.f - m_highlight_by_angle_threshold_deg);
-        if (!m_parent.is_using_slope()) {
-            m_parent.use_slope(true);
-            m_parent.set_as_dirty();
-        }
+    // "Like auto supports": the rule sets the angle, so the slider and the input are read-only.
+    const bool highlight_read_only = m_highlight_like_auto;
+    if (highlight_read_only) {
+        ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
     }
-    if (ImGui::IsItemHovered()) {
-        ImGui::BeginTooltip();
-        if (m_support_threshold_angle != 0) {
-            wxString str_tooltip = (_L("Auto support threshold angle: ") + std::to_string(m_support_threshold_angle));
-            m_imgui->text_colored(ImGuiWrapper::COL_WINDOW_BG, str_tooltip);
-        } else {
-            wxString s_tooltip = (_L("No auto support"));
-            m_imgui->text_colored(ImGuiWrapper::COL_WINDOW_BG, s_tooltip);
-        }
-        ImGui::EndTooltip();
-    }
+    bool highlight_angle_changed = m_imgui->bbl_slider_float_style("##angle_threshold_deg", &m_highlight_by_angle_threshold_deg, 0.f, 90.f, format_str.data(), 1.0f, true, wxString());
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        m_imgui->tooltip(tooltip + "\n\n" + highlight_rule_description(), max_tooltip_width);
     ImGui::SameLine(drag_left_width);
     ImGui::PushItemWidth(1.5 * slider_icon_width);
-    ImGui::BBLDragFloat("##angle_threshold_deg_input", &m_highlight_by_angle_threshold_deg, 0.05f, 0.0f, 0.0f, "%.2f");
+    highlight_angle_changed |= ImGui::BBLDragFloat("##angle_threshold_deg_input", &m_highlight_by_angle_threshold_deg, 0.05f, 0.0f, 0.0f, "%.2f");
+    if (highlight_read_only) {
+        ImGui::PopStyleVar();
+        ImGui::PopItemFlag();
+    }
+    if (highlight_angle_changed && ! highlight_read_only) {
+        m_highlight_by_angle_threshold_deg = std::clamp(m_highlight_by_angle_threshold_deg, 0.f, 90.f);
+        m_parent.set_slope_normal_angle(90.f - m_highlight_by_angle_threshold_deg);
+        if (!m_parent.is_using_slope())
+            m_parent.use_slope(true);
+        m_parent.set_as_dirty();
+    }
+
+    if (m_imgui->bbl_checkbox(m_desc["highlight_like_auto"], m_highlight_like_auto)) {
+        wxGetApp().app_config->set("support_paint_highlight_mode", m_highlight_like_auto ? "auto" : "angle");
+        if (m_highlight_like_auto) {
+            m_highlight_reset_pending = true;
+            update_highlight_angle_from_rule();
+            if (!m_parent.is_using_slope())
+                m_parent.use_slope(true);
+        }
+        m_parent.set_as_dirty();
+    }
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Highlight what automatic supports will hold up for this object: the threshold angle, or the threshold "
+                            "overlap at this layer height and outer wall width, or the 30° fallback of tree supports. Off, the "
+                            "slider starts there and can be moved.") +
+                             "\n\n" + highlight_rule_description(),
+                         max_tooltip_width);
 
     if (m_current_tool != ImGui::GapFillIcon) {
         ImGui::Separator();
@@ -536,21 +557,80 @@ void GLGizmoFdmSupports::show_tooltip_information(float caption_max, float x, fl
     ImGui::PopStyleVar(2);
 }
 
-// BBS
-int GLGizmoFdmSupports::get_selection_support_threshold_angle()
+void GLGizmoFdmSupports::update_highlight_angle_from_rule()
 {
-    auto sel_info = m_c->selection_info();
-    if (sel_info == nullptr)
-        return -1;
+    if (! m_highlight_reset_pending && ! m_highlight_like_auto)
+        return;
+    const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (mo == nullptr)
+        return;
+    m_highlight_reset_pending = false;
+    const float angle = float(std::clamp(support_overhang_rule_for(mo).effective_angle_deg(), 0., 90.));
+    if (std::abs(angle - m_highlight_by_angle_threshold_deg) > 1e-3f) {
+        m_highlight_by_angle_threshold_deg = angle;
+        m_parent.set_slope_normal_angle(90.f - angle);
+        m_parent.set_as_dirty();
+    }
+}
 
-    const DynamicPrintConfig& obj_cfg = sel_info->model_object()->config.get();
-    const DynamicPrintConfig& glb_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    bool enable_support = obj_cfg.option("enable_support") ? obj_cfg.opt_bool("enable_support") : glb_cfg.opt_bool("enable_support");
-    SupportType support_type = obj_cfg.option("support_type") ? obj_cfg.opt_enum<SupportType>("support_type") : glb_cfg.opt_enum<SupportType>("support_type");
-    int support_threshold_angle = obj_cfg.option("support_threshold_angle") ? obj_cfg.opt_int("support_threshold_angle") : glb_cfg.opt_int("support_threshold_angle");
+wxString GLGizmoFdmSupports::highlight_rule_description() const
+{
+    const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (mo == nullptr)
+        return {};
+    const SupportOverhangRule rule = support_overhang_rule_for(mo);
+    const double h     = rule.layer_height;
+    const double angle = rule.effective_angle_deg();
+    auto deg = [](double v) { return wxString::Format("%.1f", v); };
+    auto mm  = [](double v) { return wxString::Format("%.3g", v); };
+    const wxString type = rule.tree ? _L("Tree supports") : _L("Normal supports");
 
-    bool auto_support = enable_support && is_auto(support_type);
-    return auto_support ? support_threshold_angle : 0;
+    wxString out = format_wxstr(_L("Automatic supports hold up faces flatter than %1%° at %2% mm layers."), deg(angle), mm(h));
+    out += "\n";
+    switch (rule.source) {
+    case SupportOverhangRule::Source::Angle:
+        out += format_wxstr(_L("%1%, threshold angle %2%° (inclusive): each layer may stick out %3% mm past the layer below."), type,
+                            rule.threshold_angle, mm(rule.lower_layer_offset(h)));
+        break;
+    case SupportOverhangRule::Source::Overlap:
+        out += format_wxstr(_L("%1%, threshold overlap %2% mm of a %3% mm outer wall: each layer may stick out %4% mm past the layer "
+                               "below, so the angle changes with the layer height."),
+                            type, mm(rule.overlap_mm), mm(rule.outer_wall_width), mm(rule.lower_layer_offset(h)));
+        break;
+    case SupportOverhangRule::Source::TreeFallback:
+        out += format_wxstr(_L("%1%, threshold angle 0: tree supports use 30°; the threshold overlap does not apply."), type);
+        break;
+    }
+    if (rule.capped_by_min_band(h))
+        out += "\n" + format_wxstr(_L("Normal supports skip overhangs narrower than %1% mm, so a steeper threshold has no effect here."),
+                                   mm(rule.min_band_width()));
+
+    // A variable layer height profile or layer ranges change the answer per layer; one angle can
+    // only show the object's layer height. Report the spread.
+    double h_min = h, h_max = h;
+    const std::vector<coordf_t> profile = mo->layer_height_profile.get();
+    for (size_t i = 1; i < profile.size(); i += 2) {
+        h_min = std::min(h_min, double(profile[i]));
+        h_max = std::max(h_max, double(profile[i]));
+    }
+    for (const auto &range : mo->layer_config_ranges)
+        if (const auto *opt = range.second.get().option<ConfigOptionFloat>("layer_height"); opt != nullptr && opt->value > 0.) {
+            h_min = std::min(h_min, opt->value);
+            h_max = std::max(h_max, opt->value);
+        }
+    if (h_max - h_min > 1e-6) {
+        const double a_min = rule.effective_angle_deg(h_min), a_max = rule.effective_angle_deg(h_max);
+        if (std::abs(a_max - a_min) > 0.05)
+            out += "\n" + format_wxstr(_L("Variable layer height %1%-%2% mm: %3%°-%4%°. The highlight uses %5% mm."), mm(h_min), mm(h_max),
+                                       deg(std::min(a_min, a_max)), deg(std::max(a_min, a_max)), mm(h));
+    }
+
+    if (! rule.enable_support)
+        out += "\n" + _L("Supports are off for this object: this shows what automatic supports would hold up.");
+    else if (! rule.auto_support)
+        out += "\n" + _L("The support type is manual: only painted areas get support. This shows what automatic supports would hold up.");
+    out += "\n" + _L("Not shown: bridges, sharp tails, small overhang removal, build plate only and convex corners.");
+    return out;
 }
 
 void GLGizmoFdmSupports::select_facets_by_angle(float threshold_deg, bool block)

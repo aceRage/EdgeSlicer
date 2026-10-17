@@ -592,6 +592,8 @@ set(lisbslic3r_sources
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
+    Support/SupportOverhangHighlight.cpp
+    Support/SupportOverhangHighlight.hpp
     Support/SupportParameters.hpp
     Support/Stabilizers.cpp
     Support/Stabilizers.hpp
