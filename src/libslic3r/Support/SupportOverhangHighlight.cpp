@@ -269,10 +269,7 @@ static ExPolygons support_contact_below(const PrintObject &object, const Layer &
     if (bottom - sl.print_z > max_gap)
         return {};
     ExPolygons cover = sl.support_islands;
-    append(cover, sl.roof_areas);
-    append(cover, sl.base_areas);
-    append(cover, sl.roof_1st_layer);
-    append(cover, sl.floor_areas);
+    append(cover, sl.tree_support_areas());
     if (cover.empty())
         return {};
     return grow > 0.f ? offset_ex(cover, grow, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS) : union_ex(cover);
