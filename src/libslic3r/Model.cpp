@@ -316,13 +316,38 @@ Model Model::read_from_file(const std::string&                                  
                         result = obj_import_face_color_deal(face_filament_ids, first_extruder_id, &model);
                     }
                 }
-            } /*else if (obj_info.has_uv_png && obj_info.uvs.size() > 0) {
-                boost::filesystem::path full_path(input_file);
-                std::string             obj_directory = full_path.parent_path().string();
-                obj_info.obj_dircetory = obj_directory;
-                result = false;
-                message = _L("Importing obj with png function is developing.");
-            }*/
+            } else if (obj_info.has_uv_png && objFn && !model.objects.empty() &&
+                       model.objects.back()->volumes.size() == 1 &&
+                       obj_info.uvs.size() == model.objects.back()->volumes[0]->mesh().its.indices.size() &&
+                       obj_info.face_colors.size() == obj_info.uvs.size()) {
+                // ImageMap phase 5d: a textured OBJ (an mtl map_Kd image). Sample the image per
+                // triangle and per sub-facet through the OBJ's own UVs, then take the path a glTF
+                // base colour texture takes: the colour dialog picks the filaments, and the
+                // ImageFill service decides each sub-facet among them.
+                std::vector<std::string> face_texture(obj_info.uvs.size());
+                for (const auto &[face, png] : obj_info.uv_map_pngs)
+                    if (face >= 0 && size_t(face) < face_texture.size())
+                        face_texture[size_t(face)] = png;
+                const int         depth = 2;   // 16 samples a triangle, as for glTF
+                std::vector<RGBA> face_colors, sub_face_colors;
+                std::string       texture_warning;
+                const bool sampled = sample_obj_textures(boost::filesystem::path(input_file).parent_path().string(),
+                                                         face_texture, obj_info.uvs, obj_info.face_colors, depth,
+                                                         face_colors, sub_face_colors, texture_warning);
+                if (!texture_warning.empty() && import_warning != nullptr)
+                    *import_warning = texture_warning;
+                if (!sampled)
+                    face_colors = obj_info.face_colors;   // the materials' own colours, as before
+                std::vector<unsigned char> face_filament_ids;
+                objFn(face_colors, obj_info.is_single_mtl && !sampled, face_filament_ids, first_extruder_id);
+                if (!face_filament_ids.empty()) {
+                    result = sampled && Model::import_multi_volume_face_color_deal(face_filament_ids, face_colors,
+                                                                                   sub_face_colors, depth,
+                                                                                   first_extruder_id, &model);
+                    if (!result)
+                        result = obj_import_face_color_deal(face_filament_ids, first_extruder_id, &model);
+                }
+            }
         }
     }
     else if (boost::algorithm::iends_with(input_file, ".svg"))
