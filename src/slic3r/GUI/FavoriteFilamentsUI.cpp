@@ -70,7 +70,7 @@ void fav_migrate_once(Kind kind, std::set<std::string> &keys)
     PresetBundle *bundle = wxGetApp().preset_bundle;
     if (!bundle)
         return;
-    const PresetCollection &collection = kind == Kind::Process ? bundle->prints : bundle->filaments;
+    PresetCollection &collection = kind == Kind::Process ? bundle->prints : bundle->filaments;
     if (collection.size() <= collection.num_default_presets())
         return; // not loaded yet; try again on the next read
     kind_done = true;
