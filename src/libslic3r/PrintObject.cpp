@@ -1055,6 +1055,7 @@ void PrintObject::clear_support_layers()
             l->sharp_tails.clear();
             l->sharp_tails_height.clear();
             l->cantilevers.clear();
+            l->support_overhangs.clear();
         }
     }
 }

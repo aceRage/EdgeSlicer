@@ -33,6 +33,7 @@
 #include "Gizmos/GizmoObjectManipulation.hpp"
 #include "CostsDialog.hpp"
 #include "libslic3r/CostOverrides.hpp"
+#include "libslic3r/Support/SupportOverhangHighlight.hpp"
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 
@@ -56,6 +57,11 @@
 
 namespace Slic3r {
 namespace GUI {
+
+// Edge (support highlight, phase 2): the preview overlay's colours. Red / amber read on the light
+// and the dark preview background alike; the overlay itself is translucent.
+static const ColorRGBA SUPPORT_OVERLAY_SUPPORTED_COLOR   = { 0.92f, 0.16f, 0.16f, 0.60f };
+static const ColorRGBA SUPPORT_OVERLAY_UNSUPPORTED_COLOR = { 1.00f, 0.66f, 0.00f, 0.60f };
 
 //BBS translation of EViewType
 //const std::string EViewType_Map[(int) GCodeViewer::EViewType::Count] = {
@@ -1558,6 +1564,12 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     m_max_print_height = gcode_result.printable_height;
     m_z_offset = gcode_result.z_offset;
 
+    // Edge (support highlight): a new slice, rebuild the supported / unsupported overhang overlay
+    // on its next render (only if one of its legend toggles is on).
+    m_support_overlay.dirty            = true;
+    m_support_overlay.show_supported   = wxGetApp().app_config->get_bool("preview_show_supported_overhangs");
+    m_support_overlay.show_unsupported = wxGetApp().app_config->get_bool("preview_show_unsupported_overhangs");
+
     // load_toolpaths(gcode_result, build_volume, exclude_bounding_box);
     
     // ORCA: Apply the default view type now that we know how many tools the G-code actually uses.
@@ -1758,6 +1770,7 @@ void GCodeViewer::reset()
     m_sequential_view.gcode_window.reset();
     m_contained_in_bed = true;
     m_no_render_path = false; // EDGE (#642)
+    m_support_overlay.reset();
 }
 
 //BBS: GUI refactor: add canvas width and height
@@ -1774,6 +1787,9 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
     // EDGE (#642): the summary-only load (memory guard) has no toolpaths to draw.
     if (!m_no_render_path && !OpenGLManager::gl_skip("libvgcode"))
         render_toolpaths();
+
+    if (!m_no_render_path && !OpenGLManager::gl_skip("support_overlay"))
+        render_support_overhang_overlay();
 
     float legend_height = 0.0f;
     if (!OpenGLManager::gl_skip("imgui_legend"))
@@ -2682,6 +2698,152 @@ void GCodeViewer::render_toolpaths()
         imgui.end();
     }
 #endif // ENABLE_NEW_GCODE_VIEWER_DEBUG
+}
+
+std::pair<size_t, size_t> GCodeViewer::SupportOverhangOverlay::Part::range(size_t min_layer, size_t max_layer) const
+{
+    auto first = std::lower_bound(layer_starts.begin(), layer_starts.end(), min_layer,
+                                  [](const std::pair<size_t, size_t> &l, size_t id) { return l.first < id; });
+    auto last  = std::upper_bound(layer_starts.begin(), layer_starts.end(), max_layer,
+                                  [](size_t id, const std::pair<size_t, size_t> &l) { return id < l.first; });
+    const size_t b = first == layer_starts.end() ? indices_count : first->second;
+    const size_t e = last == layer_starts.end() ? indices_count : last->second;
+    return { b, std::max(b, e) };
+}
+
+// Edge (support highlight, phase 2): build the overlay from the plater's current slice. Reads the
+// objects' layers on the UI thread only once their support step is done; nothing in the later
+// steps writes lslices or Layer::support_overhangs, and a new apply() stops the background process
+// before it invalidates them (and the next G-code load marks the overlay dirty again).
+void GCodeViewer::load_support_overhang_overlay()
+{
+    SupportOverhangOverlay &o = m_support_overlay;
+    o.supported.reset();
+    o.unsupported.reset();
+    o.dirty     = false;
+    o.available = false;
+    if (m_only_gcode_in_preview || wxGetApp().plater() == nullptr || m_viewer.get_layers_count() == 0)
+        return;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const Print &print = wxGetApp().plater()->fff_print();
+
+    struct Entry { size_t layer_id; float z; Vec2f shift; const std::vector<Vec2f> *triangles; };
+    std::vector<std::vector<SupportOverhangOverlayLayer>> per_object;
+    std::vector<Entry> supported, unsupported;
+    per_object.reserve(print.objects().size());
+    for (const PrintObject *object : print.objects()) {
+        if (object == nullptr || !object->is_step_done(posSupportMaterial) || object->instances().empty())
+            continue;
+        per_object.emplace_back(support_overhang_overlay(*object));
+        for (const SupportOverhangOverlayLayer &layer : per_object.back()) {
+            // The vgcode layer of this object layer: the closest z, with or without the printer's z offset.
+            size_t id = m_viewer.get_layer_id_at(float(layer.print_z));
+            if (m_z_offset != 0.f) {
+                const size_t id_off = m_viewer.get_layer_id_at(float(layer.print_z) + m_z_offset);
+                if (std::abs(m_viewer.get_layer_z(id_off) - (float(layer.print_z) + m_z_offset)) < std::abs(m_viewer.get_layer_z(id) - float(layer.print_z)))
+                    id = id_off;
+            }
+            // Just above the toolpaths' top so the tint is not hidden by the layer's own extrusions.
+            const float z = m_viewer.get_layer_z(id) + 0.01f;
+            for (const PrintInstance &instance : object->instances()) {
+                const Vec2f shift = unscale(instance.shift).cast<float>();
+                if (!layer.supported_triangles.empty())
+                    supported.push_back({ id, z, shift, &layer.supported_triangles });
+                if (!layer.unsupported_triangles.empty())
+                    unsupported.push_back({ id, z, shift, &layer.unsupported_triangles });
+            }
+        }
+    }
+
+    auto build = [](std::vector<Entry> &entries, SupportOverhangOverlay::Part &part) {
+        std::stable_sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) { return a.layer_id < b.layer_id; });
+        size_t vertices = 0;
+        for (const Entry &e : entries)
+            vertices += e.triangles->size();
+        if (vertices == 0)
+            return;
+        GLModel::Geometry geometry;
+        geometry.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        geometry.reserve_vertices(vertices);
+        geometry.reserve_indices(vertices);
+        unsigned int next = 0;
+        for (const Entry &e : entries) {
+            if (part.layer_starts.empty() || part.layer_starts.back().first != e.layer_id)
+                part.layer_starts.emplace_back(e.layer_id, size_t(next));
+            for (const Vec2f &p : *e.triangles)
+                geometry.add_vertex(Vec3f(p.x() + e.shift.x(), p.y() + e.shift.y(), e.z));
+            for (size_t k = 0; k + 2 < e.triangles->size(); k += 3, next += 3)
+                geometry.add_triangle(next, next + 1, next + 2);
+        }
+        part.indices_count = size_t(next);
+        part.model.init_from(std::move(geometry));
+    };
+    build(supported, o.supported);
+    build(unsupported, o.unsupported);
+    o.available = !per_object.empty();
+    o.build_ms  = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    BOOST_LOG_TRIVIAL(info) << "Support overhang overlay: " << per_object.size() << " objects, " << o.supported.indices_count / 3
+                            << " supported and " << o.unsupported.indices_count / 3 << " unsupported triangles in " << o.build_ms << " ms";
+}
+
+void GCodeViewer::render_support_overhang_overlay()
+{
+    SupportOverhangOverlay &o = m_support_overlay;
+    if ((!o.show_supported && !o.show_unsupported) || m_viewer.get_view_type() != libvgcode::EViewType::FeatureType)
+        return;
+    if (o.dirty)
+        load_support_overhang_overlay();
+    if (!o.available || (o.supported.indices_count == 0 && o.unsupported.indices_count == 0))
+        return;
+    GLShaderProgram *shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    const libvgcode::Interval &range = m_viewer.get_layers_view_range();
+    const size_t top    = range[1];
+    const size_t bottom = m_viewer.is_top_layer_only_view_range() ? top : range[0];
+
+    const GLboolean blend_was_on = ::glIsEnabled(GL_BLEND);
+    const GLboolean cull_was_on  = ::glIsEnabled(GL_CULL_FACE);
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_CULL_FACE));
+
+    shader->start_using();
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    // The layer at the top of the slider at full strength, the visible layers below it faint.
+    auto draw = [bottom, top](SupportOverhangOverlay::Part &part, ColorRGBA color) {
+        if (part.indices_count == 0)
+            return;
+        if (top > bottom) {
+            const std::pair<size_t, size_t> lower = part.range(bottom, top - 1);
+            if (lower.second > lower.first) {
+                part.model.set_color({ color.r(), color.g(), color.b(), 0.22f });
+                part.model.render(lower);
+            }
+        }
+        const std::pair<size_t, size_t> current = part.range(top, top);
+        if (current.second > current.first) {
+            part.model.set_color(color);
+            part.model.render(current);
+        }
+    };
+    if (o.show_unsupported)
+        draw(o.unsupported, SUPPORT_OVERLAY_UNSUPPORTED_COLOR);
+    if (o.show_supported)
+        draw(o.supported, SUPPORT_OVERLAY_SUPPORTED_COLOR);
+    shader->stop_using();
+
+    glsafe(::glDepthMask(GL_TRUE));
+    if (cull_was_on)
+        glsafe(::glEnable(GL_CULL_FACE));
+    if (!blend_was_on)
+        glsafe(::glDisable(GL_BLEND));
 }
 
 void GCodeViewer::render_shells(int canvas_width, int canvas_height)
@@ -3976,6 +4138,31 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                     m_viewer.toggle_extrusion_role_visibility(role);
                     update_moves_slider();
                 });
+        }
+
+        // Edge (support highlight, phase 2): overlays of what each layer's support holds up and of
+        // the overhangs left without support, following the layer slider. Off until turned on.
+        if (!m_only_gcode_in_preview) {
+            auto overlay_item = [&](const ColorRGBA &color, const std::string &label, bool &shown, const char *config_key, const wxString &tip) {
+                std::vector<std::pair<std::string, float>> columns_offsets;
+                columns_offsets.push_back({ label, offsets[0] });
+                append_item(EItemType::Rect, color, columns_offsets, true, offsets.back(), shown, [this, &shown, config_key]() {
+                    shown = !shown;
+                    wxGetApp().app_config->set_bool(config_key, shown);
+                });
+                if (ImGui::IsItemHovered())
+                    imgui.tooltip(tip, ImGui::GetFontSize() * 20.0f);
+            };
+            overlay_item(SUPPORT_OVERLAY_SUPPORTED_COLOR, _u8L("Supported overhangs"), m_support_overlay.show_supported,
+                         "preview_show_supported_overhangs",
+                         _L("Each layer's overhang areas the support holds up, as the support generator decided them "
+                            "(after blockers, enforcers, bridges and small overhang removal). The layer at the top of the "
+                            "layer slider is shown strongest."));
+            overlay_item(SUPPORT_OVERLAY_UNSUPPORTED_COLOR, _u8L("Unsupported overhangs"), m_support_overlay.show_unsupported,
+                         "preview_show_unsupported_overhangs",
+                         _L("Overhang areas the support threshold flags that get no support on their layer: bridges, "
+                            "small overhangs removed, areas over the object with \"On build plate only\", blocked areas, "
+                            "or all of them when supports are off."));
         }
 
         auto options = m_viewer.get_options();
