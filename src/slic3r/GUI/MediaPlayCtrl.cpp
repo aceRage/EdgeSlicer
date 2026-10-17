@@ -8,6 +8,7 @@
 #include "MsgDialog.hpp"
 #include "PluginGuard.hpp"
 #include "RemoteHub.hpp"
+#include "BambuNetInfo.hpp"
 #include "slic3r/Utils/TeardownJoin.hpp"
 
 #include <nlohmann/json.hpp>
@@ -194,7 +195,10 @@ void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
         m_lan_mode       = obj->is_lan_mode_printer();
         m_lan_proto      = obj->liveview_local;
         m_remote_proto   = obj->get_liveview_remote();
-        m_lan_ip         = obj->dev_ip;
+        // A cloud-bound printer whose SSDP announcements never arrive (Windows Firewall on a Public
+        // network) still reports its address in push_status: the camera uses that until discovery
+        // finds it, instead of "[1:3]" on every Play for the whole session (BambuNetInfo.hpp).
+        m_lan_ip         = BambuNetInfo::camera_address(obj->dev_ip, obj->net_reported_ip);
         m_lan_passwd     = obj->get_access_code();
         m_device_busy    = obj->is_camera_busy_off();
         m_tutk_state     = obj->tutk_state;
@@ -405,7 +409,20 @@ void MediaPlayCtrl::Play()
                 if (m_last_state == MEDIASTATE_INITIALIZING) {
                     if (url.empty() || !boost::algorithm::starts_with(url, "bambu:///")) {
                         m_failed_code = 3;
-                        Stop(_L("Connection Failed. Please check the network and try again"), from_u8(url));
+                        if (m_lan_ip.empty() && m_lan_proto > MachineObject::LVL_Disable)
+                            // No cloud stream, and no LAN address to play the printer's own stream
+                            // from: say which of the two is missing rather than "check the network".
+#ifdef _WIN32
+                            Stop(_L("EdgeSlicer does not know this printer's LAN address yet, so the live view cannot start. "
+                                    "Printer discovery may be blocked: see Help > Check Windows Firewall."),
+                                 from_u8(url));
+#else
+                            Stop(_L("EdgeSlicer does not know this printer's LAN address yet, so the live view cannot start. "
+                                    "Printer discovery may be blocked by a firewall."),
+                                 from_u8(url));
+#endif
+                        else
+                            Stop(_L("Connection Failed. Please check the network and try again"), from_u8(url));
                     } else {
                         m_url = url;
                         load();
