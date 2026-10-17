@@ -533,6 +533,20 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
     return ok;
 }
 
+// Orca #15849 1fe5df7d4e / 733ef2b79f: a heater shared by several filaments stays
+// on until every one of them has finished. Edge has no is_imex, so this is the
+// bounds-checked half of imex_physical_heater_for. In-range physical_extruder_map
+// entries are heaters; out-of-range ids (the default single-entry {0}) pass
+// through as identity so U1 / classic multi-tool stay per-filament. get_at()
+// would clamp every filament onto heater 0 and keep all tools hot until the last
+// one finished. BBL never reaches this helper: pre_toolchange excludes it first.
+static int physical_heater_for(const ConfigOptionInts &pem, int filament_id)
+{
+    if (filament_id < 0 || filament_id >= int(pem.values.size()))
+        return filament_id;
+    return pem.values[size_t(filament_id)];
+}
+
 std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
 {
     std::string gcode;
@@ -544,9 +558,11 @@ std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
     //
     // This is restricted to "true" multi-tool setups where filament id == physical
     // extruder id (classic multi-extruder / IDEX / toolchanger machines with
-    // ooze_prevention enabled). SEMM/AMS/MMU never reach here: init_ooze_prevention()
-    // only sets m_ooze_prevention.enable when single_extruder_multi_material is off, so
-    // (like upstream bcbb8746) there is no separate SEMM check below.
+    // ooze_prevention enabled), plus the shared-heater case below when
+    // physical_extruder_map maps several filaments onto one heater. SEMM/AMS/MMU
+    // never reach here: init_ooze_prevention() only sets m_ooze_prevention.enable
+    // when single_extruder_multi_material is off, so (like upstream bcbb8746)
+    // there is no separate SEMM check below.
     //  - Bambu (H2/H2C/H2D) printers are excluded outright: they map filaments to
     //    physical nozzles through a separate grouping/virtual-filament layer
     //    (MultiNozzleUtils::LayeredNozzleGroupResult, MixedFilamentManager) where
@@ -566,7 +582,15 @@ std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
     if (gcodegen.m_curr_print != nullptr && !gcodegen.is_BBL_Printer() &&
         gcodegen.config().print_sequence == PrintSequence::ByLayer &&
         !gcodegen.m_curr_print->tool_ordering().empty()) {
-        is_last_use = gcodegen.m_curr_print->tool_ordering().is_last_extrusion_layer(print_z, extruder_id);
+        const auto &tool_ordering = gcodegen.m_curr_print->tool_ordering();
+        const auto &pem           = gcodegen.config().physical_extruder_map;
+        const int   heater        = physical_heater_for(pem, int(extruder_id));
+        // 733ef2b79f: start from this filament, then keep the heater on while any
+        // other used filament still maps to it.
+        is_last_use = tool_ordering.is_last_extrusion_layer(print_z, extruder_id);
+        for (unsigned int f : tool_ordering.all_extruders())
+            if (is_last_use && physical_heater_for(pem, int(f)) == heater)
+                is_last_use = tool_ordering.is_last_extrusion_layer(print_z, f);
     }
 
     // From upstream c93acbd2 (bcbb8746 went back to a bare pop_back()): never pop_back() on an
