@@ -4,6 +4,7 @@
 #include "Layer.hpp"
 #include "Print.hpp"
 #include "SupportMaterial.hpp"
+#include "SupportOverhangDetect.hpp"
 #include "SupportCommon.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
@@ -1460,13 +1461,10 @@ static inline ExPolygons detect_overhangs(
     // BBS.
     const bool   auto_normal_support = object_config.support_type.value == stNormalAuto;
     const bool   buildplate_only = ! annotations.buildplate_covered.empty();
-    // If user specified a custom angle threshold, convert it to radians.
-    // Zero means automatic overhang detection.
-    // Edge: the support painting highlight mirrors this layer rule (threshold, overlap, sliver
-    // filter below) in Support/SupportOverhangHighlight.cpp; keep them in step ([SupportHighlight] tests).
-    // +1 makes the threshold inclusive
-    double thresh_angle = object_config.support_threshold_angle.value > 0 ? object_config.support_threshold_angle.value + 1 : 0;
-    thresh_angle = std::min(thresh_angle, 89.); // BBS should be smaller than 90
+    // Edge: the layer rule (threshold, overlap, region overhangs, sliver filter) lives in
+    // Support/SupportOverhangDetect.cpp, shared with tree supports' twin and the support painting
+    // highlight. 0 means automatic overhang detection (overlap mode).
+    const double thresh_angle  = normal_support_threshold_angle(object_config.support_threshold_angle.value);
     const double threshold_rad = Geometry::deg2rad(thresh_angle);
     const bool bridge_no_support = object_config.bridge_no_support.value;
     const coordf_t xy_expansion = scale_(object_config.support_expansion.value);
@@ -1507,43 +1505,15 @@ static inline ExPolygons detect_overhangs(
             // Extrusion width accounts for the roundings of the extrudates.
             // It is the maximum widh of the extrudate.
             float fw = float(layerm->flow(frExternalPerimeter).scaled_width());
-            lower_layer_offset  = 
-                (layer_id < (size_t)object_config.enforce_support_layers.value) ? 
-                    // Enforce a full possible support, ignore the overhang angle.
-                    0.f :
-                (threshold_rad > 0. ? 
-                    // Overhang defined by an angle.
-                    float(scale_(lower_layer.height / tan(threshold_rad))) :
-                    // Overhang defined by overlap.
-                    fw - float(scale_(object_config.support_threshold_overlap.get_abs_value(unscale_(fw)))));
-            // Overhang polygons for this layer and region.
-            Polygons diff_polygons;
+            lower_layer_offset = normal_support_lower_layer_offset(layer_id, object_config.enforce_support_layers.value, threshold_rad,
+                                                                   lower_layer.height, fw, object_config.support_threshold_overlap);
+            // Overhang polygons for this layer and region (SupportOverhangDetect.cpp): with offset 0
+            // everything, else (auto only) what sticks out past the grown lower layer, grown back.
+            static const Polygons no_buildplate_covered;
             Polygons layerm_polygons = to_polygons(layerm->slices.surfaces);
-            if (lower_layer_offset == 0.f) {
-                // Support everything.
-                diff_polygons = diff(layerm_polygons, lower_layer_polygons);
-                if (buildplate_only) {
-                    // Don't support overhangs above the top surfaces.
-                    // This step is done before the contact surface is calculated by growing the overhang region.
-                    diff_polygons = diff(diff_polygons, annotations.buildplate_covered[layer_id]);
-                }
-            } else if (auto_normal_support) {
-                // Get the regions needing a suport, collapse very tiny spots.
-                //FIXME cache the lower layer offset if this layer has multiple regions.
-                diff_polygons = 
-                    diff(layerm_polygons,
-                            expand(lower_layer_polygons, lower_layer_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS));
-                if (buildplate_only && ! annotations.buildplate_covered[layer_id].empty()) {
-                    // Don't support overhangs above the top surfaces.
-                    // This step is done before the contact surface is calculated by growing the overhang region.
-                    diff_polygons = diff(diff_polygons, annotations.buildplate_covered[layer_id]);
-                }
-                if (! diff_polygons.empty()) {
-                    // Offset the support regions back to a full overhang, restrict them to the full overhang.
-                    // This is done to increase size of the supporting columns below, as they are calculated by 
-                    // propagating these contact surfaces downwards.
-                    diff_polygons = diff(intersection(expand(diff_polygons, lower_layer_offset, SUPPORT_SURFACES_OFFSET_PARAMETERS), layerm_polygons), lower_layer_polygons);
-                }
+            Polygons diff_polygons   = normal_support_region_overhangs(layerm_polygons, lower_layer_polygons, lower_layer_offset, auto_normal_support,
+                                                                       buildplate_only, buildplate_only ? annotations.buildplate_covered[layer_id] : no_buildplate_covered);
+            if (lower_layer_offset != 0.f && auto_normal_support) {
                 //FIXME add user defined filtering here based on minimal area or minimum radius or whatever.
 
                 // BBS
@@ -1587,7 +1557,7 @@ static inline ExPolygons detect_overhangs(
                     print_config, lower_layer, lower_layer_polygons, *layerm, fw, diff_polygons);
             }
 
-            if (diff_polygons.empty() || offset(diff_polygons, -0.1 * fw).empty())
+            if (normal_support_overhang_too_thin(diff_polygons, fw))
                 continue;
 
             if (xy_expansion != 0) { diff_polygons = expand(diff_polygons, xy_expansion, SUPPORT_SURFACES_OFFSET_PARAMETERS); }

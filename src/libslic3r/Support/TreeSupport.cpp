@@ -13,6 +13,7 @@
 #include "SVG.hpp"
 #include "TreeSupportCommon.hpp"
 #include "TreeSupport.hpp"
+#include "SupportOverhangDetect.hpp"
 #include "TreeSupport3D.hpp"
 #include <libnest2d/backends/libslic3r/geometries.hpp>
 #include <libnest2d/placers/nfpplacer.hpp>
@@ -694,11 +695,10 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     static const double sharp_tail_max_support_height = 16.f;
     // a region is considered well supported if the number of layers below it exceeds this threshold
     const int thresh_layers_below = 10 / config.layer_height;
-    // Edge: the support painting highlight mirrors this layer rule (threshold, 30 degree fallback)
-    // in Support/SupportOverhangHighlight.cpp; keep them in step ([SupportHighlight] tests).
-    // +1 makes the threshold inclusive
-    double thresh_angle = config.support_threshold_angle.value > EPSILON ? config.support_threshold_angle.value + 1 : 30;
-    thresh_angle = std::min(thresh_angle, 89.); // should be smaller than 90
+    // Edge: the layer rule (threshold with the 30 degree fallback, extrudable areas, lower-layer
+    // offset, normal overhang) lives in Support/SupportOverhangDetect.cpp, shared with normal
+    // supports' twin and the support painting highlight.
+    const double thresh_angle  = tree_support_threshold_angle(config.support_threshold_angle.value);
     const double threshold_rad = Geometry::deg2rad(thresh_angle);
     // FIXME this is a fudge constant!
     double support_tree_tip_diameter = 0.8;
@@ -802,7 +802,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                     break;
                 Layer* layer = m_object->get_layer(layer_nr);
                 // Filter out areas whose diameter that is smaller than extrusion_width, but we don't want to lose any details.
-                layer->lslices_extrudable = intersection_ex(layer->lslices, offset2_ex(layer->lslices, -extrusion_width_scaled / 2, extrusion_width_scaled));
+                layer->lslices_extrudable = tree_support_extrudable(layer->lslices, extrusion_width_scaled);
                 layer->loverhangs.clear();
             }
         });
@@ -836,15 +836,15 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 }
 
                 Layer* lower_layer = layer->lower_layer;
-                coordf_t lower_layer_offset = layer_nr < enforce_support_layers ? -0.15 * extrusion_width : (float)lower_layer->height / tan(threshold_rad);
+                coordf_t lower_layer_offset = tree_support_lower_layer_offset(layer_nr, enforce_support_layers, extrusion_width, lower_layer->height, threshold_rad);
                 //lower_layer_offset = std::min(lower_layer_offset, extrusion_width);
                 coordf_t support_offset_scaled = scale_(lower_layer_offset);
                 ExPolygons& curr_polys = layer->lslices_extrudable;
                 ExPolygons& lower_polys = lower_layer->lslices_extrudable;
 
                 // normal overhang
-                ExPolygons lower_layer_offseted = offset_ex(lower_polys, support_offset_scaled, SUPPORT_SURFACES_OFFSET_PARAMETERS);
-                overhangs_all_layers[layer_nr] = std::move(diff_ex(curr_polys, lower_layer_offseted));
+                ExPolygons lower_layer_offseted;
+                overhangs_all_layers[layer_nr] = tree_support_layer_overhangs(curr_polys, lower_polys, support_offset_scaled, lower_layer_offseted);
 
                 double duration{ std::chrono::duration_cast<second_>(clock_::now() - t0).count() };
                 if (duration > 30 || overhangs_all_layers[layer_nr].size() > 100) {
