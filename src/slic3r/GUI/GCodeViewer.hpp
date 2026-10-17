@@ -194,6 +194,35 @@ private:
     float m_max_print_height{ 0.0f };
     float m_z_offset{ 0.0f };
 
+    // Edge (support highlight, phase 2): each layer's supported overhangs (what the support
+    // generator holds up, red) and unsupported overhangs (yellow), drawn over the toolpaths and
+    // following the layer slider. Built from the slice (support_overhang_overlay()) the first time
+    // one of the two legend toggles is on after a G-code load.
+    struct SupportOverhangOverlay
+    {
+        struct Part
+        {
+            GLModel model;
+            // Per vgcode layer id present in the model, sorted: {layer id, first index}.
+            std::vector<std::pair<size_t, size_t>> layer_starts;
+            size_t indices_count{ 0 };
+            // Index range [first, second) of the triangles on layers [min_layer, max_layer].
+            std::pair<size_t, size_t> range(size_t min_layer, size_t max_layer) const;
+            void reset() { model.reset(); layer_starts.clear(); indices_count = 0; }
+        };
+        Part   supported;
+        Part   unsupported;
+        bool   show_supported{ false };
+        bool   show_unsupported{ false };
+        bool   dirty{ true };      // rebuild before the next render that shows it
+        bool   available{ false }; // the last build found a sliced print with layers
+        double build_ms{ 0. };     // CPU time of the last build (log)
+        void reset() { supported.reset(); unsupported.reset(); dirty = true; available = false; }
+    };
+    SupportOverhangOverlay m_support_overlay;
+    void load_support_overhang_overlay();
+    void render_support_overhang_overlay();
+
     ConfigOptionMode m_user_mode;
     bool m_fold = {false};
 

@@ -592,6 +592,10 @@ set(lisbslic3r_sources
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
+    Support/SupportOverhangDetect.cpp
+    Support/SupportOverhangDetect.hpp
+    Support/SupportOverhangHighlight.cpp
+    Support/SupportOverhangHighlight.hpp
     Support/SupportParameters.hpp
     Support/Stabilizers.cpp
     Support/Stabilizers.hpp
@@ -700,6 +704,7 @@ slic3r_unity_build(libslic3r SKIP
     SLA/SupportTree.cpp             # libnest2d nlopt optimizer headers clash with Optimize/NLoptOptimizer.hpp
     SLA/SupportTreeMesher.cpp       # sphere()/Portion clash with a neighbour
     Support/SupportMaterial.cpp     # support_types_interface also defined in SupportCommon.cpp
+    Support/SupportOverhangDetect.cpp # new (support highlight phase 4): defines SUPPORT_SURFACES_OFFSET_PARAMETERS; kept apart so the batches stay as they were
     utils.cpp                       # needs <windows.h> without a neighbour's lean/extra macros
     InstanceLock.cpp                # boost::interprocess file_lock pulls in <windows.h>; keep out of unity batches
     Format/bbs_3mf.cpp              # file-local tag/version constants also defined in Format/3mf.cpp
