@@ -4,16 +4,13 @@ else ()
     set(_use_IPP "-DWITH_IPP=OFF")
 endif ()
 
-# Both OpenCV patches are GIT-FORMAT diffs, so --directory is load-bearing here: without
-# it git apply resolves the paths against the repo root, skips every hunk and exits 0.
-if (IN_GIT_REPO)
-    set(OpenCV_DIRECTORY_FLAG -DDIRECTORY=${BINARY_DIR_REL}/dep_OpenCV-prefix/src/dep_OpenCV)
-endif ()
+# Both OpenCV patches are GIT-FORMAT diffs. deps/apply_patch.cmake works out the
+# --directory they need (inside a git work tree) from the source dir at patch time.
 
 Snapmaker_Orca_add_cmake_project(OpenCV
     URL https://github.com/opencv/opencv/archive/refs/tags/4.6.0.tar.gz
     URL_HASH SHA256=1ec1cba65f9f20fe5a41fda1586e01c70ea0c9a6d7b67c9e13edf0cfe2239277
-    PATCH_COMMAND ${CMAKE_COMMAND} -DGIT=${GIT_EXECUTABLE} ${OpenCV_DIRECTORY_FLAG} -DLOOSE_WS=ON
+    PATCH_COMMAND ${CMAKE_COMMAND} -DGIT=${GIT_EXECUTABLE} -DLOOSE_WS=ON
                   -DP1=${CMAKE_CURRENT_LIST_DIR}/0001-vs2022.patch
                   -DP2=${CMAKE_CURRENT_LIST_DIR}/0002-clang19-macos.patch
                   -P ${CMAKE_CURRENT_LIST_DIR}/../apply_patch.cmake

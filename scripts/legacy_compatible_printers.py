@@ -46,7 +46,7 @@ DEFAULT_BASE_TAGS = [
     "v2.4.0.0-edge", "v2.4.0.1-edge", "v2.4.1.0-edge", "v2.4.1.1-edge", "v2.4.1.2-edge",
     "v2.4.2.0-edge", "v2.4.3.0-edge", "v2.4.4.0-edge", "v2.4.4.1-edge", "v2.4.4.2-edge",
     "v2.4.5.0-edge", "v2.4.5.1-edge", "v2.4.5.2-edge", "v2.4.5.3-edge", "v2.4.5.4-edge",
-    "v2.4.5.5-edge",
+    "v2.4.5.5-edge", "v2.4.6.0-edge",
 ]
 
 

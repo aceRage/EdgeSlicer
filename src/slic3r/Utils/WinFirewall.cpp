@@ -285,6 +285,12 @@ bool Diagnosis::fix_would_help(bool allow_public) const
     return false;
 }
 
+bool default_allow_public(const Diagnosis& d)
+{
+    return d.ok && d.on_public_network() && !d.block_all_inbound[2] && (d.problem_profiles() & ProfilePublic) != 0 &&
+           d.fix_would_help(true);
+}
+
 Diagnosis diagnose(const Snapshot& s, const std::string& exe, const std::string& go2rtc, const EnvLookup& env)
 {
     Diagnosis d;

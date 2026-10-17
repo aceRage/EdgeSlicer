@@ -48,6 +48,7 @@ add_executable(${_TEST_NAME}_tests
     first_request_gate_tests.cpp
     bind_list_refresh_tests.cpp
     ssdp_connect_type_tests.cpp
+    bambu_net_info_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp
