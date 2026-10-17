@@ -65,6 +65,8 @@ std::pair<bool, std::string> GLShadersManager::init()
     valid &= append_shader("background", { prefix + "background.vs", prefix + "background.fs" });
     // used to composite the selection fill and outline over the completed scene
     appendOptionalShader("selection_composite", { prefix + "background.vs", prefix + "selection_composite.fs" });
+    // Orca #13538: screen-space FXAA pass (background.vs, as the quad is m_background's P2 one).
+    appendOptionalShader("fxaa", { prefix + "background.vs", prefix + "fxaa.fs" });
     // used to extract the selection edge from the low-resolution selection mask
     appendOptionalShader("selection_edge", { prefix + "background.vs", prefix + "selection_edge.fs" });
     // used to area-downsample the full-resolution selection mask before edge extraction

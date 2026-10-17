@@ -8331,6 +8331,10 @@ void GUI_App::open_themes()
 void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_option)
 {
     bool app_layout_changed = false;
+    // Orca #13538: FXAA, the FPS cap and the FPS overlay take effect at once; redraw when they change.
+    const std::string previous_opengl_fxaa             = app_config->get(SETTING_OPENGL_FXAA_ENABLED);
+    const std::string previous_opengl_fps_cap          = app_config->get(SETTING_OPENGL_FPS_CAP);
+    const std::string previous_opengl_show_fps_overlay = app_config->get(SETTING_OPENGL_SHOW_FPS_OVERLAY);
     {
         // the dialog needs to be destroyed before the call to recreate_GUI()
         // or sometimes the application crashes into wxDialogBase() destructor
@@ -8340,6 +8344,10 @@ void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_
         GLCanvas3D* canvas = this->plater_->get_current_canvas3D();
         if (canvas)
             canvas->force_set_focus();
+        if (app_config->get(SETTING_OPENGL_FXAA_ENABLED) != previous_opengl_fxaa ||
+            app_config->get(SETTING_OPENGL_FPS_CAP) != previous_opengl_fps_cap ||
+            app_config->get(SETTING_OPENGL_SHOW_FPS_OVERLAY) != previous_opengl_show_fps_overlay)
+            this->plater_->set_current_canvas_as_dirty();
         // BBS
         //app_layout_changed = dlg.settings_layout_changed();
 #if ENABLE_GCODE_LINES_ID_IN_H_SLIDER
