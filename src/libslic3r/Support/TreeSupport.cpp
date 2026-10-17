@@ -1126,6 +1126,13 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
 
     BOOST_LOG_TRIVIAL(info) << "Tree support overhang detection done. " << layers_with_overhangs << " layers with overhangs. nEnforced=" << layers_with_enforcers;
 
+    // Edge (support highlight): keep a copy of each layer's final overhangs for the preview
+    // overlay; PrintObject::detect_overhangs_for_lift() overwrites loverhangs after the support step.
+    for (int layer_nr = 1; layer_nr < int(m_object->layer_count()); ++ layer_nr) {
+        const Layer *layer = m_object->get_layer(layer_nr);
+        layer->support_overhangs = layer->loverhangs;
+    }
+
 #ifdef SUPPORT_TREE_DEBUG_TO_SVG
     for (const Layer* layer : m_object->layers()) {
         if (layer->loverhangs.empty() && (blockers.size()<=layer->id() || blockers[layer->id()].empty()))

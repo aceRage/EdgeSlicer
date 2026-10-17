@@ -7,11 +7,15 @@
 
 #include <catch2/catch.hpp>
 
+#include <chrono>
 #include <cmath>
+#include <iostream>
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Support/SupportOverhangHighlight.hpp"
@@ -252,4 +256,216 @@ TEST_CASE("Support highlight rule: the small rule config matches the full config
     CHECK_THAT(o.effective_angle_deg(), WithinAbs(30., 1e-9));
     // wall_filament 0 means "default" and does not undo the object's "extruder".
     CHECK_THAT(o.outer_wall_width, WithinAbs(0.9, 1e-6));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 2: Layer::support_overhangs (the generator's decision, kept for the preview) and the
+// preview overlay built from it (support_overhang_overlay()).
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+indexed_triangle_set box_its(double x0, double y0, double z0, double dx, double dy, double dz)
+{
+    indexed_triangle_set its = its_make_cube(dx, dy, dz);
+    for (stl_vertex &v : its.vertices)
+        v += Vec3f(float(x0), float(y0), float(z0));
+    return its;
+}
+
+struct OverlayTotals
+{
+    double supported   { 0. }; // mm2 over all layers
+    double unsupported { 0. };
+    size_t supported_layers { 0 };
+};
+
+double area_mm2(const ExPolygons &expolys)
+{
+    double a = 0.;
+    for (const ExPolygon &e : expolys)
+        a += e.area();
+    return a * SCALING_FACTOR * SCALING_FACTOR;
+}
+
+OverlayTotals overlay_totals(const PrintObject &object, double z_min = 0., double z_max = 1e9)
+{
+    OverlayTotals t;
+    for (const SupportOverhangOverlayLayer &l : support_overhang_overlay(object)) {
+        if (l.print_z < z_min || l.print_z > z_max)
+            continue;
+        t.supported   += area_mm2(l.supported);
+        t.unsupported += area_mm2(l.unsupported);
+        t.supported_layers += l.supported.empty() ? 0 : 1;
+        // Triangles come in threes and cover the polygons.
+        CHECK(l.supported_triangles.size() % 3 == 0);
+        CHECK(l.unsupported_triangles.size() % 3 == 0);
+        CHECK(l.supported.empty() == l.supported_triangles.empty());
+    }
+    return t;
+}
+
+size_t layers_with_support_overhangs(const PrintObject &object)
+{
+    size_t n = 0;
+    for (const Layer *layer : object.layers())
+        n += layer->support_overhangs.empty() ? 0 : 1;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("Support highlight overlay: the generators keep what they hold up", "[SupportHighlight]")
+{
+    for (const char *type : { "normal(auto)", "tree(auto)" }) {
+        DynamicPrintConfig config = support_config(type, 40, 0.2);
+        Print print;
+        Model model;
+        init_print({ TriangleMesh(inverted_frustum_its(30.)) }, print, model, config);
+        print.process();
+        const PrintObject &object = *print.objects().front();
+        INFO(type);
+        REQUIRE(support_extrusion_points(print) > 0);
+        // Every layer of a 30 degree frustum overhangs: (nearly) all of them are held up.
+        CHECK(layers_with_support_overhangs(object) > object.layer_count() / 2);
+        CHECK(object.layers().front()->support_overhangs.empty());
+        const OverlayTotals t = overlay_totals(object);
+        INFO("supported " << t.supported << " mm2, unsupported " << t.unsupported << " mm2");
+        CHECK(t.supported > 0.);
+        // What the rule calls an overhang is held up: little or nothing is left amber.
+        CHECK(t.unsupported < 0.1 * t.supported);
+    }
+}
+
+TEST_CASE("Support highlight overlay: supports off leave every overhang unsupported", "[SupportHighlight]")
+{
+    DynamicPrintConfig config = support_config("normal(auto)", 40, 0.2, { { "enable_support", 0 } });
+    Print print;
+    Model model;
+    init_print({ TriangleMesh(inverted_frustum_its(30.)) }, print, model, config);
+    print.process();
+    const PrintObject &object = *print.objects().front();
+    CHECK(layers_with_support_overhangs(object) == 0);
+    const OverlayTotals t = overlay_totals(object);
+    CHECK(t.supported == 0.);
+    CHECK(t.unsupported > 0.);
+
+    // Turning supports on fills the cache; turning them off again clears it with the support step.
+    config.set_deserialize_strict({ { "enable_support", 1 } });
+    print.apply(model, config);
+    print.process();
+    CHECK(layers_with_support_overhangs(*print.objects().front()) > 0);
+    config.set_deserialize_strict({ { "enable_support", 0 } });
+    print.apply(model, config);
+    print.process();
+    CHECK(layers_with_support_overhangs(*print.objects().front()) == 0);
+}
+
+TEST_CASE("Support highlight overlay: on build plate only, an overhang above the part is unsupported", "[SupportHighlight]")
+{
+    // A 20 x 20 x 4 mm base, a 4 x 4 mm column up to 10 mm and a 16 x 16 x 2 mm cap on it: the
+    // cap's underside hangs over the base, not over the plate.
+    indexed_triangle_set its = box_its(-10., -10., 0., 20., 20., 4.);
+    its_merge(its, box_its(-2., -2., 4., 4., 4., 6.));
+    its_merge(its, box_its(-8., -8., 10., 16., 16., 2.));
+    for (const bool plate_only : { false, true }) {
+        DynamicPrintConfig config = support_config("normal(auto)", 40, 0.2, { { "support_on_build_plate_only", plate_only ? 1 : 0 } });
+        Print print;
+        Model model;
+        init_print({ TriangleMesh(its) }, print, model, config);
+        print.process();
+        // The cap's first layers.
+        const OverlayTotals t = overlay_totals(*print.objects().front(), 10.05, 10.65);
+        INFO("plate only " << plate_only << ": supported " << t.supported << " mm2, unsupported " << t.unsupported << " mm2");
+        if (plate_only) {
+            CHECK(t.supported == 0.);
+            CHECK(t.unsupported > 100.);
+        } else {
+            CHECK(t.supported > 100.);
+            CHECK(t.unsupported < 0.1 * t.supported);
+        }
+    }
+}
+
+TEST_CASE("Support highlight overlay: a short bridge is left to bridging", "[SupportHighlight]")
+{
+    // Two 5 x 5 x 10 mm pillars 8 mm apart and a 18 x 5 x 2 mm slab across them. Tree supports with
+    // max_bridge_length 10 bridge the 8 mm span (amber); with 0 they support it (red).
+    indexed_triangle_set its = box_its(0., 0., 0., 5., 5., 10.);
+    its_merge(its, box_its(13., 0., 0., 5., 5., 10.));
+    its_merge(its, box_its(0., 0., 10., 18., 5., 2.));
+    const double gap_area = 8. * 5.;
+    for (const int max_bridge : { 0, 10 }) {
+        DynamicPrintConfig config = support_config("tree(auto)", 40, 0.2, { { "max_bridge_length", max_bridge } });
+        Print print;
+        Model model;
+        init_print({ TriangleMesh(its) }, print, model, config);
+        print.process();
+        const OverlayTotals t = overlay_totals(*print.objects().front(), 10.05, 10.25);
+        INFO("max_bridge_length " << max_bridge << ": supported " << t.supported << " mm2, unsupported " << t.unsupported << " mm2");
+        if (max_bridge == 0) {
+            CHECK(t.supported > 0.5 * gap_area);
+        } else {
+            CHECK(t.unsupported > 0.5 * gap_area);
+            CHECK(t.supported < 0.5 * gap_area);
+        }
+    }
+}
+
+TEST_CASE("Support highlight benchmark: preview overlay build", "[.][SupportOverlayBench]")
+{
+    auto run = [](const char *name, Model &model, const char *type) {
+        DynamicPrintConfig config = support_config(type, 30, 0.2);
+        DynamicPrintConfig full   = DynamicPrintConfig::full_print_config();
+        full.apply(config);
+        for (ModelObject *mo : model.objects) {
+            if (mo->instances.empty())
+                mo->add_instance();
+            mo->ensure_on_bed();
+        }
+        Print print;
+        print.apply(model, full);
+        print.set_status_silent();
+        const auto t0 = std::chrono::steady_clock::now();
+        print.process();
+        const auto t1 = std::chrono::steady_clock::now();
+        size_t layers = 0, tris = 0, facets = 0;
+        double ms = 0.;
+        for (const PrintObject *object : print.objects()) {
+            const auto a = std::chrono::steady_clock::now();
+            const std::vector<SupportOverhangOverlayLayer> overlay = support_overhang_overlay(*object);
+            ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
+            layers += object->layer_count();
+            for (const SupportOverhangOverlayLayer &l : overlay)
+                tris += (l.supported_triangles.size() + l.unsupported_triangles.size()) / 3;
+            facets += object->model_object()->facets_count();
+        }
+        std::cout << name << " (" << facets << " facets, " << layers << " layers), " << type << ": slice " << std::chrono::duration<double, std::milli>(t1 - t0).count()
+                  << " ms, overlay build " << ms << " ms, " << tris << " triangles (" << (tris * 3 * 3 * 4 + tris * 3 * 4) / 1024 << " KiB on the GPU)" << std::endl;
+    };
+    for (const char *type : { "normal(auto)", "tree(auto)" }) {
+        {
+            Model model;
+            ModelObject *mo = model.add_object();
+            indexed_triangle_set its = its_make_sphere(40., 2. * PI / 1000.);
+            mo->add_volume(TriangleMesh(std::move(its)));
+            run("sphere r40", model, type);
+        }
+        {
+            Model model;
+            DynamicPrintConfig cfg;
+            ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
+            PlateDataPtrs plate_data;
+            std::vector<Preset*> presets;
+            bool is_bbl = false;
+            Semver version;
+            const std::string path = std::string(TEST_DATA_DIR) + "/../../resources/handy_models/3DBenchy.3mf";
+            if (load_bbs_3mf(path.c_str(), &cfg, &ctxt, &model, &plate_data, &presets, &is_bbl, &version, nullptr, LoadStrategy::LoadModel) &&
+                ! model.objects.empty())
+                run("3DBenchy", model, type);
+            else
+                std::cout << "3DBenchy: could not load " << path << std::endl;
+            release_PlateData_list(plate_data);
+        }
+    }
 }

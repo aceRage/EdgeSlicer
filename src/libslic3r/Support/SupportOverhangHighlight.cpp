@@ -3,10 +3,16 @@
 
 #include "SupportOverhangHighlight.hpp"
 
+#include "../ClipperUtils.hpp"
 #include "../Config.hpp"
 #include "../Flow.hpp"
 #include "../Geometry.hpp"
+#include "../Layer.hpp"
+#include "../Print.hpp"
 #include "../PrintConfig.hpp"
+#include "../Tesselate.hpp"
+
+#include <tbb/parallel_for.h>
 
 #include <algorithm>
 #include <cmath>
@@ -169,6 +175,124 @@ DynamicPrintConfig support_overhang_rule_config(const DynamicPrintConfig &print_
             out.set_key_value(key, opt->clone());
         }
     }
+    return out;
+}
+
+SupportOverhangRule support_overhang_rule(const PrintObject &object)
+{
+    DynamicPrintConfig cfg;
+    cfg.apply(object.print()->config(), true);
+    cfg.apply(object.config(), true);
+    if (object.num_printing_regions() > 0)
+        cfg.apply(object.printing_region(0).config(), true);
+    return support_overhang_rule(cfg);
+}
+
+// Same as SupportMaterial.cpp / TreeSupport.cpp (SUPPORT_SURFACES_OFFSET_PARAMETERS).
+#define SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS ClipperLib::jtSquare, 0.
+
+std::vector<ExPolygons> support_overhangs_from_slices(const std::vector<ExPolygons> &lslices,
+                                                      const std::vector<double>     &heights,
+                                                      const SupportOverhangRule     &rule)
+{
+    const size_t            n = lslices.size();
+    std::vector<ExPolygons> out(n);
+    if (n < 2 || heights.empty())
+        return out;
+
+    // Tree: "Filter out areas whose diameter that is smaller than extrusion_width".
+    std::vector<ExPolygons> extrudable;
+    if (rule.tree) {
+        extrudable.resize(n);
+        const float w = float(scale_(rule.line_width));
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, n), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i)
+                extrudable[i] = intersection_ex(lslices[i], offset2_ex(lslices[i], -w / 2, w));
+        });
+    }
+    const std::vector<ExPolygons> &src = rule.tree ? extrudable : lslices;
+
+    tbb::parallel_for(tbb::blocked_range<size_t>(1, n), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i) {
+            const bool   enforced = int(i) < rule.enforce_layers;
+            const double lower_h  = i - 1 < heights.size() ? heights[i - 1] : heights.back();
+            if (rule.tree) {
+                // TreeSupport::detect_overhangs(), "normal overhang".
+                const double off = enforced ? -0.15 * rule.line_width : rule.lower_layer_offset(lower_h);
+                out[i] = diff_ex(src[i], offset_ex(src[i - 1], float(scale_(off)), SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS));
+            } else {
+                // SupportMaterial.cpp detect_overhangs(), auto normal support, one region.
+                const double   off   = enforced ? 0. : rule.lower_layer_offset(lower_h);
+                const Polygons cur   = to_polygons(src[i]);
+                const Polygons lower = to_polygons(src[i - 1]);
+                Polygons d;
+                if (off <= 0.) {
+                    d = diff(cur, lower);
+                } else {
+                    const float off_scaled = float(scale_(off));
+                    d = diff(cur, expand(lower, off_scaled, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS));
+                    if (! d.empty())
+                        // "Offset the support regions back to a full overhang".
+                        d = diff(intersection(expand(d, off_scaled, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS), cur), lower);
+                }
+                if (d.empty() || offset(d, -0.1f * float(scale_(rule.outer_wall_width))).empty())
+                    continue;
+                out[i] = union_ex(d);
+            }
+        }
+    });
+    return out;
+}
+
+std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObject &object)
+{
+    std::vector<SupportOverhangOverlayLayer> out;
+    const size_t n = object.layer_count();
+    if (n < 2)
+        return out;
+
+    const SupportOverhangRule rule = support_overhang_rule(object);
+    std::vector<ExPolygons>   lslices(n);
+    std::vector<double>       heights(n);
+    for (size_t i = 0; i < n; ++ i) {
+        lslices[i] = object.get_layer(int(i))->lslices;
+        heights[i] = object.get_layer(int(i))->height;
+    }
+    const std::vector<ExPolygons> by_rule = support_overhangs_from_slices(lslices, heights, rule);
+
+    // Tree supports + on build plate only: what lies above any lower layer gets no branch.
+    const bool plate_only_tree = rule.tree && object.config().support_on_build_plate_only.value;
+    std::vector<Polygons> covered;
+    if (plate_only_tree) {
+        covered.assign(n, {});
+        for (size_t i = 1; i < n; ++ i)
+            covered[i] = union_(covered[i - 1], to_polygons(lslices[i - 1]));
+    }
+
+    std::vector<SupportOverhangOverlayLayer> layers(n);
+    const float tol = 0.1f * float(scale_(rule.outer_wall_width));
+    tbb::parallel_for(tbb::blocked_range<size_t>(1, n), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i) {
+            const Layer &layer = *object.get_layer(int(i));
+            SupportOverhangOverlayLayer &l = layers[i];
+            l.print_z   = layer.print_z;
+            l.supported = layer.support_overhangs;
+            if (plate_only_tree && ! l.supported.empty())
+                l.supported = diff_ex(l.supported, covered[i]);
+            if (! by_rule[i].empty()) {
+                l.unsupported = l.supported.empty() ? by_rule[i] : diff_ex(by_rule[i], offset(l.supported, tol, SUPPORT_OVERHANG_HL_OFFSET_PARAMETERS));
+                if (! l.unsupported.empty())
+                    l.unsupported = opening_ex(l.unsupported, tol);
+            }
+            if (! l.supported.empty())
+                l.supported_triangles = triangulate_expolygons_2f(l.supported, NORMALS_UP);
+            if (! l.unsupported.empty())
+                l.unsupported_triangles = triangulate_expolygons_2f(l.unsupported, NORMALS_UP);
+        }
+    });
+    for (SupportOverhangOverlayLayer &l : layers)
+        if (! l.supported.empty() || ! l.unsupported.empty())
+            out.emplace_back(std::move(l));
     return out;
 }
 

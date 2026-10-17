@@ -20,6 +20,8 @@
 // [SupportHighlight] tests in tests/fff_print slice real objects and fail when the generators
 // and this rule drift apart.
 
+#include "../ExPolygon.hpp"
+
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -28,6 +30,7 @@ namespace Slic3r {
 
 class ConfigBase;
 class DynamicPrintConfig;
+class PrintObject;
 
 struct SupportOverhangRule
 {
@@ -86,5 +89,37 @@ DynamicPrintConfig support_overhang_rule_config(const DynamicPrintConfig &print_
                                                 const DynamicPrintConfig &project_config,
                                                 size_t                    filament_count,
                                                 const DynamicPrintConfig *object_config);
+
+// The rule as the generators see it for a sliced object: the print config, the object config and
+// its first region's config (outer wall width and filament).
+SupportOverhangRule support_overhang_rule(const PrintObject &object);
+
+// The layer-over-layer rule alone, run on an object's layer slices: lslices[i] (layer 0 on the
+// bed), heights[i] the layer heights. Returns the per-layer overhang areas either generator would
+// detect before its extras (no sharp tails, small-overhang removal, cantilevers, bridge removal,
+// build-plate-only trimming, enforcers or blockers). Normal supports: the full overhang (grown back)
+// and the sliver filter; trees: the extrudable areas, no sliver filter.
+std::vector<ExPolygons> support_overhangs_from_slices(const std::vector<ExPolygons> &lslices,
+                                                      const std::vector<double>     &heights,
+                                                      const SupportOverhangRule     &rule);
+
+// Phase 2: the preview overlay of one sliced object (posSupportMaterial done), per object layer.
+struct SupportOverhangOverlayLayer
+{
+    double              print_z { 0. };   // the layer's top, as in Layer::print_z (raft included)
+    ExPolygons          supported;        // what the generator holds up (Layer::support_overhangs)
+    ExPolygons          unsupported;      // what the rule calls an overhang and nothing holds up
+    // Both triangulated (object XY coordinates in mm, three points per triangle, counter-clockwise
+    // from above). Instances add PrintInstance::shift.
+    std::vector<Vec2f>  supported_triangles;
+    std::vector<Vec2f>  unsupported_triangles;
+};
+
+// Unsupported = the rule's overhang (support_overhangs_from_slices()) minus the supported areas
+// grown by 0.1 x the outer wall width, opened by the same amount so slivers along the edge of a
+// supported area do not show. Tree supports with "on build plate only" drop their branches over
+// the object later, so for them what lies above lower layers moves to the unsupported set, as the
+// normal generator does up front. Layers with neither are left out.
+std::vector<SupportOverhangOverlayLayer> support_overhang_overlay(const PrintObject &object);
 
 } // namespace Slic3r
