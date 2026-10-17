@@ -4279,6 +4279,16 @@ void PrintObject::detect_support_overhangs_only()
     this->throw_if_canceled();
 }
 
+// Edge (support highlight, phase 6): see Print.hpp.
+void PrintObject::generate_support_for_preview()
+{
+    this->clear_support_layers();
+    if ((m_config.enable_support.value && m_layers.size() > 1) || (this->has_raft() && ! m_layers.empty()))
+        this->_generate_support_material();
+    this->clear_tree_support_preview_cache();
+    this->throw_if_canceled();
+}
+
 void PrintObject::update_slicing_parameters()
 {
     // Orca: updated function call for XYZ shrinkage compensation

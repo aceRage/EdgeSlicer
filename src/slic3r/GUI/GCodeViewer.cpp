@@ -58,10 +58,10 @@
 namespace Slic3r {
 namespace GUI {
 
-// Edge (support highlight, phase 2): the preview overlay's colours. Red / amber read on the light
+// Edge (support highlight, phase 2): the preview overlay's colours. Red / yellow read on the light
 // and the dark preview background alike; the overlay itself is translucent.
 static const ColorRGBA SUPPORT_OVERLAY_SUPPORTED_COLOR   = { 0.92f, 0.16f, 0.16f, 0.60f };
-static const ColorRGBA SUPPORT_OVERLAY_UNSUPPORTED_COLOR = { 1.00f, 0.66f, 0.00f, 0.60f };
+static const ColorRGBA SUPPORT_OVERLAY_UNSUPPORTED_COLOR = { 1.00f, 0.85f, 0.00f, 0.70f };
 
 //BBS translation of EViewType
 //const std::string EViewType_Map[(int) GCodeViewer::EViewType::Count] = {

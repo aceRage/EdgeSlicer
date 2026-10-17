@@ -34,6 +34,10 @@ namespace Slic3r::GUI {
 
 // The colour of painted stabilizer points (EnforcerBlockerType::STABILIZER) in this gizmo.
 static const ColorRGBA STABILIZER_POINT_COLOR = { 0.62f, 0.36f, 0.90f, 1.f };
+// "By layer": red where the support holds the face up, a clear yellow where it does not. Both are
+// see-through over the painted mesh; the yellow stays apart from the red on light and dark filament.
+static const ColorRGBA LAYER_PREVIEW_SUPPORTED_COLOR   = { 0.92f, 0.10f, 0.10f, 0.60f };
+static const ColorRGBA LAYER_PREVIEW_UNSUPPORTED_COLOR = { 1.00f, 0.85f, 0.00f, 0.70f };
 
 GLGizmoFdmSupports::GLGizmoFdmSupports(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoPainterBase(parent, icon_filename, sprite_id), m_current_tool(ImGui::CircleButtonIcon)
@@ -480,21 +484,51 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     if (ImGui::IsItemHovered())
         m_imgui->tooltip(_L("Run the support generator's own overhang detection on this object in the background, with the support "
                             "type and settings in effect for it (its overrides, bridges, small overhang removal, build plate only, "
-                            "painted enforcers and blockers), and mark the result on the faces: red is held up by the support, amber is "
+                            "painted enforcers and blockers), and mark the result on the faces: red is held up by the support, yellow is "
                             "an overhang the generator leaves (a bridge, a small overhang, above the object with \"On build plate only\"). "
-                            "Supports switched off or manual are simulated as automatic."),
+                            "Tree and organic supports are then placed as well, and red becomes only what their branches and tips "
+                            "reach. Supports switched off or manual are simulated as automatic."),
                          max_tooltip_width);
     if (m_highlight_by_layer) {
+        // The colour key: a swatch the height of a text line (follows the DPI scaling), outlined in
+        // the theme's text colour so it reads on the light and the dark theme.
+        auto swatch = [this](const ColorRGBA &color, const wxString &label) {
+            const float  size = ImGui::GetTextLineHeight();
+            const ImVec2 pos  = ImGui::GetCursorScreenPos();
+            const ImVec2 off(0.f, std::max(0.f, 0.5f * (ImGui::GetFrameHeight() - size)));
+            ImDrawList  *draw = ImGui::GetWindowDrawList();
+            const float  round = 2.f * m_imgui->get_style_scaling();
+            draw->AddRectFilled(ImVec2(pos.x + off.x, pos.y + off.y), ImVec2(pos.x + off.x + size, pos.y + off.y + size),
+                                ImGuiWrapper::to_ImU32(ColorRGBA(color.r(), color.g(), color.b(), 1.f)), round);
+            draw->AddRect(ImVec2(pos.x + off.x, pos.y + off.y), ImVec2(pos.x + off.x + size, pos.y + off.y + size),
+                          ImGui::GetColorU32(ImGuiCol_Text, 0.45f), round);
+            ImGui::Dummy(ImVec2(size, ImGui::GetFrameHeight()));
+            ImGui::SameLine();
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(label);
+        };
+        swatch(LAYER_PREVIEW_SUPPORTED_COLOR, _L("Supported"));
+        ImGui::SameLine(0.f, m_imgui->scaled(1.5f));
+        swatch(LAYER_PREVIEW_UNSUPPORTED_COLOR, _L("Unsupported"));
+        const bool layer_preview_running = m_layer_preview_job && !m_layer_preview_job->done;
         if (m_layer_preview_too_big) {
             m_imgui->text_wrapped(format_wxstr(_L("Too many faces for the layer preview (%1%); the angle highlight is shown."), m_layer_preview_facets),
                                   max_tooltip_width);
-        } else if (m_layer_preview_job && !m_layer_preview_job->done) {
+        } else if (layer_preview_running && !(m_layer_preview && !m_layer_preview->slice_z.empty())) {
             m_imgui->text(_L("Computing the layers..."));
         } else if (m_layer_preview && !m_layer_preview->slice_z.empty()) {
             const SupportOverhangPreview &p = *m_layer_preview;
             const int n = int(p.slice_z.size());
-            m_imgui->text(format_wxstr(_L("%1% of %2% layers overhang (%3% ms)"), p.layers_with_overhangs(), n,
-                                       int(std::round(p.slice_ms + p.detect_ms + p.map_ms))));
+            if (layer_preview_running)
+                m_imgui->text_wrapped(m_layer_preview_intermediate ? _L("Placing the tree supports... Until then red shows what the tree detects.") :
+                                                                     _L("Updating..."), max_tooltip_width);
+            else if (p.from_generated_support)
+                m_imgui->text_wrapped(format_wxstr(_L("%1% of %2% layers overhang. Red is what the placed tree reaches (%3% ms)."),
+                                                   p.layers_with_overhangs(), n, int(std::round(p.slice_ms + p.generate_ms + p.map_ms))),
+                                      max_tooltip_width);
+            else
+                m_imgui->text(format_wxstr(_L("%1% of %2% layers overhang (%3% ms)"), p.layers_with_overhangs(), n,
+                                           int(std::round(p.slice_ms + p.detect_ms + p.map_ms))));
             // The layer stepper: 0 shows the whole object, k cuts it at layer k and draws that
             // layer's overhang areas on the cut.
             ImGui::AlignTextToFramePadding();
@@ -803,8 +837,6 @@ wxString GLGizmoFdmSupports::highlight_rule_description() const
 
 // Above this many faces the background job is skipped and the angle highlight stays.
 static constexpr size_t LAYER_PREVIEW_MAX_FACETS = 3000000;
-static const ColorRGBA  LAYER_PREVIEW_SUPPORTED_COLOR   = { 0.90f, 0.12f, 0.12f, 0.55f };
-static const ColorRGBA  LAYER_PREVIEW_UNSUPPORTED_COLOR = { 1.00f, 0.66f, 0.00f, 0.60f };
 
 static long long layer_preview_now_ms()
 {
@@ -885,7 +917,9 @@ void GLGizmoFdmSupports::clear_layer_preview()
         m_c->object_clipper()->set_position_by_ratio(0., false);
     m_layer_preview_layer = 0;
     m_layer_preview.reset();
-    m_layer_preview_models.clear();
+    m_layer_preview_intermediate = false;
+    m_layer_surface_supported.reset();
+    m_layer_surface_unsupported.reset();
     m_layer_cut_supported.reset();
     m_layer_cut_unsupported.reset();
     m_layer_preview_key.clear();
@@ -905,12 +939,30 @@ void GLGizmoFdmSupports::update_layer_preview()
     if (instance_idx < 0 || size_t(instance_idx) >= mo->instances.size())
         return;
 
+    // A tree job's detection, while its tree is placed: show it meanwhile.
+    if (m_layer_preview_job && !m_layer_preview_job->done && m_layer_preview_job->detected_ready && !m_layer_preview_job->detected_shown) {
+        std::unique_ptr<SupportOverhangPreview> detected;
+        {
+            std::lock_guard<std::mutex> lock(m_layer_preview_job->mutex);
+            detected = std::move(m_layer_preview_job->detected);
+        }
+        m_layer_preview_job->detected_shown = true;
+        if (detected) {
+            m_layer_preview              = std::move(detected);
+            m_layer_preview_intermediate = true;
+            rebuild_layer_preview_models();
+            m_parent.use_slope(false);
+            set_layer_preview_layer(m_layer_preview_layer > int(m_layer_preview->slice_z.size()) ? 0 : m_layer_preview_layer);
+            m_parent.set_as_dirty();
+        }
+    }
     // A finished job: show it.
     if (m_layer_preview_job && m_layer_preview_job->done) {
         if (m_layer_preview_thread.joinable())
             m_layer_preview_thread.join();
         if (m_layer_preview_job->result) {
             m_layer_preview = std::move(m_layer_preview_job->result);
+            m_layer_preview_intermediate = false;
             rebuild_layer_preview_models();
             // The overlay replaces the angle tint.
             m_parent.use_slope(false);
@@ -919,8 +971,8 @@ void GLGizmoFdmSupports::update_layer_preview()
             else
                 set_layer_preview_layer(m_layer_preview_layer);
             const SupportOverhangPreview &p = *m_layer_preview;
-            BOOST_LOG_TRIVIAL(info) << "Support layer preview: " << p.slice_z.size() << " layers, steps " << p.slice_ms << " ms, detect "
-                                    << p.detect_ms << " ms, map " << p.map_ms << " ms";
+            BOOST_LOG_TRIVIAL(info) << "Support layer preview: " << p.slice_z.size() << " layers, steps " << p.slice_ms << " ms, tree "
+                                    << p.generate_ms << " ms, map " << p.map_ms << " ms";
         } else if (!m_layer_preview_job->error.empty()) {
             BOOST_LOG_TRIVIAL(error) << "Support layer preview failed: " << m_layer_preview_job->error;
         }
@@ -949,7 +1001,8 @@ void GLGizmoFdmSupports::update_layer_preview()
         m_layer_preview_too_big = m_layer_preview_facets > LAYER_PREVIEW_MAX_FACETS;
         if (m_layer_preview_too_big) {
             m_layer_preview.reset();
-            m_layer_preview_models.clear();
+            m_layer_surface_supported.reset();
+            m_layer_surface_unsupported.reset();
             m_parent.use_slope(true);
             return;
         }
@@ -973,7 +1026,12 @@ void GLGizmoFdmSupports::update_layer_preview()
         m_layer_preview_job = job;
         m_layer_preview_thread = std::thread([job]() {
             try {
-                SupportOverhangPreview result = support_overhang_preview_exact(*job->print, *job->model, job->config);
+                SupportOverhangPreview result = support_overhang_preview_exact(*job->print, *job->model, job->config, true,
+                    [&job](SupportOverhangPreview &&detected) {
+                        std::lock_guard<std::mutex> lock(job->mutex);
+                        job->detected       = std::make_unique<SupportOverhangPreview>(std::move(detected));
+                        job->detected_ready = true;
+                    });
                 if (! job->cancel)
                     job->result = std::make_unique<SupportOverhangPreview>(std::move(result));
             } catch (const CanceledException &) {
@@ -989,43 +1047,31 @@ void GLGizmoFdmSupports::update_layer_preview()
 
 void GLGizmoFdmSupports::rebuild_layer_preview_models()
 {
-    m_layer_preview_models.clear();
-    const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
-    if (mo == nullptr || !m_layer_preview)
+    m_layer_surface_supported.reset();
+    m_layer_surface_unsupported.reset();
+    if (!m_layer_preview)
         return;
-    // One pair of models per model part, in the order render_triangles() walks them (mesh_id).
-    // Reserved up front: a GLModel must not be copied once it owns GPU buffers.
-    m_layer_preview_models.reserve(size_t(std::count_if(mo->volumes.begin(), mo->volumes.end(), [](const ModelVolume *v) { return v->is_model_part(); })));
-    for (size_t v = 0; v < mo->volumes.size(); ++ v) {
-        const ModelVolume *mv = mo->volumes[v];
-        if (!mv->is_model_part())
-            continue;
-        m_layer_preview_models.emplace_back();
-        if (v >= m_layer_preview->part_facets.size())
-            continue;
-        const std::vector<uint8_t> &flags = m_layer_preview->part_facets[v];
-        const indexed_triangle_set &its   = mv->mesh().its;
-        if (flags.size() != its.indices.size())
-            continue;
-        for (uint8_t cls : { uint8_t(1), uint8_t(2) }) {
-            GLModel::Geometry geometry;
-            geometry.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
-            unsigned int next = 0;
-            for (size_t f = 0; f < flags.size(); ++ f) {
-                if (flags[f] != cls)
-                    continue;
-                for (int k = 0; k < 3; ++ k)
-                    geometry.add_vertex(its.vertices[its.indices[f](k)]);
-                geometry.add_triangle(next, next + 1, next + 2);
-                next += 3;
-            }
-            if (next == 0)
-                continue;
-            GLModel &model = cls == 1 ? m_layer_preview_models.back().first : m_layer_preview_models.back().second;
-            model.init_from(std::move(geometry));
-            model.set_color(cls == 1 ? LAYER_PREVIEW_SUPPORTED_COLOR : LAYER_PREVIEW_UNSUPPORTED_COLOR);
+    // The faces cut where each layer's area ends (world coordinates): a face only partly on the
+    // support shows only partly red.
+    auto build = [](const std::vector<Vec3f> &triangles, GLModel &model, const ColorRGBA &color) {
+        if (triangles.size() < 3)
+            return;
+        GLModel::Geometry geometry;
+        geometry.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        geometry.reserve_vertices(triangles.size());
+        geometry.reserve_indices(triangles.size());
+        unsigned int next = 0;
+        for (size_t k = 0; k + 2 < triangles.size(); k += 3, next += 3) {
+            geometry.add_vertex(triangles[k]);
+            geometry.add_vertex(triangles[k + 1]);
+            geometry.add_vertex(triangles[k + 2]);
+            geometry.add_triangle(next, next + 1, next + 2);
         }
-    }
+        model.init_from(std::move(geometry));
+        model.set_color(color);
+    };
+    build(m_layer_preview->supported_surface, m_layer_surface_supported, LAYER_PREVIEW_SUPPORTED_COLOR);
+    build(m_layer_preview->unsupported_surface, m_layer_surface_unsupported, LAYER_PREVIEW_UNSUPPORTED_COLOR);
 }
 
 void GLGizmoFdmSupports::set_layer_preview_layer(int layer)
@@ -1066,7 +1112,7 @@ void GLGizmoFdmSupports::set_layer_preview_layer(int layer)
 
 void GLGizmoFdmSupports::render_layer_preview() const
 {
-    if (!m_highlight_by_layer || !m_layer_preview || m_layer_preview_models.empty())
+    if (!m_highlight_by_layer || !m_layer_preview || (!m_layer_surface_supported.is_initialized() && !m_layer_surface_unsupported.is_initialized()))
         return;
     const ModelObject *mo = m_c->selection_info()->model_object();
     const Selection   &selection = m_parent.get_selection();
@@ -1089,22 +1135,13 @@ void GLGizmoFdmSupports::render_layer_preview() const
         shader->set_uniform("clipping_plane", clp.clp_dataf);
         shader->set_uniform("z_range", clp.z_range);
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-        int mesh_id = -1;
-        for (const ModelVolume *mv : mo->volumes) {
-            if (!mv->is_model_part())
-                continue;
-            ++ mesh_id;
-            if (size_t(mesh_id) >= m_layer_preview_models.size())
-                break;
-            const Transform3d trafo = mo->instances[selection.get_instance_idx()]->get_transformation().get_matrix() * mv->get_matrix();
-            shader->set_uniform("view_model_matrix", camera.get_view_matrix() * trafo);
-            shader->set_uniform("volume_world_matrix", trafo);
-            const auto &[red, amber] = m_layer_preview_models[size_t(mesh_id)];
-            if (red.is_initialized())
-                const_cast<GLModel&>(red).render();
-            if (amber.is_initialized())
-                const_cast<GLModel&>(amber).render();
-        }
+        // The cut faces are in world coordinates already.
+        shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+        shader->set_uniform("volume_world_matrix", Transform3d::Identity());
+        if (m_layer_surface_supported.is_initialized())
+            const_cast<GLModel&>(m_layer_surface_supported).render();
+        if (m_layer_surface_unsupported.is_initialized())
+            const_cast<GLModel&>(m_layer_surface_unsupported).render();
         shader->stop_using();
     }
 

@@ -328,6 +328,17 @@ public:
     // for tree supports
     ExPolygons base_areas;
 
+    // Edge (support highlight, phase 6): everything a classic tree support layer covers - base,
+    // roof, the layer under the roof and floor (the protected areas below). Read only.
+    ExPolygons tree_support_areas() const
+    {
+        ExPolygons out = base_areas;
+        out.insert(out.end(), roof_areas.begin(), roof_areas.end());
+        out.insert(out.end(), roof_1st_layer.begin(), roof_1st_layer.end());
+        out.insert(out.end(), floor_areas.begin(), floor_areas.end());
+        return out;
+    }
+
 
     // Is there any valid extrusion assigned to this LayerRegion?
     virtual bool                has_extrusions() const { return ! support_fills.empty(); }
