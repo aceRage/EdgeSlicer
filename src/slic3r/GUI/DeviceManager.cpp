@@ -8,6 +8,7 @@
 #include "DeviceModelCode.hpp"
 #include "ChamberLights.hpp"
 #include "BambuSendDiagnosis.hpp"
+#include "BambuNetInfo.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
@@ -4152,6 +4153,15 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         if (jj.contains("net")) {
                             if (jj["net"].contains("conf")) {
                                 network_wired = (jj["net"]["conf"].get<int>() & (0x1)) != 0;
+                            }
+                            // The printer's own LAN address, for the camera when no announcement
+                            // has given us one (BambuNetInfo.hpp). Never written into dev_ip.
+                            const std::string reported_ip = BambuNetInfo::first_ip(jj["net"]);
+                            if (!reported_ip.empty() && reported_ip != net_reported_ip) {
+                                if (net_reported_ip.empty() && dev_ip.empty())
+                                    BOOST_LOG_TRIVIAL(info) << "MachineObject: the printer reported its LAN address; the camera can use it "
+                                                               "until discovery finds the printer";
+                                net_reported_ip = reported_ip;
                             }
                         }
                     }
