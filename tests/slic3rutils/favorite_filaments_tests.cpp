@@ -153,3 +153,63 @@ TEST_CASE("Flat favourite list for native combos (macOS)", "[FavoriteFilaments]"
     CHECK(FavoriteFilaments::strip_star("Generic PETG") == "Generic PETG");
     CHECK(FavoriteFilaments::star_prefix() == "\xE2\x98\x85 ");
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Favourite process (print) presets reuse the rules above; only the stored set differs.
+
+TEST_CASE("Each kind of favourite has its own stored set", "[FavoritePresets]")
+{
+    using FavoritePresets::Kind;
+    // The filament key is the one favourite filaments have always used: existing stars must survive.
+    CHECK(std::string(FavoritePresets::config_key(Kind::Filament)) == "favorite_filaments");
+    CHECK(std::string(FavoriteFilaments::config_key()) == "favorite_filaments");
+    CHECK(std::string(FavoritePresets::config_key(Kind::Process)) == "favorite_process_presets");
+    // A filament and a process preset that share a name never share a star.
+    CHECK(std::string(FavoritePresets::config_key(Kind::Filament)) != std::string(FavoritePresets::config_key(Kind::Process)));
+}
+
+TEST_CASE("Process preset keys: system by alias, user by full name", "[FavoritePresets]")
+{
+    // One star on the system process preset covers it on every printer that has it.
+    CHECK(FavoriteFilaments::key_for("0.20mm Standard @BBL X1C", "0.20mm Standard", true) == "0.20mm Standard");
+    CHECK(FavoriteFilaments::key_for("0.20mm Standard @BBL P1S", "0.20mm Standard", true) == "0.20mm Standard");
+    CHECK(FavoriteFilaments::key_for("0.20mm Standard @U1 0.4 nozzle", "", true) == "0.20mm Standard");
+    // A user copy (or a project preset) keeps its full name and is not starred with the system one.
+    CHECK(FavoriteFilaments::key_for("0.20mm Standard @BBL X1C - mine", "", false) == "0.20mm Standard @BBL X1C - mine");
+    CHECK(FavoriteFilaments::key_for("Fast draft", "", false) == "Fast draft");
+}
+
+TEST_CASE("Favourite process presets: the Process list groups the favourites that fit this printer", "[FavoritePresets]")
+{
+    // Names as the Process tab lists them for the current printer: only compatible presets are there.
+    const std::vector<std::string> names{"0.12mm Fine", "0.20mm Standard", "0.28mm Extra Draft", "Fast draft"};
+
+    SECTION("no favourites: the list is the old list") {
+        CHECK(describe(FavoriteFilaments::group(names, {}), names) == names);
+    }
+    SECTION("a favourite on this printer comes first, in the list's own order") {
+        const std::set<std::string> fav{"Fast draft", "0.20mm Standard"};
+        CHECK(describe(FavoriteFilaments::group(names, fav), names) ==
+              std::vector<std::string>{"F", "*0.20mm Standard", "*Fast draft", "A", "0.12mm Fine", "0.20mm Standard",
+                                       "0.28mm Extra Draft", "Fast draft"});
+    }
+    SECTION("a favourite that does not fit this printer is simply not shown") {
+        // "0.08mm Extra Fine" is starred but only another printer lists it: no group, no row.
+        CHECK(describe(FavoriteFilaments::group(names, {"0.08mm Extra Fine"}), names) == names);
+    }
+}
+
+TEST_CASE("Favourite process presets follow a vendor rename", "[FavoritePresets]")
+{
+    // "0.20mm Standard" became "0.20mm Balanced": the new presets list the old name in renamed_from.
+    // The "@"-removed names a profile loader adds on its own ("0.12mm Fine BBL X1C") are never a stored key.
+    const auto renames = FavoriteFilaments::rename_map({
+        {"0.20mm Balanced", "0.20mm Standard @BBL X1C"},
+        {"0.12mm Fine", "0.12mm Fine BBL X1C"},
+    });
+    CHECK(renames.at("0.20mm Standard") == "0.20mm Balanced");
+
+    std::set<std::string> keys{"0.20mm Standard", "0.12mm Fine", "Fast draft"};
+    CHECK(FavoriteFilaments::migrate(keys, {"0.20mm Balanced", "0.12mm Fine", "Fast draft"}, renames));
+    CHECK(keys == std::set<std::string>{"0.20mm Balanced", "0.12mm Fine", "Fast draft"});
+}

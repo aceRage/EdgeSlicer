@@ -24,6 +24,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/AMSMaterialsSetting.hpp
     GUI/AmsFilamentOrder.hpp
     GUI/FavoriteFilaments.hpp
+    GUI/FavoritePresets.hpp
     GUI/FavoriteFilamentsUI.hpp
     GUI/AMSSetting.cpp
     GUI/AMSSetting.hpp

@@ -12,6 +12,11 @@
 // preset being renamed: migrate() follows the renamed_from names a vendor ships with the new preset.
 //
 // Originally OrcaSlicer #13946 (AMS dialog only, keyed by filament_id); extended here to every picker.
+//
+// These rules are not filament-specific: favourite process (print) presets use the same keys, toggle,
+// migration and grouping, each kind with its own stored set (FavoritePresets.hpp).
+
+#include "FavoritePresets.hpp"
 
 #include <algorithm>
 #include <map>
@@ -22,8 +27,9 @@
 
 namespace Slic3r { namespace GUI { namespace FavoriteFilaments {
 
-// The app config key ("app" section) holding the escaped list of keys.
-inline const char *config_key() { return "favorite_filaments"; }
+// The app config key ("app" section) holding the escaped list of filament keys (the other kinds'
+// keys are in FavoritePresets::config_key).
+inline const char *config_key() { return FavoritePresets::config_key(FavoritePresets::Kind::Filament); }
 
 // The printer-independent part of a filament preset name: everything before the first " @".
 // "Bambu PLA Basic @BBL X1C" -> "Bambu PLA Basic"; "My PLA" -> "My PLA". Trailing spaces go too.

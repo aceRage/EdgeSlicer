@@ -1809,6 +1809,10 @@ static nlohmann::json combo_items(PresetComboBox* combo, Preset::Type type)
     const int sel = combo->GetSelection();
     // The sidebar repeats favourite filaments in a group on top; the phone gets each preset once, with
     // "favorite" set, and groups them itself (older pages and clients just see the plain list).
+    // The Process tab's list repeats favourite process presets the same way; the phone shows those
+    // once too (without a star: the phone page only stars filaments), so for it the selected row is
+    // found by its text as well, as the selection may sit on the favourites copy that is skipped.
+    const bool     by_text  = type == Preset::TYPE_FILAMENT || type == Preset::TYPE_PRINT;
     const wxString sel_text = sel >= 0 ? combo->GetString(unsigned(sel)) : wxString();
     bool           sel_seen = false;
     const std::set<std::string> favorites = type == Preset::TYPE_FILAMENT ? FavoriteFilamentsUI::load() : std::set<std::string>();
@@ -1818,8 +1822,8 @@ static nlohmann::json combo_items(PresetComboBox* combo, Preset::Type type)
         nlohmann::json it;
         it["name"]     = combo->GetString(i).ToUTF8().data();
         it["value"]    = combo_item_value(combo, i, type);
-        const bool selected = type == Preset::TYPE_FILAMENT ? (!sel_seen && sel >= 0 && combo->GetString(i) == sel_text)
-                                                            : (int(i) == sel);
+        const bool selected = by_text ? (!sel_seen && sel >= 0 && combo->GetString(i) == sel_text)
+                                      : (int(i) == sel);
         sel_seen = sel_seen || selected;
         it["selected"] = selected;
         if (type == Preset::TYPE_FILAMENT)

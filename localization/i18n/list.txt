@@ -79,6 +79,7 @@ src/slic3r/GUI/DeviceManager.cpp
 src/slic3r/GUI/ExtraRenderers.cpp
 src/slic3r/GUI/EditGCodeDialog.cpp
 src/slic3r/GUI/Field.cpp
+src/slic3r/GUI/FavoriteFilamentsUI.cpp
 src/slic3r/GUI/GCodeViewer.cpp
 src/slic3r/GUI/GLCanvas3D.cpp
 src/slic3r/GUI/Calibration.cpp
