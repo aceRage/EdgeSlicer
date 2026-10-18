@@ -128,7 +128,9 @@ std::pair<bool, std::string> GLShadersManager::init()
         // S2: the filament materials (without it the objects are drawn with phong, as in S1), the
         // contact shadow's footprint and its blur (without them there is no contact shadow).
         // Every sampler on a unit of its own: a sampler2D and a samplerCube left together on unit 0
-        // make the program invalid at draw time on macOS (see gouraud above).
+        // make the program invalid at draw time on macOS (see gouraud above). Parking env_map also
+        // gives it the black fallback cube whenever no environment is bound (a plain backdrop, or the
+        // "None" environment), which macOS otherwise reports as an unloadable cube map texture.
         appendOptionalShader("showcase_material", { prefix + "showcase_material.vs", prefix + "showcase_material.fs" });
         appendOptionalShader("showcase_contact", { prefix + "showcase_material.vs", prefix + "showcase_contact.fs" });
         appendOptionalShader("showcase_blur", { prefix + "background.vs", prefix + "showcase_blur.fs" });
