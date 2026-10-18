@@ -95,6 +95,8 @@ set(lisbslic3r_sources
     BrimFilament.hpp
     PaintDepth.cpp
     PaintDepth.hpp
+    PaintTransfer.cpp
+    PaintTransfer.hpp
     ColorSplit.cpp
     ColorSplit.hpp
     ImageFill.cpp

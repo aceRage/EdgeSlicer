@@ -16,6 +16,7 @@
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "libslic3r/MeshRepair.hpp"
 #include "libslic3r/MeshRemesh.hpp"
 #include "libslic3r/MeshRound.hpp"
@@ -40,7 +41,9 @@
 #include "Jobs/StabilizerBakeJob.hpp"
 #include "StabilizerBakeDialog.hpp"
 #include "Jobs/Worker.hpp"
+#include <wx/busyinfo.h>
 #include <wx/filedlg.h>
+#include <wx/utils.h>
 #include "QuadRemeshDialog.hpp"
 // RE-EDITABLE CUTS: edit_cut() arms the Cut gizmo with a stored recipe.
 #include "Gizmos/GLGizmoCut.hpp"
@@ -57,6 +60,7 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <set>
 #include <boost/log/trivial.hpp>
 
@@ -2920,7 +2924,13 @@ void ObjectList::split()
 
     take_snapshot("Split to parts");
 
+    std::unique_ptr<wxBusyInfo> busy;
+    if (PaintTransfer::has_painting(*volume)) {
+        busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), wxGetApp().plater()->get_current_canvas3D()->get_wxglcanvas());
+        wxSafeYield(nullptr, true);
+    }
     volume->split(filament_cnt);
+    busy.reset();
 
     wxBusyCursor wait;
 
@@ -3349,6 +3359,24 @@ void ObjectList::boolean()
     if (obj_idxs.empty() && vol_idxs.empty())
         return;
 
+    std::unique_ptr<wxBusyInfo> busy;
+    {
+        const ModelObject *obj            = (*m_objects)[obj_idxs.front()];
+        bool               worth          = false;
+        int                first_filament = -1;
+        for (const ModelVolume *v : obj->volumes)
+            if (v->is_model_part()) {
+                const int fil = PaintTransfer::effective_filament(*v);
+                worth = worth || PaintTransfer::has_painting(*v) || (first_filament >= 0 && fil != first_filament);
+                if (first_filament < 0)
+                    first_filament = fil;
+            }
+        if (worth) {
+            busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), wxGetApp().plater()->get_current_canvas3D()->get_wxglcanvas());
+            wxSafeYield(nullptr, true);
+        }
+    }
+
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "boolean");
 
     ModelObject* object = (*m_objects)[obj_idxs.front()];
@@ -3362,6 +3390,25 @@ void ObjectList::boolean()
     if (new_object->instances.empty())
         new_object->add_instance();
     ModelVolume* new_volume = new_object->add_volume(mesh);
+
+    // Keep the painting of every part, and the filament each part had. combine_mesh_fff() works in
+    // world coordinates over every instance, so every instance is a source; the skin left by a
+    // negative part is the wall of its cut and stays unpainted.
+    {
+        std::vector<PaintTransfer::Source> sources;
+        for (const ModelInstance *inst : object->instances)
+            for (const ModelVolume *v : object->volumes)
+                if ((v->is_model_part() || v->is_negative_volume()) && !v->mesh().empty()) {
+                    PaintTransfer::Source src;
+                    src.volume   = v;
+                    src.to_world = inst->get_matrix() * v->get_matrix();
+                    src.filament = PaintTransfer::effective_filament(*v);
+                    src.cutter   = v->is_negative_volume();
+                    sources.push_back(src);
+                }
+        PaintTransfer::transfer(sources, *new_volume, new_volume->get_matrix(),
+                                PaintTransfer::effective_filament(*new_volume));
+    }
 
     // BBS: ensure on bed but no need to ensure locate in the center around origin
     new_object->ensure_on_bed();

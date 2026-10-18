@@ -3,6 +3,7 @@
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/MeshBoolean.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -11,6 +12,9 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
 #include <imgui/imgui_internal.h>
+#include <memory>
+#include <wx/busyinfo.h>
+#include <wx/utils.h>
 namespace Slic3r {
 namespace GUI {
 
@@ -459,6 +463,21 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
     if (m_src.volume_idx < 0 || m_tool.volume_idx < 0)
         return;
 
+    std::vector<PaintTransfer::Source> sources(2);
+    sources[0].volume   = m_src.mv;
+    sources[0].to_world = m_src.mv->get_matrix();
+    sources[0].filament = PaintTransfer::effective_filament(*m_src.mv);
+    sources[1].volume   = m_tool.mv;
+    sources[1].to_world = m_tool.mv->get_matrix();
+    sources[1].filament = PaintTransfer::effective_filament(*m_tool.mv);
+    sources[1].cutter   = m_operation_mode == MeshBooleanOperation::Difference;
+
+    std::unique_ptr<wxBusyInfo> busy;
+    if (PaintTransfer::worth_transferring(sources)) {
+        busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), m_parent.get_wxglcanvas());
+        wxSafeYield(nullptr, true);
+    }
+
     wxGetApp().plater()->take_snapshot("Mesh Boolean");
 
     std::string suffix;
@@ -474,8 +493,18 @@ void GLGizmoMeshBoolean::generate_new_volume(bool delete_input, const TriangleMe
         suffix = "intersection";
         break;
     }
-    // The new volume replaces the source volume in its slot (libslic3r, unit-tested).
-    ModelVolume* new_volume = curr_model_object->replace_volume_with_object_mesh(size_t(m_src.volume_idx), TriangleMesh(mesh_result), suffix);
+    // Same placement as replace_volume_with_object_mesh (#273): add_volume() centres the result
+    // and sets the matching offset. Do not overwrite that offset — the result stays where the
+    // boolean put it. Transfer painting while the source and tool volumes still exist.
+    ModelVolume *new_volume = curr_model_object->add_volume(TriangleMesh(mesh_result), m_src.mv->type());
+    new_volume->name = m_src.mv->name + " - " + suffix;
+    new_volume->set_new_unique_id();
+    new_volume->config.apply(m_src.mv->config);
+    new_volume->set_type(m_src.mv->type());
+    new_volume->set_material_id(m_src.mv->material_id());
+    PaintTransfer::transfer(sources, *new_volume, new_volume->get_matrix(), PaintTransfer::effective_filament(*new_volume));
+    std::swap(curr_model_object->volumes[size_t(m_src.volume_idx)], curr_model_object->volumes.back());
+    curr_model_object->delete_volume(curr_model_object->volumes.size() - 1);
 
     if (delete_input) {
         std::vector<ItemForDelete> items;

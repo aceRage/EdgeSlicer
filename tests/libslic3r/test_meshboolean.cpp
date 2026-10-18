@@ -4,6 +4,9 @@
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
 #include <libslic3r/Model.hpp>
+#include <libslic3r/PaintTransfer.hpp>
+#include <libslic3r/PrintConfig.hpp>
+#include <libslic3r/TriangleSelector.hpp>
 
 #include <map>
 #include <vector>
@@ -332,4 +335,153 @@ TEST_CASE("mcut difference handles source splits between cuts", "[MeshBoolean]")
     REQUIRE(MeshBoolean::mfd::make_boolean(body, tool, mfd_result, "A_NOT_B"));
     REQUIRE_FALSE(mfd_result.empty());
     CHECK(signed_volume(mfd_result.front().its) == Approx(2480.).epsilon(0.02));
+}
+
+static double meshboolean_area(const indexed_triangle_set &its)
+{
+    double a = 0.;
+    for (const stl_triangle_vertex_indices &f : its.indices) {
+        const Vec3d p0 = its.vertices[f[0]].cast<double>(), p1 = its.vertices[f[1]].cast<double>(),
+                    p2 = its.vertices[f[2]].cast<double>();
+        a += 0.5 * (p1 - p0).cross(p2 - p0).norm();
+    }
+    return a;
+}
+
+static double painted_mmu_area(const ModelVolume &mv, EnforcerBlockerType state)
+{
+    return meshboolean_area(mv.mmu_segmentation_facets.get_facets(mv, state));
+}
+
+// A: 10 mm cube at the origin, filament 1, 2.5 mm strip painted in filament 2 on the top
+// (narrower than the facets). B: 10 mm cube at (5, 3, 2), filament 3, unpainted.
+struct PaintCarryScene
+{
+    Model        model;
+    ModelObject *a = nullptr;
+    ModelObject *b = nullptr;
+
+    PaintCarryScene()
+    {
+        a = model.add_object();
+        a->add_volume(TriangleMesh(its_make_cube(10., 10., 10.)), ModelVolumeType::MODEL_PART, false);
+        a->add_instance();
+        a->config.set_key_value("extruder", new ConfigOptionInt(1));
+
+        ModelVolume     &va = *a->volumes.front();
+        TriangleSelector sel(va.mesh());
+        sel.resample([](const Vec3f &p) {
+            TriangleSelector::SampledState s;
+            if (p.z() > 9.999f && p.x() < 2.5f)
+                s.state = EnforcerBlockerType::Extruder2;
+            return s;
+        }, 0.05f);
+        va.mmu_segmentation_facets.set(sel);
+
+        b = model.add_object();
+        b->add_volume(TriangleMesh(its_make_cube(10., 10., 10.)), ModelVolumeType::MODEL_PART, false);
+        b->add_instance()->set_offset(Vec3d(5., 3., 2.));
+        b->config.set_key_value("extruder", new ConfigOptionInt(3));
+    }
+
+    TriangleMesh world_mesh(const ModelObject *o) const
+    {
+        TriangleMesh m = o->raw_mesh();
+        m.transform(o->instances.front()->get_matrix());
+        return m;
+    }
+
+    ModelVolume &run(const std::string &op, bool b_is_cutter)
+    {
+        std::vector<TriangleMesh> out;
+        MeshBoolean::mcut::make_boolean(world_mesh(a), world_mesh(b), out, op);
+        REQUIRE(!out.empty());
+        ModelObject *r = model.add_object();
+        r->add_volume(std::move(out.front()), ModelVolumeType::MODEL_PART, false);
+        r->add_instance();
+
+        std::vector<PaintTransfer::Source> sources;
+        PaintTransfer::append_object_sources(*a, false, sources);
+        PaintTransfer::append_object_sources(*b, b_is_cutter, sources);
+        ModelVolume &target = *r->volumes.front();
+        PaintTransfer::transfer(sources, target, Transform3d::Identity(), 1);
+        return target;
+    }
+};
+
+TEST_CASE("Paint carry-over: the source strip is painted", "[MeshBoolean][PaintTransfer]")
+{
+    PaintCarryScene s;
+    REQUIRE_THAT(painted_mmu_area(*s.a->volumes.front(), EnforcerBlockerType::Extruder2),
+                 Catch::Matchers::WithinAbs(25., 0.75));
+}
+
+TEST_CASE("Paint carry-over: union keeps the strip and B's filament", "[MeshBoolean][PaintTransfer]")
+{
+    PaintCarryScene s;
+    ModelVolume    &r = s.run("UNION", false);
+    REQUIRE_THAT(painted_mmu_area(r, EnforcerBlockerType::Extruder2), Catch::Matchers::WithinAbs(25., 0.75));
+    REQUIRE_THAT(painted_mmu_area(r, EnforcerBlockerType::Extruder3), Catch::Matchers::WithinAbs(469., 10.));
+    REQUIRE_THAT(painted_mmu_area(r, EnforcerBlockerType::Extruder1), Catch::Matchers::WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("Paint carry-over: difference leaves the cut walls unpainted", "[MeshBoolean][PaintTransfer]")
+{
+    PaintCarryScene s;
+    ModelVolume    &r = s.run("A_NOT_B", true);
+    REQUIRE_THAT(painted_mmu_area(r, EnforcerBlockerType::Extruder2), Catch::Matchers::WithinAbs(25., 0.75));
+    REQUIRE_THAT(painted_mmu_area(r, EnforcerBlockerType::Extruder3), Catch::Matchers::WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("Paint carry-over: transferring paint does not move the boolean result", "[MeshBoolean][PaintTransfer]")
+{
+    PaintCarryScene s;
+    std::vector<TriangleMesh> out;
+    MeshBoolean::mcut::make_boolean(s.world_mesh(s.a), s.world_mesh(s.b), out, "UNION");
+    REQUIRE(!out.empty());
+
+    ModelObject *r = s.model.add_object();
+    ModelVolume *nv = r->add_volume(TriangleMesh(out.front()), ModelVolumeType::MODEL_PART, true);
+    r->add_instance();
+    const BoundingBoxf3 before = nv->mesh().transformed_bounding_box(nv->get_matrix());
+
+    std::vector<PaintTransfer::Source> sources;
+    PaintTransfer::append_object_sources(*s.a, false, sources);
+    PaintTransfer::append_object_sources(*s.b, false, sources);
+    PaintTransfer::transfer(sources, *nv, nv->get_matrix(), 1);
+
+    const BoundingBoxf3 after = nv->mesh().transformed_bounding_box(nv->get_matrix());
+    CHECK((after.min - before.min).norm() < 1e-6);
+    CHECK((after.max - before.max).norm() < 1e-6);
+    REQUIRE_THAT(painted_mmu_area(*nv, EnforcerBlockerType::Extruder2), Catch::Matchers::WithinAbs(25., 0.75));
+}
+
+TEST_CASE("Split to parts keeps colour painting", "[MeshBoolean][PaintTransfer]")
+{
+    Model        model;
+    ModelObject *obj = model.add_object();
+    // Two cubes sharing an object, far enough to split into two islands.
+    TriangleMesh left(its_make_cube(8., 8., 8.));
+    TriangleMesh right(its_make_cube(8., 8., 8.));
+    right.translate(20.f, 0.f, 0.f);
+    left.merge(right);
+    ModelVolume *vol = obj->add_volume(std::move(left), ModelVolumeType::MODEL_PART, false);
+    obj->add_instance();
+
+    TriangleSelector sel(vol->mesh());
+    sel.resample([](const Vec3f &p) {
+        TriangleSelector::SampledState s;
+        if (p.x() < 8.001f)
+            s.state = EnforcerBlockerType::Extruder2;
+        return s;
+    }, 0.2f);
+    vol->mmu_segmentation_facets.set(sel);
+    REQUIRE(PaintTransfer::has_painting(*vol));
+
+    const size_t n = vol->split(4);
+    REQUIRE(n >= 2);
+    bool any_painted = false;
+    for (const ModelVolume *v : obj->volumes)
+        any_painted = any_painted || v->is_mm_painted();
+    CHECK(any_painted);
 }
