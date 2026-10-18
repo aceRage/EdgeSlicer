@@ -24563,6 +24563,11 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         host_type == htFlashforge &&
         ff_serial_opt != nullptr && !ff_serial_opt->value.empty() &&
         ff_code_opt != nullptr && !ff_code_opt->value.empty();
+    // ElegooLink takes its own dialog: the time-lapse / heated-bed-leveling / plate options it shows
+    // are what ElegooLink::print() puts in the SDCP start command. Without them the command went out
+    // with empty values and the printer never answered. Not derived from host_type above, whose
+    // fallback for a missing option is htElegooLink.
+    const bool elegoolink_host = host_type_opt != nullptr && host_type_opt->value == htElegooLink;
 
     if (flashforge_local_api) {
         use_3mf          = true;
@@ -24615,8 +24620,9 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
 
     // The send dialog is polymorphic: a Flashforge printer reached over its HTTP local API gets the
     // IFS (material-station) mapping dialog, everything else - our device/slot flow included - gets
-    // the plain one. Legacy Flashforge printers (no serial number / check code, i.e. the TCP 8899
-    // M-code console) take the plain dialog too, exactly as before.
+    // the plain one, except ElegooLink, which gets the Elegoo dialog. Legacy Flashforge printers
+    // (no serial number / check code, i.e. the TCP 8899 M-code console) take the plain dialog too,
+    // exactly as before.
     std::unique_ptr<PrintHostSendDialog> pDlg;
     if (flashforge_local_api) {
         auto* flashforge_host = dynamic_cast<Flashforge*>(upload_job.printhost.get());
@@ -24690,8 +24696,16 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
                                                               std::move(slots),
                                                               project_filaments);
     } else {
-        pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
-                                                    storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
+        // An Elegoo printer gets the Elegoo dialog (an ElegooLink preset reaches here with the same
+        // device list, plate filaments and unload offer as the plain dialog below). Upstream Orca
+        // selects it by host_type too.
+        if (elegoolink_host)
+            pDlg = std::make_unique<ElegooPrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
+                                                              storage_paths, storage_names,
+                                                              config->get_bool("open_device_tab_post_upload"));
+        else
+            pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
+                                                        storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
         pDlg->set_devices(ph_model_key, ph_devices, ph_preselect);
         pDlg->set_plate_filaments(plate_filaments_for_send(plate_idx));
         if (offer_unload_at_end)

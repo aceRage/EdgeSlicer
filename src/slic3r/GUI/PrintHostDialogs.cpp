@@ -1844,6 +1844,10 @@ void ElegooPrintHostSendDialog::init() {
     if (!bedType.empty())
         m_BedType = static_cast<BedType>(std::stoi(bedType));
 
+    // The target before the file name, as in the plain dialog: which of this model's printers the plate
+    // goes to, and the filament mapping when the printer reports its slots.
+    build_device_ui();
+
     auto* label_dir_hint = new wxStaticText(this, wxID_ANY, _L("Use forward slashes ( / ) as a directory separator if needed."));
     label_dir_hint->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
 
