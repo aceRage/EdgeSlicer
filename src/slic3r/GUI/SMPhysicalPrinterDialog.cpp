@@ -598,6 +598,16 @@ void SMPhysicalPrinterDialog::update(bool printer_change)
                 m_optgroup->hide_field("printhost_apikey");
                 m_optgroup->hide_field("printhost_authorization_type");
             }
+
+        if (Field *k = m_optgroup->get_field("printhost_apikey")) {
+            if (wxWindow *w = k->getWindow()) {
+                if (opt->value == htMoonrakerHttp)
+                    w->SetToolTip(_L("Moonraker authenticates with X-Api-Key in this field. Leftover HTTP "
+                                     "user/password is sent as Basic auth, which is unencrypted over plain HTTP."));
+                else
+                    w->SetToolTip(k->get_tooltip_text(wxString()));
+            }
+        }
     }
     else {
         m_optgroup->set_value("host_type", int(PrintHostType::htOctoPrint), false);
@@ -640,16 +650,23 @@ void SMPhysicalPrinterDialog::update_host_type(bool printer_change)
 
     Choice* choice = dynamic_cast<Choice*>(ht);
     // Snapmaker's htMoonRaker* have no menu key. Showing Octo/Klipper for them is a lie; a
-    // display-only "Snapmaker" row keeps the stored value (Device-tab connect).
+    // display-only "Snapmaker" row keeps the stored value (Device-tab connect). The extra row
+    // is selectable (wx ComboBox has no disabled item); Choice::get_value maps a row past
+    // enum_values back to the stored enum so a re-click cannot become htPrusaLink.
     if (last_in_conf == htMoonRaker || last_in_conf == htMoonRaker_mqtt) {
         const wxString snapmaker_label = _L("Snapmaker");
         types.Add(snapmaker_label);
         choice->set_values(types);
-        choice->set_value(std::string(snapmaker_label.utf8_str()), false);
+        choice->set_value(last_in_conf, false);
+        if (wxWindow *w = choice->getWindow())
+            w->SetToolTip(_L("Snapmaker Device-tab connect. This extra row is display-only; "
+                             "selecting it does not change the stored host type."));
         (void) printer_change;
         return;
     }
     choice->set_values(types);
+    if (wxWindow *w = choice->getWindow())
+        w->SetToolTip(choice->get_tooltip_text(wxString()));
     // host_type is mapped by key: the dropdown index is not the stored PrintHostType
     // (htMoonRaker / htMoonRaker_mqtt have no key; htMoonrakerHttp sits after them).
     int row = enum_choice_index_of_value(ht->m_opt, last_in_conf);

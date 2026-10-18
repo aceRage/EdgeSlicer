@@ -57,6 +57,7 @@ protected:
     std::string m_cafile;
     std::string m_user;
     std::string m_password;
+    mutable bool m_warned_userpass { false };
 
     void        set_auth(Http &http) const;
     std::string make_url(const std::string &path) const;
@@ -72,6 +73,8 @@ std::vector<std::string> moonraker_host_writable_roots(const std::string &body);
 // Parent directory of an upload_path, as the Moonraker `path` form field (forward slashes,
 // no leading/trailing slash). Empty when the file sits at the root of the storage.
 std::string moonraker_host_upload_subdir(const std::string &upload_path);
+// Storage-relative path to pass to /printer/print/start when the upload reply had no item.path.
+std::string moonraker_host_start_path(const std::string &subdir, const std::string &filename);
 
 struct MoonrakerHostUploadReply
 {

@@ -1809,6 +1809,10 @@ void Choice::set_value(const boost::any& value, bool change_event)
     // BBS
     case coEnums: {
 		int val = boost::any_cast<int>(value);
+        // Keep the stored enum here so get_value() can restore it when the combo is on a
+        // display-only extra row (host_type's Snapmaker label). set_value used not to write
+        // m_value, so a re-click of that row mapped to row 0 (htPrusaLink).
+        const int stored = val;
 
         // Orca: the input shaper list holds only the types the printer's G-code flavor supports
         // (TabPrinter::update_input_shaper_menu); each row carries its enum value as client data.
@@ -1827,6 +1831,7 @@ void Choice::set_value(const boost::any& value, bool change_event)
             if (selection < 0)
                 selection = (val >= 0 && val < static_cast<int>(count)) ? val : (count > 0 ? 0 : -1);
             field->SetSelection(selection);
+            m_value = stored;
             break;
         }
 
@@ -1838,11 +1843,17 @@ void Choice::set_value(const boost::any& value, bool change_event)
 			val--;
         // Options whose list is not in value order (a subset, or an enum with a gap) map the stored
         // value to its row through the key; see libslic3r/EnumChoice.hpp. A value not in the list
-        // shows the first row, as before.
+        // shows the first row, unless the combo has a display-only extra after enum_values
+        // (host_type's Snapmaker label).
         if (enum_choice_maps_by_key(m_opt_id) && !(m_opt.nullable && val == ConfigOptionEnumsGenericNullable::nil_value()))
 		{
 			const int row = enum_choice_index_of_value(m_opt, val);
-			val = row < 0 ? 0 : row;
+			if (row >= 0)
+				val = row;
+			else if (field->GetCount() > static_cast<unsigned int>(m_opt.enum_values.size()))
+				val = int(m_opt.enum_values.size());
+			else
+				val = 0;
 		}
         if (m_opt.nullable) {
             if (val != ConfigOptionEnumsGenericNullable::nil_value())
@@ -1850,6 +1861,7 @@ void Choice::set_value(const boost::any& value, bool change_event)
             else
                 val = -1;
         }
+		m_value = stored;
 		field->SetSelection(val);
 		break;
 	}
@@ -1930,15 +1942,19 @@ boost::any& Choice::get_value()
         }
         else if (enum_choice_maps_by_key(m_opt_id))
         {
-            // Selection can be invalid when the current value is not present in the rebuilt
-            // enum list (e.g. stale support_style vs support_type); fall back to the first
-            // entry instead of indexing out of bounds.
+            // A listed row stores that key. A display-only extra (past enum_values, e.g. the
+            // Snapmaker host-type label) keeps the current value so it cannot become the first
+            // key (htPrusaLink). A missing selection still falls back to the first key — stale
+            // support_style rebuilds used to do that.
             const int selection = field->GetSelection();
-            if (! m_opt.enum_values.empty()) {
-                const int index = (selection >= 0 && selection < static_cast<int>(m_opt.enum_values.size())) ? selection : 0;
-                if (const int value = enum_choice_value_at_index(m_opt, index); value >= 0)
-                    m_value = value;
+            int       stored    = 0;
+            if (!m_value.empty()) {
+                try {
+                    stored = boost::any_cast<int>(m_value);
+                } catch (const boost::bad_any_cast &) {}
             }
+            if (! m_opt.enum_values.empty())
+                m_value = enum_choice_value_for_selection(m_opt, selection, stored);
         }
         // Support ThirdPartyPrinter
         else if (m_opt_id.compare("host_type") == 0 && m_opt.enum_values.size() > field->GetCount())

@@ -537,6 +537,11 @@ TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path r
         CHECK(enum_choice_index_of_value(*def, int(htMoonrakerHttp)) == int(def->enum_values.size()) - 1);
         CHECK(enum_choice_index_of_value(*def, int(htMoonRaker)) == -1);      // Snapmaker: no menu key
         CHECK(enum_choice_index_of_value(*def, int(htMoonRaker_mqtt)) == -1);
+        // Display-only extra row (PhysicalPrinterDialog Snapmaker label): keep stored, not row 0.
+        const int extra = int(def->enum_values.size());
+        CHECK(enum_choice_value_for_selection(*def, extra, int(htMoonRaker)) == int(htMoonRaker));
+        CHECK(enum_choice_value_for_selection(*def, extra, int(htMoonRaker_mqtt)) == int(htMoonRaker_mqtt));
+        CHECK(enum_choice_value_for_selection(*def, extra, int(htMoonrakerHttp)) == int(htMoonrakerHttp));
         ConfigOptionEnum<PrintHostType> opt;
         REQUIRE(opt.deserialize("moonraker"));
         CHECK(opt.value == htMoonrakerHttp);
@@ -822,5 +827,11 @@ TEST_CASE("MoonrakerHost: connection-test and upload reply parsers", "[PrintHost
         CHECK(moonraker_host_upload_subdir("/benchy.gcode").empty());
         CHECK(moonraker_host_upload_subdir("plates/benchy.gcode") == "plates");
         CHECK(moonraker_host_upload_subdir("a/b/c.gcode") == "a/b");
+    }
+
+    SECTION("the fallback print/start path includes the subdirectory") {
+        CHECK(moonraker_host_start_path("", "benchy.gcode") == "benchy.gcode");
+        CHECK(moonraker_host_start_path("plates", "benchy.gcode") == "plates/benchy.gcode");
+        CHECK(moonraker_host_start_path("a/b", "c.gcode") == "a/b/c.gcode");
     }
 }

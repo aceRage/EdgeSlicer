@@ -94,6 +94,13 @@ std::string moonraker_host_upload_subdir(const std::string &upload_path)
     return dir;
 }
 
+std::string moonraker_host_start_path(const std::string &subdir, const std::string &filename)
+{
+    if (subdir.empty())
+        return filename;
+    return subdir + "/" + filename;
+}
+
 namespace {
 
 void fill_upload_reply(const json &obj, MoonrakerHostUploadReply &out)
@@ -163,16 +170,22 @@ void MoonrakerHost::set_auth(Http &http) const
     // host type, or an imported profile), say so rather than dropping them on the floor.
     if (!m_apikey.empty()) {
         http.header("X-Api-Key", m_apikey);
-        if (!m_user.empty() || !m_password.empty())
+        if ((!m_user.empty() || !m_password.empty()) && !m_warned_userpass) {
+            m_warned_userpass = true;
             BOOST_LOG_TRIVIAL(warning)
                 << "Moonraker: printhost_user/password is set but ignored; Moonraker auth is X-Api-Key "
                    "(the user/password fields are a PrusaLink setting).";
+        }
         return;
     }
     if (!m_user.empty() || !m_password.empty()) {
-        BOOST_LOG_TRIVIAL(warning)
-            << "Moonraker: no API key; sending HTTP Basic for printhost_user/password (upstream does "
-               "not; Moonraker itself expects X-Api-Key, or a reverse proxy in front).";
+        if (!m_warned_userpass) {
+            m_warned_userpass = true;
+            BOOST_LOG_TRIVIAL(warning)
+                << "Moonraker: no API key; sending HTTP Basic for printhost_user/password (upstream does "
+                   "not; Moonraker itself expects X-Api-Key, or a reverse proxy in front). "
+                   "HTTP Basic over plain http:// is unencrypted.";
+        }
         http.auth_basic(m_user, m_password);
     }
 }
@@ -346,9 +359,9 @@ bool MoonrakerHost::upload(PrintHostUpload upload_data, ProgressFn progress_fn, 
             if (!reply.stored_path.empty()) {
                 uploaded_path = reply.stored_path;
             } else {
-                uploaded_path = upload_filename.string();
-                BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: upload response missing item.path, falling back to original filename `%2%`") %
-                                                  name % uploaded_path;
+                uploaded_path = moonraker_host_start_path(subdir, upload_filename.string());
+                BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: upload response missing item.path, falling back to `%2%`") % name %
+                                                  uploaded_path;
             }
             moonraker_started_print = reply.started_or_queued;
         })

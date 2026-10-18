@@ -956,6 +956,24 @@ TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row
     // The helper names 19 options (18 plus host_type); a typo there would silently drop one from the mapping.
     CHECK(mapped == 19);
 
+    SECTION("host_type: a display-only extra row keeps the stored Snapmaker value")
+    {
+        // Physical printer dialogs append a Snapmaker label after enum_values. Choice::get_value
+        // uses this helper; a row past the listed keys must not become htPrusaLink (row 0).
+        const ConfigOptionDef *def = print_config_def.get("host_type");
+        REQUIRE(def != nullptr);
+        const int extra = int(def->enum_values.size());
+        CHECK(enum_choice_value_for_selection(*def, extra, int(htMoonRaker)) == int(htMoonRaker));
+        CHECK(enum_choice_value_for_selection(*def, extra, int(htMoonRaker_mqtt)) == int(htMoonRaker_mqtt));
+        CHECK(enum_choice_value_for_selection(*def, extra + 1, int(htMoonRaker)) == int(htMoonRaker));
+        CHECK(enum_choice_value_at_index(*def, extra) == -1);
+        CHECK(enum_choice_value_at_index(*def, extra - 1) == int(htMoonrakerHttp));
+        CHECK(enum_choice_value_for_selection(*def, extra - 1, int(htMoonRaker)) == int(htMoonrakerHttp));
+        CHECK(enum_choice_value_for_selection(*def, 0, int(htMoonRaker)) == int(htPrusaLink));
+        // Missing selection still falls back to the first key (stale support_style rebuilds).
+        CHECK(enum_choice_value_for_selection(*def, -1, int(htMoonRaker)) == int(htPrusaLink));
+    }
+
     SECTION("locked_*_infill_pattern: the first row is \"default\" (ipCount), not ipMonotonic")
     {
         for (const char *key : { "locked_skin_infill_pattern", "locked_skeleton_infill_pattern" }) {
