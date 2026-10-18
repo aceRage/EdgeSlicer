@@ -364,7 +364,8 @@ SCENARIO("CANVAS tray presence and status semantics", "[ElegooCanvas]")
         CHECK(info.auto_refill == 1);
         CHECK(info.trays[1].min_nozzle_temp == 190);
         CHECK(info.trays[1].nozzle_temp == 230);
-        CHECK(info.trays[1].filament_code == "0x00000");
+        // "0x00000" = no RFID tag read: kept as no code.
+        CHECK(info.trays[1].filament_code.empty());
     }
 
     GIVEN("tray ids counted from 1, as one elegoo-link comment says some firmware does")
@@ -409,8 +410,9 @@ SCENARIO("A CANVAS tray's name and vendor for the filament sync", "[ElegooCanvas
     CanvasTray t = info.trays[1];
     t.filament_name = "Elegoo PLA+";
     CHECK(canvas_tray_name(t) == "Elegoo PLA+");
-    // No brand: a hand-entered or untagged spool is the generic preset of its family.
-    CHECK(canvas_tray_name(info.trays[2]) == "Generic PLA");
+    // No brand (a hand-entered or untagged spool): just the reported material; the preset match goes
+    // by the "Generic" vendor and the type.
+    CHECK(canvas_tray_name(info.trays[2]) == "PLA");
     CHECK(canvas_tray_vendor(info.trays[2]) == "Generic");
     // No name: the brand and the reported material.
     t.filament_name.clear();
@@ -608,4 +610,72 @@ SCENARIO("Frame redaction", "[ElegooCanvas]")
     CHECK(r.find("01-23-45-67-89-ab") == std::string::npos);
     CHECK(r.find("0123456789ABCDEF01") == std::string::npos);
     CHECK(r.find("\"filament_name\":\"PLA\"") != std::string::npos);
+}
+
+SCENARIO("The owner's CC1 capture: untagged spools and the reply shape of firmware V1.4.49", "[ElegooCanvas]")
+{
+    // Synthesized from the shape of the owner's capture (2026-10-18, firmware V1.4.49, taken while
+    // printing): the payload nested as Data.Data under Cmd 324, one unit, four hand-entered spools
+    // whose brand is four em dashes with spaces and whose code is "0x00000", trays 0..3 at status 1
+    // (in the tray) and the one in the toolhead at status 2, which is also active_tray_id. Ids and
+    // colours are made up.
+    const std::string dashes = "\xE2\x80\x94 \xE2\x80\x94 \xE2\x80\x94 \xE2\x80\x94";
+    auto tray = [&dashes](int id, const char* name, const char* colour, int lo, int hi, int status) {
+        return std::string(R"({"brand":")") + dashes + R"(","filament_code":"0x00000","filament_color":")" + colour +
+               R"(","filament_name":")" + name + R"(","filament_type":"PLA","max_nozzle_temp":)" + std::to_string(hi) +
+               R"(,"min_nozzle_temp":)" + std::to_string(lo) + R"(,"status":)" + std::to_string(status) +
+               R"(,"tray_id":)" + std::to_string(id) + "}";
+    };
+    const std::string frame = std::string(R"({"Data":{"Cmd":324,"Data":{"Ack":0,"active_canvas_id":0,"active_tray_id":3,"auto_refill":1,)") +
+                              R"("canvas_list":[{"canvas_id":0,"connected":1,"tray_list":[)" +
+                              tray(0, "PLA PRO", "#E0D040", 190, 250, 1) + "," + tray(1, "PLA", "#3060C0", 210, 230, 1) + "," +
+                              tray(2, "PLA", "#808080", 190, 230, 1) + "," + tray(3, "PLA", "#F0F0F0", 190, 230, 2) +
+                              R"(]}]},"MainboardID":"<redacted>","RequestID":"<redacted>","TimeStamp":1},"Id":"<redacted>","Topic":"<redacted>"})";
+
+    CanvasInfo  info;
+    std::string error;
+    REQUIRE(canvas_parse_payload(frame, info, error));
+    REQUIRE(info.trays.size() == 4);
+
+    THEN("the placeholder brand and the no-tag code are no brand and no code")
+    {
+        for (const CanvasTray& t : info.trays) {
+            CHECK(t.has_filament);
+            CHECK(t.brand.empty());
+            CHECK(t.filament_code.empty());
+            CHECK(canvas_tray_vendor(t) == "Generic");
+        }
+    }
+    THEN("the sync name is just the filament name, never the dashes")
+    {
+        CHECK(canvas_tray_name(info.trays[0]) == "PLA PRO");
+        CHECK(canvas_tray_name(info.trays[1]) == "PLA");
+        for (const CanvasTray& t : info.trays)
+            CHECK(canvas_tray_name(t).find("\xE2\x80\x94") == std::string::npos);
+    }
+    THEN("status 1 is in the tray, 2 is in the toolhead, and the active tray is 0-based like tray_id")
+    {
+        CHECK(info.trays[0].state() == CanvasTrayState::Preloaded);
+        CHECK(info.trays[3].state() == CanvasTrayState::Loaded);
+        CHECK(info.active_tray_id == 3);
+        REQUIRE(info.find(0, info.active_tray_id) != nullptr);
+        CHECK(info.find(0, info.active_tray_id)->status == 2);
+        CHECK(info.trays[0].tray_id == 0);
+        CHECK(info.trays[0].min_nozzle_temp == 190);
+        CHECK(info.trays[0].nozzle_temp == 250);
+        CHECK(info.auto_refill == 1);
+    }
+    THEN("the brand and code cleaners")
+    {
+        CHECK(canvas_clean_brand(dashes).empty());
+        CHECK(canvas_clean_brand(" - - ").empty());
+        CHECK(canvas_clean_brand("\xE2\x80\x93\xE2\x80\x93").empty()); // en dashes
+        CHECK(canvas_clean_brand("").empty());
+        CHECK(canvas_clean_brand(" ELEGOO ") == "ELEGOO");
+        CHECK(canvas_clean_brand("3D-Fuel") == "3D-Fuel");
+        CHECK(canvas_clean_code("0x00000").empty());
+        CHECK(canvas_clean_code("0X0").empty());
+        CHECK(canvas_clean_code("").empty());
+        CHECK(canvas_clean_code("0x1A2B3") == "0x1A2B3");
+    }
 }

@@ -96,8 +96,15 @@ CanvasTrayState canvas_tray_state(int status);
 
 // The vendor a tray stands for: its brand, or "Generic" when the printer sent none.
 std::string canvas_tray_vendor(const CanvasTray& tray);
+
+// A brand made only of dashes (ASCII, en/em dash...) and blanks - what the CC1 reports for an
+// untagged or hand-entered spool - is "". Anything else is returned trimmed.
+std::string canvas_clean_brand(const std::string& brand);
+// "0x00000" (any count of zeros) - the CANVAS read no RFID tag - is "". Anything else is returned trimmed.
+std::string canvas_clean_code(const std::string& code);
 // The filament name the sync matches presets by: "<brand> <filament_name>" (no doubled brand),
-// else "Generic <type>". Empty for an empty tray.
+// "Generic <type>" for the brand "Generic", and just the filament name (else its type) when there is
+// no brand (an untagged or hand-entered spool). Empty for an empty tray.
 std::string canvas_tray_name(const CanvasTray& tray);
 
 // Parse the payload of a command-324 reply. Split out from the query so it can be

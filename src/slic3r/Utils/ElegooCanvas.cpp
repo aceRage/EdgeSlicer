@@ -264,9 +264,50 @@ std::string canvas_generic_filament_id(const std::string& filament_type)
     return std::string();
 }
 
+std::string canvas_clean_brand(const std::string& brand)
+{
+    // The owner's CC1 (firmware V1.4.49) reports an untagged or hand-entered spool's brand as
+    // four em dashes (U+2014) with spaces between them. A brand made only of dashes and blanks is
+    // no brand.
+    const std::string b = cv_trimmed(brand);
+    for (size_t i = 0; i < b.size();) {
+        const unsigned char c = static_cast<unsigned char>(b[i]);
+        if (c == ' ' || c == '\t' || c == '-' || c == '_') {
+            ++i;
+            continue;
+        }
+        // UTF-8 U+2010..U+2015 (hyphen, figure dash, en dash, em dash, horizontal bar) and U+2212 (minus).
+        if (c == 0xE2 && i + 2 < b.size()) {
+            const unsigned char c1 = static_cast<unsigned char>(b[i + 1]);
+            const unsigned char c2 = static_cast<unsigned char>(b[i + 2]);
+            if ((c1 == 0x80 && c2 >= 0x90 && c2 <= 0x95) || (c1 == 0x88 && c2 == 0x92)) {
+                i += 3;
+                continue;
+            }
+        }
+        // U+00A0, a non-breaking space.
+        if (c == 0xC2 && i + 1 < b.size() && static_cast<unsigned char>(b[i + 1]) == 0xA0) {
+            i += 2;
+            continue;
+        }
+        return b;
+    }
+    return std::string();
+}
+
+std::string canvas_clean_code(const std::string& code)
+{
+    // "0x00000" (any number of zeros) = the CANVAS read no RFID tag.
+    std::string c = cv_trimmed(code);
+    std::string digits = (c.size() >= 2 && (c.rfind("0x", 0) == 0 || c.rfind("0X", 0) == 0)) ? c.substr(2) : c;
+    if (digits.empty() || digits.find_first_not_of('0') == std::string::npos)
+        return std::string();
+    return c;
+}
+
 std::string canvas_tray_vendor(const CanvasTray& tray)
 {
-    const std::string brand = cv_trimmed(tray.brand);
+    const std::string brand = canvas_clean_brand(tray.brand);
     return brand.empty() ? std::string("Generic") : brand;
 }
 
@@ -274,13 +315,17 @@ std::string canvas_tray_name(const CanvasTray& tray)
 {
     if (!tray.has_filament)
         return std::string();
-    const std::string brand = cv_trimmed(tray.brand);
+    const std::string brand = canvas_clean_brand(tray.brand);
     std::string       name  = cv_trimmed(tray.filament_name);
     if (name.empty())
         name = cv_trimmed(tray.filament_type);
     if (name.empty())
         name = tray.tray_type;
-    if (brand.empty() || boost::iequals(brand, "Generic"))
+    // No brand (an untagged or hand-entered spool): just what the printer calls the filament. The
+    // preset match then goes by the "Generic" vendor and the type.
+    if (brand.empty())
+        return name;
+    if (boost::iequals(brand, "Generic"))
         return "Generic " + tray.tray_type;
     // "ELEGOO" + "ELEGOO PLA" stays "ELEGOO PLA".
     if (boost::istarts_with(name, brand))
@@ -349,9 +394,11 @@ bool canvas_parse_payload(const std::string& payload, CanvasInfo& info, std::str
             t.position        = pos;
             t.status          = cv_int_at(tray, "status", -1);
             t.filament_type   = cv_str_at(tray, "filament_type");
-            t.brand           = cv_str_at(tray, "brand");
+            // A placeholder brand (em dashes) or the no-tag code ("0x00000") is kept as nothing, so
+            // the sync name, the Device tab card and the preset match never show or match it.
+            t.brand           = canvas_clean_brand(cv_str_at(tray, "brand"));
             t.filament_name   = cv_str_at(tray, "filament_name");
-            t.filament_code   = cv_str_at(tray, "filament_code");
+            t.filament_code   = canvas_clean_code(cv_str_at(tray, "filament_code"));
             t.min_nozzle_temp = cv_int_at(tray, "min_nozzle_temp", 0);
             t.nozzle_temp     = cv_int_at(tray, "max_nozzle_temp", 0);
             ++pos;
