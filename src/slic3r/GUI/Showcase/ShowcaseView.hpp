@@ -1,10 +1,10 @@
 #ifndef slic3r_GUI_ShowcaseView_hpp_
 #define slic3r_GUI_ShowcaseView_hpp_
 
-// Showcase tab (phase S1, design tests/design_showcase_tab.md): the plater's third page, after
+// Showcase tab (phases S1, S2, design tests/design_showcase_tab.md): the plater's third page, after
 // Preview (D1). A canvas of its own (GLCanvas3D::CanvasShowcase, hosted the way AssembleView is)
-// next to a side panel with the scene: backdrop, floor, light, camera and saved views, still export
-// and the user's watermark. The scene belongs to the current plate (D17) and is saved in the 3MF
+// next to a side panel with the scene: backdrop, floor, lights and environment, filament materials
+// and layer lines, camera and saved views, still export and the user's watermark. The scene belongs to the current plate (D17) and is saved in the 3MF
 // (Model::showcase). Nothing here edits the model.
 
 #include "ShowcaseWatermark.hpp"
@@ -14,6 +14,8 @@
 #include "../Camera.hpp"
 
 #include <memory>
+#include <string>
+#include <vector>
 
 #include <wx/panel.h>
 
@@ -23,6 +25,8 @@ class wxButton;
 class wxCheckBox;
 class wxChoice;
 class wxColourPickerCtrl;
+class wxFlexGridSizer;
+class wxImage;
 class wxFontPickerCtrl;
 class wxScrolledWindow;
 class wxSlider;
@@ -89,8 +93,14 @@ private:
     void                     refresh_plates();
     void                     refresh_views();
     void                     refresh_watermark_presets();
+    // S2: one row per filament slot, rebuilt when the project's filaments change; their choices
+    // set from the scene on a rebuild or when `sync_selection`.
+    void                     refresh_materials(bool sync_selection);
 
     void                     on_choose_background_image();
+    void                     on_choose_floor_image();
+    // D10: the render (centre-cropped, 240 px) as the project's cover picture.
+    void                     write_project_cover(const wxImage &image);
     void                     on_choose_logo();
     void                     on_save_view();
     void                     on_delete_view();
@@ -126,16 +136,38 @@ private:
     wxColourPickerCtrl      *m_bg_color2 = nullptr;
     wxButton                *m_bg_image = nullptr;
     wxChoice                *m_bg_fit = nullptr;
+    wxSlider                *m_bg_blur = nullptr;
     wxChoice                *m_floor_type = nullptr;
     wxColourPickerCtrl      *m_floor_color = nullptr;
     wxSlider                *m_floor_shadow = nullptr;
     wxSpinCtrl              *m_floor_grid = nullptr;
+    wxChoice                *m_floor_texture = nullptr;
+    wxButton                *m_floor_image = nullptr;
+    wxSpinCtrl              *m_floor_tile = nullptr;
+    wxSlider                *m_floor_reflection = nullptr;
+    wxSlider                *m_floor_contact = nullptr;
     wxCheckBox              *m_light_fixed = nullptr;
     wxSlider                *m_light_azimuth = nullptr;
     wxSlider                *m_light_elevation = nullptr;
     wxCheckBox              *m_shadows = nullptr;
     wxSlider                *m_shadow_darkness = nullptr;
     wxCheckBox              *m_ssao = nullptr;
+    wxChoice                *m_light_rig = nullptr;
+    wxSlider                *m_key_intensity = nullptr;
+    wxSlider                *m_key_temperature = nullptr;
+    wxCheckBox              *m_fill = nullptr;
+    wxSlider                *m_fill_intensity = nullptr;
+    wxCheckBox              *m_rim = nullptr;
+    wxSlider                *m_rim_intensity = nullptr;
+    wxChoice                *m_environment = nullptr;
+    wxSlider                *m_env_intensity = nullptr;
+    wxSlider                *m_env_rotation = nullptr;
+    wxSlider                *m_exposure = nullptr;
+    wxSlider                *m_shadow_softness = nullptr;
+    wxChoice                *m_layer_lines = nullptr;
+    wxFlexGridSizer         *m_mat_grid = nullptr;
+    std::vector<wxChoice *>  m_mat_choices;
+    std::string              m_mat_signature;
     wxChoice                *m_projection = nullptr;
     wxChoice                *m_views = nullptr;
     wxButton                *m_view_delete = nullptr;
@@ -144,6 +176,7 @@ private:
     wxSpinCtrl              *m_height = nullptr;
     wxChoice                *m_quality = nullptr;
     wxChoice                *m_format = nullptr;
+    wxCheckBox              *m_use_as_cover = nullptr;
     wxButton                *m_export = nullptr;
     wxButton                *m_copy = nullptr;
     wxStaticText            *m_status = nullptr;

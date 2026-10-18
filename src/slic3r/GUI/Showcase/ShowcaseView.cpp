@@ -1,13 +1,16 @@
 #include "ShowcaseView.hpp"
 
 #include "ShowcaseRenderer.hpp"
+#include "ShowcaseTextures.hpp"
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Showcase/ShowcaseWebP.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "../GLCanvas3D.hpp"
 #include "../GUI.hpp"
 #include "../GUI_App.hpp"
+#include "../GUI_Utils.hpp"   // _3MF_COVER_SIZE
 #include "../I18N.hpp"
 #include "../OpenGLManager.hpp"
 #include "../PartPlate.hpp"
@@ -35,6 +38,7 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -74,6 +78,28 @@ wxColour showcase_wx_colour(const std::string &hex)
 std::string showcase_hex(const wxColour &c)
 {
     return Showcase::to_hex_color({ c.Red() / 255.f, c.Green() / 255.f, c.Blue() / 255.f, 1.f });
+}
+
+wxString showcase_preset_name(Showcase::PresetId id)
+{
+    switch (id) {
+    case Showcase::PresetId::DeskWood: return _L("Desk wood");
+    case Showcase::PresetId::DarkGradient: return _L("Dark gradient");
+    case Showcase::PresetId::Outdoor: return _L("Outdoor");
+    case Showcase::PresetId::BuildPlate: return _L("Build plate");
+    default: return _L("Studio white");
+    }
+}
+
+wxString showcase_light_rig_name(Showcase::LightRig rig)
+{
+    switch (rig) {
+    case Showcase::LightRig::ClassicThreePoint: return _L("Classic three-point");
+    case Showcase::LightRig::Dramatic: return _L("Dramatic (key and rim)");
+    case Showcase::LightRig::KeyOnly: return _L("Key light only");
+    case Showcase::LightRig::Sun: return _L("Hard sun");
+    default: return _L("Soft three-point");
+    }
 }
 
 } // namespace
@@ -264,6 +290,8 @@ void ShowcaseView::on_activate()
     camera.enable_update_config_on_type_change(false);
     m_plate = current_plate();
     m_renderer->set_scene(&scene(), &project());
+    // The model or the print settings may have changed in Prepare: new layer heights.
+    m_renderer->invalidate_layers();
     refresh_plates();
     apply_scene_camera();
     sync_controls();
@@ -305,6 +333,8 @@ void ShowcaseView::on_idle_check()
         on_plate_switched();
     else if (m_plates != nullptr && int(m_plates->GetCount()) != wxGetApp().plater()->get_partplate_list().get_plate_count())
         refresh_plates();
+    else
+        refresh_materials(false);   // the filament list may have changed in the sidebar
 }
 
 // Another plate became current: its own scene, with its own camera.
@@ -354,6 +384,8 @@ void ShowcaseView::reload_scene(bool refresh_immediately, bool force_full_scene_
         return;
     if (!m_canvas->is_initialized())
         m_canvas->render(true);
+    if (m_renderer != nullptr)
+        m_renderer->invalidate_layers();
     m_canvas->reload_scene(refresh_immediately, force_full_scene_refresh);
 }
 
@@ -409,11 +441,10 @@ void ShowcaseView::build_panel()
     m_plates = choice({});
     row(_L("Plate"), m_plates);
     wxArrayString presets;
-    presets.Add(_L("Studio white"));
-    presets.Add(_L("Dark gradient"));
-    presets.Add(_L("Build plate"));
+    for (Showcase::PresetId id : Showcase::builtin_presets())
+        presets.Add(showcase_preset_name(id));
     m_presets = choice(presets);
-    m_presets->SetToolTip(_L("Applies the preset's backdrop, floor and light. The camera and the export settings stay."));
+    m_presets->SetToolTip(_L("Applies the preset's backdrop, floor, lights and environment. The camera, the materials and the export settings stay."));
     row(_L("Look"), m_presets);
     m_hide_plate = new wxCheckBox(m_side, wxID_ANY, _L("Hide the printer's plate"));
     m_hide_wipe_tower = new wxCheckBox(m_side, wxID_ANY, _L("Hide the prime tower"));
@@ -431,7 +462,9 @@ void ShowcaseView::build_panel()
     bg_types.Add(_L("Radial gradient"));
     bg_types.Add(_L("Image"));
     bg_types.Add(_L("Transparent"));
+    bg_types.Add(_L("Environment"));
     m_bg_type = choice(bg_types);
+    m_bg_type->SetToolTip(_L("Environment: the scene's lighting environment behind the model, softened by Blur."));
     row(_L("Type"), m_bg_type);
     m_bg_color1 = picker();
     row(_L("Colour"), m_bg_color1);
@@ -445,6 +478,9 @@ void ShowcaseView::build_panel()
     fits.Add(_L("Tile"));
     m_bg_fit = choice(fits);
     row(_L("Image fit"), m_bg_fit);
+    m_bg_blur = slider(0, 0, 100);
+    m_bg_blur->SetToolTip(_L("Softens the image or the environment behind the model, like a shallow depth of field."));
+    row(_L("Blur"), m_bg_blur);
 
     // --- Floor ---------------------------------------------------------------------------------
     header(_L("Floor"));
@@ -454,6 +490,8 @@ void ShowcaseView::build_panel()
     floor_types.Add(_L("Shadow only"));
     floor_types.Add(_L("Solid colour"));
     floor_types.Add(_L("Grid"));
+    floor_types.Add(_L("Photo"));
+    floor_types.Add(_L("My picture"));
     m_floor_type = choice(floor_types);
     m_floor_type->SetToolTip(_L("Shadow only: an invisible floor that shows just the shadow, over any background."));
     row(_L("Type"), m_floor_type);
@@ -463,6 +501,22 @@ void ShowcaseView::build_panel()
     row(_L("Shadow"), m_floor_shadow);
     m_floor_grid = new wxSpinCtrl(m_side, wxID_ANY, "10", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 100, 10);
     row(_L("Grid spacing (mm)"), m_floor_grid);
+    wxArrayString floor_textures;
+    for (const Showcase::FloorTextureInfo &f : showcase_floors().floors)
+        floor_textures.Add(showcase_floor_name(f));
+    m_floor_texture = choice(floor_textures);
+    row(_L("Photo"), m_floor_texture);
+    m_floor_image = new wxButton(m_side, wxID_ANY, _L("Choose picture..."));
+    row(_L("Picture"), m_floor_image);
+    m_floor_tile = new wxSpinCtrl(m_side, wxID_ANY, "300", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 10, 5000, 300);
+    m_floor_tile->SetToolTip(_L("How large one copy of the photo or picture is on the floor."));
+    row(_L("Tile size (mm)"), m_floor_tile);
+    m_floor_reflection = slider(0, 0, 100);
+    m_floor_reflection->SetToolTip(_L("A glossy floor: how strongly the model is mirrored in it."));
+    row(_L("Reflection"), m_floor_reflection);
+    m_floor_contact = slider(60, 0, 100);
+    m_floor_contact->SetToolTip(_L("The soft shade right under the model where it touches the floor. Kept in transparent exports."));
+    row(_L("Contact shadow"), m_floor_contact);
 
     // --- Light ---------------------------------------------------------------------------------
     header(_L("Light"));
@@ -483,6 +537,64 @@ void ShowcaseView::build_panel()
     m_ssao = new wxCheckBox(m_side, wxID_ANY, _L("Ambient occlusion"));
     grid->AddSpacer(0);
     grid->Add(m_ssao);
+    wxArrayString rigs;
+    for (Showcase::LightRig rig : Showcase::light_rigs())
+        rigs.Add(showcase_light_rig_name(rig));
+    m_light_rig = choice(rigs);
+    m_light_rig->SetToolTip(_L("Places the fill and rim lights around the key light and sets how soft the shadows are."));
+    row(_L("Setup"), m_light_rig);
+    m_key_intensity = slider(100, 0, 300);
+    row(_L("Key brightness"), m_key_intensity);
+    m_key_temperature = slider(56, 20, 100);
+    m_key_temperature->SetToolTip(_L("Colour of the key light: warm on the left, cool on the right (2000 to 10000 K)."));
+    row(_L("Key colour"), m_key_temperature);
+    m_fill = new wxCheckBox(m_side, wxID_ANY, _L("Fill light"));
+    m_fill->SetToolTip(_L("A soft light from the other side that lifts the shadows."));
+    m_fill_intensity = slider(35, 0, 300);
+    grid->Add(m_fill, 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(m_fill_intensity, 1, wxEXPAND);
+    m_rim = new wxCheckBox(m_side, wxID_ANY, _L("Rim light"));
+    m_rim->SetToolTip(_L("A light from behind that outlines the model."));
+    m_rim_intensity = slider(45, 0, 300);
+    grid->Add(m_rim, 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(m_rim_intensity, 1, wxEXPAND);
+    m_shadow_softness = slider(10, 5, 40);
+    row(_L("Shadow softness"), m_shadow_softness);
+    wxArrayString envs;
+    envs.Add(_L("None"));
+    for (const Showcase::EnvironmentInfo &e : showcase_environments().environments)
+        envs.Add(showcase_environment_name(e));
+    m_environment = choice(envs);
+    m_environment->SetToolTip(_L("Light and reflections from a photographed surrounding."));
+    row(_L("Environment"), m_environment);
+    m_env_intensity = slider(70, 0, 300);
+    row(_L("Environment brightness"), m_env_intensity);
+    m_env_rotation = slider(0, 0, 359);
+    row(_L("Environment rotation"), m_env_rotation);
+    m_exposure = slider(0, -30, 30);
+    m_exposure->SetToolTip(_L("Brightness of the model and the environment, in tenths of a stop."));
+    row(_L("Exposure"), m_exposure);
+
+    // --- Materials (D4) -----------------------------------------------------------------------
+    header(_L("Materials"));
+    begin_grid();
+    wxArrayString layer_lines;
+    layer_lines.Add(_L("Off"));
+    layer_lines.Add(_L("Subtle"));
+    layer_lines.Add(_L("Real"));
+    layer_lines.Add(_L("Exaggerated"));
+    m_layer_lines = choice(layer_lines);
+    m_layer_lines->SetToolTip(_L("Printed layer lines on the model at its real layer height. A layer is often thinner than a pixel "
+                                 "when the whole model is in view, so the lines show in close-ups and in large, high quality exports."));
+    row(_L("Layer lines"), m_layer_lines);
+    {
+        auto *hint = new wxStaticText(m_side, wxID_ANY, _L("The finish of each filament is guessed from its preset name and type. "
+                                                           "Pick another one where the guess is wrong."));
+        hint->Wrap(29 * em);
+        col->Add(hint, 0, wxLEFT | wxRIGHT, em);
+    }
+    begin_grid();
+    m_mat_grid = grid;
 
     // --- Camera --------------------------------------------------------------------------------
     header(_L("Camera"));
@@ -537,8 +649,13 @@ void ShowcaseView::build_panel()
     wxArrayString formats;
     formats.Add("PNG");
     formats.Add("JPEG");
+    formats.Add(_L("WebP (lossless)"));
     m_format = choice(formats);
     row(_L("Format"), m_format);
+    m_use_as_cover = new wxCheckBox(m_side, wxID_ANY, _L("Use as project cover"));
+    m_use_as_cover->SetToolTip(_L("Each export also becomes the cover picture of the project file. Off unless you turn it on."));
+    grid->AddSpacer(0);
+    grid->Add(m_use_as_cover);
     {
         auto *buttons = new wxBoxSizer(wxHORIZONTAL);
         m_export = new wxButton(m_side, wxID_ANY, _L("Export image..."));
@@ -652,11 +769,47 @@ void ShowcaseView::build_panel()
         if (sel >= 0)
             edit([sel](Showcase::Scene &s) { s.background.fit = Showcase::ImageFit(sel); });
     });
+    m_bg_blur->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.background.blur = float(m_bg_blur->GetValue()) / 100.f; });
+    });
 
     m_floor_type->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_floor_type->GetSelection();
-        if (sel >= 0)
-            edit([sel](Showcase::Scene &s) { s.floor.type = Showcase::FloorType(sel); });
+        if (sel < 0)
+            return;
+        if (Showcase::FloorType(sel) == Showcase::FloorType::Image && scene().floor.image.empty()) {
+            on_choose_floor_image();
+            sync_controls();
+            return;
+        }
+        edit([sel](Showcase::Scene &s) { s.floor.type = Showcase::FloorType(sel); }, true);
+    });
+    m_floor_texture->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_floor_texture->GetSelection();
+        const std::vector<Showcase::FloorTextureInfo> &floors = showcase_floors().floors;
+        if (sel < 0 || size_t(sel) >= floors.size())
+            return;
+        const std::string id = floors[size_t(sel)].id;
+        edit([&id](Showcase::Scene &s) {
+            s.floor.texture = id;
+            s.floor.type    = Showcase::FloorType::Texture;
+        }, true);
+    });
+    m_floor_image->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_choose_floor_image(); });
+    m_floor_tile->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent &) {
+        const float mm = float(m_floor_tile->GetValue());
+        edit([mm](Showcase::Scene &s) {
+            if (s.floor.type == Showcase::FloorType::Image)
+                s.floor.texture_size = mm;
+            else if (const Showcase::FloorTextureInfo *f = showcase_floors().find(s.floor.texture))
+                s.floor.texture_scale = std::clamp(mm / f->tile_mm, 0.1f, 10.f);
+        });
+    });
+    m_floor_reflection->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.floor.reflection = float(m_floor_reflection->GetValue()) / 100.f; });
+    });
+    m_floor_contact->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.floor.contact_shadow = float(m_floor_contact->GetValue()) / 100.f; });
     });
     m_floor_color->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
         edit([this](Showcase::Scene &s) { s.floor.color = showcase_hex(m_floor_color->GetColour()); });
@@ -680,6 +833,51 @@ void ShowcaseView::build_panel()
         edit([this](Showcase::Scene &s) { s.lighting.shadow_intensity = float(m_shadow_darkness->GetValue()) / 100.f; });
     });
     m_ssao->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.ssao = m_ssao->GetValue(); }); });
+    m_light_rig->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_light_rig->GetSelection();
+        const std::vector<Showcase::LightRig> rigs = Showcase::light_rigs();
+        if (sel >= 0 && size_t(sel) < rigs.size())
+            edit([&rigs, sel](Showcase::Scene &s) { Showcase::apply_light_rig(s.lighting, rigs[size_t(sel)]); }, true);
+    });
+    m_key_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.key_intensity = float(m_key_intensity->GetValue()) / 100.f; });
+    });
+    m_key_temperature->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.key_temperature = float(m_key_temperature->GetValue()) * 100.f; });
+    });
+    m_fill->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.fill = m_fill->GetValue(); }); });
+    m_fill_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.fill_intensity = float(m_fill_intensity->GetValue()) / 100.f; });
+    });
+    m_rim->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.rim = m_rim->GetValue(); }); });
+    m_rim_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.rim_intensity = float(m_rim_intensity->GetValue()) / 100.f; });
+    });
+    m_shadow_softness->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.shadow_softness = float(m_shadow_softness->GetValue()) / 10.f; });
+    });
+    m_environment->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_environment->GetSelection();
+        const std::vector<Showcase::EnvironmentInfo> &envs = showcase_environments().environments;
+        if (sel < 0)
+            return;
+        const std::string id = sel == 0 || size_t(sel) > envs.size() ? std::string() : envs[size_t(sel - 1)].id;
+        edit([&id](Showcase::Scene &s) { s.lighting.environment = id; });
+    });
+    m_env_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.env_intensity = float(m_env_intensity->GetValue()) / 100.f; });
+    });
+    m_env_rotation->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.env_rotation_deg = float(m_env_rotation->GetValue()); });
+    });
+    m_exposure->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.exposure = float(m_exposure->GetValue()) / 10.f; });
+    });
+    m_layer_lines->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_layer_lines->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.materials.layer_lines = Showcase::LayerLines(sel); });
+    });
 
     m_projection->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         if (m_syncing || read_only())
@@ -731,6 +929,9 @@ void ShowcaseView::build_panel()
         const int sel = m_format->GetSelection();
         if (sel >= 0)
             edit([sel](Showcase::Scene &s) { s.export_settings.format = Showcase::ImageFormat(sel); });
+    });
+    m_use_as_cover->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.use_as_cover = m_use_as_cover->GetValue(); });
     });
 
     m_wm_enabled->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
@@ -815,6 +1016,71 @@ void ShowcaseView::refresh_watermark_presets()
     m_syncing = syncing;
 }
 
+void ShowcaseView::refresh_materials(bool sync_selection)
+{
+    if (m_mat_grid == nullptr)
+        return;
+    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    std::string signature;
+    for (const ShowcaseFilament &f : filaments)
+        signature += f.preset_name + "\n" + f.type + "\n" + f.color + "\n";
+    const bool rebuild = signature != m_mat_signature || m_mat_choices.size() != filaments.size();
+    if (!rebuild && !sync_selection)
+        return;
+    const bool syncing = m_syncing;
+    m_syncing          = true;
+    if (rebuild) {
+        m_mat_signature = signature;
+        m_mat_grid->Clear(true);
+        m_mat_choices.clear();
+        const int em = wxGetApp().em_unit();
+        for (const ShowcaseFilament &f : filaments) {
+            auto *label  = new wxBoxSizer(wxHORIZONTAL);
+            auto *swatch = new wxPanel(m_side, wxID_ANY, wxDefaultPosition, wxSize(int(1.4 * em), int(1.4 * em)), wxBORDER_SIMPLE);
+            swatch->SetBackgroundColour(showcase_wx_colour(f.color));
+            label->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+            wxString name = f.preset_name.empty() ? wxString::Format(_L("Filament %d"), f.slot)
+                                                  : wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.preset_name));
+            auto *text = new wxStaticText(m_side, wxID_ANY, name, wxDefaultPosition, wxSize(14 * em, -1), wxST_ELLIPSIZE_END);
+            text->SetToolTip(wxString::FromUTF8(f.preset_name + (f.type.empty() ? std::string() : " (" + f.type + ")")));
+            label->Add(text, 1, wxALIGN_CENTER_VERTICAL);
+            m_mat_grid->Add(label, 0, wxALIGN_CENTER_VERTICAL);
+
+            wxArrayString items;
+            items.Add(wxString::Format(_L("Auto: %s"), showcase_finish_name(f.inferred)));
+            for (Showcase::Finish finish : Showcase::all_finishes())
+                items.Add(showcase_finish_name(finish));
+            auto *c = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, items);
+            const int slot = f.slot;
+            c->Bind(wxEVT_CHOICE, [this, c, slot](wxCommandEvent &) {
+                const int sel = c->GetSelection();
+                const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
+                edit([&finishes, sel, slot](Showcase::Scene &s) {
+                    if (sel <= 0 || size_t(sel) > finishes.size())
+                        s.materials.set_override(slot, nullptr);
+                    else
+                        s.materials.set_override(slot, &finishes[size_t(sel - 1)]);
+                });
+            });
+            m_mat_grid->Add(c, 1, wxEXPAND);
+            m_mat_choices.push_back(c);
+        }
+        wxGetApp().UpdateDarkUIWin(m_side);
+        m_side->FitInside();
+        m_side->Layout();
+    }
+    const Showcase::Scene &s = scene();
+    const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
+    for (size_t i = 0; i < m_mat_choices.size(); ++i) {
+        const Showcase::Finish *o = s.materials.override_for(int(i) + 1);
+        int sel = 0;
+        if (o != nullptr)
+            sel = int(std::find(finishes.begin(), finishes.end(), *o) - finishes.begin()) + 1;
+        m_mat_choices[i]->SetSelection(sel);
+    }
+    m_syncing = syncing;
+}
+
 void ShowcaseView::sync_controls()
 {
     if (m_side == nullptr)
@@ -831,8 +1097,11 @@ void ShowcaseView::sync_controls()
 
     m_presets->SetSelection(-1);
     Showcase::PresetId preset;
-    if (Showcase::from_string(s.preset_base, preset))
-        m_presets->SetSelection(int(preset));
+    if (Showcase::from_string(s.preset_base, preset)) {
+        const std::vector<Showcase::PresetId> presets = Showcase::builtin_presets();
+        if (auto it = std::find(presets.begin(), presets.end(), preset); it != presets.end())
+            m_presets->SetSelection(int(it - presets.begin()));
+    }
     m_hide_plate->SetValue(s.floor.hide_plate);
     m_hide_wipe_tower->SetValue(s.floor.hide_wipe_tower);
 
@@ -840,11 +1109,26 @@ void ShowcaseView::sync_controls()
     m_bg_color1->SetColour(showcase_wx_colour(s.background.color1));
     m_bg_color2->SetColour(showcase_wx_colour(s.background.color2));
     m_bg_fit->SetSelection(int(s.background.fit));
+    m_bg_blur->SetValue(int(std::lround(s.background.blur * 100.f)));
 
     m_floor_type->SetSelection(int(s.floor.type));
     m_floor_color->SetColour(showcase_wx_colour(s.floor.color));
     m_floor_shadow->SetValue(int(std::lround(s.floor.shadow_strength * 100.f)));
     m_floor_grid->SetValue(int(std::lround(s.floor.grid_spacing)));
+    {
+        const std::vector<Showcase::FloorTextureInfo> &floors = showcase_floors().floors;
+        int sel = -1;
+        for (size_t i = 0; i < floors.size(); ++i)
+            if (floors[i].id == s.floor.texture)
+                sel = int(i);
+        m_floor_texture->SetSelection(sel);
+        const Showcase::FloorTextureInfo *f = showcase_floors().find(s.floor.texture);
+        const float tile = s.floor.type == Showcase::FloorType::Image ? s.floor.texture_size :
+                                                                         (f != nullptr ? f->tile_mm * s.floor.texture_scale : 300.f);
+        m_floor_tile->SetValue(std::clamp(int(std::lround(tile)), 10, 5000));
+    }
+    m_floor_reflection->SetValue(int(std::lround(s.floor.reflection * 100.f)));
+    m_floor_contact->SetValue(int(std::lround(s.floor.contact_shadow * 100.f)));
 
     m_light_fixed->SetValue(s.lighting.world_fixed);
     int az = int(std::lround(s.lighting.azimuth_deg)) % 360;
@@ -855,6 +1139,30 @@ void ShowcaseView::sync_controls()
     m_shadows->SetValue(s.lighting.shadows);
     m_shadow_darkness->SetValue(int(std::lround(s.lighting.shadow_intensity * 100.f)));
     m_ssao->SetValue(s.lighting.ssao);
+    m_light_rig->SetSelection(-1);   // an action, not a state
+    m_key_intensity->SetValue(int(std::lround(s.lighting.key_intensity * 100.f)));
+    m_key_temperature->SetValue(std::clamp(int(std::lround(s.lighting.key_temperature / 100.f)), 20, 100));
+    m_fill->SetValue(s.lighting.fill);
+    m_fill_intensity->SetValue(int(std::lround(s.lighting.fill_intensity * 100.f)));
+    m_rim->SetValue(s.lighting.rim);
+    m_rim_intensity->SetValue(int(std::lround(s.lighting.rim_intensity * 100.f)));
+    m_shadow_softness->SetValue(std::clamp(int(std::lround(s.lighting.shadow_softness * 10.f)), 5, 40));
+    {
+        const std::vector<Showcase::EnvironmentInfo> &envs = showcase_environments().environments;
+        int sel = 0;
+        for (size_t i = 0; i < envs.size(); ++i)
+            if (envs[i].id == s.lighting.environment)
+                sel = int(i) + 1;
+        m_environment->SetSelection(sel);
+    }
+    m_env_intensity->SetValue(int(std::lround(s.lighting.env_intensity * 100.f)));
+    int env_rot = int(std::lround(s.lighting.env_rotation_deg)) % 360;
+    if (env_rot < 0)
+        env_rot += 360;
+    m_env_rotation->SetValue(env_rot);
+    m_exposure->SetValue(std::clamp(int(std::lround(s.lighting.exposure * 10.f)), -30, 30));
+    m_layer_lines->SetSelection(int(s.materials.layer_lines));
+    refresh_materials(true);
 
     m_projection->SetSelection(wxGetApp().plater()->get_camera().get_type() == Camera::EType::Ortho ? 1 : 0);
     refresh_views();
@@ -868,6 +1176,7 @@ void ShowcaseView::sync_controls()
     m_height->SetValue(s.export_settings.height);
     m_quality->SetSelection(int(s.export_settings.quality));
     m_format->SetSelection(int(s.export_settings.format));
+    m_use_as_cover->SetValue(s.export_settings.use_as_cover);
 
     const Showcase::Watermark &wm = s.export_settings.watermark;
     m_wm_enabled->SetValue(wm.enabled);
@@ -902,8 +1211,24 @@ void ShowcaseView::update_enabled()
     const bool floor_on = s.floor.hide_plate;
 
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
-                                                          m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled })
+                                                          m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
+                                                          m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
+                                                          m_exposure, m_layer_lines, m_use_as_cover })
         w->Enable(editable);
+    for (wxChoice *c : m_mat_choices)
+        c->Enable(editable);
+    m_fill_intensity->Enable(editable && s.lighting.fill);
+    m_rim_intensity->Enable(editable && s.lighting.rim);
+    m_env_intensity->Enable(editable && !s.lighting.environment.empty());
+    m_env_rotation->Enable(editable && !s.lighting.environment.empty());
+    m_bg_blur->Enable(editable && (image || s.background.type == Showcase::BackgroundType::Environment));
+    const bool photo   = s.floor.type == Showcase::FloorType::Texture;
+    const bool picture = s.floor.type == Showcase::FloorType::Image;
+    m_floor_texture->Enable(editable && floor_on && !showcase_floors().floors.empty());
+    m_floor_image->Enable(editable && floor_on);
+    m_floor_tile->Enable(editable && floor_on && (photo || picture));
+    m_floor_reflection->Enable(editable && floor_on && s.floor.type != Showcase::FloorType::None);
+    m_floor_contact->Enable(editable && floor_on && s.floor.type != Showcase::FloorType::None);
     m_bg_color1->Enable(editable && s.background.type != Showcase::BackgroundType::Transparent);
     m_bg_color2->Enable(editable && gradient);
     m_bg_image->Enable(editable && image);
@@ -971,6 +1296,25 @@ void ShowcaseView::on_choose_background_image()
     edit([&sha](Showcase::Scene &s) {
         s.background.image = sha;
         s.background.type  = Showcase::BackgroundType::Image;
+    }, true);
+    m_renderer->invalidate_images();
+}
+
+void ShowcaseView::on_choose_floor_image()
+{
+    if (read_only())
+        return;
+    wxFileDialog dlg(this, _L("Choose a floor picture"), "", "", _L("Images") + " (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    commit();
+    std::string sha;
+    if (!add_image_file(into_u8(dlg.GetPath()), 4096, false, sha))
+        return;
+    edit([&sha](Showcase::Scene &s) {
+        s.floor.image = sha;
+        s.floor.type  = Showcase::FloorType::Image;
     }, true);
     m_renderer->invalidate_images();
 }
@@ -1099,6 +1443,28 @@ void ShowcaseView::on_delete_watermark_preset()
 // Export
 // ------------------------------------------------------------------------------------------------
 
+void ShowcaseView::write_project_cover(const wxImage &image)
+{
+    // The project's cover picture is the one the Project page's "set as cover" writes:
+    // <auxiliary folder>/.thumbnails/thumbnail_3mf.png, saved with the project (D10). The printer
+    // thumbnails next to it are left alone.
+    if (!image.IsOk() || image.GetWidth() <= 0 || image.GetHeight() <= 0)
+        return;
+    const int side = std::min(image.GetWidth(), image.GetHeight());
+    wxImage   cover = image.GetSubImage(wxRect((image.GetWidth() - side) / 2, (image.GetHeight() - side) / 2, side, side));
+    cover.Rescale(_3MF_COVER_SIZE.GetWidth(), _3MF_COVER_SIZE.GetHeight(), wxIMAGE_QUALITY_HIGH);
+    boost::system::error_code ec;
+    const boost::filesystem::path dir = boost::filesystem::path(m_model->get_auxiliary_file_temp_path()) / ".thumbnails";
+    boost::filesystem::create_directories(dir, ec);
+    const std::string file = (dir / "thumbnail_3mf.png").string();
+    if (ec || !cover.SaveFile(wxString::FromUTF8(file), wxBITMAP_TYPE_PNG)) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the project cover could not be written to " << file;
+        return;
+    }
+    mark_project_dirty();
+    BOOST_LOG_TRIVIAL(info) << "Showcase: the export is the project cover now (" << file << ")";
+}
+
 void ShowcaseView::on_export(bool to_clipboard)
 {
     if (m_renderer == nullptr || !ShowcaseRenderer::is_supported())
@@ -1108,6 +1474,7 @@ void ShowcaseView::on_export(bool to_clipboard)
     store_scene_camera(true);
     const Showcase::Scene &s    = scene();
     const bool             jpeg = s.export_settings.format == Showcase::ImageFormat::JPEG;
+    const bool             webp = s.export_settings.format == Showcase::ImageFormat::WebP;
 
     wxString path;
     if (!to_clipboard) {
@@ -1115,9 +1482,9 @@ void ShowcaseView::on_export(bool to_clipboard)
         if (name.empty())
             name = "showcase";
         name += wxString::Format("_plate%d", current_plate() + 1);
-        name += jpeg ? ".jpg" : ".png";
+        name += jpeg ? ".jpg" : webp ? ".webp" : ".png";
         wxFileDialog dlg(this, _L("Export Showcase image"), wxString::FromUTF8(wxGetApp().app_config->get_last_dir()), name,
-                         jpeg ? "JPEG (*.jpg)|*.jpg;*.jpeg" : "PNG (*.png)|*.png", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+                         jpeg ? "JPEG (*.jpg)|*.jpg;*.jpeg" : webp ? "WebP (*.webp)|*.webp" : "PNG (*.png)|*.png", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dlg.ShowModal() != wxID_OK)
             return;
         path = dlg.GetPath();
@@ -1140,9 +1507,16 @@ void ShowcaseView::on_export(bool to_clipboard)
     }
     set_as_dirty();
 
+    const bool transparent = !jpeg && !to_clipboard && s.background.type == Showcase::BackgroundType::Transparent;
+    // WebP: our own lossless encoder (no WebP library in the dependencies), alpha included.
+    std::vector<uint8_t> webp_bytes;
+    if (webp && !to_clipboard) {
+        if (!transparent)
+            Showcase::flatten_rgba(image.rgba, 255, 255, 255);
+        webp_bytes = Showcase::encode_webp_lossless(image.rgba, image.width, image.height);
+    }
     if (jpeg || to_clipboard)
         Showcase::flatten_rgba(image.rgba, 255, 255, 255);
-    const bool transparent = !jpeg && !to_clipboard && s.background.type == Showcase::BackgroundType::Transparent;
     wxImage    out(image.width, image.height, false);
     if (transparent)
         out.InitAlpha();
@@ -1156,6 +1530,10 @@ void ShowcaseView::on_export(bool to_clipboard)
             alpha[i] = image.rgba[i * 4 + 3];
     }
 
+    // D10: opt-in only.
+    if (s.export_settings.use_as_cover)
+        write_project_cover(out);
+
     if (to_clipboard) {
         if (wxTheClipboard->Open()) {
             wxTheClipboard->SetData(new wxBitmapDataObject(wxBitmap(out)));
@@ -1166,9 +1544,19 @@ void ShowcaseView::on_export(bool to_clipboard)
         return;
     }
 
-    if (jpeg)
-        out.SetOption(wxIMAGE_OPTION_QUALITY, s.export_settings.jpeg_quality);
-    if (!out.SaveFile(path, jpeg ? wxBITMAP_TYPE_JPEG : wxBITMAP_TYPE_PNG)) {
+    bool saved = false;
+    if (webp) {
+        boost::nowide::ofstream f(into_u8(path), std::ios::binary | std::ios::trunc);
+        if (f && !webp_bytes.empty()) {
+            f.write(reinterpret_cast<const char *>(webp_bytes.data()), std::streamsize(webp_bytes.size()));
+            saved = f.good();
+        }
+    } else {
+        if (jpeg)
+            out.SetOption(wxIMAGE_OPTION_QUALITY, s.export_settings.jpeg_quality);
+        saved = out.SaveFile(path, jpeg ? wxBITMAP_TYPE_JPEG : wxBITMAP_TYPE_PNG);
+    }
+    if (!saved) {
         m_status->SetLabel("");
         show_error(this, _L("The image could not be saved."));
         return;
