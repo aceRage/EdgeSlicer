@@ -101,6 +101,8 @@ public:
     bool is_rendering_as_disabled() const { return m_render_as_disabled; }
 
     bool is_horizontal() const { return m_style == wxSL_HORIZONTAL; }
+    // Edge: left edge of the horizontal slider window on a canvas this wide (for overlays to keep clear of it).
+    float horizontal_slider_left(float canvas_width) const;
     bool is_one_layer() const { return m_is_one_layer; }
     bool is_lower_at_min() const { return m_lower_value == m_min_value; }
     bool is_higher_at_max() const { return m_higher_value == m_max_value; }

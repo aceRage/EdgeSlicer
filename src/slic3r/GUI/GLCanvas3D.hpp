@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <array>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -707,6 +708,8 @@ private:
     ECursorType m_cursor_type;
     GLSelectionRectangle m_rectangle_selection;
     bool m_navigator_dragging{ false };
+    // Edge: the quick view options flyout is open.
+    bool m_view_options_open{ false };
 
     //BBS:add plate related logic
     mutable std::vector<int> m_hover_volume_idxs;
@@ -1546,6 +1549,18 @@ private:
      * @param buttonSize Width and height of the square button.
      */
     void RenderFitCameraButton(float left, float top, float buttonSize);
+    // Edge: quick view options (eye button + flyout) next to the view cube.
+    struct ViewOption
+    {
+        wxString              label;
+        wxString              tooltip;
+        std::string           shortcut; // shown in the tooltip when not empty
+        std::function<bool()> active;
+        std::function<bool()> enabled;
+        std::function<void()> toggle;
+    };
+    std::vector<ViewOption> _view_options() const;
+    void _render_view_options();
     // render thumbnail using the default framebuffer
     void render_thumbnail_legacy(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, PartPlateList& partplate_list, ModelObjectPtrs& model_objects, const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors, GLShaderProgram* shader, Camera::EType camera_type);
 

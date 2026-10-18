@@ -35,6 +35,12 @@ static const ImU32 BRAND_COLOR            = IM_COL32(0, 150, 136, 255);
 static int m_tick_value = -1;
 static ImVec4 m_tick_rect;
 
+float IMSlider::horizontal_slider_left(float canvas_width) const
+{
+    // As render() lays the moves slider out: centred, LEFT_MARGIN or a fifth of the canvas off each side.
+    return std::max(LEFT_MARGIN * m_scale, 0.2f * canvas_width);
+}
+
 // ORCA: keep the slider window width in one place for layout alignment.
 float IMSlider::vertical_slider_window_width()
 {

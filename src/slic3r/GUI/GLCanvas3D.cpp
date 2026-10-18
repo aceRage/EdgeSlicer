@@ -5227,6 +5227,14 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
         && (_deactivate_arrange_menu() || _deactivate_orient_menu()))
         return;
 
+    // Edge: Esc closes the quick view options flyout first.
+    if (keyCode == WXK_ESCAPE && m_view_options_open) {
+        m_view_options_open = false;
+        set_as_dirty();
+        request_extra_frame();
+        return;
+    }
+
     if (m_gizmos.on_char(evt))
         return;
 
@@ -8175,6 +8183,158 @@ void GLCanvas3D::_render_3d_navigator()
     RenderFitCameraButton(fitButtonLeft, fitButtonTop, fitButtonSize);
 }
 
+// Edge: quick view options --------------------------------------------------------------------------
+// The round eye button next to the view cube's "Fit in all view" button, and its flyout of toggles.
+// Each item reads and flips the very state the View menu and Preferences use (no copy kept here), so
+// the menu checkmarks, the flyout, the saved config and any shortcut always agree.
+
+std::vector<GLCanvas3D::ViewOption> GLCanvas3D::_view_options() const
+{
+    Plater* plater = wxGetApp().plater();
+    std::vector<ViewOption> options;
+    // To add one (e.g. Smooth normals, Shadows), append it here: label, tooltip, shortcut (empty for
+    // none), and the getters / toggle of the setting the View menu or Preferences already own.
+    options.push_back({ _L("X-Ray"),
+                        _L("Show every object as a translucent, edge-weighted surface to see inside and behind parts. Prepare only."),
+                        std::string(),
+                        [plater]() { return plater->is_show_xray(); },
+                        [this]() { return m_canvas_type != ECanvasType::CanvasPreview; },
+                        [plater]() { plater->toggle_show_xray(); } });
+    options.push_back({ _L("Realistic View"),
+                        _L("Render objects with Phong shading, and optionally ambient occlusion and cast shadows (Preferences > Graphics)."),
+                        std::string(),
+                        []() { return wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_MODE); },
+                        []() { return true; },
+                        []() {
+                            AppConfig* cfg = wxGetApp().app_config;
+                            cfg->set_bool(SETTING_OPENGL_REALISTIC_MODE, !cfg->get_bool(SETTING_OPENGL_REALISTIC_MODE));
+                        } });
+    options.push_back({ _L("Center of Mass"),
+                        _L("Show the center of mass of each plate, object, separate part and support in Prepare and Preview. Click a marker for its weight, volume and moment of inertia."),
+                        std::string(),
+                        []() { return wxGetApp().show_center_of_mass(); },
+                        []() { return true; },
+                        []() { wxGetApp().toggle_show_center_of_mass(); } });
+    return options;
+}
+
+void GLCanvas3D::_render_view_options()
+{
+    // Prepare and Preview only; not while a painting gizmo, whose settings these are not, owns the view.
+    if ((m_canvas_type != ECanvasType::CanvasView3D && m_canvas_type != ECanvasType::CanvasPreview) ||
+        (m_canvas_type == ECanvasType::CanvasPreview && !m_render_preview) ||
+        dynamic_cast<const GLGizmoPainterBase*>(m_gizmos.get_current()) != nullptr) {
+        m_view_options_open = false;
+        return;
+    }
+    if (!m_gizmos.init_icon_textures())
+        return;
+    const ImTextureID normal_id = m_gizmos.get_icon_texture_id(m_is_dark ? GLGizmosManager::IC_VIEW_OPTIONS_DARK : GLGizmosManager::IC_VIEW_OPTIONS);
+    const ImTextureID hover_id  = m_gizmos.get_icon_texture_id(m_is_dark ? GLGizmosManager::IC_VIEW_OPTIONS_DARK_HOVER : GLGizmosManager::IC_VIEW_OPTIONS_HOVER);
+    if (normal_id == nullptr || hover_id == nullptr)
+        return;
+
+    // Same scale, size and baseline as the view cube and its "Fit in all view" button
+    // (_render_3d_navigator()).
+    float sc = get_scale();
+#ifdef WIN32
+    sc *= float(get_dpi_for_window(wxGetApp().GetTopWindow())) / float(DPI_DEFAULT);
+#endif // WIN32
+    const ImVec2 display     = ImGui::GetIO().DisplaySize;
+    const float  button_size = ImGui::GetFontSize() * 2.5f;
+    const float  gap         = 8.0f * sc;
+    const float  cube_size   = 128.0f * sc;
+    // Right of the fit button; where the fit button would be when the view cube is hidden (the cube's
+    // column is kept free either way: Preview's plate list runs down the left edge when it is hidden).
+    float left = cube_size + gap + (wxGetApp().show_3d_navigator() ? button_size + gap : 0.0f);
+    float top  = display.y - button_size - 20.0f * sc;
+    // Preview: if the moves slider along the bottom would reach it, stack it above the fit button.
+    if (m_canvas_type == ECanvasType::CanvasPreview && m_gcode_viewer.has_data()) {
+        const IMSlider* moves = m_gcode_viewer.get_moves_slider();
+        if (moves != nullptr && left + button_size + gap > moves->horizontal_slider_left(display.x)) {
+            left = cube_size + gap;
+            if (wxGetApp().show_3d_navigator())
+                top -= button_size + gap;
+        }
+    }
+
+    ImGuiWrapper& imgui = *wxGetApp().imgui();
+    const int window_flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar |
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                             ImGuiWindowFlags_NoSavedSettings;
+
+    // The collapsed button.
+    bool button_hovered = false;
+    imgui.set_next_window_pos(left, top, ImGuiCond_Always, 0.0f, 0.0f);
+    imgui.set_next_window_size(button_size, button_size, ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    imgui.begin(std::string("ViewOptionsButtonWindow"), window_flags);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+    // Open, it keeps its hover look, the way a pressed toggle would.
+    if (ImGui::ImageButton3(m_view_options_open ? hover_id : normal_id, hover_id, ImVec2(button_size, button_size))) {
+        m_view_options_open = !m_view_options_open;
+        set_as_dirty();
+        request_extra_frame();
+    }
+    button_hovered = ImGui::IsItemHovered();
+    if (button_hovered && !m_view_options_open)
+        imgui.tooltip(_L("View options"), ImGui::GetFontSize() * 20.0f);
+    ImGui::PopStyleVar(2);
+    imgui.end();
+    ImGui::PopStyleVar();
+
+    if (!m_view_options_open)
+        return;
+
+    // The flyout, above the button, styled like the gizmo panels.
+    const float scale = get_scale();
+    bool flyout_hovered = false;
+    bool changed        = false;
+    imgui.set_next_window_pos(left, top - gap, ImGuiCond_Always, 0.0f, 1.0f);
+    ImGuiWrapper::push_toolbar_style(scale);
+    imgui.begin(std::string("ViewOptionsFlyout"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar |
+                                                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
+    for (const ViewOption& option : _view_options()) {
+        bool value = option.active();
+        const bool enabled = option.enabled();
+        if (!enabled) {
+            ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        }
+        if (imgui.bbl_checkbox(option.label, value) && enabled) {
+            option.toggle();
+            changed = true;
+        }
+        if (!enabled) {
+            ImGui::PopStyleVar();
+            ImGui::PopItemFlag();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            wxString tip = option.tooltip;
+            if (!option.shortcut.empty())
+                tip += "\n" + _L("Shortcut") + ": " + from_u8(option.shortcut);
+            imgui.tooltip(tip, ImGui::GetFontSize() * 20.0f);
+        }
+    }
+    flyout_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    imgui.end();
+    ImGuiWrapper::pop_toolbar_style();
+
+    // Closes on a click anywhere else, and on Esc (also caught in on_char, for when the canvas has the keys).
+    if ((ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !button_hovered && !flyout_hovered) ||
+        ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape), false)) {
+        m_view_options_open = false;
+        changed             = true;
+    }
+    if (changed) {
+        // Both canvases read these settings; the other one redraws when it is shown.
+        wxGetApp().plater()->set_current_canvas_as_dirty();
+        set_as_dirty();
+        request_extra_frame();
+    }
+}
+
 void GLCanvas3D::RenderFitCameraButton(float left, float top, float buttonSize)
 {
     if (buttonSize <= 0.0f)
@@ -10905,6 +11065,7 @@ void GLCanvas3D::_render_overlays()
     m_center_of_mass.render_details(*this);
 
     _render_3d_navigator();
+    _render_view_options();
 }
 
 void GLCanvas3D::_render_style_editor()
