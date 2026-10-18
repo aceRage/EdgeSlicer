@@ -125,6 +125,19 @@ std::pair<bool, std::string> GLShadersManager::init()
     if (prefix == "140/") {
         appendOptionalShader("showcase_background", { prefix + "background.vs", prefix + "showcase_background.fs" });
         appendOptionalShader("showcase_floor", { prefix + "showcase_floor.vs", prefix + "showcase_floor.fs" });
+        // S2: the filament materials (without it the objects are drawn with phong, as in S1), the
+        // contact shadow's footprint and its blur (without them there is no contact shadow).
+        // Every sampler on a unit of its own: a sampler2D and a samplerCube left together on unit 0
+        // make the program invalid at draw time on macOS (see gouraud above).
+        appendOptionalShader("showcase_material", { prefix + "showcase_material.vs", prefix + "showcase_material.fs" });
+        appendOptionalShader("showcase_contact", { prefix + "showcase_material.vs", prefix + "showcase_contact.fs" });
+        appendOptionalShader("showcase_blur", { prefix + "background.vs", prefix + "showcase_blur.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_background"); s != nullptr)
+            s->set_sampler_units({ { "image_tex", 0 }, { "env_map", 6 } });
+        if (GLShaderProgram* s = get_shader("showcase_floor"); s != nullptr)
+            s->set_sampler_units({ { "floor_tex", 0 }, { "reflection_tex", 1 }, { "contact_tex", 2 }, { "shadow_map", 5 } });
+        if (GLShaderProgram* s = get_shader("showcase_material"); s != nullptr)
+            s->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 } });
     }
     // used to render variable layers heights in 3d editor
     valid &= append_shader("variable_layer_height", { prefix + "variable_layer_height.vs", prefix + "variable_layer_height.fs" });
