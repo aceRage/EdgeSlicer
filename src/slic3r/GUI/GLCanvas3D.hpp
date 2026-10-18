@@ -6,6 +6,9 @@
 #include <chrono>
 #include <cstdint>
 #include <array>
+#include <functional>
+#include <map>
+#include <optional>
 #include <set>
 
 #include "GLToolbar.hpp"
@@ -17,6 +20,9 @@
 #include "GLSelectionRectangle.hpp"
 #include "MeshUtils.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/ConnectedBodies.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "GLModel.hpp"
 #include "GCodeViewer.hpp"
 #include "Camera.hpp"
 #include "SceneRaycaster.hpp"
@@ -424,6 +430,70 @@ class GLCanvas3D
         void render(const std::vector<const ModelInstance*>& sorted_instances) const;
     };
 
+    // Orca #16291: center of mass markers in Prepare and Preview.
+    class CenterOfMass
+    {
+        using Sum = GCodeProcessorResult::ObjectMass::Sum;
+        enum MarkerKind : size_t { mkPlate, mkObject, mkSupport, mkBody, mkCount };
+        // A marker's mass and the box of what it stands for.
+        struct Marker
+        {
+            Sum           sum;
+            BoundingBoxf3 box;
+            // Of an object, whether it is an assembly.
+            bool assembly{ false };
+
+            Vec3d center() const { return sum.moment / sum.mass; }
+        };
+        // The plates', each object instance's, its supports' and each body of an assembly's.
+        using Markers = std::array<std::vector<Marker>, mkCount>;
+
+        // The marker's two colors of alternating octants.
+        std::array<GLModel, 2> m_octants;
+        // Mass properties at unit density of each ModelVolume's mesh, by ModelVolume id, which a new mesh changes.
+        std::map<size_t, MassProperties> m_meshes;
+        // The connected bodies of each assembly in its own coordinates, by ModelObject id, with the volumes they were sliced from.
+        struct Bodies
+        {
+            struct Volume
+            {
+                size_t      id;
+                bool        negative;
+                double      density;
+                Transform3d trafo;
+
+                bool operator==(const Volume& other) const
+                {
+                    return id == other.id && negative == other.negative && density == other.density && trafo.matrix() == other.trafo.matrix();
+                }
+            };
+            std::vector<Volume>    volumes;
+            size_t                 slabs{ 0 };
+            std::vector<SolidBody> bodies;
+        };
+        std::map<size_t, Bodies> m_bodies;
+        // The markers drawn last: of the finished print and, in Preview, of what is printed up to the top layer shown.
+        std::array<Markers, 2> m_drawn;
+        size_t                 m_top_layer{ 0 };
+        // The marker whose details are shown, with the number of its kind then.
+        struct Pick
+        {
+            size_t set;
+            size_t kind;
+            size_t index;
+            size_t count;
+        };
+        std::optional<Pick> m_picked;
+
+        Markers model_markers(const GLCanvas3D& canvas);
+
+    public:
+        void render(GLCanvas3D& canvas);
+        // Shows the details of the marker under the mouse, else hides them; whether it hit one.
+        bool on_left_down(GLCanvas3D& canvas, const Vec2d& mouse);
+        void render_details(GLCanvas3D& canvas);
+    };
+
     class Tooltip
     {
         std::string m_text;
@@ -638,6 +708,8 @@ private:
     ECursorType m_cursor_type;
     GLSelectionRectangle m_rectangle_selection;
     bool m_navigator_dragging{ false };
+    // Edge: the quick view options flyout is open.
+    bool m_view_options_open{ false };
 
     //BBS:add plate related logic
     mutable std::vector<int> m_hover_volume_idxs;
@@ -668,6 +740,8 @@ private:
     bool m_reload_delayed;
 
     RenderStats m_render_stats;
+    // Orca #13538: start of the last frame let through by the FPS cap.
+    std::chrono::time_point<std::chrono::steady_clock> m_last_frame_start_time{ std::chrono::steady_clock::now() };
     // Orca #15884 Stage B: per-pass timings inside the existing Render statistics
     // window. Armed only while that window is visible (no Preferences toggle).
     std::unique_ptr<FrameProfiler> m_frame_profiler;
@@ -678,6 +752,7 @@ private:
     int m_selected_extruder;
 
     Labels m_labels;
+    CenterOfMass m_center_of_mass;
     Tooltip m_tooltip;
     bool m_tooltip_enabled{ true };
     Slope m_slope;
@@ -791,6 +866,21 @@ public:
     CameraTarget m_camera_target;
 #endif // ENABLE_SHOW_CAMERA_TARGET
     GLModel m_background;
+    // Orca #13538: FXAA copy of the back buffer.
+    unsigned int m_fxaa_texture_id{ 0 };
+    std::array<unsigned int, 2> m_fxaa_texture_size{ 0, 0 };
+    // Orca #13704: realistic view (SSAO copies of the back buffer, the plate mask of the cast shadows).
+    unsigned int m_ssao_color_texture_id{ 0 };
+    unsigned int m_ssao_depth_texture_id{ 0 };
+    std::array<unsigned int, 2> m_ssao_texture_size{ { 0, 0 } };
+    GLModel m_plate_shadow_mask;
+    std::string m_plate_shadow_mask_key;
+    // Orca #14702: depth-based shadow map used to cast object shadows onto other objects and themselves.
+    unsigned int m_shadow_map_fbo{ 0 };
+    unsigned int m_shadow_map_texture_id{ 0 };
+    unsigned int m_shadow_map_size{ 0 };
+    Transform3d  m_shadow_light_vp{ Transform3d::Identity() };
+    bool         m_shadow_map_valid{ false };
 public:
     explicit GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed);
     ~GLCanvas3D();
@@ -1392,12 +1482,29 @@ private:
     // (gaps between the glyphs included), so a press there drags it instead of the object behind.
     void _apply_emboss_footprint_hover(bool gizmo_element_hovered);
     void _rectangular_selection_picking_pass();
+    // Orca #13538: graphics preferences.
+    bool _is_fxaa_enabled() const;
+    int _get_effective_fps_cap() const;
+    bool _is_fps_overlay_enabled() const;
+    void _render_fps_overlay(int fps) const;
+    void _render_fxaa_pass(unsigned int width, unsigned int height);
+    // Orca #13704: realistic view.
+    bool _is_realistic_view_enabled() const;
+    bool _is_realistic_shadows_enabled() const;
+    bool _is_ssao_enabled() const;
+    void _render_ssao_pass(unsigned int width, unsigned int height);
+    // Orca #14702: build the light-space depth shadow map (consumed by gouraud/phong for object and self
+    // shadows) and cast it onto the build plate. Realistic view only.
+    void _render_shadows(const Transform3d& view_matrix, const Transform3d& projection_matrix);
     void _render_background();
     void _render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes);
     //BBS: add part plate related logic
     void _render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true, const std::set<int>& visible_plates = std::set<int>());
     //BBS: add outline drawing logic
     void _render_objects(GLVolumeCollection::ERenderType type, bool with_outline = true);
+    // Orca #15770: X-Ray view.
+    bool _is_xray_view_active() const;
+    void _render_xray_volumes();
     //BBS: GUI refactor: add canvas size as parameters
     void _render_gcode(int canvas_width, int canvas_height);
     //BBS: render a plane for assemble
@@ -1442,6 +1549,18 @@ private:
      * @param buttonSize Width and height of the square button.
      */
     void RenderFitCameraButton(float left, float top, float buttonSize);
+    // Edge: quick view options (eye button + flyout) next to the view cube.
+    struct ViewOption
+    {
+        wxString              label;
+        wxString              tooltip;
+        std::string           shortcut; // shown in the tooltip when not empty
+        std::function<bool()> active;
+        std::function<bool()> enabled;
+        std::function<void()> toggle;
+    };
+    std::vector<ViewOption> _view_options() const;
+    void _render_view_options();
     // render thumbnail using the default framebuffer
     void render_thumbnail_legacy(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, PartPlateList& partplate_list, ModelObjectPtrs& model_objects, const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors, GLShaderProgram* shader, Camera::EType camera_type);
 

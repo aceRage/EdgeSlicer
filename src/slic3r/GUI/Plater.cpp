@@ -10982,6 +10982,8 @@ struct Plater::priv
     bool                        show_render_statistic_dialog{ false };
     bool                        show_wireframe{ false };
     bool                        wireframe_enabled{ true };
+    // Orca #15770: global X-Ray view of the Prepare scene (not persisted, like the wireframe).
+    bool                        show_xray{ false };
 
     std::chrono::steady_clock::time_point m_slice_start_time;
     bool                                  m_slice_timing_active = false;
@@ -26291,6 +26293,9 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
                  opt_key == "sparse_infill_filament" || opt_key == "solid_infill_filament") {
             update_scheduled = true;
         }
+        // Orca #16291: the center of mass markers weigh the parts by it.
+        else if (opt_key == "filament_density" && wxGetApp().show_center_of_mass())
+            p->view3D->get_canvas3d()->set_as_dirty();
     }
 
     if (bed_shape_changed)
@@ -28348,6 +28353,18 @@ void Plater::enable_wireframe(bool status)
 bool Plater::is_wireframe_enabled() const
 {
     return p->wireframe_enabled;
+}
+
+void Plater::toggle_show_xray()
+{
+    p->show_xray = !p->show_xray;
+    if (p->view3D != nullptr)
+        p->view3D->get_canvas3d()->set_as_dirty();
+}
+
+bool Plater::is_show_xray() const
+{
+    return p->show_xray;
 }
 
 

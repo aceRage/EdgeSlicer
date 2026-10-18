@@ -3509,6 +3509,37 @@ void MainFrame::init_menubar_as_editor()
             },
             this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_view3D_overhang_shown(); }, this);
 
+        // Orca #15770: global X-Ray view of the Prepare scene. Orca puts the toggle in its canvas menu,
+        // which EdgeSlicer does not have; the per-object Ghost mode stays in the object list.
+        append_menu_check_item(viewMenu, wxID_ANY, _L("X-Ray"), _L("Show every object as a translucent, edge-weighted surface to see inside and behind parts."),
+            [this](wxCommandEvent &) {
+                m_plater->toggle_show_xray();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_show_xray(); }, this);
+
+        // Orca #13704: realistic view (Orca: its canvas menu). The details are in Preferences > Graphics.
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Realistic View"),
+            _L("Render objects with Phong shading, and optionally ambient occlusion and cast shadows (Preferences > Graphics)."),
+            [this](wxCommandEvent &) {
+                AppConfig* cfg = wxGetApp().app_config;
+                cfg->set_bool(SETTING_OPENGL_REALISTIC_MODE, !cfg->get_bool(SETTING_OPENGL_REALISTIC_MODE));
+                m_plater->set_current_canvas_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown() || m_plater->is_preview_shown(); },
+            []() { return wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_MODE); }, this);
+
+        // Orca #16291: center of mass markers, in Prepare and Preview (Orca: its canvas menu).
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Show Center of Mass"),
+            _L("Show the center of mass of each plate, object, separate part and support in Prepare and Preview. Click a marker for its weight, volume and moment of inertia."),
+            [this](wxCommandEvent &) {
+                wxGetApp().toggle_show_center_of_mass();
+                m_plater->set_current_canvas_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown() || m_plater->is_preview_shown(); }, []() { return wxGetApp().show_center_of_mass(); }, this);
+
         /*viewMenu->AppendSeparator();
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show &Wireframe") + "\t" + ctrl + shift + _L("Enter"), _L("Show wireframes in 3D scene."),
             [this](wxCommandEvent&) { m_plater->toggle_show_wireframe(); m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT)); }, this,

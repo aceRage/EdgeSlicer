@@ -1382,6 +1382,10 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
         wxGetApp().plater()->schedule_background_process();
         return;
     }
+    m_plate_mass     = gcode_result.plate_mass;
+    m_object_masses  = gcode_result.object_masses;
+    m_body_masses    = gcode_result.body_masses;
+    m_support_masses = gcode_result.support_masses;
 
     // convert data from PrusaSlicer format to libvgcode format
     // EDGE (#642 memory guard): when memory ran low while slicing and the user chose to continue, only a
@@ -1686,6 +1690,10 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
 void GCodeViewer::load_as_preview(libvgcode::GCodeInputData&& data)
 {
     m_loaded_as_preview = true;
+    m_plate_mass = {};
+    m_object_masses.clear();
+    m_body_masses.clear();
+    m_support_masses.clear();
 
     m_move_type_counts.fill(0);
     for (auto& move_type_times : m_move_type_times)
@@ -1758,6 +1766,10 @@ void GCodeViewer::reset()
     m_filament_diameters = std::vector<float>();
     m_filament_densities = std::vector<float>();
     m_move_type_counts.fill(0);
+    m_plate_mass = {};
+    m_object_masses.clear();
+    m_body_masses.clear();
+    m_support_masses.clear();
     for (auto& move_type_times : m_move_type_times)
         move_type_times.fill(0.0f);
     m_move_type_distances.fill(0.0f);
