@@ -380,9 +380,9 @@ void ElegooCanvasPanel::rebuild_units(const CanvasInfo& info)
             l1->SetFont(active ? ::Label::Head_12 : ::Label::Body_12);
             text->Add(l1);
             if (t.has_filament) {
-                const std::string label = t.brand.empty() ? std::string("Generic") :
-                                                            (t.filament_name.empty() ? t.brand : canvas_tray_name(t));
-                auto* l2 = new wxStaticText(m_units, wxID_ANY, from_u8(label));
+                // The same name the sync uses: "ELEGOO PLA Silk", "Generic PLA PRO" for an untagged
+                // spool, just the filament's name when the brand is empty.
+                auto* l2 = new wxStaticText(m_units, wxID_ANY, from_u8(canvas_tray_name(t)));
                 l2->SetFont(::Label::Body_10);
                 text->Add(l2);
             }
