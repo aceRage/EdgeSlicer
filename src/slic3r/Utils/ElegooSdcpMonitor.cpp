@@ -767,6 +767,10 @@ void shutdown()
         M.ioc.stop();
         t.join();
     }
+    // Phone access can be switched on again, and the Printers tab does not need it at all: the next
+    // touch() starts over with a fresh thread.
+    std::lock_guard<std::mutex> lock(M.m);
+    M.down = false;
 }
 
 void set_port_for_tests(int port)
