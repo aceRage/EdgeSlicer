@@ -105,6 +105,12 @@ set(lisbslic3r_sources
     RealisticRenderSettings.hpp
     Showcase/ShowcaseScene.cpp
     Showcase/ShowcaseScene.hpp
+    Showcase/ShowcaseAssets.cpp
+    Showcase/ShowcaseAssets.hpp
+    Showcase/ShowcaseMaterial.cpp
+    Showcase/ShowcaseMaterial.hpp
+    Showcase/ShowcaseWebP.cpp
+    Showcase/ShowcaseWebP.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp

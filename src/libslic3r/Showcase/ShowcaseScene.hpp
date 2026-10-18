@@ -4,9 +4,11 @@
 // Showcase (tab after Preview): presentation renders of the model. This is the GL-free half - the
 // scene description, its JSON form in the 3MF (Metadata/showcase/scenes.json), the built-in presets
 // and the pure layout maths the renderer and the exporter share (export sizes, the safe frame, the
-// user's branding watermark). Design: tests/design_showcase_tab.md (phase S1).
+// user's branding watermark). Design: tests/design_showcase_tab.md (phases S1, S2).
 //
 // Kept wxWidgets- and GL-free so the 3MF code, the CLI and the unit tests can use it.
+
+#include "ShowcaseMaterial.hpp"
 
 #include <array>
 #include <cstdint>
@@ -18,8 +20,11 @@ namespace Slic3r {
 namespace Showcase {
 
 // The scenes.json schema this build writes. A file with a higher number opens read-only: its scenes
-// are shown but the file is written back exactly as it was read.
-constexpr int SCHEMA_VERSION = 1;
+// are shown but the file is written back exactly as it was read. 2 (S2): lights, environments,
+// materials, textured and reflective floors, WebP, the project cover. A schema 1 file reads as is
+// (the new settings take their defaults); an S1 build opens a schema 2 file read-only, so it never
+// writes back a floor or backdrop type it does not know.
+constexpr int SCHEMA_VERSION = 2;
 
 // The archive folder. Nothing in the core model references it, so other readers ignore it.
 inline const char *ARCHIVE_DIR        = "Metadata/showcase/";
@@ -29,16 +34,18 @@ inline const char *ARCHIVE_SCENES     = "Metadata/showcase/scenes.json";
 constexpr int MAX_EXPORT_SIDE = 8192;
 constexpr int MIN_EXPORT_SIDE = 16;
 
-enum class BackgroundType : int { Solid = 0, VerticalGradient, RadialGradient, Image, Transparent };
+// New values go at the end: the panel's choices follow this order.
+enum class BackgroundType : int { Solid = 0, VerticalGradient, RadialGradient, Image, Transparent, Environment };
 enum class ImageFit       : int { Fill = 0, Fit, Tile };
-enum class FloorType      : int { None = 0, ShadowCatcher, Solid, Grid };
+enum class FloorType      : int { None = 0, ShadowCatcher, Solid, Grid, Texture, Image };
 enum class Quality        : int { Draft = 0, High, Best };
-enum class ImageFormat    : int { PNG = 0, JPEG };
+enum class ImageFormat    : int { PNG = 0, JPEG, WebP };
 enum class Projection     : int { Perspective = 0, Ortho };
 enum class Anchor         : int { TopLeft = 0, Top, TopRight, Left, Center, Right, BottomLeft, Bottom, BottomRight };
 
-// The built-in presets of S1. More arrive with the lighting work (S2).
-enum class PresetId : int { StudioWhite = 0, DarkGradient, BuildPlate };
+// The built-in presets: S1's three, then S2's (design 1.3). builtin_presets() gives the order the
+// panel lists them in.
+enum class PresetId : int { StudioWhite = 0, DarkGradient, BuildPlate, DeskWood, Outdoor };
 
 const char *to_string(BackgroundType v);
 const char *to_string(ImageFit v);
@@ -70,6 +77,8 @@ struct Background
     std::string    color2 = "#D9DCE1";   // gradient bottom / edge
     std::string    image;                // sha256 of an image in Project::images (type Image)
     ImageFit       fit    = ImageFit::Fill;
+    // Image and Environment: 0 = sharp, 1 = very soft (a shallow depth of field look).
+    float          blur   = 0.f;
 
     bool operator==(const Background &o) const;
     bool operator!=(const Background &o) const { return !(*this == o); }
@@ -83,6 +92,17 @@ struct Floor
     float       grid_spacing    = 10.f;    // mm, Grid floor
     bool        hide_plate      = true;    // draw the floor instead of the printer's plate
     bool        hide_wipe_tower = true;
+    // Texture: a bundled photo floor (FloorManifest id). Image: the user's picture (sha256 in
+    // Project::images), tiled every texture_size mm.
+    std::string texture         = "oak";
+    std::string image;
+    float       texture_scale   = 1.f;     // Texture: times the tile size the texture was shot at
+    float       texture_size    = 300.f;   // Image: mm the picture spans on the floor
+    // Glossy floor: strength of the mirrored objects in it (0 = none, a planar reflection pass).
+    float       reflection      = 0.f;
+    // The soft "sitting on the table" darkening right under the objects (design 2.3). Also what
+    // a transparent export's shadow catcher carries as alpha.
+    float       contact_shadow  = 0.6f;
 
     bool operator==(const Floor &o) const;
     bool operator!=(const Floor &o) const { return !(*this == o); }
@@ -101,12 +121,43 @@ struct Lighting
     float shadow_intensity = 0.35f;   // darkening of a fully shadowed object surface
     bool  ssao          = true;
 
+    // S2: the key light's strength and colour, and the fill and rim lights placed around it
+    // (three_point_lights()), all world-fixed like the key (D14).
+    float key_intensity   = 1.f;      // 0..3
+    float key_temperature = 5600.f;   // kelvin, 2000..10000
+    bool  fill            = true;
+    float fill_intensity  = 0.35f;
+    bool  rim             = true;
+    float rim_intensity   = 0.45f;
+    // Image-based light from a bundled environment (D3, EnvironmentManifest id; empty = none).
+    std::string environment     = "studio";
+    float       env_intensity   = 0.7f;   // 0..3
+    float       env_rotation_deg = 0.f;   // around +Z
+    float       exposure        = 0.f;    // EV, -3..3
+    float       shadow_softness = 1.f;    // 0.5 (hard, sun) .. 4 (very soft)
+
     bool operator==(const Lighting &o) const;
     bool operator!=(const Lighting &o) const { return !(*this == o); }
 };
 
 // The direction TO the light for the given angles, world space, unit length.
 std::array<double, 3> light_direction(float azimuth_deg, float elevation_deg);
+
+// One analytic light: the direction TO it (world, unit) and its linear colour times intensity.
+struct LightSource
+{
+    std::array<float, 3> dir{ { 0.f, 0.f, 1.f } };
+    std::array<float, 3> color{ { 1.f, 1.f, 1.f } };
+};
+// The key light, then the fill (the other side of the subject, low and neutral) and the rim
+// (behind, high), each only when on and brighter than nothing. Fixed in the world (D14).
+std::vector<LightSource> three_point_lights(const Lighting &lighting);
+
+// The lights panel's arrangements. Each sets the key's height and strength, the fill and the rim
+// and the shadow softness; the key's direction and colour and the environment stay as they are.
+enum class LightRig : int { SoftThreePoint = 0, ClassicThreePoint, Dramatic, KeyOnly, Sun };
+std::vector<LightRig> light_rigs();
+void                  apply_light_rig(Lighting &lighting, LightRig rig);
 
 struct CameraView
 {
@@ -151,9 +202,37 @@ struct ExportSettings
     ImageFormat format       = ImageFormat::PNG;
     int         jpeg_quality = 92;
     Watermark   watermark;
+    // D10: an export also becomes the project's cover picture. Opt-in, off by default.
+    bool        use_as_cover = false;
 
     bool operator==(const ExportSettings &o) const;
     bool operator!=(const ExportSettings &o) const { return !(*this == o); }
+};
+
+// Per filament slot (1-based, as the filament list shows it): the finish the user picked over the
+// inferred one (D4).
+struct MaterialOverride
+{
+    int    filament = 1;
+    Finish finish   = Finish::Standard;
+    bool operator==(const MaterialOverride &o) const { return filament == o.filament && finish == o.finish; }
+    bool operator!=(const MaterialOverride &o) const { return !(*this == o); }
+};
+
+struct Materials
+{
+    LayerLines                    layer_lines = LayerLines::Subtle;   // R11: subtle by default
+    std::vector<MaterialOverride> overrides;                          // sorted by filament
+
+    // The override for a filament, or null when its finish is inferred.
+    const Finish *override_for(int filament) const;
+    // Sets (or with `finish` null clears) a filament's override.
+    void          set_override(int filament, const Finish *finish);
+    // The finish a filament renders with: the override, else the inference from its preset.
+    Finish        finish_for(int filament, const std::string &preset_name, const std::string &filament_type) const;
+
+    bool operator==(const Materials &o) const { return layer_lines == o.layer_lines && overrides == o.overrides; }
+    bool operator!=(const Materials &o) const { return !(*this == o); }
 };
 
 struct Scene
@@ -169,6 +248,7 @@ struct Scene
     CameraView              camera;
     std::vector<CameraView> views;                  // saved, named views
     ExportSettings          export_settings;
+    Materials               materials;
 
     // Keys this build does not know, as a JSON object text, written back on save (forward compat).
     std::string             extra_json;

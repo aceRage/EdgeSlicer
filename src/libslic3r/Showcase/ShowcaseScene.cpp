@@ -37,14 +37,14 @@ template<class E, size_t N> bool enum_parse(const std::string &s, E &v, const ch
     return false;
 }
 
-const char *const BACKGROUND_NAMES[] = { "solid", "vertical_gradient", "radial_gradient", "image", "transparent" };
+const char *const BACKGROUND_NAMES[] = { "solid", "vertical_gradient", "radial_gradient", "image", "transparent", "environment" };
 const char *const FIT_NAMES[]        = { "fill", "fit", "tile" };
-const char *const FLOOR_NAMES[]      = { "none", "shadow_catcher", "solid", "grid" };
+const char *const FLOOR_NAMES[]      = { "none", "shadow_catcher", "solid", "grid", "texture", "image" };
 const char *const QUALITY_NAMES[]    = { "draft", "high", "best" };
-const char *const FORMAT_NAMES[]     = { "png", "jpg" };
+const char *const FORMAT_NAMES[]     = { "png", "jpg", "webp" };
 const char *const PROJECTION_NAMES[] = { "perspective", "ortho" };
 const char *const ANCHOR_NAMES[]     = { "top_left", "top", "top_right", "left", "center", "right", "bottom_left", "bottom", "bottom_right" };
-const char *const PRESET_NAMES[]     = { "studio_white", "dark_gradient", "build_plate" };
+const char *const PRESET_NAMES[]     = { "studio_white", "dark_gradient", "build_plate", "desk_wood", "outdoor" };
 
 } // namespace
 
@@ -124,25 +124,83 @@ std::array<double, 3> light_direction(float azimuth_deg, float elevation_deg)
     return { std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el) };
 }
 
+std::vector<LightSource> three_point_lights(const Lighting &li)
+{
+    std::vector<LightSource> out;
+    auto add = [&out](float az, float el, const std::array<float, 3> &rgb, float intensity) {
+        if (!(intensity > 0.f))
+            return;
+        const std::array<double, 3> d = light_direction(az, el);
+        LightSource l;
+        l.dir   = { float(d[0]), float(d[1]), float(d[2]) };
+        l.color = { rgb[0] * intensity, rgb[1] * intensity, rgb[2] * intensity };
+        out.push_back(l);
+    };
+    add(li.azimuth_deg, li.elevation_deg, color_temperature_rgb(li.key_temperature), li.key_intensity);
+    // Fill: across from the key, low, a touch cooler so the shadow side does not go grey.
+    if (li.fill)
+        add(li.azimuth_deg + 110.f, 20.f, color_temperature_rgb(7000.f), li.fill_intensity);
+    // Rim: behind the subject as the key sees it, high, neutral; it outlines the silhouette.
+    if (li.rim)
+        add(li.azimuth_deg + 165.f, 50.f, color_temperature_rgb(6500.f), li.rim_intensity);
+    return out;
+}
+
+std::vector<LightRig> light_rigs()
+{
+    return { LightRig::SoftThreePoint, LightRig::ClassicThreePoint, LightRig::Dramatic, LightRig::KeyOnly, LightRig::Sun };
+}
+
+void apply_light_rig(Lighting &li, LightRig rig)
+{
+    switch (rig) {
+    default:
+    case LightRig::SoftThreePoint:
+        li.elevation_deg = 55.f; li.key_intensity = 1.f;  li.fill = true;  li.fill_intensity = 0.35f; li.rim = true;  li.rim_intensity = 0.45f;
+        li.shadow_softness = 1.5f;
+        break;
+    case LightRig::ClassicThreePoint:
+        li.elevation_deg = 45.f; li.key_intensity = 1.f;  li.fill = true;  li.fill_intensity = 0.5f;  li.rim = true;  li.rim_intensity = 0.7f;
+        li.shadow_softness = 1.f;
+        break;
+    case LightRig::Dramatic:
+        li.elevation_deg = 35.f; li.key_intensity = 1.15f; li.fill = false; li.rim = true;  li.rim_intensity = 1.f;
+        li.shadow_softness = 1.f;
+        break;
+    case LightRig::KeyOnly:
+        li.key_intensity = 1.1f; li.fill = false; li.rim = false;
+        break;
+    case LightRig::Sun:
+        li.elevation_deg = 50.f; li.key_intensity = 1.3f; li.fill = false; li.rim = false;
+        li.shadow_softness = 0.5f;
+        break;
+    }
+}
+
 // ------------------------------------------------------------------------------------------------
 // Equality
 // ------------------------------------------------------------------------------------------------
 
 bool Background::operator==(const Background &o) const
 {
-    return type == o.type && color1 == o.color1 && color2 == o.color2 && image == o.image && fit == o.fit;
+    return type == o.type && color1 == o.color1 && color2 == o.color2 && image == o.image && fit == o.fit && blur == o.blur;
 }
 
 bool Floor::operator==(const Floor &o) const
 {
     return type == o.type && color == o.color && shadow_strength == o.shadow_strength && grid_spacing == o.grid_spacing &&
-           hide_plate == o.hide_plate && hide_wipe_tower == o.hide_wipe_tower;
+           hide_plate == o.hide_plate && hide_wipe_tower == o.hide_wipe_tower && texture == o.texture && image == o.image &&
+           texture_scale == o.texture_scale && texture_size == o.texture_size && reflection == o.reflection &&
+           contact_shadow == o.contact_shadow;
 }
 
 bool Lighting::operator==(const Lighting &o) const
 {
     return world_fixed == o.world_fixed && azimuth_deg == o.azimuth_deg && elevation_deg == o.elevation_deg && shadows == o.shadows &&
-           shadow_intensity == o.shadow_intensity && ssao == o.ssao;
+           shadow_intensity == o.shadow_intensity && ssao == o.ssao && key_intensity == o.key_intensity &&
+           key_temperature == o.key_temperature && fill == o.fill && fill_intensity == o.fill_intensity && rim == o.rim &&
+           rim_intensity == o.rim_intensity && environment == o.environment && env_intensity == o.env_intensity &&
+           env_rotation_deg == o.env_rotation_deg && exposure == o.exposure && shadow_softness == o.shadow_softness;
 }
 
 bool CameraView::operator==(const CameraView &o) const
@@ -161,14 +219,39 @@ bool Watermark::operator==(const Watermark &o) const
 bool ExportSettings::operator==(const ExportSettings &o) const
 {
     return width == o.width && height == o.height && quality == o.quality && format == o.format && jpeg_quality == o.jpeg_quality &&
-           watermark == o.watermark;
+           watermark == o.watermark && use_as_cover == o.use_as_cover;
 }
 
 bool Scene::operator==(const Scene &o) const
 {
     return id == o.id && name == o.name && plate_index == o.plate_index && source == o.source && preset_base == o.preset_base &&
            background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && views == o.views &&
-           export_settings == o.export_settings;
+           export_settings == o.export_settings && materials == o.materials;
+}
+
+const Finish *Materials::override_for(int filament) const
+{
+    for (const MaterialOverride &m : overrides)
+        if (m.filament == filament)
+            return &m.finish;
+    return nullptr;
+}
+
+void Materials::set_override(int filament, const Finish *finish)
+{
+    overrides.erase(std::remove_if(overrides.begin(), overrides.end(), [filament](const MaterialOverride &m) { return m.filament == filament; }),
+                    overrides.end());
+    if (finish != nullptr && filament >= 1) {
+        overrides.push_back({ filament, *finish });
+        std::sort(overrides.begin(), overrides.end(), [](const MaterialOverride &a, const MaterialOverride &b) { return a.filament < b.filament; });
+    }
+}
+
+Finish Materials::finish_for(int filament, const std::string &preset_name, const std::string &filament_type) const
+{
+    if (const Finish *f = override_for(filament))
+        return *f;
+    return infer_finish(preset_name, filament_type);
 }
 
 std::vector<std::string> Scene::used_images() const
@@ -176,6 +259,8 @@ std::vector<std::string> Scene::used_images() const
     std::vector<std::string> out;
     if (background.type == BackgroundType::Image && !background.image.empty())
         out.push_back(background.image);
+    if (floor.type == FloorType::Image && !floor.image.empty())
+        out.push_back(floor.image);
     if (export_settings.watermark.enabled && !export_settings.watermark.logo.empty())
         out.push_back(export_settings.watermark.logo);
     return out;
@@ -438,6 +523,7 @@ json scene_to_json_object(const Scene &s)
     bg["color2"] = s.background.color2;
     bg["image"]  = s.background.image;
     bg["fit"]    = to_string(s.background.fit);
+    bg["blur"]   = s.background.blur;
     j["background"] = merged(raw, "background", bg);
 
     json fl;
@@ -447,6 +533,12 @@ json scene_to_json_object(const Scene &s)
     fl["grid_spacing"]    = s.floor.grid_spacing;
     fl["hide_plate"]      = s.floor.hide_plate;
     fl["hide_wipe_tower"] = s.floor.hide_wipe_tower;
+    fl["texture"]         = s.floor.texture;
+    fl["image"]           = s.floor.image;
+    fl["texture_scale"]   = s.floor.texture_scale;
+    fl["texture_size"]    = s.floor.texture_size;
+    fl["reflection"]      = s.floor.reflection;
+    fl["contact_shadow"]  = s.floor.contact_shadow;
     j["floor"] = merged(raw, "floor", fl);
 
     json li;
@@ -456,6 +548,17 @@ json scene_to_json_object(const Scene &s)
     li["shadows"]          = s.lighting.shadows;
     li["shadow_intensity"] = s.lighting.shadow_intensity;
     li["ssao"]             = s.lighting.ssao;
+    li["key_intensity"]    = s.lighting.key_intensity;
+    li["key_temperature"]  = s.lighting.key_temperature;
+    li["fill"]             = s.lighting.fill;
+    li["fill_intensity"]   = s.lighting.fill_intensity;
+    li["rim"]              = s.lighting.rim;
+    li["rim_intensity"]    = s.lighting.rim_intensity;
+    li["environment"]      = s.lighting.environment;
+    li["env_intensity"]    = s.lighting.env_intensity;
+    li["env_rotation"]     = s.lighting.env_rotation_deg;
+    li["exposure"]         = s.lighting.exposure;
+    li["shadow_softness"]  = s.lighting.shadow_softness;
     j["lighting"] = merged(raw, "lighting", li);
 
     if (s.camera.valid)
@@ -475,10 +578,19 @@ json scene_to_json_object(const Scene &s)
     ex["quality"]      = to_string(s.export_settings.quality);
     ex["format"]       = to_string(s.export_settings.format);
     ex["jpeg_quality"] = s.export_settings.jpeg_quality;
+    ex["use_as_cover"] = s.export_settings.use_as_cover;
     json raw_export = raw.is_object() && raw.contains("export") ? raw["export"] : json();
     ex["watermark"] = watermark_to_json(s.export_settings.watermark,
                                         raw_export.is_object() && raw_export.contains("watermark") ? raw_export["watermark"] : json());
     j["export"] = merged(raw, "export", ex);
+
+    json ma;
+    ma["layer_lines"] = to_string(s.materials.layer_lines);
+    json filaments = json::array();
+    for (const MaterialOverride &m : s.materials.overrides)
+        filaments.push_back({ { "slot", m.filament }, { "finish", to_string(m.finish) } });
+    ma["filaments"] = filaments;
+    j["materials"] = merged(raw, "materials", ma);
     return j;
 }
 
@@ -502,6 +614,7 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.background.color2 = normalize_hex_color(get_or<std::string>(bg, "color2", s.background.color2), s.background.color2);
     s.background.image  = get_or<std::string>(bg, "image", "");
     s.background.fit    = enum_or(bg, "fit", s.background.fit);
+    s.background.blur   = clamp_or(get_or<float>(bg, "blur", s.background.blur), 0.f, 1.f, 0.f);
 
     const json fl             = j.contains("floor") ? j["floor"] : json();
     s.floor.type              = enum_or(fl, "type", s.floor.type);
@@ -510,6 +623,12 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.floor.grid_spacing      = clamp_or(get_or<float>(fl, "grid_spacing", s.floor.grid_spacing), 1.f, 1000.f, 10.f);
     s.floor.hide_plate        = get_or<bool>(fl, "hide_plate", s.floor.hide_plate);
     s.floor.hide_wipe_tower   = get_or<bool>(fl, "hide_wipe_tower", s.floor.hide_wipe_tower);
+    s.floor.texture           = get_or<std::string>(fl, "texture", s.floor.texture);
+    s.floor.image             = get_or<std::string>(fl, "image", "");
+    s.floor.texture_scale     = clamp_or(get_or<float>(fl, "texture_scale", s.floor.texture_scale), 0.1f, 10.f, 1.f);
+    s.floor.texture_size      = clamp_or(get_or<float>(fl, "texture_size", s.floor.texture_size), 10.f, 5000.f, 300.f);
+    s.floor.reflection        = clamp_or(get_or<float>(fl, "reflection", s.floor.reflection), 0.f, 1.f, 0.f);
+    s.floor.contact_shadow    = clamp_or(get_or<float>(fl, "contact_shadow", s.floor.contact_shadow), 0.f, 1.f, 0.6f);
 
     const json li               = j.contains("lighting") ? j["lighting"] : json();
     s.lighting.world_fixed      = get_or<bool>(li, "world_fixed", s.lighting.world_fixed);
@@ -518,6 +637,17 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.lighting.shadows          = get_or<bool>(li, "shadows", s.lighting.shadows);
     s.lighting.shadow_intensity = clamp_or(get_or<float>(li, "shadow_intensity", s.lighting.shadow_intensity), 0.f, 1.f, 0.35f);
     s.lighting.ssao             = get_or<bool>(li, "ssao", s.lighting.ssao);
+    s.lighting.key_intensity    = clamp_or(get_or<float>(li, "key_intensity", s.lighting.key_intensity), 0.f, 3.f, 1.f);
+    s.lighting.key_temperature  = clamp_or(get_or<float>(li, "key_temperature", s.lighting.key_temperature), 2000.f, 10000.f, 5600.f);
+    s.lighting.fill             = get_or<bool>(li, "fill", s.lighting.fill);
+    s.lighting.fill_intensity   = clamp_or(get_or<float>(li, "fill_intensity", s.lighting.fill_intensity), 0.f, 3.f, 0.35f);
+    s.lighting.rim              = get_or<bool>(li, "rim", s.lighting.rim);
+    s.lighting.rim_intensity    = clamp_or(get_or<float>(li, "rim_intensity", s.lighting.rim_intensity), 0.f, 3.f, 0.45f);
+    s.lighting.environment      = get_or<std::string>(li, "environment", s.lighting.environment);
+    s.lighting.env_intensity    = clamp_or(get_or<float>(li, "env_intensity", s.lighting.env_intensity), 0.f, 3.f, 0.7f);
+    s.lighting.env_rotation_deg = clamp_or(get_or<float>(li, "env_rotation", s.lighting.env_rotation_deg), -360.f, 720.f, 0.f);
+    s.lighting.exposure         = clamp_or(get_or<float>(li, "exposure", s.lighting.exposure), -3.f, 3.f, 0.f);
+    s.lighting.shadow_softness  = clamp_or(get_or<float>(li, "shadow_softness", s.lighting.shadow_softness), 0.5f, 4.f, 1.f);
 
     if (j.contains("camera"))
         s.camera = camera_from_json(j["camera"]);
@@ -536,6 +666,17 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.export_settings.jpeg_quality = std::clamp(get_or<int>(ex, "jpeg_quality", s.export_settings.jpeg_quality), 10, 100);
     if (ex.is_object() && ex.contains("watermark"))
         s.export_settings.watermark = watermark_from_json(ex["watermark"]);
+    s.export_settings.use_as_cover = get_or<bool>(ex, "use_as_cover", false);   // D10: never on unless saved on
+
+    const json ma              = j.contains("materials") ? j["materials"] : json();
+    s.materials.layer_lines    = enum_or(ma, "layer_lines", s.materials.layer_lines);
+    if (ma.is_object() && ma.contains("filaments") && ma["filaments"].is_array())
+        for (const json &f : ma["filaments"]) {
+            const int slot = get_or<int>(f, "slot", 0);
+            Finish    finish;
+            if (slot >= 1 && slot <= 1024 && from_string(get_or<std::string>(f, "finish", ""), finish))
+                s.materials.set_override(slot, &finish);
+        }
     return true;
 }
 
@@ -644,7 +785,10 @@ bool parse_image_archive_path(const std::string &path, std::string &sha, std::st
 // Presets
 // ------------------------------------------------------------------------------------------------
 
-std::vector<PresetId> builtin_presets() { return { PresetId::StudioWhite, PresetId::DarkGradient, PresetId::BuildPlate }; }
+std::vector<PresetId> builtin_presets()
+{
+    return { PresetId::StudioWhite, PresetId::DeskWood, PresetId::DarkGradient, PresetId::Outdoor, PresetId::BuildPlate };
+}
 
 void apply_preset(Scene &scene, PresetId preset)
 {
@@ -652,34 +796,79 @@ void apply_preset(Scene &scene, PresetId preset)
     Background &bg = scene.background;
     Floor      &fl = scene.floor;
     Lighting   &li = scene.lighting;
-    bg.image.clear();
-    bg.fit = ImageFit::Fill;
+    // The look only: the floor picture, the materials, the camera and the export stay the user's.
+    const std::string floor_image = fl.image;
+    bg = Background();
+    fl = Floor();
+    li = Lighting();
+    fl.image = floor_image;
     switch (preset) {
     default:
     case PresetId::StudioWhite:
+        // Product shot: white sweep, soft key + fill + rim, studio softboxes in the reflections.
         bg.type   = BackgroundType::RadialGradient;
         bg.color1 = "#FFFFFF";
         bg.color2 = "#D9DCE1";
         fl.type   = FloorType::ShadowCatcher;
         fl.color  = "#F2F2F2";
         fl.shadow_strength = 0.45f;
-        fl.hide_plate      = true;
-        fl.hide_wipe_tower = true;
-        li                 = Lighting();
+        break;
+    case PresetId::DeskWood:
+        // Maker's desk: an oak top, a warm window key, the workshop around it softly out of focus.
+        bg.type   = BackgroundType::Environment;
+        bg.blur   = 0.7f;
+        bg.color1 = "#E8DCCB";
+        bg.color2 = "#8E7A63";
+        fl.type   = FloorType::Texture;
+        fl.texture = "oak";
+        fl.shadow_strength = 0.5f;
+        fl.contact_shadow  = 0.7f;
+        li.azimuth_deg     = 200.f;
+        li.elevation_deg   = 40.f;
+        li.key_temperature = 4000.f;
+        li.key_intensity   = 1.1f;
+        li.fill_intensity  = 0.25f;
+        li.rim_intensity   = 0.3f;
+        li.environment     = "workshop";
+        li.env_intensity   = 0.8f;
+        li.shadow_softness = 1.5f;
         break;
     case PresetId::DarkGradient:
+        // Dramatic: a single key and a strong rim on charcoal, no fill.
         bg.type   = BackgroundType::VerticalGradient;
         bg.color1 = "#3A3D42";   // top
         bg.color2 = "#0B0C0E";   // bottom
         fl.type   = FloorType::ShadowCatcher;
         fl.color  = "#1A1B1E";
         fl.shadow_strength = 0.6f;
-        fl.hide_plate      = true;
-        fl.hide_wipe_tower = true;
-        li                 = Lighting();
-        li.azimuth_deg     = 200.f;
-        li.elevation_deg   = 40.f;
+        li.azimuth_deg      = 200.f;
+        li.elevation_deg    = 40.f;
         li.shadow_intensity = 0.45f;
+        li.key_intensity    = 1.15f;
+        li.fill             = false;
+        li.rim_intensity    = 1.f;
+        li.environment      = "dark_studio";
+        li.env_intensity    = 0.5f;
+        break;
+    case PresetId::Outdoor:
+        // Daylight: the sky behind, concrete under, a hard sun and the sky as the fill.
+        bg.type   = BackgroundType::Environment;
+        bg.blur   = 0.35f;
+        bg.color1 = "#BFD6EE";
+        bg.color2 = "#E9EEF2";
+        fl.type   = FloorType::Texture;
+        fl.texture = "concrete";
+        fl.shadow_strength = 0.55f;
+        li.azimuth_deg      = 135.f;
+        li.elevation_deg    = 50.f;
+        li.key_temperature  = 5800.f;
+        li.key_intensity    = 1.3f;
+        li.shadow_intensity = 0.45f;
+        li.shadow_softness  = 0.5f;
+        li.fill             = false;
+        li.rim              = false;
+        li.environment      = "outdoor";
+        li.env_intensity    = 1.f;
         break;
     case PresetId::BuildPlate:
         // "As on the printer": the real plate, the editing view's light.
@@ -689,7 +878,7 @@ void apply_preset(Scene &scene, PresetId preset)
         fl.type   = FloorType::None;
         fl.hide_plate      = false;
         fl.hide_wipe_tower = false;
-        li                 = Lighting();
+        li.env_intensity   = 0.5f;
         break;
     }
 }

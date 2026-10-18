@@ -296,7 +296,7 @@ TEST_CASE("Showcase: presets change the look and keep the camera and export", "[
     CHECK(s.export_settings.width == 1234);
     apply_preset(s, PresetId::BuildPlate);
     CHECK_FALSE(s.floor.hide_plate);
-    CHECK(builtin_presets().size() == 3);
+    CHECK(builtin_presets().size() == 5);   // S2 added Desk wood and Outdoor
     for (PresetId id : builtin_presets()) {
         PresetId back;
         REQUIRE(from_string(to_string(id), back));
@@ -461,6 +461,52 @@ TEST_CASE("Showcase: scenes round-trip through the project 3MF and stay out of o
         REQUIRE(load(path, back));
         CHECK(back.showcase.read_only());
         CHECK(back.showcase.images.size() == 1);   // kept, though no scene names it
+    }
+
+    SECTION("S2: lights, materials, a floor picture and the cover flag survive a project save") {
+        Model rich;
+        one_cube(rich);
+        rich.showcase = rich_project();
+        Scene &sc = rich.showcase.scenes[0];
+        sc.floor.type          = FloorType::Image;
+        sc.floor.image         = rich.showcase.add_image(fake_image(7), "jpg");
+        sc.floor.reflection    = 0.4f;
+        sc.lighting.environment = "outdoor";
+        sc.lighting.rim         = false;
+        sc.lighting.exposure    = 0.5f;
+        sc.materials.layer_lines = LayerLines::Real;
+        const Finish silk = Finish::Silk;
+        sc.materials.set_override(1, &silk);
+        sc.export_settings.format       = ImageFormat::WebP;
+        sc.export_settings.use_as_cover = true;
+        const fs::path path = dir / "s2.3mf";
+        REQUIRE(store(path, rich, cfg, PROJECT));
+        CHECK(json::parse(zip_entry(path.string(), "Metadata/showcase/scenes.json"))["schema"] == SCHEMA_VERSION);
+        Model back;
+        REQUIRE(load(path, back));
+        REQUIRE(back.showcase.scenes.size() == 2);
+        CHECK(back.showcase.scenes[0] == sc);
+        const ImageBlob *floor_image = back.showcase.find_image(sc.floor.image);
+        REQUIRE(floor_image != nullptr);
+        CHECK(floor_image->bytes == fake_image(7));
+    }
+
+    SECTION("an S1 project (schema 1) opens and saves as schema 2") {
+        Model old;
+        one_cube(old);
+        const std::string s1 = R"({"schema":1,"active":"plate1","scenes":[{"id":"plate1","plate_index":0,"preset_base":"studio_white",
+            "floor":{"type":"solid","color":"#ABCDEF"},"lighting":{"azimuth":100,"elevation":30}}]})";
+        REQUIRE(scenes_from_json(s1, old.showcase));
+        const fs::path path = dir / "s1.3mf";
+        REQUIRE(store(path, old, cfg, PROJECT));
+        Model back;
+        REQUIRE(load(path, back));
+        CHECK_FALSE(back.showcase.read_only());
+        REQUIRE(back.showcase.scenes.size() == 1);
+        CHECK(back.showcase.scenes[0].floor.color == "#ABCDEF");
+        CHECK(back.showcase.scenes[0].lighting.azimuth_deg == 100.f);
+        CHECK(back.showcase.scenes[0].materials == Materials());
+        CHECK(json::parse(zip_entry(path.string(), "Metadata/showcase/scenes.json"))["schema"] == 2);
     }
 
     SECTION("a copied model carries its scenes") {
