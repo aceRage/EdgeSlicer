@@ -193,8 +193,21 @@ Parity parity(const std::vector<stabilizers::LayerOutline> &outlines, const stab
     return out;
 }
 
+// The 3MF reader unpacks a project into a backup directory rooted at temporary_dir(). The application
+// sets that at startup; a test that loads or stores a project has to as well, or the reader writes to
+// "/snapmaker_orca_model" (read-only on macOS) and depends on whichever test ran before it.
+boost::filesystem::path use_test_temporary_dir()
+{
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    return tmp_root;
+}
+
+// Loads the owner's project. The caller checks the model has objects.
 bool load_project(Bench &b, DynamicPrintConfig &config)
 {
+    use_test_temporary_dir();
     const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
     ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
     PlateDataPtrs             plate_data;
@@ -204,13 +217,13 @@ bool load_project(Bench &b, DynamicPrintConfig &config)
     const bool ok = load_bbs_3mf(path.c_str(), &config, &ctxt, &b.model, &plate_data, &project_presets, &is_bbl,
                                  &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
     release_PlateData_list(plate_data);
-    return ok && ! b.model.objects.empty();
+    return ok;
 }
 
 bool slice_project(Bench &b)
 {
     DynamicPrintConfig config;
-    if (! load_project(b, config))
+    if (! load_project(b, config) || b.model.objects.empty())
         return false;
     config.normalize_fdm();
     slice(b, config);
@@ -220,9 +233,7 @@ bool slice_project(Bench &b)
 // Stores `model` as a project and loads it back.
 bool round_trip(Model &model, Model &loaded, const char *name)
 {
-    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
-    boost::filesystem::create_directories(tmp_root);
-    Slic3r::set_temporary_dir(tmp_root.string());
+    const boost::filesystem::path tmp_root = use_test_temporary_dir();
     const std::string  file   = (tmp_root / name).string();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
 
@@ -293,6 +304,7 @@ TEST_CASE("Side stabilizers saved as a checkbox load as Auto or Off", "[Stabiliz
     Bench              b;
     DynamicPrintConfig config;
     REQUIRE(load_project(b, config));
+    REQUIRE_FALSE(b.model.objects.empty());
     CHECK(mode_of(*b.model.objects.front()) == smAuto);
     CHECK(config.opt_enum<StabilizerMode>("stabilizer_supports") == smOff);
 }
