@@ -118,7 +118,7 @@ std::string no_filament_note(const std::string& host_type_key)
     if (host_type_key == "elegoolink")
         // A Centauri Carbon 1 with a CANVAS reports its trays (ElegooCanvas.hpp); anything else on
         // Elegoo Link - or a CC1 without a CANVAS, or one that did not answer - has nothing to map.
-        return "No CANVAS slot data, so there is nothing to map. The plate is sent exactly as it was sliced.";
+        return "Elegoo Link reports no CANVAS slot data, so there is nothing to map. The plate is sent exactly as it was sliced.";
     if (PrusaLinkStatus::speaks_prusalink(host_type_key))
         // Measured against the API, not guessed: PrusaLink's /api/v1/status reports the printer's
         // state and its two heaters, and /api/v1/job the file it is on. Neither says what filament
