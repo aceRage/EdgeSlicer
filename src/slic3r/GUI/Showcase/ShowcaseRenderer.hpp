@@ -29,7 +29,7 @@
 namespace Slic3r {
 namespace GUI {
 
-class Camera;
+struct Camera; // a struct in Camera.hpp: MSVC mangles class and struct differently (LNK2001)
 class GLCanvas3D;
 class GLModel;
 
