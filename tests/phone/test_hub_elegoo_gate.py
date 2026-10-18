@@ -155,7 +155,8 @@ check(heater(p, "bed").get("settable") is False, "bed read-only")
 check([f.get("id") for f in (p.get("controls") or {}).get("fans", [])] == ["part", "aux", "chamber"], "three fans")
 check(fan(p, "part").get("percent") == 100, "part fan 100%")
 check(((p.get("controls") or {}).get("light") or {}).get("on") is True, "light on")
-check((p.get("camera_hint") or {}).get("available") is True, "camera hint: a camera is there")
+check((p.get("camera_hint") or {}).get("available") is True and (p.get("camera_hint") or {}).get("rkind") == "elegoo",
+      "camera hint: a camera is there, played as the Stream tab's elegoo tile")
 check((p.get("sdcp") or {}).get("firmware") == "V1.4.49", "firmware from Cmd 1")
 
 # GET /api/printers through the hub counts as somebody watching: the CANVAS is read.

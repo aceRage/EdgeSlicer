@@ -500,17 +500,20 @@ void fill_row(const Snapshot& snap, const std::string& host, json& row)
         const json ams = canvas_ams_json(snap.canvas);
         if (!ams.empty()) row["ams"] = ams;
     }
-    // Where the app finds the camera: the Stream tab's relay joins a printer by `ip` (already on the
-    // row); this says whether there is a camera at all and how many viewers it takes.
+    // Where the app finds the camera. This backend opens no video connection of its own: the
+    // camera is the Stream tab's CC1 tile (EdgeSlicer #599, rkind "elegoo"), played through the hub's
+    // one relay connection at /r/<token>/elegoo?id=<tile id> (and /elegoo/status for why not). The
+    // hub's /summary joins that tile to this row by `ip` and names it in `camera`; this says whether
+    // the printer has a camera at all and how many viewers it takes.
     json cam;
-    cam["vendor"]    = "elegoo";
-    cam["available"] = snap.attrs.camera_status == 1 ||
+    cam["vendor"]       = "elegoo";
+    cam["rkind"]        = "elegoo";
+    cam["route"]        = "/elegoo?id=";
+    cam["status_route"] = "/elegoo/status?id=";
+    cam["available"]    = snap.attrs.camera_status == 1 ||
                        std::find(snap.attrs.capabilities.begin(), snap.attrs.capabilities.end(), "VIDEO_STREAM") != snap.attrs.capabilities.end();
     if (snap.attrs.max_video_streams > 0) cam["max_streams"] = snap.attrs.max_video_streams;
-    if (!host.empty()) {
-        cam["relay_path"]  = "/elegoo?ip=" + host;
-        cam["status_path"] = "/elegoo/status?ip=" + host;
-    }
+    if (!host.empty()) cam["ip"] = host;
     row["camera_hint"] = cam;
     json d;
     d["protocol"] = "sdcp";

@@ -309,7 +309,9 @@ TEST_CASE("SDCP row: a CC1 mid-print fills the row a Bambu printer does", "[Eleg
 
     CHECK(row["camera_hint"]["available"] == true);
     CHECK(row["camera_hint"]["max_streams"] == 4);
-    CHECK(row["camera_hint"]["relay_path"] == "/elegoo?ip=printer.local");
+    CHECK(row["camera_hint"]["rkind"] == "elegoo");
+    CHECK(row["camera_hint"]["route"] == "/elegoo?id=");
+    CHECK(row["camera_hint"]["ip"] == "printer.local");
     CHECK(row["sdcp"]["firmware"] == "V1.4.49");
     CHECK(row["sdcp"]["canvas_attached"] == true);
     CHECK(row["sdcp_connected"] == true);
@@ -326,7 +328,7 @@ TEST_CASE("SDCP row: paused, preheating, finished and a print error", "[ElegooSd
     CHECK(row["status"] == "paused");
     CHECK(row["can_resume"] == true);
     CHECK(row["can_pause"] == false);
-    CHECK_FALSE(row.contains("camera_hint") && row["camera_hint"].contains("relay_path"));
+    CHECK_FALSE(row["camera_hint"].contains("ip")); // no host given
 
     snap.status.print_status = Sdcp::PRINT_PREHEATING;
     row = json::object();
