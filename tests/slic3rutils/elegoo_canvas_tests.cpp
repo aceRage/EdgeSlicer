@@ -637,19 +637,19 @@ SCENARIO("The owner's CC1 capture: untagged spools and the reply shape of firmwa
     REQUIRE(canvas_parse_payload(frame, info, error));
     REQUIRE(info.trays.size() == 4);
 
-    THEN("the placeholder brand and the no-tag code are no brand and no code")
+    THEN("the placeholder brand is Generic and the no-tag code is no code")
     {
         for (const CanvasTray& t : info.trays) {
             CHECK(t.has_filament);
-            CHECK(t.brand.empty());
+            CHECK(t.brand == "Generic");
             CHECK(t.filament_code.empty());
             CHECK(canvas_tray_vendor(t) == "Generic");
         }
     }
-    THEN("the sync name is just the filament name, never the dashes")
+    THEN("the sync name is Generic plus the filament name, never the dashes")
     {
-        CHECK(canvas_tray_name(info.trays[0]) == "PLA PRO");
-        CHECK(canvas_tray_name(info.trays[1]) == "PLA");
+        CHECK(canvas_tray_name(info.trays[0]) == "Generic PLA PRO");
+        CHECK(canvas_tray_name(info.trays[1]) == "Generic PLA");
         for (const CanvasTray& t : info.trays)
             CHECK(canvas_tray_name(t).find("\xE2\x80\x94") == std::string::npos);
     }
@@ -667,15 +667,23 @@ SCENARIO("The owner's CC1 capture: untagged spools and the reply shape of firmwa
     }
     THEN("the brand and code cleaners")
     {
-        CHECK(canvas_clean_brand(dashes).empty());
-        CHECK(canvas_clean_brand(" - - ").empty());
-        CHECK(canvas_clean_brand("\xE2\x80\x93\xE2\x80\x93").empty()); // en dashes
+        CHECK(canvas_clean_brand(dashes) == "Generic");
+        CHECK(canvas_clean_brand("---") == "Generic");
+        CHECK(canvas_clean_brand(" - - ") == "Generic");
+        CHECK(canvas_clean_brand("\xE2\x80\x93\xE2\x80\x93") == "Generic"); // en dashes
+        // An empty brand stays no brand: the sync name is the filament's own.
         CHECK(canvas_clean_brand("").empty());
+        CHECK(canvas_clean_brand("   ").empty());
         CHECK(canvas_clean_brand(" ELEGOO ") == "ELEGOO");
         CHECK(canvas_clean_brand("3D-Fuel") == "3D-Fuel");
         CHECK(canvas_clean_code("0x00000").empty());
         CHECK(canvas_clean_code("0X0").empty());
         CHECK(canvas_clean_code("").empty());
         CHECK(canvas_clean_code("0x1A2B3") == "0x1A2B3");
+    }
+    THEN("an untagged spool's preferred preset is the CC1's own Generic one of its family")
+    {
+        CHECK(canvas_generic_preset_name(info.trays[0].tray_type) == "Generic PLA @ECC");
+        CHECK(canvas_generic_preset_name(" PETG ") == "Generic PETG @ECC");
     }
 }
