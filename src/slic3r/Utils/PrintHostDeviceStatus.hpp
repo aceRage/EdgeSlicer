@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "PrintHostDevices.hpp"
+#include "ElegooCanvas.hpp"
 
 // Asking one print-host device what it is doing and what is loaded in it.
 //
@@ -45,6 +46,13 @@ struct Slot
     std::string color;          // "#RRGGBB", "" = the printer did not say
     bool        loaded { false };
     double      nozzle { 0.0 };
+    // A CANVAS tray (Elegoo Centauri Carbon 1): the raw pair the start-print slot_map names, -1 for
+    // every other kind of slot. `index` stays the flat 0-based number shown and stored elsewhere.
+    int         unit { -1 };
+    int         tray { -1 };
+    std::string name;           // what the remembered mapping matches it by ("ELEGOO PLA Silk")
+    int         min_temp { 0 }; // the tray's nozzle range, 0 = unknown
+    int         max_temp { 0 };
 
     // Something to put in a dropdown.
     std::string label() const;
@@ -61,6 +69,8 @@ struct Status
     // The printer named the materials, not just the tools. Only then is a mapping table worth
     // showing: a bare tool list with nothing in it tells a person nothing they did not know.
     bool              slots_have_filaments { false };
+    // The slots are CANVAS trays read over SDCP (Cmd 324), so the start command can carry a slot_map.
+    bool              canvas { false };
 };
 
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
@@ -70,6 +80,9 @@ Status probe(const Device& d, int timeout_s = 3);
 // into slots and a state. Exposed so the parsing is exercised by the Catch2 suite instead of
 // only by a printer on somebody's desk. `status_json` is the JSON text of that object.
 Status parse_moonraker_status(const std::string& status_json, const std::string& host_type_key);
+
+// The half of the Elegoo probe that has no network in it: a CANVAS query result as slots.
+Status status_from_canvas(const CanvasQueryResult& result);
 
 // What can be said before asking: false for every host type this fork has no status client for.
 bool   can_probe(const std::string& host_type_key);

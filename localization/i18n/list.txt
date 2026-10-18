@@ -197,3 +197,4 @@ src/slic3r/GUI/Gizmos/GLGizmoBrimEars.cpp
 src/slic3r/GUI/MixedFilamentBatchDialog.cpp
 src/slic3r/GUI/MixedColorMatchHelpers.cpp
 src/slic3r/GUI/ElegooCanvasUI.cpp
+src/slic3r/Utils/ElegooCanvasMapping.cpp

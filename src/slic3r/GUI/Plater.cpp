@@ -24368,6 +24368,7 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
     const DynamicPrintConfig   full    = bundle->full_config();
     const ConfigOptionStrings* colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
     const ConfigOptionStrings* types   = full.option<ConfigOptionStrings>("filament_type");
+    const ConfigOptionInts*    temps   = full.option<ConfigOptionInts>("nozzle_temperature");
     std::map<size_t, double>   volumes;
     if (plate && plate->is_slice_result_valid() && plate->get_slice_result())
         for (const auto& kv : plate->get_slice_result()->print_statistics.total_volumes_per_extruder)
@@ -24377,6 +24378,12 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
         f.index  = (int) i;
         f.colour = (colours && i < colours->values.size()) ? colours->values[i] : std::string();
         f.type   = (types && i < types->values.size()) ? types->values[i] : std::string();
+        f.nozzle_temp = (temps && i < temps->values.size()) ? temps->values[i] : 0;
+        // The remembered CANVAS mapping keys on the preset as people know it: its alias, else its name.
+        if (const Preset* fp = bundle->filaments.find_preset(bundle->filament_presets[i]))
+            f.alias = fp->alias.empty() ? fp->name : fp->alias;
+        else
+            f.alias = bundle->filament_presets[i];
         auto it  = volumes.find(i);
         f.used   = it != volumes.end() && it->second > 0;
         out.push_back(std::move(f));
@@ -24756,6 +24763,13 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         // An Elegoo printer gets the Elegoo dialog (an ElegooLink preset reaches here with the same
         // device list, plate filaments and unload offer as the plain dialog below). Upstream Orca
         // selects it by host_type too.
+        // An Elegoo Link preset with no device list still has its own address: the dialog needs one
+        // device to read the CANVAS from. It has no id, so nothing is rebuilt or remembered from it.
+        if (elegoolink_host && ph_devices.empty()) {
+            PrintHostDevices::Device own = PrintHostDevices::from_config(*physical_printer_config);
+            if (!own.address.empty())
+                ph_devices.push_back(own);
+        }
         if (elegoolink_host)
             pDlg = std::make_unique<ElegooPrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
                                                               storage_paths, storage_names,
