@@ -1165,6 +1165,13 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
             shader->set_uniform("draw_field_origin", m_draw_field_origin);
             shader->set_uniform("draw_field_size", m_draw_field_size);
         }
+        // Orca #14702: the shadow map, bound again for every volume because start_using() above parks
+        // a fallback texture on its unit (see GLShaderProgram::set_sampler_units).
+        if (m_shadow_map_tex != 0) {
+            glsafe(::glActiveTexture(GL_TEXTURE5));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint) m_shadow_map_tex));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+        }
         // BOOST_LOG_TRIVIAL(info) << boost::format("set uniform_color to {%1%, %2%, %3%, %4%}, with_outline=%5%, selected %6%")
         //     %volume.first->render_color[0]%volume.first->render_color[1]%volume.first->render_color[2]%volume.first->render_color[3]
         //     %with_outline%volume.first->selected;

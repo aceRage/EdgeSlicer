@@ -1950,7 +1950,8 @@ GLCanvas3D::~GLCanvas3D()
         if (m_frame_profiler)
             m_frame_profiler->reset();
     }
-    if ((m_fxaa_texture_id != 0 || m_ssao_color_texture_id != 0 || m_ssao_depth_texture_id != 0 || m_plate_shadow_mask.is_initialized()) &&
+    if ((m_fxaa_texture_id != 0 || m_ssao_color_texture_id != 0 || m_ssao_depth_texture_id != 0 || m_plate_shadow_mask.is_initialized() ||
+         m_shadow_map_texture_id != 0 || m_shadow_map_fbo != 0) &&
         m_canvas != nullptr && _set_current()) {
         if (m_fxaa_texture_id != 0) {
             glsafe(::glDeleteTextures(1, &m_fxaa_texture_id));
@@ -1966,6 +1967,15 @@ GLCanvas3D::~GLCanvas3D()
             m_ssao_depth_texture_id = 0;
         }
         m_plate_shadow_mask.reset();
+        // Orca #14702
+        if (m_shadow_map_texture_id != 0) {
+            glsafe(::glDeleteTextures(1, &m_shadow_map_texture_id));
+            m_shadow_map_texture_id = 0;
+        }
+        if (m_shadow_map_fbo != 0) {
+            glsafe(::glDeleteFramebuffers(1, &m_shadow_map_fbo));
+            m_shadow_map_fbo = 0;
+        }
     }
     m_plate_shadow_mask_key.clear();
 
@@ -3772,6 +3782,9 @@ void GLCanvas3D::render(bool only_init)
 
     // draw scene
     glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    // Orca #14702: invalidate the shadow map each frame; only the View3D path below rebuilds it, so the
+    // Preview / Assemble canvases never sample a stale map with an outdated light matrix.
+    m_shadow_map_valid = false;
     _render_background();
 
     //BBS add partplater rendering logic
@@ -3824,7 +3837,9 @@ void GLCanvas3D::render(bool only_init)
         if (plate_first) {
             {
                 FrameProfiler::Scope scope(*m_frame_profiler, "shadows");
-                _render_cast_shadows_on_plate(camera.get_view_matrix(), camera.get_projection_matrix());
+                // Orca #14702: depth pass for object-on-object and self shadows (sampled by the object
+                // shaders below), and the shadow on the plate.
+                _render_shadows(camera.get_view_matrix(), camera.get_projection_matrix());
             }
             render_opaque();
         }
@@ -9840,6 +9855,11 @@ void GLCanvas3D::_rectangular_selection_picking_pass()
 
 // Orca #13704: realistic view --------------------------------------------------------------------
 
+// Orca #14702 uses unit 4 for the shadow map; here 3 and 4 hold the cut gizmo's curved sheet and
+// drawn field, and two sampler types on one unit invalidate the program on macOS. Parked on 5 in
+// GLShadersManager::init for gouraud and phong.
+static constexpr int SHADOW_MAP_TEXTURE_UNIT = 5;
+
 bool GLCanvas3D::_is_realistic_view_enabled() const
 {
     const AppConfig* cfg = wxGetApp().app_config;
@@ -9942,64 +9962,189 @@ void GLCanvas3D::_render_ssao_pass(unsigned int width, unsigned int height)
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 }
 
-// Shadows of the objects cast onto the plate, along a light fixed to the camera: the plate is
-// marked in the stencil buffer, the volumes are flattened onto z = 0 into it, and the marked
-// pixels are darkened.
-void GLCanvas3D::_render_cast_shadows_on_plate(const Transform3d& view_matrix, const Transform3d& projection_matrix)
+// Orca #14702: builds the light-space depth shadow map (object-on-object and self shadows, sampled
+// by gouraud and phong) and casts it onto the build plate. Realistic view with shadows only.
+void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform3d& projection_matrix)
 {
     if (!_is_realistic_shadows_enabled())
         return;
 
     GLShaderProgram* shader = wxGetApp().get_shader("flat");
-    if (shader == nullptr || !m_background.is_initialized())
+    if (shader == nullptr)
         return;
 
-    // Drive shadow direction from current view angle: define light in eye-space,
-    // then transform it to world-space with inverse view rotation.
-    const Vec3d light_dir_eye = Vec3d(-0.4574957, 0.4574957, 0.7624929).normalized();
-    const Matrix3d view_rot = view_matrix.matrix().block<3, 3>(0, 0);
-    const Vec3d light_dir_to_light = (view_rot.transpose() * light_dir_eye).normalized();
-    const Vec3d ray_dir = -light_dir_to_light;  // Direction of shadow projection
+    if (OpenGLManager::get_framebuffers_type() == OpenGLManager::EFramebufferType::Arb) {
 
-    if (std::abs(ray_dir.z()) < 1e-6)
+        // Light direction (same as used in shading and plate shading)
+        const Vec3d light_dir_eye = Vec3d(-0.4574957, 0.4574957, 0.7624929).normalized();
+        const Matrix3d view_rot = view_matrix.matrix().block<3, 3>(0, 0);
+        const Vec3d dir_to_light = (view_rot.transpose() * light_dir_eye).normalized();
+
+        // Bounding box of the printable objects (the shadow casters).
+        BoundingBoxf3 obj_bb;
+        for (const GLVolume* volume : m_volumes.volumes) {
+            if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
+                continue;
+            obj_bb.merge(volume->transformed_bounding_box());
+        }
+        if (!obj_bb.defined)
+            return; // no objects to cast shadows
+
+        // Orthographic light-space basis (z points toward the light).
+        const Vec3d up     = (std::abs(dir_to_light.z()) > 0.99) ? Vec3d::UnitY() : Vec3d::UnitZ();
+        const Vec3d z_axis = dir_to_light;
+        const Vec3d x_axis = up.cross(z_axis).normalized();
+        const Vec3d y_axis = z_axis.cross(x_axis).normalized();
+
+        // Fit the frustum to the object AABB *and* the object's shadow projected onto the plate
+        // (clamped to the plate footprint). This keeps the map tight/high-res for short shadows
+        // while still covering long shadows at grazing light angles.
+        const Vec3d ray_dir = -dir_to_light; // direction the shadow travels
+        const BoundingBoxf3 plate_bb = m_bed.build_volume().valid() ? m_bed.build_volume().bounding_volume() : obj_bb;
+
+        Vec3d lmin(DBL_MAX, DBL_MAX, DBL_MAX);
+        Vec3d lmax(-DBL_MAX, -DBL_MAX, -DBL_MAX);
+        auto enclose = [&](const Vec3d& p) {
+            const Vec3d lp(x_axis.dot(p), y_axis.dot(p), z_axis.dot(p));
+            lmin = lmin.cwiseMin(lp);
+            lmax = lmax.cwiseMax(lp);
+        };
+        for (int i = 0; i < 8; ++i) {
+            const Vec3d corner((i & 1) ? obj_bb.max.x() : obj_bb.min.x(),
+                               (i & 2) ? obj_bb.max.y() : obj_bb.min.y(),
+                               (i & 4) ? obj_bb.max.z() : obj_bb.min.z());
+            enclose(corner);
+            // Where this corner's shadow lands on z = 0, clamped to the plate so a grazing angle
+            // (t -> infinity) stays bounded.
+            if (ray_dir.z() < -1e-6) {
+                const double t = -corner.z() / ray_dir.z();
+                Vec3d s = corner + t * ray_dir;
+                s.x() = std::min(std::max(s.x(), plate_bb.min.x()), plate_bb.max.x());
+                s.y() = std::min(std::max(s.y(), plate_bb.min.y()), plate_bb.max.y());
+                s.z() = 0.0;
+                enclose(s);
+            }
+        }
+
+        // Light "camera" placed just past the nearest enclosed point, looking toward the scene.
+        const double range  = lmax.z() - lmin.z();
+        const double margin = std::max(1.0, 0.05 * range);
+        const double cx     = 0.5 * (lmin.x() + lmax.x());
+        const double cy     = 0.5 * (lmin.y() + lmax.y());
+        const Vec3d  eye    = x_axis * cx + y_axis * cy + z_axis * (lmax.z() + margin);
+
+        Matrix4d light_view = Matrix4d::Identity();
+        light_view.block<1, 3>(0, 0) = x_axis.transpose();
+        light_view.block<1, 3>(1, 0) = y_axis.transpose();
+        light_view.block<1, 3>(2, 0) = z_axis.transpose();
+        light_view(0, 3) = -x_axis.dot(eye);
+        light_view(1, 3) = -y_axis.dot(eye);
+        light_view(2, 3) = -z_axis.dot(eye);
+
+        // Ortho fit to the light-space extent (symmetric in X/Y around cx,cy; +2% edge padding).
+        const double halfx  = std::max(0.5 * (lmax.x() - lmin.x()), 1.0) * 1.02;
+        const double halfy  = std::max(0.5 * (lmax.y() - lmin.y()), 1.0) * 1.02;
+        const double near_z = margin * 0.5;
+        const double far_z  = range + margin * 1.5;
+        Matrix4d light_proj = Matrix4d::Identity();
+        light_proj(0, 0) = 1.0 / halfx;
+        light_proj(1, 1) = 1.0 / halfy;
+        light_proj(2, 2) = -2.0 / (far_z - near_z);
+        light_proj(2, 3) = -(far_z + near_z) / (far_z - near_z);
+
+        m_shadow_light_vp = Transform3d(light_proj * light_view);
+
+        // Create / resize the depth texture and FBO
+        const unsigned int size = 2048;
+        if (m_shadow_map_texture_id == 0) {
+            glsafe(::glGenTextures(1, &m_shadow_map_texture_id));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_map_texture_id));
+            glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+            glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+            glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER));
+            glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER));
+            const float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+            glsafe(::glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border));
+            m_shadow_map_size = 0;
+        }
+        if (m_shadow_map_size != size) {
+            glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_map_texture_id));
+            glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size, size, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr));
+            m_shadow_map_size = size;
+        }
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        if (m_shadow_map_fbo == 0)
+            glsafe(::glGenFramebuffers(1, &m_shadow_map_fbo));
+
+        // Save OpenGL state that we will modify
+        GLint prev_viewport[4] = { 0, 0, 0, 0 };
+        glsafe(::glGetIntegerv(GL_VIEWPORT, prev_viewport));
+        GLint prev_fbo = 0;
+        glsafe(::glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo));
+        GLboolean prev_color_mask[4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+        glsafe(::glGetBooleanv(GL_COLOR_WRITEMASK, prev_color_mask));
+        const GLboolean prev_cull = ::glIsEnabled(GL_CULL_FACE);
+        GLint prev_depth_func = GL_LESS;
+        glsafe(::glGetIntegerv(GL_DEPTH_FUNC, &prev_depth_func));
+        GLboolean prev_depth_mask = GL_TRUE;
+        glsafe(::glGetBooleanv(GL_DEPTH_WRITEMASK, &prev_depth_mask));
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map_fbo));
+        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_shadow_map_texture_id, 0));
+        glsafe(::glDrawBuffer(GL_NONE));
+        glsafe(::glReadBuffer(GL_NONE));
+
+        if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo)));
+            m_shadow_map_valid = false;
+        } else {
+            glsafe(::glViewport(0, 0, size, size));
+            glsafe(::glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE));
+            glsafe(::glEnable(GL_DEPTH_TEST));
+            glsafe(::glDepthMask(GL_TRUE));
+            glsafe(::glDepthFunc(GL_LESS));
+            glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
+            glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
+            glsafe(::glPolygonOffset(4.0f, 4.0f));
+            glsafe(::glDisable(GL_CULL_FACE));
+
+            shader->start_using();
+            shader->set_uniform("projection_matrix", Transform3d(light_proj));
+            for (GLVolume* volume : m_volumes.volumes) {
+                if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
+                    continue;
+                shader->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
+                volume->model.render();
+            }
+            shader->stop_using();
+
+            // Restore state
+            glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+            glsafe(::glColorMask(prev_color_mask[0], prev_color_mask[1], prev_color_mask[2], prev_color_mask[3]));
+            if (prev_cull)
+                glsafe(::glEnable(GL_CULL_FACE));
+            else
+                glsafe(::glDisable(GL_CULL_FACE));
+            glsafe(::glDepthFunc(prev_depth_func));
+            glsafe(::glDepthMask(prev_depth_mask));
+            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo)));
+            glsafe(::glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]));
+
+            m_shadow_map_valid = true;
+        }
+    } else {
+        m_shadow_map_valid = false;
+    }
+
+    // Unified plate shadow: draw the build-plate footprint and darken it wherever the same depth
+    // shadow map (built above) says the light is occluded. This replaces #13704's planar stencil
+    // projection so plate, object and self shadows all come from one technique.
+    if (!m_shadow_map_valid)
         return;
 
-    // Shadow projection matrix - flattens geometry onto Z=0 plane along light direction
-    Matrix4d shadow_proj = Matrix4d::Identity();
-    shadow_proj(0, 2) = -ray_dir.x() / ray_dir.z();
-    shadow_proj(1, 2) = -ray_dir.y() / ray_dir.z();
-    shadow_proj(2, 0) = 0.0;
-    shadow_proj(2, 1) = 0.0;
-    shadow_proj(2, 2) = 0.0;
-    shadow_proj(2, 3) = 0.01;  // Bias to prevent shadow acne
+    GLShaderProgram* plate_shader = wxGetApp().get_shader("printbed_shadow");
+    if (plate_shader == nullptr)
+        return;
 
-    // Save OpenGL state
-    GLint prev_depth_func = GL_LESS;
-    glsafe(::glGetIntegerv(GL_DEPTH_FUNC, &prev_depth_func));
-    GLboolean prev_depth_mask = GL_TRUE;
-    glsafe(::glGetBooleanv(GL_DEPTH_WRITEMASK, &prev_depth_mask));
-    GLint prev_stencil_mask = 0xFF;
-    glsafe(::glGetIntegerv(GL_STENCIL_WRITEMASK, &prev_stencil_mask));
-    GLboolean prev_stencil_test = GL_FALSE;
-    glsafe(::glGetBooleanv(GL_STENCIL_TEST, &prev_stencil_test));
-    const GLboolean prev_cull = ::glIsEnabled(GL_CULL_FACE);
-
-    // PASS 0: create stencil mask for the build plate (value = 1)
-    glsafe(::glEnable(GL_STENCIL_TEST));
-    glsafe(::glStencilMask(0xFF));
-    glsafe(::glClearStencil(0));
-    glsafe(::glClear(GL_STENCIL_BUFFER_BIT));
-
-    glsafe(::glStencilFunc(GL_ALWAYS, 1, 0xFF));
-    glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE));
-
-    glsafe(::glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE));
-    glsafe(::glDisable(GL_DEPTH_TEST));
-
-    shader->start_using();
-    shader->set_uniform("projection_matrix", projection_matrix);
-
-    // Draw the build plate (cached model to avoid per-frame uploads)
     if (const BuildVolume& build_volume = m_bed.build_volume(); build_volume.valid()) {
         const std::string mask_key = build_volume.type() == BuildVolume_Type::Rectangle
             ? (boost::format("rect|%1$.5f|%2$.5f|%3$.5f|%4$.5f")
@@ -10055,66 +10200,46 @@ void GLCanvas3D::_render_cast_shadows_on_plate(const Transform3d& view_matrix, c
         }
 
         if (m_plate_shadow_mask.is_initialized()) {
-            shader->set_uniform("view_model_matrix", view_matrix);
+            // Blend the shadow over the already-drawn plate. Depth test keeps it behind anything
+            // already in front; depth writes are off, and a small negative polygon offset lifts it
+            // just above the bed to avoid z-fighting.
+            GLboolean prev_depth_mask = GL_TRUE;
+            glsafe(::glGetBooleanv(GL_DEPTH_WRITEMASK, &prev_depth_mask));
+            GLint prev_depth_func = GL_LESS;
+            glsafe(::glGetIntegerv(GL_DEPTH_FUNC, &prev_depth_func));
+
+            glsafe(::glEnable(GL_DEPTH_TEST));
+            glsafe(::glDepthMask(GL_FALSE));
+            glsafe(::glDepthFunc(GL_LEQUAL));
+            glsafe(::glEnable(GL_BLEND));
+            glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+            glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
+            glsafe(::glPolygonOffset(-1.0f, -1.0f));
+
+            glsafe(::glActiveTexture(GL_TEXTURE0 + SHADOW_MAP_TEXTURE_UNIT));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_map_texture_id));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+
+            plate_shader->start_using();
+            plate_shader->set_uniform("view_model_matrix", view_matrix);
+            plate_shader->set_uniform("projection_matrix", projection_matrix);
+            plate_shader->set_uniform("shadow_map", SHADOW_MAP_TEXTURE_UNIT);
+            plate_shader->set_uniform("shadow_light_vp", m_shadow_light_vp);
+            plate_shader->set_uniform("shadow_intensity", 0.35f);
+            plate_shader->set_uniform("shadow_map_texel", 1.0f / static_cast<float>(m_shadow_map_size));
             m_plate_shadow_mask.render();
+            plate_shader->stop_using();
+
+            glsafe(::glActiveTexture(GL_TEXTURE0 + SHADOW_MAP_TEXTURE_UNIT));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+
+            glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+            glsafe(::glDisable(GL_BLEND));
+            glsafe(::glDepthFunc(prev_depth_func));
+            glsafe(::glDepthMask(prev_depth_mask));
         }
     }
-
-    // PASS 1: project object shadows onto plate (increment stencil to 2), only where the plate is.
-    glsafe(::glStencilFunc(GL_EQUAL, 1, 0xFF));
-    glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_INCR));
-
-    glsafe(::glDepthMask(GL_FALSE));
-    glsafe(::glEnable(GL_DEPTH_TEST));
-    glsafe(::glDepthFunc(GL_ALWAYS));  // Shadows don't need depth testing
-    glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
-    glsafe(::glPolygonOffset(-2.0f, -2.0f));
-    glsafe(::glDisable(GL_CULL_FACE));
-
-    for (GLVolume* volume : m_volumes.volumes) {
-        if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
-            continue;
-        // Flattened onto z = 0 in world space, then into the view.
-        const Matrix4d shadow_world_matrix = shadow_proj * volume->world_matrix().matrix();
-        shader->set_uniform("view_model_matrix", Matrix4d(view_matrix.matrix() * shadow_world_matrix));
-        shader->set_uniform("projection_matrix", projection_matrix);
-        volume->model.render();
-    }
-
-    // PASS 2: draw shadow color where stencil == 2
-    glsafe(::glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE));
-    glsafe(::glStencilFunc(GL_EQUAL, 2, 0xFF));
-    glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP));
-    glsafe(::glStencilMask(0x00));
-
-    glsafe(::glDepthFunc(GL_ALWAYS));
-    glsafe(::glEnable(GL_BLEND));
-    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-
-    shader->set_uniform("view_model_matrix", Transform3d::Identity());
-    shader->set_uniform("projection_matrix", Transform3d::Identity());
-    const ColorRGBA shadow_fill_color(0.0f, 0.0f, 0.0f, 0.4f);
-    const ColorRGBA prev_bg_color = m_background.get_color();
-    m_background.set_color(shadow_fill_color);
-    m_background.render();
-    m_background.set_color(prev_bg_color);
-
-    shader->stop_using();
-
-    // Restore state
-    glsafe(::glEnable(GL_DEPTH_TEST));
-    glsafe(::glDepthMask(prev_depth_mask));
-    glsafe(::glDepthFunc(prev_depth_func));
-    if (prev_cull)
-        glsafe(::glEnable(GL_CULL_FACE));
-    else
-        glsafe(::glDisable(GL_CULL_FACE));
-    glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
-    glsafe(::glDisable(GL_BLEND));
-
-    if (!prev_stencil_test)
-        glsafe(::glDisable(GL_STENCIL_TEST));
-    glsafe(::glStencilMask(prev_stencil_mask));
 }
 
 bool GLCanvas3D::_is_fxaa_enabled() const
@@ -10408,6 +10533,22 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     if (shader != nullptr) {
         shader->start_using();
 
+        // Orca #14702: object-on-object and self shadows, from the depth map built in _render_shadows().
+        // shadow_intensity == 0 disables the effect entirely (unchanged behaviour when off / unsupported).
+        const bool sample_shadows = m_shadow_map_valid && m_shadow_map_texture_id != 0;
+        if (sample_shadows) {
+            glsafe(::glActiveTexture(GL_TEXTURE0 + SHADOW_MAP_TEXTURE_UNIT));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_map_texture_id));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+            shader->set_uniform("shadow_map", SHADOW_MAP_TEXTURE_UNIT);
+            shader->set_uniform("shadow_light_vp", m_shadow_light_vp);
+            shader->set_uniform("shadow_map_texel", 1.0f / static_cast<float>(m_shadow_map_size));
+            shader->set_uniform("shadow_intensity", 0.35f);
+        }
+        else
+            shader->set_uniform("shadow_intensity", 0.0f);
+        m_volumes.set_shadow_map_texture(sample_shadows ? m_shadow_map_texture_id : 0);
+
         const Size&   cvn_size = get_canvas_size();
         switch (type)
         {
@@ -10493,6 +10634,15 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         /*if (wxGetApp().plater()->is_wireframe_enabled()) {
             shader->set_uniform("show_wireframe", false);
         }*/
+
+        if (sample_shadows) {
+            glsafe(::glActiveTexture(GL_TEXTURE0 + SHADOW_MAP_TEXTURE_UNIT));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+            // Edge: gouraud is used elsewhere too (gizmos, painters); leave it with shadows off.
+            shader->set_uniform("shadow_intensity", 0.0f);
+            m_volumes.set_shadow_map_texture(0);
+        }
 
         shader->stop_using();
     }

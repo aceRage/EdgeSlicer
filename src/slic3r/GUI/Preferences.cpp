@@ -2006,7 +2006,7 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_realistic_ssao = create_item_checkbox(_L("SSAO ambient occlusion"), page,
         _L("Applies SSAO in realistic view."), 50, SETTING_OPENGL_PHONG_SSAO);
     auto item_realistic_shadows = create_item_checkbox(_L("Shadows"), page,
-        _L("Renders cast shadows on the plate in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
+        _L("Renders cast shadows on the plate, other objects, and each object onto itself in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");

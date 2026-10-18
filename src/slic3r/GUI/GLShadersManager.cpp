@@ -108,7 +108,7 @@ std::pair<bool, std::string> GLShadersManager::init()
     // or drawn cut was active, so park them on their own units once, right after linking, where
     // no caller can miss it. 3 and 4 are the units the cut gizmo binds its textures to.
     if (GLShaderProgram* gouraud = get_shader("gouraud"); gouraud != nullptr)
-        gouraud->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 } });
+        gouraud->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 }, { "shadow_map", 5 } });
     // Orca #15770: used to render objects as translucent, edge weighted surfaces in the X-Ray view.
     // Optional here: without it the X-Ray toggle just leaves the normal shaded view.
     appendOptionalShader("xray", { prefix + "xray.vs", prefix + "xray.fs" });
@@ -117,7 +117,9 @@ std::pair<bool, std::string> GLShadersManager::init()
     // it the realistic view keeps gouraud.
     appendOptionalShader("phong", { prefix + "phong.vs", prefix + "phong.fs" });
     if (GLShaderProgram* phong = get_shader("phong"); phong != nullptr)
-        phong->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 } });
+        phong->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 }, { "shadow_map", 5 } });
+    // Orca #14702: casts the object shadow map onto the build plate (realistic view).
+    appendOptionalShader("printbed_shadow", { prefix + "printbed_shadow.vs", prefix + "printbed_shadow.fs" });
     // used to render variable layers heights in 3d editor
     valid &= append_shader("variable_layer_height", { prefix + "variable_layer_height.vs", prefix + "variable_layer_height.fs" });
     // used to render highlight contour around selected triangles inside the multi-material gizmo
