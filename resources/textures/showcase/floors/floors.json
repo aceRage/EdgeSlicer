@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "floors": [
+    {
+      "id": "oak",
+      "name": "Oak",
+      "file": "oak.jpg",
+      "tile_mm": 800,
+      "roughness": 0.5,
+      "source": "https://ambientcg.com/a/Wood048",
+      "authors": "ambientCG",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "walnut",
+      "name": "Walnut",
+      "file": "walnut.jpg",
+      "tile_mm": 800,
+      "roughness": 0.45,
+      "source": "https://ambientcg.com/a/Wood051",
+      "authors": "ambientCG",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "concrete",
+      "name": "Concrete",
+      "file": "concrete.jpg",
+      "tile_mm": 1100,
+      "roughness": 0.8,
+      "source": "https://ambientcg.com/a/Concrete034",
+      "authors": "ambientCG",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "marble",
+      "name": "Marble",
+      "file": "marble.jpg",
+      "tile_mm": 600,
+      "roughness": 0.25,
+      "source": "https://ambientcg.com/a/Marble012",
+      "authors": "ambientCG",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "linen",
+      "name": "Linen",
+      "file": "linen.jpg",
+      "tile_mm": 400,
+      "roughness": 0.95,
+      "source": "https://ambientcg.com/a/Fabric066",
+      "authors": "ambientCG",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "slate",
+      "name": "Slate tiles",
+      "file": "slate.jpg",
+      "tile_mm": 1000,
+      "roughness": 0.7,
+      "source": "https://ambientcg.com/a/Tiles138",
+      "authors": "ambientCG",
+      "licence": "CC0 1.0"
+    }
+  ]
+}
