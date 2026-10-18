@@ -33,7 +33,10 @@ inline bool enum_choice_maps_by_key(const std::string &opt_key)
         opt_key == "nozzle_volume_type" || opt_key == "default_nozzle_volume_type" || opt_key == "extruder_nozzle_volume_type" ||
         // GCodeFlavor keeps its numbering (it is stored by key in files, but the C++ values are not renumbered);
         // the menu lists the supported flavors with Repetier after RepRapFirmware.
-        opt_key == "gcode_flavor";
+        opt_key == "gcode_flavor" ||
+        // PrintHostType: htMoonRaker / htMoonRaker_mqtt (Snapmaker, no config key) sit before
+        // htMoonrakerHttp (key "moonraker"), so the dropdown index is not the stored value.
+        opt_key == "host_type";
 }
 
 // Row of the combo that shows the stored enum `value`: the position in def.enum_values of a key whose
@@ -58,6 +61,23 @@ inline int enum_choice_value_at_index(const ConfigOptionDef &def, int index)
         return -1;
     const auto it = def.enum_keys_map->find(def.enum_values[size_t(index)]);
     return it == def.enum_keys_map->end() ? -1 : it->second;
+}
+
+// What Choice::get_value stores for combo selection `index` when the option is mapped by key.
+// A listed row stores that key's value. A display-only extra (index >= enum_values.size(), e.g. the
+// Snapmaker host-type label) keeps `stored` so it cannot become the first key (htPrusaLink).
+// A missing selection (index < 0) still falls back to the first key — stale support_style rebuilds
+// used to do that, and Field.cpp kept the behaviour.
+inline int enum_choice_value_for_selection(const ConfigOptionDef &def, int index, int stored)
+{
+    if (index >= int(def.enum_values.size()))
+        return stored;
+    if (index < 0) {
+        const int first = enum_choice_value_at_index(def, 0);
+        return first >= 0 ? first : stored;
+    }
+    const int value = enum_choice_value_at_index(def, index);
+    return value >= 0 ? value : stored;
 }
 
 } // namespace Slic3r

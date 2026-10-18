@@ -18,6 +18,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/EnumChoice.hpp"
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -597,6 +598,16 @@ void SMPhysicalPrinterDialog::update(bool printer_change)
                 m_optgroup->hide_field("printhost_apikey");
                 m_optgroup->hide_field("printhost_authorization_type");
             }
+
+        if (Field *k = m_optgroup->get_field("printhost_apikey")) {
+            if (wxWindow *w = k->getWindow()) {
+                if (opt->value == htMoonrakerHttp)
+                    w->SetToolTip(_L("Moonraker authenticates with X-Api-Key in this field. Leftover HTTP "
+                                     "user/password is sent as Basic auth, which is unencrypted over plain HTTP."));
+                else
+                    w->SetToolTip(k->get_tooltip_text(wxString()));
+            }
+        }
     }
     else {
         m_optgroup->set_value("host_type", int(PrintHostType::htOctoPrint), false);
@@ -628,7 +639,7 @@ void SMPhysicalPrinterDialog::update_host_type(bool printer_change)
         return;
     Field* ht = m_optgroup->get_field("host_type");
     wxArrayString types;
-    int last_in_conf = m_config->option("host_type")->getInt(); //  this is real position in last choice
+    const int last_in_conf = m_config->option("host_type")->getInt();
 
     // Append localized enum_labels
     assert(ht->m_opt.enum_labels.size() == ht->m_opt.enum_values.size());
@@ -638,18 +649,36 @@ void SMPhysicalPrinterDialog::update_host_type(bool printer_change)
     }
 
     Choice* choice = dynamic_cast<Choice*>(ht);
-    choice->set_values(types);
-    int index_in_choice = (printer_change ? std::clamp(last_in_conf - ((int)ht->m_opt.enum_values.size() - (int)types.size()), 0, (int)ht->m_opt.enum_values.size() - 1) : last_in_conf);
-    choice->set_value(index_in_choice);
-    if ("prusalink" == ht->m_opt.enum_values.at(index_in_choice))
-        m_config->set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(htPrusaLink));
-    else if ("prusaconnect" == ht->m_opt.enum_values.at(index_in_choice))
-        m_config->set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(htPrusaConnect));
-    else {
-        int host_type = std::clamp(index_in_choice + ((int)ht->m_opt.enum_values.size() - (int)types.size()), 0, (int)ht->m_opt.enum_values.size() - 1);
-        PrintHostType type = static_cast<PrintHostType>(host_type);
-        m_config->set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(type));
+    // Snapmaker's htMoonRaker* have no menu key. Showing Octo/Klipper for them is a lie; a
+    // display-only "Snapmaker" row keeps the stored value (Device-tab connect). The extra row
+    // is selectable (wx ComboBox has no disabled item); Choice::get_value maps a row past
+    // enum_values back to the stored enum so a re-click cannot become htPrusaLink.
+    if (last_in_conf == htMoonRaker || last_in_conf == htMoonRaker_mqtt) {
+        const wxString snapmaker_label = _L("Snapmaker");
+        types.Add(snapmaker_label);
+        choice->set_values(types);
+        choice->set_value(last_in_conf, false);
+        if (wxWindow *w = choice->getWindow())
+            w->SetToolTip(_L("Snapmaker Device-tab connect. This extra row is display-only; "
+                             "selecting it does not change the stored host type."));
+        (void) printer_change;
+        return;
     }
+    choice->set_values(types);
+    if (wxWindow *w = choice->getWindow())
+        w->SetToolTip(choice->get_tooltip_text(wxString()));
+    // host_type is mapped by key: the dropdown index is not the stored PrintHostType
+    // (htMoonRaker / htMoonRaker_mqtt have no key; htMoonrakerHttp sits after them).
+    int row = enum_choice_index_of_value(ht->m_opt, last_in_conf);
+    if (row < 0)
+        row = enum_choice_index_of_value(ht->m_opt, int(htOctoPrint));
+    if (row < 0)
+        row = 0;
+    const int value_for_row = enum_choice_value_at_index(ht->m_opt, row);
+    choice->set_value(value_for_row < 0 ? last_in_conf : value_for_row, false);
+    if (enum_choice_index_of_value(ht->m_opt, last_in_conf) >= 0 && value_for_row >= 0)
+        m_config->set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(static_cast<PrintHostType>(value_for_row)));
+    (void) printer_change;
 }
 
 void SMPhysicalPrinterDialog::update_printers()

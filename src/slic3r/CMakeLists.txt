@@ -1089,6 +1089,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/WinFirewall.hpp
     Utils/BambuSetupNotice.cpp
     Utils/BambuSetupNotice.hpp
+    Utils/MoonrakerHost.cpp
+    Utils/MoonrakerHost.hpp
     # Last on purpose: a new source in the middle of the list reshuffles the unity batches (HomeVaults.cpp
     # and HomeVendors.cpp share file-local names and must not land in one batch).
     GUI/FavoriteFilamentsUI.cpp

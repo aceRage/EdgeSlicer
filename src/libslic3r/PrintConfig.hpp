@@ -63,7 +63,10 @@ enum class NoiseType {
 };
 
 enum PrintHostType {
-    htPrusaLink, htPrusaConnect, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier, htMKS, htESP3D, htCrealityPrint, htObico, htFlashforge, htSimplyPrint, htElegooLink, htMoonRaker_mqtt, htMoonRaker, 
+    htPrusaLink, htPrusaConnect, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier, htMKS, htESP3D, htCrealityPrint, htObico, htFlashforge, htSimplyPrint, htElegooLink, htMoonRaker_mqtt, htMoonRaker,
+    // Native Klipper/Moonraker HTTP host (config key "moonraker"). Appended: htMoonRaker and
+    // htMoonRaker_mqtt are Snapmaker's Device-tab path and must keep their values.
+    htMoonrakerHttp,
 };
 
 enum AuthorizationType {

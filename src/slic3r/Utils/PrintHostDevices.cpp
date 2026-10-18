@@ -474,10 +474,10 @@ std::string host_type_key(PrintHostType type)
 
 bool speaks_moonraker(const std::string& key)
 {
-    // "octoprint" is what this fork labels "Octo/Klipper" (PrintConfig.cpp:4682) and is the host
-    // type a Moonraker box is configured as; the two htMoonRaker* enum members have no key of their
-    // own (they are set by the Device tab's connect, not by the preset), so they are named here for
-    // completeness only.
+    // "octoprint" is what this fork labels "Octo/Klipper". "moonraker" is the native Moonraker
+    // host (htMoonrakerHttp). The Snapmaker htMoonRaker* members have no config key of their own
+    // (Device tab connect); "moonraker_mqtt" is named here so a stored device with that string
+    // still probes as Moonraker.
     return key == "octoprint" || key == "moonraker" || key == "moonraker_mqtt";
 }
 

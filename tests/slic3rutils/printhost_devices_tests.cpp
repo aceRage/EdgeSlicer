@@ -10,11 +10,14 @@
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
+#include "slic3r/Utils/MoonrakerHost.hpp"
+#include "libslic3r/EnumChoice.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include <ctime>
+#include <memory>
 #include <string>
 
 using namespace Slic3r;
@@ -519,6 +522,42 @@ TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path r
     CHECK(speaks_moonraker("octoprint"));
     CHECK_FALSE(speaks_moonraker("elegoolink"));
 
+    // Native Moonraker (htMoonrakerHttp, key "moonraker"): not Snapmaker's htMoonRaker / htMoonRaker_mqtt.
+    CHECK(host_type_enum("moonraker") == htMoonrakerHttp);
+    CHECK(host_type_key(htMoonrakerHttp) == "moonraker");
+    CHECK(int(htMoonrakerHttp) != int(htMoonRaker));
+    CHECK(int(htMoonrakerHttp) != int(htMoonRaker_mqtt));
+    CHECK(speaks_moonraker("moonraker"));
+    CHECK(can_probe("moonraker"));
+    CHECK(enum_choice_maps_by_key("host_type"));
+    {
+        const ConfigOptionDef *def = print_config_def.get("host_type");
+        REQUIRE(def != nullptr);
+        CHECK(enum_choice_value_at_index(*def, int(def->enum_values.size()) - 1) == int(htMoonrakerHttp));
+        CHECK(enum_choice_index_of_value(*def, int(htMoonrakerHttp)) == int(def->enum_values.size()) - 1);
+        CHECK(enum_choice_index_of_value(*def, int(htMoonRaker)) == -1);      // Snapmaker: no menu key
+        CHECK(enum_choice_index_of_value(*def, int(htMoonRaker_mqtt)) == -1);
+        // Display-only extra row (PhysicalPrinterDialog Snapmaker label): keep stored, not row 0.
+        const int extra = int(def->enum_values.size());
+        CHECK(enum_choice_value_for_selection(*def, extra, int(htMoonRaker)) == int(htMoonRaker));
+        CHECK(enum_choice_value_for_selection(*def, extra, int(htMoonRaker_mqtt)) == int(htMoonRaker_mqtt));
+        CHECK(enum_choice_value_for_selection(*def, extra, int(htMoonrakerHttp)) == int(htMoonrakerHttp));
+        ConfigOptionEnum<PrintHostType> opt;
+        REQUIRE(opt.deserialize("moonraker"));
+        CHECK(opt.value == htMoonrakerHttp);
+        CHECK(opt.serialize() == "moonraker");
+    }
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_deserialize_strict({ { "printer_technology", "FFF" }, { "host_type", "moonraker" }, { "print_host", "127.0.0.1" },
+                                     { "printhost_apikey", "" }, { "printhost_cafile", "" }, { "printhost_ssl_ignore_revoke", "0" } });
+        std::unique_ptr<PrintHost> host(PrintHost::get_print_host(&cfg));
+        REQUIRE(host != nullptr);
+        CHECK(std::string(host->get_name()) == "Moonraker");
+        CHECK(host->can_test());
+        CHECK(host->get_post_upload_actions() == PrintHostPostUploadAction::StartPrint);
+    }
+
     CHECK(normalize_address(" 192.168.1.41/ ") == "192.168.1.41");
     CHECK(normalize_address("HTTP://Printer.local/") == "http://printer.local");
 }
@@ -721,4 +760,78 @@ TEST_CASE("PrintHost: get_err_code_from_body does not throw on malformed JSON", 
     // A successful Duet connect often has no err field; that is success (0), not unknown (-1).
     CHECK(PrintHost::get_err_code_from_body(R"({})") == 0);
     REQUIRE_NOTHROW(PrintHost::get_err_code_from_body("<html>404</html>"));
+}
+
+TEST_CASE("MoonrakerHost: connection-test and upload reply parsers", "[PrintHostDevices][MoonrakerHost]")
+{
+    SECTION("GET /server/info is Moonraker when klippy_state is present") {
+        CHECK(moonraker_host_is_server_info(R"({"result":{"klippy_state":"ready","klippy_connected":true}})"));
+        CHECK(moonraker_host_is_server_info(R"({"result":{"klippy_state":"error"}})")); // idle buddy-fork
+        CHECK_FALSE(moonraker_host_is_server_info(R"({"api":"0.1","text":"OctoPrint 1.9.0"})"));
+        CHECK_FALSE(moonraker_host_is_server_info("{}"));
+        CHECK_FALSE(moonraker_host_is_server_info("not json"));
+        CHECK_FALSE(moonraker_host_is_server_info(R"({"result":{"klippy_state":""}})"));
+    }
+
+    SECTION("GET /printer/info is the fallback when /server/info is missing") {
+        CHECK(moonraker_host_is_printer_info(R"({"result":{"state":"ready","software_version":"v0.12.0"}})"));
+        CHECK(moonraker_host_is_printer_info(R"({"result":{"software_version":"v0.12.0"}})"));
+        CHECK_FALSE(moonraker_host_is_printer_info(R"({"result":{}})"));
+        CHECK_FALSE(moonraker_host_is_printer_info(R"({"api":"0.1"})"));
+    }
+
+    SECTION("writable roots offer only gcodes, never config") {
+        const std::string body =
+            R"({"result":[{"name":"gcodes","permissions":"rwd"},{"name":"config","permissions":"rw"},)"
+            R"({"name":"logs","permissions":"r"},{"name":"","permissions":"rwd"},{"name":"timelapse"}]})";
+        const std::vector<std::string> roots = moonraker_host_writable_roots(body);
+        REQUIRE(roots.size() == 1);
+        CHECK(roots[0] == "gcodes");
+        CHECK(moonraker_host_writable_roots("{}").empty());
+        CHECK(moonraker_host_writable_roots(R"({"result":{}})").empty());
+        CHECK(moonraker_host_writable_roots(R"({"result":[{"name":"config","permissions":"rw"}]})").empty());
+        CHECK(moonraker_host_writable_roots(R"({"result":[{"name":"gcodes","permissions":"r"}]})").empty());
+    }
+
+    SECTION("upload reply reads item.path and print_started/print_queued at the top level") {
+        const MoonrakerHostUploadReply started =
+            moonraker_host_parse_upload_reply(R"({"item":{"path":"benchy.gcode"},"print_started":true,"print_queued":false})");
+        CHECK(started.stored_path == "benchy.gcode");
+        CHECK(started.started_or_queued);
+
+        const MoonrakerHostUploadReply queued =
+            moonraker_host_parse_upload_reply(R"({"item":{"path":"job.gcode"},"print_started":false,"print_queued":true})");
+        CHECK(queued.stored_path == "job.gcode");
+        CHECK(queued.started_or_queued);
+
+        const MoonrakerHostUploadReply neither =
+            moonraker_host_parse_upload_reply(R"({"item":{"path":"only.gcode"},"print_started":false})");
+        CHECK(neither.stored_path == "only.gcode");
+        CHECK_FALSE(neither.started_or_queued);
+    }
+
+    SECTION("a {\"result\":...}-wrapped upload reply still sees print_started") {
+        const MoonrakerHostUploadReply wrapped = moonraker_host_parse_upload_reply(
+            R"({"result":{"item":{"path":"shim.gcode"},"print_started":true,"print_queued":false}})");
+        CHECK(wrapped.stored_path == "shim.gcode");
+        CHECK(wrapped.started_or_queued);
+
+        const MoonrakerHostUploadReply queued = moonraker_host_parse_upload_reply(
+            R"({"result":{"item":{"path":"q.gcode"},"print_started":false,"print_queued":true}})");
+        CHECK(queued.stored_path == "q.gcode");
+        CHECK(queued.started_or_queued);
+    }
+
+    SECTION("the path form field is the parent directory inside the storage root") {
+        CHECK(moonraker_host_upload_subdir("benchy.gcode").empty());
+        CHECK(moonraker_host_upload_subdir("/benchy.gcode").empty());
+        CHECK(moonraker_host_upload_subdir("plates/benchy.gcode") == "plates");
+        CHECK(moonraker_host_upload_subdir("a/b/c.gcode") == "a/b");
+    }
+
+    SECTION("the fallback print/start path includes the subdirectory") {
+        CHECK(moonraker_host_start_path("", "benchy.gcode") == "benchy.gcode");
+        CHECK(moonraker_host_start_path("plates", "benchy.gcode") == "plates/benchy.gcode");
+        CHECK(moonraker_host_start_path("a/b", "c.gcode") == "a/b/c.gcode");
+    }
 }
