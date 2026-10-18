@@ -250,6 +250,7 @@
 
 #include "filamentsync/SyncConfirmDialog.hpp"
 #include "filamentsync/SyncFilamentColorDialog.hpp"
+#include "ElegooCanvasUI.hpp"
 
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include <chrono>
@@ -2190,9 +2191,11 @@ static wxString nozzle_type_key_to_label(const std::string& key)
 // Which filament sync the "Filaments" row's button performs for the printer
 // preset that is selected right now.  Snapmaker presets keep the fork's own
 // dialog (Sidebar::show_sync_filament_dialog, U1-only); Bambu presets get the
-// AMS sync, which works over the Bambu network and in LAN mode alike.  Every
-// other vendor has nothing to sync from, so the button is hidden.
-enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog };
+// AMS sync, which works over the Bambu network and in LAN mode alike.  An
+// Elegoo Centauri Carbon 1 on Elegoo Link reads its CANVAS into the same dialog
+// the Snapmaker path uses (Sidebar::show_canvas_sync_dialog).  Every other
+// vendor has nothing to sync from, so the button is hidden.
+enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog, ElegooCanvas };
 
 static FilamentSyncTarget filament_sync_target_for_current_preset()
 {
@@ -2205,6 +2208,8 @@ static FilamentSyncTarget filament_sync_target_for_current_preset()
         return FilamentSyncTarget::SnapmakerDialog;
     if (pb->is_bbl_vendor())
         return FilamentSyncTarget::BambuAms;
+    if (current_printer_reads_canvas())
+        return FilamentSyncTarget::ElegooCanvas;
     return FilamentSyncTarget::None;
 }
 
@@ -3328,8 +3333,11 @@ Sidebar::Sidebar(Plater *parent)
     ScalableButton* sync_filament_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "sync_filament");
     sync_filament_btn->SetToolTip(_L("Sync Filament Information"));
     sync_filament_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-        if (filament_sync_target_for_current_preset() == FilamentSyncTarget::BambuAms)
+        const FilamentSyncTarget target = filament_sync_target_for_current_preset();
+        if (target == FilamentSyncTarget::BambuAms)
             sync_ams_list();  // reports "select a printer in Device page" when none is connected
+        else if (target == FilamentSyncTarget::ElegooCanvas)
+            show_canvas_sync_dialog();
         else
             show_sync_filament_dialog();
     });
@@ -9829,6 +9837,10 @@ void Sidebar::update_filament_sync_button()
         p->m_bpButton_sync_filament->SetToolTip(_L("Sync Filament Information"));
         sizer->Show(p->m_bpButton_sync_filament);
         break;
+    case FilamentSyncTarget::ElegooCanvas:
+        p->m_bpButton_sync_filament->SetToolTip(_L("Sync filaments from CANVAS"));
+        sizer->Show(p->m_bpButton_sync_filament);
+        break;
     default:
         sizer->Hide(p->m_bpButton_sync_filament);
         break;
@@ -9924,6 +9936,51 @@ void Sidebar::show_sync_filament_dialog()
         dlg.ShowModal();
         return;
     }
+
+    apply_machine_filament_sync(machineFilamentList);
+}
+
+// The Elegoo Centauri Carbon 1's CANVAS into the same dialog the U1 uses (design D1): read the
+// trays over SDCP, then the shared tail below. No "Machine Filament" dropdown section and no
+// m_connect_machine_info_list - that state belongs to the Snapmaker connection.
+void Sidebar::show_canvas_sync_dialog()
+{
+    if (!wxGetApp().plater())
+        return;
+    const std::string address = canvas_address_for_current_printer();
+    if (address.empty()) {
+        SyncRichConfirmDialog dlg(this, _L("This printer has no address yet. Add one in its connection settings, then sync again."), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    const CanvasQueryResult result = query_canvas_with_progress(this, address);
+    if (!result.ok) {
+        SyncRichConfirmDialog dlg(this, canvas_failure_text(result), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    std::vector<FilamentData> machineFilamentList = canvas_machine_filaments(result.info);
+    if (result.info.loaded_count() == 0) {
+        SyncRichConfirmDialog dlg(this, _L("The CANVAS reports no loaded trays. Load the filaments, then sync again."), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    apply_machine_filament_sync(machineFilamentList);
+}
+
+// The part of the sync both sources share: the colour-matching dialog, then the project's
+// filaments, presets and colours from what it settled on.
+void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList)
+{
+    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+    if (!preset_bundle || !wxGetApp().plater())
+        return;
 
     std::vector<FilamentData> designFilamentList;
     build_design_filament_list(preset_bundle, designFilamentList);

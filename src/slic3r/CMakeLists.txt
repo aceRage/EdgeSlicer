@@ -606,6 +606,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LiveActivityPush.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
+    GUI/ElegooCanvasUI.cpp
+    GUI/ElegooCanvasUI.hpp
     GUI/PrintHostDevicesDialog.cpp
     GUI/PrintHostDevicesDialog.hpp
     GUI/CostsDialog.cpp

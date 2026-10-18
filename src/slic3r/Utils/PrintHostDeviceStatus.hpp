@@ -11,14 +11,11 @@
 // This is the honest half of the "map the plate's filaments to the printer's slots" story, and the
 // honesty is the point: **most print hosts cannot answer the second question at all.**
 //
-//  * Elegoo Link (the Centauri Carbon) speaks SDCP over its own websocket on port 3030. The fork's
-//    ElegooLink only ever sends two commands - `Cmd 0` (status), whose answer it reads exactly one
-//    field of (`Status.CurrentStatus`, and only to notice the value 8, "checking the file"), and
-//    `Cmd 128` (start print). `Cmd 1` (Attributes), which is where an SDCP device would describe
-//    its materials, is declared in the enum and never sent; `PrintInfo` is never read. There is no
-//    filament, material, box or slot field anywhere in the Elegoo path, and the upload carries no
-//    per-extruder parameter. So for an Elegoo device this returns `probed = false` with a note that
-//    says so, and the send goes out exactly as the plate was sliced.
+//  * Elegoo Link (the Centauri Carbon) speaks SDCP over its own websocket on port 3030. The print
+//    status (`Cmd 0`) names no filament; a Centauri Carbon 1 with a CANVAS attached answers
+//    `Cmd 324` with its trays (ElegooCanvas.hpp, read by the sidebar sync). Without one, or for any
+//    other Elegoo model, this returns `probed = false` with a note that says so, and the send goes
+//    out exactly as the plate was sliced.
 //  * A Moonraker/Klipper box does answer. `/printer/objects/query` gives `print_stats.state`, and a
 //    Snapmaker-flavoured Moonraker also carries `print_task_config`, whose parallel arrays are the
 //    loaded filaments per toolhead (the same object SnapmakerLan::toolheads_of reads,

@@ -71,6 +71,7 @@ namespace UndoRedo {
 namespace GUI {
 
 class MainFrame;
+struct FilamentData;
 class ConfigOptionsGroup;
 class ObjectSettings;
 class ObjectLayers;
@@ -188,6 +189,10 @@ public:
     // the "<printer> as of <time>" text), 0 = the user declined, -1 = there is none.
     int load_ams_snapshot(const std::string &preferred_dev_id, wxString &as_of);
     void show_sync_filament_dialog();
+    // Elegoo Centauri Carbon 1: the CANVAS trays into the same sync dialog (ElegooCanvasUI.hpp).
+    void show_canvas_sync_dialog();
+    // The colour-matching dialog and the project update both syncs share.
+    void apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList);
     // Point the "Filaments" row's sync button at the sync that fits the current
     // printer preset (Bambu AMS / Snapmaker dialog), or hide it for other vendors.
     void update_filament_sync_button();
