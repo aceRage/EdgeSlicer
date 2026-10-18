@@ -101,6 +101,10 @@ set(lisbslic3r_sources
     FlexiJoint.cpp
     FlexiJoint.hpp
     ImageFill.hpp
+    RealisticRenderSettings.cpp
+    RealisticRenderSettings.hpp
+    Showcase/ShowcaseScene.cpp
+    Showcase/ShowcaseScene.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
