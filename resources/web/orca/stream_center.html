@@ -1147,7 +1147,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         }
     }
 
-    // ---- Elegoo Centauri Carbon (CC1) ----------------------------------------------------------
+    // ---- ElegooLink (Centauri Carbon, CC1) ------------------------------------------------------
     // The camera is MJPEG on the printer (port 3031, path /video), which the hub's local relay
     // re-serves for a plain <img> over ONE connection per printer: the printer lets only four
     // viewers in, so every tile, window and phone shares the relay's single connection. The relay
@@ -1791,13 +1791,13 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         { value: 'p1',         label: 'Bambu P1 / A1 (needs access code)' },
         { value: 'rtsps',      label: 'Bambu X1 / H2 (needs access code + LAN Liveview on)' },
         { value: 'flashforge', label: 'Flashforge (Creator 5 / Adventurer 5M family)' },
-        { value: 'elegoo',     label: 'Elegoo Centauri Carbon (CC1)' },
+        { value: 'elegoo',     label: 'ElegooLink' },
         { value: 'ipcam',      label: 'IP camera (RTSP / ONVIF: Reolink, Amcrest, Hikvision, Tapo, …)' },
         { value: 'wyze',       label: 'Wyze (RTSP firmware or wyze-bridge)' }
     ];
     var KIND_INFO = {
-        elegoo: 'The camera is read through this PC\u2019s relay, which keeps one connection to the printer however many tiles, windows or phones are watching: ' +
-                'the Centauri Carbon allows only 4 viewers at a time (its own web page and the Elegoo app count too). Enter the printer\u2019s IP address.',
+        elegoo: 'For printers added with the Elegoo Link host type (the Centauri Carbon). The camera is read through this PC\u2019s relay, which keeps one connection to the printer however many tiles, windows or phones are watching: ' +
+                'the printer allows only 4 viewers at a time (its own web page and the Elegoo app count too). Enter the printer\u2019s IP address.',
         ipcam: 'The camera is pulled through the bundled go2rtc relay: it asks the camera over ONVIF for its stream and plays it here. ' +
                'ONVIF must be enabled on the camera (most brands: on by default, some need a separate ONVIF user). ' +
                'Use an H.264 stream — H.265 only plays if Windows has the HEVC video extension. ' +

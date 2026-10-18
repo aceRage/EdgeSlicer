@@ -8,7 +8,7 @@
 namespace Slic3r {
 namespace GUI {
 
-// Elegoo Centauri Carbon (CC1) camera, re-served by the hub's local relay (BambuCamRelay's port):
+// ElegooLink camera (Centauri Carbon, CC1), re-served by the hub's local relay (BambuCamRelay's port):
 //
 //   GET /elegoo?ip=<printer>[&fps=N]    the camera as multipart MJPEG, for a plain <img>
 //   GET /elegoo/status?ip=<printer>     {"state":"live|busy|no_camera|failed|connecting|idle","message":...}
@@ -43,8 +43,11 @@ bool valid_host(const std::string& host);
 // Empty when nothing usable is left.
 std::string host_from_address(const std::string& address);
 
-// The Centauri Carbon 2 / Centauri 2 speak MQTT and serve their camera elsewhere; this relay is
-// the CC1's. True when a printer or preset name is one of those.
+// The Centauri Carbon 2 / Centauri 2 use the same "Elegoo Link" host type but a different camera:
+// MQTT control (no SDCP on :3030), MJPEG on :8080 on any path, and not a thing on :3031 (pycentauri
+// docs/PROTOCOL.md "Centauri Carbon 2", elegoo-link's elegoo_fdm_cc2 adapter, the Home Assistant
+// elegoo-printer CC2 notes). This relay is the CC1's, so those are left out of the auto-add.
+// True when a printer or preset name is one of those.
 bool is_cc2_name(const std::string& name);
 
 struct VideoTarget
