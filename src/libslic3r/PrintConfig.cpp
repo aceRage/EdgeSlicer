@@ -4958,6 +4958,68 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(-1));
 
+    def = this->add("sandwich_lite_enable", coBool);
+    def->label = L("Sandwich-lite (spike)");
+    def->category = L("Quality");
+    def->tooltip = L("SPIKE, do not merge. Print the top surface as up to 3 thin sub-passes inside one "
+                     "layer (each at least 0.04 mm), each with its own angle, speed, fan and height share. "
+                     "Single-tool only: no toolchanges and no wipe tower. Off by default.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("sandwich_lite_include_bottom", coBool);
+    def->label = L("Sandwich-lite bottom too");
+    def->category = L("Quality");
+    def->tooltip = L("Also split the bottom surface into the same thin sub-passes. Spike only.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("sandwich_lite_pass_count", coInt);
+    def->label = L("Sandwich-lite passes");
+    def->category = L("Quality");
+    def->tooltip = L("Number of sub-passes stacked inside the nominal layer (2 or 3). A pass that would "
+                     "be thinner than 0.04 mm is dropped and the feature is skipped if fewer than 2 remain.");
+    def->min = 2;
+    def->max = 3;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(2));
+
+    def = this->add("sandwich_lite_height_ratios", coFloats);
+    def->label = L("Sandwich-lite height ratios");
+    def->category = L("Quality");
+    def->tooltip = L("Relative height of each sub-pass. Values are normalized to sum to the layer height. "
+                     "The last pass is pinned to the nominal layer Z.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats { 1., 1., 1. });
+
+    def = this->add("sandwich_lite_angles", coFloats);
+    def->label = L("Sandwich-lite angles");
+    def->category = L("Quality");
+    def->tooltip = L("Fill angle in degrees for each sub-pass. Cross-hatch defaults (45 / 135 / 0).");
+    def->sidetext = "°";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats { 45., 135., 0. });
+
+    def = this->add("sandwich_lite_speed_percents", coFloats);
+    def->label = L("Sandwich-lite speed percents");
+    def->category = L("Quality");
+    def->tooltip = L("Percent of the role speed (top_surface_speed / first-layer infill) for each sub-pass. "
+                     "100 is unchanged. 0 is treated as 100.");
+    def->sidetext = "%";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats { 100., 100., 100. });
+
+    def = this->add("sandwich_lite_fan_speeds", coInts);
+    def->label = L("Sandwich-lite fan speeds");
+    def->category = L("Quality");
+    def->tooltip = L("Part-cooling fan percent for each sub-pass. -1 leaves the layer fan alone. "
+                     "CoolingBuffer may still override a direct M106; this is a spike.");
+    def->sidetext = "%";
+    def->min = -1;
+    def->max = 100;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts { -1, -1, -1 });
+
     def = this->add("zaa_enabled", coBool);
     def->label    = L("Z contouring enabled");
     def->category = L("Quality");

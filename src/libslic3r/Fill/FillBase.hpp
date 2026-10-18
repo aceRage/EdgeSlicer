@@ -116,6 +116,8 @@ struct FillParams
     bool            locked_zag{false};
     float           infill_lock_depth{0.0};
     float           skin_infill_depth{0.0};
+    // Sandwich-lite: skip gap fill on every sub-pass except the last.
+    bool            skip_gap_fill{false};
 };
 static_assert(IsTriviallyCopyable<FillParams>::value, "FillParams class is not POD (and it should be - see constructor).");
 

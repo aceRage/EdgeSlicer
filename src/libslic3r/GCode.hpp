@@ -656,6 +656,8 @@ private:
     // Filament mass (g) printed up to the previous layer change, for curr_layer_mass.
     double                              m_last_layer_accumulated_mass{ 0.0 };
     float                               m_last_width{ 0.0f };
+    // Sandwich-lite (spike): last emitted per-pass fan so we do not spam M106 on every path.
+    int                                 m_last_sandwich_fan_percent{ -2 };
 
     // SM_Orca
     float                               m_next_wipe_x {0.0f};

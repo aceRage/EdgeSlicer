@@ -217,6 +217,7 @@ set(lisbslic3r_sources
     FDMHollowing.cpp
     FDMHollowing.hpp
     Fill/Fill.cpp
+    Fill/SandwichLite.hpp
     Fill/FillCrossHatch.cpp
     Fill/FillCrossHatch.hpp
     Fill/FillGyroid.cpp

@@ -10324,6 +10324,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             }
         }
     }
+    // Sandwich-lite (spike): per-pass speed share of the role speed already resolved above.
+    if (path.sandwich_speed_factor > 0.f && std::abs(double(path.sandwich_speed_factor) - 1.) > EPSILON)
+        speed *= double(path.sandwich_speed_factor);
+
     // Override skirt speed if set
     if (path.role() == erSkirt) {
         const double skirt_speed = m_config.skirt_speed.value; // a plain float option: same value get_abs_value("skirt_speed") returned
@@ -10632,6 +10636,15 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         m_last_height = path.height;
         sprintf(buf, ";%s%g\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height).c_str(), m_last_height);
         gcode += buf;
+    }
+
+    // Sandwich-lite (spike): optional per-pass fan. CoolingBuffer may still rewrite M106
+    // from layer-time slowdown; the comment is the stable marker for tests and Stream.
+    if (path.sandwich_fan_percent >= 0 && path.sandwich_fan_percent != m_last_sandwich_fan_percent) {
+        m_last_sandwich_fan_percent = path.sandwich_fan_percent;
+        sprintf(buf, "; sandwich-lite fan %d\n", path.sandwich_fan_percent);
+        gcode += buf;
+        gcode += m_writer.set_fan(unsigned(std::clamp(path.sandwich_fan_percent, 0, 100)));
     }
 
     // Orca: Dynamic PA

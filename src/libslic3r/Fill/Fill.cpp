@@ -18,6 +18,7 @@
 
 #include "ExtrusionEntity.hpp"
 #include "Fill.hpp"
+#include "SandwichLite.hpp"
 #include "FillRectilinear.hpp"
 #include "FillLightning.hpp"
 #include "FillConcentricInternal.hpp"
@@ -1881,6 +1882,73 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 		                              surface_fill.params.image_row_filament_id != 0 &&
 		                              image_row_context_for_region(*this->object(), layerm->region(),
 		                                                           float(surface_fill.params.flow.width()), image_row_ctx);
+
+		const std::vector<SandwichLitePass> sandwich_passes =
+		    sandwich_lite_plan(region_config, surface_fill.params.extrusion_role, this->height, this->print_z);
+		if (!sandwich_passes.empty()) {
+			const ExPolygons originals     = surface_fill.expolygons;
+			const FillParams params_saved  = params;
+			const float      angle_saved   = f->angle;
+			const coordf_t   z_saved       = f->z;
+			const double     nozzle        = surface_fill.params.flow.nozzle_diameter();
+			for (size_t pi = 0; pi < sandwich_passes.size(); ++pi) {
+				const SandwichLitePass &pass = sandwich_passes[pi];
+				params                       = params_saved;
+				params.skip_gap_fill         = pi + 1 < sandwich_passes.size();
+				f->angle                     = float(pass.angle_rad);
+				f->z                         = pass.print_z;
+				for (const ExPolygon &expoly_src : originals) {
+					ExPolygon expoly = expoly_src;
+					f->no_overlap_expolygons = intersection_ex(surface_fill.no_overlap_expolygons, ExPolygons() = {expoly}, ApplySafetyOffset::Yes);
+					if (params.symmetric_infill_y_axis) {
+						params.symmetric_y_axis = f->extended_object_bounding_box().center().x();
+						expoly.symmetric_y(params.symmetric_y_axis);
+					}
+					f->spacing = surface_fill.params.spacing;
+					surface_fill.surface.expolygon = expoly;
+					if (surface_fill.params.bridge && surface_fill.surface.is_external() && surface_fill.params.density > 99.0) {
+						params.density     = layerm->region().config().bridge_density.get_abs_value(1.0);
+						params.dont_adjust = true;
+					}
+					if (surface_fill.surface.is_internal_bridge()) {
+						params.density     = f->print_object_config->internal_bridge_density.get_abs_value(1.0);
+						params.dont_adjust = true;
+					}
+					const float elefant_density_s = float(f->print_object_config->elefant_foot_layers_density.get_abs_value(1.0));
+					if (!is_approx(elefant_density_s, 1.0f) && surface_fill.surface.is_solid_infill() &&
+					    f->print_object_config->raft_layers.value == 0) {
+						const size_t elefant_layers = size_t(std::max(f->print_object_config->elefant_foot_compensation_layers.value, 1));
+						if (f->layer_id > 0 && f->layer_id <= elefant_layers)
+							params.density = 1.0f - (1.0f - elefant_density_s) * (elefant_layers - (f->layer_id - 1)) / elefant_layers;
+					}
+					ExtrusionEntitiesPtr &region_fill_entities = m_regions[surface_fill.region_id]->fills.entities;
+					const size_t          entities_before      = region_fill_entities.size();
+					f->fill_surface_extrusion(&surface_fill.surface, params, region_fill_entities);
+					if (image_row_ctx_ok && region_fill_entities.size() > entities_before) {
+						ExtrusionEntitiesPtr new_entities(region_fill_entities.begin() + entities_before, region_fill_entities.end());
+						region_fill_entities.erase(region_fill_entities.begin() + entities_before, region_fill_entities.end());
+						for (ExtrusionEntity *ee : new_entities) {
+							auto *eec = dynamic_cast<ExtrusionEntityCollection *>(ee);
+							if (eec == nullptr) {
+								region_fill_entities.push_back(ee);
+								continue;
+							}
+							std::vector<ExtrusionEntityCollection *> replaced =
+							    split_top_infill_by_image_row(this->object()->model_object()->get_model()->image_assets,
+							                                  image_row_ctx, pass.print_z, eec);
+							for (ExtrusionEntityCollection *r : replaced)
+								region_fill_entities.push_back(r);
+						}
+					}
+					for (size_t i = entities_before; i < region_fill_entities.size(); ++i)
+						sandwich_lite_tag_entity(region_fill_entities[i], pass, this->print_z, nozzle);
+				}
+			}
+			f->angle = angle_saved;
+			f->z     = z_saved;
+			params   = params_saved;
+			continue;
+		}
 
 		for (ExPolygon& expoly : surface_fill.expolygons) {
 

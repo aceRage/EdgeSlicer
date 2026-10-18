@@ -195,6 +195,7 @@ void Fill::_create_gap_fill(const Surface* surface, const FillParams& params, Ex
 
     //Orca: just to be safe, check against null pointer for the print object config and if NULL return.
     if (this->print_object_config == nullptr) return;
+    if (params.skip_gap_fill) return;
 
     // Orca: Enable gap fill as per the user preference. Return early if gap fill is to not be applied.
     if ((this->print_object_config->gap_fill_target.value == gftNowhere) ||

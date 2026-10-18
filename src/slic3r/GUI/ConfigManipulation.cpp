@@ -1033,6 +1033,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     
     toggle_line("ironing_speed", has_ironing || has_support_ironing);
 
+    const bool has_sandwich_lite = config->opt_bool("sandwich_lite_enable");
+    for (auto el : { "sandwich_lite_include_bottom", "sandwich_lite_pass_count", "sandwich_lite_height_ratios",
+                     "sandwich_lite_angles", "sandwich_lite_speed_percents", "sandwich_lite_fan_speeds" })
+        toggle_line(el, has_sandwich_lite);
+
     // ZAA: the three detail settings only matter once Z contouring is on.
     bool has_zaa = config->opt_bool("zaa_enabled");
     for (auto el : {"zaa_minimize_perimeter_height", "zaa_min_z", "zaa_dont_alternate_fill_direction", "zaa_speed_scaling"})

@@ -190,6 +190,9 @@ public:
     // to the nominal Z; extrusion_multiplier scales the flow of this path.
     float z_offset { 0.f };
     float extrusion_multiplier { 1.f };
+    // Sandwich-lite (spike): 1.0 / -1 leave G-code speed and fan unchanged. Copied with z_offset.
+    float sandwich_speed_factor { 1.f };
+    int   sandwich_fan_percent { -1 };
 
     // ZAA (Z contouring): per-position Z deltas relative to this path's own base Z
     // (print_z + z_offset * height). Null unless the posContouring step contoured this path.
@@ -214,6 +217,8 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->sandwich_speed_factor = rhs.sandwich_speed_factor;
+        this->sandwich_fan_percent = rhs.sandwich_fan_percent;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(ExtrusionPath &&rhs)
@@ -228,6 +233,8 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->sandwich_speed_factor = rhs.sandwich_speed_factor;
+        this->sandwich_fan_percent = rhs.sandwich_fan_percent;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(const Polyline &polyline, const ExtrusionPath &rhs)
@@ -242,6 +249,8 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->sandwich_speed_factor = rhs.sandwich_speed_factor;
+        this->sandwich_fan_percent = rhs.sandwich_fan_percent;
         this->z_contour = rhs.z_contour;
     }
     ExtrusionPath(Polyline &&polyline, const ExtrusionPath &rhs)
@@ -256,6 +265,8 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->sandwich_speed_factor = rhs.sandwich_speed_factor;
+        this->sandwich_fan_percent = rhs.sandwich_fan_percent;
         this->z_contour = rhs.z_contour;
     }
 
@@ -270,6 +281,8 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->sandwich_speed_factor = rhs.sandwich_speed_factor;
+        this->sandwich_fan_percent = rhs.sandwich_fan_percent;
         this->z_contour = rhs.z_contour;
         return *this;
     }
@@ -284,6 +297,8 @@ public:
         this->inset_idx = rhs.inset_idx;
         this->z_offset = rhs.z_offset;
         this->extrusion_multiplier = rhs.extrusion_multiplier;
+        this->sandwich_speed_factor = rhs.sandwich_speed_factor;
+        this->sandwich_fan_percent = rhs.sandwich_fan_percent;
         this->z_contour = rhs.z_contour;
         return *this;
     }
