@@ -198,3 +198,7 @@ src/slic3r/GUI/MixedFilamentBatchDialog.cpp
 src/slic3r/GUI/MixedColorMatchHelpers.cpp
 src/slic3r/GUI/ElegooCanvasUI.cpp
 src/slic3r/Utils/ElegooCanvasMapping.cpp
+src/slic3r/GUI/PrintHostDevicesDialog.cpp
+src/slic3r/GUI/PrinterWebView.cpp
+src/slic3r/GUI/RemoteSend.cpp
+src/slic3r/Utils/ElegooLink.cpp
