@@ -992,7 +992,7 @@ float GLVolumeCollection::get_support_normal_z(int object_idx)
 {
     const Model      &model = GUI::wxGetApp().model();
     const ModelObject *mo   = object_idx >= 0 && size_t(object_idx) < model.objects.size() ? model.objects[object_idx] : nullptr;
-    const double angle_deg  = support_overhang_rule_for(mo).effective_angle_deg();
+    const double angle_deg  = GUI::support_overhang_rule_for(mo).effective_angle_deg();
     return static_cast<float>(-std::cos(Geometry::deg2rad(std::clamp(angle_deg, 0.0, 89.0))));
 }
 
