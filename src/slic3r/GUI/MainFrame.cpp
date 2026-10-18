@@ -972,10 +972,13 @@ void MainFrame::update_layout()
             }
         };
 
-        // On Linux m_plater needs to be removed from m_tabpanel before to reparent it
+        // On Linux m_plater needs to be removed from m_tabpanel before to reparent it. It is the
+        // page of Prepare, Preview and Showcase, so remove every one of them.
         int plater_page_id = m_tabpanel->FindPage(m_plater);
-        if (plater_page_id != wxNOT_FOUND)
+        while (plater_page_id != wxNOT_FOUND) {
             m_tabpanel->RemovePage(plater_page_id);
+            plater_page_id = m_tabpanel->FindPage(m_plater);
+        }
 
         if (m_plater->GetParent() != this)
             m_plater->Reparent(this);
@@ -1031,6 +1034,8 @@ void MainFrame::update_layout()
         m_plater->Reparent(m_tabpanel);
         m_tabpanel->InsertPage(tp3DEditor, m_plater, _L("Prepare"), std::string("tab_3d_active"), std::string("tab_3d_active"), false);
         m_tabpanel->InsertPage(tpPreview, m_plater, _L("Preview"), std::string("tab_preview_active"), std::string("tab_preview_active"), false);
+        // Showcase (D1): presentation renders, the plater's third page.
+        m_tabpanel->InsertPage(tpShowcase, m_plater, _L("Showcase"), std::string("tab_showcase_active"), std::string("tab_showcase_active"), false);
         m_main_sizer->Add(m_tabpanel, 1, wxEXPAND | wxTOP, 0);
 
         m_tabpanel->Bind(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, [this](wxCommandEvent& evt)
@@ -1394,9 +1399,13 @@ void MainFrame::init_tabpanel() {
                 m_param_panel->OnActivate();
             }
             else if (sel == tpPreview) {
-                if (!m_plater || m_plater->is_view3D_shown())
+                if (!m_plater || m_plater->is_view3D_shown() || m_plater->is_showcase_shown())
                     wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_PREVIEW));
                 m_param_panel->OnActivate();
+            }
+            else if (sel == tpShowcase) {
+                if (m_plater && !m_plater->is_showcase_shown())
+                    wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_SHOWCASE));
             }
         }
         //else if (panel == m_param_panel)
@@ -1582,6 +1591,16 @@ void MainFrame::init_tabpanel() {
     }
 }
 
+// Where the Device page goes: tpMonitor once update_layout() has inserted the plater's three pages
+// (Prepare, Preview, Showcase), right after Home before that - the inserts then move it to tpMonitor.
+int MainFrame::device_page_position() const
+{
+    const int count = int(m_tabpanel->GetPageCount());
+    if (m_plater != nullptr && m_tabpanel->FindPage(m_plater) != wxNOT_FOUND)
+        return std::min<int>(tpMonitor, count);
+    return std::min(1, count);
+}
+
 // SoftFever
 void MainFrame::show_device(bool bBBLPrinter) {
     auto idx = -1;
@@ -1605,7 +1624,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
         if (!m_monitor_holder)
             m_monitor_holder = make_monitor_holder();
         m_monitor_holder->Show(false);
-        m_tabpanel->InsertPage(tpMonitor, m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
+        m_tabpanel->InsertPage(device_page_position(), m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
 
         if (!m_calibration_holder)
             m_calibration_holder = make_calibration_holder();
@@ -1640,7 +1659,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
             });
         }
         m_printer_view->Show(false);
-        m_tabpanel->InsertPage(tpMonitor, m_printer_view, _L("Device"), std::string("tab_monitor_active"),
+        m_tabpanel->InsertPage(device_page_position(), m_printer_view, _L("Device"), std::string("tab_monitor_active"),
                                std::string("tab_monitor_active"));
     }
 }
@@ -1666,7 +1685,7 @@ void MainFrame::show_flashforge_device()
     if (m_ff_device == nullptr)
         m_ff_device = new FFDeviceTab(m_tabpanel);
     m_ff_device->Show(false);
-    m_tabpanel->InsertPage(tpMonitor, m_ff_device, _L("Device"), std::string("tab_monitor_active"),
+    m_tabpanel->InsertPage(device_page_position(), m_ff_device, _L("Device"), std::string("tab_monitor_active"),
                            std::string("tab_monitor_active"));
     static_cast<FFDeviceTab*>(m_ff_device)->OnActivate();
 #ifdef _MSW_DARK_MODE
@@ -4302,7 +4321,8 @@ void MainFrame::select_tab(wxPanel* panel)
         return;
     }
     int page_idx = m_tabpanel->FindPage(panel);
-    if (page_idx == tp3DEditor && m_tabpanel->GetSelection() == tpPreview)
+    // FindPage() gives the plater's first page (Prepare); Preview and Showcase show it too.
+    if (page_idx == tp3DEditor && (m_tabpanel->GetSelection() == tpPreview || m_tabpanel->GetSelection() == tpShowcase))
         return;
     //BBS GUI refactor: remove unused layout new/dlg
     /*if (page_idx != wxNOT_FOUND && m_layout == ESettingsLayout::Dlg)
