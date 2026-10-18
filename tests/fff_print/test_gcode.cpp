@@ -577,6 +577,11 @@ TEST_CASE("Sandwich-lite planner: off, min height, pin last Z", "[GCode][Sandwic
     CHECK_THAT(two[0].print_z, Catch::Matchers::WithinAbs(19.9, 1e-9));
     CHECK_THAT(two[1].print_z, Catch::Matchers::WithinAbs(20.0, 1e-9));
     CHECK_THAT((two[0].print_z - 20.0) / two[0].height, Catch::Matchers::WithinAbs(-1.0, 1e-9));
+
+    CHECK(sandwich_lite_unsupported_reason(false, false, 1) == nullptr);
+    CHECK(std::string(sandwich_lite_unsupported_reason(true, false, 1)) == "image-row top infill");
+    CHECK(std::string(sandwich_lite_unsupported_reason(false, true, 1)) == "wipe tower");
+    CHECK(std::string(sandwich_lite_unsupported_reason(false, false, 2)) == "more than one extruder");
 }
 
 TEST_CASE("Sandwich-lite planner skips a layer thinner than two 0.04 mm passes", "[GCode][SandwichLite]")
@@ -652,10 +657,16 @@ TEST_CASE("Sandwich-lite sub-passes: Z, flow, preview heights, no toolchange", "
     const PrintObject &object = *print.objects().front();
     const Layer       &top    = *object.layers().back();
     std::vector<const ExtrusionPath *> top_paths;
+    bool found_nosort_parent = false;
     for (const LayerRegion *region : top.regions())
-        for (const ExtrusionEntity *ee : region->fills.entities)
+        for (const ExtrusionEntity *ee : region->fills.entities) {
+            if (auto *col = dynamic_cast<const ExtrusionEntityCollection *>(ee))
+                if (col->no_sort && col->entities.size() >= 2)
+                    found_nosort_parent = true;
             collect_role_paths(ee, erTopSolidInfill, top_paths);
+        }
     REQUIRE_FALSE(top_paths.empty());
+    CHECK(found_nosort_parent);
 
     std::set<int> height_um;
     std::set<int> zoff_milli;
@@ -688,6 +699,15 @@ TEST_CASE("Sandwich-lite sub-passes: Z, flow, preview heights, no toolchange", "
     REQUIRE(preview_z_um.size() >= 2);
     // Sub-pass Z moves inside the same layer: ~0.1 mm between the two top-surface bands.
     CHECK(*preview_z_um.rbegin() - *preview_z_um.begin() >= 90);
+
+    // B1: emission order inside one region's top passes must never plow a later pass first.
+    double last_top_z = -1e9;
+    for (const auto &m : result.moves) {
+        if (m.type != EMoveType::Extrude || m.extrusion_role != erTopSolidInfill || m.layer_id != top_layer_id)
+            continue;
+        CHECK(double(m.position.z()) + 1e-4 >= last_top_z);
+        last_top_z = double(m.position.z());
+    }
 
     const std::string on  = sandwich_lite_strip_volatile(gcode);
     config.set("sandwich_lite_enable", false);

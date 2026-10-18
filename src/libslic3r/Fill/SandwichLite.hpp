@@ -39,6 +39,18 @@ inline bool sandwich_lite_requested(const PrintRegionConfig &cfg, ExtrusionRole 
     return role == erBottomSurface && cfg.sandwich_lite_include_bottom;
 }
 
+// Spike is single-tool only. Callers fall back to a normal fill when any of these is true.
+inline const char *sandwich_lite_unsupported_reason(bool image_row, bool wipe_tower, size_t extruder_count)
+{
+    if (image_row)
+        return "image-row top infill";
+    if (wipe_tower)
+        return "wipe tower";
+    if (extruder_count > 1)
+        return "more than one extruder";
+    return nullptr;
+}
+
 // Equal-share fallback, then user ratios, then drop the feature if a pass would be < 0.04 mm.
 inline std::vector<SandwichLitePass> sandwich_lite_plan(const PrintRegionConfig &cfg,
                                                         ExtrusionRole            role,

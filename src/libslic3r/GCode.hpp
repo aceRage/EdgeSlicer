@@ -545,6 +545,8 @@ private:
 
     std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first, bool unsupported_loops_only = false);
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
+    // Recurse one collection: honor no_sort, chain children that allow it, then emit.
+    std::string     extrude_infill_collection(ExtrusionEntityCollection &collection, const char *extrusion_name);
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
 
     // BBS
