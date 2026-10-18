@@ -537,6 +537,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HomeDownload.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
+    GUI/ElegooCamRelay.cpp
+    GUI/ElegooCamRelay.hpp
     GUI/RemoteAccess.cpp
     GUI/RemoteAccess.hpp
     GUI/RemoteControl.cpp

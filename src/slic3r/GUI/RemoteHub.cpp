@@ -4,6 +4,7 @@
 #include "RemoteHub.hpp"
 
 #include "BambuCamRelay.hpp"
+#include "ElegooCamRelay.hpp"
 #include "RemoteNotify.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
@@ -6099,6 +6100,22 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             int fps = std::atoi(query_param(r.query, "fps").c_str());
             if (fps < 0 || fps > 60) fps = 0;
             const std::string new_head = "GET /bambu?ip=" + percent_encode(ip) + "&code=" + percent_encode(code) +
+                                         (fps > 0 ? "&fps=" + std::to_string(fps) : "") + " HTTP/1.1\r\n" +
+                                         r.head.substr(r.head.find("\r\n") + 2);
+            tunnel(client, relay, force_close(new_head), "");
+        } else if (rest == "/elegoo" || rest == "/elegoo/status") {
+            // A Centauri Carbon camera: the same relay the PC's Stream tab uses, so a phone is one
+            // more viewer of the one connection the printer is given - never a connection of its own.
+            // The printer's address comes from the saved camera list, not from the phone.
+            std::string ip, unused_code;
+            if (!lookup_host(query_param(r.query, "id"), ip, unused_code)) { respond(client, 404, "text/plain", "unknown camera"); return; }
+            ip = ElegooCam::host_from_address(ip);
+            if (ip.empty()) { respond(client, 404, "text/plain", "unknown camera"); return; }
+            const int relay = BambuCamRelay::get().port();
+            if (relay == 0) { respond(client, 503, "text/plain", "camera relay is not running"); return; }
+            int fps = std::atoi(query_param(r.query, "fps").c_str());
+            if (fps < 0 || fps > 60) fps = 0;
+            const std::string new_head = std::string("GET ") + (rest == "/elegoo" ? "/elegoo" : "/elegoo/status") + "?ip=" + percent_encode(ip) +
                                          (fps > 0 ? "&fps=" + std::to_string(fps) : "") + " HTTP/1.1\r\n" +
                                          r.head.substr(r.head.find("\r\n") + 2);
             tunnel(client, relay, force_close(new_head), "");
