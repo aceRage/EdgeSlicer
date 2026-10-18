@@ -1,5 +1,6 @@
 #include "MoonrakerHost.hpp"
 
+#include <boost/filesystem.hpp>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
 #include <nlohmann/json.hpp>
@@ -54,6 +55,7 @@ bool moonraker_host_is_printer_info(const std::string &body)
 std::vector<std::string> moonraker_host_writable_roots(const std::string &body)
 {
     // GET /server/files/roots: { "result": [ { "name": "gcodes", "permissions": "rwd" }, ... ] }
+    // Only "gcodes" is offered: a print started from "config" would ask Klipper to run printer.cfg.
     std::vector<std::string> out;
     const json               root = parse_object(body);
     const auto               it   = root.find("result");
@@ -67,33 +69,59 @@ std::vector<std::string> moonraker_host_writable_roots(const std::string &body)
         if (name == child.end() || !name->is_string())
             continue;
         const std::string &root_name = name->get_ref<const std::string &>();
-        if (root_name.empty())
+        if (root_name != "gcodes")
             continue;
         const std::string perm = (perms != child.end() && perms->is_string()) ? perms->get<std::string>() : std::string();
         if (perm.find('w') == std::string::npos)
             continue;
         out.push_back(root_name);
+        break;
     }
     return out;
 }
 
-MoonrakerHostUploadReply moonraker_host_parse_upload_reply(const std::string &body)
+std::string moonraker_host_upload_subdir(const std::string &upload_path)
 {
-    // FileUploadHandler writes finalize_upload()'s dict at the top level: item.path, print_started,
-    // print_queued. There is no {"result": ...} envelope.
-    MoonrakerHostUploadReply out;
-    const json               root = parse_object(body);
-    const auto               item = root.find("item");
-    if (item != root.end() && item->is_object()) {
+    // Moonraker's `path` form field is the directory inside `root`, relative, forward slashes.
+    boost::filesystem::path parent = boost::filesystem::path(upload_path).parent_path();
+    std::string             dir    = parent.generic_string();
+    while (!dir.empty() && (dir.front() == '/' || dir.front() == '\\'))
+        dir.erase(dir.begin());
+    while (!dir.empty() && (dir.back() == '/' || dir.back() == '\\'))
+        dir.pop_back();
+    if (dir.empty() || dir == ".")
+        return {};
+    return dir;
+}
+
+namespace {
+
+void fill_upload_reply(const json &obj, MoonrakerHostUploadReply &out)
+{
+    const auto item = obj.find("item");
+    if (item != obj.end() && item->is_object()) {
         const auto path = item->find("path");
-        if (path != item->end() && path->is_string())
+        if (path != item->end() && path->is_string() && out.stored_path.empty())
             out.stored_path = path->get<std::string>();
     }
-    auto flag = [&root](const char *key) {
-        const auto it = root.find(key);
-        return it != root.end() && it->is_boolean() && it->get<bool>();
+    auto flag = [&obj](const char *key) {
+        const auto it = obj.find(key);
+        return it != obj.end() && it->is_boolean() && it->get<bool>();
     };
-    out.started_or_queued = flag("print_started") || flag("print_queued");
+    out.started_or_queued = out.started_or_queued || flag("print_started") || flag("print_queued");
+}
+
+} // namespace
+
+MoonrakerHostUploadReply moonraker_host_parse_upload_reply(const std::string &body)
+{
+    // Stock Moonraker FileUploadHandler writes finalize_upload() at the top level. Some shims wrap
+    // the same dict in {"result": ...}; read both so print_started is not lost (a lost flag would
+    // POST /printer/print/start on a job Moonraker already started or queued).
+    MoonrakerHostUploadReply out;
+    const json               root = parse_object(body);
+    fill_upload_reply(root, out);
+    fill_upload_reply(result_object(root), out);
     return out;
 }
 
@@ -101,6 +129,8 @@ MoonrakerHost::MoonrakerHost(DynamicPrintConfig *config)
     : m_host(config->opt_string("print_host"))
     , m_apikey(config->opt_string("printhost_apikey"))
     , m_cafile(config->opt_string("printhost_cafile"))
+    , m_user(config->has("printhost_user") ? config->opt_string("printhost_user") : std::string())
+    , m_password(config->has("printhost_password") ? config->opt_string("printhost_password") : std::string())
 {}
 
 const char *MoonrakerHost::get_name() const { return "Moonraker"; }
@@ -127,8 +157,24 @@ std::string MoonrakerHost::make_url(const std::string &path) const
 
 void MoonrakerHost::set_auth(Http &http) const
 {
-    if (!m_apikey.empty())
+    // Upstream Moonraker.cpp only sends X-Api-Key. HTTP user/password is not in that host: Digest
+    // is a PrusaLink path, and this fork's physical-printer dialog hides the user/password fields
+    // for every host type except PrusaLink. If they are still set (a leftover after switching
+    // host type, or an imported profile), say so rather than dropping them on the floor.
+    if (!m_apikey.empty()) {
         http.header("X-Api-Key", m_apikey);
+        if (!m_user.empty() || !m_password.empty())
+            BOOST_LOG_TRIVIAL(warning)
+                << "Moonraker: printhost_user/password is set but ignored; Moonraker auth is X-Api-Key "
+                   "(the user/password fields are a PrusaLink setting).";
+        return;
+    }
+    if (!m_user.empty() || !m_password.empty()) {
+        BOOST_LOG_TRIVIAL(warning)
+            << "Moonraker: no API key; sending HTTP Basic for printhost_user/password (upstream does "
+               "not; Moonraker itself expects X-Api-Key, or a reverse proxy in front).";
+        http.auth_basic(m_user, m_password);
+    }
 }
 
 bool MoonrakerHost::test(wxString &msg) const
@@ -258,8 +304,15 @@ bool MoonrakerHost::upload(PrintHostUpload upload_data, ProgressFn progress_fn, 
 
     const char *name                 = get_name();
     const auto  upload_filename      = upload_data.upload_path.filename();
+    const std::string subdir         = moonraker_host_upload_subdir(upload_data.upload_path.generic_string());
     const std::string root           = upload_data.storage.empty() ? std::string("gcodes") : upload_data.storage;
-    const bool        want_start     = upload_data.post_action == PrintHostPostUploadAction::StartPrint;
+    const bool        gcodes_root    = (root == "gcodes");
+    bool              want_start     = upload_data.post_action == PrintHostPostUploadAction::StartPrint;
+    if (want_start && !gcodes_root) {
+        BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: refusing to start a print from storage root `%2%`; only \"gcodes\" is printable") %
+                                          name % root;
+        want_start = false;
+    }
     const std::string url            = make_url("server/files/upload");
     bool              result         = true;
     std::string       uploaded_path;
@@ -272,14 +325,17 @@ bool MoonrakerHost::upload(PrintHostUpload upload_data, ProgressFn progress_fn, 
             plateindex = it->second;
     }
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2% to %3% (root=%4%, filename=%5%, plateindex=%6%, start_print=%7%)") %
-                                   name % upload_data.source_path % url % root % upload_filename.string() %
-                                   (plateindex.empty() ? "-" : plateindex) % (want_start ? "true" : "false");
+    BOOST_LOG_TRIVIAL(info) << boost::format(
+                                   "%1%: Uploading file %2% to %3% (root=%4%, path=%5%, filename=%6%, plateindex=%7%, start_print=%8%)") %
+                                   name % upload_data.source_path % url % root % (subdir.empty() ? "-" : subdir) %
+                                   upload_filename.string() % (plateindex.empty() ? "-" : plateindex) % (want_start ? "true" : "false");
 
     auto http = Http::post(url);
     apply_tls(http);
     set_auth(http);
     http.form_add("root", root);
+    if (!subdir.empty())
+        http.form_add("path", subdir);
     if (!plateindex.empty())
         http.form_add("plateindex", plateindex);
     http.form_add("print", want_start ? "true" : "false");

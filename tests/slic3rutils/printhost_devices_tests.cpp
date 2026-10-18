@@ -775,16 +775,17 @@ TEST_CASE("MoonrakerHost: connection-test and upload reply parsers", "[PrintHost
         CHECK_FALSE(moonraker_host_is_printer_info(R"({"api":"0.1"})"));
     }
 
-    SECTION("writable roots skip read-only entries") {
+    SECTION("writable roots offer only gcodes, never config") {
         const std::string body =
             R"({"result":[{"name":"gcodes","permissions":"rwd"},{"name":"config","permissions":"rw"},)"
             R"({"name":"logs","permissions":"r"},{"name":"","permissions":"rwd"},{"name":"timelapse"}]})";
         const std::vector<std::string> roots = moonraker_host_writable_roots(body);
-        REQUIRE(roots.size() == 2);
+        REQUIRE(roots.size() == 1);
         CHECK(roots[0] == "gcodes");
-        CHECK(roots[1] == "config");
         CHECK(moonraker_host_writable_roots("{}").empty());
         CHECK(moonraker_host_writable_roots(R"({"result":{}})").empty());
+        CHECK(moonraker_host_writable_roots(R"({"result":[{"name":"config","permissions":"rw"}]})").empty());
+        CHECK(moonraker_host_writable_roots(R"({"result":[{"name":"gcodes","permissions":"r"}]})").empty());
     }
 
     SECTION("upload reply reads item.path and print_started/print_queued at the top level") {
@@ -802,9 +803,24 @@ TEST_CASE("MoonrakerHost: connection-test and upload reply parsers", "[PrintHost
             moonraker_host_parse_upload_reply(R"({"item":{"path":"only.gcode"},"print_started":false})");
         CHECK(neither.stored_path == "only.gcode");
         CHECK_FALSE(neither.started_or_queued);
+    }
 
-        const MoonrakerHostUploadReply missing = moonraker_host_parse_upload_reply(R"({"result":{"item":{"path":"nope.gcode"}}})");
-        CHECK(missing.stored_path.empty()); // not under result.
-        CHECK_FALSE(missing.started_or_queued);
+    SECTION("a {\"result\":...}-wrapped upload reply still sees print_started") {
+        const MoonrakerHostUploadReply wrapped = moonraker_host_parse_upload_reply(
+            R"({"result":{"item":{"path":"shim.gcode"},"print_started":true,"print_queued":false}})");
+        CHECK(wrapped.stored_path == "shim.gcode");
+        CHECK(wrapped.started_or_queued);
+
+        const MoonrakerHostUploadReply queued = moonraker_host_parse_upload_reply(
+            R"({"result":{"item":{"path":"q.gcode"},"print_started":false,"print_queued":true}})");
+        CHECK(queued.stored_path == "q.gcode");
+        CHECK(queued.started_or_queued);
+    }
+
+    SECTION("the path form field is the parent directory inside the storage root") {
+        CHECK(moonraker_host_upload_subdir("benchy.gcode").empty());
+        CHECK(moonraker_host_upload_subdir("/benchy.gcode").empty());
+        CHECK(moonraker_host_upload_subdir("plates/benchy.gcode") == "plates");
+        CHECK(moonraker_host_upload_subdir("a/b/c.gcode") == "a/b");
     }
 }

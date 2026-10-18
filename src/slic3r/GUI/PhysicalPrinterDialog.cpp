@@ -723,6 +723,16 @@ void PhysicalPrinterDialog::update_host_type(bool printer_change)
     }
 
     Choice* choice = dynamic_cast<Choice*>(ht);
+    // Snapmaker's htMoonRaker* have no menu key. Showing Octo/Klipper for them is a lie; a
+    // display-only "Snapmaker" row keeps the stored value (Device-tab connect).
+    if (last_in_conf == htMoonRaker || last_in_conf == htMoonRaker_mqtt) {
+        const wxString snapmaker_label = _L("Snapmaker");
+        types.Add(snapmaker_label);
+        choice->set_values(types);
+        choice->set_value(std::string(snapmaker_label.utf8_str()), false);
+        (void) printer_change;
+        return;
+    }
     choice->set_values(types);
     // host_type is mapped by key: the dropdown index is not the stored PrintHostType
     // (htMoonRaker / htMoonRaker_mqtt have no key; htMoonrakerHttp sits after them).
@@ -733,8 +743,6 @@ void PhysicalPrinterDialog::update_host_type(bool printer_change)
         row = 0;
     const int value_for_row = enum_choice_value_at_index(ht->m_opt, row);
     choice->set_value(value_for_row < 0 ? last_in_conf : value_for_row, false);
-    // Leave Snapmaker's htMoonRaker* (no menu key) as stored; rewriting them from the row
-    // would turn a Device-tab connect into Octo/Klipper or PrusaLink.
     if (enum_choice_index_of_value(ht->m_opt, last_in_conf) >= 0 && value_for_row >= 0)
         m_config->set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(static_cast<PrintHostType>(value_for_row)));
     (void) printer_change;
