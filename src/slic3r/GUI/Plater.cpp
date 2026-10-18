@@ -9971,12 +9971,13 @@ void Sidebar::show_canvas_sync_dialog()
         dlg.ShowModal();
         return;
     }
-    apply_machine_filament_sync(machineFilamentList);
+    apply_machine_filament_sync(machineFilamentList, true);
 }
 
 // The part of the sync both sources share: the colour-matching dialog, then the project's
-// filaments, presets and colours from what it settled on.
-void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList)
+// filaments, presets and colours from what it settled on. `canvas_generic`: a "Generic" filament
+// takes the Generic preset of its type (CANVAS).
+void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList, bool canvas_generic)
 {
     PresetBundle* preset_bundle = wxGetApp().preset_bundle;
     if (!preset_bundle || !wxGetApp().plater())
@@ -10046,8 +10047,20 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
 
         for (size_t i = 0; i < effective_size; ++i) {
             const std::string synced_colour = into_u8(getMainColor(syncedData[i].m_color).GetAsString(wxC2S_HTML_SYNTAX));
-            Preset* matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
-                                                      syncedData[i].m_vendor, synced_colour);
+            Preset* matched = nullptr;
+            // CANVAS: an untagged or Generic spool takes the Generic preset of its type - the CC1's own
+            // ("Generic PLA @ECC") when the profiles have one - never a colour-picked look-alike such
+            // as "Generic PLA Silk" (owner decision 2026-10-18).
+            if (canvas_generic && boost::iequals(syncedData[i].m_vendor, "Generic") && !syncedData[i].m_type.empty()) {
+                if (Preset* own = preset_bundle->filaments.find_preset(canvas_generic_preset_name(syncedData[i].m_type));
+                    own != nullptr && own->is_compatible && own->name == canvas_generic_preset_name(syncedData[i].m_type))
+                    matched = own;
+                else
+                    matched = resolve_filament_preset(preset_bundle, "Generic " + syncedData[i].m_type, syncedData[i].m_type);
+            }
+            if (!matched)
+                matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
+                                                  syncedData[i].m_vendor, synced_colour);
             if (matched) {
                 preset_bundle->set_filament_preset(i, matched->name);
             }

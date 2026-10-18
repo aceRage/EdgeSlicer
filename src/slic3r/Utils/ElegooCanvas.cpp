@@ -267,9 +267,11 @@ std::string canvas_generic_filament_id(const std::string& filament_type)
 std::string canvas_clean_brand(const std::string& brand)
 {
     // The owner's CC1 (firmware V1.4.49) reports an untagged or hand-entered spool's brand as
-    // four em dashes (U+2014) with spaces between them. A brand made only of dashes and blanks is
-    // no brand.
+    // four em dashes (U+2014) with spaces between them. Owner decision (2026-10-18): a brand made
+    // only of dashes and blanks is "Generic"; an empty brand stays no brand.
     const std::string b = cv_trimmed(brand);
+    if (b.empty())
+        return b;
     for (size_t i = 0; i < b.size();) {
         const unsigned char c = static_cast<unsigned char>(b[i]);
         if (c == ' ' || c == '\t' || c == '-' || c == '_') {
@@ -292,7 +294,7 @@ std::string canvas_clean_brand(const std::string& brand)
         }
         return b;
     }
-    return std::string();
+    return "Generic";
 }
 
 std::string canvas_clean_code(const std::string& code)
@@ -321,12 +323,11 @@ std::string canvas_tray_name(const CanvasTray& tray)
         name = cv_trimmed(tray.filament_type);
     if (name.empty())
         name = tray.tray_type;
-    // No brand (an untagged or hand-entered spool): just what the printer calls the filament. The
-    // preset match then goes by the "Generic" vendor and the type.
+    // No brand at all: just what the printer calls the filament. The preset match then goes by the
+    // "Generic" vendor and the type.
     if (brand.empty())
         return name;
-    if (boost::iequals(brand, "Generic"))
-        return "Generic " + tray.tray_type;
+    // "Generic" (also the placeholder brand of an untagged spool) + "PLA PRO" is "Generic PLA PRO";
     // "ELEGOO" + "ELEGOO PLA" stays "ELEGOO PLA".
     if (boost::istarts_with(name, brand))
         return name;
@@ -394,8 +395,8 @@ bool canvas_parse_payload(const std::string& payload, CanvasInfo& info, std::str
             t.position        = pos;
             t.status          = cv_int_at(tray, "status", -1);
             t.filament_type   = cv_str_at(tray, "filament_type");
-            // A placeholder brand (em dashes) or the no-tag code ("0x00000") is kept as nothing, so
-            // the sync name, the Device tab card and the preset match never show or match it.
+            // A placeholder brand (em dashes) is "Generic" and the no-tag code ("0x00000") is kept as
+            // nothing, so the sync name, the Device tab card and the preset match never show them.
             t.brand           = canvas_clean_brand(cv_str_at(tray, "brand"));
             t.filament_name   = cv_str_at(tray, "filament_name");
             t.filament_code   = canvas_clean_code(cv_str_at(tray, "filament_code"));
@@ -428,6 +429,12 @@ bool canvas_parse_payload(const std::string& payload, CanvasInfo& info, std::str
 bool canvas_capable_model(const std::string& printer_model)
 {
     return boost::iequals(cv_trimmed(printer_model), "Elegoo Centauri Carbon");
+}
+
+std::string canvas_generic_preset_name(const std::string& family)
+{
+    // "@ECC" is the suffix of every Centauri Carbon 1 filament preset (resources/profiles/Elegoo/filament/ECC).
+    return "Generic " + cv_trimmed(family) + " @ECC";
 }
 
 std::string sdcp_host_of(const std::string& address)

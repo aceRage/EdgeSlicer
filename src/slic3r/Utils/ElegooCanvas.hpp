@@ -98,13 +98,14 @@ CanvasTrayState canvas_tray_state(int status);
 std::string canvas_tray_vendor(const CanvasTray& tray);
 
 // A brand made only of dashes (ASCII, en/em dash...) and blanks - what the CC1 reports for an
-// untagged or hand-entered spool - is "". Anything else is returned trimmed.
+// untagged or hand-entered spool - is "Generic" (owner decision). "" stays "". Anything else is
+// returned trimmed.
 std::string canvas_clean_brand(const std::string& brand);
 // "0x00000" (any count of zeros) - the CANVAS read no RFID tag - is "". Anything else is returned trimmed.
 std::string canvas_clean_code(const std::string& code);
 // The filament name the sync matches presets by: "<brand> <filament_name>" (no doubled brand),
-// "Generic <type>" for the brand "Generic", and just the filament name (else its type) when there is
-// no brand (an untagged or hand-entered spool). Empty for an empty tray.
+// so "Generic PLA PRO" for an untagged spool, and just the filament name (else its type) when the
+// brand is empty. Empty for an empty tray.
 std::string canvas_tray_name(const CanvasTray& tray);
 
 // Parse the payload of a command-324 reply. Split out from the query so it can be
@@ -114,6 +115,10 @@ bool canvas_parse_payload(const std::string& payload, CanvasInfo& info, std::str
 
 // True for the printer models this fork reads CANVAS from: the Centauri Carbon 1 only (design D10).
 bool canvas_capable_model(const std::string& printer_model);
+
+// The CC1's own Generic filament preset for a family ("PLA" -> "Generic PLA @ECC"). The sync prefers
+// it for an untagged or Generic spool when the profiles have it, else the usual "Generic <type>".
+std::string canvas_generic_preset_name(const std::string& family);
 
 // The host part of a print_host value ("http://h:3030/x" -> "h"), which is where the SDCP
 // websocket lives whatever port the preset's HTTP address carries.
