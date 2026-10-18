@@ -9,6 +9,7 @@
 // after replying.
 
 #include "ElegooCanvas.hpp"
+#include "ElegooSdcpMonitor.hpp"
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
@@ -198,8 +199,12 @@ CanvasQueryResult canvas_query(const std::string& address, const CanvasQueryOpti
     }
     CanvasQueryResult r;
     try {
-        BeastSdcpTransport transport(host);
-        r = canvas_query_over(transport, opts);
+        // While the hub holds its connection to this printer (ElegooSdcpMonitor), ask over that one
+        // instead of opening two more: the CC1 takes only a few websocket clients at once.
+        if (!SdcpMonitor::canvas_query_shared(host, opts, r)) {
+            BeastSdcpTransport transport(host);
+            r = canvas_query_over(transport, opts);
+        }
     } catch (const std::exception& e) {
         r       = CanvasQueryResult();
         r.error = std::string("CANVAS query failed: ") + e.what();

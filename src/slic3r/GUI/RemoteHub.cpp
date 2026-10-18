@@ -1789,6 +1789,13 @@ Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_r
             out.keep_cached = true;
             return out;
         }
+        // An Elegoo SDCP printer has one connection per PC, held by one window (ElegooSdcpMonitor's
+        // lock); another window's row for it says it has nothing, and the holder's row is kept.
+        if (incoming.contains("sdcp_connected") && cached_fresh && cached_instance != incoming_instance &&
+            cached.value("sdcp_connected", false) && !incoming.value("sdcp_connected", false)) {
+            out.keep_cached = true;
+            return out;
+        }
         if (!row_has_filament(incoming) && row_has_filament(cached)) {
             for (const char* k : { "ams", "ext_spools" }) {
                 if (!cached.contains(k)) continue;
@@ -2956,6 +2963,10 @@ private:
     // or replaces one. Guarded by m_mutex. Idle streams cost nothing: go2rtc only connects to the
     // printer while somebody watches.
     std::map<std::string, std::string> m_own_streams;
+    // When somebody last looked at the printers (/summary, /state, a proxied /api/printers): the
+    // background poll tells the instances watching=0 otherwise, so an Elegoo printer's CANVAS is only
+    // read while a person can see it (ElegooSdcpMonitor).
+    std::atomic<long long>         m_watch_ms { 0 };
     std::atomic<bool>              m_streams_dirty { false };  // a Stream-tab save not synced yet
     std::atomic<bool>              m_streams_worker { false }; // the sync worker is running
     int                            m_webrtc_port { 0 };          // go2rtc's WebRTC media port (0 = WebRTC off)
@@ -3416,11 +3427,13 @@ static long long now_millis()
 void HubServer::poll_printers()
 {
     const std::vector<Instance> live = instances(false);
+    const long long             seen = m_watch_ms.load();
+    const bool                  watched = seen != 0 && now_millis() - seen < 45000;
     for (const Instance& inst : live) {
         if (inst.port <= 0) continue;
         std::string body;
         int         status = 0;
-        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers")
+        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers?watching=" + (watched ? "1" : "0"))
             .timeout_connect(1).timeout_max(10)
             .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
             .on_error([&](std::string, std::string, unsigned) {})
@@ -3888,6 +3901,10 @@ json HubServer::summary_json()
         // fans), the U1's toolhead filaments and a Bambu printer's AMS units - as the instance's
         // row carried them. A stale row keeps them for display; the app offers no control on one.
         for (const char* k : { "controls", "toolheads", "ams", "ext_spools", "hms" })
+            if (row.contains(k)) p[k] = row[k];
+        // An Elegoo SDCP printer's chamber reading, where its camera is found, and what the printer
+        // itself says it is doing (ElegooSdcp::fill_row).
+        for (const char* k : { "chamber_temp", "chamber_target", "camera_hint", "sdcp" })
             if (row.contains(k)) p[k] = row[k];
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);
@@ -5568,6 +5585,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
     // the requirement: the app's Devices screen used to be able to say nothing at all with the
     // slicer closed, because the printers were only reachable through /i/<pid>/api/printers.
     if (r.method == "GET" && (rest == "/summary" || rest == "/summary/")) {
+        m_watch_ms = now_millis();
         respond_json(client, 200, summary_json().dump());
         return;
     }
@@ -5851,6 +5869,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         }
         if (sub.compare(0, 4, "/api") == 0 && (sub.size() == 4 || sub[4] == '/')) {
             if (!instance_api_allowed(r.method, sub)) { respond_json(client, 404, json_error("route not proxied; see /api")); return; }
+            if (r.method == "GET" && sub == "/api/printers") m_watch_ms = now_millis();
             if (r.content_length > MAX_API_BODY) { respond_json(client, 413, json_error("body too large")); return; }
             // Replay the request against the instance with the prefix stripped; the instance
             // answers with Connection: close, so the splice ends by itself.
@@ -6052,6 +6071,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             respond(client, 200, "text/html; charset=utf-8", page,
                     "X-Frame-Options: DENY\r\nSet-Cookie: rt=" + token + "; Path=/; SameSite=Lax" + cookie_flags + "\r\n");
         } else if (rest == "/state") {
+            m_watch_ms = now_millis();
             // Through Tailscale Serve the phone learns who it is signed in as (shown in its top bar).
             std::string st = state_for_phone();
             if (via_serve) {

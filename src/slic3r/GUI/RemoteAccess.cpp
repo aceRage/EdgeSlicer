@@ -37,6 +37,7 @@
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
+#include "slic3r/Utils/ElegooSdcpMonitor.hpp"
 #include "slic3r/Utils/LoopbackAcceptLoop.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -567,6 +568,7 @@ void RemoteAccess::stop()
         m_on = false;
         RemoteEvents::stop();
         RemoteTimelapse::shutdown();
+        SdcpMonitor::shutdown(); // the Elegoo printers' connections
         if (s_heartbeat) s_heartbeat->Stop();
         boost::system::error_code ig;
         fs::remove(fs::path(RemoteHub::instances_dir()) / (std::to_string(wxGetProcessId()) + ".json"), ig);
@@ -1091,8 +1093,11 @@ RemoteAccess::ApiResponse RemoteAccess::api_object_transform(const std::string& 
     return r;
 }
 
-RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate)
+RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate, bool watching)
 {
+    // Somebody is looking (the app, the hub page, the Printers tab - not the hub's own background
+    // poll, which says watching=0 when nobody is): the Elegoo printers' CANVAS may be read.
+    if (watching) SdcpMonitor::note_watching();
     auto out      = std::make_shared<nlohmann::json>();
     auto targets  = std::make_shared<std::vector<RemoteControl::HostTarget>>();
     auto lan_name = std::make_shared<std::string>();
@@ -2651,7 +2656,7 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     if (path == "/objects/transform" && method == "POST")
         return api_object_transform(body.empty() ? query : body);
     if (path == "/printers" && method == "GET")
-        return api_printers(num(query_param(query, "plate"), -1));
+        return api_printers(num(query_param(query, "plate"), -1), query_param(query, "watching") != "0");
     // The timelapse list and pictures (the video itself is streamed by serve(), see there). The id
     // is a printer id like /control's, percent-decoded; the name is checked by RemoteTimelapse.
     if (method == "GET") {

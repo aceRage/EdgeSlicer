@@ -961,6 +961,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/ElegooCanvasQuery.cpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
+    Utils/ElegooSdcp.cpp
+    Utils/ElegooSdcp.hpp
+    Utils/ElegooSdcpMonitor.cpp
+    Utils/ElegooSdcpMonitor.hpp
     Utils/EmbossStyleManager.cpp
     Utils/EmbossStyleManager.hpp
     Utils/ESP3D.cpp
