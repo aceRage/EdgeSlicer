@@ -616,6 +616,7 @@ void PrintHostSendDialog::rebuild_mapping_rows()
     if (!can_map) {
         m_mapping_panel->Show(false);
         m_mapping_panel->Layout();
+        update_mapping_note(); // no rows, no warnings
         return;
     }
 
