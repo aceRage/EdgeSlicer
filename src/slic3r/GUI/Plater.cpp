@@ -26187,6 +26187,9 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
                  opt_key == "sparse_infill_filament" || opt_key == "solid_infill_filament") {
             update_scheduled = true;
         }
+        // Orca #16291: the center of mass markers weigh the parts by it.
+        else if (opt_key == "filament_density" && wxGetApp().show_center_of_mass())
+            p->view3D->get_canvas3d()->set_as_dirty();
     }
 
     if (bed_shape_changed)

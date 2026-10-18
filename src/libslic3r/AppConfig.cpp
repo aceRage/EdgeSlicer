@@ -237,6 +237,10 @@ void AppConfig::set_defaults()
     if (get(SETTING_OPENGL_SHOW_FPS_OVERLAY).empty())
         set_bool(SETTING_OPENGL_SHOW_FPS_OVERLAY, false);
 
+    // Orca #16291: center of mass markers in Prepare and Preview.
+    if (get("show_center_of_mass").empty())
+        set_bool("show_center_of_mass", false);
+
     if (get("zoom_to_mouse").empty())
         set_bool("zoom_to_mouse", false);
 

@@ -3518,6 +3518,16 @@ void MainFrame::init_menubar_as_editor()
             },
             this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_show_xray(); }, this);
 
+        // Orca #16291: center of mass markers, in Prepare and Preview (Orca: its canvas menu).
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Show Center of Mass"),
+            _L("Show the center of mass of each plate, object, separate part and support in Prepare and Preview. Click a marker for its weight, volume and moment of inertia."),
+            [this](wxCommandEvent &) {
+                wxGetApp().toggle_show_center_of_mass();
+                m_plater->set_current_canvas_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown() || m_plater->is_preview_shown(); }, []() { return wxGetApp().show_center_of_mass(); }, this);
+
         /*viewMenu->AppendSeparator();
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show &Wireframe") + "\t" + ctrl + shift + _L("Enter"), _L("Show wireframes in 3D scene."),
             [this](wxCommandEvent&) { m_plater->toggle_show_wireframe(); m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT)); }, this,

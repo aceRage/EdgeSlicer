@@ -266,6 +266,11 @@ private:
     GCodeProcessorResult::SettingsIds m_settings_ids;
 
     std::vector<CustomGCode::Item> m_custom_gcode_per_print_z;
+    // Orca #16291: centers of mass of the loaded G-code.
+    GCodeProcessorResult::ObjectMass              m_plate_mass;
+    std::vector<GCodeProcessorResult::ObjectMass> m_object_masses;
+    std::vector<GCodeProcessorResult::ObjectMass> m_body_masses;
+    std::vector<GCodeProcessorResult::ObjectMass> m_support_masses;
 
     bool m_contained_in_bed{ true };
     // EDGE (#642 memory guard): set when the toolpaths were not loaded because memory ran low while
@@ -331,6 +336,10 @@ public:
     std::vector<float> get_layers_times() const { return m_viewer.get_layers_estimated_times(); }
 
     const libvgcode::Interval& get_layers_z_range() const { return m_viewer.get_layers_view_range(); }
+    const GCodeProcessorResult::ObjectMass&              get_plate_mass() const { return m_plate_mass; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_object_masses() const { return m_object_masses; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_body_masses() const { return m_body_masses; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_support_masses() const { return m_support_masses; }
 
     const SequentialView& get_sequential_view() const { return m_sequential_view; }
     void update_sequential_view_current(unsigned int first, unsigned int last);
