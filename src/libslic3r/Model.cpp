@@ -1143,43 +1143,63 @@ std::string Model::get_auxiliary_file_temp_path()
 }
 
 // BBS: backup dir
+// A fresh backup folder for a model under parent, named by date, pid and model id.
+static std::string new_backup_path(const std::string &parent, size_t model_id)
+{
+    std::time_t t = std::time(0);
+    std::tm* now_time = std::localtime(&t);
+    std::stringstream buf;
+    buf << "/snapmaker_orca_model/";
+    buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
+    buf << get_current_pid() << "#";
+    buf << model_id;
+    return boost::filesystem::path(parent).string() + buf.str();
+}
+
 std::string Model::get_backup_path()
 {
+    bool generated = false;
     if (backup_path.empty())
     {
-        auto pid = get_current_pid();
-        boost::filesystem::path parent_path(temporary_dir());
-        std::time_t t = std::time(0);
-        std::tm* now_time = std::localtime(&t);
-        std::stringstream buf;
-        buf << "/snapmaker_orca_model/";
-        buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
-        buf << pid << "#";
-        buf << this->id().id;
-
-        backup_path = parent_path.string() + buf.str();
+        backup_path = new_backup_path(temporary_dir(), this->id().id);
+        generated = true;
         BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, backup_path empty, set to %3%")%this%this->id().id%backup_path;
-        boost::filesystem::path temp_path(backup_path);
-        if (boost::filesystem::exists(temp_path))
-        {
-            BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, remove previous %3%")%this%this->id().id%backup_path;
-            boost::filesystem::remove_all(temp_path);
-        }
     }
-    boost::filesystem::path temp_path(backup_path);
-    try {
-        if (!boost::filesystem::exists(temp_path))
-        {
-            BOOST_LOG_TRIVIAL(info) << "create /3D/Objects in " << temp_path;
-            boost::filesystem::create_directories(backup_path + "/3D/Objects");
-            BOOST_LOG_TRIVIAL(info) << "create /Metadata in " << temp_path;
-            boost::filesystem::create_directories(backup_path + "/Metadata");
-            BOOST_LOG_TRIVIAL(info) << "create /lock.txt in " << temp_path;
-            save_string_file(backup_path + "/lock.txt",
-                boost::lexical_cast<std::string>(get_current_pid()));
+    auto create_backup_dirs = [this, generated]() -> bool {
+        boost::filesystem::path temp_path(backup_path);
+        try {
+            if (generated && boost::filesystem::exists(temp_path))
+            {
+                BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, remove previous %3%")%this%this->id().id%backup_path;
+                boost::filesystem::remove_all(temp_path);
+            }
+            if (!boost::filesystem::exists(temp_path))
+            {
+                BOOST_LOG_TRIVIAL(info) << "create /3D/Objects in " << temp_path;
+                boost::filesystem::create_directories(backup_path + "/3D/Objects");
+                BOOST_LOG_TRIVIAL(info) << "create /Metadata in " << temp_path;
+                boost::filesystem::create_directories(backup_path + "/Metadata");
+                BOOST_LOG_TRIVIAL(info) << "create /lock.txt in " << temp_path;
+                save_string_file(backup_path + "/lock.txt",
+                    boost::lexical_cast<std::string>(get_current_pid()));
+            }
+            return true;
+        } catch (std::exception &ex) {
+            BOOST_LOG_TRIVIAL(error) << "Failed to create backup path" << temp_path << ": " << ex.what();
+            return false;
         }
-    } catch (std::exception &ex) {
-        BOOST_LOG_TRIVIAL(error) << "Failed to create backup path" << temp_path << ": " << ex.what();
+    };
+    if (!create_backup_dirs() && generated) {
+        // temporary_dir() is unset or not writable (unset, the path is "/snapmaker_orca_model", read-only
+        // on macOS). The 3MF importer extracts the project settings into this folder, so fall back to the
+        // system temp folder rather than hand out one nothing can be written to.
+        boost::system::error_code ec;
+        const boost::filesystem::path system_temp = boost::filesystem::temp_directory_path(ec);
+        if (!ec && !system_temp.empty()) {
+            backup_path = new_backup_path(system_temp.string(), this->id().id);
+            BOOST_LOG_TRIVIAL(warning) << boost::format("model %1%, id %2%, backup path falls back to %3%")%this%this->id().id%backup_path;
+            create_backup_dirs();
+        }
     }
 
     return backup_path;

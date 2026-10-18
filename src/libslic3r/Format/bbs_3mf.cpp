@@ -1381,7 +1381,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         void _extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, const std::string& archive_filename);
         //BBS: add project config file logic
-        void _extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, Model& model);
+        // False when the settings could not be extracted at all; a load must not go on without them.
+        bool _extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, Model& model);
         //BBS: extract project embedded presets
         void _extract_project_embedded_presets_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, std::vector<Preset*>&project_presets, Model& model, Preset::Type type, bool use_json = true);
 
@@ -1760,7 +1761,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (boost::algorithm::iequals(name, BBS_PROJECT_CONFIG_FILE)) {
                     // extract slic3r print config file
                     ConfigSubstitutionContext config_substitutions(ForwardCompatibilitySubstitutionRule::Disable);
-                    _extract_project_config_from_archive(archive, stat, config, config_substitutions, model);
+                    if (!_extract_project_config_from_archive(archive, stat, config, config_substitutions, model))
+                        return false;
                 }
                 else if (boost::algorithm::iequals(name, BBS_MODEL_CONFIG_FILE)) {
                     // extract slic3r model config file
@@ -2119,7 +2121,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //} else
                 if (boost::algorithm::iequals(name, BBS_PROJECT_CONFIG_FILE)) {
                     // extract slic3r print config file
-                    _extract_project_config_from_archive(archive, stat, config, config_substitutions, model);
+                    if (!_extract_project_config_from_archive(archive, stat, config, config_substitutions, model) && !dont_load_config)
+                        return false;
                 }
                 else if (boost::algorithm::iequals(name, CUT_INFORMATION_FILE)) {
                     // extract object cut info
@@ -3363,7 +3366,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     }
 
     //BBS: extract project config from json files
-    void _BBS_3MF_Importer::_extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model& model)
+    bool _BBS_3MF_Importer::_extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model& model)
     {
         if (stat.m_uncomp_size > 0) {
             const std::string& temp_path = model.get_backup_path();
@@ -3373,21 +3376,25 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             mz_bool res = mz_zip_reader_extract_to_file(&archive, stat.m_file_index, dest_zip_file.c_str(), 0);
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", extract  %1% from 3mf %2%, ret %3%\n") % dest_file % stat.m_filename % res;
             if (res == 0) {
-                add_error("Error while extract project config file to file");
-                return;
+                // The backup folder cannot be written. Going on would hand the caller an empty config
+                // for a project that has one, and callers read its options without checking for them.
+                add_error("Error while extract project config file to file " + dest_file);
+                return false;
             }
             std::map<std::string, std::string> key_values;
             std::string reason;
             int ret = config.load_from_json(dest_file, config_substitutions, true, key_values, reason);
             if (ret) {
+                // A damaged settings file stays a warning, as it always was.
                 add_error("Error load config from json:"+reason);
-                return;
+                return true;
             }
             // Edge (Orca #11582): a Bambu Lab project from before the option keeps its M1003.
             if (upgrade_missing_power_loss_recovery(config))
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": project has no enable_power_loss_recovery; Bambu Lab printer, set to enable";
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", load project config file successfully from %1%\n") %dest_file;
         }
+        return true;
     }
 
     //BBS: extract project embedded presets
