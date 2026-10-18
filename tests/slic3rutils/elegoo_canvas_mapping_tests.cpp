@@ -157,7 +157,7 @@ TEST_CASE("A CANVAS read becomes the send dialog's slots", "[ElegooCanvas]")
     CHECK(st.slots[0].label() == "Tray 1 PLA");
     CHECK(! st.slots[2].loaded);
     CHECK(st.slots[2].label() == "Tray 3 (empty)");
-    CHECK(st.slots[3].name == "Generic PLA");
+    CHECK(st.slots[3].name == "PLA");
 
     SECTION("no CANVAS attached, or no answer: nothing to map, and the dialog says why")
     {
@@ -285,7 +285,7 @@ TEST_CASE("Remembered CANVAS mappings follow the spool, not the tray number", "[
         REQUIRE(it != back.end());
         CHECK(it->first == "PLA|Elegoo PLA @ECC|#FF0000");
         CHECK(it->second.type == "PLA");
-        CHECK(it->second.name == "Generic PLA");
+        CHECK(it->second.name == "PLA");
         CHECK(it->second.colour == "#FFFFFF");
     }
     SECTION("the next send preselects it")
