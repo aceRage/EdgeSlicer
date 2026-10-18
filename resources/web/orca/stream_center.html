@@ -743,6 +743,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         });
         var before = JSON.stringify(state.hosts);
         state.hosts = hosts;
+        if (Array.isArray(s.dismissed)) state.dismissed = s.dismissed.slice();
         var local = state.active.slice();
         if (first && Array.isArray(s.active) && s.active.length) state.active = s.active.slice();
         var added = normalize();
@@ -752,6 +753,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             state.hosts.forEach(function(h) { ids[h.id] = true; });
             state.active = local.filter(function(id) { return ids[id]; });
         }
+        if (applyElegooSeed()) added = true;
         if (state.active.length === 0 && state.hosts.length > 0) state.active = [state.hosts[0].id];
         hubStateKnown = true;
         try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
@@ -777,6 +779,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             else return { rkind: 'flashforge' };
         }
         if (kind === 'p1') return { rkind: 'p1' };
+        if (kind === 'elegoo') return { rkind: 'elegoo' }; // the hub's relay, looked up by id
         if (kind === 'url') return { rkind: 'url', rurl: streamSrc(h) };
         var src = go2rtcSrc(h, kind);
         return { rkind: 'go2rtc', rname: 's' + hashStr(src), rsrc: src };
@@ -789,7 +792,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             for (var k2 in d) out[k2] = d[k2];
             return out;
         });
-        postToSlicer('stream_state:' + JSON.stringify({ hosts: hosts, active: state.active }));
+        postToSlicer('stream_state:' + JSON.stringify({ hosts: hosts, active: state.active, dismissed: state.dismissed || [] }));
     }
     // How video reaches this phone, kept per phone (not on the PC). This is the *default* for
     // every camera tile; a single tile can still be overridden with its own mode picker (the
@@ -979,7 +982,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     var relayPort = 0;
     function kindOf(h) {
         if (/^(rtsps?|onvif):\/\//i.test(h.ip)) return 'rtsp-url'; // a pasted stream URL wins over the picked type
-        if (h.kind === 'rtsps' || h.kind === 'flashforge' || h.kind === 'ipcam' || h.kind === 'wyze') return h.kind;
+        if (h.kind === 'rtsps' || h.kind === 'flashforge' || h.kind === 'ipcam' || h.kind === 'wyze' || h.kind === 'elegoo') return h.kind;
         if (h.kind === 'p1' || (h.code && h.kind !== 'auto-url')) return 'p1';
         return 'url';
     }
@@ -1143,6 +1146,83 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                 .catch(function(e) { cb(null, String(e)); });
         }
     }
+
+    // ---- Elegoo Centauri Carbon (CC1) ----------------------------------------------------------
+    // The camera is MJPEG on the printer (port 3031, path /video), which the hub's local relay
+    // re-serves for a plain <img> over ONE connection per printer: the printer lets only four
+    // viewers in, so every tile, window and phone shares the relay's single connection. The relay
+    // starts that connection when a tile first loads and drops it a moment after the last viewer
+    // is gone (a parked tile has no <img> source, which ends its request).
+    var ELEGOO_BUSY = 'Camera busy: too many viewers (Elegoo allows 4).';
+    // The printer's address out of whatever was typed: no scheme, user, port or path.
+    function elegooHost(ip) {
+        return String(ip || '').replace(/^[a-z][a-z0-9+.\-]*:\/\//i, '').replace(/[\/?#].*$/, '').replace(/^.*@/, '').replace(/:\d+$/, '');
+    }
+    // What a tile says when its picture did not come. `st` is the relay's answer to
+    // /elegoo/status ({state, message}); null when that could not be fetched either.
+    function elegooMessage(st) {
+        var s = st && st.state;
+        if (s === 'busy') return ELEGOO_BUSY;
+        if (s === 'no_camera') return 'This printer reports no camera.';
+        return 'Can\u2019t read the printer\u2019s camera. Check that it is on and on this network. If other viewers are open, the printer lets only 4 in.';
+    }
+    // Wires an <img> already in `cell` to the relay: a "connecting" note until the first picture, and
+    // when the relay refuses, the reason in words (an <img> cannot show an HTTP error) with Retry.
+    function elegooAttach(cell, im, src, statusUrl) {
+        var note = document.createElement('div');
+        note.className = 'elegoo-note';
+        note.setAttribute('role', 'status');
+        note.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;font-size:13px;text-align:center;padding:8px;';
+        cell.appendChild(note);
+        var tries = 0;
+        function connect() {
+            note.style.color = 'var(--mute5)';
+            note.textContent = 'Connecting to the camera\u2026';
+            note.style.display = 'flex';
+            im.src = src + (tries ? '&n=' + tries : '');
+            tries++;
+        }
+        function show(st) {
+            note.style.color = 'var(--err2-fg)';
+            note.textContent = elegooMessage(st);
+            var retry = document.createElement('button');
+            retry.type = 'button';
+            retry.textContent = 'Retry';
+            retry.onclick = function(e) { e.stopPropagation(); connect(); };
+            note.appendChild(retry);
+            note.style.display = 'flex';
+        }
+        im.addEventListener('load', function() { note.style.display = 'none'; });
+        im.addEventListener('error', function() {
+            if (!im.getAttribute('src')) return; // a parked tile has its source taken away on purpose
+            fetch(statusUrl).then(function(r) { return r.json(); }).then(show, function() { show(null); });
+        });
+        connect();
+    }
+    // Printers set up in Printer settings with host type Elegoo Link (the slicer hands them over
+    // through __elegooSeed). Each is added once as a tile; one the person removes is remembered in
+    // state.dismissed (kept in the hub with the camera list) and not brought back.
+    var elegooSeedList = [];
+    function applyElegooSeed() {
+        if (REMOTE) return false;
+        if (!Array.isArray(state.dismissed)) state.dismissed = [];
+        var added = false;
+        elegooSeedList.forEach(function(p) {
+            var ip = elegooHost(p && p.ip);
+            if (!ip || state.dismissed.indexOf(ip) !== -1) return;
+            if (state.hosts.some(function(h) { return h.kind === 'elegoo' && elegooHost(h.ip) === ip; })) return;
+            var h = { id: newId(), ip: ip, kind: 'elegoo', alias: (p && p.name) ? String(p.name) : '' };
+            state.hosts.push(h);
+            state.active.push(h.id);
+            added = true;
+        });
+        return added;
+    }
+    window.__elegooSeed = function(list) {
+        elegooSeedList = Array.isArray(list) ? list : [];
+        if (REMOTE || !hubStateKnown) return; // __hubState applies it once the hub's list has been read
+        if (applyElegooSeed()) { save(); render(); }
+    };
 
     // Flashforge (Creator 5 / Adventurer 5M family): the printer reports its own
     // camera URL through the LAN detail API; the slicer probes it for us because
@@ -1416,6 +1496,16 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             var fps = qualityFps(h.id);
             im.src = REMOTE + 'bambu?id=' + encodeURIComponent(h.id) + (fps ? '&fps=' + fps : '');
             cell.appendChild(im);
+        } else if (h.rkind === 'elegoo') {
+            var eim = document.createElement('img');
+            eim.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
+            eim.addEventListener('load', function() {
+                if (eim.naturalWidth && eim.naturalHeight) setCellAspect(cell, eim.naturalWidth / eim.naturalHeight);
+            });
+            cell.appendChild(eim);
+            var efps = qualityFps(h.id); // the same frame-rate knob as the Bambu relay
+            var eid = encodeURIComponent(h.id);
+            elegooAttach(cell, eim, REMOTE + 'elegoo?id=' + eid + (efps ? '&fps=' + efps : ''), REMOTE + 'elegoo/status?id=' + eid);
         } else if (h.rkind === 'url' && h.rurl) {
             var f2 = document.createElement('iframe');
             f2.allow = 'autoplay';
@@ -1701,10 +1791,13 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         { value: 'p1',         label: 'Bambu P1 / A1 (needs access code)' },
         { value: 'rtsps',      label: 'Bambu X1 / H2 (needs access code + LAN Liveview on)' },
         { value: 'flashforge', label: 'Flashforge (Creator 5 / Adventurer 5M family)' },
+        { value: 'elegoo',     label: 'Elegoo Centauri Carbon (CC1)' },
         { value: 'ipcam',      label: 'IP camera (RTSP / ONVIF: Reolink, Amcrest, Hikvision, Tapo, …)' },
         { value: 'wyze',       label: 'Wyze (RTSP firmware or wyze-bridge)' }
     ];
     var KIND_INFO = {
+        elegoo: 'The camera is read through this PC\u2019s relay, which keeps one connection to the printer however many tiles, windows or phones are watching: ' +
+                'the Centauri Carbon allows only 4 viewers at a time (its own web page and the Elegoo app count too). Enter the printer\u2019s IP address.',
         ipcam: 'The camera is pulled through the bundled go2rtc relay: it asks the camera over ONVIF for its stream and plays it here. ' +
                'ONVIF must be enabled on the camera (most brands: on by default, some need a separate ONVIF user). ' +
                'Use an H.264 stream — H.265 only plays if Windows has the HEVC video extension. ' +
@@ -1720,7 +1813,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             title: title,
             fields: [
                 { key: 'kind', label: 'Type', type: 'select', value: h.kind || 'auto', options: KIND_OPTIONS },
-                { key: 'info', type: 'info', text: function(v) { return KIND_INFO[v.kind] || ''; }, showIf: isCam },
+                { key: 'info', type: 'info', text: function(v) { return KIND_INFO[v.kind] || ''; }, showIf: function(v) { return isCam(v) || v.kind === 'elegoo'; } },
                 { key: 'find', type: 'button', label: 'Find ONVIF cameras on this network', showIf: function(v) { return v.kind === 'ipcam'; },
                   onClick: function(ctx) {
                       ctx.setStatus('find', 'Searching (a few seconds)…');
@@ -2020,6 +2113,12 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                 e.stopPropagation();
                 showModal({ title: 'Remove camera', message: 'Remove ' + (h.alias ? h.alias + ' (' + h.ip + ')' : h.ip) + ' from the list?' }, function(r) {
                     if (r === null) return;
+                    if (h.kind === 'elegoo') {
+                        // Do not bring it back from the printer list (applyElegooSeed).
+                        if (!Array.isArray(state.dismissed)) state.dismissed = [];
+                        var gone = elegooHost(h.ip);
+                        if (state.dismissed.indexOf(gone) === -1) state.dismissed.push(gone);
+                    }
                     state.hosts = state.hosts.filter(function(x) { return x.id !== h.id; });
                     state.active = state.active.filter(function(x) { return x !== h.id; });
                     save(); render();
@@ -2100,6 +2199,17 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                         ffCell(hh, cell);
                     } else if (kind === 'rtsp-url' || kind === 'rtsps' || kind === 'ipcam' || kind === 'wyze') {
                         if (go2rtcPort) go2rtcCell(cell, go2rtcSrc(hh, kind)); else relayWaitCell(cell, hubAnswered && !go2rtcPort);
+                    } else if (kind === 'elegoo') {
+                        if (!relayPort) relayWaitCell(cell, hubAnswered && !relayPort);
+                        else {
+                            cell.dataset.hub = '1';
+                            var eim = document.createElement('img');
+                            eim.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
+                            cell.appendChild(eim);
+                            var ehost = encodeURIComponent(elegooHost(hh.ip));
+                            var ebase = 'http://127.0.0.1:' + relayPort + '/elegoo';
+                            elegooAttach(cell, eim, ebase + '?ip=' + ehost, ebase + '/status?ip=' + ehost);
+                        }
                     } else if (kind === 'p1') {
                         // The hub's relay serves MJPEG, which renders in a plain <img>.
                         if (!relayPort) relayWaitCell(cell, hubAnswered && !relayPort);
