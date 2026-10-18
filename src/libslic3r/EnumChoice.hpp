@@ -33,7 +33,10 @@ inline bool enum_choice_maps_by_key(const std::string &opt_key)
         opt_key == "nozzle_volume_type" || opt_key == "default_nozzle_volume_type" || opt_key == "extruder_nozzle_volume_type" ||
         // GCodeFlavor keeps its numbering (it is stored by key in files, but the C++ values are not renumbered);
         // the menu lists the supported flavors with Repetier after RepRapFirmware.
-        opt_key == "gcode_flavor";
+        opt_key == "gcode_flavor" ||
+        // PrintHostType: htMoonRaker / htMoonRaker_mqtt (Snapmaker, no config key) sit before
+        // htMoonrakerHttp (key "moonraker"), so the dropdown index is not the stored value.
+        opt_key == "host_type";
 }
 
 // Row of the combo that shows the stored enum `value`: the position in def.enum_values of a key whose

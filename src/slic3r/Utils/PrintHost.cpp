@@ -18,6 +18,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Channel.hpp"
 #include "MoonRaker.hpp"
+#include "MoonrakerHost.hpp"
 #include "OctoPrint.hpp"
 #include "Duet.hpp"
 #include "FlashAir.hpp"
@@ -92,6 +93,7 @@ static PrintHost* make_print_host(DynamicPrintConfig *config, bool change_engine
             case htFlashforge: return new Flashforge(config);
             case htSimplyPrint: return new SimplyPrint(config);
             case htElegooLink: return new ElegooLink(config);
+            case htMoonrakerHttp: return new MoonrakerHost(config);
             default:          return nullptr;
         }
     } else {

@@ -1830,8 +1830,10 @@ void Choice::set_value(const boost::any& value, bool change_event)
             break;
         }
 
-        // Support ThirdPartyPrinter
-        if (m_opt_id.compare("host_type") == 0 && val != 0 &&
+        // Support ThirdPartyPrinter: when PrusaLink is hidden the combo is one row short, so the
+        // stored value is one ahead of the row. host_type is mapped by key (a gap after
+        // htElegooLink), so skip this shift when mapping by key.
+        if (!enum_choice_maps_by_key(m_opt_id) && m_opt_id.compare("host_type") == 0 && val != 0 &&
 			m_opt.enum_values.size() > field->GetCount()) // for case, when PrusaLink isn't used as a HostType
 			val--;
         // Options whose list is not in value order (a subset, or an enum with a gap) map the stored

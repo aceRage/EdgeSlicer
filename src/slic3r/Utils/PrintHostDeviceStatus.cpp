@@ -49,14 +49,18 @@ static std::string moonraker_base(const std::string& host)
     return "http://" + h;
 }
 
-static bool moonraker_get(const std::string& url, std::string& body, std::string& error, int timeout_s)
+static bool moonraker_get(const std::string& url, std::string& body, std::string& error, int timeout_s,
+                          const std::string& apikey = {})
 {
     bool ok = false;
-    Http::get(url).tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
+    auto http = Http::get(url);
+    http.tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(timeout_s)
         .timeout_max(timeout_s)
-        .size_limit(512 * 1024)
-        .on_error([&](std::string reply, std::string err, unsigned status) {
+        .size_limit(512 * 1024);
+    if (!apikey.empty())
+        http.header("X-Api-Key", apikey);
+    http.on_error([&](std::string reply, std::string err, unsigned status) {
             error = err.empty() ? ("HTTP " + std::to_string(status)) : err;
             if (!reply.empty())
                 body = reply;
@@ -254,7 +258,7 @@ Status probe(const Device& d, int timeout_s)
     // for plus print_task_config, which is where the loaded filaments live when there are any.
     std::string body;
     if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&extruder&extruder1&extruder2&extruder3",
-                       body, st.error, timeout_s)) {
+                       body, st.error, timeout_s, d.apikey)) {
         st.note = "this printer did not answer" + (st.error.empty() ? std::string() : (": " + st.error));
         return st;
     }
