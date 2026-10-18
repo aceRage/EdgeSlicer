@@ -447,6 +447,8 @@ private:
     // non-zero the two halves are split by the height field it holds instead of
     // by m_color_clip_plane, evaluated per fragment in the cut plane's frame.
     unsigned int m_curved_sheet_tex{ 0 };
+    // Orca #14702: the realistic view's shadow map, bound on texture unit 5 for every volume (0: none).
+    unsigned int m_shadow_map_tex{ 0 };
     Transform3d  m_curved_sheet_matrix{ Transform3d::Identity() };
     // Half extents of the sheet's RECTANGULAR domain, (u,v), in the plane frame.
     Vec2f        m_curved_sheet_half_size{ 1.f, 1.f };
@@ -560,6 +562,8 @@ public:
     // ghosted, negative hidden (the shader discards those fragments). Reset to
     // { 1, 1 } to go back to two solid halves.
     void set_color_clip_plane_alphas(float side_1, float side_2) { m_color_clip_plane_alphas = { side_1, side_2 }; }
+    // Orca #14702: shadow map texture for render() to bind, 0 for none.
+    void set_shadow_map_texture(unsigned int tex) { m_shadow_map_tex = tex; }
     // world -> cut plane frame, and the sheet's half extents (u,v) in that
     // frame. Pass tex == 0 to go back to the plain flat colour split.
     // range == 0 means the texture holds f directly; otherwise it holds

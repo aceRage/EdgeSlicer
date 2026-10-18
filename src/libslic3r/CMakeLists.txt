@@ -123,6 +123,8 @@ set(lisbslic3r_sources
     Color.hpp
     Config.cpp
     Config.hpp
+    ConnectedBodies.cpp
+    ConnectedBodies.hpp
     CustomGCode.cpp
     CustomGCode.hpp
     CustomModels.cpp

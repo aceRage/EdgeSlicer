@@ -1,6 +1,8 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -10,6 +12,8 @@
 #include "test_data.hpp"
 
 #include <algorithm>
+#include <initializer_list>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -487,4 +491,267 @@ TEST_CASE("Elegoo M6211 filament changes are timed and their purge is counted", 
     CHECK_THAT(elegoo.print_statistics.flush_per_filament.at(0), Catch::Matchers::WithinAbs(200. * area + 10., 0.01));
     CHECK_THAT(elegoo.print_statistics.flush_per_filament.at(1), Catch::Matchers::WithinAbs(100. * area - 10., 0.01));
     CHECK(other.print_statistics.flush_per_filament.empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Orca #16291: centers of mass. The processor sums each extrusion's mass into the plate, the object
+// instance and the connected body it lies in, in memory only (nothing is written to the G-code).
+// Adapted from upstream: our Test::init_print has no copies/overrides arguments, so models are built
+// by hand where needed, and the separated-infills variant is left out (#16274 is not ported).
+
+namespace {
+
+void process_mass_gcode(const std::string &gcode, GCodeProcessorResult &result)
+{
+    FullPrintConfig config;
+    config.gcode_flavor.value = gcfMarlinFirmware;
+    // s_IsBBLPrinter selects the "; FEATURE: " role tags the G-code uses.
+    const bool       was_bbl_printer = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl_printer([was_bbl_printer] { GCodeProcessor::s_IsBBLPrinter = was_bbl_printer; });
+    GCodeProcessor::s_IsBBLPrinter = true;
+    const boost::filesystem::path temp = Test::scratch_path();
+    const ScopeGuard              remove_temp([&temp] { boost::filesystem::remove(temp); });
+    save_string_file(temp, gcode);
+    GCodeProcessor processor;
+    processor.apply_config(config);
+    processor.process_file(temp.string());
+    result = processor.extract_result();
+}
+
+// Objects A and B on the first layer and A again on the second, with A's brim and support. The skirt and the
+// prime tower belong to neither.
+void process_two_objects(GCodeProcessorResult &result)
+{
+    std::ostringstream gcode;
+    gcode << "M83\nG90\n"
+          << "; CHANGE_LAYER\n; LAYER_HEIGHT: 0.2\nG1 Z0.2 F12000\n"
+          << "; FEATURE: Skirt\nG1 X0 Y100 E5 F3000\n"
+          << "; FEATURE: Brim\nG1 X8 Y8 F12000\nG1 X12 Y8 E1 F3000\n"
+          << "; FEATURE: Support\nG1 X10 Y20 F12000\nG1 X10 Y30 E1 F3000\n"
+          << "; FEATURE: Outer wall\nG1 X10 Y10 F12000\nG1 X20 Y10 E1 F3000\n"
+          << "; FEATURE: Outer wall\nG1 X50 Y50 F12000\nG1 X60 Y50 E2 F3000\n"
+          << "; FEATURE: Prime tower\nG1 X80 Y80 F12000\nG1 X90 Y80 E1 F3000\n"
+          << "; CHANGE_LAYER\n; LAYER_HEIGHT: 0.2\nG1 Z0.4 F12000\n"
+          << "; FEATURE: Outer wall\nG1 X10 Y10 F12000\nG1 X20 Y10 E1 F3000\n";
+    process_mass_gcode(gcode.str(), result);
+}
+
+// Bead centers of process_two_objects(), half the 0.2 mm layer below the nozzle.
+const Vec3d a_brim(10., 8., 0.1), a_support(10., 25., 0.1), a_wall_0(15., 10., 0.1), a_wall_1(15., 10., 0.3), b_wall(55., 50., 0.1);
+
+Vec3d center_of(const GCodeProcessorResult::ObjectMass::Sum &sum) { return sum.moment / sum.mass; }
+
+// One filament, so each bead weighs as much as the E it was extruded with.
+Vec3d weighted_center(std::initializer_list<std::pair<double, Vec3d>> beads)
+{
+    double mass   = 0.;
+    Vec3d  moment = Vec3d::Zero();
+    for (const auto &[e, center] : beads) {
+        mass += e;
+        moment += e * center;
+    }
+    return moment / mass;
+}
+
+const GCodeProcessorResult::ObjectMass &nearest_mass(const std::vector<GCodeProcessorResult::ObjectMass> &masses, const Vec3d &center)
+{
+    return *std::min_element(masses.begin(), masses.end(), [&center](const auto &l, const auto &r) {
+        return (center_of(l.total()) - center).squaredNorm() < (center_of(r.total()) - center).squaredNorm();
+    });
+}
+
+ModelObject *add_cube_object(Model &model, const Vec3d &offset)
+{
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(offset);
+    object->ensure_on_bed();
+    return object;
+}
+
+} // namespace
+
+TEST_CASE("The plate's center of mass takes every extrusion of G-code without a print behind it", "[GCodeProcessor][CenterOfMass]")
+{
+    GCodeProcessorResult result;
+    process_two_objects(result);
+
+    CHECK(result.object_masses.empty());
+    CHECK(result.body_masses.empty());
+    const GCodeProcessorResult::ObjectMass &plate = result.plate_mass;
+    REQUIRE(plate.printed_up_to_layer.size() == 2);
+    CHECK_THAT((center_of(plate.printed_up_to_layer.front()) -
+                weighted_center({ { 1., a_brim }, { 1., a_support }, { 1., a_wall_0 }, { 2., b_wall } })).norm(),
+               Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT((center_of(plate.printed_up_to_layer.back()) -
+                weighted_center({ { 1., a_brim }, { 1., a_support }, { 1., a_wall_0 }, { 2., b_wall }, { 1., a_wall_1 } })).norm(),
+               Catch::Matchers::WithinAbs(0., 1e-5));
+
+    // Each bead weighs its volume at the default density and spreads along its move, (a^2 + ab + b^2) / 3 for one from
+    // a to b: the brim from x 8 to 12 at y 8, the support at x 10 from y 20 to 30, A's walls from x 10 to 20 at y 10 and
+    // B's from x 50 to 60 at y 50 with twice the filament, all at z 0.1 but A's second wall at 0.3.
+    const GCodeProcessorResult::ObjectMass::Sum total = plate.total();
+    CHECK_THAT(total.mass / total.volume, Catch::Matchers::WithinRel(double(DEFAULT_FILAMENT_DENSITY), 1e-6));
+    const Vec3d second = total.second / total.mass;
+    CHECK_THAT(second.x(), Catch::Matchers::WithinRel((304. / 3. + 100. + 2. * 700. / 3. + 2. * 9100. / 3.) / 6., 1e-6));
+    CHECK_THAT(second.y(), Catch::Matchers::WithinRel((64. + 1900. / 3. + 2. * 100. + 2. * 2500.) / 6., 1e-6));
+    CHECK_THAT(second.z(), Catch::Matchers::WithinRel((5. * 0.01 + 0.09) / 6., 1e-5));
+    // The beads' center lines, brim and support included, from the first layer's bottom to the second's top.
+    CHECK_THAT((plate.box.min - Vec3d(8., 8., 0.)).norm(), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK_THAT((plate.box.max - Vec3d(60., 50., 0.4)).norm(), Catch::Matchers::WithinAbs(0., 1e-5));
+}
+
+TEST_CASE("Each sliced cube's center of mass is its center, and the brim lowers the plate's printed one", "[GCodeProcessor][CenterOfMass]")
+{
+    const bool copies = GENERATE(false, true);
+    INFO((copies ? "two copies of one cube" : "two cubes"));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "skirt_loops", 0 }, { "brim_type", "outer_only" }, { "brim_width", 5 }, { "combine_brims", 0 } });
+    Print print;
+    Model model;
+    ModelObject *first = add_cube_object(model, Vec3d(80., 80., 0.));
+    if (copies) {
+        first->add_instance()->set_offset(Vec3d(130., 80., 0.));
+        first->ensure_on_bed();
+    } else
+        add_cube_object(model, Vec3d(130., 80., 0.));
+    print.apply(model, config);
+    print.validate();
+    GCodeProcessorResult result;
+    Test::gcode(print, result);
+
+    CHECK(result.body_masses.empty());
+    REQUIRE(result.object_masses.size() == 2);
+    for (const ModelObject *object : model.objects)
+        for (size_t instance = 0; instance < object->instances.size(); ++instance) {
+            const BoundingBoxf3 box    = object->instance_bounding_box(instance);
+            const Vec3d         center = box.center();
+            // Off the center only by the infill's alignment and the top and bottom shells.
+            const GCodeProcessorResult::ObjectMass &mass = nearest_mass(result.object_masses, center);
+            const Vec3d                             part = center_of(mass.total());
+            CHECK_THAT(part.x(), Catch::Matchers::WithinAbs(center.x(), 0.5));
+            CHECK_THAT(part.y(), Catch::Matchers::WithinAbs(center.y(), 0.5));
+            CHECK_THAT(part.z(), Catch::Matchers::WithinAbs(center.z(), 1.));
+            // The outer walls' center lines run half a line inside the cube's sides.
+            for (int axis = 0; axis < 3; ++axis) {
+                CHECK_THAT(mass.box.min[axis], Catch::Matchers::WithinAbs(box.min[axis], 0.3));
+                CHECK_THAT(mass.box.max[axis], Catch::Matchers::WithinAbs(box.max[axis], 0.3));
+            }
+        }
+    GCodeProcessorResult::ObjectMass::Sum objects;
+    for (const GCodeProcessorResult::ObjectMass &object : result.object_masses)
+        objects.add(object.total());
+    const GCodeProcessorResult::ObjectMass::Sum plate = result.plate_mass.total();
+    CHECK(plate.mass > objects.mass);
+    CHECK(center_of(plate).z() < center_of(objects).z());
+}
+
+TEST_CASE("Each cube's raft is its support, centered below it", "[GCodeProcessor][CenterOfMass]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "skirt_loops", 0 }, { "brim_type", "no_brim" }, { "raft_layers", 3 } });
+    Print print;
+    Model model;
+    Test::init_print({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, print, model, config);
+    GCodeProcessorResult result;
+    Test::gcode(print, result);
+
+    REQUIRE(result.support_masses.size() == 2);
+    REQUIRE(result.object_masses.size() == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        const GCodeProcessorResult::ObjectMass::Sum support = result.support_masses[i].total();
+        const Vec3d                                 object  = center_of(result.object_masses[i].total());
+        REQUIRE(support.mass > 0.);
+        CHECK_THAT(center_of(support).x(), Catch::Matchers::WithinAbs(object.x(), 1.));
+        CHECK_THAT(center_of(support).y(), Catch::Matchers::WithinAbs(object.y(), 1.));
+        CHECK(center_of(support).z() < 1.);
+    }
+}
+
+TEST_CASE("A spiral vase cube counts all its extrusions, rising through each layer", "[GCodeProcessor][CenterOfMass]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "skirt_loops", 0 }, { "brim_type", "no_brim" }, { "spiral_mode", 1 }, { "wall_loops", 1 },
+                                    { "top_shell_layers", 0 }, { "sparse_infill_density", 0 } });
+    Print print;
+    Model model;
+    Test::init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    GCodeProcessorResult result;
+    Test::gcode(print, result);
+
+    REQUIRE(result.object_masses.size() == 1);
+    CHECK_THAT(result.object_masses.front().total().mass, Catch::Matchers::WithinRel(result.plate_mass.total().mass, 1e-6));
+}
+
+TEST_CASE("Each separate part of an assembly gets its center of mass, overlapping parts one", "[GCodeProcessor][CenterOfMass]")
+{
+    const bool overlapping = GENERATE(false, true);
+    INFO((overlapping ? "overlapping parts" : "separate parts"));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "skirt_loops", 0 }, { "brim_type", "no_brim" } });
+    TriangleMesh first  = mesh(TestMesh::cube_20x20x20);
+    TriangleMesh second = mesh(TestMesh::cube_20x20x20);
+    first.translate(50, 50, 0);
+    second.translate(overlapping ? 60 : 90, 50, 0);
+    Print        print;
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "assembly.stl";
+    object->add_volume(std::move(first), ModelVolumeType::MODEL_PART, false);
+    object->add_volume(std::move(second), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->ensure_on_bed();
+    print.apply(model, config);
+    print.validate();
+    GCodeProcessorResult result;
+    Test::gcode(print, result);
+
+    REQUIRE(result.object_masses.size() == 1);
+    CHECK(result.object_masses.front().assembly);
+    // One body is the object itself.
+    if (overlapping) {
+        CHECK(result.body_masses.empty());
+        return;
+    }
+    REQUIRE(result.body_masses.size() == 2);
+    for (const ModelVolume *volume : object->volumes) {
+        const Vec3d center = volume->mesh().transformed_bounding_box(object->instances.front()->get_matrix() * volume->get_matrix()).center();
+        const Vec3d part   = center_of(nearest_mass(result.body_masses, center).total());
+        CHECK_THAT(part.x(), Catch::Matchers::WithinAbs(center.x(), 0.5));
+        CHECK_THAT(part.y(), Catch::Matchers::WithinAbs(center.y(), 0.5));
+        CHECK_THAT(part.z(), Catch::Matchers::WithinAbs(center.z(), 1.));
+    }
+}
+
+TEST_CASE("Each extrusion weighs its filament's density", "[GCodeProcessor][CenterOfMass]")
+{
+    // Two like cubes, the second's filament three times as dense.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+    config.option<ConfigOptionFloats>("filament_density")->values  = { 1., 3. };
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = false;
+    config.set_deserialize_strict({ { "skirt_loops", 0 }, { "brim_type", "no_brim" } });
+    Print print;
+    Model model;
+    add_cube_object(model, Vec3d(80., 80., 0.));
+    add_cube_object(model, Vec3d(130., 80., 0.))->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.validate();
+    GCodeProcessorResult result;
+    Test::gcode(print, result);
+
+    REQUIRE(result.object_masses.size() == 2);
+    std::vector<const GCodeProcessorResult::ObjectMass *> masses;
+    for (const ModelObject *object : model.objects)
+        masses.emplace_back(&nearest_mass(result.object_masses, object->instance_bounding_box(0).center()));
+    CHECK_THAT(masses[1]->total().mass / masses[0]->total().mass, Catch::Matchers::WithinRel(3., 0.02));
+    // The plate's center lies three quarters of the way to the dense cube.
+    const Vec3d plate = center_of(result.plate_mass.total());
+    const Vec3d light = center_of(masses[0]->total());
+    const Vec3d dense = center_of(masses[1]->total());
+    CHECK_THAT((plate - light).dot(dense - light) / (dense - light).squaredNorm(), Catch::Matchers::WithinAbs(0.75, 0.01));
 }

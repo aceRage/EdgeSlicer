@@ -360,6 +360,18 @@ bool GLGizmosManager::init_icon_textures()
             return false;
     }
 
+    // Edge: quick view options button, same 36 px round style as fit_camera. Not fatal when missing: the
+    // button just does not show, and the other icons keep working.
+    static const std::pair<int, const char*> view_options_icons[] = {
+        { IC_VIEW_OPTIONS,            "view_options" },
+        { IC_VIEW_OPTIONS_HOVER,      "view_options_hover" },
+        { IC_VIEW_OPTIONS_DARK,       "view_options_dark" },
+        { IC_VIEW_OPTIONS_DARK_HOVER, "view_options_dark_hover" },
+    };
+    for (const auto& [id, name] : view_options_icons)
+        if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/" + name + ".svg", 64, 64, texture_id))
+            icon_list.insert(std::make_pair(id, texture_id));
+
     return true;
 }
 
