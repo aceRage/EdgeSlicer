@@ -34,6 +34,8 @@ using namespace nlohmann;
 #define SETTING_OPENGL_REALISTIC_PHONG "opengl_realistic_phong"
 #define SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS "opengl_phong_basic_plate_shadows"
 #define SETTING_OPENGL_PHONG_SSAO "opengl_phong_ssao"
+// Orca #14080
+#define SETTING_OPENGL_PHONG_SMOOTH_NORMALS "opengl_phong_smooth_normals"
 #define OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY "load_geometry_only"
 
 #define SUPPORT_DARK_MODE

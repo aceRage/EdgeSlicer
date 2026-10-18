@@ -246,6 +246,9 @@ void AppConfig::set_defaults()
         set_bool(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS, false);
     if (get(SETTING_OPENGL_PHONG_SSAO).empty())
         set_bool(SETTING_OPENGL_PHONG_SSAO, false);
+    // Orca #14080
+    if (get(SETTING_OPENGL_PHONG_SMOOTH_NORMALS).empty())
+        set_bool(SETTING_OPENGL_PHONG_SMOOTH_NORMALS, false);
 
     // Orca #16291: center of mass markers in Prepare and Preview.
     if (get("show_center_of_mass").empty())

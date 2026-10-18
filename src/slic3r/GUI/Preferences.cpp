@@ -2002,6 +2002,11 @@ wxWindow* PreferencesDialog::create_general_page()
         _L("Applies SSAO in realistic view."), 50, SETTING_OPENGL_PHONG_SSAO);
     auto item_realistic_shadows = create_item_checkbox(_L("Shadows"), page,
         _L("Renders cast shadows on the plate in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
+    // Orca #14080
+    auto item_realistic_smooth_normals = create_item_checkbox(_L("Smooth normals"), page,
+        _L("Applies smooth normals to the realistic view.\n\nRequires manual scene reload to take effect "
+           "(right-click on 3D view > \"Reload All\")."),
+        50, SETTING_OPENGL_PHONG_SMOOTH_NORMALS);
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
@@ -2229,6 +2234,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_realistic_phong, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_realistic_ssao, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_realistic_shadows, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_smooth_normals, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     if (item_user_sync)
