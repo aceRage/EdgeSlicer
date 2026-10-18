@@ -118,7 +118,7 @@ std::string normalize_hex_color(const std::string &hex, const std::string &fallb
 
 std::array<double, 3> light_direction(float azimuth_deg, float elevation_deg)
 {
-    constexpr double DEG = 3.14159265358979323846 / 180.;
+    static constexpr double DEG = 3.14159265358979323846 / 180.;
     const double     az  = double(azimuth_deg) * DEG;
     const double     el  = double(std::clamp(elevation_deg, -89.9f, 89.9f)) * DEG;
     return { std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el) };

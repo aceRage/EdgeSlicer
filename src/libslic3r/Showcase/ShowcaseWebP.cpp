@@ -256,10 +256,11 @@ std::vector<Token> lz77(const std::vector<uint32_t> &px, int width)
     const size_t n = px.size();
     std::vector<Token> out;
     out.reserve(n / 2 + 16);
-    constexpr int  HASH_BITS  = 18;
-    constexpr int  CHAIN      = 12;
+    // static: MSVC will not use a local constexpr inside a lambda without capturing it.
+    static constexpr int  HASH_BITS  = 18;
+    static constexpr int  CHAIN      = 12;
     // The largest distance code (39) reaches about a million; the plain distance is that minus 120.
-    constexpr size_t WINDOW   = (size_t(1) << 20) - 256;
+    static constexpr size_t WINDOW   = (size_t(1) << 20) - 256;
     std::vector<int32_t> head(size_t(1) << HASH_BITS, -1);
     std::vector<int32_t> prev(n, -1);
     auto hash = [&px, n](size_t i) -> uint32_t {
@@ -454,7 +455,7 @@ std::vector<uint8_t> encode_webp_lossless(const std::vector<uint8_t> &rgba, int 
     }
 
     // Predictor modes per block, chosen by the smallest residuals.
-    constexpr int SIZE_BITS = 5;
+    static constexpr int SIZE_BITS = 5;
     const int     bw_blocks = (width + (1 << SIZE_BITS) - 1) >> SIZE_BITS;
     const int     bh_blocks = (height + (1 << SIZE_BITS) - 1) >> SIZE_BITS;
     std::vector<uint32_t> modes(size_t(bw_blocks) * size_t(bh_blocks), 0xFF000000u | (11u << 8));
