@@ -16,6 +16,11 @@ uniform float z_far;
 // expressed in view space, which is what tells a top surface from a wall.
 uniform mat4 inv_projection_matrix;
 uniform vec3 up_view;
+// Showcase exports (design 2.1): the kernel is a few pixels wide, so a supersampled export scales it
+// to cover the same part of the model as on screen. 0 (the GLSL default) means 1.
+uniform float radius_scale;
+// Showcase transparent exports: keep the alpha of what is under the pass instead of writing 1.
+uniform bool keep_alpha;
 
 in vec2 tex_coord;
 out vec4 frag_color;
@@ -46,12 +51,14 @@ vec3 view_normal(ivec2 pixel, vec3 p)
 void main()
 {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
-    vec3 color = texture(color_texture, tex_coord).rgb;
+    vec4 color_alpha = texture(color_texture, tex_coord);
+    vec3 color = color_alpha.rgb;
+    float out_alpha = keep_alpha ? color_alpha.a : 1.0;
 
     // Nothing was drawn here: occluding the background would only darken the gradient, and its
     // reconstructed normal is degenerate anyway.
     if (texelFetch(depth_texture, pixel, 0).r >= 0.9999) {
-        frag_color = vec4(color, 1.0);
+        frag_color = vec4(color, out_alpha);
         return;
     }
 
@@ -63,7 +70,8 @@ void main()
     float up_factor = clamp(dot(normal_center, up_view), 0.0, 1.0);
 
     // Adaptive radius in pixel space
-    int radius = int(mix(2.0, 4.0, center_depth / z_far));
+    float scale = radius_scale > 0.0 ? radius_scale : 1.0;
+    int radius = int(mix(2.0, 4.0, center_depth / z_far) * scale);
 
     // Optimized sampling pattern
     const int SAMPLE_COUNT = 12;
@@ -113,5 +121,5 @@ void main()
     float ao_min = mix(0.45, 0.70, up_factor);
     occlusion = clamp(ao_factor, ao_min, 1.0);
 
-    frag_color = vec4(color * occlusion, 1.0);
+    frag_color = vec4(color * occlusion, out_alpha);
 }

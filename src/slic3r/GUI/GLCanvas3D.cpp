@@ -10020,10 +10020,17 @@ void GLCanvas3D::_rectangular_selection_picking_pass()
 // GLShadersManager::init for gouraud and phong.
 static constexpr int SHADOW_MAP_TEXTURE_UNIT = 5;
 
+RealisticRenderSettings GLCanvas3D::_render_settings() const
+{
+    if (m_render_settings_override)
+        return *m_render_settings_override;
+    const AppConfig* cfg = wxGetApp().app_config;
+    return cfg != nullptr ? RealisticRenderSettings::from_app_config(*cfg) : RealisticRenderSettings();
+}
+
 bool GLCanvas3D::_is_realistic_view_enabled() const
 {
-    const AppConfig* cfg = wxGetApp().app_config;
-    if (cfg == nullptr || !cfg->get_bool(SETTING_OPENGL_REALISTIC_MODE))
+    if (!_render_settings().realistic)
         return false;
     // Edge: Orca switches the realistic view off in the app config while the seam, support or fuzzy
     // skin painting gizmo is open and back on when it closes. Here it is just not applied then, so
@@ -10034,13 +10041,24 @@ bool GLCanvas3D::_is_realistic_view_enabled() const
 
 bool GLCanvas3D::_is_realistic_shadows_enabled() const
 {
-    return m_canvas_type == ECanvasType::CanvasView3D && _is_realistic_view_enabled() &&
-           wxGetApp().app_config->get_bool(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS) && !m_volumes.empty();
+    return m_canvas_type == ECanvasType::CanvasView3D && _is_realistic_view_enabled() && _render_settings().shadows && !m_volumes.empty();
+}
+
+void GLCanvas3D::_set_key_light_uniforms(GLShaderProgram& shader, const RealisticRenderSettings& settings, const Transform3d& view_matrix)
+{
+    shader.set_uniform("use_custom_key_light", settings.world_light);
+    if (!settings.world_light)
+        return;
+    Vec3d dir(settings.world_light_dir[0], settings.world_light_dir[1], settings.world_light_dir[2]);
+    if (dir.squaredNorm() < 1e-12)
+        dir = Vec3d::UnitZ();
+    const Vec3d eye_dir = (view_matrix.matrix().block<3, 3>(0, 0) * dir.normalized()).normalized();
+    shader.set_uniform("custom_key_light_dir", eye_dir);
 }
 
 bool GLCanvas3D::_is_ssao_enabled() const
 {
-    return _is_realistic_view_enabled() && wxGetApp().app_config->get_bool(SETTING_OPENGL_PHONG_SSAO);
+    return _is_realistic_view_enabled() && _render_settings().ssao;
 }
 
 // Copies the finished scene's colour and depth out of the back buffer and draws the colour back
@@ -10106,6 +10124,11 @@ void GLCanvas3D::_render_ssao_pass(unsigned int width, unsigned int height)
     shader->set_uniform("inv_projection_matrix", inv_projection_matrix);
     const Vec3d up_view = (camera.get_view_matrix().matrix().block<3, 3>(0, 0) * Vec3d::UnitZ()).normalized();
     shader->set_uniform("up_view", up_view);
+    // Showcase: a supersampled export widens the kernel, a transparent one keeps its alpha. The
+    // preferences give 1 and false, which is what the shader did before these existed.
+    const RealisticRenderSettings render_settings = _render_settings();
+    shader->set_uniform("radius_scale", render_settings.ssao_radius_scale);
+    shader->set_uniform("keep_alpha", render_settings.ssao_keep_alpha);
 
     glsafe(::glActiveTexture(GL_TEXTURE0));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_color_texture_id));
@@ -10133,12 +10156,23 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
     if (shader == nullptr)
         return;
 
+    const RealisticRenderSettings render_settings = _render_settings();
+
     if (OpenGLManager::get_framebuffers_type() == OpenGLManager::EFramebufferType::Arb) {
 
-        // Light direction (same as used in shading and plate shading)
-        const Vec3d light_dir_eye = Vec3d(-0.4574957, 0.4574957, 0.7624929).normalized();
-        const Matrix3d view_rot = view_matrix.matrix().block<3, 3>(0, 0);
-        const Vec3d dir_to_light = (view_rot.transpose() * light_dir_eye).normalized();
+        // Light direction (same as used in shading and plate shading): the camera's headlight, or
+        // a light fixed in the world (Showcase, D14), which keeps the shadows still while orbiting.
+        Vec3d dir_to_light;
+        if (render_settings.world_light) {
+            dir_to_light = Vec3d(render_settings.world_light_dir[0], render_settings.world_light_dir[1], render_settings.world_light_dir[2]);
+            if (dir_to_light.squaredNorm() < 1e-12)
+                dir_to_light = Vec3d::UnitZ();
+            dir_to_light.normalize();
+        } else {
+            const Vec3d light_dir_eye = Vec3d(-0.4574957, 0.4574957, 0.7624929).normalized();
+            const Matrix3d view_rot = view_matrix.matrix().block<3, 3>(0, 0);
+            dir_to_light = (view_rot.transpose() * light_dir_eye).normalized();
+        }
 
         // Bounding box of the printable objects (the shadow casters).
         BoundingBoxf3 obj_bb;
@@ -10160,7 +10194,11 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
         // (clamped to the plate footprint). This keeps the map tight/high-res for short shadows
         // while still covering long shadows at grazing light angles.
         const Vec3d ray_dir = -dir_to_light; // direction the shadow travels
-        const BoundingBoxf3 plate_bb = m_bed.build_volume().valid() ? m_bed.build_volume().bounding_volume() : obj_bb;
+        // The Showcase floor replaces the plate as the area shadows are clamped to.
+        const BoundingBoxf3 plate_bb = render_settings.has_fit_box() ?
+            BoundingBoxf3(Vec3d(render_settings.fit_min[0], render_settings.fit_min[1], render_settings.fit_min[2]),
+                          Vec3d(render_settings.fit_max[0], render_settings.fit_max[1], render_settings.fit_max[2])) :
+            (m_bed.build_volume().valid() ? m_bed.build_volume().bounding_volume() : obj_bb);
 
         Vec3d lmin(DBL_MAX, DBL_MAX, DBL_MAX);
         Vec3d lmax(-DBL_MAX, -DBL_MAX, -DBL_MAX);
@@ -10214,8 +10252,8 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
 
         m_shadow_light_vp = Transform3d(light_proj * light_view);
 
-        // Create / resize the depth texture and FBO
-        const unsigned int size = 2048;
+        // Create / resize the depth texture and FBO (2048 for the editing views, larger for exports)
+        const unsigned int size = std::max(256u, render_settings.shadow_map_size);
         if (m_shadow_map_texture_id == 0) {
             glsafe(::glGenTextures(1, &m_shadow_map_texture_id));
             glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_map_texture_id));
@@ -10298,7 +10336,7 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
     // Unified plate shadow: draw the build-plate footprint and darken it wherever the same depth
     // shadow map (built above) says the light is occluded. This replaces #13704's planar stencil
     // projection so plate, object and self shadows all come from one technique.
-    if (!m_shadow_map_valid)
+    if (!m_shadow_map_valid || !render_settings.plate_shadow)
         return;
 
     GLShaderProgram* plate_shader = wxGetApp().get_shader("printbed_shadow");
@@ -10385,7 +10423,7 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
             plate_shader->set_uniform("projection_matrix", projection_matrix);
             plate_shader->set_uniform("shadow_map", SHADOW_MAP_TEXTURE_UNIT);
             plate_shader->set_uniform("shadow_light_vp", m_shadow_light_vp);
-            plate_shader->set_uniform("shadow_intensity", 0.35f);
+            plate_shader->set_uniform("shadow_intensity", render_settings.shadow_intensity);
             plate_shader->set_uniform("shadow_map_texel", 1.0f / static_cast<float>(m_shadow_map_size));
             m_plate_shadow_mask.render();
             plate_shader->stop_using();
@@ -10684,7 +10722,8 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     }
 
     // Orca #13704: Phong in the realistic view, falling back to gouraud.
-    const bool realistic_phong = _is_realistic_view_enabled() && wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_PHONG);
+    const RealisticRenderSettings render_settings = _render_settings();
+    const bool realistic_phong = _is_realistic_view_enabled() && render_settings.phong;
     GLShaderProgram* shader = realistic_phong ? wxGetApp().get_shader("phong") : nullptr;
     if (shader == nullptr)
         shader = wxGetApp().get_shader("gouraud");
@@ -10703,11 +10742,14 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
             shader->set_uniform("shadow_map", SHADOW_MAP_TEXTURE_UNIT);
             shader->set_uniform("shadow_light_vp", m_shadow_light_vp);
             shader->set_uniform("shadow_map_texel", 1.0f / static_cast<float>(m_shadow_map_size));
-            shader->set_uniform("shadow_intensity", 0.35f);
+            shader->set_uniform("shadow_intensity", render_settings.shadow_intensity);
         }
         else
             shader->set_uniform("shadow_intensity", 0.0f);
         m_volumes.set_shadow_map_texture(sample_shadows ? m_shadow_map_texture_id : 0);
+        // Showcase (D14): the key light fixed in the world, handed to phong in eye space. Always set,
+        // so the editing views get the built-in headlight whatever drew last.
+        _set_key_light_uniforms(*shader, render_settings, wxGetApp().plater()->get_camera().get_view_matrix());
 
         const Size&   cvn_size = get_canvas_size();
         switch (type)
@@ -10803,6 +10845,8 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
             shader->set_uniform("shadow_intensity", 0.0f);
             m_volumes.set_shadow_map_texture(0);
         }
+        if (render_settings.world_light)
+            shader->set_uniform("use_custom_key_light", false);
 
         shader->stop_using();
     }

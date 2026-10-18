@@ -120,7 +120,17 @@ uniform sampler2D shadow_map;
 uniform mat4 shadow_light_vp;
 uniform float shadow_intensity;
 uniform float shadow_map_texel;
-const vec3 SHADOW_LIGHT_DIR = LIGHT_TOP_DIR;
+
+// Showcase tab (D14): the key light fixed in the world. The C++ side turns the world direction into
+// eye space every frame and sets use_custom_key_light; the editing views leave it false (the GLSL
+// default), so their headlight is unchanged.
+uniform bool use_custom_key_light;
+uniform vec3 custom_key_light_dir;
+
+vec3 key_light_dir()
+{
+    return use_custom_key_light ? normalize(custom_key_light_dir) : LIGHT_TOP_DIR;
+}
 
 // Orca #14702: a lighting multiplier in [1 - shadow_intensity, 1]: < 1 where the fragment is
 // occluded from the light in the shadow map.
@@ -138,7 +148,7 @@ float shadow_shade()
     // Slope-scaled depth bias: larger where the surface grazes / faces away from the light. This
     // suppresses self-shadow acne without discarding real shadows cast by other objects onto
     // back-facing surfaces.
-    float NdotL = dot(normalize(eye_normal), SHADOW_LIGHT_DIR);
+    float NdotL = dot(normalize(eye_normal), key_light_dir());
     float bias = mix(0.0004, 0.004, clamp(1.0 - NdotL, 0.0, 1.0));
     // 5x5 PCF: softens shadow edges into a smooth penumbra and blurs residual facet acne.
     float sum = 0.0;
@@ -160,7 +170,7 @@ float soft_circle(vec2 p, vec2 center, float radius, float blur)
 // A soft round "window" highlight reflected off the surface.
 vec3 compute_window_reflection(vec3 normal, vec3 view_dir)
 {
-    vec3 light_dir = normalize(LIGHT_TOP_DIR);
+    vec3 light_dir = key_light_dir();
     vec3 reflect_light = normalize(reflect(-light_dir, normal));
 
     // UV coordinates for the reflection
@@ -259,9 +269,10 @@ void main()
     vec3 normal = normalize(eye_normal);
     vec3 view_dir = normalize(-eye_position);
 
-    float NdotL_top = max(dot(normal, LIGHT_TOP_DIR), 0.0);
+    vec3 top_dir = key_light_dir();
+    float NdotL_top = max(dot(normal, top_dir), 0.0);
     float diffuse = INTENSITY_AMBIENT + NdotL_top * LIGHT_TOP_DIFFUSE;
-    vec3 half_top = normalize(LIGHT_TOP_DIR + view_dir);
+    vec3 half_top = normalize(top_dir + view_dir);
     float specular = LIGHT_TOP_SPECULAR * pow(max(dot(normal, half_top), 0.0), LIGHT_TOP_SHININESS);
 
     float NdotL_front = max(dot(normal, LIGHT_FRONT_DIR), 0.0);

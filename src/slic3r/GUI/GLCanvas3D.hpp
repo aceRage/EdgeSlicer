@@ -29,6 +29,7 @@
 #include "IMToolbar.hpp"
 #include "slic3r/GUI/3DBed.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/RealisticRenderSettings.hpp"
 
 #include <float.h>
 
@@ -881,6 +882,9 @@ public:
     unsigned int m_shadow_map_size{ 0 };
     Transform3d  m_shadow_light_vp{ Transform3d::Identity() };
     bool         m_shadow_map_valid{ false };
+    // The realistic view's switches when they do not come from the preferences (the Showcase
+    // canvas sets its own; Prepare and Preview never set it, so they read the app config).
+    std::optional<RealisticRenderSettings> m_render_settings_override;
 public:
     explicit GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed);
     ~GLCanvas3D();
@@ -888,6 +892,9 @@ public:
     bool is_initialized() const { return m_initialized; }
 
     void set_context(wxGLContext* context) { m_context = context; }
+    // Realistic view switches for this canvas only, in place of the preferences (Showcase).
+    void set_render_settings_override(const RealisticRenderSettings& settings) { m_render_settings_override = settings; }
+    void clear_render_settings_override() { m_render_settings_override.reset(); }
     void set_type(ECanvasType type) { m_canvas_type = type; }
     ECanvasType get_canvas_type() { return m_canvas_type; }
 
@@ -1489,9 +1496,13 @@ private:
     void _render_fps_overlay(int fps) const;
     void _render_fxaa_pass(unsigned int width, unsigned int height);
     // Orca #13704: realistic view.
+    // The switches in force: the override when a caller set one, else the preferences.
+    RealisticRenderSettings _render_settings() const;
     bool _is_realistic_view_enabled() const;
     bool _is_realistic_shadows_enabled() const;
     bool _is_ssao_enabled() const;
+    // phong's key light: the built-in headlight, or the settings' world-fixed light in eye space.
+    static void _set_key_light_uniforms(GLShaderProgram& shader, const RealisticRenderSettings& settings, const Transform3d& view_matrix);
     void _render_ssao_pass(unsigned int width, unsigned int height);
     // Orca #14702: build the light-space depth shadow map (consumed by gouraud/phong for object and self
     // shadows) and cast it onto the build plate. Realistic view only.
