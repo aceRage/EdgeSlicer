@@ -72,6 +72,13 @@ function load(opts) {
 const tick = () => new Promise((r) => setImmediate(r));
 
 (async () => {
+    // ---- the Add dialog calls the type ElegooLink (the id stays 'elegoo' so saved tiles keep working) --
+    {
+        const m = /\{ value: 'elegoo',\s*label: '([^']*)' \}/.exec(html);
+        check('the type is listed as ElegooLink', !!m && m[1] === 'ElegooLink');
+        check('the page does not call it Centauri Carbon (CC1) any more', html.indexOf("label: 'Elegoo Centauri Carbon (CC1)'") === -1);
+    }
+
     // ---- the address ---------------------------------------------------------------------------
     {
         const { t } = load();
