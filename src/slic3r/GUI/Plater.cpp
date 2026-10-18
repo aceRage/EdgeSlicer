@@ -4085,6 +4085,12 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id);
                 else
                     p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host");
+                // The CANVAS card (a Centauri Carbon 1 on Elegoo Link) is for the same printer.
+                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
+                p_mainframe->m_printer_view->set_canvas_device((ph_picked && !ph_picked->address.empty()) ?
+                                                                   *ph_picked :
+                                                                   PrintHostDevices::from_config(cfg),
+                                                               preset_model);
             }
             is_sm_page = false;
 
@@ -4106,6 +4112,8 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     p_mainframe->m_printer_view->set_storage_source(PrinterStoragePanel::snapmaker_source());
                 else if (!takes_printhost_row)
                     p_mainframe->m_printer_view->set_storage_source(PrinterStoragePanel::Source());
+                if (!takes_printhost_row)
+                    p_mainframe->m_printer_view->set_canvas_device(PrintHostDevices::Device(), std::string());
             }
 
             if (is_snapmaker_u1) {

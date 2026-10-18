@@ -6,16 +6,21 @@
 // failure sentences and the "Capture Canvas data" diagnostic. Design:
 // tests/design_elegoo_canvas_sync_device_page.md.
 
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include <wx/panel.h>
 #include <wx/string.h>
 
 #include "slic3r/Utils/ElegooCanvas.hpp"
 #include "filamentsync/FilamentData.hpp"
 
 class wxWindow;
+class wxStaticText;
+class Button;
 
 namespace Slic3r {
 namespace GUI {
@@ -45,6 +50,46 @@ wxString canvas_failure_text(const CanvasQueryResult& result);
 // "Capture Canvas data": Cmd 0 / 1 / 324 with every frame, redacted, written as JSON to the log
 // folder, then says where. Asks nothing of the printer beyond those three reads.
 void capture_canvas_data(wxWindow* parent, const std::string& address, const std::string& printer_model);
+
+// Phase 3 (design D8, option 3a): the read-only CANVAS card at the top of the Device tab for a
+// Centauri Carbon 1 on Elegoo Link - each unit, its four trays (colour, material, name), the tray in
+// the extruder - above the printer's own web UI, which stays as it was. It asks the printer only on
+// its Refresh button and when the Device tab is opened (at most every 10 s), one short query off
+// the GUI thread each time; nothing polls.
+class ElegooCanvasPanel : public wxPanel
+{
+public:
+    explicit ElegooCanvasPanel(wxWindow* parent);
+    ~ElegooCanvasPanel() override;
+
+    // The printer the card is for. An address of a non-CANVAS printer (or "") hides the card.
+    // Returns whether the card is shown.
+    bool set_target(const std::string& address, const std::string& printer_model);
+    bool has_target() const { return !m_address.empty(); }
+    // Asks the printer now, unless a query is already running. `throttled` skips it when the last
+    // one started less than 10 s ago (the tab-entry refresh).
+    void refresh(bool throttled);
+
+    void sys_color_changed();
+    void msw_rescale();
+
+private:
+    void on_result(int generation, const CanvasQueryResult& result);
+    void rebuild_units(const CanvasInfo& info);
+    void set_status(const wxString& text);
+
+    std::string                        m_address;
+    std::string                        m_model;
+    std::shared_ptr<std::atomic<bool>> m_alive;
+    int                                m_generation { 0 };
+    bool                               m_busy { false };
+    long long                          m_last_started_ms { 0 };
+    wxStaticText*                      m_title { nullptr };
+    wxStaticText*                      m_status { nullptr };
+    ::Button*                          m_btn_refresh { nullptr };
+    ::Button*                          m_btn_capture { nullptr };
+    wxPanel*                           m_units { nullptr };
+};
 
 } // namespace GUI
 } // namespace Slic3r
