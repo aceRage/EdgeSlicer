@@ -88,6 +88,9 @@ private:
     void                     on_plate_switched();
 
     void                     build_panel();
+    // Sizes the side panel to its widest row (at least the default width, at least what the user
+    // dragged the sash to), leaving the canvas some room; the panel scrolls sideways past that.
+    void                     fit_side_width();
     void                     sync_controls();
     void                     update_enabled();
     void                     refresh_plates();
@@ -124,8 +127,12 @@ private:
     bool                     m_has_saved_camera = false;
     WatermarkPresets         m_watermark_presets;
 
-    // The side panel.
+    // The side panel, and the sash on its left edge that makes it wider.
     wxScrolledWindow        *m_side = nullptr;
+    wxWindow                *m_sash = nullptr;
+    int                      m_side_width = 0;      // dragged to, in px; 0 = fit the contents
+    int                      m_sash_start_x = 0;    // drag start, screen px
+    int                      m_sash_start_width = 0;
     wxStaticText            *m_notice = nullptr;
     wxChoice                *m_plates = nullptr;
     wxChoice                *m_presets = nullptr;

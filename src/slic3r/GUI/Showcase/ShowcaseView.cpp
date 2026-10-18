@@ -22,11 +22,13 @@
 #include <wx/clipbrd.h>
 #include <wx/clrpicker.h>
 #include <wx/dataobj.h>
+#include <wx/dcclient.h>
 #include <wx/filedlg.h>
 #include <wx/filename.h>
 #include <wx/fontpicker.h>
 #include <wx/glcanvas.h>
 #include <wx/scrolwin.h>
+#include <wx/settings.h>
 #include <wx/sizer.h>
 #include <wx/slider.h>
 #include <wx/spinctrl.h>
@@ -42,6 +44,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <initializer_list>
 
 namespace Slic3r {
@@ -140,12 +143,64 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
 
     build_panel();
 
+    // The sash on the panel's left edge: drag it to widen the panel, double-click it to fit the panel
+    // to its contents again. The width is kept in tenths of an em, so it carries over between
+    // displays of different scaling.
+    const int em = wxGetApp().em_unit();
+    m_side_width = std::max(0, std::atoi(wxGetApp().app_config->get("showcase_panel_width").c_str()) * em / 10);
+    m_sash = new wxWindow(this, wxID_ANY, wxDefaultPosition, wxSize(std::max(4, em / 2), -1));
+    m_sash->SetCursor(wxCursor(wxCURSOR_SIZEWE));
+    m_sash->SetToolTip(_L("Drag to resize the panel. Double-click to fit it to its contents."));
+    m_sash->Bind(wxEVT_PAINT, [this](wxPaintEvent &) {
+        wxPaintDC dc(m_sash);
+        // The colours of the Plater's sidebar sash.
+        dc.SetBackground(wxBrush(wxGetApp().dark_mode() ? wxColour(38, 46, 48) : wxColour(206, 206, 206)));
+        dc.Clear();
+    });
+    m_sash->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent &e) {
+        m_sash_start_x     = m_sash->ClientToScreen(e.GetPosition()).x;
+        m_sash_start_width = m_side->GetSize().x;
+        if (!m_sash->HasCapture())
+            m_sash->CaptureMouse();
+    });
+    m_sash->Bind(wxEVT_MOTION, [this](wxMouseEvent &e) {
+        if (!m_sash->HasCapture())
+            return;
+        // The panel is on the right: dragging left widens it. It never gets narrower than its contents.
+        m_side_width = std::max(0, m_sash_start_width - (m_sash->ClientToScreen(e.GetPosition()).x - m_sash_start_x));
+        fit_side_width();
+        // Where the canvas' share stops it, remember the stop, so dragging back responds at once.
+        m_side_width = std::min(m_side_width, m_side->GetMinSize().x);
+    });
+    auto save_side_width = [this]() {
+        wxGetApp().app_config->set("showcase_panel_width", std::to_string(m_side_width * 10 / std::max(1, wxGetApp().em_unit())));
+    };
+    m_sash->Bind(wxEVT_LEFT_UP, [this, save_side_width](wxMouseEvent &) {
+        if (!m_sash->HasCapture())
+            return;
+        m_sash->ReleaseMouse();
+        save_side_width();
+    });
+    m_sash->Bind(wxEVT_MOUSE_CAPTURE_LOST, [](wxMouseCaptureLostEvent &) {});
+    m_sash->Bind(wxEVT_LEFT_DCLICK, [this, save_side_width](wxMouseEvent &) {
+        m_side_width = 0;
+        fit_side_width();
+        save_side_width();
+    });
+
     auto *sizer = new wxBoxSizer(wxHORIZONTAL);
     sizer->Add(m_canvas_widget, 1, wxEXPAND);
+    sizer->Add(m_sash, 0, wxEXPAND);
     sizer->Add(m_side, 0, wxEXPAND);
     SetSizer(sizer);
     SetMinSize(GetSize());
     GetSizer()->SetSizeHints(this);
+    // After the size hints: the view's own minimum stays the default panel width's.
+    fit_side_width();
+    Bind(wxEVT_SIZE, [this](wxSizeEvent &evt) {
+        fit_side_width();
+        evt.Skip();
+    });
 
     Bind(wxEVT_IDLE, [this](wxIdleEvent &evt) {
         evt.Skip();
@@ -395,6 +450,8 @@ void ShowcaseView::on_change_color_mode(bool is_dark)
         m_canvas->on_change_color_mode(is_dark);
     wxGetApp().UpdateDarkUIWin(this);
     Refresh();
+    if (m_sash != nullptr)
+        m_sash->Refresh();
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -404,8 +461,10 @@ void ShowcaseView::on_change_color_mode(bool is_dark)
 void ShowcaseView::build_panel()
 {
     const int em = wxGetApp().em_unit();
-    m_side = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxSize(32 * em, -1), wxVSCROLL);
-    m_side->SetScrollRate(0, em);
+    // 32 em is the default width; fit_side_width() widens the panel to its widest row and to what the
+    // user drags the sash to. Sideways scrolling only shows where the window is too narrow for that.
+    m_side = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxSize(32 * em, -1), wxVSCROLL | wxHSCROLL);
+    m_side->SetScrollRate(em, em);
     auto *col = new wxBoxSizer(wxVERTICAL);
 
     auto header = [this, col, em](const wxString &title) {
@@ -428,6 +487,9 @@ void ShowcaseView::build_panel()
         auto *c = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, items);
         return c;
     };
+    // For names the user picks (plates, saved views, watermark presets): a set width, so a long name
+    // is cut short instead of widening the panel. Wider when the panel is.
+    auto named_choice = [this, em]() { return new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxSize(12 * em, -1)); };
     auto slider = [this](int value, int lo, int hi) { return new wxSlider(m_side, wxID_ANY, value, lo, hi); };
     auto picker = [this]() { return new wxColourPickerCtrl(m_side, wxID_ANY, *wxWHITE); };
 
@@ -438,7 +500,7 @@ void ShowcaseView::build_panel()
     // --- Scene ---------------------------------------------------------------------------------
     header(_L("Scene"));
     begin_grid();
-    m_plates = choice({});
+    m_plates = named_choice();
     row(_L("Plate"), m_plates);
     wxArrayString presets;
     for (Showcase::PresetId id : Showcase::builtin_presets())
@@ -604,7 +666,7 @@ void ShowcaseView::build_panel()
     projections.Add(_L("Orthographic"));
     m_projection = choice(projections);
     row(_L("Projection"), m_projection);
-    m_views = choice({});
+    m_views = named_choice();
     row(_L("Saved views"), m_views);
     {
         auto *buttons = new wxBoxSizer(wxHORIZONTAL);
@@ -676,11 +738,13 @@ void ShowcaseView::build_panel()
     m_wm_enabled->SetToolTip(_L("Your own logo and/or text on the exported images. Off unless you turn it on."));
     grid->AddSpacer(0);
     grid->Add(m_wm_enabled);
-    m_wm_presets = choice({});
+    m_wm_presets = named_choice();
     row(_L("Preset"), m_wm_presets);
     m_wm_text = new wxTextCtrl(m_side, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     row(_L("Text"), m_wm_text);
-    m_wm_font = new wxFontPickerCtrl(m_side, wxID_ANY, wxFont(wxFontInfo(12)), wxDefaultPosition, wxDefaultSize, wxFNTP_FONTDESC_AS_LABEL);
+    // A set width too: the button shows the font's name, which can be long.
+    m_wm_font = new wxFontPickerCtrl(m_side, wxID_ANY, wxFont(wxFontInfo(12)), wxDefaultPosition, wxSize(12 * em, -1),
+                                     wxFNTP_FONTDESC_AS_LABEL);
     row(_L("Font"), m_wm_font);
     m_wm_color = picker();
     row(_L("Text colour"), m_wm_color);
@@ -1066,7 +1130,7 @@ void ShowcaseView::refresh_materials(bool sync_selection)
             m_mat_choices.push_back(c);
         }
         wxGetApp().UpdateDarkUIWin(m_side);
-        m_side->FitInside();
+        fit_side_width();
         m_side->Layout();
     }
     const Showcase::Scene &s = scene();
@@ -1195,8 +1259,28 @@ void ShowcaseView::sync_controls()
 
     m_syncing = false;
     update_enabled();
-    m_side->FitInside();
+    fit_side_width();
     m_side->Layout();
+}
+
+void ShowcaseView::fit_side_width()
+{
+    if (m_side == nullptr || m_side->GetSizer() == nullptr)
+        return;
+    const int em = wxGetApp().em_unit();
+    // Measured, not assumed: labels and controls come out wider in macOS's system font, and in longer
+    // languages, than an em count tuned on Windows allows for. The vertical scroll bar takes its
+    // share too where it is not an overlay.
+    const int content = m_side->GetSizer()->CalcMin().x + wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, m_side);
+    int       width   = std::max({ 32 * em, content, m_side_width });
+    // Leave the canvas some room; in a window too narrow for both the panel scrolls sideways.
+    if (const int client = GetClientSize().x; client > 0)
+        width = std::min(width, std::max(client - (m_sash != nullptr ? m_sash->GetSize().x : 0) - 24 * em, 20 * em));
+    if (width != m_side->GetMinSize().x) {
+        m_side->SetMinSize(wxSize(width, -1));
+        Layout();
+    }
+    m_side->FitInside();
 }
 
 void ShowcaseView::update_enabled()
@@ -1564,7 +1648,7 @@ void ShowcaseView::on_export(bool to_clipboard)
     wxGetApp().app_config->update_skein_dir(into_u8(wxFileName(path).GetPath()));
     m_status->SetLabel(wxString::Format(_L("Saved %s (%d x %d)."), wxFileName(path).GetFullName(), image.width, image.height));
     m_status->Wrap(30 * wxGetApp().em_unit());
-    m_side->FitInside();
+    fit_side_width();
     BOOST_LOG_TRIVIAL(info) << "Showcase: exported " << image.width << "x" << image.height << " to " << into_u8(path);
 }
 
