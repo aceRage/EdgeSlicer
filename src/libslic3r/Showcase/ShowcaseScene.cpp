@@ -543,6 +543,17 @@ bool scene_from_json_object(const json &j, Scene &s)
 
 std::string scene_to_json(const Scene &scene) { return scene_to_json_object(scene).dump(); }
 
+std::string watermark_to_json(const Watermark &wm) { return watermark_to_json(wm, json()).dump(); }
+
+bool watermark_from_json(const std::string &text, Watermark &out)
+{
+    const json j = json::parse(text, nullptr, false);
+    if (!j.is_object())
+        return false;
+    out = watermark_from_json(j);
+    return true;
+}
+
 bool scene_from_json(const std::string &text, Scene &out)
 {
     const json j = json::parse(text, nullptr, false);

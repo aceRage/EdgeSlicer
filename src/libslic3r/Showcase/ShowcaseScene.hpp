@@ -232,6 +232,9 @@ std::string scenes_to_json(const Project &project);
 bool        scenes_from_json(const std::string &text, Project &out, std::string *error = nullptr);
 std::string scene_to_json(const Scene &scene);
 bool        scene_from_json(const std::string &text, Scene &out);
+// One watermark on its own (the user's reusable watermark presets, outside any project).
+std::string watermark_to_json(const Watermark &wm);
+bool        watermark_from_json(const std::string &text, Watermark &out);
 
 // "Metadata/showcase/<sha>.<ext>" and back. Returns false for any other name.
 std::string image_archive_path(const std::string &sha, const std::string &ext);

@@ -43,6 +43,7 @@
 #include "FrameProfiler.hpp"
 #include "CameraUtils.hpp"
 #include "EmbossPicking.hpp"
+#include "Showcase/ShowcaseRenderer.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
@@ -3716,6 +3717,14 @@ void GLCanvas3D::render(bool only_init)
         wxGetApp().plater()->init_environment_texture();
 #endif // ENABLE_ENVIRONMENT_MAP
 
+    // Showcase: its own frame (backdrop, floor, world-fixed light, safe frame). None of the editing
+    // passes below run on this canvas.
+    if (m_canvas_type == ECanvasType::CanvasShowcase) {
+        if (m_showcase_renderer != nullptr)
+            m_showcase_renderer->render_frame();
+        return;
+    }
+
     const Size& cnv_size = get_canvas_size();
     // Probably due to different order of events on Linux/GTK2, when one switched from 3D scene
     // to preview, this was called before canvas had its final size. It reported zero width
@@ -4100,6 +4109,7 @@ static const char* gl_canvas_type_name(GLCanvas3D::ECanvasType type)
     case GLCanvas3D::ECanvasType::CanvasView3D:       return "Prepare (3D)";
     case GLCanvas3D::ECanvasType::CanvasPreview:      return "Preview";
     case GLCanvas3D::ECanvasType::CanvasAssembleView: return "Assemble";
+    case GLCanvas3D::ECanvasType::CanvasShowcase:     return "Showcase";
     default:                                          return "unknown canvas";
     }
 }
@@ -4888,7 +4898,8 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
         post_event(SimpleEvent(EVT_GLCANVAS_OBJECT_SELECT));
 
     //BBS:exclude the assmble view
-    if (m_canvas_type != ECanvasType::CanvasAssembleView) {
+    // Showcase: the same objects as Prepare; it leaves the warnings to Prepare's canvas.
+    if (m_canvas_type != ECanvasType::CanvasAssembleView && m_canvas_type != ECanvasType::CanvasShowcase) {
         _set_warning_notification_if_needed(EWarning::GCodeConflict);
         // checks for geometry outside the print volume to render it accordingly
         if (!m_volumes.empty()) {
@@ -5213,6 +5224,30 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
     auto imgui = wxGetApp().imgui();
     if (imgui->update_key_data(evt)) {
         render();
+        return;
+    }
+
+    // Showcase never edits the model: the editing shortcuts (filament keys, arrange, delete, ...)
+    // must not reach it. Ctrl+0..6 pick a view, I/O zoom.
+    if (m_canvas_type == ECanvasType::CanvasShowcase) {
+        if ((evt.GetModifiers() & ctrlMask) != 0) {
+            switch (keyCode) {
+            case '0': select_view("plate"); break;
+            case '1': select_view("top"); break;
+            case '2': select_view("bottom"); break;
+            case '3': select_view("front"); break;
+            case '4': select_view("rear"); break;
+            case '5': select_view("left"); break;
+            case '6': select_view("right"); break;
+            default: evt.Skip(); break;
+            }
+        } else if (keyCode == 'I' || keyCode == 'i')
+            _update_camera_zoom(1.0);
+        else if (keyCode == 'O' || keyCode == 'o')
+            _update_camera_zoom(-1.0);
+        else
+            evt.Skip();
+        m_dirty = true;
         return;
     }
 
@@ -5639,6 +5674,14 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
     const int keyCode = evt.GetKeyCode();
 
     auto imgui = wxGetApp().imgui();
+    // Showcase: no selection to move, no gizmos; keys only feed ImGui (see on_char()).
+    if (m_canvas_type == ECanvasType::CanvasShowcase) {
+        if (imgui->update_key_data(evt))
+            render();
+        else
+            evt.Skip();
+        return;
+    }
     if (imgui->update_key_data(evt)) {
         render();
     }
@@ -10041,7 +10084,8 @@ bool GLCanvas3D::_is_realistic_view_enabled() const
 
 bool GLCanvas3D::_is_realistic_shadows_enabled() const
 {
-    return m_canvas_type == ECanvasType::CanvasView3D && _is_realistic_view_enabled() && _render_settings().shadows && !m_volumes.empty();
+    return (m_canvas_type == ECanvasType::CanvasView3D || m_canvas_type == ECanvasType::CanvasShowcase) && _is_realistic_view_enabled() &&
+           _render_settings().shadows && !m_volumes.empty();
 }
 
 void GLCanvas3D::_set_key_light_uniforms(GLShaderProgram& shader, const RealisticRenderSettings& settings, const Transform3d& view_matrix)
@@ -10061,7 +10105,8 @@ bool GLCanvas3D::_is_ssao_enabled() const
     return _is_realistic_view_enabled() && _render_settings().ssao;
 }
 
-// Copies the finished scene's colour and depth out of the back buffer and draws the colour back
+// Copies the finished scene's colour and depth out of the bound framebuffer (the back buffer, or the
+// Showcase export's resolved, single-sample one) and draws the colour back
 // darkened where the depth says a surface sits in a crease. Shader and normals as Orca #15809 has
 // them (see ssao.fs); the full-screen quad is m_background with background.vs, as for FXAA.
 void GLCanvas3D::_render_ssao_pass(unsigned int width, unsigned int height)

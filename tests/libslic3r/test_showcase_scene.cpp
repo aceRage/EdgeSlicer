@@ -468,7 +468,8 @@ TEST_CASE("Showcase: scenes round-trip through the project 3MF and stay out of o
         CHECK(copy.showcase == model.showcase);
     }
 
-    fs::remove_all(dir);
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);   // best effort: a backup folder may still be held open
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -606,6 +607,26 @@ TEST_CASE("Showcase: watermark layout", "[Showcase][Watermark]")
     Anchor a;
     REQUIRE(from_string("bottom_right", a));
     CHECK(a == Anchor::BottomRight);
+}
+
+TEST_CASE("Showcase: a watermark preset round-trips on its own", "[Showcase][Watermark]")
+{
+    Watermark wm;
+    wm.name       = "Shop";
+    wm.enabled    = true;
+    wm.text       = "Ace Prints";
+    wm.font_face  = "Segoe UI";
+    wm.bold       = true;
+    wm.text_color = "#102030";
+    wm.logo       = std::string(64, 'b');
+    wm.anchor     = Anchor::Top;
+    wm.size_pct   = 12.5f;
+    wm.opacity    = 0.5f;
+    wm.margin_pct = 1.f;
+    Watermark back;
+    REQUIRE(watermark_from_json(watermark_to_json(wm), back));
+    CHECK(back == wm);
+    CHECK_FALSE(watermark_from_json("[]", back));
 }
 
 TEST_CASE("Showcase: image helpers", "[Showcase]")

@@ -68,6 +68,8 @@ class Bed3D;
 class PartPlateList;
 class FrameProfiler;
 
+class ShowcaseRenderer;
+
 #if ENABLE_RETINA_GL
 class RetinaHelper;
 #endif
@@ -577,6 +579,8 @@ public:
         CanvasView3D = 0,
         CanvasPreview = 1,
         CanvasAssembleView = 2,
+        // The Showcase tab: drawn by ShowcaseRenderer, never edited (no picking, gizmos or toolbars).
+        CanvasShowcase = 3,
     };
 
     int GetHoverId();
@@ -885,6 +889,9 @@ public:
     // The realistic view's switches when they do not come from the preferences (the Showcase
     // canvas sets its own; Prepare and Preview never set it, so they read the app config).
     std::optional<RealisticRenderSettings> m_render_settings_override;
+    // Showcase canvas: draws every frame of this canvas (owned by ShowcaseView).
+    ShowcaseRenderer* m_showcase_renderer{ nullptr };
+    friend class ShowcaseRenderer;
 public:
     explicit GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed);
     ~GLCanvas3D();
@@ -895,6 +902,7 @@ public:
     // Realistic view switches for this canvas only, in place of the preferences (Showcase).
     void set_render_settings_override(const RealisticRenderSettings& settings) { m_render_settings_override = settings; }
     void clear_render_settings_override() { m_render_settings_override.reset(); }
+    void set_showcase_renderer(ShowcaseRenderer* renderer) { m_showcase_renderer = renderer; }
     void set_type(ECanvasType type) { m_canvas_type = type; }
     ECanvasType get_canvas_type() { return m_canvas_type; }
 

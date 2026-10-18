@@ -148,6 +148,7 @@
 #include "Selection.hpp"
 #include "GLToolbar.hpp"
 #include "GUI_Preview.hpp"
+#include "Showcase/ShowcaseView.hpp"
 #include "UVEditorCanvas.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
@@ -10857,6 +10858,8 @@ struct Plater::priv
     GLToolbar collapse_toolbar;
     Preview *preview;
     AssembleView* assemble_view { nullptr };
+    // The Showcase tab (after Preview): presentation renders of the current plate.
+    ShowcaseView* showcase_view { nullptr };
     // Docked/resizable 2D pane showing GLGizmoTextureDisplacement's LSCM unwrap of a painted
     // patch; a sibling AUI pane alongside "sidebar"/"main", not part of the view3D/preview/
     // assemble_view sizer - see its registration below and Plater::get_uv_editor_canvas(). The
@@ -10986,6 +10989,7 @@ struct Plater::priv
     bool is_preview_loaded() const { return preview->is_loaded(); }
     bool is_view3D_shown() const { return current_panel == view3D; }
     bool is_assemble_view_show() const { return current_panel == assemble_view; }
+    bool is_showcase_shown() const { return showcase_view != nullptr && current_panel == showcase_view; }
 
     bool are_view3D_labels_shown() const { return (current_panel == view3D) && view3D->get_canvas3d()->are_labels_shown(); }
     void show_view3D_labels(bool show) { if (current_panel == view3D) view3D->get_canvas3d()->show_labels(show); }
@@ -11510,6 +11514,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     preview = new Preview(panel_3d, bed, &model, config, &background_process, partplate_list.get_current_slice_result(), [this]() { schedule_background_process(); });
 
     assemble_view = new AssembleView(panel_3d, bed, &model, config, &background_process);
+    showcase_view = new ShowcaseView(panel_3d, bed, &model, config, &background_process);
 
 #ifdef __APPLE__
     // BBS
@@ -11520,6 +11525,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panels.push_back(view3D);
     panels.push_back(preview);
     panels.push_back(assemble_view);
+    panels.push_back(showcase_view);
 
     this->background_process_timer.SetOwner(this->q, 0);
     this->auto_reslice_timer.SetOwner(this->q, 0);
@@ -11582,6 +11588,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panel_sizer->Add(view3D, 1, wxEXPAND | wxALL, 0);
     panel_sizer->Add(preview, 1, wxEXPAND | wxALL, 0);
     panel_sizer->Add(assemble_view, 1, wxEXPAND | wxALL, 0);
+    panel_sizer->Add(showcase_view, 1, wxEXPAND | wxALL, 0);
     panel_3d->SetSizer(panel_sizer);
     m_aui_mgr.AddPane(panel_3d, wxAuiPaneInfo().Name("main").CenterPane().PaneBorder(false));
 
@@ -11805,8 +11812,10 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         q->Bind(EVT_EXPORT_FINISHED, &priv::on_export_finished, this);
         q->Bind(EVT_GLVIEWTOOLBAR_3D, [q](SimpleEvent&) { q->select_view_3D("3D"); });
         //BBS: set on_slice to false
+        q->Bind(EVT_GLVIEWTOOLBAR_SHOWCASE, [q](SimpleEvent&) { q->select_view_3D("Showcase"); });
         q->Bind(EVT_GLVIEWTOOLBAR_PREVIEW, [q](SimpleEvent&) {
-            if (q->is_view3D_shown()) {
+            // From Showcase as from Prepare: an unsliceable plate shows Preview without slicing.
+            if (q->is_view3D_shown() || q->is_showcase_shown()) {
                 PartPlate* curr = q->get_partplate_list().get_curr_plate();
                 if (curr && !q->is_plate_sliceable(q->get_partplate_list().get_curr_plate_index())) {
                     q->sync_filament_temp_mixing_notification();
@@ -12036,6 +12045,9 @@ void Plater::priv::update(unsigned int flags)
     if (is_preview_shown()) this->preview->reload_print();
     //BBS assemble view
     this->assemble_view->reload_scene(false, flags);
+    // Showcase: refreshed now when it is showing, else when it is next shown.
+    if (this->showcase_view != nullptr)
+        this->showcase_view->reload_scene(false, flags & (unsigned int)UpdateParams::FORCE_FULL_SCREEN_REFRESH);
 
     if (current_panel && is_preview_shown()) {
         q->force_update_all_plate_thumbnails();
@@ -12071,6 +12083,10 @@ void Plater::priv::select_view(const std::string& direction)
     else if (current_panel == assemble_view) {
         BOOST_LOG_TRIVIAL(info) << "select assemble view";
         assemble_view->select_view(direction);
+    }
+    else if (showcase_view != nullptr && current_panel == showcase_view) {
+        showcase_view->get_canvas3d()->select_view(direction);
+        showcase_view->set_as_dirty();
     }
 }
 
@@ -12156,6 +12172,11 @@ void Plater::priv::select_view_3D(const std::string& name, bool no_slice)
         set_current_panel(assemble_view, no_slice);
         wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
     }
+    else if (name == "Showcase" && showcase_view != nullptr) {
+        BOOST_LOG_TRIVIAL(info) << "select showcase view";
+        set_current_panel(showcase_view, no_slice);
+        wxGetApp().mainframe->select_tab(size_t(MainFrame::tpShowcase));
+    }
 
     //BBS update selection
     wxGetApp().obj_list()->update_selections();
@@ -12209,7 +12230,8 @@ void Plater::priv::update_sidebar(bool force_update) {
     }
     bool  needs_update = force_update;
 
-    if (!sidebar_layout.is_enabled) {
+    if (!sidebar_layout.is_enabled || is_showcase_shown()) {
+        // Showcase has its own panel on the right; the print settings are not for it.
         if (sidebar.IsShown()) {
             sidebar.Hide();
             needs_update = true;
@@ -12912,6 +12934,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         this->model.model_info = model.model_info;
                         // Costs > Project: the project's own fees and markup (display only).
                         this->model.pricing = model.pricing;
+                        // Showcase: the project's scenes and their pictures.
+                        this->model.showcase = model.showcase;
+                        if (showcase_view != nullptr)
+                            showcase_view->on_project_changed();
                     }
                 }
 
@@ -14191,6 +14217,10 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     model.plates_custom_gcodes.clear();
     // A new project starts on your default fees and markup.
     model.pricing.clear();
+    // ... and without Showcase scenes.
+    model.showcase.clear();
+    if (showcase_view != nullptr)
+        showcase_view->on_project_changed();
 
     // BBS
     m_saved_timestamp = m_backup_timestamp = size_t(-1);
@@ -16313,6 +16343,12 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
 
     update_sidebar(true);
 
+    // Leaving Showcase: its camera goes back into its scene, the editing camera comes back.
+    if (showcase_view != nullptr && old_panel == showcase_view) {
+        showcase_view->on_deactivate();
+        showcase_view->get_canvas3d()->unbind_event_handlers();
+    }
+
     if (wxGetApp().plater()) {
         Camera& cam = wxGetApp().plater()->get_camera();
         if (old_panel == preview || old_panel == view3D) {
@@ -16471,6 +16507,29 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
         assemble_view->set_as_dirty();
         // BBS
         //view_toolbar.select_item("Assemble");
+    }
+    else if (showcase_view != nullptr && current_panel == showcase_view) {
+        if (old_panel == view3D)
+            view3D->get_canvas3d()->unbind_event_handlers();
+        else if (old_panel == preview)
+            preview->get_canvas3d()->unbind_event_handlers();
+        else if (old_panel == assemble_view)
+            assemble_view->get_canvas3d()->unbind_event_handlers();
+
+        // A painting or editing gizmo left open on Prepare stays out of the picture.
+        GLGizmosManager& gizmos = view3D->get_canvas3d()->get_gizmos_manager();
+        if (gizmos.is_running()) {
+            gizmos.reset_all_states();
+            gizmos.update_data();
+        }
+
+        showcase_view->get_canvas3d()->bind_event_handlers();
+        showcase_view->reload_scene(true);
+        showcase_view->on_activate();
+        showcase_view->get_canvas3d()->reset_old_size();
+        showcase_view->set_as_dirty();
+        if (notification_manager != nullptr)
+            notification_manager->set_in_preview(false);
     }
 
     current_panel->SetFocusFromKbd();
@@ -17840,6 +17899,8 @@ void Plater::priv::on_apple_change_color_mode(wxSysColourChangedEvent& evt) {
         view3D->get_canvas3d()->on_change_color_mode(m_is_dark);
         preview->get_canvas3d()->on_change_color_mode(m_is_dark);
         assemble_view->get_canvas3d()->on_change_color_mode(m_is_dark);
+        if (showcase_view != nullptr)
+            showcase_view->on_change_color_mode(m_is_dark);
     }
 
     apply_color_mode();
@@ -17850,6 +17911,8 @@ void Plater::priv::on_change_color_mode(SimpleEvent& evt) {
     view3D->get_canvas3d()->on_change_color_mode(m_is_dark);
     preview->get_canvas3d()->on_change_color_mode(m_is_dark);
     assemble_view->get_canvas3d()->on_change_color_mode(m_is_dark);
+    if (showcase_view != nullptr)
+        showcase_view->on_change_color_mode(m_is_dark);
     if (m_send_to_sdcard_dlg) m_send_to_sdcard_dlg->on_change_color_mode();
 
     apply_color_mode();
@@ -18287,6 +18350,8 @@ void Plater::priv::set_current_canvas_as_dirty()
         preview->set_as_dirty();
     else if (current_panel == assemble_view)
         assemble_view->set_as_dirty();
+    else if (showcase_view != nullptr && current_panel == showcase_view)
+        showcase_view->set_as_dirty();
 }
 
 GLCanvas3D* Plater::priv::get_current_canvas3D(bool exclude_preview)
@@ -18323,6 +18388,9 @@ void Plater::priv::unbind_canvas_event_handlers()
 
     if (assemble_view != nullptr)
         assemble_view->get_canvas3d()->unbind_event_handlers();
+
+    if (showcase_view != nullptr && showcase_view->get_canvas3d() != nullptr)
+        showcase_view->get_canvas3d()->unbind_event_handlers();
 }
 
 void Plater::priv::reset_canvas_volumes()
@@ -18332,6 +18400,9 @@ void Plater::priv::reset_canvas_volumes()
 
     if (preview != nullptr)
         preview->get_canvas3d()->reset_volumes();
+
+    if (showcase_view != nullptr && showcase_view->get_canvas3d() != nullptr)
+        showcase_view->get_canvas3d()->reset_volumes();
 }
 
 bool Plater::priv::init_collapse_toolbar()
@@ -22130,6 +22201,7 @@ void Plater::reload_paint_after_background_process_apply() {
 bool Plater::is_preview_shown() const { return p->is_preview_shown(); }
 bool Plater::is_preview_loaded() const { return p->is_preview_loaded(); }
 bool Plater::is_view3D_shown() const { return p->is_view3D_shown(); }
+bool Plater::is_showcase_shown() const { return p->is_showcase_shown(); }
 
 bool Plater::are_view3D_labels_shown() const { return p->are_view3D_labels_shown(); }
 void Plater::show_view3D_labels(bool show) { p->show_view3D_labels(show); }
@@ -27618,6 +27690,12 @@ int Plater::delete_plate(int plate_index)
     p->background_process.set_current_plate(nullptr);
 
     ret = p->partplate_list.delete_plate(index);
+    // Showcase: the plate's scene goes with it, later plates' scenes move down one.
+    if (ret == 0) {
+        p->model.showcase.on_plate_deleted(index);
+        if (p->showcase_view != nullptr)
+            p->showcase_view->on_project_changed();
+    }
 
     //BBS: update the current print to the current plate
     p->partplate_list.update_slice_context_to_current_plate(p->background_process);

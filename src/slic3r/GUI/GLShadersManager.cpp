@@ -120,6 +120,12 @@ std::pair<bool, std::string> GLShadersManager::init()
         phong->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 }, { "shadow_map", 5 } });
     // Orca #14702: casts the object shadow map onto the build plate (realistic view).
     appendOptionalShader("printbed_shadow", { prefix + "printbed_shadow.vs", prefix + "printbed_shadow.fs" });
+    // Showcase tab: the backdrop and the floor. Core profile (GLSL 1.40) only, and optional: if one
+    // fails to compile the tab draws the plain two-colour gradient and no floor, nothing else changes.
+    if (prefix == "140/") {
+        appendOptionalShader("showcase_background", { prefix + "background.vs", prefix + "showcase_background.fs" });
+        appendOptionalShader("showcase_floor", { prefix + "showcase_floor.vs", prefix + "showcase_floor.fs" });
+    }
     // used to render variable layers heights in 3d editor
     valid &= append_shader("variable_layer_height", { prefix + "variable_layer_height.vs", prefix + "variable_layer_height.fs" });
     // used to render highlight contour around selected triangles inside the multi-material gizmo

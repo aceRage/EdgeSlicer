@@ -293,6 +293,13 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_ObjectTableSettings.hpp
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
+    GUI/MainTabs.hpp
+    GUI/Showcase/ShowcaseRenderer.cpp
+    GUI/Showcase/ShowcaseRenderer.hpp
+    GUI/Showcase/ShowcaseView.cpp
+    GUI/Showcase/ShowcaseView.hpp
+    GUI/Showcase/ShowcaseWatermark.cpp
+    GUI/Showcase/ShowcaseWatermark.hpp
     GUI/GUI_Utils.cpp
     GUI/GUI_Utils.hpp
     GUI/HintNotification.cpp
@@ -1238,6 +1245,8 @@ slic3r_unity_build(libslic3r_gui SKIP
     Utils/StepMesh.cpp                            # OCCT's Handle() macro breaks CGAL headers in neighbours
     GUI/GLToolbar.cpp                             # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/GUI_Preview.cpp                           # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseView.cpp                 # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseRenderer.cpp             # glad + ImGui + wx image headers; file-local GL helpers
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
