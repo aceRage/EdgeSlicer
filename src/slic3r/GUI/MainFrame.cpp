@@ -3518,6 +3518,18 @@ void MainFrame::init_menubar_as_editor()
             },
             this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_show_xray(); }, this);
 
+        // Orca #13704: realistic view (Orca: its canvas menu). The details are in Preferences > Graphics.
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Realistic View"),
+            _L("Render objects with Phong shading, and optionally ambient occlusion and cast shadows (Preferences > Graphics)."),
+            [this](wxCommandEvent &) {
+                AppConfig* cfg = wxGetApp().app_config;
+                cfg->set_bool(SETTING_OPENGL_REALISTIC_MODE, !cfg->get_bool(SETTING_OPENGL_REALISTIC_MODE));
+                m_plater->set_current_canvas_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown() || m_plater->is_preview_shown(); },
+            []() { return wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_MODE); }, this);
+
         // Orca #16291: center of mass markers, in Prepare and Preview (Orca: its canvas menu).
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show Center of Mass"),
             _L("Show the center of mass of each plate, object, separate part and support in Prepare and Preview. Click a marker for its weight, volume and moment of inertia."),

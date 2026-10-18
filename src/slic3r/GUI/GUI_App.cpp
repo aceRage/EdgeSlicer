@@ -8335,6 +8335,9 @@ void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_
     const std::string previous_opengl_fxaa             = app_config->get(SETTING_OPENGL_FXAA_ENABLED);
     const std::string previous_opengl_fps_cap          = app_config->get(SETTING_OPENGL_FPS_CAP);
     const std::string previous_opengl_show_fps_overlay = app_config->get(SETTING_OPENGL_SHOW_FPS_OVERLAY);
+    // Orca #13704: the realistic view options apply at once too.
+    const std::string previous_realistic = app_config->get(SETTING_OPENGL_REALISTIC_MODE) + app_config->get(SETTING_OPENGL_REALISTIC_PHONG) +
+                                           app_config->get(SETTING_OPENGL_PHONG_SSAO) + app_config->get(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
     {
         // the dialog needs to be destroyed before the call to recreate_GUI()
         // or sometimes the application crashes into wxDialogBase() destructor
@@ -8346,7 +8349,9 @@ void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_
             canvas->force_set_focus();
         if (app_config->get(SETTING_OPENGL_FXAA_ENABLED) != previous_opengl_fxaa ||
             app_config->get(SETTING_OPENGL_FPS_CAP) != previous_opengl_fps_cap ||
-            app_config->get(SETTING_OPENGL_SHOW_FPS_OVERLAY) != previous_opengl_show_fps_overlay)
+            app_config->get(SETTING_OPENGL_SHOW_FPS_OVERLAY) != previous_opengl_show_fps_overlay ||
+            app_config->get(SETTING_OPENGL_REALISTIC_MODE) + app_config->get(SETTING_OPENGL_REALISTIC_PHONG) +
+                app_config->get(SETTING_OPENGL_PHONG_SSAO) + app_config->get(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS) != previous_realistic)
             this->plater_->set_current_canvas_as_dirty();
         // BBS
         //app_layout_changed = dlg.settings_layout_changed();

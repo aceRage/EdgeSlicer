@@ -29,6 +29,11 @@ using namespace nlohmann;
 #define SETTING_OPENGL_FXAA_ENABLED "opengl_fxaa_enabled"
 #define SETTING_OPENGL_FPS_CAP "opengl_fps_cap"
 #define SETTING_OPENGL_SHOW_FPS_OVERLAY "opengl_show_fps_overlay"
+// Orca #13704: realistic view.
+#define SETTING_OPENGL_REALISTIC_MODE "opengl_realistic_mode"
+#define SETTING_OPENGL_REALISTIC_PHONG "opengl_realistic_phong"
+#define SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS "opengl_phong_basic_plate_shadows"
+#define SETTING_OPENGL_PHONG_SSAO "opengl_phong_ssao"
 #define OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY "load_geometry_only"
 
 #define SUPPORT_DARK_MODE

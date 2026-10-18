@@ -1950,10 +1950,24 @@ GLCanvas3D::~GLCanvas3D()
         if (m_frame_profiler)
             m_frame_profiler->reset();
     }
-    if (m_fxaa_texture_id != 0 && m_canvas != nullptr && _set_current()) {
-        glsafe(::glDeleteTextures(1, &m_fxaa_texture_id));
-        m_fxaa_texture_id = 0;
+    if ((m_fxaa_texture_id != 0 || m_ssao_color_texture_id != 0 || m_ssao_depth_texture_id != 0 || m_plate_shadow_mask.is_initialized()) &&
+        m_canvas != nullptr && _set_current()) {
+        if (m_fxaa_texture_id != 0) {
+            glsafe(::glDeleteTextures(1, &m_fxaa_texture_id));
+            m_fxaa_texture_id = 0;
+        }
+        // Orca #13704
+        if (m_ssao_color_texture_id != 0) {
+            glsafe(::glDeleteTextures(1, &m_ssao_color_texture_id));
+            m_ssao_color_texture_id = 0;
+        }
+        if (m_ssao_depth_texture_id != 0) {
+            glsafe(::glDeleteTextures(1, &m_ssao_depth_texture_id));
+            m_ssao_depth_texture_id = 0;
+        }
+        m_plate_shadow_mask.reset();
     }
+    m_plate_shadow_mask_key.clear();
 
     reset_volumes(ResetVolumesMode::CanvasDestruction);
 
@@ -3785,19 +3799,34 @@ void GLCanvas3D::render(bool only_init)
     /* view3D render*/
     int hover_id = (m_hover_plate_idxs.size() > 0)?m_hover_plate_idxs.front():-1;
     if (m_canvas_type == ECanvasType::CanvasView3D) {
-        //BBS: add outline logic
-        {
-            FrameProfiler::Scope scope(*m_frame_profiler, "objects");
-            _render_objects(GLVolumeCollection::ERenderType::Opaque, !m_gizmos.is_running());
-        }
-        _render_sla_slices();
-        _render_selection();
+        // Orca #13704: with the realistic view's shadows on, the bed and plates are drawn first, the
+        // shadows are cast onto them, and the objects follow. Without them the order is unchanged.
+        // No plate (a painting gizmo hides it), no shadow on it.
+        const bool plate_first = !no_partplate && _is_realistic_shadows_enabled();
+        const auto render_opaque = [&]() {
+            //BBS: add outline logic
+            {
+                FrameProfiler::Scope scope(*m_frame_profiler, "objects");
+                _render_objects(GLVolumeCollection::ERenderType::Opaque, !m_gizmos.is_running());
+            }
+            _render_sla_slices();
+            _render_selection();
+        };
+        if (!plate_first)
+            render_opaque();
         {
             FrameProfiler::Scope scope(*m_frame_profiler, "bed");
             if (!no_partplate)
                 _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), show_axes);
             if (!no_partplate) //BBS: add outline logic
                 _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), only_current, only_body, hover_id, true, show_grid, m_plate_focus_visible_plates);
+        }
+        if (plate_first) {
+            {
+                FrameProfiler::Scope scope(*m_frame_profiler, "shadows");
+                _render_cast_shadows_on_plate(camera.get_view_matrix(), camera.get_projection_matrix());
+            }
+            render_opaque();
         }
         {
             FrameProfiler::Scope scope(*m_frame_profiler, "transparent");
@@ -3881,6 +3910,12 @@ void GLCanvas3D::render(bool only_init)
 
     if (m_picking_enabled && m_rectangle_selection.is_dragging())
         m_rectangle_selection.render(*this);
+
+    // Orca #13704: ambient occlusion of the realistic view, before the markers and the anti-aliasing.
+    if (_is_ssao_enabled()) {
+        FrameProfiler::Scope scope(*m_frame_profiler, "ssao");
+        _render_ssao_pass(static_cast<unsigned int>(cnv_size.get_width()), static_cast<unsigned int>(cnv_size.get_height()));
+    }
 
     // Orca #16291: center of mass markers, over the scene and under the anti-aliasing and the overlays.
     m_center_of_mass.render(*this);
@@ -9811,6 +9846,285 @@ void GLCanvas3D::_rectangular_selection_picking_pass()
     _update_volumes_hover_state();
 }
 
+// Orca #13704: realistic view --------------------------------------------------------------------
+
+bool GLCanvas3D::_is_realistic_view_enabled() const
+{
+    const AppConfig* cfg = wxGetApp().app_config;
+    if (cfg == nullptr || !cfg->get_bool(SETTING_OPENGL_REALISTIC_MODE))
+        return false;
+    // Edge: Orca switches the realistic view off in the app config while the seam, support or fuzzy
+    // skin painting gizmo is open and back on when it closes. Here it is just not applied then, so
+    // the setting is never rewritten behind the user's back (nor left off by a crash mid-gizmo).
+    const GLGizmosManager::EType gizmo = m_gizmos.get_current_type();
+    return gizmo != GLGizmosManager::Seam && gizmo != GLGizmosManager::FdmSupports && gizmo != GLGizmosManager::FuzzySkin;
+}
+
+bool GLCanvas3D::_is_realistic_shadows_enabled() const
+{
+    return m_canvas_type == ECanvasType::CanvasView3D && _is_realistic_view_enabled() &&
+           wxGetApp().app_config->get_bool(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS) && !m_volumes.empty();
+}
+
+bool GLCanvas3D::_is_ssao_enabled() const
+{
+    return _is_realistic_view_enabled() && wxGetApp().app_config->get_bool(SETTING_OPENGL_PHONG_SSAO);
+}
+
+// Copies the finished scene's colour and depth out of the back buffer and draws the colour back
+// darkened where the depth says a surface sits in a crease. Shader and normals as Orca #15809 has
+// them (see ssao.fs); the full-screen quad is m_background with background.vs, as for FXAA.
+void GLCanvas3D::_render_ssao_pass(unsigned int width, unsigned int height)
+{
+    if (width == 0 || height == 0 || !m_background.is_initialized())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("ssao");
+    if (shader == nullptr)
+        return;
+
+    if (m_ssao_color_texture_id == 0) {
+        glsafe(::glGenTextures(1, &m_ssao_color_texture_id));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_color_texture_id));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        m_ssao_texture_size = { { 0, 0 } };
+    }
+    if (m_ssao_depth_texture_id == 0) {
+        glsafe(::glGenTextures(1, &m_ssao_depth_texture_id));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_depth_texture_id));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        m_ssao_texture_size = { { 0, 0 } };
+    }
+
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    if (m_ssao_texture_size[0] != width || m_ssao_texture_size[1] != height) {
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_color_texture_id));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_depth_texture_id));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr));
+        m_ssao_texture_size = { { width, height } };
+    }
+
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_color_texture_id));
+    glsafe(::glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_depth_texture_id));
+    glsafe(::glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDisable(GL_BLEND));
+
+    shader->start_using();
+    shader->set_uniform("color_texture", 0);
+    shader->set_uniform("depth_texture", 1);
+    shader->set_uniform("inv_tex_size", Vec2f(1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height)));
+    shader->set_uniform("z_far", static_cast<float>(camera.get_far_z()));
+    // The shader reconstructs the surface normal from the depth buffer, there being no normal
+    // target to read: it unprojects a pixel back into view space, then measures the result
+    // against world +Z expressed in view space to tell a top surface from a wall.
+    const Matrix4d inv_projection_matrix = camera.get_projection_matrix().matrix().inverse();
+    shader->set_uniform("inv_projection_matrix", inv_projection_matrix);
+    const Vec3d up_view = (camera.get_view_matrix().matrix().block<3, 3>(0, 0) * Vec3d::UnitZ()).normalized();
+    shader->set_uniform("up_view", up_view);
+
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_color_texture_id));
+    glsafe(::glActiveTexture(GL_TEXTURE1));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_ssao_depth_texture_id));
+    m_background.render();
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    shader->stop_using();
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+}
+
+// Shadows of the objects cast onto the plate, along a light fixed to the camera: the plate is
+// marked in the stencil buffer, the volumes are flattened onto z = 0 into it, and the marked
+// pixels are darkened.
+void GLCanvas3D::_render_cast_shadows_on_plate(const Transform3d& view_matrix, const Transform3d& projection_matrix)
+{
+    if (!_is_realistic_shadows_enabled())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr || !m_background.is_initialized())
+        return;
+
+    // Drive shadow direction from current view angle: define light in eye-space,
+    // then transform it to world-space with inverse view rotation.
+    const Vec3d light_dir_eye = Vec3d(-0.4574957, 0.4574957, 0.7624929).normalized();
+    const Matrix3d view_rot = view_matrix.matrix().block<3, 3>(0, 0);
+    const Vec3d light_dir_to_light = (view_rot.transpose() * light_dir_eye).normalized();
+    const Vec3d ray_dir = -light_dir_to_light;  // Direction of shadow projection
+
+    if (std::abs(ray_dir.z()) < 1e-6)
+        return;
+
+    // Shadow projection matrix - flattens geometry onto Z=0 plane along light direction
+    Matrix4d shadow_proj = Matrix4d::Identity();
+    shadow_proj(0, 2) = -ray_dir.x() / ray_dir.z();
+    shadow_proj(1, 2) = -ray_dir.y() / ray_dir.z();
+    shadow_proj(2, 0) = 0.0;
+    shadow_proj(2, 1) = 0.0;
+    shadow_proj(2, 2) = 0.0;
+    shadow_proj(2, 3) = 0.01;  // Bias to prevent shadow acne
+
+    // Save OpenGL state
+    GLint prev_depth_func = GL_LESS;
+    glsafe(::glGetIntegerv(GL_DEPTH_FUNC, &prev_depth_func));
+    GLboolean prev_depth_mask = GL_TRUE;
+    glsafe(::glGetBooleanv(GL_DEPTH_WRITEMASK, &prev_depth_mask));
+    GLint prev_stencil_mask = 0xFF;
+    glsafe(::glGetIntegerv(GL_STENCIL_WRITEMASK, &prev_stencil_mask));
+    GLboolean prev_stencil_test = GL_FALSE;
+    glsafe(::glGetBooleanv(GL_STENCIL_TEST, &prev_stencil_test));
+    const GLboolean prev_cull = ::glIsEnabled(GL_CULL_FACE);
+
+    // PASS 0: create stencil mask for the build plate (value = 1)
+    glsafe(::glEnable(GL_STENCIL_TEST));
+    glsafe(::glStencilMask(0xFF));
+    glsafe(::glClearStencil(0));
+    glsafe(::glClear(GL_STENCIL_BUFFER_BIT));
+
+    glsafe(::glStencilFunc(GL_ALWAYS, 1, 0xFF));
+    glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE));
+
+    glsafe(::glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+
+    shader->start_using();
+    shader->set_uniform("projection_matrix", projection_matrix);
+
+    // Draw the build plate (cached model to avoid per-frame uploads)
+    if (const BuildVolume& build_volume = m_bed.build_volume(); build_volume.valid()) {
+        const std::string mask_key = build_volume.type() == BuildVolume_Type::Rectangle
+            ? (boost::format("rect|%1$.5f|%2$.5f|%3$.5f|%4$.5f")
+                % build_volume.bounding_volume().min.x()
+                % build_volume.bounding_volume().min.y()
+                % build_volume.bounding_volume().max.x()
+                % build_volume.bounding_volume().max.y()).str()
+            : (build_volume.type() == BuildVolume_Type::Circle
+                ? (boost::format("circle|%1$.5f|%2$.5f|%3$.5f")
+                    % unscaled<double>(build_volume.circle().center.x())
+                    % unscaled<double>(build_volume.circle().center.y())
+                    % unscaled<double>(build_volume.circle().radius)).str()
+                : std::string("invalid"));
+
+        if (mask_key != m_plate_shadow_mask_key) {
+            m_plate_shadow_mask.reset();
+            m_plate_shadow_mask_key = mask_key;
+
+            GLModel::Geometry mask;
+            mask.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+
+            if (build_volume.type() == BuildVolume_Type::Rectangle) {
+                const BoundingBox3Base<Vec3d> bb = build_volume.bounding_volume();
+                mask.reserve_vertices(4);
+                mask.reserve_indices(6);
+                mask.add_vertex(Vec3f((float)bb.min.x(), (float)bb.min.y(), 0.0f));
+                mask.add_vertex(Vec3f((float)bb.max.x(), (float)bb.min.y(), 0.0f));
+                mask.add_vertex(Vec3f((float)bb.max.x(), (float)bb.max.y(), 0.0f));
+                mask.add_vertex(Vec3f((float)bb.min.x(), (float)bb.max.y(), 0.0f));
+                mask.add_triangle(0, 1, 2);
+                mask.add_triangle(0, 2, 3);
+            }
+            else if (build_volume.type() == BuildVolume_Type::Circle) {
+                const Vec2f c = Vec2f(unscaled<float>(build_volume.circle().center.x()), unscaled<float>(build_volume.circle().center.y()));
+                const float r = unscaled<float>(build_volume.circle().radius);
+                const int segments = 64;
+                mask.reserve_vertices(segments + 1);
+                mask.reserve_indices(segments * 3);
+                mask.add_vertex(Vec3f(c.x(), c.y(), 0.0f));
+                for (int i = 0; i < segments; ++i) {
+                    const float a = (2.0f * float(PI) * float(i)) / float(segments);
+                    mask.add_vertex(Vec3f(c.x() + r * std::cos(a), c.y() + r * std::sin(a), 0.0f));
+                }
+                for (int i = 0; i < segments; ++i) {
+                    const unsigned int i1 = 1 + i;
+                    const unsigned int i2 = 1 + ((i + 1) % segments);
+                    mask.add_triangle(0, i1, i2);
+                }
+            }
+
+            if (mask.vertices_count() > 0 && mask.indices_count() > 0)
+                m_plate_shadow_mask.init_from(std::move(mask));
+        }
+
+        if (m_plate_shadow_mask.is_initialized()) {
+            shader->set_uniform("view_model_matrix", view_matrix);
+            m_plate_shadow_mask.render();
+        }
+    }
+
+    // PASS 1: project object shadows onto plate (increment stencil to 2), only where the plate is.
+    glsafe(::glStencilFunc(GL_EQUAL, 1, 0xFF));
+    glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_INCR));
+
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthFunc(GL_ALWAYS));  // Shadows don't need depth testing
+    glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
+    glsafe(::glPolygonOffset(-2.0f, -2.0f));
+    glsafe(::glDisable(GL_CULL_FACE));
+
+    for (GLVolume* volume : m_volumes.volumes) {
+        if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
+            continue;
+        // Flattened onto z = 0 in world space, then into the view.
+        const Matrix4d shadow_world_matrix = shadow_proj * volume->world_matrix().matrix();
+        shader->set_uniform("view_model_matrix", Matrix4d(view_matrix.matrix() * shadow_world_matrix));
+        shader->set_uniform("projection_matrix", projection_matrix);
+        volume->model.render();
+    }
+
+    // PASS 2: draw shadow color where stencil == 2
+    glsafe(::glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE));
+    glsafe(::glStencilFunc(GL_EQUAL, 2, 0xFF));
+    glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP));
+    glsafe(::glStencilMask(0x00));
+
+    glsafe(::glDepthFunc(GL_ALWAYS));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    shader->set_uniform("view_model_matrix", Transform3d::Identity());
+    shader->set_uniform("projection_matrix", Transform3d::Identity());
+    const ColorRGBA shadow_fill_color(0.0f, 0.0f, 0.0f, 0.4f);
+    const ColorRGBA prev_bg_color = m_background.get_color();
+    m_background.set_color(shadow_fill_color);
+    m_background.render();
+    m_background.set_color(prev_bg_color);
+
+    shader->stop_using();
+
+    // Restore state
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(prev_depth_mask));
+    glsafe(::glDepthFunc(prev_depth_func));
+    if (prev_cull)
+        glsafe(::glEnable(GL_CULL_FACE));
+    else
+        glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+    glsafe(::glDisable(GL_BLEND));
+
+    if (!prev_stencil_test)
+        glsafe(::glDisable(GL_STENCIL_TEST));
+    glsafe(::glStencilMask(prev_stencil_mask));
+}
+
 bool GLCanvas3D::_is_fxaa_enabled() const
 {
     return wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool(SETTING_OPENGL_FXAA_ENABLED);
@@ -10092,7 +10406,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         return;
     }
 
-    GLShaderProgram* shader = wxGetApp().get_shader("gouraud");
+    // Orca #13704: Phong in the realistic view, falling back to gouraud.
+    const bool realistic_phong = _is_realistic_view_enabled() && wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_PHONG);
+    GLShaderProgram* shader = realistic_phong ? wxGetApp().get_shader("phong") : nullptr;
+    if (shader == nullptr)
+        shader = wxGetApp().get_shader("gouraud");
     ECanvasType canvas_type = this->m_canvas_type;
     bool                 partly_inside_enable = canvas_type == ECanvasType::CanvasAssembleView ? false : true;
     if (shader != nullptr) {

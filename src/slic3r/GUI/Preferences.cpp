@@ -1992,6 +1992,16 @@ wxWindow* PreferencesDialog::create_general_page()
         });
     auto item_fps_overlay = create_item_checkbox(_L("Show FPS overlay"), page,
         _L("Displays current viewport FPS in the top-right corner."), 50, SETTING_OPENGL_SHOW_FPS_OVERLAY);
+    // Orca #13704: realistic view (also View > Realistic View).
+    auto item_realistic_mode = create_item_checkbox(_L("Realistic view"), page,
+        _L("Renders the objects of the 3D view more realistically, with the options below. Also in View > Realistic View."),
+        50, SETTING_OPENGL_REALISTIC_MODE);
+    auto item_realistic_phong = create_item_checkbox(_L("Phong shading"), page,
+        _L("Uses Phong shading inside realistic view."), 50, SETTING_OPENGL_REALISTIC_PHONG);
+    auto item_realistic_ssao = create_item_checkbox(_L("SSAO ambient occlusion"), page,
+        _L("Applies SSAO in realistic view."), 50, SETTING_OPENGL_PHONG_SSAO);
+    auto item_realistic_shadows = create_item_checkbox(_L("Shadows"), page,
+        _L("Renders cast shadows on the plate in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
@@ -2215,6 +2225,10 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_fxaa, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_fps_cap, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_fps_overlay, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_mode, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_phong, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_ssao, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_shadows, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     if (item_user_sync)
