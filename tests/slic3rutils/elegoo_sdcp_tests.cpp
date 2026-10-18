@@ -58,12 +58,12 @@ const char* const ATTRIBUTES = R"({
 
 // Cmd 324's payload frame: tray 0 an Elegoo spool, 1 and 2 empty, 3 an untagged spool (brand of dashes)
 // in the toolhead.
-const char* const CANVAS = u8R"({"Id":"","Data":{"Cmd":324,"Data":{"Ack":0,"active_canvas_id":0,"active_tray_id":3,"auto_refill":0,
+const char* const CANVAS = R"({"Id":"","Data":{"Cmd":324,"Data":{"Ack":0,"active_canvas_id":0,"active_tray_id":3,"auto_refill":0,
   "canvas_list":[{"canvas_id":0,"connected":1,"tray_list":[
    {"tray_id":0,"brand":"ELEGOO","filament_type":"PLA","filament_name":"ELEGOO PLA","filament_code":"0x0001","filament_color":"#1E7A3C","status":1},
    {"tray_id":1,"brand":"","filament_type":"","filament_name":"","filament_code":"0x00000","filament_color":"","status":0},
    {"tray_id":2,"brand":"","filament_type":"","filament_name":"","filament_code":"0x00000","filament_color":"","status":0},
-   {"tray_id":3,"brand":"—— ——","filament_type":"PLA","filament_name":"PLA PRO","filament_code":"0x00000","filament_color":"#D02A2A","status":2}]}]},
+   {"tray_id":3,"brand":"\u2014\u2014 \u2014\u2014","filament_type":"PLA","filament_name":"PLA PRO","filament_code":"0x00000","filament_color":"#D02A2A","status":2}]}]},
   "RequestID":"abc","MainboardID":"MOCKBOARD00000001","TimeStamp":1760000000},"Topic":"sdcp/response/MOCKBOARD00000001"})";
 
 Sdcp::Status status_of(const std::string& frame)
@@ -263,11 +263,11 @@ TEST_CASE("SDCP row: a CC1 mid-print fills the row a Bambu printer does", "[Eleg
     CHECK(row["task"] == "Cube_PLA_mock.gcode");
     CHECK(row["stage"] == "Cube_PLA_mock.gcode");
     CHECK(row["print_error"].is_null());
-    CHECK(row["bed_temp"] == Approx(60.1));
-    CHECK(row["bed_target"] == Approx(60));
+    CHECK(row["bed_temp"].get<double>() == Approx(60.1));
+    CHECK(row["bed_target"].get<double>() == Approx(60));
     REQUIRE(row["nozzles"].size() == 1);
-    CHECK(row["nozzles"][0]["temp"] == Approx(219.6));
-    CHECK(row["chamber_temp"] == Approx(31.5));
+    CHECK(row["nozzles"][0]["temp"].get<double>() == Approx(219.6));
+    CHECK(row["chamber_temp"].get<double>() == Approx(31.5));
 
     const json& c = row["controls"];
     REQUIRE(c["heaters"].size() == 3);
