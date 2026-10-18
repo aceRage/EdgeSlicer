@@ -3,11 +3,12 @@
 //
 // The [ElegooSdcp] cases drive the pure half with frames shaped like the owner's capture (firmware
 // V1.4.49, SDCP V3.0.0) - every id, name and colour here is made up. The hidden [.ElegooSdcpE2E]
-// cases run the real persistent connection against tests/phone/mock_elegoo_sdcp.py on 127.0.0.1
+// cases run the real on-demand connection against tests/phone/mock_elegoo_sdcp.py on 127.0.0.1
 // (run_elegoo_sdcp_e2e.py starts it and passes the port in ELEGOO_SDCP_MOCK_PORT). No real printer.
 
 #include <catch2/catch.hpp>
 
+#include "slic3r/GUI/ElegooCamRelay.hpp"
 #include "slic3r/GUI/RemoteHub.hpp"
 #include "slic3r/Utils/ElegooCanvas.hpp"
 #include "slic3r/Utils/ElegooSdcp.hpp"
@@ -15,6 +16,7 @@
 #include "slic3r/Utils/Http.hpp"
 #include "libslic3r/Utils.hpp"
 
+#include <boost/asio.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/interprocess/sync/file_lock.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -392,6 +394,19 @@ TEST_CASE("SDCP row: off, still connecting, and held by another window", "[Elego
     for (const char* k : { "bed_temp", "nozzles", "controls", "ams", "percent", "task", "print_status" })
         CHECK_FALSE(row.contains(k));
 
+    // Closed on purpose (nobody needed it): the last status it heard, online, no buttons, not live.
+    Sdcp::Snapshot idle;
+    idle.exists = idle.ever_connected = true;
+    idle.status = status_of(PRINTING);
+    row         = { { "status", "unknown" } };
+    Sdcp::fill_row(idle, "h", row);
+    CHECK(row["online"] == true);
+    CHECK(row["status"] == "printing");
+    CHECK(row["percent"] == 33);
+    CHECK(row["can_pause"] == false);
+    CHECK(row["can_stop"] == false);
+    CHECK(row["sdcp"]["live"] == false);
+
     Sdcp::Snapshot other;
     other.exists       = true;
     other.other_window = true;
@@ -417,11 +432,12 @@ TEST_CASE("SDCP row: the hub keeps the window that holds the connection", "[Eleg
 
 namespace {
 
-int mock_port()
+int env_port(const char* name)
 {
-    const char* p = std::getenv("ELEGOO_SDCP_MOCK_PORT");
+    const char* p = std::getenv(name);
     return p ? std::atoi(p) : 0;
 }
+int mock_port() { return env_port("ELEGOO_SDCP_MOCK_PORT"); }
 
 json mock(const std::string& path)
 {
@@ -450,176 +466,308 @@ template<class Pred> bool wait_for(Pred pred, int ms)
 
 const std::string HOST = "127.0.0.1";
 
+// Somebody looking at the printer (the app's device page, the Printers tab): a request each time.
+Sdcp::Snapshot live() { return SdcpMonitor::demand(HOST); }
+// The event watcher / the hub's background poll: a look that asks for nothing.
+Sdcp::Snapshot look() { return SdcpMonitor::touch(HOST); }
+
+long long elapsed_ms(std::chrono::steady_clock::time_point t0)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+
+struct E2E
+{
+    E2E(int keep_ms, int checkin_ms)
+    {
+        REQUIRE(mock_port() > 0);
+        SdcpMonitor::reset_for_tests();
+        SdcpMonitor::set_port_for_tests(mock_port());
+        SdcpMonitor::set_timing_for_tests(keep_ms, checkin_ms);
+        mock("/mock/reset");
+    }
+    ~E2E()
+    {
+        SdcpMonitor::reset_for_tests();
+        SdcpMonitor::set_timing_for_tests(0, 0);
+    }
+};
+
 } // namespace
 
-TEST_CASE("SDCP monitor: one connection, pushed status, CANVAS while watched, commands", "[.][ElegooSdcpE2E]")
+TEST_CASE("SDCP monitor: a request connects, pushes and CANVAS come over one socket, idle closes it", "[.][ElegooSdcpE2E]")
 {
-    REQUIRE(mock_port() > 0);
-    SdcpMonitor::reset_for_tests();
-    SdcpMonitor::set_port_for_tests(mock_port());
-    mock("/mock/reset");
+    E2E e(1500, 600000);
     mock("/mock/print?state=printing");
     mock("/mock/canvas?attached=1");
 
-    // touch() never waits for the network.
+    // demand() never waits for the network.
     const auto t0 = std::chrono::steady_clock::now();
-    SdcpMonitor::touch(HOST);
-    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() < 200);
+    live();
+    CHECK(elapsed_ms(t0) < 200);
 
-    REQUIRE(wait_for([] { return SdcpMonitor::touch(HOST).connected; }, 5000));
-    REQUIRE(wait_for([] { return Sdcp::hub_state(SdcpMonitor::touch(HOST).status) == "printing"; }, 3000));
-    REQUIRE(wait_for([] { return SdcpMonitor::touch(HOST).attrs.firmware == "V1.4.49"; }, 3000));
-    Sdcp::Snapshot s = SdcpMonitor::touch(HOST);
-    CHECK(s.status.ams_connect == 1);
-    CHECK_FALSE(s.has_canvas); // nobody watches yet: no Cmd 324
+    REQUIRE(wait_for([] { return live().connected; }, 5000));
+    REQUIRE(wait_for([] { return Sdcp::hub_state(live().status) == "printing"; }, 3000));
+    REQUIRE(wait_for([] { return live().attrs.firmware == "V1.4.49"; }, 3000));
+    // Somebody asks while a CANVAS is attached: it is read.
+    REQUIRE(wait_for([] { return live().has_canvas; }, 4000));
+    Sdcp::Snapshot s = live();
+    REQUIRE(s.canvas.trays.size() == 4);
+    CHECK(s.canvas.active_tray_id == 3);
 
     // The pushes keep coming without asking.
     const long long ticks = s.status.current_ticks;
-    CHECK(wait_for([&] { return SdcpMonitor::touch(HOST).status.current_ticks > ticks; }, 4000));
-
-    // Somebody looks: the CANVAS is read.
-    SdcpMonitor::note_watching();
-    REQUIRE(wait_for([] { return SdcpMonitor::touch(HOST).has_canvas; }, 4000));
-    s = SdcpMonitor::touch(HOST);
-    REQUIRE(s.canvas.trays.size() == 4);
-    CHECK(s.canvas.active_tray_id == 3);
+    CHECK(wait_for([&] { return live().status.current_ticks > ticks; }, 4000));
 
     // The desktop's own CANVAS read goes over the same connection.
     const CanvasQueryResult cq = canvas_query(HOST);
     CHECK(cq.ok);
     CHECK(cq.info.trays.size() == 4);
 
-    // Pause, then resume, over the same connection; the printer's pushes say it happened.
+    // Pause, then resume; the printer's pushes say it happened.
     SdcpMonitor::CommandResult r = SdcpMonitor::command(HOST, Sdcp::CMD_PAUSE, json::object(), 5000);
     CHECK(r.answered);
     CHECK(r.ack == 0);
-    CHECK(wait_for([] { return Sdcp::hub_state(SdcpMonitor::touch(HOST).status) == "paused"; }, 4000));
+    CHECK(wait_for([] { return Sdcp::hub_state(live().status) == "paused"; }, 4000));
     r = SdcpMonitor::command(HOST, Sdcp::CMD_PAUSE, json::object(), 5000);
     CHECK(r.ack == 1); // already paused: the printer refuses
     r = SdcpMonitor::command(HOST, Sdcp::CMD_RESUME, json::object(), 5000);
     CHECK(r.ack == 0);
-    CHECK(wait_for([] { return SdcpMonitor::touch(HOST).status.print_status == Sdcp::PRINT_PRINTING; }, 4000));
-
-    // Light and fan.
+    CHECK(wait_for([] { return live().status.print_status == Sdcp::PRINT_PRINTING; }, 4000));
     r = SdcpMonitor::command(HOST, Sdcp::CMD_CONTROL, Sdcp::light_data(false), 5000);
     CHECK(r.ack == 0);
-    CHECK(wait_for([] { return SdcpMonitor::touch(HOST).status.second_light == 0; }, 3000));
+    CHECK(wait_for([] { return live().status.second_light == 0; }, 3000));
     r = SdcpMonitor::command(HOST, Sdcp::CMD_CONTROL, Sdcp::fan_data("chamber", 60), 5000);
     CHECK(r.ack == 0);
-    CHECK(wait_for([] { return SdcpMonitor::touch(HOST).status.box_fan == 60; }, 3000));
+    CHECK(wait_for([] { return live().status.box_fan == 60; }, 3000));
 
     // All of that over exactly one websocket.
-    const json st = mock("/mock/state");
+    json st = mock("/mock/state");
     CHECK(st["connections_total"] == 1);
     CHECK(st["max_open"] == 1);
 
-    // Unplugging the CANVAS drops its trays from the snapshot.
+    // Unplugging the CANVAS drops its trays.
     mock("/mock/canvas?attached=0");
-    CHECK(wait_for([] { return !SdcpMonitor::touch(HOST).has_canvas; }, 3000));
+    CHECK(wait_for([] { return !live().has_canvas; }, 3000));
 
-    SdcpMonitor::reset_for_tests();
+    // Nobody asks any more (a passive look is not a request, and nobody is subscribed): closed after
+    // KEEP, and the row then shows the last status with no buttons.
+    CHECK(wait_for([] { return !look().connected; }, 4000));
+    CHECK(wait_for([] { return mock("/mock/state")["open"] == 0; }, 2000));
+    json row = json::object();
+    Sdcp::fill_row(look(), HOST, row);
+    CHECK(row["online"] == true);
+    CHECK(row["status"] == "printing");
+    CHECK(row["can_pause"] == false);
+    CHECK(row["sdcp"]["live"] == false);
+    // A command is a request: it connects again by itself.
+    r = SdcpMonitor::command(HOST, Sdcp::CMD_PAUSE, json::object(), 6000);
+    CHECK(r.answered);
+    CHECK(r.ack == 0);
+    CHECK(mock("/mock/state")["connections_total"] == 2);
 }
 
-TEST_CASE("SDCP monitor: a dropped connection comes back, a refused one is reported", "[.][ElegooSdcpE2E]")
+TEST_CASE("SDCP monitor: nobody asking, a brief check-in now and then - connect, one status, disconnect", "[.][ElegooSdcpE2E]")
 {
-    REQUIRE(mock_port() > 0);
-    SdcpMonitor::reset_for_tests();
+    E2E e(1500, 3000);
+    mock("/mock/print?state=printing"); // printing, but nobody is subscribed: never held
+
+    look(); // the printer becomes known: its first check-in happens at once
+    REQUIRE(wait_for([] { return look().status.valid; }, 5000));
+    CHECK(Sdcp::hub_state(look().status) == "printing");
+    CHECK(wait_for([] { return !look().connected && mock("/mock/state")["open"] == 0; }, 3000));
+    CHECK(mock("/mock/state")["connections_total"] == 1);
+    const auto closed = std::chrono::steady_clock::now();
+    // The next one comes CHECKIN later, not sooner.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    look();
+    CHECK(mock("/mock/state")["connections_total"] == 1);
+    CHECK(wait_for([] { look(); return mock("/mock/state")["connections_total"] == 2; }, 4000));
+    CHECK(elapsed_ms(closed) >= 2500);
+    CHECK(wait_for([] { return mock("/mock/state")["open"] == 0; }, 3000));
+    // No CANVAS read on a check-in (nobody is looking).
+    bool any_324 = false;
+    for (const json& c : mock("/mock/state")["commands"]) any_324 = any_324 || c[0] == 324;
+    CHECK_FALSE(any_324);
+}
+
+TEST_CASE("SDCP monitor: a print somebody is subscribed to is held to its end, then KEEP, then closed", "[.][ElegooSdcpE2E]")
+{
+    E2E e(1500, 600000);
+    SdcpMonitor::note_subscribers(true);
+    mock("/mock/print?state=printing");
+    look(); // the check-in finds it printing
+    REQUIRE(wait_for([] { return Sdcp::hub_state(look().status) == "printing"; }, 5000));
+    // Held: well past KEEP and still connected, with the pushes coming in.
+    std::this_thread::sleep_for(std::chrono::milliseconds(3500));
+    CHECK(look().connected);
+    CHECK(mock("/mock/state")["open"] == 1);
+    const long long ticks = look().status.current_ticks;
+    CHECK(wait_for([&] { return look().status.current_ticks > ticks; }, 3000));
+    // The print ends: kept for KEEP, then closed.
+    mock("/mock/print?state=complete");
+    CHECK(wait_for([] { return Sdcp::hub_state(look().status) == "complete"; }, 3000));
+    const auto ended = std::chrono::steady_clock::now();
+    CHECK(wait_for([] { return !look().connected; }, 5000));
+    CHECK(elapsed_ms(ended) >= 1000);
+    CHECK(mock("/mock/state")["connections_total"] == 1);
+
+    // With nobody subscribed the same print is not held.
+    SdcpMonitor::reset_for_tests(); // also forgets the subscribers
     SdcpMonitor::set_port_for_tests(mock_port());
-    mock("/mock/reset");
+    mock("/mock/print?state=printing");
+    look();
+    REQUIRE(wait_for([] { return look().status.valid; }, 5000));
+    CHECK(wait_for([] { return !look().connected; }, 3000));
+}
+
+TEST_CASE("SDCP monitor: a dropped connection comes back while wanted, a refused one is reported", "[.][ElegooSdcpE2E]")
+{
+    E2E e(60000, 600000);
     mock("/mock/print?state=idle");
-    REQUIRE(wait_for([] { return SdcpMonitor::touch(HOST).connected; }, 5000));
-    CHECK(wait_for([] { return Sdcp::hub_state(SdcpMonitor::touch(HOST).status) == "standby"; }, 3000));
+    REQUIRE(wait_for([] { return live().connected; }, 5000));
+    CHECK(wait_for([] { return Sdcp::hub_state(live().status) == "standby"; }, 3000));
 
     mock("/mock/drop");
-    CHECK(wait_for([] { return !SdcpMonitor::touch(HOST).connected; }, 3000));
-    CHECK(wait_for([] { return SdcpMonitor::touch(HOST).connected; }, 8000)); // back after the 2 s retry
+    CHECK(wait_for([] { return !live().connected; }, 3000));
+    CHECK(wait_for([] { return live().connected; }, 8000)); // back after the 2 s retry
     CHECK(mock("/mock/state")["open"] == 1);
 
-    // A printer that declines the handshake (too many clients): an error, no hang, and touch() stays fast.
+    // A printer that declines the handshake (too many clients): an error, no hang, and demand() stays fast.
     mock("/mock/refuse?on=1");
     mock("/mock/drop");
     CHECK(wait_for([] {
-        const Sdcp::Snapshot s = SdcpMonitor::touch(HOST);
+        const Sdcp::Snapshot s = live();
         return !s.connected && s.failures >= 1 && s.error.find("declined") != std::string::npos;
     }, 8000));
     const auto t0 = std::chrono::steady_clock::now();
     json row = json::object();
-    Sdcp::fill_row(SdcpMonitor::touch(HOST), HOST, row);
-    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() < 200);
+    Sdcp::fill_row(live(), HOST, row);
+    CHECK(elapsed_ms(t0) < 200);
     CHECK(row["online"] == false);
     CHECK(row["status"] == "offline");
-    // Commands fail at once when it is not connected.
-    const SdcpMonitor::CommandResult r = SdcpMonitor::command(HOST, Sdcp::CMD_PAUSE, json::object(), 5000);
+    // A command waits only until the next attempt fails.
+    const auto t1 = std::chrono::steady_clock::now();
+    const SdcpMonitor::CommandResult r = SdcpMonitor::command(HOST, Sdcp::CMD_PAUSE, json::object(), 20000);
     CHECK_FALSE(r.answered);
     CHECK_FALSE(r.sent);
+    CHECK(elapsed_ms(t1) < 19000);
     mock("/mock/refuse?on=0");
-    SdcpMonitor::reset_for_tests();
 }
 
 TEST_CASE("SDCP monitor: a second EdgeSlicer window leaves the printer to the first", "[.][ElegooSdcpE2E]")
 {
-    REQUIRE(mock_port() > 0);
-    SdcpMonitor::reset_for_tests();
-    SdcpMonitor::set_port_for_tests(mock_port());
-    mock("/mock/reset");
+    E2E e(60000, 600000);
     // A scratch data dir, so the lock file lands nowhere real.
     const std::string old_dir = data_dir();
     const boost::filesystem::path dir = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("sdcp_lock_%%%%%%%%");
     set_data_dir(dir.string());
     boost::filesystem::create_directories(dir / "hub" / "sdcp");
-    // Another window holds the lock for this printer (the lock file is <datadir>/hub/sdcp/<host>[_port].lock).
+    // Another window holds the lock for this printer (<datadir>/hub/sdcp/<host>[_port].lock).
     const boost::filesystem::path lock_path = dir / "hub" / "sdcp" / ("127_0_0_1_" + std::to_string(mock_port()) + ".lock");
     { boost::nowide::ofstream f(lock_path.string()); }
     {
         boost::interprocess::file_lock other(lock_path.string().c_str());
         REQUIRE(other.try_lock());
-        SdcpMonitor::touch(HOST);
-        CHECK(wait_for([] { return SdcpMonitor::touch(HOST).other_window; }, 3000));
+        live();
+        CHECK(wait_for([] { return live().other_window; }, 3000));
         std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-        CHECK_FALSE(SdcpMonitor::touch(HOST).connected);
+        CHECK_FALSE(live().connected);
         CHECK(mock("/mock/state")["open"] == 0);
         json row = { { "status", "unknown" } };
-        Sdcp::fill_row(SdcpMonitor::touch(HOST), HOST, row);
+        Sdcp::fill_row(live(), HOST, row);
         CHECK(row["status"] == "unknown");
         CHECK(row["sdcp_connected"] == false);
+        // The CANVAS read falls back to its own short connection (the other window holds the printer).
+        CanvasQueryResult out;
+        CHECK_FALSE(SdcpMonitor::canvas_query_shared(HOST, CanvasQueryOptions(), out));
         other.unlock();
     }
     SdcpMonitor::reset_for_tests();
     // Free again: this window connects.
-    CHECK(wait_for([] { return SdcpMonitor::touch(HOST).connected; }, 5000));
-    CHECK_FALSE(SdcpMonitor::touch(HOST).other_window);
+    CHECK(wait_for([] { return live().connected; }, 5000));
+    CHECK_FALSE(live().other_window);
     SdcpMonitor::reset_for_tests();
     set_data_dir(old_dir);
     boost::system::error_code ec;
     boost::filesystem::remove_all(dir, ec);
 }
 
-TEST_CASE("SDCP monitor: a printer that stops answering is dropped, and a dead address costs no caller anything", "[.][ElegooSdcpE2E]")
+TEST_CASE("SDCP monitor: a printer that stops answering costs a command its deadline, a dead address nothing", "[.][ElegooSdcpE2E]")
 {
-    REQUIRE(mock_port() > 0);
-    SdcpMonitor::reset_for_tests();
-    SdcpMonitor::set_port_for_tests(mock_port());
-    mock("/mock/reset");
+    E2E e(60000, 600000);
     mock("/mock/print?state=idle");
-    REQUIRE(wait_for([] { return SdcpMonitor::touch(HOST).connected; }, 5000));
+    REQUIRE(wait_for([] { return live().connected; }, 5000));
     // Muted: no pushes, no pongs, no answers. A command times out at its own deadline.
     mock("/mock/mute?on=1");
     const auto t0 = std::chrono::steady_clock::now();
     const SdcpMonitor::CommandResult r = SdcpMonitor::command(HOST, Sdcp::CMD_STATUS, json::object(), 1500);
-    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     CHECK_FALSE(r.answered);
-    CHECK(took < 3000);
+    CHECK(elapsed_ms(t0) < 3000);
     mock("/mock/mute?on=0");
 
-    // Nothing listens on this port: the attempts fail in the background, quickly, and keep failing
-    // quietly; touch() never blocks.
+    // Nothing listens on this port: the attempts fail in the background, quickly; nothing blocks.
     SdcpMonitor::reset_for_tests();
     SdcpMonitor::set_port_for_tests(1); // nothing on 127.0.0.1:1
     const auto t1 = std::chrono::steady_clock::now();
-    SdcpMonitor::touch(HOST);
-    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1).count() < 200);
-    CHECK(wait_for([] { return SdcpMonitor::touch(HOST).failures >= 1; }, 6000));
-    CHECK_FALSE(SdcpMonitor::touch(HOST).connected);
+    live();
+    CHECK(elapsed_ms(t1) < 200);
+    CHECK(wait_for([] { return live().failures >= 1; }, 6000));
+    CHECK_FALSE(live().connected);
     SdcpMonitor::reset_for_tests();
     SdcpMonitor::set_port_for_tests(mock_port());
+}
+
+TEST_CASE("SDCP monitor: the camera relay's Cmd 386 goes over the hub's connection when it is up", "[.][ElegooSdcpE2E]")
+{
+    namespace ecam = Slic3r::GUI::ElegooCam;
+    const int video_port = env_port("ELEGOO_SDCP_MOCK_VIDEO_PORT");
+    REQUIRE(video_port > 0);
+    E2E e(60000, 600000);
+    mock("/mock/print?state=idle");
+    REQUIRE(wait_for([] { return live().connected; }, 5000));
+    mock("/mock/video?refuse=1"); // the camera wants Cmd 386 first
+    ecam::Testing::set_ports(video_port, mock_port());
+
+    // One viewer of the relay, its real serve_client(), on a loopback pair.
+    boost::asio::io_context      ioc;
+    boost::asio::ip::tcp::socket server_side(ioc), client_side(ioc);
+    {
+        boost::asio::ip::tcp::acceptor acc(ioc, boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0));
+        client_side.connect(acc.local_endpoint());
+        acc.accept(server_side);
+    }
+    std::thread serve([&]() {
+        try {
+            ecam::serve_client(server_side, "/elegoo?ip=127.0.0.1");
+        } catch (...) {}
+        boost::system::error_code ig;
+        server_side.close(ig);
+    });
+    std::string got;
+    std::thread reader([&]() {
+        char buf[8192];
+        for (;;) {
+            boost::system::error_code ec;
+            const size_t n = client_side.read_some(boost::asio::buffer(buf), ec);
+            if (ec) break;
+            got.append(buf, n);
+            if (got.size() > 4000) break;
+        }
+    });
+    reader.join();
+    CHECK(got.find("--elegooframe") != std::string::npos); // pictures came through
+    boost::system::error_code ig;
+    client_side.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ig);
+    client_side.close(ig);
+    serve.join();
+
+    const json st = mock("/mock/state");
+    bool any_386 = false;
+    for (const json& c : st["commands"]) any_386 = any_386 || c[0] == 386;
+    CHECK(any_386);                          // the printer was asked to start its camera
+    CHECK(st["connections_total"] == 1);     // ... over the hub's one connection, not a new one
+    CHECK(st["video"]["requests"].get<int>() >= 2); // the refused ask and the one that played
+    wait_for([] { return ecam::Testing::session_count() == 0; }, 8000);
+    ecam::Testing::set_ports(0, 0);
 }

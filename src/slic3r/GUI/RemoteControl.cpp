@@ -451,12 +451,16 @@ static std::string sdcp_state_words(const Sdcp::Snapshot& s)
 static std::pair<int, std::string> prepare_elegoo(const Request& req, const ElegooTarget& t, std::shared_ptr<Prepared> p,
                                                   std::shared_ptr<Prepared>& out)
 {
-    const Sdcp::Snapshot s = SdcpMonitor::touch(t.host);
+    const Sdcp::Snapshot s = SdcpMonitor::demand(t.host);
     p->kind         = "elegoo";
     p->printer_name = t.name;
     p->sdcp_host    = t.host;
-    if (!s.connected)
-        return { 409, t.name + " is not connected" + (s.error.empty() ? std::string() : " (" + s.error + ")") };
+    // A control is a request: the connection opens if it is not up (run() waits for it). The check
+    // goes by what the printer last said; it refuses anything that no longer fits with its own Ack.
+    if (s.other_window) return { 409, "another EdgeSlicer window is connected to " + t.name };
+    if (!s.connected && s.failures > 0)
+        return { 409, t.name + " is not answering" + (s.error.empty() ? std::string() : " (" + s.error + ")") };
+    if (!s.status.valid) return { 409, "connecting to " + t.name + "; try again in a moment" };
     const bool allowed = req.action == "pause" ? Sdcp::can_pause(s.status) :
                          req.action == "resume" ? Sdcp::can_resume(s.status) : Sdcp::can_stop(s.status);
     if (!allowed) {
@@ -756,12 +760,16 @@ static std::string moonraker_setting_script(const Prepared& p)
 static std::pair<int, std::string> prepare_setting_elegoo(const Request& req, const ElegooTarget& t, std::shared_ptr<Prepared> p,
                                                           std::shared_ptr<Prepared>& out)
 {
-    const Sdcp::Snapshot s = SdcpMonitor::touch(t.host);
+    const Sdcp::Snapshot s = SdcpMonitor::demand(t.host);
     p->kind         = "elegoo";
     p->printer_name = t.name;
     p->sdcp_host    = t.host;
-    if (!s.connected)
-        return { 409, t.name + " is not connected" + (s.error.empty() ? std::string() : " (" + s.error + ")") };
+    // A control is a request: the connection opens if it is not up (run() waits for it). The check
+    // goes by what the printer last said; it refuses anything that no longer fits with its own Ack.
+    if (s.other_window) return { 409, "another EdgeSlicer window is connected to " + t.name };
+    if (!s.connected && s.failures > 0)
+        return { 409, t.name + " is not answering" + (s.error.empty() ? std::string() : " (" + s.error + ")") };
+    if (!s.status.valid) return { 409, "connecting to " + t.name + "; try again in a moment" };
     if (req.action == "set_temp") return { 409, "temperatures can only be read on " + t.name + " from here" };
     if (req.action == "set_speed") return { 409, "the print speed can only be read on " + t.name + " from here" };
     const auto checked = check_setting(req, Sdcp::caps(s), Sdcp::is_printing(s.status), *p);
@@ -1352,7 +1360,7 @@ static void run_elegoo(std::shared_ptr<Prepared> p, Sink& sink)
         return;
     }
     sink.progress(40, "sending " + (p->is_setting ? p->setting_text : p->action) + " to the printer");
-    const SdcpMonitor::CommandResult r = SdcpMonitor::command(p->sdcp_host, p->sdcp_cmd, p->sdcp_data, 8000);
+    const SdcpMonitor::CommandResult r = SdcpMonitor::command(p->sdcp_host, p->sdcp_cmd, p->sdcp_data, 12000);
     result["ack"] = r.ack;
     if (!r.answered) {
         sink.done(false, p->printer_name + (r.sent ? " did not answer: " : " could not be reached: ") + r.error, result);
@@ -1370,7 +1378,7 @@ static void run_elegoo(std::shared_ptr<Prepared> p, Sink& sink)
     std::string state = "unknown";
     for (int i = 0; i < 10 && state == "unknown"; ++i) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        const Sdcp::Snapshot s  = SdcpMonitor::touch(p->sdcp_host);
+        const Sdcp::Snapshot s  = SdcpMonitor::demand(p->sdcp_host);
         const std::string    st = Sdcp::hub_state(s.status);
         if (p->action == "pause" && st == "paused") state = "paused";
         else if (p->action == "resume" && st == "printing" && s.status.print_status == Sdcp::PRINT_PRINTING) state = "printing";
@@ -1598,11 +1606,12 @@ struct HostAnswer
 
 static void describe_moonraker_hosts(const std::vector<HostTarget>& targets, json& printers);
 
-void describe_hosts(const std::vector<HostTarget>& targets, json& printers)
+void describe_hosts(const std::vector<HostTarget>& targets, json& printers, bool demand)
 {
     if (targets.empty() || !printers.is_array()) return;
-    // The Elegoo SDCP printers first: their state is whatever the hub's persistent connection last
-    // heard (a pushed status), read without waiting, and asking keeps that connection open.
+    // The Elegoo SDCP printers first: their state is whatever the hub's connection last heard (a
+    // pushed status, or the last check-in), read without waiting. Somebody looking (`demand`) is a
+    // request and opens the connection; the event watcher and the hub's background poll only look.
     std::vector<HostTarget> others;
     others.reserve(targets.size());
     for (const HostTarget& t : targets) {
@@ -1610,7 +1619,7 @@ void describe_hosts(const std::vector<HostTarget>& targets, json& printers)
             others.push_back(t);
             continue;
         }
-        const Sdcp::Snapshot s = SdcpMonitor::touch(t.base);
+        const Sdcp::Snapshot s = demand ? SdcpMonitor::demand(t.base) : SdcpMonitor::touch(t.base);
         for (json& p : printers)
             if (p.is_object() && p.value("id", std::string()) == t.id) {
                 Sdcp::fill_row(s, t.base, p);

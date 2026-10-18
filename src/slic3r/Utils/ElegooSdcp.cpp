@@ -4,6 +4,7 @@
 #include "ElegooSdcp.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace Slic3r {
@@ -438,19 +439,25 @@ void fill_row(const Snapshot& snap, const std::string& host, json& row)
     row["can_stop"]    = false;
     row["print_error"] = nullptr;
     row["sdcp_connected"] = snap.connected;
-    if (!snap.connected) {
+    const bool live = snap.connected;
+    if (!live) {
         if (snap.other_window) {
             // Another window on this PC holds the printer's one connection; its row is the live one
             // (the hub keeps the connected row) and this one says why it has nothing.
             row["status_error"] = "another EdgeSlicer window is connected to this printer";
             return;
         }
-        if (!snap.ever_connected && snap.failures == 0) return; // the first attempt is still running: "unknown"
-        row["online"]       = false;
-        row["status"]       = "offline";
-        row["printing"]     = false;
-        row["status_error"] = snap.error.empty() ? std::string("the printer does not answer") : snap.error;
-        return;
+        if (snap.failures > 0) {
+            // The last attempt (a request or a check-in) failed: off, unplugged, or refusing clients.
+            row["online"]       = false;
+            row["status"]       = "offline";
+            row["printing"]     = false;
+            row["status_error"] = snap.error.empty() ? std::string("the printer does not answer") : snap.error;
+            return;
+        }
+        // Not connected on purpose (nobody needs it right now): what it said at the last connection
+        // or check-in, with no buttons until somebody asks again. Never heard at all: "unknown".
+        if (!snap.status.valid) return;
     }
     const Status&     s     = snap.status;
     const std::string state = hub_state(s);
@@ -460,9 +467,9 @@ void fill_row(const Snapshot& snap, const std::string& host, json& row)
     row["print_status"] = state;
     const bool active   = is_printing(s);
     row["printing"]     = active;
-    row["can_pause"]    = can_pause(s);
-    row["can_resume"]   = can_resume(s);
-    row["can_stop"]     = can_stop(s);
+    row["can_pause"]    = live && can_pause(s);
+    row["can_resume"]   = live && can_resume(s);
+    row["can_stop"]     = live && can_stop(s);
     // The job: while it runs, and after it, as a Klipper printer keeps reporting its last file.
     if (!s.filename.empty() && (active || state == "complete" || state == "cancelled" || state == "error"))
         row["task"] = s.filename;
@@ -517,6 +524,12 @@ void fill_row(const Snapshot& snap, const std::string& host, json& row)
     row["camera_hint"] = cam;
     json d;
     d["protocol"] = "sdcp";
+    d["live"]     = live; // false: the last status heard, the connection closed since (on demand)
+    if (snap.status_at_ms > 0) {
+        const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch()).count();
+        d["age_s"] = now > snap.status_at_ms ? (now - snap.status_at_ms) / 1000 : 0;
+    }
     if (!snap.attrs.firmware.empty()) d["firmware"] = snap.attrs.firmware;
     if (s.machine() >= 0) d["machine_status"] = s.machine();
     if (s.print_status >= 0) d["print_status"] = s.print_status;

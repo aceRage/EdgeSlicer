@@ -1,6 +1,6 @@
-// The persistent SDCP connections declared in ElegooSdcpMonitor.hpp: one beast websocket per printer,
-// every one of them driven by a single background io_context thread, so no caller ever waits on a
-// printer's network and a dead printer costs nothing but a timer.
+// The on-demand SDCP connections declared in ElegooSdcpMonitor.hpp: at most one beast websocket per
+// printer, every one of them driven by a single background io_context thread, so no caller ever
+// waits on a printer's network and a dead printer costs nothing but a timer.
 
 #include "ElegooSdcpMonitor.hpp"
 
@@ -53,12 +53,16 @@ const int  WRITE_MS          = 10000;
 const int  PING_MS           = 20000;  // elegoo-link's heartbeat interval
 const int  SILENCE_MS        = 45000;  // no frame for this long: ask for the status
 const int  PROBE_MS          = 15000;  // ... and give up on the connection if that is not answered
+const int  CHECKIN_WAIT_MS   = 15000;  // a check-in that has heard no status by then gives up
 const int  CANVAS_EVERY_MS   = 15000;
-const int  WATCH_MS          = 45000;  // how long one look at the printers counts as watching
-const int  IDLE_MS           = 120000; // nobody asked about the printer: close
+const int  FORGET_MS         = 600000; // nothing asked about the printer at all: forget it
 const int  LOCK_RETRY_MS     = 30000;
-const int  WATCHED_BACKOFF   = 15000;
+const int  SUBSCRIBERS_MS    = 60000;  // how long the hub's "somebody is subscribed" holds
+const int  DEMANDED_BACKOFF  = 15000;
 const long long BACKOFF_MS[] = { 2000, 4000, 8000, 16000, 30000, 60000 };
+
+std::atomic<int> g_keep_ms { 60000 };     // KEEP: a request keeps the connection this long
+std::atomic<int> g_checkin_ms { 300000 }; // CHECKIN: nobody asking, a look at most this often
 
 long long now_ms()
 {
@@ -77,14 +81,20 @@ std::string new_request_id()
     return id;
 }
 
-std::atomic<long long> g_watch_ms { 0 };
+std::atomic<long long> g_subscribers_ms { 0 }; // when the hub last said somebody is subscribed
+
+bool subscribers()
+{
+    const long long t = g_subscribers_ms.load();
+    return t != 0 && now_ms() - t < SUBSCRIBERS_MS;
+}
 
 // A host the connection may be opened to: a name or an address, nothing that could smuggle a path.
 bool valid_host(const std::string& h)
 {
     if (h.empty() || h.size() > 253) return false;
     for (char c : h)
-        if (!(std::isalnum((unsigned char) c) || c == '.' || c == '-' || c == '_' || c == ':' )) return false;
+        if (!(std::isalnum((unsigned char) c) || c == '.' || c == '-' || c == '_' || c == ':')) return false;
     return true;
 }
 
@@ -96,11 +106,13 @@ struct Waiter
     std::mutex              m;
     std::condition_variable cv;
     bool                    done { false };
+    bool                    sent { false };
     bool                    answered { false };
     int                     ack { -1 };
+    std::string             frame;
     std::string             error;
 
-    void finish(bool ans, int a, const std::string& err)
+    void finish(bool ans, int a, const std::string& err, const std::string& text = std::string())
     {
         std::lock_guard<std::mutex> lock(m);
         if (done) return;
@@ -108,7 +120,13 @@ struct Waiter
         answered = ans;
         ack      = a;
         error    = err;
+        frame    = text;
         cv.notify_all();
+    }
+    void mark_sent()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        sent = true;
     }
 };
 
@@ -136,8 +154,6 @@ public:
         m_snap.exists = true;
     }
 
-    const std::string& host() const { return m_host; }
-
     void start()
     {
         auto self = shared_from_this();
@@ -155,6 +171,21 @@ public:
     }
 
     void touched() { m_last_touch = now_ms(); }
+
+    // A request: connect now if not connected (the tick is not waited for).
+    void demanded()
+    {
+        const long long now = now_ms();
+        m_last_touch        = now;
+        const long long was = m_last_demand.exchange(now);
+        if (now - was >= g_keep_ms.load()) {
+            auto self = shared_from_this();
+            net::post(m_ioc, [self]() {
+                if (!self->m_stopped) self->tick();
+            });
+        }
+    }
+
     bool idle() const { return m_stopped.load(); }
 
     Sdcp::Snapshot snapshot()
@@ -186,6 +217,7 @@ public:
                 w->finish(false, -1, "the printer is not connected");
                 return;
             }
+            w->mark_sent();
             self->send(Sdcp::request_text(w->cmd, data, w->request_id, wall_ms(), self->m_mainboard));
             if (w->canvas) self->m_last_canvas = now_ms();
         });
@@ -199,6 +231,8 @@ public:
     }
 
 private:
+    bool is_demanded(long long now) const { return now - m_last_demand.load() < g_keep_ms.load(); }
+
     // ---------------------------------------------------------- one PC, one connection ----
 
     void acquire_lock()
@@ -251,7 +285,7 @@ private:
     void arm_tick()
     {
         auto self = shared_from_this();
-        m_tick.expires_after(std::chrono::seconds(1));
+        m_tick.expires_after(std::chrono::milliseconds(250));
         m_tick.async_wait([self](const boost::system::error_code& ec) {
             if (ec || self->m_stopped) return;
             self->tick();
@@ -262,8 +296,8 @@ private:
     void tick()
     {
         const long long now = now_ms();
-        if (now - m_last_touch.load() > IDLE_MS) {
-            BOOST_LOG_TRIVIAL(info) << "SDCP printer " << m_seq << ": nobody asked for two minutes, closing";
+        if (now - std::max(m_last_touch.load(), m_last_demand.load()) > FORGET_MS) {
+            BOOST_LOG_TRIVIAL(info) << "SDCP printer " << m_seq << ": nothing asked about it for ten minutes, forgetting it";
             do_stop();
             return;
         }
@@ -271,11 +305,40 @@ private:
             if (now - m_lock_tried > LOCK_RETRY_MS) acquire_lock();
             if (!may_connect()) return;
         }
+        const bool demanded = is_demanded(now);
+        bool       printing = false;
+        int        ams      = -1;
+        {
+            std::lock_guard<std::mutex> lock(m_state);
+            printing = m_snap.status.valid && Sdcp::is_printing(m_snap.status);
+            ams      = m_snap.status.ams_connect;
+        }
+        // A print somebody will want notifications about: held for as long as it runs, and KEEP after.
+        if (m_conn && m_conn->open && m_status_since_open && printing && subscribers()) m_hold_until = now + g_keep_ms.load();
+        const bool wanted = demanded || now < m_hold_until;
+
         if (!m_conn) {
-            if (!m_connecting && now >= m_next_attempt) connect();
+            if (m_connecting) return;
+            if (wanted) {
+                if (now >= m_next_attempt) connect(false);
+            } else if (now >= m_next_checkin) {
+                connect(true);
+            }
             return;
         }
-        if (!m_conn->open) return; // still connecting
+        if (!m_conn->open) return; // still connecting; the steps have their own deadlines
+        if (m_checkin) {
+            if (m_status_since_open) {
+                m_checkin = false; // what to do with the connection is now up to `wanted`
+            } else if (now - m_open_at > CHECKIN_WAIT_MS) {
+                fail("the printer did not report its status");
+                return;
+            }
+        }
+        if (!m_checkin && !wanted) {
+            close_idle();
+            return;
+        }
         Conn& c = *m_conn;
         if (c.writing && now - c.write_started > WRITE_MS) {
             fail("a write to the printer timed out");
@@ -293,18 +356,12 @@ private:
             m_probe_sent = now;
             send(Sdcp::request_text(Sdcp::CMD_STATUS, json::object(), new_request_id(), wall_ms(), m_mainboard));
         }
-        const bool watched = watching();
-        if (watched && !m_was_watched) {
-            // Somebody just started looking: a fresh status rather than whatever the last push said.
+        if (demanded && !m_was_demanded) {
+            // Somebody just started looking at an open connection: a fresh status rather than the last push.
             send(Sdcp::request_text(Sdcp::CMD_STATUS, json::object(), new_request_id(), wall_ms(), m_mainboard));
         }
-        m_was_watched = watched;
-        int ams = -1;
-        {
-            std::lock_guard<std::mutex> lock(m_state);
-            ams = m_snap.status.ams_connect;
-        }
-        if (watched && ams == 1 && now - m_last_canvas >= CANVAS_EVERY_MS) {
+        m_was_demanded = demanded;
+        if (demanded && ams == 1 && now - m_last_canvas >= CANVAS_EVERY_MS) {
             m_last_canvas = now;
             send(Sdcp::request_text(Sdcp::CMD_CANVAS, json::object(), new_request_id(), wall_ms(), m_mainboard));
         }
@@ -312,9 +369,11 @@ private:
 
     // ------------------------------------------------------------------ connecting ----
 
-    void connect()
+    void connect(bool checkin)
     {
-        m_connecting = true;
+        m_connecting        = true;
+        m_checkin           = checkin;
+        m_status_since_open = false;
         {
             std::lock_guard<std::mutex> lock(m_state);
             m_snap.connecting = true;
@@ -388,6 +447,7 @@ private:
         m_connecting = false;
         m_failures   = 0;
         const long long now = now_ms();
+        m_open_at     = now;
         m_last_frame  = now;
         m_last_ping   = now;
         m_probe_sent  = 0;
@@ -400,13 +460,13 @@ private:
             m_snap.failures       = 0;
             m_snap.error.clear();
         }
-        BOOST_LOG_TRIVIAL(info) << "SDCP printer " << m_seq << ": connected";
+        BOOST_LOG_TRIVIAL(info) << "SDCP printer " << m_seq << (m_checkin ? ": connected for a check-in" : ": connected");
         conn->ws.text(true);
         read(conn);
         // What the printer is and what it is doing; from here on it pushes every change itself.
         send(Sdcp::request_text(Sdcp::CMD_ATTRIBUTES, json::object(), new_request_id(), wall_ms(), m_mainboard));
         send(Sdcp::request_text(Sdcp::CMD_STATUS, json::object(), new_request_id(), wall_ms(), m_mainboard));
-        m_was_watched = watching();
+        m_was_demanded = is_demanded(now);
     }
 
     // ------------------------------------------------------------- reading, writing ----
@@ -461,7 +521,7 @@ private:
         const long long now = now_ms();
         m_last_frame        = now;
         Sdcp::Frame f;
-        bool        canvas_ok = false;
+        bool        canvas_ok  = false;
         int         ams_before = -1, ams_after = -1;
         {
             std::lock_guard<std::mutex> lock(m_state);
@@ -482,6 +542,7 @@ private:
             ams_after = m_snap.status.ams_connect;
             if (ams_after == 0) m_snap.has_canvas = false; // unplugged: its trays are gone
         }
+        if (f.kind == Sdcp::FrameKind::Status) m_status_since_open = true;
         if (f.kind == Sdcp::FrameKind::Response) {
             std::vector<std::shared_ptr<Waiter>> waiters;
             {
@@ -491,20 +552,20 @@ private:
             for (const auto& w : waiters) {
                 if (w->canvas) {
                     if (canvas_ok)
-                        w->finish(true, 0, "");
+                        w->finish(true, 0, "", text);
                     else if (f.cmd == Sdcp::CMD_CANVAS && f.ack > 0)
-                        w->finish(true, f.ack, "the printer refused the CANVAS request (Ack " + std::to_string(f.ack) + ")");
+                        w->finish(true, f.ack, "the printer refused the CANVAS request (Ack " + std::to_string(f.ack) + ")", text);
                     continue;
                 }
                 const bool mine = !f.request_id.empty() ? f.request_id == w->request_id : f.cmd == w->cmd;
-                if (mine) w->finish(true, f.ack, "");
+                if (mine) w->finish(true, f.ack, "", text);
             }
         }
-        // A CANVAS just plugged in while somebody watches: read it now rather than in 15 s.
-        if (ams_after == 1 && ams_before != 1 && watching()) m_last_canvas = 0;
+        // A CANVAS just plugged in while somebody asks about the printer: read it now rather than in 15 s.
+        if (ams_after == 1 && ams_before != 1 && is_demanded(now)) m_last_canvas = 0;
     }
 
-    // ------------------------------------------------------------- failing, stopping ----
+    // ------------------------------------------------------------- closing, failing ----
 
     void close_conn()
     {
@@ -527,16 +588,39 @@ private:
         for (const auto& w : waiters) w->finish(false, -1, why);
     }
 
+    // Nobody needs it any more (or the check-in has what it came for): a polite close, not a failure.
+    // The row keeps the last status it heard.
+    void close_idle()
+    {
+        close_conn();
+        m_connecting   = false;
+        m_checkin      = false;
+        m_failures     = 0;
+        m_next_checkin = now_ms() + g_checkin_ms.load();
+        {
+            std::lock_guard<std::mutex> lock(m_state);
+            m_snap.connected  = false;
+            m_snap.connecting = false;
+            m_snap.failures   = 0;
+            m_snap.error.clear();
+        }
+        BOOST_LOG_TRIVIAL(info) << "SDCP printer " << m_seq << ": closed (nothing needs it now)";
+        fail_waiters("the connection to the printer was closed");
+    }
+
     void fail(const std::string& why)
     {
         const bool was_open = m_conn && m_conn->open;
         close_conn();
         m_connecting = false;
+        m_checkin    = false;
         ++m_failures;
-        long long delay = BACKOFF_MS[std::min<size_t>(m_failures - 1, sizeof(BACKOFF_MS) / sizeof(BACKOFF_MS[0]) - 1)];
-        if (watching()) delay = std::min<long long>(delay, WATCHED_BACKOFF);
-        if (was_open) delay = 2000; // it was up a moment ago: try again soon
-        m_next_attempt = now_ms() + delay;
+        const long long now   = now_ms();
+        long long       delay = BACKOFF_MS[std::min<size_t>(m_failures - 1, sizeof(BACKOFF_MS) / sizeof(BACKOFF_MS[0]) - 1)];
+        if (is_demanded(now)) delay = std::min<long long>(delay, DEMANDED_BACKOFF);
+        if (was_open) delay = 2000; // it was up a moment ago: try again soon (if it is still wanted)
+        m_next_attempt = now + delay;
+        m_next_checkin = now + g_checkin_ms.load();
         {
             std::lock_guard<std::mutex> lock(m_state);
             m_snap.connected  = false;
@@ -547,7 +631,7 @@ private:
         // The first failure and every lost connection are worth a line; a printer that stays off is not
         // worth one every minute.
         if (was_open || m_failures == 1)
-            BOOST_LOG_TRIVIAL(info) << "SDCP printer " << m_seq << ": " << why << " (next try in " << delay / 1000 << " s)";
+            BOOST_LOG_TRIVIAL(info) << "SDCP printer " << m_seq << ": " << why;
         fail_waiters(why);
     }
 
@@ -566,29 +650,35 @@ private:
         m_lock.reset();
     }
 
-    net::io_context&    m_ioc;
-    const std::string   m_host;
-    const int           m_port;
-    const int           m_seq; // the printer's number in the log, instead of its address
-    tcp::resolver       m_resolver;
-    net::steady_timer   m_step;
-    net::steady_timer   m_tick;
+    net::io_context&      m_ioc;
+    const std::string     m_host;
+    const int             m_port;
+    const int             m_seq; // the printer's number in the log, instead of its address
+    tcp::resolver         m_resolver;
+    net::steady_timer     m_step;
+    net::steady_timer     m_tick;
     std::shared_ptr<Conn> m_conn;
-    bool                m_connecting { false };
-    int                 m_failures { 0 };
-    long long           m_next_attempt { 0 };
-    long long           m_last_frame { 0 }, m_last_ping { 0 }, m_probe_sent { 0 }, m_last_canvas { 0 };
-    bool                m_was_watched { false };
-    std::string         m_mainboard; // io thread only; never logged
+    bool                  m_connecting { false };
+    bool                  m_checkin { false };
+    bool                  m_status_since_open { false };
+    int                   m_failures { 0 };
+    long long             m_next_attempt { 0 };
+    long long             m_next_checkin { 0 }; // the first look happens as soon as the printer is known
+    long long             m_hold_until { 0 };
+    long long             m_open_at { 0 };
+    long long             m_last_frame { 0 }, m_last_ping { 0 }, m_probe_sent { 0 }, m_last_canvas { 0 };
+    bool                  m_was_demanded { false };
+    std::string           m_mainboard; // io thread only; never logged
     std::unique_ptr<boost::interprocess::file_lock> m_lock;
-    bool                m_lock_failed { false };
-    long long           m_lock_tried { 0 };
+    bool                  m_lock_failed { false };
+    long long             m_lock_tried { 0 };
     std::atomic<long long> m_last_touch { 0 };
-    std::atomic<bool>   m_stopped { false };
+    std::atomic<long long> m_last_demand { 0 };
+    std::atomic<bool>     m_stopped { false };
 
-    std::mutex          m_state;
-    Sdcp::Snapshot      m_snap;
-    std::mutex          m_wmutex;
+    std::mutex            m_state;
+    Sdcp::Snapshot        m_snap;
+    std::mutex            m_wmutex;
     std::vector<std::shared_ptr<Waiter>> m_waiters;
 };
 
@@ -596,20 +686,28 @@ private:
 // still be running when static destructors run at exit, and it must not find its io_context gone.
 struct Manager
 {
-    std::mutex                                                     m;
-    net::io_context                                                ioc;
+    std::mutex                                                                m;
+    net::io_context                                                           ioc;
     std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> work;
-    std::thread                                                    thread;
-    std::map<std::string, std::shared_ptr<Link>>                   links;
-    int                                                            port { 3030 };
-    int                                                            next_seq { 1 };
-    bool                                                           down { false };
+    std::thread                                                               thread;
+    std::map<std::string, std::shared_ptr<Link>>                              links;
+    int                                                                       port { 3030 };
+    int                                                                       next_seq { 1 };
+    bool                                                                      down { false };
 
     Manager()
     {
         if (const char* p = std::getenv("SNORCA_SDCP_PORT")) {
             const int v = std::atoi(p);
             if (v > 0 && v < 65536) port = v;
+        }
+        if (const char* p = std::getenv("SNORCA_SDCP_KEEP_S")) {
+            const int v = std::atoi(p);
+            if (v > 0 && v < 3600) g_keep_ms = v * 1000;
+        }
+        if (const char* p = std::getenv("SNORCA_SDCP_CHECKIN_S")) {
+            const int v = std::atoi(p);
+            if (v > 0 && v < 86400) g_checkin_ms = v * 1000;
         }
     }
 
@@ -631,7 +729,7 @@ struct Manager
         });
     }
 
-    // Under m. The live link for `host`, or a new one; stopped (idle) links are replaced.
+    // Under m. The live link for `host`, or a new one; forgotten links are replaced.
     std::shared_ptr<Link> link_for(const std::string& host, bool create)
     {
         auto it = links.find(host);
@@ -663,6 +761,35 @@ std::shared_ptr<Link> find_link(const std::string& host, bool create)
     return M.link_for(host, create);
 }
 
+// Worker thread: wait (bounded) for a demanded link to come up, or to fail trying.
+bool wait_connected(const std::shared_ptr<Link>& l, long long deadline)
+{
+    const int failures_before = l->snapshot().failures;
+    for (;;) {
+        const Sdcp::Snapshot s = l->snapshot();
+        if (s.connected) return true;
+        if (s.other_window || s.failures > failures_before || now_ms() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
+CommandResult send_and_wait(const std::shared_ptr<Link>& l, int cmd, const json& data, long long deadline)
+{
+    CommandResult           r;
+    std::shared_ptr<Waiter> w = l->request(cmd, data, false);
+    {
+        std::unique_lock<std::mutex> lock(w->m);
+        w->cv.wait_for(lock, std::chrono::milliseconds(std::max<long long>(100, deadline - now_ms())), [&]() { return w->done; });
+        r.sent     = w->sent;
+        r.answered = w->done && w->answered;
+        r.ack      = w->ack;
+        r.frame    = w->frame;
+        r.error    = w->done ? w->error : std::string("the printer did not answer in time");
+    }
+    l->forget(w);
+    return r;
+}
+
 } // namespace
 
 Sdcp::Snapshot touch(const std::string& host)
@@ -673,15 +800,42 @@ Sdcp::Snapshot touch(const std::string& host)
     return l->snapshot();
 }
 
-void note_watching() { g_watch_ms = now_ms(); }
-
-bool watching()
+Sdcp::Snapshot demand(const std::string& host)
 {
-    const long long w = g_watch_ms.load();
-    return w != 0 && now_ms() - w < WATCH_MS;
+    std::shared_ptr<Link> l = find_link(host, true);
+    if (!l) return Sdcp::Snapshot();
+    l->demanded();
+    return l->snapshot();
+}
+
+void note_subscribers(bool any) { g_subscribers_ms = any ? now_ms() : 0; }
+
+bool connected(const std::string& host)
+{
+    std::shared_ptr<Link> l = find_link(host, false);
+    return l && l->connected();
 }
 
 CommandResult command(const std::string& host, int cmd, const nlohmann::json& data, int timeout_ms)
+{
+    CommandResult         r;
+    std::shared_ptr<Link> l = find_link(host, true);
+    if (!l) {
+        r.error = "no such printer";
+        return r;
+    }
+    l->demanded();
+    const long long deadline = now_ms() + std::max(100, timeout_ms);
+    if (!wait_connected(l, deadline)) {
+        const Sdcp::Snapshot s = l->snapshot();
+        r.error = s.other_window ? "another EdgeSlicer window is connected to this printer" :
+                                   (s.error.empty() ? std::string("the printer did not connect in time") : s.error);
+        return r;
+    }
+    return send_and_wait(l, cmd, data, deadline);
+}
+
+CommandResult command_if_connected(const std::string& host, int cmd, const nlohmann::json& data, int timeout_ms)
 {
     CommandResult         r;
     std::shared_ptr<Link> l = find_link(host, false);
@@ -689,26 +843,19 @@ CommandResult command(const std::string& host, int cmd, const nlohmann::json& da
         r.error = "the printer is not connected";
         return r;
     }
-    l->touched();
-    std::shared_ptr<Waiter> w = l->request(cmd, data, false);
-    {
-        std::unique_lock<std::mutex> lock(w->m);
-        w->cv.wait_for(lock, std::chrono::milliseconds(std::max(100, timeout_ms)), [&]() { return w->done; });
-        // Not sent only when the connection was gone by the time the command reached it.
-        r.sent     = !(w->done && !w->answered && w->error == "the printer is not connected");
-        r.answered = w->done && w->answered;
-        r.ack      = w->ack;
-        r.error    = w->done ? w->error : std::string("the printer did not answer in time");
-    }
-    l->forget(w);
-    return r;
+    return send_and_wait(l, cmd, data, now_ms() + std::max(100, timeout_ms));
 }
 
 bool canvas_query_shared(const std::string& host, const CanvasQueryOptions& opts, CanvasQueryResult& out)
 {
-    std::shared_ptr<Link> l = find_link(host, false);
-    if (!l || !l->connected()) return false;
-    l->touched();
+    std::shared_ptr<Link> l = find_link(host, true);
+    if (!l) return false;
+    l->demanded();
+    const long long deadline = now_ms() + std::max(500, opts.step_timeout_ms);
+    if (!wait_connected(l, deadline)) return false; // another window, or it did not come up: the short way
+    // The status the connection asks for on open says whether a CANVAS is attached; give it a moment.
+    while (l->snapshot().status.ams_connect < 0 && now_ms() < deadline && l->connected())
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     const Sdcp::Snapshot before = l->snapshot();
     out                         = CanvasQueryResult();
     out.reached                 = true;
@@ -722,7 +869,7 @@ bool canvas_query_shared(const std::string& host, const CanvasQueryOptions& opts
     bool done = false;
     {
         std::unique_lock<std::mutex> lock(w->m);
-        w->cv.wait_for(lock, std::chrono::milliseconds(std::max(500, opts.step_timeout_ms)), [&]() { return w->done; });
+        w->cv.wait_for(lock, std::chrono::milliseconds(std::max<long long>(500, deadline - now_ms())), [&]() { return w->done; });
         done = w->done;
         if (!done)
             out.error = "no CANVAS payload before the timeout";
@@ -780,6 +927,12 @@ void set_port_for_tests(int port)
     M.port = port > 0 ? port : 3030;
 }
 
+void set_timing_for_tests(int keep_ms, int checkin_ms)
+{
+    g_keep_ms    = keep_ms > 0 ? keep_ms : 60000;
+    g_checkin_ms = checkin_ms > 0 ? checkin_ms : 300000;
+}
+
 void reset_for_tests()
 {
     Manager&                           M = mgr();
@@ -791,8 +944,8 @@ void reset_for_tests()
         M.down = false;
     }
     for (auto& l : links) l->stop();
-    g_watch_ms = 0;
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    g_subscribers_ms = 0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
 }
 
 } // namespace SdcpMonitor

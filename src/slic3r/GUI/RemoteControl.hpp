@@ -174,7 +174,8 @@ void list_host_targets(std::vector<HostTarget>& out);
 // control fields into its entry of the printers array, plus the temperatures a Bambu entry carries
 // (bed_temp, bed_target, nozzles) when the printer reports them. A printer that does not answer
 // keeps its buttons off and gets no temperatures. Safe to call with an empty list.
-void describe_hosts(const std::vector<HostTarget>& targets, nlohmann::json& printers);
+// `demand`: somebody is looking (an Elegoo SDCP printer then connects; see ElegooSdcpMonitor).
+void describe_hosts(const std::vector<HostTarget>& targets, nlohmann::json& printers, bool demand = false);
 
 } // namespace RemoteControl
 } // namespace GUI

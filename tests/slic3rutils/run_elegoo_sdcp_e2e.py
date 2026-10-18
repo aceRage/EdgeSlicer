@@ -4,7 +4,7 @@ tests/phone/mock_elegoo_sdcp.py on 127.0.0.1.
     python run_elegoo_sdcp_e2e.py --exe <build>/tests/slic3rutils/slic3rutils_tests.exe
 
 Starts the mock on a free loopback port, runs the hidden Catch2 tag [.ElegooSdcpE2E] with the port
-in ELEGOO_SDCP_MOCK_PORT, and stops the mock again (always, by the handle this script started it
+in ELEGOO_SDCP_MOCK_PORT (its camera's in ELEGOO_SDCP_MOCK_VIDEO_PORT), and stops the mock again (always, by the handle this script started it
 with). No real printer is contacted. Exit code: the test executable's.
 """
 import argparse
@@ -33,14 +33,14 @@ def main():
     exe = os.path.abspath(args.exe)
     if not os.path.isfile(exe):
         raise SystemExit("no test executable at " + exe)
-    port = free_port()
-    mock = subprocess.Popen([sys.executable, "-u", MOCK, "--port", str(port)], stdout=subprocess.PIPE,
+    port, video_port = free_port(), free_port()
+    mock = subprocess.Popen([sys.executable, "-u", MOCK, "--port", str(port), "--video-port", str(video_port)], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
     try:
         line = mock.stdout.readline().strip()
         if not line.startswith("READY"):
             raise SystemExit("the mock did not start: " + line)
-        env = dict(os.environ, ELEGOO_SDCP_MOCK_PORT=str(port))
+        env = dict(os.environ, ELEGOO_SDCP_MOCK_PORT=str(port), ELEGOO_SDCP_MOCK_VIDEO_PORT=str(video_port))
         t0 = time.time()
         rc = subprocess.call([exe, "[ElegooSdcpE2E]", "--durations", "yes"] + rest, env=env)
         print("ElegooSdcpE2E exit %d after %.1f s" % (rc, time.time() - t0))

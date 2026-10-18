@@ -15,6 +15,9 @@ colour here is made up. Nothing here talks to a real printer: it binds 127.0.0.1
     Cmd 129 / 131 / 130  pause / resume / stop: Ack 0, then the status moves on (pausing -> paused,
                          resuming -> printing, stopping -> stopped) and is pushed
     Cmd 403           -> Ack 0; LightStatus.SecondLight and TargetFanSpeed.* applied and pushed
+    Cmd 386           -> Ack 0 with VideoUrl "127.0.0.1:<video port>/video" (no scheme, as on V1.4.49)
+  --video-port V: an MJPEG camera on http://127.0.0.1:V/video (multipart JPEG frames), which turns
+    the first /mock/video?refuse=N requests away by closing them, as a camera that needs Cmd 386
     while printing, a status push every second with the progress moving on
   HTTP on the same port (the test's control surface):
     GET /mock/state                 {"connections_total", "open", "max_open", "commands": [[cmd, data]...],
@@ -26,8 +29,10 @@ colour here is made up. Nothing here talks to a real printer: it binds 127.0.0.1
     GET /mock/refuse?on=1|0         decline new websocket handshakes (HTTP 403), as a full printer does
     GET /mock/limit?n=4             decline a handshake beyond n open clients (default 4)
     GET /mock/mute?on=1|0           stop answering anything (and stop pushing): a printer that hangs
+    GET /mock/video?refuse=N        the camera turns the next N stream requests away
+    POST /mock/hook                 a notification webhook: counted in /mock/state "hooks"
 
-usage: mock_elegoo_sdcp.py --port P      (prints "READY <port>", runs until killed)
+usage: mock_elegoo_sdcp.py --port P [--video-port V]   (prints "READY <port>", runs until killed)
 """
 import argparse
 import base64
@@ -44,8 +49,9 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 BOARD = "MOCKBOARD00000001"
 LOCK = threading.Lock()
 SOCKETS = {}  # socket -> send function
-STATS = {"connections_total": 0, "open": 0, "max_open": 0, "commands": [], "pings": 0}
-FLAGS = {"refuse": False, "limit": 4, "mute": False}
+STATS = {"connections_total": 0, "open": 0, "max_open": 0, "commands": [], "pings": 0, "hooks": 0}
+FLAGS = {"refuse": False, "limit": 4, "mute": False, "video_refuse": 0, "video_port": 0}
+VIDEO = {"requests": 0, "streaming": 0}
 
 
 def fresh_state():
@@ -251,12 +257,20 @@ class Handler(socketserver.StreamRequestHandler):
                               "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
             self.wfile.flush()
             return self.websocket()
+        if base == "/mock/hook":
+            # A notification destination (the gate's webhook): counted, body read and dropped.
+            n = int(headers.get("content-length", "0") or 0)
+            if n > 0:
+                self.rfile.read(n)
+            with LOCK:
+                STATS["hooks"] += 1
+            return http_reply(self.wfile, 200, {"ok": True})
         if base == "/mock/state":
             with LOCK:
-                return http_reply(self.wfile, 200, dict(STATS, state=dict(STATE)))
+                return http_reply(self.wfile, 200, dict(STATS, state=dict(STATE), video=dict(VIDEO)))
         if base == "/mock/reset":
             with LOCK:
-                STATS.update(commands=[], pings=0, connections_total=STATS["open"], max_open=STATS["open"])
+                STATS.update(commands=[], pings=0, hooks=0, connections_total=STATS["open"], max_open=STATS["open"])
                 FLAGS.update(refuse=False, limit=4, mute=False)
             STATE.update(fresh_state())
             return http_reply(self.wfile, 200, {"reset": True})
@@ -283,6 +297,9 @@ class Handler(socketserver.StreamRequestHandler):
         if base == "/mock/limit":
             FLAGS["limit"] = int(q.get("n", "4"))
             return http_reply(self.wfile, 200, {"limit": FLAGS["limit"]})
+        if base == "/mock/video":
+            FLAGS["video_refuse"] = int(q.get("refuse", "0"))
+            return http_reply(self.wfile, 200, {"video_refuse": FLAGS["video_refuse"]})
         if base == "/mock/mute":
             FLAGS["mute"] = q.get("on", "1") == "1"
             return http_reply(self.wfile, 200, {"mute": FLAGS["mute"]})
@@ -361,6 +378,11 @@ class Handler(socketserver.StreamRequestHandler):
                                 STATE["machine"] = 0
                             broadcast(status_frame())
                         later(1.0, finish)
+                elif cmd == 386:
+                    data = {"Ack": 0}
+                    if FLAGS["video_port"]:
+                        data["VideoUrl"] = "127.0.0.1:%d/video" % FLAGS["video_port"]
+                    send_json(response(386, rid, data))
                 elif cmd == 403:
                     if isinstance(body.get("LightStatus"), dict):
                         STATE["light"] = int(body["LightStatus"].get("SecondLight", STATE["light"]))
@@ -388,6 +410,35 @@ class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
 
+class VideoHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        while True:
+            h = self.rfile.readline()
+            if h in (b"\r\n", b"\n", b""):
+                break
+        with LOCK:
+            VIDEO["requests"] += 1
+            refuse = FLAGS["video_refuse"] > 0
+            if refuse:
+                FLAGS["video_refuse"] -= 1
+        if refuse:
+            return
+        self.wfile.write(b"HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=f\r\n\r\n")
+        jpeg = b"\xff\xd8" + b"\x11" * 100 + b"\xff\xd9"
+        with LOCK:
+            VIDEO["streaming"] += 1
+        try:
+            while True:
+                self.wfile.write(b"--f\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n")
+                self.wfile.flush()
+                time.sleep(0.05)
+        except OSError:
+            pass
+        finally:
+            with LOCK:
+                VIDEO["streaming"] -= 1
+
+
 def pusher():
     # A printing printer pushes its status on every change; here, once a second.
     while True:
@@ -404,8 +455,13 @@ def pusher():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--video-port", type=int, default=0)
     args = ap.parse_args()
     srv = Server(("127.0.0.1", args.port), Handler)
+    if args.video_port:
+        FLAGS["video_port"] = args.video_port
+        vsrv = Server(("127.0.0.1", args.video_port), VideoHandler)
+        threading.Thread(target=vsrv.serve_forever, daemon=True).start()
     threading.Thread(target=pusher, daemon=True).start()
     print("READY %d" % args.port, flush=True)
     srv.serve_forever()

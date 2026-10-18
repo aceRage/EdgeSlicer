@@ -196,6 +196,15 @@ check(bool(srow.get("ams")) and srow["ams"][0].get("name") == "CANVAS 1", "/summ
 check(bool(srow.get("controls")), "/summary carries controls")
 check(isinstance(srow.get("chamber_temp"), (int, float)), "/summary carries the chamber reading")
 check(bool(srow.get("camera_hint")) and bool(srow.get("sdcp")), "/summary carries camera_hint and sdcp")
+# The camera: the Stream tab's CC1 tile (#599, rkind elegoo) at the printer's address is joined to the
+# row, /state lists it as rkind elegoo, and the hub's relay route answers for it (nothing listens on
+# 127.0.0.1's camera port, so it can only say why there is no picture - never a real printer).
+check(srow.get("camera") == "cc1cam", "/summary joins the Stream tab's CC1 tile to the row (%s)" % srow.get("camera"))
+st, state = http("%s/r/%s/state" % (HUB, TOKEN))
+tile = next((h for h in state.get("hosts", []) if h.get("id") == "cc1cam"), {})
+check(tile.get("rkind") == "elegoo", "/state lists the tile as rkind elegoo (%s)" % tile.get("rkind"))
+st, cam = http("%s/r/%s/elegoo/status?id=cc1cam" % (HUB, TOKEN), timeout=20)
+check(st == 200 and "state" in cam, "the hub's /elegoo/status route answers for the tile (%d %s)" % (st, cam.get("state")))
 check(srow.get("percent", 0) > 0 and srow.get("job") == "Cube_PLA_mock.gcode", "/summary percent and job")
 
 print("-- controls --", flush=True)
@@ -245,8 +254,9 @@ check(129 in cmds and 131 in cmds and 130 in cmds and 403 in cmds and 324 in cmd
       "the printer saw 129, 131, 130, 403 and 324 (%s)" % sorted(set(cmds)))
 
 st_m = mock("/mock/state")
-check(st_m.get("connections_total") == 1 and st_m.get("max_open") == 1,
-      "one websocket for everything (total %s, max open %s)" % (st_m.get("connections_total"), st_m.get("max_open")))
+check(st_m.get("max_open") == 1,
+      "never more than one websocket (max open %s; %s connection(s) in all while somebody looked)"
+      % (st_m.get("max_open"), st_m.get("connections_total")))
 
 print("-- printer off --", flush=True)
 mock("/mock/refuse?on=1")
@@ -265,6 +275,45 @@ mock("/mock/refuse?on=0")
 mock("/mock/print?state=idle")
 p = until(lambda p: p.get("online") is True and p.get("status") == "standby", 40)
 check(p.get("status") == "standby", "back online, idle (%s)" % p.get("status"))
+
+print("-- nobody looking: idle close, check-ins, a print held for its notifications --", flush=True)
+# From here on only the mock is asked; the hub's background poll says watching=0 once 45 s pass.
+t0 = time.time()
+while time.time() - t0 < 120 and mock("/mock/state").get("open") != 0:
+    time.sleep(2)
+check(mock("/mock/state").get("open") == 0,
+      "idle: no socket to the printer once nobody looks (%.0f s after the last look)" % (time.time() - t0))
+time.sleep(3)
+check(mock("/mock/state").get("open") == 0, "idle steady state: 0 sockets")
+total = mock("/mock/state").get("connections_total", 0)
+t0, seen_open = time.time(), False
+while time.time() - t0 < 60:
+    s = mock("/mock/state")
+    seen_open = seen_open or s.get("open") == 1
+    if s.get("connections_total", 0) > total and s.get("open") == 0:
+        break
+    time.sleep(0.5)
+s = mock("/mock/state")
+check(s.get("connections_total", 0) > total and s.get("open") == 0,
+      "a check-in: connected, read the status and disconnected (%.0f s; connections %s -> %s)"
+      % (time.time() - t0, total, s.get("connections_total")))
+cmds_before = len(mock("/mock/state").get("commands", []))
+mock("/mock/print?state=printing")  # a print starts while nobody looks; somebody is subscribed (webhook)
+t0 = time.time()
+while time.time() - t0 < 60 and mock("/mock/state").get("open") != 1:
+    time.sleep(1)
+check(mock("/mock/state").get("open") == 1, "the next check-in finds the print (%.0f s)" % (time.time() - t0))
+time.sleep(25)  # well past KEEP (10 s here)
+check(mock("/mock/state").get("open") == 1, "the print is held while it runs (somebody is subscribed)")
+cmds = mock("/mock/state").get("commands", [])[cmds_before:]
+check(not any(c[0] == 324 for c in cmds), "no CANVAS read while nobody looks")
+mock("/mock/print?state=complete")
+t0 = time.time()
+while time.time() - t0 < 45 and mock("/mock/state").get("open") != 0:
+    time.sleep(1)
+check(mock("/mock/state").get("open") == 0, "closed about KEEP after the print ended (%.0f s)" % (time.time() - t0))
+hooks = mock("/mock/state").get("hooks", 0)
+check(hooks > 0, "the subscribed destination got the print's notifications (%s)" % hooks)
 
 print("\n%d checks, %d failed" % (checks, len(fails)))
 for f in fails:

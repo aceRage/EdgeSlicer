@@ -1,5 +1,7 @@
 #include "ElegooCamRelay.hpp"
 
+#include "slic3r/Utils/ElegooSdcpMonitor.hpp"
+
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
@@ -602,6 +604,29 @@ private:
     {
         if (m_stopping)
             return;
+        // While the hub already holds this printer's SDCP connection (ElegooSdcpMonitor, an on-demand
+        // connection the phone and the Printers tab use), Cmd 386 goes over it rather than taking
+        // one more of the printer's few control sockets. Asked once; anything else - no connection,
+        // no answer, not a Cmd 386 reply - falls through to the relay's own short connection.
+        if (!m_tried_shared && SdcpMonitor::connected(m_host)) {
+            m_tried_shared         = true;
+            auto              self = shared_from_this();
+            const std::string host = m_host;
+            std::thread([self, host]() {
+                nlohmann::json data;
+                data["Enable"] = 1;
+                const SdcpMonitor::CommandResult r = SdcpMonitor::command_if_connected(host, 386, data, kEnableMs - 1000);
+                asio::post(self->m_ioc, [self, r]() {
+                    if (self->m_stopping)
+                        return;
+                    const EnableReply e = r.answered ? parse_enable_reply(r.frame) : EnableReply();
+                    if (e.valid)
+                        return self->enable_answered_shared(e);
+                    self->begin_enable(); // the relay's own connection, as before
+                });
+            }).detach();
+            return;
+        }
         m_ws = std::make_unique<websocket::stream<tcp::socket>>(m_ioc);
         arm_deadline(kEnableMs);
         auto self = shared_from_this();
@@ -673,6 +698,19 @@ private:
         });
     }
 
+    // Cmd 386 answered over the hub's connection: nothing of ours to close, straight on to the picture.
+    void enable_answered_shared(const EnableReply& r)
+    {
+        const State s = state_from_ack(r.ack);
+        if (s != State::Live)
+            return finish(s);
+        VideoTarget t{ m_host, g_video_port.load(), "/video" };
+        VideoTarget from_reply;
+        if (video_target_from_reply(r.video_url, m_host, from_reply))
+            t = from_reply;
+        begin_video(t, false);
+    }
+
     void enable_failed()
     {
         if (m_stopping)
@@ -710,6 +748,7 @@ private:
     bool                                              m_stopping       = false;
     bool                                              m_idle_stop      = false;
     bool                                              m_allow_fallback = true;
+    bool                                              m_tried_shared   = false; // Cmd 386 over the hub's SDCP connection
     bool                                              m_got_frame_ever = false;
     int                                               m_reconnects     = 0;
 };

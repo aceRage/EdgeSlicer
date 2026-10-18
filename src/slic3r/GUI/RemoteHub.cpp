@@ -3430,11 +3430,16 @@ void HubServer::poll_printers()
     const std::vector<Instance> live = instances(false);
     const long long             seen = m_watch_ms.load();
     const bool                  watched = seen != 0 && now_millis() - seen < 45000;
+    // Whether a notification would go anywhere (a destination, a browser, the app): an Elegoo printer's
+    // print is then watched to its end even with nobody looking (ElegooSdcpMonitor).
+    bool notify = false;
+    try { notify = RemoteNotify::has_destinations(); } catch (...) {}
     for (const Instance& inst : live) {
         if (inst.port <= 0) continue;
         std::string body;
         int         status = 0;
-        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers?watching=" + (watched ? "1" : "0"))
+        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers?watching=" + (watched ? "1" : "0") +
+                  "&notify=" + (notify ? "1" : "0"))
             .timeout_connect(1).timeout_max(10)
             .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
             .on_error([&](std::string, std::string, unsigned) {})

@@ -27,6 +27,8 @@
 #include "libslic3r/AppConfig.hpp"
 #include "Bonjour.hpp"
 #include "ElegooStartPrint.hpp"
+#include "ElegooCanvas.hpp"
+#include "ElegooSdcpMonitor.hpp"
 #include "slic3r/GUI/BonjourDialog.hpp"
 
 namespace fs = boost::filesystem;
@@ -586,6 +588,9 @@ namespace Slic3r {
 
     bool ElegooLink::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn) const
     {
+        // An upload (and the start-print after it) is a request for the hub's connection to this
+        // printer: it opens now, so the phone and the Printers tab see the print begin.
+        SdcpMonitor::demand(sdcp_host_of(m_host));
     #ifndef WIN32
         return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
     #else
