@@ -10056,20 +10056,30 @@ void Sidebar::show_cfs_sync_dialog()
     std::string       boxs;
     std::string       info_err;
     bool              reached = false;
+    const int         timeout_s = 2;
     std::atomic<bool> done { false };
     std::atomic<bool> cancel { false };
-    CrealityWsClient  session(2000, 2000);
-    std::thread       worker([&] {
+    // Constructed after /info so the boxsInfo budget is not eaten by fetch_info.
+    std::unique_ptr<CrealityWsClient> session;
+    std::atomic<CrealityWsClient *>   session_ptr { nullptr };
+    std::thread                       worker([&] {
         try {
             std::string body;
-            if (CrealityPrint::fetch_info(address, body, info_err, 2) && !cancel.load()) {
-                reached = true;
-                boxs    = CrealityPrint::query_boxes_info(address, 2, &session);
+            if (CrealityPrint::fetch_info(address, body, info_err, timeout_s) && !cancel.load()) {
+                reached             = true;
+                const int budget_ms = std::max(1, timeout_s) * 1000;
+                session             = std::make_unique<CrealityWsClient>(budget_ms, budget_ms);
+                session_ptr.store(session.get());
+                if (cancel.load())
+                    session->cancel();
+                else
+                    boxs = CrealityPrint::query_boxes_info(address, timeout_s, session.get());
             }
         } catch (const std::exception &e) {
             BOOST_LOG_TRIVIAL(error) << "CFS sync: " << e.what();
             info_err = e.what();
         } catch (...) {}
+        session_ptr.store(nullptr);
         done = true;
     });
     bool aborted = false;
@@ -10079,7 +10089,8 @@ void Sidebar::show_cfs_sync_dialog()
         while (!done) {
             if (!progress.Pulse()) {
                 cancel = true;
-                session.cancel();
+                if (CrealityWsClient *s = session_ptr.load())
+                    s->cancel();
                 aborted = true;
                 break;
             }
