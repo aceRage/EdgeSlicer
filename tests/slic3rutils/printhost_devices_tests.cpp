@@ -10,13 +10,17 @@
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
+#include "slic3r/Utils/CrealityPrint.hpp"
 #include "slic3r/Utils/CrealityPrintModel.hpp"
 
+#include <boost/asio.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include <chrono>
 #include <ctime>
 #include <string>
+#include <thread>
 
 using namespace Slic3r;
 using namespace Slic3r::PrintHostDevices;
@@ -803,5 +807,31 @@ TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
         CHECK(parse_model_from_info(R"({"model":1})").empty());
         CHECK(parse_model_from_info(R"({"name":"K1"})").empty());
         REQUIRE_NOTHROW(parse_model_from_info(std::string(64, '{')));
+    }
+}
+
+TEST_CASE("CrealityPrint: WebSocket budget 0 does not start and does not UAF", "[CrealityPrint]")
+{
+    SECTION("expired total budget fails before any I/O") {
+        CrealityWsClient ws(200, 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::string err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", "1", err));
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+        CHECK(ws.remaining_ms() == 0);
+    }
+
+    SECTION("local acceptor that never accepts times out and drains") {
+        namespace net = boost::asio;
+        using tcp     = net::ip::tcp;
+        net::io_context ioc;
+        tcp::acceptor   acc(ioc, tcp::endpoint(tcp::v4(), 0));
+        const auto      port = std::to_string(acc.local_endpoint().port());
+        CrealityWsClient ws(150, 150);
+        std::string      err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", port, err));
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
     }
 }
