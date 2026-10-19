@@ -4,7 +4,9 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include <boost/filesystem/path.hpp>
 
@@ -103,6 +105,7 @@ protected:
     // device is a crealityprint host. Called with the mapping rows.
     void rebuild_creality_options();
     void update_creality_mapping_enabled();
+    void set_send_enabled(bool on);
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
@@ -137,11 +140,15 @@ protected:
     wxCheckBox*                           m_creality_use_cfs { nullptr };
     wxCheckBox*                           m_creality_calibrate { nullptr };
     // Lets a late probe result drop itself if the dialog closed or the user switched devices.
+    // alive is read/written under mtx; the worker is joinable and joined on close.
     struct ProbeToken {
-        std::atomic<int>  gen { 0 };
-        std::atomic<bool> alive { true };
+        std::mutex        mtx;
+        int               gen { 0 };
+        bool              alive { true };
     };
     std::shared_ptr<ProbeToken>           m_probe_token;
+    std::thread                           m_probe_thread;
+    bool                                  m_probe_pending { false };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
     bool                                  m_unload_default { false };

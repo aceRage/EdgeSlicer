@@ -612,30 +612,33 @@ bool CrealityPrint::start_print(wxString &msg, const std::string &filename, cons
         // Empty match list: fall back to opGcodeFile + enableSelfTest (do not send colorMatch).
         if (use_cfs && !color_list.empty()) {
             const json color_match = CrealityPrintModel::color_match_cmd(gcode_path, color_list);
-            bool       matched     = false;
-            // Creality Print: send, retry up to 5x at 2 s, each attempt on its own deadline.
-            for (int attempt = 0; attempt < 5 && !matched; ++attempt) {
-                CrealityWsClient attempt_ws(2000, 2000);
-                if (!attempt_ws.open(m_host, "9999", err)) {
-                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
-                                               << " open failed: " << err;
-                    continue;
-                }
-                if (!attempt_ws.write(to_string(color_match), err)) {
+            // Creality Print: colorMatch (retry 5× at 2 s) then multiColorPrint on ONE socket.
+            // A 2 s silence kills the Beast stream; we then fail rather than open a second
+            // connection. Do not send multiColorPrint if every colorMatch attempt failed.
+            CrealityWsClient ws(2000, 10000);
+            if (!ws.open(m_host, "9999", err)) {
+                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch open failed: " << err;
+                msg = wxString::FromUTF8(err);
+                return false;
+            }
+            bool matched = false;
+            for (int attempt = 0; attempt < 5 && !matched && ws.is_open(); ++attempt) {
+                if (!ws.write(to_string(color_match), err)) {
                     BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
                                                << " write failed: " << err;
-                    continue;
+                    break;
                 }
                 std::string reply;
-                if (attempt_ws.read_until("colorMatch", reply, err))
+                if (ws.read_until("colorMatch", reply, err))
                     matched = true;
                 else
                     BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
                                                << " read failed: " << err;
             }
-
-            CrealityWsClient ws(5000);
-            if (!ws.open(m_host, "9999", err)) {
+            if (!matched) {
+                if (err.empty())
+                    err = "colorMatch failed";
+                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch failed: " << err;
                 msg = wxString::FromUTF8(err);
                 return false;
             }
