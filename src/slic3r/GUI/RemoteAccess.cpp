@@ -38,6 +38,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/ElegooSdcpMonitor.hpp"
+#include "slic3r/Utils/AnycubicLanMonitor.hpp"
 #include "slic3r/Utils/LoopbackAcceptLoop.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -575,6 +576,9 @@ void RemoteAccess::stop()
         loop.swap(m_accept_loop);
         m_port = 0;
     }
+    // Outside m_mutex: the monitor joins worker threads and disconnects MQTT without
+    // holding this lock (or its own lock, during Disconnect).
+    AnycubicLanMonitor::shutdown();
     // EDGESLICER-9: this used to close the acceptor here while the accept thread, woken by that
     // very close, deleted it - two threads tearing down one acceptor, a double close and a write
     // into freed memory, which macOS reported a moment later as a double free when the main window

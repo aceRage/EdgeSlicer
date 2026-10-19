@@ -13,6 +13,8 @@
 #include "slic3r/Utils/ElegooCanvas.hpp"
 #include "slic3r/Utils/ElegooSdcp.hpp"
 #include "slic3r/Utils/ElegooSdcpMonitor.hpp"
+#include "slic3r/Utils/AnycubicLan.hpp"
+#include "slic3r/Utils/AnycubicLanMonitor.hpp"
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
@@ -439,6 +441,40 @@ static bool elegoo_target(const std::string& printer, ElegooTarget& out)
     return false;
 }
 
+struct AnycubicTarget
+{
+    std::string host; // bare
+    std::string name;
+};
+
+static bool anycubic_target(const std::string& printer, AnycubicTarget& out)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    if (!bundle) return false;
+    if (printer == "host") {
+        if (bundle->use_bbl_network()) return false;
+        const DynamicPrintConfig&      cfg = bundle->printers.get_edited_preset().config;
+        const PrintHostDevices::Device d   = PrintHostDevices::from_config(cfg);
+        if (!PrintHostDevices::speaks_anycubic_lan(d.host_type)) return false;
+        out.host = AnycubicLan::bare_host(d.address);
+        out.name = "Anycubic " + d.address;
+        return !out.host.empty();
+    }
+    if (printer.compare(0, 3, "ph:") != 0) return false;
+    const std::string id = printer.substr(3);
+    try {
+        for (const auto& kv : PrintHostDevices::all_devices())
+            for (const PrintHostDevices::Device& d : kv.second) {
+                if (d.id != id) continue;
+                if (!PrintHostDevices::speaks_anycubic_lan(d.host_type)) return false;
+                out.host = AnycubicLan::bare_host(d.address);
+                out.name = d.display_name();
+                return !out.host.empty();
+            }
+    } catch (...) {}
+    return false;
+}
+
 static std::string sdcp_state_words(const Sdcp::Snapshot& s)
 {
     const std::string st = Sdcp::hub_state(s.status);
@@ -470,6 +506,29 @@ static std::pair<int, std::string> prepare_elegoo(const Request& req, const Eleg
     p->sdcp_cmd      = req.action == "pause" ? Sdcp::CMD_PAUSE : req.action == "resume" ? Sdcp::CMD_RESUME : Sdcp::CMD_STOP;
     p->sdcp_data     = json::object();
     p->status_before = Sdcp::hub_state(s.status);
+    out              = p;
+    return { 200, "" };
+}
+
+// Pause, resume or stop over the hub's Anycubic LAN MQTT session (print/{pause,resume,stop}).
+static std::pair<int, std::string> prepare_anycubic(const Request& req, const AnycubicTarget& t, std::shared_ptr<Prepared> p,
+                                                    std::shared_ptr<Prepared>& out)
+{
+    const AnycubicLan::Snapshot s = AnycubicLanMonitor::demand(t.host);
+    p->kind         = "anycubic";
+    p->printer_name = t.name;
+    p->sdcp_host    = t.host;
+    if (s.failures > 0 && !s.connected)
+        return { 409, t.name + " is not answering" + (s.error.empty() ? std::string() : " (" + s.error + ")") };
+    if (!s.connected && !s.status.valid) return { 409, "connecting to " + t.name + "; try again in a moment" };
+    const bool allowed = req.action == "pause" ? AnycubicLan::can_pause(s.status) :
+                         req.action == "resume" ? AnycubicLan::can_resume(s.status) : AnycubicLan::can_stop(s.status);
+    if (!allowed) {
+        const std::string what = req.action == "pause" ? "paused" : req.action == "resume" ? "resumed" : "stopped";
+        const std::string st   = AnycubicLan::hub_state(s.status);
+        return { 409, t.name + " cannot be " + what + " right now (it reports " + (st.empty() ? std::string("no print state") : st) + ")" };
+    }
+    p->status_before = AnycubicLan::hub_state(s.status);
     out              = p;
     return { 200, "" };
 }
@@ -1076,6 +1135,11 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
         if ((req.printer == "host" || req.printer.compare(0, 3, "ph:") == 0) && elegoo_target(req.printer, et))
             return prepare_elegoo(req, et, p, out);
     }
+    {
+        AnycubicTarget at;
+        if ((req.printer == "host" || req.printer.compare(0, 3, "ph:") == 0) && anycubic_target(req.printer, at))
+            return prepare_anycubic(req, at, p, out);
+    }
     if (req.printer == "host" || req.printer == "connect") return prepare_host(req, *a, p, out);
     if (req.printer.compare(0, 3, "sm:") == 0) return prepare_snapmaker_lan(req, *a, p, out);
     return prepare_bambu(req, *a, p, out);
@@ -1388,12 +1452,47 @@ static void run_elegoo(std::shared_ptr<Prepared> p, Sink& sink)
     sink.done(true, "", result);
 }
 
+static void run_anycubic(std::shared_ptr<Prepared> p, Sink& sink)
+{
+    json result;
+    result["kind"]      = p->kind;
+    result["action"]    = p->action;
+    result["printer"]   = { { "id", p->printer_id }, { "name", p->printer_name } };
+    result["transport"] = "anycubic-lan";
+    if (p->dry_run) {
+        result["dry_run"] = true;
+        sink.progress(99, "dry run: nothing was sent");
+        sink.done(true, "", result);
+        return;
+    }
+    sink.progress(40, "sending " + p->action + " to the printer");
+    const nlohmann::json inner = nlohmann::json{ { "taskid", "-1" } };
+    const AnycubicLanMonitor::CommandResult r = AnycubicLanMonitor::command(p->sdcp_host, "print", p->action, inner, 12000);
+    if (!r.sent) {
+        sink.done(false, p->printer_name + " could not be reached: " + r.error, result);
+        return;
+    }
+    sink.progress(70, error_wait_text(p));
+    std::string state = "unknown";
+    for (int i = 0; i < 10 && state == "unknown"; ++i) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const AnycubicLan::Snapshot s  = AnycubicLanMonitor::demand(p->sdcp_host);
+        const std::string           st = AnycubicLan::hub_state(s.status);
+        if (p->action == "pause" && st == "paused") state = "paused";
+        else if (p->action == "resume" && st == "printing") state = "printing";
+        else if (p->action == "stop" && !AnycubicLan::is_printing(s.status)) state = "stopped";
+    }
+    result["state"] = state;
+    sink.done(true, "", result);
+}
+
 void run(std::shared_ptr<Prepared> p, Sink sink)
 {
     try {
-        if (p->kind == "bambu")       run_bambu(p, sink);
-        else if (p->kind == "elegoo") run_elegoo(p, sink);
-        else                          run_host(p, sink);
+        if (p->kind == "bambu")          run_bambu(p, sink);
+        else if (p->kind == "elegoo")    run_elegoo(p, sink);
+        else if (p->kind == "anycubic")  run_anycubic(p, sink);
+        else                             run_host(p, sink);
     } catch (const std::exception& e) {
         sink.done(false, std::string("the command failed: ") + e.what(), json::object());
     } catch (...) {
@@ -1464,6 +1563,8 @@ void list_host_targets(std::vector<HostTarget>& out)
                                 d.apikey, d.user, d.password });
             else if (speaks_sdcp(d.host_type, cfg.opt_string("printer_model")))
                 out.push_back({ "host", sdcp_host_of(url), d.host_type, "", "", "", "", "Elegoo " + url });
+            else if (PrintHostDevices::speaks_anycubic_lan(d.host_type))
+                out.push_back({ "host", AnycubicLan::bare_host(url), d.host_type, "", "", "", "", "Anycubic " + url });
             else
                 out.push_back({ "host", moonraker_base(url), "", "", "", "", "" });
         }
@@ -1488,6 +1589,7 @@ void list_host_targets(std::vector<HostTarget>& out)
         for (const PrintHostDevices::Device& d : PrintHostDevices::devices(model_key)) {
             if (d.address.empty()) continue;
             if (d.host_type == "elegoolink") continue; // every model's Elegoo printers are added below
+            if (d.host_type == "anycubiclan") continue;
             if (PrintHostDevices::speaks_moonraker(d.host_type)) {
                 out.push_back({ "ph:" + d.id, moonraker_base(d.address), "", "", "", "", "" });
             } else if (PrusaLinkStatus::speaks_prusalink(d.host_type)) {
@@ -1506,6 +1608,14 @@ void list_host_targets(std::vector<HostTarget>& out)
             for (const PrintHostDevices::Device& d : kv.second) {
                 if (d.address.empty() || !speaks_sdcp(d.host_type, d.printer_model.empty() ? kv.first : d.printer_model)) continue;
                 const std::string host = sdcp_host_of(d.address);
+                if (!host.empty()) out.push_back({ "ph:" + d.id, host, d.host_type, "", "", "", "", d.display_name() });
+            }
+    } catch (...) {}
+    if (bundle) try {
+        for (const auto& kv : PrintHostDevices::all_devices())
+            for (const PrintHostDevices::Device& d : kv.second) {
+                if (d.address.empty() || !PrintHostDevices::speaks_anycubic_lan(d.host_type)) continue;
+                const std::string host = AnycubicLan::bare_host(d.address);
                 if (!host.empty()) out.push_back({ "ph:" + d.id, host, d.host_type, "", "", "", "", d.display_name() });
             }
     } catch (...) {}
@@ -1615,16 +1725,25 @@ void describe_hosts(const std::vector<HostTarget>& targets, json& printers, bool
     std::vector<HostTarget> others;
     others.reserve(targets.size());
     for (const HostTarget& t : targets) {
-        if (t.host_type != "elegoolink") {
-            others.push_back(t);
+        if (t.host_type == "elegoolink") {
+            const Sdcp::Snapshot s = demand ? SdcpMonitor::demand(t.base) : SdcpMonitor::touch(t.base);
+            for (json& p : printers)
+                if (p.is_object() && p.value("id", std::string()) == t.id) {
+                    Sdcp::fill_row(s, t.base, p);
+                    break;
+                }
             continue;
         }
-        const Sdcp::Snapshot s = demand ? SdcpMonitor::demand(t.base) : SdcpMonitor::touch(t.base);
-        for (json& p : printers)
-            if (p.is_object() && p.value("id", std::string()) == t.id) {
-                Sdcp::fill_row(s, t.base, p);
-                break;
-            }
+        if (t.host_type == "anycubiclan") {
+            const AnycubicLan::Snapshot s = demand ? AnycubicLanMonitor::demand(t.base) : AnycubicLanMonitor::touch(t.base);
+            for (json& p : printers)
+                if (p.is_object() && p.value("id", std::string()) == t.id) {
+                    AnycubicLan::fill_row(s, t.base, p);
+                    break;
+                }
+            continue;
+        }
+        others.push_back(t);
     }
     if (others.empty()) return;
     describe_moonraker_hosts(others, printers);

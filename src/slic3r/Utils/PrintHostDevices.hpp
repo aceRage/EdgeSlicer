@@ -180,6 +180,7 @@ std::string   host_type_key(PrintHostType type);
 // True for the host types that answer Moonraker's /printer/objects/query, i.e. the ones whose
 // status the hub can probe through RemoteControl's existing probe cache.
 bool          speaks_moonraker(const std::string& host_type_key);
+bool          speaks_anycubic_lan(const std::string& host_type_key);
 
 // ---- migration ----
 

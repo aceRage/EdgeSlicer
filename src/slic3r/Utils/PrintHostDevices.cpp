@@ -481,6 +481,8 @@ bool speaks_moonraker(const std::string& key)
     return key == "octoprint" || key == "moonraker" || key == "moonraker_mqtt";
 }
 
+bool speaks_anycubic_lan(const std::string& key) { return key == "anycubiclan"; }
+
 Device from_config(const DynamicPrintConfig& config)
 {
     Device d;

@@ -59,6 +59,7 @@ wxString PlatePrintHistoryDialog::connection_label(const std::string &key)
     if (key == "moonraker")        return wxString("Moonraker");
     if (key == "flashforge")       return wxString("Flashforge");
     if (key == "elegoolink")       return wxString("Elegoo");
+    if (key == "anycubiclan")      return wxString("Anycubic LAN");
     if (key == "duet")             return wxString("Duet");
     if (key.empty())               return {};
     // A host type this list does not know: show its key as a readable word.
