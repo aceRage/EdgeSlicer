@@ -181,15 +181,27 @@ void MaterialItem::render(wxDC &dc)
     wxString material_txt      = m_material_name;
     auto     material_txt_size = dc.GetTextExtent(material_txt);
     int      name_x            = (MATERIAL_ITEM_SIZE.x - material_txt_size.x) / 2;
+    wxSize   badge_ts(0, 0);
+    int      badge_w           = 0;
+    int      badge_h           = 0;
     if (!m_nozzle_badge.empty()) {
-        // 12 DIP badge at top-left: long types (PETG-CF) on a 64-DIP tile must not sit under it.
-        const int name_x_pad = FromDIP(12) + FromDIP(4);
+        // Pill sized to Body_10 text: a fixed 12 DIP circle clips "10" and is shorter than the glyph.
+        dc.SetFont(::Label::Body_10);
+        badge_ts         = dc.GetTextExtent(m_nozzle_badge);
+        const int pad    = FromDIP(2);
+        badge_w          = badge_ts.x + 2 * pad;
+        badge_h          = badge_ts.y + 2 * pad;
+        const int name_x_pad = badge_w + FromDIP(4);
         const int name_max_w = GetSize().x - name_x_pad - FromDIP(4);
-        if (material_txt_size.x > name_max_w) {
+        dc.SetFont(::Label::Body_13);
+        if (dc.GetTextExtent(material_txt).x > GetSize().x - 10)
+            dc.SetFont(::Label::Body_10);
+        if (dc.GetTextExtent(material_txt).x > name_max_w) {
+            dc.SetFont(::Label::Body_10);
             material_txt      = wxControl::Ellipsize(material_txt, dc, wxELLIPSIZE_END, name_max_w);
-            material_txt_size = dc.GetTextExtent(material_txt);
         }
-        name_x = std::max(name_x, name_x_pad);
+        material_txt_size = dc.GetTextExtent(material_txt);
+        name_x = std::max((MATERIAL_ITEM_SIZE.x - material_txt_size.x) / 2, name_x_pad);
     }
     dc.DrawText(material_txt, wxPoint(name_x, (FromDIP(28) - material_txt_size.y) / 2));
 
@@ -211,17 +223,21 @@ void MaterialItem::render(wxDC &dc)
     dc.DrawText(mapping_txt, wxPoint((MATERIAL_ITEM_SIZE.x - mapping_txt_size.x) / 2, FromDIP(30) + (FromDIP(16) - mapping_txt_size.y) / 2));
 
     if (!m_nozzle_badge.empty()) {
-        const int      d        = FromDIP(12);
         const wxPoint  o(FromDIP(2), FromDIP(2));
         const wxColour badge_bg = StateColor::darkModeColorFor(wxColour(0x26, 0x2E, 0x30));
         dc.SetPen(*wxTRANSPARENT_PEN);
         dc.SetBrush(wxBrush(badge_bg));
-        dc.DrawEllipse(o.x, o.y, d, d);
         dc.SetFont(::Label::Body_10);
+        if (badge_w <= 0 || badge_h <= 0) {
+            badge_ts      = dc.GetTextExtent(m_nozzle_badge);
+            const int pad = FromDIP(2);
+            badge_w       = badge_ts.x + 2 * pad;
+            badge_h       = badge_ts.y + 2 * pad;
+        }
+        dc.DrawRoundedRectangle(o.x, o.y, badge_w, badge_h, std::min(badge_w, badge_h) / 2);
         dc.SetTextForeground(badge_bg.GetLuminance() < 0.6 ? *wxWHITE : wxColour(0x26, 0x2E, 0x30));
         dc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
-        const wxSize ts = dc.GetTextExtent(m_nozzle_badge);
-        dc.DrawText(m_nozzle_badge, o.x + (d - ts.x) / 2, o.y + (d - ts.y) / 2);
+        dc.DrawText(m_nozzle_badge, o.x + (badge_w - badge_ts.x) / 2, o.y + (badge_h - badge_ts.y) / 2);
     }
 }
 

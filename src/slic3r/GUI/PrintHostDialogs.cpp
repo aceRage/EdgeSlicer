@@ -459,6 +459,36 @@ static wxString third_party_slot_tile_label(const PrintHostDevices::Slot& s)
     return from_u8(slot_display_label(third_party_slot_from(s)));
 }
 
+static void append_unique_mapping_lines(wxString& out, const wxString& block)
+{
+    size_t start = 0;
+    while (start <= block.size()) {
+        const size_t     nl   = block.find('\n', start);
+        const wxString   line = (nl == wxString::npos) ? block.Mid(start) : block.Mid(start, nl - start);
+        if (!line.IsEmpty()) {
+            bool seen = false;
+            size_t ostart = 0;
+            while (!seen && ostart <= out.size()) {
+                const size_t onl = out.find('\n', ostart);
+                const wxString existing = (onl == wxString::npos) ? out.Mid(ostart) : out.Mid(ostart, onl - ostart);
+                if (existing == line)
+                    seen = true;
+                if (onl == wxString::npos)
+                    break;
+                ostart = onl + 1;
+            }
+            if (!seen) {
+                if (!out.IsEmpty())
+                    out += "\n";
+                out += line;
+            }
+        }
+        if (nl == wxString::npos)
+            break;
+        start = nl + 1;
+    }
+}
+
 static const char *CONFIG_KEY_PATH  = "printhost_path";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
 static const char* CONFIG_KEY_STORAGE = "printhost_storage";
@@ -814,6 +844,11 @@ const SendPlateFilament* PrintHostSendDialog::plate_filament(int index) const
     return nullptr;
 }
 
+wxString PrintHostSendDialog::mapping_warning() const
+{
+    return wxString();
+}
+
 wxString PrintHostSendDialog::third_party_mismatch_warning() const
 {
     return m_filament_map ? m_filament_map->mismatch_warning() : wxString();
@@ -845,8 +880,9 @@ void PrintHostSendDialog::update_mapping_note()
 {
     if (!m_mapping_note)
         return;
-    const bool has_rows = m_filament_map || !m_mapping_choices.empty();
-    const wxString text = has_rows ? third_party_mismatch_warning() : wxString();
+    wxString text;
+    append_unique_mapping_lines(text, mapping_warning());
+    append_unique_mapping_lines(text, third_party_mismatch_warning());
     const bool     was  = m_mapping_note->IsShown();
     m_mapping_note->SetLabel(text);
     m_mapping_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
@@ -2433,10 +2469,10 @@ int ElegooPrintHostSendDialog::preselect_slot(const SendPlateFilament& f) const
     return ElegooCanvasMapping::recall(m_memory, u, m_device_status.slots);
 }
 
-wxString ElegooPrintHostSendDialog::third_party_mismatch_warning() const
+wxString ElegooPrintHostSendDialog::mapping_warning() const
 {
     if (!m_device_status.canvas)
-        return PrintHostSendDialog::third_party_mismatch_warning();
+        return PrintHostSendDialog::mapping_warning();
     const auto used     = used_filaments();
     const auto warnings = ElegooCanvasMapping::warnings_for(used, mapping_choice_positions(), m_device_status.slots);
     wxString   text;
@@ -2469,8 +2505,6 @@ wxString ElegooPrintHostSendDialog::third_party_mismatch_warning() const
             break;
         }
     }
-    if (const wxString extra = PrintHostSendDialog::third_party_mismatch_warning(); !extra.IsEmpty())
-        add(extra);
     return text;
 }
 
