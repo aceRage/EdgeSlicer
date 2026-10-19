@@ -25,6 +25,8 @@ class wxDataViewListCtrl;
 class wxFlexGridSizer;
 class wxStaticText;
 class wxWrapSizer;
+class wxBoxSizer;
+class wxCheckBox;
 
 namespace Slic3r {
 
@@ -67,6 +69,14 @@ public:
     // "0:1,1:2" - the plate's filament 0 goes in slot 1, filament 1 in slot 2. Empty when nothing
     // was mapped, which is every host that reports no slots.
     std::string filament_mapping() const;
+    // ---- QIDI printers (PrintHostJob::qidi_start_script / qidi_leveling_script / qidi_timelapse) ----
+    //
+    // QIDIStudio's print options for the picked device - Box, bed leveling, timelapse, polar
+    // cooler - shown when it answered as QIDI firmware, remembered between sends. The scripts are
+    // empty, and the timelapse -1, for every other printer.
+    std::string qidi_start_script() const;
+    std::string qidi_leveling_script() const;
+    int         qidi_timelapse() const;
 
     // ---- "unload filaments when the print ends" (Snapmaker tool changers) ----
     //
@@ -92,6 +102,14 @@ protected:
     // cursor and a short timeout - the same shape as the devices dialog's Test button.
     void refresh_device_status();
     void rebuild_mapping_rows();
+    // The picked QIDI printer said it is printing or paused: Upload only, no start.
+    bool print_blocked() const;
+    // "Upload and Print" follows print_blocked(). Safe before the buttons exist.
+    void update_print_button();
+    // The QIDI options for the picked device, from what it said. Called with the mapping rows.
+    void rebuild_qidi_options();
+    // "As sliced" and greyed out while the QIDI Box is switched off: nothing is fed from it.
+    void update_mapping_enabled();
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
@@ -119,6 +137,13 @@ protected:
     wxFlexGridSizer*                      m_mapping_sizer { nullptr };
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
+    // QIDI printers: QIDIStudio's print options, null where the device does not have them.
+    wxWindow*                             m_qidi_panel { nullptr };
+    wxBoxSizer*                           m_qidi_sizer { nullptr };
+    wxCheckBox*                           m_qidi_use_box { nullptr };
+    wxCheckBox*                           m_qidi_leveling { nullptr };
+    wxCheckBox*                           m_qidi_timelapse { nullptr };
+    wxCheckBox*                           m_qidi_polar_cooler { nullptr };
     wxStaticText*                         m_mapping_note { nullptr };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
