@@ -14,9 +14,11 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <boost/filesystem.hpp>
+#include <boost/system/error_code.hpp>
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -193,30 +195,49 @@ Parity parity(const std::vector<stabilizers::LayerOutline> &outlines, const stab
     return out;
 }
 
-// Restores temporary_dir() when a test leaves the function, including on a failed REQUIRE.
+// Sets temporary_dir() and restores the previous value when the guard dies, including on a failed
+// REQUIRE. use_test_temporary_dir() returns one of these so a load/store cannot leak the global.
 struct ScopedTemporaryDir
 {
-    std::string prev;
-    explicit ScopedTemporaryDir(const std::string &next) : prev(Slic3r::temporary_dir()) { Slic3r::set_temporary_dir(next); }
-    ~ScopedTemporaryDir() { Slic3r::set_temporary_dir(prev); }
+    std::string             prev;
+    boost::filesystem::path path;
+    bool                    active = true;
+
+    explicit ScopedTemporaryDir(boost::filesystem::path next)
+        : prev(Slic3r::temporary_dir()), path(std::move(next))
+    {
+        Slic3r::set_temporary_dir(path.string());
+    }
+    ScopedTemporaryDir(const ScopedTemporaryDir &)            = delete;
+    ScopedTemporaryDir &operator=(const ScopedTemporaryDir &) = delete;
+    ScopedTemporaryDir(ScopedTemporaryDir &&other) noexcept
+        : prev(std::move(other.prev)), path(std::move(other.path)), active(other.active)
+    {
+        other.active = false;
+    }
+    ScopedTemporaryDir &operator=(ScopedTemporaryDir &&) = delete;
+    ~ScopedTemporaryDir()
+    {
+        if (active)
+            Slic3r::set_temporary_dir(prev);
+    }
 };
 
 // The 3MF reader unpacks a project into a backup directory rooted at temporary_dir(). The
 // application sets that at startup; a test that loads or stores a project has to as well, or the
 // reader writes to "/snapmaker_orca_model" (read-only on macOS) and depends on whichever test ran
 // before it.
-boost::filesystem::path use_test_temporary_dir()
+ScopedTemporaryDir use_test_temporary_dir()
 {
     const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
     boost::filesystem::create_directories(tmp_root);
-    Slic3r::set_temporary_dir(tmp_root.string());
-    return tmp_root;
+    return ScopedTemporaryDir(tmp_root);
 }
 
 // Loads the owner's project. The caller checks the model has objects.
 bool load_project(Bench &b, DynamicPrintConfig &config)
 {
-    use_test_temporary_dir();
+    const ScopedTemporaryDir tmp = use_test_temporary_dir();
     const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
     ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
     PlateDataPtrs             plate_data;
@@ -242,8 +263,8 @@ bool slice_project(Bench &b)
 // Stores `model` as a project and loads it back.
 bool round_trip(Model &model, Model &loaded, const char *name)
 {
-    const boost::filesystem::path tmp_root = use_test_temporary_dir();
-    const std::string  file   = (tmp_root / name).string();
+    const ScopedTemporaryDir      tmp  = use_test_temporary_dir();
+    const std::string             file = (tmp.path / name).string();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
 
     StoreParams store_params;
@@ -326,14 +347,25 @@ TEST_CASE("A stabilizer project loads when temporary_dir was never set", "[Stabi
     ScopedTemporaryDir unset("");
     REQUIRE(Slic3r::temporary_dir().empty());
 
-    Model model;
-    const std::string backup = model.get_backup_path();
-    REQUIRE_FALSE(backup.empty());
-    const boost::filesystem::path backup_path(backup);
     // macOS temp_directory_path() ends in '/'; lexically_normal() then yields ".../T/.", which
     // is not a prefix of ".../T/snapmaker_orca_model/...". Strip the trailing separator first.
     boost::filesystem::path sys_tmp = boost::filesystem::temp_directory_path();
     sys_tmp.remove_trailing_separator();
+    // Fallback writes under T/snapmaker_orca_model/...; remove it even if a REQUIRE throws.
+    struct RemoveAll
+    {
+        boost::filesystem::path p;
+        ~RemoveAll()
+        {
+            boost::system::error_code ec;
+            boost::filesystem::remove_all(p, ec);
+        }
+    } leftover{sys_tmp / "snapmaker_orca_model"};
+
+    Model model;
+    const std::string backup = model.get_backup_path();
+    REQUIRE_FALSE(backup.empty());
+    const boost::filesystem::path backup_path(backup);
     const std::string backup_norm = backup_path.lexically_normal().string();
     const std::string tmp_norm    = sys_tmp.lexically_normal().string();
     INFO("backup " << backup << ", sys temp " << sys_tmp.string());

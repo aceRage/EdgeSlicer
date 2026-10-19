@@ -26,6 +26,7 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/convert.hpp>
 #include <boost/nowide/iostream.hpp>
 
 #include "SVG.hpp"
@@ -1159,7 +1160,9 @@ std::string Model::get_backup_path()
         std::string tmp = temporary_dir();
         if (tmp.empty()) {
             try {
-                tmp = boost::filesystem::temp_directory_path().string();
+                // Wide path to UTF-8: path::string() is a narrow ACP conversion on Windows and
+                // breaks a non-ASCII %TEMP%.
+                tmp = boost::nowide::narrow(boost::filesystem::temp_directory_path().wstring());
             } catch (const std::exception &ex) {
                 BOOST_LOG_TRIVIAL(error) << "temporary_dir unset and system temp unavailable: " << ex.what();
                 return backup_path;
