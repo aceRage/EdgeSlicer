@@ -387,6 +387,16 @@ inline std::string color_match_id(int filament_index)
     return "T" + std::to_string(filament_index / 4 + 1) + std::string(1, static_cast<char>('A' + (filament_index % 4)));
 }
 
+// Tab-separated dialog / extendedInfo value. Tests and the send dialog share this
+// so the id is never rebuilt beside the helper that produces it.
+inline std::string color_match_value(int filament_index, const std::string &type, const std::string &color, int box_id, int material_id)
+{
+    const std::string id = color_match_id(filament_index);
+    if (id.empty())
+        return {};
+    return id + "\t" + type + "\t" + color + "\t" + std::to_string(box_id) + "\t" + std::to_string(material_id);
+}
+
 inline nlohmann::json op_gcode_file_cmd(const std::string &gcode_path, int enable_self_test)
 {
     return nlohmann::json{{"method", "set"},
