@@ -10,6 +10,7 @@
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
+#include "slic3r/Utils/AnycubicPrintHost.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -721,4 +722,126 @@ TEST_CASE("PrintHost: get_err_code_from_body does not throw on malformed JSON", 
     // A successful Duet connect often has no err field; that is success (0), not unknown (-1).
     CHECK(PrintHost::get_err_code_from_body(R"({})") == 0);
     REQUIRE_NOTHROW(PrintHost::get_err_code_from_body("<html>404</html>"));
+}
+
+TEST_CASE("Anycubic: stock OctoPrint and Rinkhals Moonraker host helpers", "[PrintHost][Anycubic]")
+{
+    CHECK(is_anycubic_printer("Anycubic Kobra 3"));
+    CHECK(is_anycubic_printer("Anycubic Kobra S1"));
+    CHECK(is_anycubic_printer(" anycubic kobra 3 max "));
+    CHECK_FALSE(is_anycubic_printer("Voron 2.4"));
+    CHECK_FALSE(is_anycubic_printer("Elegoo Centauri Carbon"));
+    CHECK_FALSE(is_anycubic_printer(""));
+
+    CHECK(anycubic_default_port("octoprint") == 80);
+    CHECK(anycubic_default_port("moonraker") == 7125);
+    CHECK(anycubic_default_port("elegoolink") == 0);
+
+    CHECK_FALSE(print_host_has_explicit_port("192.168.1.10"));
+    CHECK_FALSE(print_host_has_explicit_port("http://192.168.1.10"));
+    CHECK_FALSE(print_host_has_explicit_port("http://192.168.1.10/"));
+    CHECK(print_host_has_explicit_port("192.168.1.10:7125"));
+    CHECK(print_host_has_explicit_port("http://192.168.1.10:80"));
+    CHECK(print_host_has_explicit_port("http://user:pass@192.168.1.10:7125/path"));
+    CHECK_FALSE(print_host_has_explicit_port("http://user:pass@192.168.1.10/path"));
+    CHECK(print_host_has_explicit_port("[fe80::1]:7125"));
+    CHECK_FALSE(print_host_has_explicit_port("[fe80::1]"));
+
+    CHECK(print_host_with_port("192.168.1.10", 7125) == "192.168.1.10:7125");
+    CHECK(print_host_with_port("http://192.168.1.10/", 7125) == "http://192.168.1.10:7125/");
+    CHECK(print_host_with_port("[fe80::1]", 7125) == "[fe80::1]:7125");
+    CHECK(print_host_with_port("192.168.1.10:80", 7125) == "192.168.1.10:80");
+    CHECK(print_host_with_port("", 7125) == "");
+
+    SECTION("default port only for Anycubic + moonraker, never for others")
+    {
+        CHECK(anycubic_apply_default_port("192.168.1.10", "moonraker", "Anycubic Kobra 3") == "192.168.1.10:7125");
+        CHECK(anycubic_apply_default_port("192.168.1.10", "octoprint", "Anycubic Kobra 3") == "192.168.1.10");
+        CHECK(anycubic_apply_default_port("192.168.1.10:80", "moonraker", "Anycubic Kobra S1") == "192.168.1.10:80");
+        CHECK(anycubic_apply_default_port("192.168.1.10", "moonraker", "Voron 2.4") == "192.168.1.10");
+        CHECK(anycubic_apply_default_port("http://kobra.local", "moonraker", "Anycubic Kobra 3") == "http://kobra.local:7125");
+    }
+
+    CHECK(should_send_api_key("abc"));
+    CHECK_FALSE(should_send_api_key(""));
+    CHECK_FALSE(should_send_api_key("  "));
+
+    CHECK(anycubic_prefer_start_print("Anycubic Kobra S1"));
+    CHECK_FALSE(anycubic_prefer_start_print("Snapmaker U1"));
+
+    SECTION("version JSON: stock, Moonraker compat, result envelope, Anycubic text")
+    {
+        const auto stock = parse_octoprint_compat_version(R"({"api":"0.1","server":"1.1.0","text":"OctoPrint 1.1.0"})", true);
+        CHECK(stock.ok);
+        CHECK(stock.api == "0.1");
+
+        const auto moon = parse_octoprint_compat_version(R"({"api":"0.1","text":"OctoPrint compatible"})", true);
+        CHECK(moon.ok);
+
+        const auto wrapped = parse_octoprint_compat_version(R"({"result":{"api":"0.1","text":"OctoPrint 1.1.0"}})", true);
+        CHECK(wrapped.ok);
+
+        const auto branded = parse_octoprint_compat_version(R"({"api":"0.1","text":"Anycubic Orca compatible"})", true);
+        CHECK(branded.ok);
+
+        const auto empty_any = parse_octoprint_compat_version("", true);
+        CHECK(empty_any.ok);
+        const auto empty_other = parse_octoprint_compat_version("", false);
+        CHECK_FALSE(empty_other.ok);
+
+        const auto html = parse_octoprint_compat_version("<!DOCTYPE html><html><body>Rinkhals</body></html>", true);
+        CHECK_FALSE(html.ok);
+
+        const auto mismatch = parse_octoprint_compat_version(R"({"api":"0.1","text":"PrusaLink 0.7"})", false);
+        CHECK_FALSE(mismatch.ok);
+
+        const auto missing_api = parse_octoprint_compat_version(R"({"hello":true})", false);
+        CHECK_FALSE(missing_api.ok);
+        const auto missing_api_any = parse_octoprint_compat_version(R"({"hello":true})", true);
+        CHECK(missing_api_any.ok);
+    }
+
+    CHECK(looks_like_http_portal(401, ""));
+    CHECK(looks_like_http_portal(200, "<html><title>Rinkhals</title></html>"));
+    CHECK_FALSE(looks_like_http_portal(200, R"({"api":"0.1"})"));
+
+    CHECK(anycubic_upload_reply_ok(200, R"({"done":true})"));
+    CHECK(anycubic_upload_reply_ok(201, ""));
+    CHECK_FALSE(anycubic_upload_reply_ok(401, "Unauthorized"));
+    CHECK_FALSE(anycubic_upload_reply_ok(200, "<html>login</html>"));
+    CHECK_FALSE(anycubic_upload_reply_ok(200, R"({"error":{"message":"nope"}})"));
+    CHECK_FALSE(anycubic_upload_reply_ok(200, R"({"result":{"error":{"message":"nope"}}}"));
+
+    CHECK(std::string(anycubic_connection_hint()).find("7125") != std::string::npos);
+    CHECK(std::string(anycubic_upload_only_warning()).find("Checking files") != std::string::npos);
+
+    SECTION("apply_to_config writes :7125 only for Anycubic moonraker")
+    {
+        DynamicPrintConfig config;
+        Device             d;
+        d.address       = "192.168.1.10";
+        d.host_type     = "moonraker";
+        d.printer_model = "Anycubic Kobra 3";
+        apply_to_config(d, config);
+        CHECK(config.opt_string("print_host") == "192.168.1.10:7125");
+
+        DynamicPrintConfig voron;
+        d.printer_model = "Voron 2.4";
+        apply_to_config(d, voron);
+        CHECK(voron.opt_string("print_host") == "192.168.1.10");
+
+        DynamicPrintConfig stock;
+        d.host_type     = "octoprint";
+        d.printer_model = "Anycubic Kobra S1";
+        apply_to_config(d, stock);
+        CHECK(stock.opt_string("print_host") == "192.168.1.10");
+
+        DynamicPrintConfig from_preset;
+        from_preset.opt_string("printer_model", true) = "Anycubic Kobra 3";
+        Device orphan;
+        orphan.address   = "10.0.0.5";
+        orphan.host_type = "moonraker";
+        apply_to_config(orphan, from_preset);
+        CHECK(from_preset.opt_string("print_host") == "10.0.0.5:7125");
+    }
 }

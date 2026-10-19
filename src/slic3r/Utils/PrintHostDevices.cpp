@@ -1,4 +1,5 @@
 #include "PrintHostDevices.hpp"
+#include "AnycubicPrintHost.hpp"
 
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -512,7 +513,13 @@ void apply_to_config(const Device& d, DynamicPrintConfig& config)
 {
     // create = true: a config that does not carry the host options yet gets them, so this works on a
     // bare DynamicPrintConfig as well as on a printer preset's.
-    config.opt_string("print_host", true)         = d.address;
+    // Anycubic + native Moonraker (#613 key "moonraker") with no port → :7125. Stock octoprint
+    // stays on implicit 80. Non-Anycubic addresses are unchanged. Fall back to the preset's
+    // printer_model when the device row predates that field.
+    std::string model = d.printer_model;
+    if (model.empty() && config.has("printer_model"))
+        model = config.opt_string("printer_model");
+    config.opt_string("print_host", true) = anycubic_apply_default_port(d.address, d.host_type, model);
     config.opt_string("printhost_apikey", true)   = d.apikey;
     config.opt_string("printhost_user", true)     = d.user;
     config.opt_string("printhost_password", true) = d.password;

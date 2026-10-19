@@ -88,6 +88,7 @@ These areas are custom to EdgeSlicer (or heavily extended here). Each page follo
 | [Compare Slices](Compare-Slices) | Diff two slices: settings, time, filament, toolpaths |
 | [Stream tab](Stream-tab) | Multi-camera wall (Snapmaker, Moonraker, Bambu LAN, RTSP/ONVIF) |
 | [Devices list](Devices) | Multiple printers of the same model as separate entries |
+| [Anycubic network send](Anycubic-network) | Stock OctoPrint on port 80; Rinkhals Moonraker on 7125 |
 | [Bambu Lab in EdgeSlicer](Bambu-Lab) | Profiles, LAN send, dual-nozzle, mixed nozzles, status |
 
 ### Getting started

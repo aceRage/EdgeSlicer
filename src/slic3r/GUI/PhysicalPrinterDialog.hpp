@@ -36,6 +36,7 @@ class PhysicalPrinterDialog : public DPIDialog
     Button*     m_printhost_client_cert_browse_btn  {nullptr};
     Button*     m_printhost_port_browse_btn         {nullptr};
     Button*     m_printhost_devices_btn             {nullptr};
+    wxStaticText* m_anycubic_hint                   {nullptr};
 
     RoundedRectangle*   m_input_area                        {nullptr};
     wxStaticText*       m_valid_label                       {nullptr};

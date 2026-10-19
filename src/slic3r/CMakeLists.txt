@@ -1045,6 +1045,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/Obico.hpp
     Utils/OctoPrint.cpp
     Utils/OctoPrint.hpp
+    Utils/AnycubicPrintHost.cpp
+    Utils/AnycubicPrintHost.hpp
     Utils/PresetUpdater.cpp
     Utils/PresetUpdater.hpp
     Utils/PrintHost.cpp

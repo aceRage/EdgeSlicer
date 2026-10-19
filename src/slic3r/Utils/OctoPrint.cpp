@@ -7,6 +7,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
+#include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -21,6 +22,7 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/format.hpp"
 #include "Http.hpp"
+#include "AnycubicPrintHost.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "Bonjour.hpp"
 #include "slic3r/GUI/BonjourDialog.hpp"
@@ -168,6 +170,7 @@ OctoPrint::OctoPrint(DynamicPrintConfig *config) :
     m_host(config->opt_string("print_host")),
     m_apikey(config->opt_string("printhost_apikey")),
     m_cafile(config->opt_string("printhost_cafile")),
+    m_printer_model(config->has("printer_model") ? config->opt_string("printer_model") : std::string()),
     m_ssl_revoke_best_effort(config->opt_bool("printhost_ssl_ignore_revoke"))
 {}
 
@@ -205,7 +208,12 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
         })
         .on_complete([&, this](std::string body, unsigned) {
             BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Got version: %2%") % name % body;
-
+            const bool anycubic = is_anycubic_printer(m_printer_model);
+            const AnycubicOctoVersion parsed = parse_octoprint_compat_version(body, anycubic);
+            if (parsed.ok) {
+                res = true;
+                return;
+            }
             try {
                 std::stringstream ss(body);
                 pt::ptree ptree;
@@ -224,7 +232,7 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
             }
             catch (const std::exception&) {
                 res = false;
-                msg = "Could not parse server response.";
+                msg = anycubic && !parsed.error.empty() ? GUI::from_u8(parsed.error) : wxString("Could not parse server response.");
             }
         })
         .ssl_revoke_best_effort(m_ssl_revoke_best_effort)
@@ -239,68 +247,112 @@ bool OctoPrint::test(wxString& msg) const
     // Since the request is performed synchronously here,
     // it is ok to refer to `msg` from within the closure
     const char *name = get_name();
+    const bool  anycubic = is_anycubic_printer(m_printer_model);
+    m_host_override.clear();
 
-    bool res = true;
-    auto url = make_url("api/version");
+    struct Probe {
+        bool        ok { false };
+        unsigned    status { 0 };
+        std::string body;
+        wxString    msg;
+        std::string resolved_ip;
+    };
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
-    // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
-    auto http = Http::get(std::move(url));
-    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
-    set_auth(http);
-    http.on_error([&](std::string body, std::string error, unsigned status) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
-            res = false;
-            msg = format_error(body, error, status);
-        })
-        .on_complete([&, this](std::string body, unsigned) {
-            BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: Got version: %2%") % name % body;
-
-            try {
-                std::stringstream ss(body);
-                pt::ptree ptree;
-                pt::read_json(ss, ptree);
-
-                if (! ptree.get_optional<std::string>("api")) {
-                    res = false;
+    auto probe = [&]() -> Probe {
+        Probe p;
+        auto  url = make_url("api/version");
+        BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
+        auto http = Http::get(std::move(url));
+        apply_tls(http);
+        set_auth(http);
+        http.on_error([&](std::string body, std::string error, unsigned status) {
+                BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
+                p.status = status;
+                p.body   = std::move(body);
+                p.msg    = format_error(p.body, error, status);
+            })
+            .on_complete([&](std::string body, unsigned status) {
+                BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: Got version: %2%") % name % body;
+                p.status = status;
+                p.body   = std::move(body);
+                const AnycubicOctoVersion parsed = parse_octoprint_compat_version(p.body, anycubic);
+                if (parsed.ok) {
+                    p.ok = true;
                     return;
                 }
-
-                const auto text = ptree.get_optional<std::string>("text");
-                res = validate_version_text(text);
-                if (! res) {
-                    msg = GUI::format_wxstr(_L("Mismatched type of print host: %s"), (text ? *text : name));
+                // Non-Anycubic: keep the old ptree shape so a missing "api" still fails the same way.
+                if (!anycubic) {
+                    try {
+                        std::stringstream ss(p.body);
+                        pt::ptree         ptree;
+                        pt::read_json(ss, ptree);
+                        if (!ptree.get_optional<std::string>("api"))
+                            return;
+                        const auto text = ptree.get_optional<std::string>("text");
+                        p.ok = validate_version_text(text);
+                        if (!p.ok)
+                            p.msg = GUI::format_wxstr(_L("Mismatched type of print host: %s"), (text ? *text : name));
+                    } catch (const std::exception &) {
+                        p.msg = "Could not parse server response";
+                    }
+                    return;
                 }
-            }
-            catch (const std::exception &) {
-                res = false;
-                msg = "Could not parse server response";
-            }
-        })
+                p.msg = GUI::from_u8(parsed.error);
+            })
 #ifdef WIN32
             .ssl_revoke_best_effort(m_ssl_revoke_best_effort)
             .on_ip_resolve([&](std::string address) {
-            // Workaround for Windows 10/11 mDNS resolve issue, where two mDNS resolves in succession fail.
-            // Remember resolved address to be reused at successive REST API call.
-            msg = GUI::from_u8(address);
-        })
-#endif // WIN32
-        .perform_sync();
+                p.resolved_ip = std::move(address);
+            })
+#endif
+            .perform_sync();
+        return p;
+    };
 
-    return res;
+    Probe p = probe();
+#ifdef WIN32
+    if (p.ok && !p.resolved_ip.empty())
+        msg = GUI::from_u8(p.resolved_ip);
+#endif
+    if (p.ok)
+        return true;
+
+    // Rinkhals (PR #68): port 80 is the web portal. Retry Moonraker :7125 only when the first
+    // answer looked like that portal — never on a timeout, and never for non-Anycubic hosts.
+    if (anycubic && !print_host_has_explicit_port(m_host) && looks_like_http_portal(p.status, p.body)) {
+        m_host_override = print_host_with_port(m_host, 7125);
+        Probe retry = probe();
+        if (retry.ok) {
+#ifdef WIN32
+            if (!retry.resolved_ip.empty())
+                msg = GUI::from_u8(retry.resolved_ip);
+#endif
+            return true;
+        }
+        m_host_override.clear();
+        p = std::move(retry);
+    }
+
+    msg = p.msg;
+    return false;
 }
 
 wxString OctoPrint::get_test_ok_msg () const
 {
+    if (is_anycubic_printer(m_printer_model) && !m_host_override.empty())
+        return _(L("Connected on port 7125 (Rinkhals Moonraker). Save the hostname as http://IP:7125 so Test and Upload keep using it."));
     return _(L("Connection to OctoPrint is working correctly."));
 }
 
 wxString OctoPrint::get_test_failed_msg (wxString &msg) const
 {
+    wxString extra = _L("Note: OctoPrint version 1.1.0 or higher is required.");
+    if (is_anycubic_printer(m_printer_model))
+        extra = _L("If this printer runs Rinkhals, put :7125 on the hostname (Moonraker). Port 80 is the Rinkhals web portal.");
     return GUI::format_wxstr("%s: %s\n\n%s"
         , _L("Could not connect to OctoPrint")
         , msg
-        , _L("Note: OctoPrint version 1.1.0 or higher is required."));
+        , extra);
 }
 
 bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn) const
@@ -308,6 +360,11 @@ bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Erro
 #ifndef WIN32
     return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
 #else
+    // Anycubic: the Unix test() path retries Moonraker :7125 when port 80 is the Rinkhals portal.
+    // Skip the Windows mDNS-resolve path so that fallback still runs (users type an IP anyway).
+    if (is_anycubic_printer(m_printer_model))
+        return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
+
     std::string host = get_host_from_url(m_host);
 
     // decide what to do based on m_host - resolve hostname or upload to ip
@@ -395,7 +452,7 @@ bool OctoPrint::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
         % upload_parent_path.string()
         % (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false");
 
-    std::string host = get_host_from_url(m_host);
+    std::string host = get_host_from_url(host_for_url());
     auto http = Http::post(url);//std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
@@ -411,6 +468,10 @@ bool OctoPrint::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
   
         .on_complete([&](std::string body, unsigned status) {
             BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: File uploaded: HTTP %2%: %3%") % name % status % body;
+            if (is_anycubic_printer(m_printer_model) && !anycubic_upload_reply_ok(status, body)) {
+                error_fn(format_error(body, "upload rejected", status));
+                result = false;
+            }
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file to %2%: %3%, HTTP %4%, body: `%5%`") % name % url % error % status % body;
@@ -490,7 +551,7 @@ bool OctoPrint::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
     // Not changing the host would work on the most cases (where there is 1 service on 1 hostname) but would break when f.e. reverse proxy is used (issue #9734).
     // Also when allow_ip_resolve = 0, this is not needed, but it should not break anything if it stays.
     // https://www.rfc-editor.org/rfc/rfc7230#section-5.4
-    std::string host = get_host_from_url(m_host);
+    std::string host = get_host_from_url(host_for_url());
     http.header("Host", host);
 #endif // _WIN32
     set_auth(http);
@@ -499,6 +560,10 @@ bool OctoPrint::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
         .form_add_file("file", upload_data.source_path.string(), upload_filename.string())
         .on_complete([&](std::string body, unsigned status) {
             BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: File uploaded: HTTP %2%: %3%") % name % status % body;
+            if (is_anycubic_printer(m_printer_model) && !anycubic_upload_reply_ok(status, body)) {
+                error_fn(format_error(body, "upload rejected", status));
+                res = false;
+            }
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading file: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
@@ -523,28 +588,42 @@ bool OctoPrint::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
 
 bool OctoPrint::validate_version_text(const boost::optional<std::string> &version_text) const
 {
-    return version_text ? boost::starts_with(*version_text, "OctoPrint") : true;
+    if (!version_text || version_text->empty() || boost::starts_with(*version_text, "OctoPrint"))
+        return true;
+    if (!is_anycubic_printer(m_printer_model))
+        return false;
+    return boost::istarts_with(*version_text, "Moonraker") || boost::istarts_with(*version_text, "Anycubic") ||
+           boost::istarts_with(*version_text, "Kobra");
 }
 
 void OctoPrint::set_auth(Http &http) const
 {
-    http.header("X-Api-Key", m_apikey);
+    // Empty X-Api-Key confuses some OctoPrint-compatible shims (stock Anycubic, Moonraker).
+    // Same idea as #613: only send the header when the user set a key.
+    if (should_send_api_key(m_apikey))
+        http.header("X-Api-Key", m_apikey);
 
     if (!m_cafile.empty()) {
         http.ca_file(m_cafile);
     }
 }
 
+std::string OctoPrint::host_for_url() const
+{
+    return m_host_override.empty() ? m_host : m_host_override;
+}
+
 std::string OctoPrint::make_url(const std::string &path) const
 {
-    if (m_host.find("http://") == 0 || m_host.find("https://") == 0) {
-        if (m_host.back() == '/') {
-            return (boost::format("%1%%2%") % m_host % path).str();
+    const std::string host = host_for_url();
+    if (host.find("http://") == 0 || host.find("https://") == 0) {
+        if (host.back() == '/') {
+            return (boost::format("%1%%2%") % host % path).str();
         } else {
-            return (boost::format("%1%/%2%") % m_host % path).str();
+            return (boost::format("%1%/%2%") % host % path).str();
         }
     } else {
-        return (boost::format("http://%1%/%2%") % m_host % path).str();
+        return (boost::format("http://%1%/%2%") % host % path).str();
     }
 }
 

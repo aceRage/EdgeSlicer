@@ -20,6 +20,7 @@
 #include "format.hpp"
 #include "Widgets/Button.hpp"
 #include "../Utils/PrintHost.hpp"
+#include "../Utils/AnycubicPrintHost.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -57,9 +58,10 @@ static wxString host_type_label(const std::string& key)
 class PrintHostDeviceEditDialog : public DPIDialog
 {
 public:
-    PrintHostDeviceEditDialog(wxWindow* parent, const wxString& title, const Device& d)
+    PrintHostDeviceEditDialog(wxWindow* parent, const wxString& title, const Device& d, const std::string& model_key)
         : DPIDialog(parent, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
         , m_device(d)
+        , m_model_key(model_key)
     {
         host_type_choices(m_type_keys, m_type_labels);
 
@@ -103,6 +105,14 @@ public:
 
         auto* top = new wxBoxSizer(wxVERTICAL);
         top->Add(grid, 1, wxEXPAND | wxALL, FromDIP(12));
+        if (is_anycubic_printer(d.printer_model) || is_anycubic_printer(model_key)) {
+            auto* hint = new wxStaticText(this, wxID_ANY,
+                _L("Anycubic: stock firmware uses Host Type Octo/Klipper on port 80 (the printer IP; API key optional). "
+                   "Rinkhals: uploads go to Moonraker on port 7125 (http://IP:7125). Since Rinkhals PR #68 the bare IP is "
+                   "the web portal, not the slicer API. Native LAN mode is Anycubic Slicer Next only."));
+            hint->Wrap(FromDIP(420));
+            top->Add(hint, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+        }
         // The fork's own buttons, not wx's stock ones: same shape as every other dialog here
         // (FileArchiveDialog.cpp:378-410 is the pattern).
         auto* btns = new wxBoxSizer(wxHORIZONTAL);
@@ -143,6 +153,8 @@ public:
         d.user      = into_u8(m_user->GetValue());
         d.password  = into_u8(m_password->GetValue());
         d.serial    = into_u8(m_serial->GetValue());
+        const std::string model = d.printer_model.empty() ? m_model_key : d.printer_model;
+        d.address = anycubic_apply_default_port(d.address, d.host_type, model);
         return d;
     }
 
@@ -160,6 +172,7 @@ private:
     }
 
     Device                   m_device;
+    std::string              m_model_key;
     std::vector<std::string> m_type_keys;
     wxArrayString            m_type_labels;
     wxTextCtrl*              m_alias { nullptr };
@@ -315,7 +328,7 @@ void PrintHostDevicesDialog::on_add()
         seed.host_type     = from.host_type;
         seed.printer_model = from.printer_model;
     }
-    PrintHostDeviceEditDialog dlg(this, _L("Add a device"), seed);
+    PrintHostDeviceEditDialog dlg(this, _L("Add a device"), seed, m_model_key);
     if (dlg.ShowModal() != wxID_OK)
         return;
     Device      d = dlg.device();
@@ -332,7 +345,7 @@ void PrintHostDevicesDialog::on_edit()
     Device d;
     if (!selected(d))
         return;
-    PrintHostDeviceEditDialog dlg(this, _L("Edit the device"), d);
+    PrintHostDeviceEditDialog dlg(this, _L("Edit the device"), d, m_model_key);
     if (dlg.ShowModal() != wxID_OK)
         return;
     Device      edited = dlg.device();

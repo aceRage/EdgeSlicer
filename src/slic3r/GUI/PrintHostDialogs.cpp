@@ -39,6 +39,7 @@
 #include "WebPreprintDialog.hpp"
 #include "../Utils/PrintHostDevices.hpp"
 #include "../Utils/PrintHostDeviceStatus.hpp"
+#include "../Utils/AnycubicPrintHost.hpp"
 #include <wx/choice.h>
 #include <wx/combobox.h>
 #include <wx/panel.h>
@@ -811,9 +812,27 @@ void PrintHostSendDialog::init()
         return true;
     };
 
-    auto* btn_ok = add_button(wxID_OK, true, _L("Upload"));
-    btn_ok->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
+    const bool anycubic_print = is_anycubic_printer(m_model_key) &&
+                                post_actions.has(PrintHostPostUploadAction::StartPrint);
+    if (anycubic_print) {
+        auto* warn = new wxStaticText(this, wxID_ANY,
+            _L("Stock Anycubic firmware can hang on \"Checking files\" after Upload (OrcaSlicer #14349). "
+               "Upload and Print works. Prefer Upload and Print."));
+        warn->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+        content_sizer->Add(warn, 0, wxBOTTOM, VERT_SPACING);
+    }
+
+    auto* btn_ok = add_button(wxID_OK, !anycubic_print, _L("Upload"));
+    btn_ok->Bind(wxEVT_BUTTON, [this, validate_path, anycubic_print](wxCommandEvent&) {
         sentryReportLog(SENTRY_LOG_TRACE, BP_UPLOAD, BP_UPLOAD);
+        if (anycubic_print) {
+            MessageDialog ask(this,
+                _L("Stock Anycubic firmware can hang on \"Checking files\" after Upload (OrcaSlicer #14349). "
+                   "Upload and Print works. Continue with Upload only?"),
+                _L("Upload only"), wxYES_NO | wxICON_WARNING);
+            if (ask.ShowModal() != wxID_YES)
+                return;
+        }
         if (validate_path(txt_filename->GetValue())) {
             post_upload_action = PrintHostPostUploadAction::None;
             EndDialog(wxID_OK);
@@ -832,7 +851,9 @@ void PrintHostSendDialog::init()
     // }
 
     if (post_actions.has(PrintHostPostUploadAction::StartPrint)) {
-        auto* btn_print = add_button(wxID_YES, false, _L("Upload and Print"));
+        auto* btn_print = add_button(wxID_YES, anycubic_print, _L("Upload and Print"));
+        if (anycubic_print)
+            btn_print->SetDefault();
         btn_print->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
             sentryReportLog(SENTRY_LOG_TRACE, BP_UPLOAD_AND_PRINT, BP_UPLOAD_AND_PRINT);
             if (validate_path(txt_filename->GetValue())) {

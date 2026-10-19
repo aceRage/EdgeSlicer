@@ -31,6 +31,8 @@
 #include "PrintHostDialogs.hpp"
 #include "../Utils/ASCIIFolding.hpp"
 #include "../Utils/PrintHost.hpp"
+#include "../Utils/AnycubicPrintHost.hpp"
+#include "../Utils/PrintHostDevices.hpp"
 #include "../Utils/FixModelByWin10.hpp"
 #include "../Utils/Flashforge.hpp"
 #include "../Utils/UndoRedo.hpp"
@@ -390,6 +392,20 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
     m_optgroup->append_single_option_line(option);
 #endif
 
+    Line anycubic_hint{ "", "" };
+    anycubic_hint.full_width = 1;
+    anycubic_hint.widget = [this](wxWindow* parent) {
+        m_anycubic_hint = new wxStaticText(parent, wxID_ANY,
+            _L("Anycubic: stock firmware uses Host Type Octo/Klipper on port 80 (the printer IP; API key optional). "
+               "Rinkhals: uploads go to Moonraker on port 7125 (http://IP:7125). Since Rinkhals PR #68 the bare IP is "
+               "the web portal, not the slicer API. Native LAN mode is Anycubic Slicer Next only."));
+        m_anycubic_hint->Wrap(FromDIP(420));
+        auto sizer = new wxBoxSizer(wxHORIZONTAL);
+        sizer->Add(m_anycubic_hint, 1, wxEXPAND | wxALIGN_LEFT);
+        return sizer;
+    };
+    m_optgroup->append_line(anycubic_hint);
+
     m_optgroup->activate();
 
     Field* printhost_field = m_optgroup->get_field("print_host");
@@ -698,6 +714,9 @@ void PhysicalPrinterDialog::update(bool printer_change)
     m_optgroup->show_field("printhost_port", supports_multiple_printers);
     m_printhost_port_browse_btn->Show(supports_multiple_printers);
 
+    if (m_anycubic_hint)
+        m_anycubic_hint->Show(tech == ptFFF && is_anycubic_printer(m_config->opt_string("printer_model")));
+
     update_preset_input();
 
     update_printhost_buttons();
@@ -779,6 +798,12 @@ void PhysicalPrinterDialog::on_dpi_changed(const wxRect& suggested_rect)
 
 void PhysicalPrinterDialog::OnOK(wxEvent& event)
 {
+    if (m_config) {
+        const auto        opt = m_config->option<ConfigOptionEnum<PrintHostType>>("host_type");
+        const std::string ht  = opt ? PrintHostDevices::host_type_key(opt->value) : std::string("octoprint");
+        m_config->opt_string("print_host") =
+            anycubic_apply_default_port(m_config->opt_string("print_host"), ht, m_config->opt_string("printer_model"));
+    }
     wxGetApp().get_tab(Preset::TYPE_PRINTER)->save_preset("", false, false, true, m_preset_name );
     event.Skip();
 }

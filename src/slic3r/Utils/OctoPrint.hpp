@@ -44,9 +44,14 @@ protected:
     std::string m_host;
     std::string m_apikey;
     std::string m_cafile;
+    std::string m_printer_model;
     bool        m_ssl_revoke_best_effort;
+    // Set when Test Connection on an Anycubic box without a port fell through to Moonraker :7125
+    // (Rinkhals portal on :80). Upload on the same instance follows it.
+    mutable std::string m_host_override;
 
     virtual void set_auth(Http &http) const;
+    std::string host_for_url() const;
     std::string make_url(const std::string &path) const;
 
 #ifdef WIN32
