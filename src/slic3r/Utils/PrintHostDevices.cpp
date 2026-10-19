@@ -513,9 +513,9 @@ void apply_to_config(const Device& d, DynamicPrintConfig& config)
 {
     // create = true: a config that does not carry the host options yet gets them, so this works on a
     // bare DynamicPrintConfig as well as on a printer preset's.
-    // Anycubic + native Moonraker (#613 key "moonraker") with no port → :7125. Stock octoprint
-    // stays on implicit 80. Non-Anycubic addresses are unchanged. Fall back to the preset's
-    // printer_model when the device row predates that field.
+    // anycubic_apply_default_port is a no-op on save (F5): a bare IP + moonraker is also
+    // Klipper-behind-nginx on :80. Fall back to the preset's printer_model when the device
+    // row predates that field.
     std::string model = d.printer_model;
     if (model.empty() && config.has("printer_model"))
         model = config.opt_string("printer_model");

@@ -733,6 +733,29 @@ TEST_CASE("Anycubic: stock OctoPrint and Rinkhals Moonraker host helpers", "[Pri
     CHECK_FALSE(is_anycubic_printer("Elegoo Centauri Carbon"));
     CHECK_FALSE(is_anycubic_printer(""));
 
+    SECTION("stock-network family: Kobra 3 / S1 / X / 4, not Pi OctoPrint models")
+    {
+        CHECK(is_anycubic_stock_network_printer("Anycubic Kobra 3"));
+        CHECK(is_anycubic_stock_network_printer("Anycubic Kobra 3 Max"));
+        CHECK(is_anycubic_stock_network_printer("Anycubic Kobra 3 V2"));
+        CHECK(is_anycubic_stock_network_printer("Anycubic Kobra S1"));
+        CHECK(is_anycubic_stock_network_printer("Anycubic Kobra S1 Max"));
+        CHECK(is_anycubic_stock_network_printer("Anycubic Kobra X"));
+        CHECK(is_anycubic_stock_network_printer("Anycubic Kobra 4"));
+        CHECK(is_anycubic_stock_network_printer(" anycubic kobra 3 max "));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic Kobra"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic Kobra 2"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic Kobra Max"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic Kobra Plus"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic Kobra Neo"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic i3 Mega"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic i3 Mega S"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic Chiron"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Anycubic Vyper"));
+        CHECK_FALSE(is_anycubic_stock_network_printer("Voron 2.4"));
+        CHECK_FALSE(is_anycubic_stock_network_printer(""));
+    }
+
     CHECK(anycubic_default_port("octoprint") == 80);
     CHECK(anycubic_default_port("moonraker") == 7125);
     CHECK(anycubic_default_port("elegoolink") == 0);
@@ -753,13 +776,13 @@ TEST_CASE("Anycubic: stock OctoPrint and Rinkhals Moonraker host helpers", "[Pri
     CHECK(print_host_with_port("192.168.1.10:80", 7125) == "192.168.1.10:80");
     CHECK(print_host_with_port("", 7125) == "");
 
-    SECTION("default port only for Anycubic + moonraker, never for others")
+    SECTION("apply_default_port never rewrites on save (F5)")
     {
-        CHECK(anycubic_apply_default_port("192.168.1.10", "moonraker", "Anycubic Kobra 3") == "192.168.1.10:7125");
+        CHECK(anycubic_apply_default_port("192.168.1.10", "moonraker", "Anycubic Kobra 3") == "192.168.1.10");
         CHECK(anycubic_apply_default_port("192.168.1.10", "octoprint", "Anycubic Kobra 3") == "192.168.1.10");
         CHECK(anycubic_apply_default_port("192.168.1.10:80", "moonraker", "Anycubic Kobra S1") == "192.168.1.10:80");
         CHECK(anycubic_apply_default_port("192.168.1.10", "moonraker", "Voron 2.4") == "192.168.1.10");
-        CHECK(anycubic_apply_default_port("http://kobra.local", "moonraker", "Anycubic Kobra 3") == "http://kobra.local:7125");
+        CHECK(anycubic_apply_default_port("http://kobra.local", "moonraker", "Anycubic Kobra 3") == "http://kobra.local");
     }
 
     CHECK(should_send_api_key("abc"));
@@ -767,7 +790,18 @@ TEST_CASE("Anycubic: stock OctoPrint and Rinkhals Moonraker host helpers", "[Pri
     CHECK_FALSE(should_send_api_key("  "));
 
     CHECK(anycubic_prefer_start_print("Anycubic Kobra S1"));
+    CHECK(anycubic_prefer_start_print("Anycubic Kobra 3"));
+    CHECK_FALSE(anycubic_prefer_start_print("Anycubic Kobra"));
+    CHECK_FALSE(anycubic_prefer_start_print("Anycubic Vyper"));
+    CHECK_FALSE(anycubic_prefer_start_print("Anycubic i3 Mega"));
+    CHECK_FALSE(anycubic_prefer_start_print("Anycubic Chiron"));
     CHECK_FALSE(anycubic_prefer_start_print("Snapmaker U1"));
+
+    CHECK(anycubic_is_moonraker_host("moonraker", "192.168.1.10"));
+    CHECK(anycubic_is_moonraker_host("octoprint", "192.168.1.10:7125"));
+    CHECK(anycubic_is_moonraker_host("octoprint", "http://192.168.1.10:7125/"));
+    CHECK_FALSE(anycubic_is_moonraker_host("octoprint", "192.168.1.10"));
+    CHECK_FALSE(anycubic_is_moonraker_host("octoprint", "192.168.1.10:80"));
 
     SECTION("version JSON: stock, Moonraker compat, result envelope, Anycubic text")
     {
@@ -801,21 +835,60 @@ TEST_CASE("Anycubic: stock OctoPrint and Rinkhals Moonraker host helpers", "[Pri
         CHECK(missing_api_any.ok);
     }
 
-    CHECK(looks_like_http_portal(401, ""));
+    SECTION("non-Anycubic still requires root api (ElegooLink must not take the OctoPrint path)")
+    {
+        CHECK_FALSE(parse_octoprint_compat_version(R"({"text":"OctoPrint 1.1.0"})", false).ok);
+        CHECK_FALSE(parse_octoprint_compat_version(R"({"server":"1.1.0"})", false).ok);
+        CHECK_FALSE(parse_octoprint_compat_version(R"({"text":"OctoPrint 1.1.0","server":"1.1.0"})", false).ok);
+        CHECK_FALSE(parse_octoprint_compat_version(R"({"result":{"api":"0.1","text":"OctoPrint 1.1.0"}})", false).ok);
+        CHECK_FALSE(parse_octoprint_compat_version(R"({"api":"0.1","text":"octoprint 1.1.0"})", false).ok);
+        CHECK(parse_octoprint_compat_version(R"({"api":"0.1","text":"OctoPrint 1.1.0"})", false).ok);
+        // Anycubic may still accept the looser shapes.
+        CHECK(parse_octoprint_compat_version(R"({"text":"OctoPrint 1.1.0"})", true).ok);
+        CHECK(parse_octoprint_compat_version(R"({"result":{"api":"0.1","text":"OctoPrint 1.1.0"}})", true).ok);
+        CHECK(parse_octoprint_compat_version(R"({"api":"0.1","text":"octoprint compatible"})", true).ok);
+    }
+
+    CHECK_FALSE(looks_like_http_portal(401, ""));
+    CHECK_FALSE(looks_like_http_portal(403, "Invalid API key"));
+    CHECK_FALSE(looks_like_http_portal(401, R"({"error":"Invalid API key"})"));
     CHECK(looks_like_http_portal(200, "<html><title>Rinkhals</title></html>"));
+    CHECK(looks_like_http_portal(401, "<html><title>Rinkhals login</title></html>"));
+    CHECK(looks_like_http_portal(200, "Rinkhals portal"));
     CHECK_FALSE(looks_like_http_portal(200, R"({"api":"0.1"})"));
+    CHECK_FALSE(looks_like_http_portal(200, R"({"files":{"local":{"name":"rinkhals_test.gcode"}}})"));
+    CHECK_FALSE(looks_like_http_portal(201, R"({"done":true,"name":"rinkhals_test.gcode"})"));
 
     CHECK(anycubic_upload_reply_ok(200, R"({"done":true})"));
     CHECK(anycubic_upload_reply_ok(201, ""));
+    CHECK(anycubic_upload_reply_ok(200, R"({"files":{"local":{"name":"rinkhals_test.gcode"}}})"));
     CHECK_FALSE(anycubic_upload_reply_ok(401, "Unauthorized"));
     CHECK_FALSE(anycubic_upload_reply_ok(200, "<html>login</html>"));
     CHECK_FALSE(anycubic_upload_reply_ok(200, R"({"error":{"message":"nope"}})"));
     CHECK_FALSE(anycubic_upload_reply_ok(200, R"({"result":{"error":{"message":"nope"}}}"));
 
+    SECTION("retry :7125 only on a portal body, not a bare 401/403")
+    {
+        const char *kobra3 = "Anycubic Kobra 3";
+        CHECK(anycubic_should_retry_moonraker_port(kobra3, "192.168.1.10", 200,
+                                                   "<html><title>Rinkhals</title></html>"));
+        CHECK_FALSE(anycubic_should_retry_moonraker_port(kobra3, "192.168.1.10", 403, "Invalid API key"));
+        CHECK_FALSE(anycubic_should_retry_moonraker_port(kobra3, "192.168.1.10", 401, ""));
+        CHECK_FALSE(anycubic_should_retry_moonraker_port(kobra3, "192.168.1.10:80", 200,
+                                                        "<html><title>Rinkhals</title></html>"));
+        CHECK_FALSE(anycubic_should_retry_moonraker_port("Anycubic Vyper", "192.168.1.10", 200,
+                                                        "<html><title>Rinkhals</title></html>"));
+        CHECK_FALSE(anycubic_should_retry_moonraker_port("Elegoo Centauri Carbon", "192.168.1.10", 200,
+                                                        "<html><title>Rinkhals</title></html>"));
+        CHECK_FALSE(anycubic_should_retry_moonraker_port(kobra3, "192.168.1.10", 200,
+                                                        R"({"files":{"name":"rinkhals_test.gcode"}})"));
+    }
+
     CHECK(std::string(anycubic_connection_hint()).find("7125") != std::string::npos);
     CHECK(std::string(anycubic_upload_only_warning()).find("Checking files") != std::string::npos);
+    CHECK(std::string(anycubic_rinkhals_port_hint()).find("7125") != std::string::npos);
 
-    SECTION("apply_to_config writes :7125 only for Anycubic moonraker")
+    SECTION("apply_to_config does not write :7125")
     {
         DynamicPrintConfig config;
         Device             d;
@@ -823,7 +896,7 @@ TEST_CASE("Anycubic: stock OctoPrint and Rinkhals Moonraker host helpers", "[Pri
         d.host_type     = "moonraker";
         d.printer_model = "Anycubic Kobra 3";
         apply_to_config(d, config);
-        CHECK(config.opt_string("print_host") == "192.168.1.10:7125");
+        CHECK(config.opt_string("print_host") == "192.168.1.10");
 
         DynamicPrintConfig voron;
         d.printer_model = "Voron 2.4";
@@ -842,6 +915,6 @@ TEST_CASE("Anycubic: stock OctoPrint and Rinkhals Moonraker host helpers", "[Pri
         orphan.address   = "10.0.0.5";
         orphan.host_type = "moonraker";
         apply_to_config(orphan, from_preset);
-        CHECK(from_preset.opt_string("print_host") == "10.0.0.5:7125");
+        CHECK(from_preset.opt_string("print_host") == "10.0.0.5");
     }
 }

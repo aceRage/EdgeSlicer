@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
+#include <exception>
 
 #include <nlohmann/json.hpp>
 
@@ -25,6 +27,12 @@ std::string lower_copy(std::string s)
     for (char &c : s)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+bool starts_with(const std::string &s, const char *prefix)
+{
+    const std::string p = prefix;
+    return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
 }
 
 bool istarts_with(const std::string &s, const char *prefix)
@@ -98,6 +106,33 @@ bool port_digits(const std::string &s)
     return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
 }
 
+int explicit_port(const std::string &address)
+{
+    std::string auth;
+    size_t      b = 0, e = 0;
+    if (!split_authority(address, auth, b, e) || auth.empty())
+        return 0;
+    std::string digits;
+    if (auth.front() == '[') {
+        const size_t br = auth.find(']');
+        if (br == std::string::npos || br + 1 >= auth.size() || auth[br + 1] != ':')
+            return 0;
+        digits = auth.substr(br + 2);
+    } else {
+        const size_t colon = auth.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= auth.size())
+            return 0;
+        digits = auth.substr(colon + 1);
+    }
+    if (!port_digits(digits))
+        return 0;
+    try {
+        return std::stoi(digits);
+    } catch (const std::exception &) {
+        return 0;
+    }
+}
+
 const nlohmann::json *compat_object(const nlohmann::json &root)
 {
     if (!root.is_object())
@@ -127,19 +162,21 @@ bool version_text_ok(const std::string &text, bool anycubic)
 {
     if (text.empty())
         return true;
-    if (istarts_with(text, "OctoPrint"))
-        return true;
-    if (!anycubic)
+    if (anycubic) {
+        if (istarts_with(text, "OctoPrint"))
+            return true;
+        if (istarts_with(text, "Moonraker"))
+            return true;
+        if (istarts_with(text, "Anycubic"))
+            return true;
+        if (istarts_with(text, "Kobra"))
+            return true;
+        if (icontains(text, "OctoPrint"))
+            return true;
         return false;
-    if (istarts_with(text, "Moonraker"))
-        return true;
-    if (istarts_with(text, "Anycubic"))
-        return true;
-    if (istarts_with(text, "Kobra"))
-        return true;
-    if (icontains(text, "OctoPrint"))
-        return true;
-    return false;
+    }
+    // Non-Anycubic: original OctoPrint::validate_version_text — case-sensitive prefix.
+    return starts_with(text, "OctoPrint");
 }
 
 bool looks_like_html(const std::string &body)
@@ -149,11 +186,46 @@ bool looks_like_html(const std::string &body)
     return head.find("<html") != std::string::npos || head.find("<!doctype") != std::string::npos;
 }
 
+bool looks_like_json(const std::string &body)
+{
+    const std::string t = trimmed(body);
+    if (t.empty())
+        return false;
+    const auto parsed = nlohmann::json::parse(t, nullptr, false);
+    return !parsed.is_discarded();
+}
+
+bool family_match(const std::string &rest, const char *family)
+{
+    const size_t n = std::strlen(family);
+    if (rest.size() < n)
+        return false;
+    if (rest.compare(0, n, family) != 0)
+        return false;
+    return rest.size() == n || !std::isalnum(static_cast<unsigned char>(rest[n]));
+}
+
 } // namespace
 
 bool is_anycubic_printer(const std::string &printer_model)
 {
     return istarts_with(trimmed(printer_model), "Anycubic");
+}
+
+bool is_anycubic_stock_network_printer(const std::string &printer_model)
+{
+    const std::string m = lower_copy(trimmed(printer_model));
+    static const char prefix[] = "anycubic";
+    const size_t      plen     = sizeof(prefix) - 1;
+    if (m.size() < plen || m.compare(0, plen, prefix) != 0)
+        return false;
+    size_t i = plen;
+    while (i < m.size() && std::isspace(static_cast<unsigned char>(m[i])))
+        ++i;
+    const std::string rest = m.substr(i);
+    // Kobra 3 / S1 / X / 4 (and Max / V2 / Combo variants). Not Kobra, Kobra 2, Kobra Max, Vyper, …
+    return family_match(rest, "kobra 3") || family_match(rest, "kobra s1") ||
+           family_match(rest, "kobra x") || family_match(rest, "kobra 4");
 }
 
 int anycubic_default_port(const std::string &host_type_key)
@@ -167,18 +239,7 @@ int anycubic_default_port(const std::string &host_type_key)
 
 bool print_host_has_explicit_port(const std::string &address)
 {
-    std::string auth;
-    size_t      b = 0, e = 0;
-    if (!split_authority(address, auth, b, e) || auth.empty())
-        return false;
-    if (auth.front() == '[') {
-        const size_t br = auth.find(']');
-        return br != std::string::npos && br + 1 < auth.size() && auth[br + 1] == ':';
-    }
-    const size_t colon = auth.rfind(':');
-    if (colon == std::string::npos || colon == 0 || colon + 1 >= auth.size())
-        return false;
-    return port_digits(auth.substr(colon + 1));
+    return explicit_port(address) > 0;
 }
 
 std::string print_host_with_port(const std::string &address, int port)
@@ -197,14 +258,10 @@ std::string anycubic_apply_default_port(const std::string &address,
                                         const std::string &host_type_key,
                                         const std::string &printer_model)
 {
-    if (!is_anycubic_printer(printer_model))
-        return address;
-    // Stock octoprint-compat is already on implicit 80; do not write :80 into saved URLs.
-    if (host_type_key != "moonraker")
-        return address;
-    if (print_host_has_explicit_port(address))
-        return address;
-    return print_host_with_port(address, 7125);
+    // F5: never rewrite on save. See header.
+    (void) host_type_key;
+    (void) printer_model;
+    return address;
 }
 
 bool should_send_api_key(const std::string &apikey)
@@ -233,6 +290,22 @@ AnycubicOctoVersion parse_octoprint_compat_version(const std::string &body, bool
         return out;
     }
 
+    if (!anycubic) {
+        // Strict: root "api" required. Do not unwrap {"result":...}; do not accept text/server only.
+        if (!parsed.contains("api")) {
+            out.error = "missing api field";
+            return out;
+        }
+        out.api  = json_string_or_number(parsed, "api");
+        out.text = json_string_or_number(parsed, "text");
+        if (!version_text_ok(out.text, false)) {
+            out.error = "Mismatched type of print host: " + out.text;
+            return out;
+        }
+        out.ok = true;
+        return out;
+    }
+
     const nlohmann::json *obj = compat_object(parsed);
     if (obj == nullptr) {
         out.error = "Could not parse server response";
@@ -245,17 +318,13 @@ AnycubicOctoVersion parse_octoprint_compat_version(const std::string &body, bool
 
     const bool has_api = obj->contains("api");
     if (!has_api && out.text.empty() && server.empty()) {
-        if (anycubic) {
-            // A JSON object with none of the usual keys is still not HTML; stock firmware has
-            // answered this way on some builds. Accept it so Test Connection is not a false fail.
-            out.ok = true;
-            return out;
-        }
-        out.error = "missing api field";
+        // A JSON object with none of the usual keys is still not HTML; stock firmware has
+        // answered this way on some builds. Accept it so Test Connection is not a false fail.
+        out.ok = true;
         return out;
     }
 
-    if (!version_text_ok(out.text, anycubic)) {
+    if (!version_text_ok(out.text, true)) {
         out.error = "Mismatched type of print host: " + out.text;
         return out;
     }
@@ -265,11 +334,32 @@ AnycubicOctoVersion parse_octoprint_compat_version(const std::string &body, bool
 
 bool looks_like_http_portal(unsigned status, const std::string &body)
 {
-    if (status == 401 || status == 403)
-        return true;
+    (void) status; // a bare 401/403 is Pi OctoPrint "no key", not the Rinkhals portal
     if (looks_like_html(body))
         return true;
+    // JSON (including a 2xx upload naming rinkhals_test.gcode) is never the portal.
+    if (looks_like_json(body))
+        return false;
     return icontains(body.substr(0, std::min<size_t>(body.size(), 1024)), "rinkhals");
+}
+
+bool anycubic_should_retry_moonraker_port(const std::string &printer_model,
+                                          const std::string &address,
+                                          unsigned           status,
+                                          const std::string &body)
+{
+    if (!is_anycubic_stock_network_printer(printer_model))
+        return false;
+    if (print_host_has_explicit_port(address))
+        return false;
+    return looks_like_http_portal(status, body);
+}
+
+bool anycubic_is_moonraker_host(const std::string &host_type_key, const std::string &address)
+{
+    if (host_type_key == "moonraker")
+        return true;
+    return explicit_port(address) == 7125;
 }
 
 bool anycubic_upload_reply_ok(unsigned status, const std::string &body)
@@ -298,7 +388,7 @@ bool anycubic_upload_reply_ok(unsigned status, const std::string &body)
 
 bool anycubic_prefer_start_print(const std::string &printer_model)
 {
-    return is_anycubic_printer(printer_model);
+    return is_anycubic_stock_network_printer(printer_model);
 }
 
 const char *anycubic_connection_hint()

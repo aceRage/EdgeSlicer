@@ -318,8 +318,10 @@ bool OctoPrint::test(wxString& msg) const
         return true;
 
     // Rinkhals (PR #68): port 80 is the web portal. Retry Moonraker :7125 only when the first
-    // answer looked like that portal — never on a timeout, and never for non-Anycubic hosts.
-    if (anycubic && !print_host_has_explicit_port(m_host) && looks_like_http_portal(p.status, p.body)) {
+    // answer looked like that portal — never a bare 401/403 (Pi OctoPrint, no key), never a
+    // timeout, and never for non-stock-network / non-Anycubic hosts. If :7125 is refused, keep
+    // the first error instead of replacing it with connection-refused.
+    if (anycubic_should_retry_moonraker_port(m_printer_model, m_host, p.status, p.body)) {
         m_host_override = print_host_with_port(m_host, 7125);
         Probe retry = probe();
         if (retry.ok) {
@@ -330,7 +332,6 @@ bool OctoPrint::test(wxString& msg) const
             return true;
         }
         m_host_override.clear();
-        p = std::move(retry);
     }
 
     msg = p.msg;
@@ -339,7 +340,7 @@ bool OctoPrint::test(wxString& msg) const
 
 wxString OctoPrint::get_test_ok_msg () const
 {
-    if (is_anycubic_printer(m_printer_model) && !m_host_override.empty())
+    if (is_anycubic_stock_network_printer(m_printer_model) && !m_host_override.empty())
         return _(L("Connected on port 7125 (Rinkhals Moonraker). Save the hostname as http://IP:7125 so Test and Upload keep using it."));
     return _(L("Connection to OctoPrint is working correctly."));
 }
@@ -347,8 +348,8 @@ wxString OctoPrint::get_test_ok_msg () const
 wxString OctoPrint::get_test_failed_msg (wxString &msg) const
 {
     wxString extra = _L("Note: OctoPrint version 1.1.0 or higher is required.");
-    if (is_anycubic_printer(m_printer_model))
-        extra = _L("If this printer runs Rinkhals, put :7125 on the hostname (Moonraker). Port 80 is the Rinkhals web portal.");
+    if (is_anycubic_stock_network_printer(m_printer_model))
+        extra = _L(anycubic_rinkhals_port_hint());
     return GUI::format_wxstr("%s: %s\n\n%s"
         , _L("Could not connect to OctoPrint")
         , msg
@@ -360,9 +361,10 @@ bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Erro
 #ifndef WIN32
     return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
 #else
-    // Anycubic: the Unix test() path retries Moonraker :7125 when port 80 is the Rinkhals portal.
-    // Skip the Windows mDNS-resolve path so that fallback still runs (users type an IP anyway).
-    if (is_anycubic_printer(m_printer_model))
+    // Stock-network Anycubic: the Unix test() path retries Moonraker :7125 when port 80 is the
+    // Rinkhals portal. Skip the Windows mDNS-resolve path so that fallback still runs
+    // (users type an IP anyway). Pi OctoPrint models keep the original resolve path.
+    if (is_anycubic_stock_network_printer(m_printer_model))
         return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
 
     std::string host = get_host_from_url(m_host);

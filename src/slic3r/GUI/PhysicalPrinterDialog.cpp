@@ -395,10 +395,7 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
     Line anycubic_hint{ "", "" };
     anycubic_hint.full_width = 1;
     anycubic_hint.widget = [this](wxWindow* parent) {
-        m_anycubic_hint = new wxStaticText(parent, wxID_ANY,
-            _L("Anycubic: stock firmware uses Host Type Octo/Klipper on port 80 (the printer IP; API key optional). "
-               "Rinkhals: uploads go to Moonraker on port 7125 (http://IP:7125). Since Rinkhals PR #68 the bare IP is "
-               "the web portal, not the slicer API. Native LAN mode is Anycubic Slicer Next only."));
+        m_anycubic_hint = new wxStaticText(parent, wxID_ANY, _L(anycubic_connection_hint()));
         m_anycubic_hint->Wrap(FromDIP(420));
         auto sizer = new wxBoxSizer(wxHORIZONTAL);
         sizer->Add(m_anycubic_hint, 1, wxEXPAND | wxALIGN_LEFT);
@@ -715,7 +712,7 @@ void PhysicalPrinterDialog::update(bool printer_change)
     m_printhost_port_browse_btn->Show(supports_multiple_printers);
 
     if (m_anycubic_hint)
-        m_anycubic_hint->Show(tech == ptFFF && is_anycubic_printer(m_config->opt_string("printer_model")));
+        m_anycubic_hint->Show(tech == ptFFF && is_anycubic_stock_network_printer(m_config->opt_string("printer_model")));
 
     update_preset_input();
 

@@ -812,12 +812,15 @@ void PrintHostSendDialog::init()
         return true;
     };
 
-    const bool anycubic_print = is_anycubic_printer(m_model_key) &&
-                                post_actions.has(PrintHostPostUploadAction::StartPrint);
+    bool rinkhals_or_moonraker = false;
+    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size())
+        rinkhals_or_moonraker = anycubic_is_moonraker_host(m_devices[m_device_sel].host_type,
+                                                          m_devices[m_device_sel].address);
+    const bool anycubic_print = anycubic_prefer_start_print(m_model_key) &&
+                                post_actions.has(PrintHostPostUploadAction::StartPrint) &&
+                                !rinkhals_or_moonraker;
     if (anycubic_print) {
-        auto* warn = new wxStaticText(this, wxID_ANY,
-            _L("Stock Anycubic firmware can hang on \"Checking files\" after Upload (OrcaSlicer #14349). "
-               "Upload and Print works. Prefer Upload and Print."));
+        auto* warn = new wxStaticText(this, wxID_ANY, _L(anycubic_upload_only_warning()));
         warn->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
         content_sizer->Add(warn, 0, wxBOTTOM, VERT_SPACING);
     }
@@ -827,8 +830,7 @@ void PrintHostSendDialog::init()
         sentryReportLog(SENTRY_LOG_TRACE, BP_UPLOAD, BP_UPLOAD);
         if (anycubic_print) {
             MessageDialog ask(this,
-                _L("Stock Anycubic firmware can hang on \"Checking files\" after Upload (OrcaSlicer #14349). "
-                   "Upload and Print works. Continue with Upload only?"),
+                _L(anycubic_upload_only_warning()) + "\n\n" + _L("Continue with Upload only?"),
                 _L("Upload only"), wxYES_NO | wxICON_WARNING);
             if (ask.ShowModal() != wxID_YES)
                 return;

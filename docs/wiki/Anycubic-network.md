@@ -37,11 +37,13 @@ After slicing: **Print** / **Send** → Upload or Upload and Print.
 4. API Key only if you configured Moonraker authorization.
 5. **Test**, then send.
 
-If Test on a bare Anycubic IP sees the Rinkhals portal, EdgeSlicer retries port 7125 and asks you to save `http://IP:7125`. Non-Anycubic Moonraker boxes are not rewritten.
+If Test on a bare Anycubic IP sees the **Rinkhals portal** (HTML / non-JSON), EdgeSlicer retries port 7125 and asks you to save `http://IP:7125`. A bare 401/403 (Pi OctoPrint with no API key) is **not** retried. Saving a device does **not** silently append `:7125` — a Klipper-behind-nginx box on port 80 would break if it did.
+
+Non-Anycubic Moonraker boxes are never rewritten.
 
 ### Upload vs Upload and Print
 
-On **stock** firmware, **Upload** (print=false) can hang the printer on “Checking files, please wait” ([OrcaSlicer #14349](https://github.com/OrcaSlicer/OrcaSlicer/issues/14349)). **Upload and Print** works. EdgeSlicer therefore makes Upload and Print the default for Anycubic printers and warns if you pick Upload only. That is a firmware bug; the slicer cannot fix the hang.
+On **stock** firmware (Kobra 3 / S1 / X family), **Upload** (print=false) can hang the printer on “Checking files, please wait” ([OrcaSlicer #14349](https://github.com/OrcaSlicer/OrcaSlicer/issues/14349)). **Upload and Print** works. EdgeSlicer therefore makes Upload and Print the default for those models and warns if you pick Upload only. Pi OctoPrint models (Kobra 1, i3 Mega, Chiron, Vyper) and Rinkhals/Moonraker hosts keep the ordinary Upload default. That hang is a firmware bug; the slicer cannot fix it.
 
 Upload and Print starts immediately and skips the printer’s on-screen filament / leveling menus. If you need those menus, use Upload and Print and stop the job on the printer, then start the saved file from the touchscreen (the workaround from that issue).
 

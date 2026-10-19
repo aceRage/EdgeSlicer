@@ -105,11 +105,8 @@ public:
 
         auto* top = new wxBoxSizer(wxVERTICAL);
         top->Add(grid, 1, wxEXPAND | wxALL, FromDIP(12));
-        if (is_anycubic_printer(d.printer_model) || is_anycubic_printer(model_key)) {
-            auto* hint = new wxStaticText(this, wxID_ANY,
-                _L("Anycubic: stock firmware uses Host Type Octo/Klipper on port 80 (the printer IP; API key optional). "
-                   "Rinkhals: uploads go to Moonraker on port 7125 (http://IP:7125). Since Rinkhals PR #68 the bare IP is "
-                   "the web portal, not the slicer API. Native LAN mode is Anycubic Slicer Next only."));
+        if (is_anycubic_stock_network_printer(d.printer_model) || is_anycubic_stock_network_printer(model_key)) {
+            auto* hint = new wxStaticText(this, wxID_ANY, _L(anycubic_connection_hint()));
             hint->Wrap(FromDIP(420));
             top->Add(hint, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
         }

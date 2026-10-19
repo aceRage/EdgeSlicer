@@ -15,6 +15,11 @@ namespace Slic3r {
 
 bool is_anycubic_printer(const std::string &printer_model);
 
+// Stock-firmware network box (Kobra 3 / S1 / X / 4 family), not a Pi OctoPrint model
+// (Kobra 1, i3 Mega, Chiron, Vyper, Kobra 2, …). Upload-and-print default, the #14349 warning,
+// the Rinkhals test hint, and the :80→:7125 retry apply only here.
+bool is_anycubic_stock_network_printer(const std::string &printer_model);
+
 // 7125 for host_type "moonraker" (Rinkhals / Fluidd). 80 for "octoprint" (stock compat).
 // 0 = no Anycubic-specific default (leave the address alone).
 int anycubic_default_port(const std::string &host_type_key);
@@ -22,9 +27,9 @@ int anycubic_default_port(const std::string &host_type_key);
 bool print_host_has_explicit_port(const std::string &address);
 std::string print_host_with_port(const std::string &address, int port);
 
-// Anycubic + moonraker with no port → append :7125. Anycubic + octoprint is left as-is so stock
-// firmware keeps implicit port 80. Non-Anycubic addresses are never rewritten (a Voron on :80
-// behind nginx must not pick up 7125).
+// Intentionally a no-op on save. A bare IP + host_type "moonraker" is also how Klipper-behind-nginx
+// on :80 looks; writing :7125 would break that (F5). Test Connection retries 7125 only when :80
+// actually returned the Anycubic portal, and asks the user to save http://IP:7125.
 std::string anycubic_apply_default_port(const std::string &address,
                                         const std::string &host_type_key,
                                         const std::string &printer_model);
@@ -34,8 +39,10 @@ std::string anycubic_apply_default_port(const std::string &address,
 // (same idea as #613's MoonrakerHost).
 bool should_send_api_key(const std::string &apikey);
 
-// Version JSON from stock octoprint-compat or Moonraker's [octoprint_compat], including a
-// {"result":...} envelope. Hostile / HTML bodies return ok=false.
+// Version JSON from stock octoprint-compat or Moonraker's [octoprint_compat].
+// Non-Anycubic: strict OctoPrint — root "api" required, no result unwrap, case-sensitive
+// "OctoPrint" prefix (ElegooLink::test uses this to choose the OctoPrint upload path).
+// Anycubic: result envelope, optional api, Anycubic/Moonraker/Kobra text.
 struct AnycubicOctoVersion {
     bool        ok { false };
     std::string api;
@@ -44,17 +51,29 @@ struct AnycubicOctoVersion {
 };
 AnycubicOctoVersion parse_octoprint_compat_version(const std::string &body, bool anycubic);
 
-// Rinkhals web portal on :80 (login page) instead of the slicer API.
+// Rinkhals web portal on :80 (HTML login, or non-JSON text mentioning rinkhals).
+// Not a bare 401/403 (Pi OctoPrint with no key), and not JSON that happens to name a file
+// "rinkhals_test.gcode".
 bool looks_like_http_portal(unsigned status, const std::string &body);
 
-// HTTP 2xx with no error envelope. HTML / 401 from the portal is a failure.
+// Retry Moonraker :7125 after a portal reply on :80. Stock-network Anycubic, no explicit port,
+// and looks_like_http_portal — never a bare 401/403.
+bool anycubic_should_retry_moonraker_port(const std::string &printer_model,
+                                          const std::string &address,
+                                          unsigned           status,
+                                          const std::string &body);
+
+// Host Type Moonraker, or an address already on :7125 (Rinkhals / Fluidd).
+bool anycubic_is_moonraker_host(const std::string &host_type_key, const std::string &address);
+
+// HTTP 2xx with no error envelope. HTML / portal bodies are a failure.
 bool anycubic_upload_reply_ok(unsigned status, const std::string &body);
 
-// OrcaSlicer #14349: stock Kobra hangs on "Checking files" after upload-only. Upload and print
-// works. Research found no slicer-side root cause (firmware), so the send dialog prefers StartPrint.
+// OrcaSlicer #14349: stock Kobra 3 / S1 / X hang on "Checking files" after upload-only.
+// Upload and print works. Research found no slicer-side root cause (firmware).
 bool anycubic_prefer_start_print(const std::string &printer_model);
 
-// English, for tests and for the GUI to wrap with _L().
+// English, for tests and for the GUI to wrap with _L(). One copy of each string (F6).
 const char *anycubic_connection_hint();
 const char *anycubic_upload_only_warning();
 const char *anycubic_rinkhals_port_hint();
