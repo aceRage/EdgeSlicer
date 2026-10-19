@@ -1168,13 +1168,13 @@ std::string Model::get_backup_path()
         boost::filesystem::path parent_path(tmp);
         std::time_t t = std::time(0);
         std::tm* now_time = std::localtime(&t);
-        std::stringstream buf;
-        buf << "/snapmaker_orca_model/";
-        buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
-        buf << pid << "#";
-        buf << this->id().id;
-
-        backup_path = parent_path.string() + buf.str();
+        // Join with operator/, not string concat: temp_directory_path() on macOS ends in '/',
+        // so parent.string() + "/snapmaker_orca_model" became T//snapmaker_orca_model.
+        std::stringstream day;
+        day << std::put_time(now_time, "%a_%b_%d");
+        std::stringstream stamp;
+        stamp << std::put_time(now_time, "%H_%M_%S#") << pid << "#" << this->id().id;
+        backup_path = (parent_path / "snapmaker_orca_model" / day.str() / stamp.str()).string();
         BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, backup_path empty, set to %3%")%this%this->id().id%backup_path;
         boost::filesystem::path temp_path(backup_path);
         if (boost::filesystem::exists(temp_path))

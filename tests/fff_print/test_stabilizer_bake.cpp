@@ -330,9 +330,14 @@ TEST_CASE("A stabilizer project loads when temporary_dir was never set", "[Stabi
     const std::string backup = model.get_backup_path();
     REQUIRE_FALSE(backup.empty());
     const boost::filesystem::path backup_path(backup);
-    const boost::filesystem::path sys_tmp = boost::filesystem::temp_directory_path();
+    // macOS temp_directory_path() ends in '/'; lexically_normal() then yields ".../T/.", which
+    // is not a prefix of ".../T/snapmaker_orca_model/...". Strip the trailing separator first.
+    boost::filesystem::path sys_tmp = boost::filesystem::temp_directory_path();
+    sys_tmp.remove_trailing_separator();
+    const std::string backup_norm = backup_path.lexically_normal().string();
+    const std::string tmp_norm    = sys_tmp.lexically_normal().string();
     INFO("backup " << backup << ", sys temp " << sys_tmp.string());
-    CHECK(backup_path.lexically_normal().string().find(sys_tmp.lexically_normal().string()) == 0);
+    CHECK(backup_norm.find(tmp_norm) == 0);
     CHECK(backup.find("/snapmaker_orca_model") != 0);
 
     Bench              b;
