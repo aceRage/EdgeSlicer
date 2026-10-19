@@ -765,6 +765,32 @@ TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
         CHECK(model_display_name("F022") == "SPARKX i7");
     }
 
+    SECTION("F039 / K3 is a known direct-rack model, not CFS, and uses the stack default root") {
+        CHECK(is_direct_rack_model("F039"));
+        CHECK(is_direct_rack_model("K3"));
+        CHECK(is_direct_rack_model("Creality K3"));
+        CHECK(is_k3("F039"));
+        CHECK_FALSE(is_k1_family("F039"));
+        CHECK_FALSE(is_k1_family("K3"));
+        CHECK_FALSE(looks_like_k1_family("Creality K3"));
+        CHECK_FALSE(model_supports_multi_color("F039"));
+        CHECK_FALSE(model_supports_multi_color("K3"));
+        CHECK(is_known_model("F039"));
+        CHECK_FALSE(is_known_model("K3")); // display name; /info code is F039
+        CHECK(model_display_name("F039") == "K3");
+        CHECK(resolve_model("F039", "Creality K2 Plus") == "F039");
+        CHECK(resolve_model("", "Creality K3") == "F039");
+        CHECK(resolve_model("unknown", "Creality K3") == "F039");
+        // Creality Print does not name a K3 gcode root; non-K1 stack default.
+        CHECK(gcode_root("F039") == "/mnt/UDISK");
+        CHECK(gcode_root_for("", "Creality K3") == "/mnt/UDISK");
+        CHECK(gcode_path("F039", "cube.gcode") == "/mnt/UDISK/printer_data/gcodes/cube.gcode");
+        CHECK_FALSE(omit_upload_path("F039"));
+        CHECK(k3_tool_label(0) == "T0");
+        CHECK(k3_tool_label(3) == "T3");
+        CHECK(k3_tool_label(4).empty());
+    }
+
     SECTION("an unknown model is not treated as K1, so the K2-platform root applies") {
         CHECK_FALSE(is_k1_family(""));
         CHECK_FALSE(is_k1_family("Ender-3"));
@@ -816,6 +842,7 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
     using namespace Slic3r::CrealityPrintModel;
     using Slic3r::PrintHostDevices::Status;
     using Slic3r::PrintHostDevices::status_from_cfs;
+    using Slic3r::PrintHostDevices::status_from_direct_rack;
     using Slic3r::PrintHostDevices::auto_match_slot;
 
     const std::string k2_boxs = R"({
@@ -974,6 +1001,83 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(color_match_value(0, "PLA", "#FF0000", 2, 1) == "T1A\tPLA\t#FF0000\t2\t1");
         CHECK(color_match_item_from_value("bad").empty());
         CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
+    }
+
+    SECTION("F039 / K3 start stays on opGcodeFile and holders are not CFS") {
+        // Creality Print reverted K3 send mapping; the stack's start for a non-CFS
+        // model is opGcodeFile + enableSelfTest on /mnt/UDISK.
+        const std::string path = gcode_path("F039", "k3.gcode");
+        CHECK(path == "/mnt/UDISK/printer_data/gcodes/k3.gcode");
+        const auto op = op_gcode_file_cmd(path, 1);
+        CHECK(op["method"] == "set");
+        CHECK(op["params"]["opGcodeFile"] == "printprt:/mnt/UDISK/printer_data/gcodes/k3.gcode");
+        CHECK(op["params"]["enableSelfTest"] == 1);
+        CHECK_FALSE(op["params"].contains("colorMatch"));
+        CHECK_FALSE(op["params"].contains("multiColorPrint"));
+
+        const std::string four_racks = R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": 1, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "vendor": "Creality", "type": "PLA", "name": "Hyper PLA", "color": "#FF0000" }
+                ]},
+                { "id": 2, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "vendor": "Creality", "type": "PETG", "name": "PETG", "color": "#0000FF" }
+                ]},
+                { "id": 3, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 0, "vendor": "", "type": "", "name": "", "color": "" }
+                ]},
+                { "id": 4, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "vendor": "Creality", "type": "ABS", "name": "ABS", "color": "#FFFFFF" }
+                ]},
+                { "id": 0, "state": 1, "type": 1, "materials": [
+                    { "id": 0, "state": 1, "vendor": "Creality", "type": "PLA", "name": "External", "color": "#00FF00" }
+                ]}
+            ]}
+        })";
+        const DirectRackParseResult r = parse_direct_rack_response(four_racks);
+        CHECK(r.ok);
+        REQUIRE(r.slots.size() == 4);
+        CHECK(r.slots[0].filament_type == "PLA");
+        CHECK(r.slots[0].loaded);
+        CHECK(r.slots[1].filament_type == "PETG");
+        CHECK_FALSE(r.slots[2].loaded);
+        CHECK(r.slots[3].filament_type == "ABS");
+        // External type-1 box is skipped; T0 is the first direct rack, not External.
+        CHECK(r.slots[0].brand_name == "Hyper PLA");
+
+        const Status st = status_from_direct_rack(four_racks);
+        CHECK(st.direct_rack);
+        CHECK_FALSE(st.cfs);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.slots[0].name == "T0");
+        CHECK(st.slots[0].label().find("T0") != std::string::npos);
+        CHECK(st.slots[3].name == "T3");
+        CHECK(st.note.find("opGcodeFile") != std::string::npos);
+
+        const std::string one_box = R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": 1, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "type": "PLA", "vendor": "X", "color": "#FF0000" },
+                    { "id": 1, "state": 1, "type": "PETG", "vendor": "X", "color": "#0000FF" },
+                    { "id": 2, "state": 1, "type": "ABS", "vendor": "X", "color": "#FFFFFF" },
+                    { "id": 3, "state": 1, "type": "ASA", "vendor": "X", "color": "#111111" }
+                ]}
+            ]}
+        })";
+        const DirectRackParseResult one = parse_direct_rack_response(one_box);
+        CHECK(one.ok);
+        REQUIRE(one.slots.size() == 4);
+        CHECK(one.slots[3].filament_type == "ASA");
+        const Status cfs_same = status_from_cfs(one_box);
+        CHECK(cfs_same.cfs); // the CFS parser still sees a type-0 box
+        const Status rack_same = status_from_direct_rack(one_box);
+        CHECK_FALSE(rack_same.cfs);
+        CHECK(rack_same.direct_rack);
+
+        CHECK_FALSE(parse_direct_rack_response("").ok);
+        CHECK_FALSE(parse_direct_rack_response("<html>").ok);
+        REQUIRE_NOTHROW(parse_direct_rack_response(std::string(64, '{')));
     }
 
     SECTION("normalize_filament_type strips subtypes") {

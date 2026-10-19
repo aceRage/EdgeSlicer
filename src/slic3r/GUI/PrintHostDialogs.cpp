@@ -604,6 +604,10 @@ void PrintHostSendDialog::apply_device_status()
             if (!text.IsEmpty())
                 text += "  ";
             text += _(from_u8(m_device_status.note));
+        } else if (m_device_status.direct_rack && m_device_status.slots_have_filaments) {
+            if (!text.IsEmpty())
+                text += "  ";
+            text += _(from_u8(m_device_status.note.empty() ? Slic3r::CrealityPrintModel::k3_holders_note() : m_device_status.note));
         } else if (m_device_status.cfs && m_device_status.slots_have_filaments) {
             if (!text.IsEmpty())
                 text += "  ";

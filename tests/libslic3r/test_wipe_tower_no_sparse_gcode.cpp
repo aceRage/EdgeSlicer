@@ -646,6 +646,77 @@ TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCod
     CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
 }
 
+TEST_CASE("Creality K3 system profile emits T0-T3 tool changes", "[WipeTower][GCode][CrealityK3]")
+{
+    const std::string saved_data_dir = data_dir();
+    const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("k3_toolchange_%%%%-%%%%");
+    boost::filesystem::create_directories(scratch);
+    ScopeGuard restore_data_dir([&] {
+        set_data_dir(saved_data_dir);
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(scratch, ec);
+    });
+    set_data_dir(scratch.string());
+    const std::string profiles = (boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
+    static std::unique_ptr<PresetBundle> library;
+    if (!library) {
+        library = std::make_unique<PresetBundle>();
+        library->load_vendor_configs_from_json(profiles, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                               ForwardCompatibilitySubstitutionRule::EnableSilent);
+    }
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(profiles, "Creality", PresetBundle::LoadSystem,
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, library.get());
+    REQUIRE(bundle.printers.select_preset_by_name("Creality K3 0.4 nozzle", true));
+    REQUIRE(bundle.prints.select_preset_by_name("0.20mm Standard @Creality K3 0.4 nozzle", true));
+    REQUIRE(bundle.filaments.select_preset_by_name("Generic PLA @Creality K3", true));
+    bundle.set_num_filaments(4, std::vector<std::string>{"#E01919", "#1943E0", "#19E043", "#E0E019"});
+    bundle.filament_presets = std::vector<std::string>(4, "Generic PLA @Creality K3");
+    DynamicPrintConfig config = bundle.full_config_secure();
+    config.set_deserialize_strict({
+        { "enable_prime_tower",        "1" },
+        { "wipe_tower_x",              30 },
+        { "wipe_tower_y",              30 },
+        { "wipe_tower_rotation_angle", 0 },
+        { "gcode_comments",            true },
+        { "layer_change_gcode",        "G92 E0" },
+        { "skirt_loops",               0 },
+        { "enable_support",            false },
+    });
+    REQUIRE(config.opt_bool("single_extruder_multi_material") == false);
+    REQUIRE(config.opt_bool("enable_filament_ramming") == false);
+    REQUIRE(config.opt_bool("tool_change_temprature_wait") == false);
+    REQUIRE(config.option<ConfigOptionFloats>("nozzle_diameter")->values.size() == 4);
+
+    Print print;
+    Model model;
+    for (int i = 0; i < 4; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(make_cube(10., 10., 6.));
+        object->config.set("extruder", i + 1);
+        object->add_instance()->set_offset(Vec3d(40. + 25. * i, 40., 0.));
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    }
+    print.is_BBL_printer() = false;
+    const FinalPurgeSlice slice = slice_final_purge_model(print, model, config);
+    REQUIRE_FALSE(slice.gcode.empty());
+    CHECK(slice.gcode.find("START_PRINT") != std::string::npos);
+    CHECK(slice.gcode.find("END_PRINT") != std::string::npos);
+    // Independent toolchanger: filament i → physical Ti (U1-style, no filament_is_mixed).
+    CHECK(slice.gcode.find("\nT0") != std::string::npos);
+    CHECK(slice.gcode.find("\nT1") != std::string::npos);
+    CHECK(slice.gcode.find("\nT2") != std::string::npos);
+    CHECK(slice.gcode.find("\nT3") != std::string::npos);
+    // Ported Creality Print change_filament_gcode: Y dodge or spiral lift.
+    const bool k3_lift = slice.gcode.find("F30000") != std::string::npos;
+    CHECK(k3_lift);
+    // Profile-gated M109 fix: tool_change_temprature_wait=0 → M104, not wait-M109.
+    CHECK(slice.gcode.find("set nozzle temperature and wait for it to be reached") == std::string::npos);
+}
+
 namespace {
 
 DynamicPrintConfig n2_clearance_config(bool no_sparse, bool stagger = false)

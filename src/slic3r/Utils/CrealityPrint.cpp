@@ -611,6 +611,10 @@ bool CrealityPrint::start_print(wxString &msg, const std::string &filename, cons
         }
 
         std::string err;
+        // F039 / K3: Creality Print reverted the K3-specific send fields (filament_maps /
+        // open_cfs in SendToPrinter; see creality-k3-current-direct-rack-scope-plan.md).
+        // The dialog never sets useCFS for a direct-rack model, so start stays on
+        // opGcodeFile + enableSelfTest, fire-and-forget only for the CFS path below.
         // Empty match list: fall back to opGcodeFile + enableSelfTest (do not send colorMatch).
         if (use_cfs && !color_list.empty()) {
             const json color_match = CrealityPrintModel::color_match_cmd(gcode_path, color_list);

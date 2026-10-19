@@ -21,6 +21,14 @@ using nlohmann::json;
 
 std::string Slot::label() const
 {
+    if (cfs_box < 0 && unit < 0 && !name.empty()) {
+        std::string out = name;
+        if (loaded && !type.empty())
+            out += " " + type;
+        else if (!loaded)
+            out += " (empty)";
+        return out;
+    }
     if (cfs_box >= 0) {
         std::string out = name.empty() ? (cfs_external ? std::string("External") :
                                                          std::string("CFS ") + char('A' + std::max(0, std::min(3, cfs_material)))) :
@@ -338,6 +346,40 @@ Status status_from_cfs(const std::string& boxs_info_json)
     return st;
 }
 
+Status status_from_direct_rack(const std::string& boxs_info_json)
+{
+    Status st;
+    st.probed      = true;
+    st.direct_rack = true;
+    const CrealityPrintModel::DirectRackParseResult parsed = CrealityPrintModel::parse_direct_rack_response(boxs_info_json);
+    if (!parsed.ok) {
+        st.note  = CrealityPrintModel::k3_unreported_holders_note();
+        st.error = parsed.error;
+        return st;
+    }
+    st.online = true;
+    int idx   = 0;
+    for (const CrealityPrintModel::DirectRackSlot& h : parsed.slots) {
+        Slot s;
+        s.index  = idx;
+        s.name   = CrealityPrintModel::k3_tool_label(idx);
+        s.type   = h.filament_type;
+        s.sub_type = h.brand_name;
+        s.vendor = h.vendor;
+        s.color  = h.color_hex;
+        s.loaded = h.loaded;
+        if (s.loaded && (!s.type.empty() || !s.color.empty()))
+            st.slots_have_filaments = true;
+        st.slots.push_back(std::move(s));
+        ++idx;
+    }
+    if (!st.slots_have_filaments)
+        st.note = CrealityPrintModel::k3_empty_holders_note();
+    else
+        st.note = CrealityPrintModel::k3_holders_note();
+    return st;
+}
+
 int auto_match_slot(const std::string& type, const std::string& colour, const std::vector<Slot>& slots, bool cfs_order)
 {
     std::vector<CrealityPrintModel::CfsSlot> cfs;
@@ -375,6 +417,18 @@ static Status probe_creality(const Device& d, int timeout_s)
     st.online               = true;
     const std::string model = CrealityPrintModel::resolve_model(CrealityPrintModel::parse_model_from_info(body),
                                                                 d.printer_model);
+    if (CrealityPrintModel::is_direct_rack_model(model)) {
+        const std::string boxs = CrealityPrint::query_boxes_info(host, wait);
+        if (boxs.empty()) {
+            st.online = true;
+            st.note   = CrealityPrintModel::k3_unreported_holders_note();
+            return st;
+        }
+        Status parsed = status_from_direct_rack(boxs);
+        parsed.probed = true;
+        parsed.online = true;
+        return parsed;
+    }
     if (!CrealityPrintModel::model_supports_multi_color(model) && !CrealityPrintModel::looks_like_k1_family(model)) {
         st.note = no_filament_note("crealityprint");
         return st;

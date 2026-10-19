@@ -53,11 +53,26 @@ inline const std::map<std::string, std::string> &cfs_capable_models()
 
 inline bool model_supports_multi_color(const std::string &model) { return cfs_capable_models().count(model) > 0; }
 
+// Direct-rack toolchangers. F039 / K3 has four independent nozzles, each fed from its own
+// holder. It is not CFS-capable: Creality Print's device panel treats model == "F039"
+// (PrinterBoxFilamentPanel.cpp) and the current-direct-rack plan forbids CFS on this SKU.
+inline const std::map<std::string, std::string> &direct_rack_models()
+{
+    static const std::map<std::string, std::string> models = {
+        {"F039", "K3"},
+    };
+    return models;
+}
+
 inline std::string model_display_name(const std::string &model)
 {
-    auto &      names = cfs_capable_models();
-    const auto  it    = names.find(model);
-    return it != names.end() ? it->second : std::string{};
+    auto &     cfs_names = cfs_capable_models();
+    const auto cfs_it    = cfs_names.find(model);
+    if (cfs_it != cfs_names.end())
+        return cfs_it->second;
+    auto &     rack_names = direct_rack_models();
+    const auto rack_it    = rack_names.find(model);
+    return rack_it != rack_names.end() ? rack_it->second : std::string{};
 }
 
 // Preset printer_model values are "Creality K1C", while /info uses "K1C".
@@ -69,7 +84,25 @@ inline std::string strip_vendor_prefix(const std::string &model)
     return model;
 }
 
-inline bool is_known_model(const std::string &model) { return is_k1_family(model) || model_supports_multi_color(model); }
+inline bool is_direct_rack_model(const std::string &model)
+{
+    if (direct_rack_models().count(model) > 0)
+        return true;
+    const std::string n = strip_vendor_prefix(model);
+    if (direct_rack_models().count(n) > 0)
+        return true;
+    for (const auto &kv : direct_rack_models())
+        if (kv.second == n || kv.second == model)
+            return true;
+    return false;
+}
+
+inline bool is_k3(const std::string &model) { return is_direct_rack_model(model); }
+
+inline bool is_known_model(const std::string &model)
+{
+    return is_k1_family(model) || model_supports_multi_color(model) || direct_rack_models().count(model) > 0;
+}
 
 // /info codes and preset names ("Creality K1", "K1 Max", "K1C_CFS-C").
 inline bool looks_like_k1_family(const std::string &model)
@@ -94,13 +127,18 @@ inline std::string resolve_model(const std::string &info_model, const std::strin
     for (const auto &kv : cfs_capable_models())
         if (kv.second == n || kv.second == preset_model)
             return kv.first;
+    for (const auto &kv : direct_rack_models())
+        if (kv.second == n || kv.second == preset_model)
+            return kv.first;
     if (!n.empty())
         return n;
     return info_model;
 }
 
-// K1-family: /usr/data. Everything else (K2 / K2 Pro / K2 Plus / SPARKX i7, and an
-// unknown model with no K1-like preset fallback) uses /mnt/UDISK.
+// K1-family: /usr/data. Everything else (K2 / K2 Pro / K2 Plus / SPARKX i7 / F039 K3,
+// and an unknown model with no K1-like preset fallback) uses /mnt/UDISK.
+// Creality Print's F039 sources do not name a K3-specific gcode root; this is the
+// stack default for non-K1 models and is unverified on hardware.
 inline std::string gcode_root(const std::string &model) { return looks_like_k1_family(model) ? "/usr/data" : "/mnt/UDISK"; }
 
 inline std::string gcode_root_for(const std::string &info_model, const std::string &preset_model)
@@ -477,6 +515,149 @@ inline CfsParseResult parse_cfs_response(const std::string &response)
             }
         }
     }
+    out.ok = true;
+    return out;
+}
+
+// One K3 / F039 direct-rack holder. Not a CFS slot: Creality Print hides the type-1
+// external rack on F039 (PrinterBoxFilamentPanel.cpp) and does not send colorMatch.
+struct DirectRackSlot
+{
+    int         index = 0; // 0..3 → T0..T3
+    std::string color_hex;
+    std::string filament_type;
+    std::string brand_name;
+    std::string vendor;
+    bool        loaded = false;
+};
+
+struct DirectRackParseResult
+{
+    std::vector<DirectRackSlot> slots;
+    std::string                 error;
+    bool                        ok = false;
+};
+
+inline std::string k3_unreported_holders_note()
+{
+    return "The K3 did not report its four holders, so filaments map to T0-T3 as sliced. "
+           "Start uses opGcodeFile (no CFS).";
+}
+
+inline std::string k3_empty_holders_note()
+{
+    return "The K3 reported its four holders but none are loaded. Filaments map to T0-T3 as sliced. "
+           "Start uses opGcodeFile (no CFS).";
+}
+
+inline std::string k3_holders_note()
+{
+    return "K3: each filament is printed by the nozzle picked below (T0-T3). "
+           "Start uses opGcodeFile; Creality Print does not send a K3 nozzle-mapping message.";
+}
+
+inline std::string k3_tool_label(int index)
+{
+    if (index < 0 || index > 3)
+        return {};
+    return "T" + std::to_string(index);
+}
+
+// Parse boxsInfo as K3 direct racks. Same JSON envelope as CFS, but:
+// type 1 (external) is skipped (Creality Print F039 UI), remaining boxes/materials
+// become up to four holders labeled T0-T3, and the result is never CFS.
+// The on-wire holder layout is unverified; both "one box, four materials" and
+// "four boxes, one material each" are accepted. Do not reuse parse_cfs_response:
+// that pads every type-0 box to four CFS slots and would mis-read four 1-slot racks.
+inline DirectRackParseResult parse_direct_rack_response(const std::string &response)
+{
+    DirectRackParseResult out;
+    if (response.empty()) {
+        out.error = "empty response";
+        return out;
+    }
+    constexpr size_t kMaxMessage = 1024 * 1024;
+    if (response.size() > kMaxMessage) {
+        out.error = "message too large";
+        return out;
+    }
+    nlohmann::json resp;
+    try {
+        resp = nlohmann::json::parse(response);
+    } catch (...) {
+        out.error = "JSON parse error";
+        return out;
+    }
+    if (!resp.is_object()) {
+        out.error = "invalid schema";
+        return out;
+    }
+    nlohmann::json boxes = nlohmann::json::array();
+    try {
+        if (resp.contains("boxsInfo") && resp["boxsInfo"].is_object() && resp["boxsInfo"].contains("materialBoxs") &&
+            resp["boxsInfo"]["materialBoxs"].is_array())
+            boxes = resp["boxsInfo"]["materialBoxs"];
+        else if (resp.contains("result") && resp["result"].is_object() && resp["result"].contains("boxsInfo") &&
+                 resp["result"]["boxsInfo"].is_object() && resp["result"]["boxsInfo"].contains("materialBoxs") &&
+                 resp["result"]["boxsInfo"]["materialBoxs"].is_array())
+            boxes = resp["result"]["boxsInfo"]["materialBoxs"];
+        else {
+            out.error = "invalid schema (missing boxsInfo.materialBoxs)";
+            return out;
+        }
+    } catch (...) {
+        out.error = "invalid schema";
+        return out;
+    }
+
+    auto push_holder = [&](const nlohmann::json *mat) {
+        if (out.slots.size() >= 4)
+            return;
+        DirectRackSlot h;
+        if (mat && mat->is_object()) {
+            h.vendor        = json_str(*mat, "vendor");
+            h.filament_type = json_str(*mat, "type");
+            h.brand_name    = json_str(*mat, "name");
+            h.color_hex     = colour_hex(json_str(*mat, "color"));
+            const int st    = json_int(*mat, "state", 0, 0, 16);
+            h.loaded        = st != 0 && !(h.vendor.empty() && h.filament_type.empty());
+        }
+        out.slots.push_back(std::move(h));
+    };
+
+    int seen = 0;
+    for (const auto &box : boxes) {
+        if (!box.is_object())
+            continue;
+        if (seen >= 8)
+            break;
+        ++seen;
+        const int box_st   = json_int(box, "state", 0, 0, 16);
+        const int box_type = json_int(box, "type", 0, 0, 16);
+        if (box_st != 1)
+            continue;
+        if (box_type == 1)
+            continue; // F039: hide the external rack
+        if (box.contains("materials") && box["materials"].is_array() && !box["materials"].empty()) {
+            for (const auto &mat : box["materials"]) {
+                if (!mat.is_object())
+                    continue;
+                push_holder(&mat);
+                if (out.slots.size() >= 4)
+                    break;
+            }
+        } else {
+            push_holder(nullptr);
+        }
+        if (out.slots.size() >= 4)
+            break;
+    }
+    while (out.slots.size() < 4) {
+        DirectRackSlot empty;
+        out.slots.push_back(std::move(empty));
+    }
+    for (size_t i = 0; i < out.slots.size(); ++i)
+        out.slots[i].index = static_cast<int>(i);
     out.ok = true;
     return out;
 }

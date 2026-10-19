@@ -84,6 +84,8 @@ struct Status
     bool              cfs { false };
     int               cfs_box_count { 0 };
     std::string       cfs_variant; // "CFS", "CFS-C", ... when the printer named one
+    // F039 / K3: four direct-rack holders, not CFS. Mapping is T0-T3; start stays opGcodeFile.
+    bool              direct_rack { false };
 };
 
 // Blocking. Callers that own a GUI run this on a worker. `timeout_s` is the per-call deadline.
@@ -99,6 +101,9 @@ Status status_from_canvas(const CanvasQueryResult& result);
 
 // The half of the Creality probe that has no network in it: a boxsInfo body as slots.
 Status status_from_cfs(const std::string& boxs_info_json);
+
+// F039 / K3 holders from the same boxsInfo envelope, never marked CFS.
+Status status_from_direct_rack(const std::string& boxs_info_json);
 
 // Material-first auto-match (research X3 / #610), with Creality's CFS-over-external ranking
 // when `cfs_order` is true: CFS type+colour > CFS type > ext type+colour > ext type.
