@@ -535,26 +535,31 @@ bool CrealityPrint::fetch_info(const std::string &host, std::string &body, std::
     return ok;
 }
 
-std::string CrealityPrint::query_boxes_info(const std::string &host, int timeout_s)
+std::string CrealityPrint::query_boxes_info(const std::string &host, int timeout_s, CrealityWsClient *session)
 {
-    const int          budget_ms = std::max(1, timeout_s) * 1000;
-    CrealityWsClient   ws(budget_ms, budget_ms);
-    std::string        err;
-    if (!ws.open(host, "9999", err)) {
+    const int                         budget_ms = std::max(1, timeout_s) * 1000;
+    std::unique_ptr<CrealityWsClient> owned;
+    CrealityWsClient                 *ws = session;
+    if (!ws) {
+        owned = std::make_unique<CrealityWsClient>(budget_ms, budget_ms);
+        ws    = owned.get();
+    }
+    std::string err;
+    if (!ws->open(host, "9999", err)) {
         BOOST_LOG_TRIVIAL(error) << "CrealityPrint: boxsInfo open failed: " << err;
         return {};
     }
     const json boxs_query = {{"method", "get"}, {"params", {{"boxsInfo", 1}}}};
-    if (!ws.write(to_string(boxs_query), err)) {
+    if (!ws->write(to_string(boxs_query), err)) {
         BOOST_LOG_TRIVIAL(error) << "CrealityPrint: boxsInfo write failed: " << err;
         return {};
     }
     std::string result;
-    if (!ws.read_until("boxsInfo", result, err)) {
+    if (!ws->read_until("boxsInfo", result, err)) {
         BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: boxsInfo read failed: " << err;
         return {};
     }
-    ws.close();
+    ws->close();
     return result;
 }
 

@@ -74,7 +74,8 @@ public:
     static bool fetch_info(const std::string &host, std::string &body, std::string &error, int timeout_s);
     // Port-9999 WebSocket `get boxsInfo`. timeout_s is the total deadline (probe uses ~1 s).
     // Empty on timeout or a refused handshake. Uses CrealityWsClient.
-    static std::string query_boxes_info(const std::string& host, int timeout_s);
+    // session, when set, is the connection the caller can cancel() from another thread.
+    static std::string query_boxes_info(const std::string& host, int timeout_s, CrealityWsClient *session = nullptr);
     std::string        query_boxes_info(int timeout_s = 10) const;
 
 protected:
