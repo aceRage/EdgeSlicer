@@ -703,18 +703,33 @@ TEST_CASE("Creality K3 system profile emits T0-T3 tool changes", "[WipeTower][GC
     print.is_BBL_printer() = false;
     const FinalPurgeSlice slice = slice_final_purge_model(print, model, config);
     REQUIRE_FALSE(slice.gcode.empty());
-    CHECK(slice.gcode.find("START_PRINT") != std::string::npos);
+    // Creality Print K3 machine_start_gcode (START_PRINT + hardcoded 140/220 warmup).
+    CHECK(slice.gcode.find("START_PRINT EXTRUDER_TEMP=") != std::string::npos);
+    CHECK(slice.gcode.find("BED_TEMP=") != std::string::npos);
+    CHECK(slice.gcode.find("M104 S140") != std::string::npos);
+    CHECK(slice.gcode.find("M104 S220 T") != std::string::npos);
+    CHECK(slice.gcode.find("G1 X120 Y0 E15") != std::string::npos);
     CHECK(slice.gcode.find("END_PRINT") != std::string::npos);
+    CHECK(slice.gcode.find("G1 X130 Y255") != std::string::npos);
     // Independent toolchanger: filament i → physical Ti (U1-style, no filament_is_mixed).
-    CHECK(slice.gcode.find("\nT0") != std::string::npos);
-    CHECK(slice.gcode.find("\nT1") != std::string::npos);
-    CHECK(slice.gcode.find("\nT2") != std::string::npos);
-    CHECK(slice.gcode.find("\nT3") != std::string::npos);
-    // Ported Creality Print change_filament_gcode: Y dodge or spiral lift.
-    const bool k3_lift = slice.gcode.find("F30000") != std::string::npos;
-    CHECK(k3_lift);
+    auto has_tool = [&](const char *tn) {
+        const std::string needle = std::string("\n") + tn;
+        return slice.gcode.find(needle + "\n") != std::string::npos ||
+               slice.gcode.find(needle + " ") != std::string::npos ||
+               slice.gcode.find(needle + "\r") != std::string::npos;
+    };
+    CHECK(has_tool("T0"));
+    CHECK(has_tool("T1"));
+    CHECK(has_tool("T2"));
+    CHECK(has_tool("T3"));
+    // Ported Creality Print change_filament_gcode: Y dodge at F30000 or I0.86 spiral.
+    const bool k3_change = slice.gcode.find(" F30000") != std::string::npos &&
+                           (slice.gcode.find("I0.86 J0.86 P1") != std::string::npos ||
+                            slice.gcode.find("G1 Y") != std::string::npos);
+    CHECK(k3_change);
     // Profile-gated M109 fix: tool_change_temprature_wait=0 → M104, not wait-M109.
     CHECK(slice.gcode.find("set nozzle temperature and wait for it to be reached") == std::string::npos);
+    CHECK(slice.gcode.find("M109") == std::string::npos);
 }
 
 namespace {

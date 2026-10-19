@@ -786,9 +786,13 @@ TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
         CHECK(gcode_root_for("", "Creality K3") == "/mnt/UDISK");
         CHECK(gcode_path("F039", "cube.gcode") == "/mnt/UDISK/printer_data/gcodes/cube.gcode");
         CHECK_FALSE(omit_upload_path("F039"));
-        CHECK(k3_tool_label(0) == "T0");
-        CHECK(k3_tool_label(3) == "T3");
+        CHECK(k3_tool_label(0) == "Nozzle 1 (T0)");
+        CHECK(k3_tool_label(3) == "Nozzle 4 (T3)");
         CHECK(k3_tool_label(4).empty());
+        CHECK(k3_as_sliced_note().find("As sliced (T0-T3 go to nozzles 1-4)") != std::string::npos);
+        CHECK(k3_as_sliced_note().find("assign filaments to extruders") != std::string::npos);
+        CHECK(k3_holders_note().find("read-only") != std::string::npos);
+        CHECK(k3_holders_note().find("does not remap") != std::string::npos);
     }
 
     SECTION("an unknown model is not treated as K1, so the K2-platform root applies") {
@@ -1050,10 +1054,20 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK_FALSE(st.cfs);
         CHECK(st.slots_have_filaments);
         REQUIRE(st.slots.size() == 4);
-        CHECK(st.slots[0].name == "T0");
+        CHECK(st.slots[0].name == "Nozzle 1 (T0)");
         CHECK(st.slots[0].label().find("T0") != std::string::npos);
-        CHECK(st.slots[3].name == "T3");
+        CHECK(st.slots[3].name == "Nozzle 4 (T3)");
         CHECK(st.note.find("opGcodeFile") != std::string::npos);
+        CHECK(st.note.find("As sliced (T0-T3 go to nozzles 1-4)") != std::string::npos);
+        CHECK(st.note.find("read-only") != std::string::npos);
+
+        const std::string mismatch = k3_holder_mismatch_warning(
+            {{0, "PLA", "#FF0000", true}, {1, "PETG", "#0000FF", true}, {2, "ABS", "#FFFFFF", true}},
+            r.slots);
+        CHECK(mismatch.find("Filament 1") == std::string::npos); // T0 PLA #FF0000 matches holder 0
+        CHECK(mismatch.find("Filament 3 (T2)") != std::string::npos); // holder 2 is empty
+        CHECK(k3_holder_mismatch_warning({{0, "PETG", "#00FF00", true}}, r.slots).find("sliced PETG") !=
+              std::string::npos);
 
         const std::string one_box = R"({
             "boxsInfo": { "materialBoxs": [

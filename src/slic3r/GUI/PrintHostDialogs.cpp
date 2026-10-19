@@ -497,6 +497,9 @@ std::string PrintHostSendDialog::device_id() const
 
 std::string PrintHostSendDialog::filament_mapping() const
 {
+    // F039 / K3: T0-T3 are the sliced nozzles. A dropdown remapping is never applied.
+    if (m_device_status.direct_rack)
+        return {};
     if (m_creality_use_cfs && !m_creality_use_cfs->GetValue())
         return {};
     std::string out;
@@ -600,14 +603,14 @@ void PrintHostSendDialog::apply_device_status()
             text = format_wxstr(_L("Status: %1%"), from_u8(m_device_status.state));
         else if (m_device_status.probed && !m_device_status.online)
             text = _L("Status: unknown");
-        if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
+        if (m_device_status.direct_rack) {
+            if (!text.IsEmpty())
+                text += "  ";
+            text += _(from_u8(m_device_status.note.empty() ? Slic3r::CrealityPrintModel::k3_as_sliced_note() : m_device_status.note));
+        } else if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
             if (!text.IsEmpty())
                 text += "  ";
             text += _(from_u8(m_device_status.note));
-        } else if (m_device_status.direct_rack && m_device_status.slots_have_filaments) {
-            if (!text.IsEmpty())
-                text += "  ";
-            text += _(from_u8(m_device_status.note.empty() ? Slic3r::CrealityPrintModel::k3_holders_note() : m_device_status.note));
         } else if (m_device_status.cfs && m_device_status.slots_have_filaments) {
             if (!text.IsEmpty())
                 text += "  ";
@@ -732,6 +735,39 @@ void PrintHostSendDialog::rebuild_mapping_rows()
     m_mapping_choices.clear();
     m_mapping_filament.clear();
     m_mapping_sizer->Clear(true);
+
+    // F039 / K3: holders are read-only. T0-T3 already name the nozzles; a choice would look
+    // applied and is not (start is opGcodeFile, filament_mapping() is empty).
+    if (m_device_status.direct_rack) {
+        if (m_device_status.slots.empty()) {
+            m_mapping_panel->Show(false);
+            m_mapping_panel->Layout();
+            update_mapping_note();
+            return;
+        }
+        for (const PrintHostDevices::Slot &s : m_device_status.slots) {
+            auto *swatch = new wxPanel(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(16), FromDIP(16)));
+            swatch->SetBackgroundColour(s.color.empty() ? wxColour("#DDDDDD") : swatch_colour(s.color));
+            m_mapping_sizer->Add(swatch, 0, wxALIGN_CENTER_VERTICAL);
+
+            const wxString name = from_u8(s.name.empty() ? Slic3r::CrealityPrintModel::k3_tool_label(s.index) : s.name);
+            m_mapping_sizer->Add(new wxStaticText(m_mapping_panel, wxID_ANY, name), 0, wxALIGN_CENTER_VERTICAL);
+
+            wxString loaded = _L("empty");
+            if (s.loaded) {
+                loaded = from_u8(s.type.empty() ? s.sub_type : s.type);
+                if (!s.vendor.empty())
+                    loaded += " " + from_u8(s.vendor);
+                if (loaded.empty())
+                    loaded = _L("loaded");
+            }
+            m_mapping_sizer->Add(new wxStaticText(m_mapping_panel, wxID_ANY, loaded), 1, wxALIGN_CENTER_VERTICAL);
+        }
+        m_mapping_panel->Show(true);
+        m_mapping_panel->Layout();
+        update_mapping_note();
+        return;
+    }
 
     const bool can_map = m_device_status.slots_have_filaments && !m_device_status.slots.empty() && !m_plate_filaments.empty();
     if (!can_map) {
@@ -900,11 +936,34 @@ const SendPlateFilament* PrintHostSendDialog::plate_filament(int index) const
     return nullptr;
 }
 
+wxString PrintHostSendDialog::mapping_warning() const
+{
+    if (!m_device_status.direct_rack)
+        return wxString();
+    std::vector<Slic3r::CrealityPrintModel::K3PlateFilament> filaments;
+    filaments.reserve(m_plate_filaments.size());
+    for (const SendPlateFilament &f : m_plate_filaments)
+        filaments.push_back({f.index, f.type, f.colour, f.used});
+    std::vector<Slic3r::CrealityPrintModel::DirectRackSlot> holders;
+    holders.reserve(m_device_status.slots.size());
+    for (const PrintHostDevices::Slot &s : m_device_status.slots) {
+        Slic3r::CrealityPrintModel::DirectRackSlot h;
+        h.index         = s.index;
+        h.filament_type = s.type;
+        h.color_hex     = s.color;
+        h.brand_name    = s.sub_type;
+        h.vendor        = s.vendor;
+        h.loaded        = s.loaded;
+        holders.push_back(std::move(h));
+    }
+    return from_u8(Slic3r::CrealityPrintModel::k3_holder_mismatch_warning(filaments, holders));
+}
+
 void PrintHostSendDialog::update_mapping_note()
 {
     if (!m_mapping_note)
         return;
-    const wxString text = m_mapping_choices.empty() ? wxString() : mapping_warning();
+    const wxString text = mapping_warning();
     const bool     was  = m_mapping_note->IsShown();
     m_mapping_note->SetLabel(text);
     m_mapping_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());

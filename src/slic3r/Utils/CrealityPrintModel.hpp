@@ -538,29 +538,85 @@ struct DirectRackParseResult
     bool                        ok = false;
 };
 
+// Send never remaps T0-T3. Mapping is chosen in the slicer (filament → extruder).
+inline std::string k3_as_sliced_note()
+{
+    return "As sliced (T0-T3 go to nozzles 1-4). Mapping is set when slicing: "
+           "assign filaments to extruders in the slicer. The send does not remap G-code. "
+           "Start uses opGcodeFile (no CFS).";
+}
+
 inline std::string k3_unreported_holders_note()
 {
-    return "The K3 did not report its four holders, so filaments map to T0-T3 as sliced. "
-           "Start uses opGcodeFile (no CFS).";
+    return "The K3 did not report its four holders. " + k3_as_sliced_note();
 }
 
 inline std::string k3_empty_holders_note()
 {
-    return "The K3 reported its four holders but none are loaded. Filaments map to T0-T3 as sliced. "
-           "Start uses opGcodeFile (no CFS).";
+    return "The K3 reported its four holders but none are loaded. " + k3_as_sliced_note();
 }
 
 inline std::string k3_holders_note()
 {
-    return "K3: each filament is printed by the nozzle picked below (T0-T3). "
-           "Start uses opGcodeFile; Creality Print does not send a K3 nozzle-mapping message.";
+    return "K3 holders below are what is loaded in each nozzle (read-only). " + k3_as_sliced_note();
 }
 
 inline std::string k3_tool_label(int index)
 {
     if (index < 0 || index > 3)
         return {};
-    return "T" + std::to_string(index);
+    return "Nozzle " + std::to_string(index + 1) + " (T" + std::to_string(index) + ")";
+}
+
+struct K3PlateFilament
+{
+    int         index = 0;
+    std::string type;
+    std::string colour;
+    bool        used = true;
+};
+
+// Warn when a sliced filament's type or colour does not match the holder that T-number prints.
+inline std::string k3_holder_mismatch_warning(const std::vector<K3PlateFilament> &filaments,
+                                              const std::vector<DirectRackSlot> & holders)
+{
+    std::string out;
+    auto        add = [&](const std::string &line) {
+        if (!out.empty())
+            out += "\n";
+        out += line;
+    };
+    for (const auto &f : filaments) {
+        if (!f.used || f.index < 0 || f.index > 3)
+            continue;
+        const std::string label  = k3_tool_label(f.index);
+        const DirectRackSlot *h  = nullptr;
+        for (const auto &slot : holders) {
+            if (slot.index == f.index) {
+                h = &slot;
+                break;
+            }
+        }
+        const std::string prefix = "Filament " + std::to_string(f.index + 1) + " (T" + std::to_string(f.index) +
+                                   ") does not match " + label + ": ";
+        if (!h || !h->loaded) {
+            add(prefix + "that holder is empty.");
+            continue;
+        }
+        const bool        type_mismatch = !f.type.empty() && !h->filament_type.empty() &&
+                                   !iequals_ascii(normalize_filament_type(f.type), normalize_filament_type(h->filament_type));
+        const std::string plate_colour   = colour_hex(f.colour);
+        const std::string holder_colour  = colour_hex(h->color_hex);
+        const bool        colour_mismatch = !plate_colour.empty() && !holder_colour.empty() &&
+                                     !iequals_ascii(plate_colour, holder_colour);
+        if (!type_mismatch && !colour_mismatch)
+            continue;
+        add(prefix + "sliced " + (f.type.empty() ? std::string("?") : f.type) +
+            (plate_colour.empty() ? std::string() : " " + plate_colour) + " vs holder " +
+            (h->filament_type.empty() ? std::string("?") : h->filament_type) +
+            (holder_colour.empty() ? std::string() : " " + holder_colour) + ".");
+    }
+    return out;
 }
 
 // Parse boxsInfo as K3 direct racks. Same JSON envelope as CFS, but:

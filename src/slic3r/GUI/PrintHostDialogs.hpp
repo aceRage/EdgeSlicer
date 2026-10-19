@@ -110,7 +110,7 @@ protected:
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
     // One or more lines under the mapping table, refreshed whenever a choice changes; "" = none.
-    virtual wxString mapping_warning() const { return wxString(); }
+    virtual wxString mapping_warning() const;
     void update_mapping_note();
     // The rows' choices as positions in m_device_status.slots, -1 = "As sliced"; and the plate
     // filament each row is for.
