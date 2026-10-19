@@ -116,10 +116,11 @@ protected:
     void rebuild_creality_options();
     void update_creality_mapping_enabled();
     void set_send_enabled(bool on);
-    // Elegoo CC and CFS: Bambu-style MaterialItem rows instead of a text combo.
-    virtual bool use_third_party_map_panel() const { return m_device_status.cfs; }
-    // Creality K3 holders: show the two colours, no popup.
-    virtual bool third_party_map_read_only() const { return false; }
+    // Elegoo CC, CFS, and K3 holders: Bambu-style MaterialItem rows instead of a text combo.
+    // Once #612 merges, this must be cfs || direct_rack || qidi_box || happy_hare || afc.
+    virtual bool use_third_party_map_panel() const { return m_device_status.cfs || m_device_status.direct_rack; }
+    // Creality K3 holders: identity T-number tiles, no popup. filament_mapping() stays empty.
+    virtual bool third_party_map_read_only() const { return m_device_status.direct_rack; }
     void rebuild_third_party_map_rows();
     // The picked QIDI printer said it is printing or paused: Upload only, no start.
     bool print_blocked() const;
@@ -136,9 +137,11 @@ protected:
     // Vendor PRs (#616/#619/#620/#622) override this; keep the name and signature.
     // #625 F14: update_mapping_note() no longer gates on has_rows, so this is called even when
     // the panel / combo has no rows. Overrides must return empty themselves in that case.
+    // K3 (#622) still returns identity holder mismatches here even with no combo rows.
     virtual wxString mapping_warning() const;
     // Panel type/colour mismatch (identity slots when read-only). Combined with mapping_warning()
     // in update_mapping_note(); vendor overrides of mapping_warning() still compile after rebase.
+    // Direct-rack (K3) returns empty: mapping_warning() already names those mismatches.
     virtual wxString third_party_mismatch_warning() const;
     void on_dpi_changed(const wxRect &suggested_rect) override;
     void on_sys_color_changed() override;

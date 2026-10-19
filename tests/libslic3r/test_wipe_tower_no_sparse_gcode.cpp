@@ -648,6 +648,255 @@ TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCod
 
 namespace {
 
+bool is_k3_change_filament_block(const std::string &block)
+{
+    if (block.find("I0.86 J0.86 P1") != std::string::npos)
+        return true;
+    std::istringstream in(block);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("G1", 0) == 0 && code.find('Y') != std::string::npos &&
+            code.find('Z') != std::string::npos && code.find("F30000") != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+bool is_tn_command(const std::string &line, int n)
+{
+    std::string cmd = line.substr(0, line.find(';'));
+    while (!cmd.empty() && (cmd.back() == ' ' || cmd.back() == '\t'))
+        cmd.pop_back();
+    size_t i = 0;
+    while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '\t'))
+        ++i;
+    return cmd.compare(i, std::string::npos, "T" + std::to_string(n)) == 0;
+}
+
+// CoolingBuffer replaces ;_FORCE_RESUME_FAN_SPEED with M106/M107 (CoolingBuffer.cpp ~1025,
+// ~1146; GCodeWriter::set_fan / set_additional_fan). Those sit between "; custom gcode end"
+// and T, so they must not count as a "last significant" line.
+bool is_k3_fan_line_between_custom_and_t(const std::string &line)
+{
+    if (line.rfind(";_FORCE_RESUME_FAN_SPEED", 0) == 0)
+        return true;
+    std::string cmd = line.substr(0, line.find(';'));
+    while (!cmd.empty() && (cmd.back() == ' ' || cmd.back() == '\t'))
+        cmd.pop_back();
+    size_t i = 0;
+    while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '\t'))
+        ++i;
+    auto is_word = [&](const char *word) {
+        const size_t n = std::char_traits<char>::length(word);
+        if (cmd.compare(i, n, word) != 0)
+            return false;
+        const size_t after = i + n;
+        return after == cmd.size() || cmd[after] == ' ' || cmd[after] == '\t';
+    };
+    return is_word("M106") || is_word("M107");
+}
+
+// T1-T3 whose most recent significant line is "; custom gcode end" (blanks,
+// ;_FORCE_RESUME_FAN_SPEED, and M106/M107 including P-indexed forms may sit in
+// between). A preceding T0 consumes that block so a later T1-T3 cannot take
+// credit for it (F10). Start G-code's bare T is ignored. M104 T3 is not a T.
+struct K3ChangeTCount
+{
+    int tool_changes       = 0;
+    int k3_blocks_before_t = 0;
+};
+
+K3ChangeTCount count_k3_change_t_lines(const std::string &gcode)
+{
+    K3ChangeTCount     out;
+    std::istringstream in(gcode);
+    std::string        line, last_custom, collecting, last_significant;
+    bool               in_custom = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind("; custom gcode start", 0) == 0) {
+            in_custom  = true;
+            collecting = line + "\n";
+            continue;
+        }
+        if (in_custom) {
+            collecting += line + "\n";
+            if (line.rfind("; custom gcode end", 0) == 0) {
+                last_custom      = collecting;
+                in_custom        = false;
+                last_significant = line;
+            }
+            continue;
+        }
+        if (line.find_first_not_of(" \t") == std::string::npos || is_k3_fan_line_between_custom_and_t(line))
+            continue;
+        if (is_tn_command(line, 0)) {
+            last_custom.clear();
+            last_significant = line;
+            continue;
+        }
+        if (is_tn_command(line, 1) || is_tn_command(line, 2) || is_tn_command(line, 3)) {
+            if (last_significant.rfind("; custom gcode end", 0) == 0) {
+                ++out.tool_changes;
+                if (is_k3_change_filament_block(last_custom))
+                    ++out.k3_blocks_before_t;
+            }
+            last_custom.clear();
+            last_significant = line;
+            continue;
+        }
+        last_significant = line;
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Creality K3 T1-T3 count ignores start T and a preceding T0 block", "[WipeTower][GCode][CrealityK3]")
+{
+    const std::string dodge = "; custom gcode start\nG1 Y45 Z0.4 F30000\n; custom gcode end\n";
+    SECTION("start G-code bare T1 is ignored") {
+        const auto c = count_k3_change_t_lines("START_PRINT\nT1\nG1 X0\n");
+        CHECK(c.tool_changes == 0);
+        CHECK(c.k3_blocks_before_t == 0);
+    }
+    SECTION("start G-code bare T3 is ignored") {
+        const auto c = count_k3_change_t_lines("START_PRINT\nT3\nG1 X0\n");
+        CHECK(c.tool_changes == 0);
+        CHECK(c.k3_blocks_before_t == 0);
+    }
+    SECTION("custom gcode end then T1 counts") {
+        const auto c = count_k3_change_t_lines(dodge + "T1\n");
+        CHECK(c.tool_changes == 1);
+        CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("FORCE_RESUME_FAN_SPEED may sit between custom gcode end and T") {
+        const auto c = count_k3_change_t_lines(dodge + "\n;_FORCE_RESUME_FAN_SPEED\nT2\n");
+        CHECK(c.tool_changes == 1);
+        CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("CoolingBuffer M106 S128 between marker and T2 counts") {
+        const auto c = count_k3_change_t_lines(dodge + "M106 S128\nT2\n");
+        CHECK(c.tool_changes == 1);
+        CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("M106 P2 S255 and M107 between marker and T1 count") {
+        const auto c = count_k3_change_t_lines(dodge + "M106 P2 S255\nM107\nT1\n");
+        CHECK(c.tool_changes == 1);
+        CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("M104 T3 is not a T3 command") {
+        const auto c = count_k3_change_t_lines(dodge + "M104 T3\n");
+        CHECK(c.tool_changes == 0);
+        CHECK(c.k3_blocks_before_t == 0);
+    }
+    SECTION("F10: a T1-3 change cannot take credit for a preceding T0 block") {
+        const auto c = count_k3_change_t_lines(dodge + "T0\nT1\n");
+        CHECK(c.tool_changes == 0);
+        CHECK(c.k3_blocks_before_t == 0);
+        const auto with_own = count_k3_change_t_lines(dodge + "T0\n" + dodge + "T1\n");
+        CHECK(with_own.tool_changes == 1);
+        CHECK(with_own.k3_blocks_before_t == 1);
+    }
+}
+
+TEST_CASE("Creality K3 system profile emits T0-T3 tool changes", "[WipeTower][GCode][CrealityK3]")
+{
+    const std::string saved_data_dir = data_dir();
+    const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() /
+                                            boost::filesystem::unique_path("k3_toolchange_%%%%-%%%%");
+    boost::filesystem::create_directories(scratch);
+    ScopeGuard restore_data_dir([&] {
+        set_data_dir(saved_data_dir);
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(scratch, ec);
+    });
+    set_data_dir(scratch.string());
+    const std::string profiles = (boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
+    static std::unique_ptr<PresetBundle> library;
+    if (!library) {
+        library = std::make_unique<PresetBundle>();
+        library->load_vendor_configs_from_json(profiles, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                               ForwardCompatibilitySubstitutionRule::EnableSilent);
+    }
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(profiles, "Creality", PresetBundle::LoadSystem,
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, library.get());
+    REQUIRE(bundle.printers.select_preset_by_name("Creality K3 0.4 nozzle", true));
+    REQUIRE(bundle.prints.select_preset_by_name("0.20mm Standard @Creality K3 0.4 nozzle", true));
+    REQUIRE(bundle.filaments.select_preset_by_name("Generic PLA @Creality K3", true));
+    bundle.set_num_filaments(4, std::vector<std::string>{"#E01919", "#1943E0", "#19E043", "#E0E019"});
+    bundle.filament_presets = std::vector<std::string>(4, "Generic PLA @Creality K3");
+    DynamicPrintConfig config = bundle.full_config_secure();
+    config.set_deserialize_strict({
+        { "enable_prime_tower",        "1" },
+        { "wipe_tower_x",              30 },
+        { "wipe_tower_y",              30 },
+        { "wipe_tower_rotation_angle", 0 },
+        { "gcode_comments",            true },
+        { "layer_change_gcode",        "G92 E0" },
+        { "skirt_loops",               0 },
+        { "enable_support",            false },
+    });
+    REQUIRE(config.opt_bool("single_extruder_multi_material") == false);
+    REQUIRE(config.opt_bool("enable_filament_ramming") == false);
+    REQUIRE(config.opt_bool("tool_change_temprature_wait") == false);
+    REQUIRE(config.option<ConfigOptionFloats>("nozzle_diameter")->values.size() == 4);
+
+    Print print;
+    Model model;
+    for (int i = 0; i < 4; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(make_cube(10., 10., 6.));
+        object->config.set("extruder", i + 1);
+        object->add_instance()->set_offset(Vec3d(40. + 25. * i, 40., 0.));
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    }
+    print.is_BBL_printer() = false;
+    const FinalPurgeSlice slice = slice_final_purge_model(print, model, config);
+    REQUIRE_FALSE(slice.gcode.empty());
+    // Creality Print K3 machine_start_gcode (START_PRINT + hardcoded 140/220 warmup).
+    CHECK(slice.gcode.find("START_PRINT EXTRUDER_TEMP=") != std::string::npos);
+    CHECK(slice.gcode.find("BED_TEMP=") != std::string::npos);
+    CHECK(slice.gcode.find("M104 S140") != std::string::npos);
+    CHECK(slice.gcode.find("M104 S220 T") != std::string::npos);
+    CHECK(slice.gcode.find("G1 X120 Y0 E15") != std::string::npos);
+    CHECK(slice.gcode.find("END_PRINT") != std::string::npos);
+    CHECK(slice.gcode.find("G1 X130 Y255") != std::string::npos);
+    // Independent toolchanger: filament i → physical Ti (U1-style, no filament_is_mixed).
+    auto has_tool = [&](const char *tn) {
+        const std::string needle = std::string("\n") + tn;
+        return slice.gcode.find(needle + "\n") != std::string::npos ||
+               slice.gcode.find(needle + " ") != std::string::npos ||
+               slice.gcode.find(needle + "\r") != std::string::npos;
+    };
+    CHECK(has_tool("T0"));
+    CHECK(has_tool("T1"));
+    CHECK(has_tool("T2"));
+    CHECK(has_tool("T3"));
+    // change_filament_gcode is written BEFORE T (GCode.cpp append_tcr / set_extruder),
+    // wrapped in "; custom gcode start" ... "; custom gcode end". The K3 template is a
+    // Y±5 dodge (`G1 Y… Z… F30000`) or the `I0.86 J0.86 P1` spiral — not a bare Z hop
+    // (travel_speed 500 writes G1 Z… F30000 too). Cubes sit at Y=40 so the dodge is Y45.
+    // Only T1-T3 whose previous significant line is "; custom gcode end" count (start G-code's
+    // bare T is ignored; blanks / ;_FORCE_RESUME_FAN_SPEED / M106/M107 may sit in between;
+    // T0's block cannot credit a later T1-T3).
+    const K3ChangeTCount counted = count_k3_change_t_lines(slice.gcode);
+    REQUIRE(counted.tool_changes >= 3);
+    CHECK(counted.k3_blocks_before_t == counted.tool_changes);
+    // Profile-gated M109 fix: tool_change_temprature_wait=0 → M104, not wait-M109.
+    CHECK(slice.gcode.find("set nozzle temperature and wait for it to be reached") == std::string::npos);
+    CHECK(slice.gcode.find("M109") == std::string::npos);
+}
+
+namespace {
+
 DynamicPrintConfig n2_clearance_config(bool no_sparse, bool stagger = false)
 {
     DynamicPrintConfig config = final_purge_config(true, no_sparse);

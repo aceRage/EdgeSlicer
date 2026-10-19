@@ -989,6 +989,38 @@ TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
         CHECK(model_display_name("F022") == "SPARKX i7");
     }
 
+    SECTION("F039 / K3 is a known direct-rack model, not CFS, and uses the stack default root") {
+        CHECK(is_direct_rack_model("F039"));
+        CHECK(is_direct_rack_model("K3"));
+        CHECK(is_direct_rack_model("Creality K3"));
+        CHECK(is_k3("F039"));
+        CHECK_FALSE(is_k1_family("F039"));
+        CHECK_FALSE(is_k1_family("K3"));
+        CHECK_FALSE(looks_like_k1_family("Creality K3"));
+        CHECK_FALSE(model_supports_multi_color("F039"));
+        CHECK_FALSE(model_supports_multi_color("K3"));
+        CHECK(is_known_model("F039"));
+        CHECK_FALSE(is_known_model("K3")); // display name; /info code is F039
+        CHECK(model_display_name("F039") == "K3");
+        CHECK(resolve_model("F039", "Creality K2 Plus") == "F039");
+        CHECK(resolve_model("", "Creality K3") == "F039");
+        CHECK(resolve_model("unknown", "Creality K3") == "F039");
+        // Creality Print does not name a K3 gcode root; non-K1 stack default.
+        CHECK(gcode_root("F039") == "/mnt/UDISK");
+        CHECK(gcode_root_for("", "Creality K3") == "/mnt/UDISK");
+        CHECK(gcode_path("F039", "cube.gcode") == "/mnt/UDISK/printer_data/gcodes/cube.gcode");
+        CHECK_FALSE(omit_upload_path("F039"));
+        CHECK(k3_tool_label(0) == "Nozzle 1 (T0)");
+        CHECK(k3_tool_label(3) == "Nozzle 4 (T3)");
+        CHECK(k3_tool_label(4).empty());
+        CHECK(colour_rgb_dist_sq("#FF0000", "#FE1010") < k3_colour_mismatch_sq);
+        CHECK(colour_rgb_dist_sq("#FF0000", "#0000FF") > k3_colour_mismatch_sq);
+        CHECK(k3_as_sliced_note().find("As sliced (T0-T3 go to nozzles 1-4)") != std::string::npos);
+        CHECK(k3_as_sliced_note().find("assign filaments to extruders") != std::string::npos);
+        CHECK(k3_holders_note().find("read-only") != std::string::npos);
+        CHECK(k3_holders_note().find("does not remap") != std::string::npos);
+    }
+
     SECTION("an unknown model is not treated as K1, so the K2-platform root applies") {
         CHECK_FALSE(is_k1_family(""));
         CHECK_FALSE(is_k1_family("Ender-3"));
@@ -1040,6 +1072,7 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
     using namespace Slic3r::CrealityPrintModel;
     using Slic3r::PrintHostDevices::Status;
     using Slic3r::PrintHostDevices::status_from_cfs;
+    using Slic3r::PrintHostDevices::status_from_direct_rack;
     using Slic3r::PrintHostDevices::auto_match_slot;
 
     const std::string k2_boxs = R"({
@@ -1216,6 +1249,139 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(color_match_value(0, "PLA", "#FF0000", 2, 1) == "T1A\tPLA\t#FF0000\t2\t1");
         CHECK(color_match_item_from_value("bad").empty());
         CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
+    }
+
+    SECTION("F039 / K3 start stays on opGcodeFile and holders are not CFS") {
+        // Creality Print reverted K3 send mapping; the stack's start for a non-CFS
+        // model is opGcodeFile + enableSelfTest on /mnt/UDISK.
+        const std::string path = gcode_path("F039", "k3.gcode");
+        CHECK(path == "/mnt/UDISK/printer_data/gcodes/k3.gcode");
+        const auto op = op_gcode_file_cmd(path, 1);
+        CHECK(op["method"] == "set");
+        CHECK(op["params"]["opGcodeFile"] == "printprt:/mnt/UDISK/printer_data/gcodes/k3.gcode");
+        CHECK(op["params"]["enableSelfTest"] == 1);
+        CHECK_FALSE(op["params"].contains("colorMatch"));
+        CHECK_FALSE(op["params"].contains("multiColorPrint"));
+
+        const std::string four_racks = R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": 1, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "vendor": "Creality", "type": "PLA", "name": "Hyper PLA", "color": "#FF0000" }
+                ]},
+                { "id": 2, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "vendor": "Creality", "type": "PETG", "name": "PETG", "color": "#0000FF" }
+                ]},
+                { "id": 3, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 0, "vendor": "", "type": "", "name": "", "color": "" }
+                ]},
+                { "id": 4, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "vendor": "Creality", "type": "ABS", "name": "ABS", "color": "#FFFFFF" }
+                ]},
+                { "id": 0, "state": 1, "type": 1, "materials": [
+                    { "id": 0, "state": 1, "vendor": "Creality", "type": "PLA", "name": "External", "color": "#00FF00" }
+                ]}
+            ]}
+        })";
+        const DirectRackParseResult r = parse_direct_rack_response(four_racks);
+        CHECK(r.ok);
+        REQUIRE(r.slots.size() == 4);
+        CHECK(r.slots[0].filament_type == "PLA");
+        CHECK(r.slots[0].loaded);
+        CHECK(r.slots[1].filament_type == "PETG");
+        CHECK_FALSE(r.slots[2].loaded);
+        CHECK(r.slots[3].filament_type == "ABS");
+        // External type-1 box is skipped; T0 is the first direct rack, not External.
+        CHECK(r.slots[0].brand_name == "Hyper PLA");
+
+        const Status st = status_from_direct_rack(four_racks);
+        CHECK(st.direct_rack);
+        CHECK_FALSE(st.cfs);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.slots[0].name == "Nozzle 1 (T0)");
+        CHECK(st.slots[0].label().find("T0") != std::string::npos);
+        CHECK(st.slots[3].name == "Nozzle 4 (T3)");
+        // Read-only identity (#625 F13): mapping[i] is warning_slot_position (T-number),
+        // so tiles / highlight / note agree. encode_filament_mapping stays empty.
+        {
+            using namespace Slic3r::GUI;
+            ThirdPartyFilamentMapModel model;
+            ThirdPartySlicerFilament   f0;
+            f0.index  = 0;
+            f0.type   = "PLA";
+            f0.colour = "#FF0000";
+            ThirdPartySlicerFilament f1;
+            f1.index  = 1;
+            f1.type   = "PETG";
+            f1.colour = "#0000FF";
+            model.filaments = {f0, f1};
+            for (const auto &s : st.slots) {
+                ThirdPartyDeviceSlot ds;
+                ds.index  = s.index;
+                ds.colour = s.color;
+                ds.type   = s.type;
+                ds.name   = s.name;
+                ds.label  = s.name;
+                ds.empty  = !s.loaded;
+                model.slots.push_back(ds);
+            }
+            model.read_only = true;
+            model.mapping.resize(model.filaments.size(), -1);
+            for (size_t i = 0; i < model.filaments.size(); ++i)
+                model.mapping[i] = warning_slot_position(model, i);
+            REQUIRE(model.mapping.size() == 2);
+            CHECK(model.mapping[0] == 0);
+            CHECK(model.mapping[1] == 1);
+            CHECK(warning_slot_position(model, 0) == model.mapping[0]);
+            CHECK(warning_slot_position(model, 1) == model.mapping[1]);
+            CHECK(slot_display_label(model.slots[0]) == "Nozzle 1 (T0)");
+            CHECK(encode_filament_mapping(model).empty());
+        }
+        CHECK(st.note.find("opGcodeFile") != std::string::npos);
+        CHECK(st.note.find("As sliced (T0-T3 go to nozzles 1-4)") != std::string::npos);
+        CHECK(st.note.find("read-only") != std::string::npos);
+
+        const std::string mismatch = k3_holder_mismatch_warning(
+            {{0, "PLA", "#FF0000", true}, {1, "PETG", "#0000FF", true}, {2, "ABS", "#FFFFFF", true}},
+            r.slots);
+        CHECK(mismatch.find("Filament 1") == std::string::npos); // T0 PLA #FF0000 matches holder 0
+        CHECK(mismatch.find("Filament 3 (T2)") != std::string::npos); // holder 2 is empty
+        CHECK(k3_holder_mismatch_warning({{0, "PETG", "#00FF00", true}}, r.slots).find("sliced PETG") !=
+              std::string::npos);
+        // Near-identical shade of the same type must not warn; a different hue must.
+        CHECK(k3_holder_mismatch_warning({{0, "PLA", "#FE1010", true}}, r.slots).empty());
+        CHECK(k3_holder_mismatch_warning({{0, "PLA", "#0000FF", true}}, r.slots).find("sliced PLA") !=
+              std::string::npos);
+        CHECK(k3_holder_mismatch_warning({{4, "PLA", "#FF0000", true}}, r.slots).find("no matching nozzle") !=
+              std::string::npos);
+        const auto extra = k3_holder_mismatches({{4, "PLA", "#FF0000", true}}, r.slots);
+        REQUIRE(extra.size() == 1);
+        CHECK(extra[0].kind == K3MismatchKind::NoNozzle);
+        CHECK(extra[0].index == 4);
+
+        const std::string one_box = R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": 1, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "type": "PLA", "vendor": "X", "color": "#FF0000" },
+                    { "id": 1, "state": 1, "type": "PETG", "vendor": "X", "color": "#0000FF" },
+                    { "id": 2, "state": 1, "type": "ABS", "vendor": "X", "color": "#FFFFFF" },
+                    { "id": 3, "state": 1, "type": "ASA", "vendor": "X", "color": "#111111" }
+                ]}
+            ]}
+        })";
+        const DirectRackParseResult one = parse_direct_rack_response(one_box);
+        CHECK(one.ok);
+        REQUIRE(one.slots.size() == 4);
+        CHECK(one.slots[3].filament_type == "ASA");
+        const Status cfs_same = status_from_cfs(one_box);
+        CHECK(cfs_same.cfs); // the CFS parser still sees a type-0 box
+        const Status rack_same = status_from_direct_rack(one_box);
+        CHECK_FALSE(rack_same.cfs);
+        CHECK(rack_same.direct_rack);
+
+        CHECK_FALSE(parse_direct_rack_response("").ok);
+        CHECK_FALSE(parse_direct_rack_response("<html>").ok);
+        REQUIRE_NOTHROW(parse_direct_rack_response(std::string(64, '{')));
     }
 
     SECTION("normalize_filament_type strips subtypes") {

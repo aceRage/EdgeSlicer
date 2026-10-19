@@ -446,7 +446,7 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 
 } // namespace
 
-static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& s)
+static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& s, bool direct_rack = false)
 {
     ThirdPartyDeviceSlot ds;
     ds.unit_id = s.unit;
@@ -458,6 +458,10 @@ static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& 
     ds.index   = s.index;
     if (s.cfs_external)
         ds.label = s.name.empty() ? "External" : s.name;
+    else if (direct_rack && !s.name.empty())
+        // K3 "Nozzle N (Tn)". Do not apply this when unit/tray are unset: #612 groups
+        // QIDI/HH/AFC as 1A–1D from index, and a Slot name would steal that label.
+        ds.label = s.name;
     return ds;
 }
 
@@ -558,6 +562,9 @@ std::string PrintHostSendDialog::device_id() const
 
 std::string PrintHostSendDialog::filament_mapping() const
 {
+    // F039 / K3: T0-T3 are the sliced nozzles. A dropdown remapping is never applied.
+    if (m_device_status.direct_rack)
+        return {};
     if (m_creality_use_cfs && !m_creality_use_cfs->GetValue())
         return {};
     // The QIDI Box switched off: the print runs from the extruder's own spool, nothing is mapped.
@@ -698,7 +705,19 @@ void PrintHostSendDialog::apply_device_status()
             text = format_wxstr(_L("Status: %1%"), from_u8(m_device_status.state));
         else if (m_device_status.probed && !m_device_status.online)
             text = _L("Status: unknown");
-        if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
+        if (m_device_status.direct_rack) {
+            if (!text.IsEmpty())
+                text += "  ";
+            // Literals for xgettext. Do not wrap an English Status.note with from_u8.
+            if (m_device_status.slots.empty())
+                text += _L("The K3 did not report its four holders.");
+            else if (!m_device_status.slots_have_filaments)
+                text += _L("The K3 reported its four holders but none are loaded.");
+            else
+                text += _L("K3 holders below are what is loaded in each nozzle (read-only).");
+            text += " ";
+            text += _L("As sliced (T0-T3 go to nozzles 1-4). Mapping is set when slicing: assign filaments to extruders in the slicer. The send does not remap G-code. Start uses opGcodeFile (no CFS).");
+        } else if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
             if (!text.IsEmpty())
                 text += "  ";
             text += _(from_u8(m_device_status.note));
@@ -858,7 +877,10 @@ void PrintHostSendDialog::rebuild_mapping_rows()
     m_mapping_filament.clear();
     m_mapping_sizer->Clear(true);
 
-    const bool can_map = m_device_status.slots_have_filaments && !m_device_status.slots.empty() && !m_plate_filaments.empty();
+    // Direct-rack (K3) still draws identity tiles when every holder is empty, so the note
+    // and the cards stay in the same place. Other hosts need a named filament in a slot.
+    const bool can_map = !m_device_status.slots.empty() && !m_plate_filaments.empty() &&
+                         (m_device_status.slots_have_filaments || m_device_status.direct_rack);
     if (!can_map) {
         m_mapping_panel->Show(false);
         m_mapping_panel->Layout();
@@ -932,12 +954,16 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         m_mapping_filament.push_back(f.index);
     }
     for (const PrintHostDevices::Slot& s : m_device_status.slots)
-        model.slots.push_back(third_party_slot_from(s));
+        model.slots.push_back(third_party_slot_from(s, m_device_status.direct_rack));
     model.read_only = third_party_map_read_only();
     model.mapping.resize(model.filaments.size(), -1);
-    // Always fill the visual auto-match, including read-only (K3): the cards show the match, but
-    // encode_filament_mapping() / filament_mapping() return empty when read_only.
+    // Interactive: visual auto-match. Read-only (K3, #625 F13): identity T-number so the
+    // tiles, highlight and mapping_warning() all name the same holder. Sent map stays empty.
     for (size_t i = 0; i < model.filaments.size(); ++i) {
+        if (model.read_only) {
+            model.mapping[i] = warning_slot_position(model, i);
+            continue;
+        }
         const SendPlateFilament* f = plate_filament(model.filaments[i].index);
         if (!f)
             continue;
@@ -1062,11 +1088,55 @@ const SendPlateFilament* PrintHostSendDialog::plate_filament(int index) const
 
 wxString PrintHostSendDialog::mapping_warning() const
 {
-    return wxString();
+    if (!m_device_status.direct_rack)
+        return wxString();
+    std::vector<Slic3r::CrealityPrintModel::K3PlateFilament> filaments;
+    filaments.reserve(m_plate_filaments.size());
+    for (const SendPlateFilament &f : m_plate_filaments)
+        filaments.push_back({f.index, f.type, f.colour, f.used});
+    std::vector<Slic3r::CrealityPrintModel::DirectRackSlot> holders;
+    holders.reserve(m_device_status.slots.size());
+    for (const PrintHostDevices::Slot &s : m_device_status.slots) {
+        Slic3r::CrealityPrintModel::DirectRackSlot h;
+        h.index         = s.index;
+        h.filament_type = s.type;
+        h.color_hex     = s.color;
+        h.brand_name    = s.sub_type;
+        h.vendor        = s.vendor;
+        h.loaded        = s.loaded;
+        holders.push_back(std::move(h));
+    }
+    wxString text;
+    for (const auto &m : Slic3r::CrealityPrintModel::k3_holder_mismatches(filaments, holders)) {
+        if (!text.IsEmpty())
+            text += "\n";
+        if (m.kind == Slic3r::CrealityPrintModel::K3MismatchKind::NoNozzle) {
+            text += format_wxstr(_L("Filament %1% has no matching nozzle (T0-T3 go to nozzles 1-4)."), m.index + 1);
+            continue;
+        }
+        const wxString label = format_wxstr(_L("Nozzle %1% (T%2%)"), m.index + 1, m.index);
+        if (m.kind == Slic3r::CrealityPrintModel::K3MismatchKind::Empty) {
+            text += format_wxstr(_L("Filament %1% (T%2%) does not match %3%: that holder is empty."), m.index + 1,
+                                 m.index, label);
+            continue;
+        }
+        wxString sliced = from_u8(m.sliced_type);
+        if (!m.sliced_colour.empty())
+            sliced += " " + from_u8(m.sliced_colour);
+        wxString holder = from_u8(m.holder_type);
+        if (!m.holder_colour.empty())
+            holder += " " + from_u8(m.holder_colour);
+        text += format_wxstr(_L("Filament %1% (T%2%) does not match %3%: sliced %4% vs holder %5%."), m.index + 1,
+                             m.index, label, sliced, holder);
+    }
+    return text;
 }
 
 wxString PrintHostSendDialog::third_party_mismatch_warning() const
 {
+    // K3 mapping_warning() already names identity mismatches; do not duplicate them.
+    if (m_device_status.direct_rack)
+        return wxString();
     return m_filament_map ? m_filament_map->mismatch_warning() : wxString();
 }
 

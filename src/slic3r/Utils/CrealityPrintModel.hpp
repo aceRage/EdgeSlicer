@@ -53,11 +53,26 @@ inline const std::map<std::string, std::string> &cfs_capable_models()
 
 inline bool model_supports_multi_color(const std::string &model) { return cfs_capable_models().count(model) > 0; }
 
+// Direct-rack toolchangers. F039 / K3 has four independent nozzles, each fed from its own
+// holder. It is not CFS-capable: Creality Print's device panel treats model == "F039"
+// (PrinterBoxFilamentPanel.cpp) and the current-direct-rack plan forbids CFS on this SKU.
+inline const std::map<std::string, std::string> &direct_rack_models()
+{
+    static const std::map<std::string, std::string> models = {
+        {"F039", "K3"},
+    };
+    return models;
+}
+
 inline std::string model_display_name(const std::string &model)
 {
-    auto &      names = cfs_capable_models();
-    const auto  it    = names.find(model);
-    return it != names.end() ? it->second : std::string{};
+    auto &     cfs_names = cfs_capable_models();
+    const auto cfs_it    = cfs_names.find(model);
+    if (cfs_it != cfs_names.end())
+        return cfs_it->second;
+    auto &     rack_names = direct_rack_models();
+    const auto rack_it    = rack_names.find(model);
+    return rack_it != rack_names.end() ? rack_it->second : std::string{};
 }
 
 // Preset printer_model values are "Creality K1C", while /info uses "K1C".
@@ -69,7 +84,25 @@ inline std::string strip_vendor_prefix(const std::string &model)
     return model;
 }
 
-inline bool is_known_model(const std::string &model) { return is_k1_family(model) || model_supports_multi_color(model); }
+inline bool is_direct_rack_model(const std::string &model)
+{
+    if (direct_rack_models().count(model) > 0)
+        return true;
+    const std::string n = strip_vendor_prefix(model);
+    if (direct_rack_models().count(n) > 0)
+        return true;
+    for (const auto &kv : direct_rack_models())
+        if (kv.second == n || kv.second == model)
+            return true;
+    return false;
+}
+
+inline bool is_k3(const std::string &model) { return is_direct_rack_model(model); }
+
+inline bool is_known_model(const std::string &model)
+{
+    return is_k1_family(model) || model_supports_multi_color(model) || direct_rack_models().count(model) > 0;
+}
 
 // /info codes and preset names ("Creality K1", "K1 Max", "K1C_CFS-C").
 inline bool looks_like_k1_family(const std::string &model)
@@ -94,13 +127,18 @@ inline std::string resolve_model(const std::string &info_model, const std::strin
     for (const auto &kv : cfs_capable_models())
         if (kv.second == n || kv.second == preset_model)
             return kv.first;
+    for (const auto &kv : direct_rack_models())
+        if (kv.second == n || kv.second == preset_model)
+            return kv.first;
     if (!n.empty())
         return n;
     return info_model;
 }
 
-// K1-family: /usr/data. Everything else (K2 / K2 Pro / K2 Plus / SPARKX i7, and an
-// unknown model with no K1-like preset fallback) uses /mnt/UDISK.
+// K1-family: /usr/data. Everything else (K2 / K2 Pro / K2 Plus / SPARKX i7 / F039 K3,
+// and an unknown model with no K1-like preset fallback) uses /mnt/UDISK.
+// Creality Print's F039 sources do not name a K3-specific gcode root; this is the
+// stack default for non-K1 models and is unverified on hardware.
 inline std::string gcode_root(const std::string &model) { return looks_like_k1_family(model) ? "/usr/data" : "/mnt/UDISK"; }
 
 inline std::string gcode_root_for(const std::string &info_model, const std::string &preset_model)
@@ -289,6 +327,24 @@ inline bool iequals_ascii(const std::string &a, const std::string &b)
             return false;
     return true;
 }
+
+// Sum of squared RGB channel deltas for "#RRGGBB". Same helper auto_match_index uses
+// to break CFS colour ties. Missing or short colours are "infinitely" far.
+inline double colour_rgb_dist_sq(const std::string &a, const std::string &b)
+{
+    if (a.size() < 7 || b.size() < 7)
+        return 1e9;
+    auto hex = [](char c) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return c >= 'a' ? 10 + (c - 'a') : c - '0';
+    };
+    auto ch = [&](const std::string &s, int o) { return hex(s[o]) * 16 + hex(s[o + 1]); };
+    const double dr = ch(a, 1) - ch(b, 1), dg = ch(a, 3) - ch(b, 3), db = ch(a, 5) - ch(b, 5);
+    return dr * dr + dg * dg + db * db;
+}
+
+// Near-identical shades (about 32 RGB units) do not warn; a different hue does.
+inline constexpr double k3_colour_mismatch_sq = 32.0 * 32.0 * 3.0;
 
 struct CfsSlot
 {
@@ -481,6 +537,256 @@ inline CfsParseResult parse_cfs_response(const std::string &response)
     return out;
 }
 
+// One K3 / F039 direct-rack holder. Not a CFS slot: Creality Print hides the type-1
+// external rack on F039 (PrinterBoxFilamentPanel.cpp) and does not send colorMatch.
+struct DirectRackSlot
+{
+    int         index = 0; // 0..3 → T0..T3
+    std::string color_hex;
+    std::string filament_type;
+    std::string brand_name;
+    std::string vendor;
+    bool        loaded = false;
+};
+
+struct DirectRackParseResult
+{
+    std::vector<DirectRackSlot> slots;
+    std::string                 error;
+    bool                        ok = false;
+};
+
+// Send never remaps T0-T3. Mapping is chosen in the slicer (filament → extruder).
+inline std::string k3_as_sliced_note()
+{
+    return "As sliced (T0-T3 go to nozzles 1-4). Mapping is set when slicing: "
+           "assign filaments to extruders in the slicer. The send does not remap G-code. "
+           "Start uses opGcodeFile (no CFS).";
+}
+
+inline std::string k3_unreported_holders_note()
+{
+    return "The K3 did not report its four holders. " + k3_as_sliced_note();
+}
+
+inline std::string k3_empty_holders_note()
+{
+    return "The K3 reported its four holders but none are loaded. " + k3_as_sliced_note();
+}
+
+inline std::string k3_holders_note()
+{
+    return "K3 holders below are what is loaded in each nozzle (read-only). " + k3_as_sliced_note();
+}
+
+inline std::string k3_tool_label(int index)
+{
+    if (index < 0 || index > 3)
+        return {};
+    return "Nozzle " + std::to_string(index + 1) + " (T" + std::to_string(index) + ")";
+}
+
+struct K3PlateFilament
+{
+    int         index = 0;
+    std::string type;
+    std::string colour;
+    bool        used = true;
+};
+
+enum class K3MismatchKind { Empty, TypeOrColour, NoNozzle };
+
+struct K3HolderMismatch
+{
+    K3MismatchKind kind = K3MismatchKind::Empty;
+    int            index = 0; // 0-based filament / T-number
+    std::string    sliced_type;
+    std::string    sliced_colour;
+    std::string    holder_type;
+    std::string    holder_colour;
+};
+
+// Structured mismatches so the send dialog can format them with _L() (xgettext).
+inline std::vector<K3HolderMismatch> k3_holder_mismatches(const std::vector<K3PlateFilament> &filaments,
+                                                          const std::vector<DirectRackSlot> & holders)
+{
+    std::vector<K3HolderMismatch> out;
+    for (const auto &f : filaments) {
+        if (!f.used || f.index < 0)
+            continue;
+        if (f.index > 3) {
+            K3HolderMismatch m;
+            m.kind         = K3MismatchKind::NoNozzle;
+            m.index        = f.index;
+            m.sliced_type  = f.type;
+            m.sliced_colour = colour_hex(f.colour);
+            out.push_back(std::move(m));
+            continue;
+        }
+        const DirectRackSlot *h = nullptr;
+        for (const auto &slot : holders) {
+            if (slot.index == f.index) {
+                h = &slot;
+                break;
+            }
+        }
+        if (!h || !h->loaded) {
+            K3HolderMismatch m;
+            m.kind         = K3MismatchKind::Empty;
+            m.index        = f.index;
+            m.sliced_type  = f.type;
+            m.sliced_colour = colour_hex(f.colour);
+            out.push_back(std::move(m));
+            continue;
+        }
+        const bool        type_mismatch = !f.type.empty() && !h->filament_type.empty() &&
+                                   !iequals_ascii(normalize_filament_type(f.type), normalize_filament_type(h->filament_type));
+        const std::string plate_colour    = colour_hex(f.colour);
+        const std::string holder_colour   = colour_hex(h->color_hex);
+        const bool        colour_mismatch = !plate_colour.empty() && !holder_colour.empty() &&
+                                     colour_rgb_dist_sq(plate_colour, holder_colour) > k3_colour_mismatch_sq;
+        if (!type_mismatch && !colour_mismatch)
+            continue;
+        K3HolderMismatch m;
+        m.kind          = K3MismatchKind::TypeOrColour;
+        m.index         = f.index;
+        m.sliced_type   = f.type.empty() ? "?" : f.type;
+        m.sliced_colour = plate_colour;
+        m.holder_type   = h->filament_type.empty() ? "?" : h->filament_type;
+        m.holder_colour = holder_colour;
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+// English join for Catch2. The send dialog does not use this (it formats with _L()).
+inline std::string k3_holder_mismatch_warning(const std::vector<K3PlateFilament> &filaments,
+                                              const std::vector<DirectRackSlot> & holders)
+{
+    std::string out;
+    auto        add = [&](const std::string &line) {
+        if (!out.empty())
+            out += "\n";
+        out += line;
+    };
+    for (const auto &m : k3_holder_mismatches(filaments, holders)) {
+        if (m.kind == K3MismatchKind::NoNozzle) {
+            add("Filament " + std::to_string(m.index + 1) +
+                " has no matching nozzle (T0-T3 go to nozzles 1-4).");
+            continue;
+        }
+        const std::string label  = k3_tool_label(m.index);
+        const std::string prefix = "Filament " + std::to_string(m.index + 1) + " (T" + std::to_string(m.index) +
+                                   ") does not match " + label + ": ";
+        if (m.kind == K3MismatchKind::Empty)
+            add(prefix + "that holder is empty.");
+        else
+            add(prefix + "sliced " + m.sliced_type +
+                (m.sliced_colour.empty() ? std::string() : " " + m.sliced_colour) + " vs holder " + m.holder_type +
+                (m.holder_colour.empty() ? std::string() : " " + m.holder_colour) + ".");
+    }
+    return out;
+}
+
+// Parse boxsInfo as K3 direct racks. Same JSON envelope as CFS, but:
+// type 1 (external) is skipped (Creality Print F039 UI), remaining boxes/materials
+// become up to four holders labeled T0-T3, and the result is never CFS.
+// The on-wire holder layout is unverified; both "one box, four materials" and
+// "four boxes, one material each" are accepted. Do not reuse parse_cfs_response:
+// that pads every type-0 box to four CFS slots and would mis-read four 1-slot racks.
+inline DirectRackParseResult parse_direct_rack_response(const std::string &response)
+{
+    DirectRackParseResult out;
+    if (response.empty()) {
+        out.error = "empty response";
+        return out;
+    }
+    constexpr size_t kMaxMessage = 1024 * 1024;
+    if (response.size() > kMaxMessage) {
+        out.error = "message too large";
+        return out;
+    }
+    nlohmann::json resp;
+    try {
+        resp = nlohmann::json::parse(response);
+    } catch (...) {
+        out.error = "JSON parse error";
+        return out;
+    }
+    if (!resp.is_object()) {
+        out.error = "invalid schema";
+        return out;
+    }
+    nlohmann::json boxes = nlohmann::json::array();
+    try {
+        if (resp.contains("boxsInfo") && resp["boxsInfo"].is_object() && resp["boxsInfo"].contains("materialBoxs") &&
+            resp["boxsInfo"]["materialBoxs"].is_array())
+            boxes = resp["boxsInfo"]["materialBoxs"];
+        else if (resp.contains("result") && resp["result"].is_object() && resp["result"].contains("boxsInfo") &&
+                 resp["result"]["boxsInfo"].is_object() && resp["result"]["boxsInfo"].contains("materialBoxs") &&
+                 resp["result"]["boxsInfo"]["materialBoxs"].is_array())
+            boxes = resp["result"]["boxsInfo"]["materialBoxs"];
+        else {
+            out.error = "invalid schema (missing boxsInfo.materialBoxs)";
+            return out;
+        }
+    } catch (...) {
+        out.error = "invalid schema";
+        return out;
+    }
+
+    auto push_holder = [&](const nlohmann::json *mat) {
+        if (out.slots.size() >= 4)
+            return;
+        DirectRackSlot h;
+        if (mat && mat->is_object()) {
+            h.vendor        = json_str(*mat, "vendor");
+            h.filament_type = json_str(*mat, "type");
+            h.brand_name    = json_str(*mat, "name");
+            h.color_hex     = colour_hex(json_str(*mat, "color"));
+            const int st    = json_int(*mat, "state", 0, 0, 16);
+            h.loaded        = st != 0 && !(h.vendor.empty() && h.filament_type.empty());
+        }
+        out.slots.push_back(std::move(h));
+    };
+
+    int seen = 0;
+    for (const auto &box : boxes) {
+        if (!box.is_object())
+            continue;
+        if (seen >= 8)
+            break;
+        ++seen;
+        const int box_st   = json_int(box, "state", 0, 0, 16);
+        const int box_type = json_int(box, "type", 0, 0, 16);
+        if (box_st != 1)
+            continue;
+        if (box_type == 1)
+            continue; // F039: hide the external rack
+        if (box.contains("materials") && box["materials"].is_array() && !box["materials"].empty()) {
+            for (const auto &mat : box["materials"]) {
+                if (!mat.is_object())
+                    continue;
+                push_holder(&mat);
+                if (out.slots.size() >= 4)
+                    break;
+            }
+        } else {
+            push_holder(nullptr);
+        }
+        if (out.slots.size() >= 4)
+            break;
+    }
+    while (out.slots.size() < 4) {
+        DirectRackSlot empty;
+        out.slots.push_back(std::move(empty));
+    }
+    for (size_t i = 0; i < out.slots.size(); ++i)
+        out.slots[i].index = static_cast<int>(i);
+    out.ok = true;
+    return out;
+}
+
 // G-code filament index, as Creality Print / upstream Orca:
 // T{idx/4+1}{'A'+idx%4}. Destination box/slot travel in the mapped fields.
 inline std::string color_match_id(int filament_index)
@@ -592,18 +898,6 @@ inline nlohmann::json color_match_item_from_value(const std::string &val)
 // Lower rank wins; colour_dist breaks ties. Returns -1 when nothing is usable.
 inline int auto_match_index(const std::string &type, const std::string &colour, const std::vector<CfsSlot> &slots)
 {
-    auto rgb_dist = [](const std::string &a, const std::string &b) -> double {
-        if (a.size() < 7 || b.size() < 7)
-            return 1e9;
-        auto hex = [](char c) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            return c >= 'a' ? 10 + (c - 'a') : c - '0';
-        };
-        auto ch = [&](const std::string &s, int o) { return hex(s[o]) * 16 + hex(s[o + 1]); };
-        const double dr = ch(a, 1) - ch(b, 1), dg = ch(a, 3) - ch(b, 3), db = ch(a, 5) - ch(b, 5);
-        return dr * dr + dg * dg + db * db;
-    };
-
     int    best   = -1;
     int    best_r = 99;
     double best_d = 1e12;
@@ -629,7 +923,7 @@ inline int auto_match_index(const std::string &type, const std::string &colour, 
             rank = 4;
         else
             continue;
-        const double dist = colour_ok ? rgb_dist(plate_colour, slot_colour) : 1e9;
+        const double dist = colour_ok ? colour_rgb_dist_sq(plate_colour, slot_colour) : 1e9;
         if (best < 0 || rank < best_r || (rank == best_r && dist < best_d)) {
             best   = static_cast<int>(i);
             best_r = rank;
