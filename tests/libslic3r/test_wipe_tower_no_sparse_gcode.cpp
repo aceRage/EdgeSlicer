@@ -722,44 +722,60 @@ TEST_CASE("Creality K3 system profile emits T0-T3 tool changes", "[WipeTower][GC
     CHECK(has_tool("T1"));
     CHECK(has_tool("T2"));
     CHECK(has_tool("T3"));
-    // change_filament_gcode only: a Z lift at F30000 (Y dodge) or the I0.86 spiral,
-    // on the next motion line after T1/T2/T3. Start/end also contain F30000 or G1 Y.
-    auto k3_change_after_tool = [&]() {
-        std::istringstream in(slice.gcode);
+    // change_filament_gcode is written BEFORE T (GCode.cpp append_tcr / set_extruder),
+    // wrapped in "; custom gcode start" ... "; custom gcode end". The K3 template is a
+    // Y±5 dodge (`G1 Y… Z… F30000`) or the `I0.86 J0.86 P1` spiral — not a bare Z hop
+    // (travel_speed 500 writes G1 Z… F30000 too). Cubes sit at Y=40 so the dodge is Y45.
+    auto is_k3_change_block = [](const std::string &block) {
+        if (block.find("I0.86 J0.86 P1") != std::string::npos)
+            return true;
+        std::istringstream in(block);
         std::string        line;
-        bool               after_tool = false;
-        int                look       = 0;
         while (std::getline(in, line)) {
             if (!line.empty() && line.back() == '\r')
                 line.pop_back();
             const std::string code = line.substr(0, line.find(';'));
-            auto              trim_end = [](std::string s) {
-                while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
-                    s.pop_back();
-                return s;
-            };
-            const std::string cmd = trim_end(code);
-            const bool        is_t123 = cmd == "T1" || cmd == "T2" || cmd == "T3";
-            if (is_t123) {
-                after_tool = true;
-                look       = 0;
-                continue;
-            }
-            if (!after_tool)
-                continue;
-            if (cmd.empty())
-                continue;
-            if (cmd.find("I0.86 J0.86 P1") != std::string::npos)
+            if (code.rfind("G1", 0) == 0 && code.find('Y') != std::string::npos &&
+                code.find('Z') != std::string::npos && code.find("F30000") != std::string::npos)
                 return true;
-            if ((cmd.rfind("G1", 0) == 0 || cmd.rfind("G2", 0) == 0) && cmd.find('Z') != std::string::npos &&
-                cmd.find("F30000") != std::string::npos)
-                return true;
-            if (++look >= 12)
-                after_tool = false;
         }
         return false;
     };
-    CHECK(k3_change_after_tool());
+    int tool_changes = 0, k3_blocks_before_t = 0;
+    {
+        std::istringstream in(slice.gcode);
+        std::string        line, last_custom, collecting;
+        bool               in_custom = false;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            if (line.rfind("; custom gcode start", 0) == 0) {
+                in_custom  = true;
+                collecting = line + "\n";
+                continue;
+            }
+            if (in_custom) {
+                collecting += line + "\n";
+                if (line.rfind("; custom gcode end", 0) == 0) {
+                    last_custom = collecting;
+                    in_custom   = false;
+                }
+                continue;
+            }
+            const std::string code = line.substr(0, line.find(';'));
+            std::string       cmd  = code;
+            while (!cmd.empty() && (cmd.back() == ' ' || cmd.back() == '\t'))
+                cmd.pop_back();
+            if (cmd == "T1" || cmd == "T2" || cmd == "T3") {
+                ++tool_changes;
+                if (is_k3_change_block(last_custom))
+                    ++k3_blocks_before_t;
+                last_custom.clear();
+            }
+        }
+    }
+    REQUIRE(tool_changes >= 3);
+    CHECK(k3_blocks_before_t == tool_changes);
     // Profile-gated M109 fix: tool_change_temprature_wait=0 → M104, not wait-M109.
     CHECK(slice.gcode.find("set nozzle temperature and wait for it to be reached") == std::string::npos);
     CHECK(slice.gcode.find("M109") == std::string::npos);
