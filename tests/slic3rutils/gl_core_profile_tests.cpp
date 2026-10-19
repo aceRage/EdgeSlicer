@@ -537,7 +537,8 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
         CHECK(drain_gl_errors() == GL_NO_ERROR);
 
         // The fallback textures are complete on their own.
-        for (const GLenum target : { GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_3D) }) {
+        for (const GLenum target : { GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_3D), GLenum(GL_TEXTURE_CUBE_MAP) }) {
+            INFO("target " << target);
             const unsigned int fallback = OpenGLManager::get_fallback_texture(target);
             REQUIRE(fallback != 0);
             CHECK(OpenGLManager::get_fallback_texture(target) == fallback);
@@ -633,6 +634,41 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
         OpenGLManager::check_sampled_textures(gouraud, "the core-profile test");
         OpenGLManager::set_gl_debug_enabled(debug);
         gouraud->stop_using();
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
+    SECTION("Showcase: env_map (a samplerCube on unit 6) sees a complete fallback cube while no environment is bound")
+    {
+        gl_test_trace("SECTION Showcase: env_map sees a complete fallback cube while no env");
+        // What macOS reported as "unit 1 GLD_TEXTURE_INDEX_CUBE_MAP is unloadable" on the first Showcase draw:
+        // a plain backdrop, or the "None" environment, left texture 0 on env_map's cube target.
+        for (const char* name : { "showcase_background", "showcase_material" }) {
+            INFO("shader " << name);
+            GLShaderProgram* shader = manager->get_shader(name);
+            CHECK(shader != nullptr);
+            if (shader == nullptr)
+                continue;
+            bool has_env = false;
+            for (const GLShaderProgram::SamplerUniform& sampler : shader->get_samplers())
+                has_env |= sampler.name == "env_map" && GLShaderProgram::sampler_target(sampler.type) == GL_TEXTURE_CUBE_MAP;
+            CHECK(has_env);
+            // Leave nothing on unit 6, as the renderer does after each draw.
+            glActiveTexture(GL_TEXTURE6);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+            glActiveTexture(GL_TEXTURE0);
+            shader->start_using();
+            for (const GLShaderProgram::SamplerUniform& sampler : shader->get_samplers()) {
+                const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
+                if (target == 0)
+                    continue;
+                GLint unit = -1;
+                glGetUniformiv(shader->get_id(), sampler.location, &unit);
+                INFO(sampler.name << " on unit " << unit);
+                CHECK(OpenGLManager::describe_texture_incompleteness(target, unit).empty());
+            }
+            CHECK(shader->sampler_unit_conflicts().empty());
+            shader->stop_using();
+        }
         CHECK(drain_gl_errors() == GL_NO_ERROR);
     }
 

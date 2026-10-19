@@ -104,6 +104,7 @@ private:
     // EDGE: see get_fallback_texture().
     static unsigned int s_fallback_texture_2d;
     static unsigned int s_fallback_texture_3d;
+    static unsigned int s_fallback_texture_cube;
 
 public:
     OpenGLManager() = default;
@@ -139,13 +140,14 @@ public:
     static bool gl_debug_enabled();
     static void set_gl_debug_enabled(bool enabled);
 
-    // EDGE (core profile): a 1x1 (or 1x1x1) opaque white texture for GL_TEXTURE_2D / GL_TEXTURE_3D, made
-    // on first use with the current context. Bound to a unit a shader samples while it has nothing of
-    // its own there (see GLShaderProgram::set_sampler_units), so the draw never samples texture 0: an
-    // incomplete texture, which macOS reports as "unit N GLD_TEXTURE_INDEX_2D is unloadable ... using
-    // zero texture". 0 for any other target or without GL.
+    // EDGE (core profile): a 1x1 (or 1x1x1) opaque white texture for GL_TEXTURE_2D / GL_TEXTURE_3D, or an
+    // opaque black 1x1 cube for GL_TEXTURE_CUBE_MAP (Showcase's env_map), made on first use with the
+    // current context. Bound to a unit a shader samples while it has nothing of its own there (see
+    // GLShaderProgram::set_sampler_units), so the draw never samples texture 0: an incomplete texture,
+    // which macOS reports as "unit N GLD_TEXTURE_INDEX_2D (or _CUBE_MAP) is unloadable ... using zero
+    // texture". 0 for any other target or without GL.
     static unsigned int get_fallback_texture(unsigned int target);
-    // Why the texture bound to `unit` for `target` (GL_TEXTURE_2D/3D) cannot be sampled: texture 0,
+    // Why the texture bound to `unit` for `target` (GL_TEXTURE_2D/3D/CUBE_MAP) cannot be sampled: texture 0,
     // no image at the base level, a mipmap min filter without every level up to GL_TEXTURE_MAX_LEVEL,
     // or a wrongly sized level. Empty when it is complete. Restores the active texture unit.
     static std::string describe_texture_incompleteness(unsigned int target, unsigned int unit);
