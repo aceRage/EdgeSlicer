@@ -769,6 +769,22 @@ TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
         CHECK_FALSE(model_supports_multi_color("Ender-3"));
     }
 
+    SECTION("empty or unknown /info falls back to the preset printer_model") {
+        CHECK(resolve_model("K1C", "Creality K2 Plus") == "K1C");
+        CHECK(resolve_model("F021", "Creality K1C") == "F021");
+        CHECK(resolve_model("", "Creality K1C") == "K1C");
+        CHECK(resolve_model("unknown", "Creality K1") == "K1");
+        CHECK(resolve_model("", "Creality K2 Plus") == "F008");
+        CHECK(gcode_root_for("", "Creality K1C") == "/usr/data");
+        CHECK(gcode_root_for("garbage", "Creality K1 SE") == "/usr/data");
+        CHECK(gcode_root_for("", "Creality K1") == "/usr/data");
+        CHECK(gcode_root_for("", "Creality K2 Plus") == "/mnt/UDISK");
+        CHECK(gcode_root_for("K1C", "Creality K2 Plus") == "/usr/data");
+        CHECK(gcode_root_for("F021", "Creality K1C") == "/mnt/UDISK");
+        CHECK(looks_like_k1_family("Creality K1 Max"));
+        CHECK(gcode_root_for("", "Creality K1 Max") == "/usr/data");
+    }
+
     SECTION("ws_host strips scheme and port (Http::url_host)") {
         CHECK(ws_host("192.168.1.50") == "192.168.1.50");
         CHECK(ws_host("http://192.168.1.50") == "192.168.1.50");
