@@ -328,6 +328,24 @@ inline bool iequals_ascii(const std::string &a, const std::string &b)
     return true;
 }
 
+// Sum of squared RGB channel deltas for "#RRGGBB". Same helper auto_match_index uses
+// to break CFS colour ties. Missing or short colours are "infinitely" far.
+inline double colour_rgb_dist_sq(const std::string &a, const std::string &b)
+{
+    if (a.size() < 7 || b.size() < 7)
+        return 1e9;
+    auto hex = [](char c) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return c >= 'a' ? 10 + (c - 'a') : c - '0';
+    };
+    auto ch = [&](const std::string &s, int o) { return hex(s[o]) * 16 + hex(s[o + 1]); };
+    const double dr = ch(a, 1) - ch(b, 1), dg = ch(a, 3) - ch(b, 3), db = ch(a, 5) - ch(b, 5);
+    return dr * dr + dg * dg + db * db;
+}
+
+// Near-identical shades (about 32 RGB units) do not warn; a different hue does.
+inline constexpr double k3_colour_mismatch_sq = 32.0 * 32.0 * 3.0;
+
 struct CfsSlot
 {
     int         box_id   = 0; // raw printer boxId (0 is the external spool holder)
@@ -576,7 +594,72 @@ struct K3PlateFilament
     bool        used = true;
 };
 
-// Warn when a sliced filament's type or colour does not match the holder that T-number prints.
+enum class K3MismatchKind { Empty, TypeOrColour, NoNozzle };
+
+struct K3HolderMismatch
+{
+    K3MismatchKind kind = K3MismatchKind::Empty;
+    int            index = 0; // 0-based filament / T-number
+    std::string    sliced_type;
+    std::string    sliced_colour;
+    std::string    holder_type;
+    std::string    holder_colour;
+};
+
+// Structured mismatches so the send dialog can format them with _L() (xgettext).
+inline std::vector<K3HolderMismatch> k3_holder_mismatches(const std::vector<K3PlateFilament> &filaments,
+                                                          const std::vector<DirectRackSlot> & holders)
+{
+    std::vector<K3HolderMismatch> out;
+    for (const auto &f : filaments) {
+        if (!f.used || f.index < 0)
+            continue;
+        if (f.index > 3) {
+            K3HolderMismatch m;
+            m.kind         = K3MismatchKind::NoNozzle;
+            m.index        = f.index;
+            m.sliced_type  = f.type;
+            m.sliced_colour = colour_hex(f.colour);
+            out.push_back(std::move(m));
+            continue;
+        }
+        const DirectRackSlot *h = nullptr;
+        for (const auto &slot : holders) {
+            if (slot.index == f.index) {
+                h = &slot;
+                break;
+            }
+        }
+        if (!h || !h->loaded) {
+            K3HolderMismatch m;
+            m.kind         = K3MismatchKind::Empty;
+            m.index        = f.index;
+            m.sliced_type  = f.type;
+            m.sliced_colour = colour_hex(f.colour);
+            out.push_back(std::move(m));
+            continue;
+        }
+        const bool        type_mismatch = !f.type.empty() && !h->filament_type.empty() &&
+                                   !iequals_ascii(normalize_filament_type(f.type), normalize_filament_type(h->filament_type));
+        const std::string plate_colour    = colour_hex(f.colour);
+        const std::string holder_colour   = colour_hex(h->color_hex);
+        const bool        colour_mismatch = !plate_colour.empty() && !holder_colour.empty() &&
+                                     colour_rgb_dist_sq(plate_colour, holder_colour) > k3_colour_mismatch_sq;
+        if (!type_mismatch && !colour_mismatch)
+            continue;
+        K3HolderMismatch m;
+        m.kind          = K3MismatchKind::TypeOrColour;
+        m.index         = f.index;
+        m.sliced_type   = f.type.empty() ? "?" : f.type;
+        m.sliced_colour = plate_colour;
+        m.holder_type   = h->filament_type.empty() ? "?" : h->filament_type;
+        m.holder_colour = holder_colour;
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+// English join for Catch2. The send dialog does not use this (it formats with _L()).
 inline std::string k3_holder_mismatch_warning(const std::vector<K3PlateFilament> &filaments,
                                               const std::vector<DirectRackSlot> & holders)
 {
@@ -586,35 +669,21 @@ inline std::string k3_holder_mismatch_warning(const std::vector<K3PlateFilament>
             out += "\n";
         out += line;
     };
-    for (const auto &f : filaments) {
-        if (!f.used || f.index < 0 || f.index > 3)
+    for (const auto &m : k3_holder_mismatches(filaments, holders)) {
+        if (m.kind == K3MismatchKind::NoNozzle) {
+            add("Filament " + std::to_string(m.index + 1) +
+                " has no matching nozzle (T0-T3 go to nozzles 1-4).");
             continue;
-        const std::string label  = k3_tool_label(f.index);
-        const DirectRackSlot *h  = nullptr;
-        for (const auto &slot : holders) {
-            if (slot.index == f.index) {
-                h = &slot;
-                break;
-            }
         }
-        const std::string prefix = "Filament " + std::to_string(f.index + 1) + " (T" + std::to_string(f.index) +
+        const std::string label  = k3_tool_label(m.index);
+        const std::string prefix = "Filament " + std::to_string(m.index + 1) + " (T" + std::to_string(m.index) +
                                    ") does not match " + label + ": ";
-        if (!h || !h->loaded) {
+        if (m.kind == K3MismatchKind::Empty)
             add(prefix + "that holder is empty.");
-            continue;
-        }
-        const bool        type_mismatch = !f.type.empty() && !h->filament_type.empty() &&
-                                   !iequals_ascii(normalize_filament_type(f.type), normalize_filament_type(h->filament_type));
-        const std::string plate_colour   = colour_hex(f.colour);
-        const std::string holder_colour  = colour_hex(h->color_hex);
-        const bool        colour_mismatch = !plate_colour.empty() && !holder_colour.empty() &&
-                                     !iequals_ascii(plate_colour, holder_colour);
-        if (!type_mismatch && !colour_mismatch)
-            continue;
-        add(prefix + "sliced " + (f.type.empty() ? std::string("?") : f.type) +
-            (plate_colour.empty() ? std::string() : " " + plate_colour) + " vs holder " +
-            (h->filament_type.empty() ? std::string("?") : h->filament_type) +
-            (holder_colour.empty() ? std::string() : " " + holder_colour) + ".");
+        else
+            add(prefix + "sliced " + m.sliced_type +
+                (m.sliced_colour.empty() ? std::string() : " " + m.sliced_colour) + " vs holder " + m.holder_type +
+                (m.holder_colour.empty() ? std::string() : " " + m.holder_colour) + ".");
     }
     return out;
 }
@@ -787,18 +856,6 @@ inline nlohmann::json color_match_item_from_value(const std::string &val)
 // Lower rank wins; colour_dist breaks ties. Returns -1 when nothing is usable.
 inline int auto_match_index(const std::string &type, const std::string &colour, const std::vector<CfsSlot> &slots)
 {
-    auto rgb_dist = [](const std::string &a, const std::string &b) -> double {
-        if (a.size() < 7 || b.size() < 7)
-            return 1e9;
-        auto hex = [](char c) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            return c >= 'a' ? 10 + (c - 'a') : c - '0';
-        };
-        auto ch = [&](const std::string &s, int o) { return hex(s[o]) * 16 + hex(s[o + 1]); };
-        const double dr = ch(a, 1) - ch(b, 1), dg = ch(a, 3) - ch(b, 3), db = ch(a, 5) - ch(b, 5);
-        return dr * dr + dg * dg + db * db;
-    };
-
     int    best   = -1;
     int    best_r = 99;
     double best_d = 1e12;
@@ -824,7 +881,7 @@ inline int auto_match_index(const std::string &type, const std::string &colour, 
             rank = 4;
         else
             continue;
-        const double dist = colour_ok ? rgb_dist(plate_colour, slot_colour) : 1e9;
+        const double dist = colour_ok ? colour_rgb_dist_sq(plate_colour, slot_colour) : 1e9;
         if (best < 0 || rank < best_r || (rank == best_r && dist < best_d)) {
             best   = static_cast<int>(i);
             best_r = rank;

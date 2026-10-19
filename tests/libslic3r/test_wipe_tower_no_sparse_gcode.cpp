@@ -722,11 +722,44 @@ TEST_CASE("Creality K3 system profile emits T0-T3 tool changes", "[WipeTower][GC
     CHECK(has_tool("T1"));
     CHECK(has_tool("T2"));
     CHECK(has_tool("T3"));
-    // Ported Creality Print change_filament_gcode: Y dodge at F30000 or I0.86 spiral.
-    const bool k3_change = slice.gcode.find(" F30000") != std::string::npos &&
-                           (slice.gcode.find("I0.86 J0.86 P1") != std::string::npos ||
-                            slice.gcode.find("G1 Y") != std::string::npos);
-    CHECK(k3_change);
+    // change_filament_gcode only: a Z lift at F30000 (Y dodge) or the I0.86 spiral,
+    // on the next motion line after T1/T2/T3. Start/end also contain F30000 or G1 Y.
+    auto k3_change_after_tool = [&]() {
+        std::istringstream in(slice.gcode);
+        std::string        line;
+        bool               after_tool = false;
+        int                look       = 0;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            const std::string code = line.substr(0, line.find(';'));
+            auto              trim_end = [](std::string s) {
+                while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
+                    s.pop_back();
+                return s;
+            };
+            const std::string cmd = trim_end(code);
+            const bool        is_t123 = cmd == "T1" || cmd == "T2" || cmd == "T3";
+            if (is_t123) {
+                after_tool = true;
+                look       = 0;
+                continue;
+            }
+            if (!after_tool)
+                continue;
+            if (cmd.empty())
+                continue;
+            if (cmd.find("I0.86 J0.86 P1") != std::string::npos)
+                return true;
+            if ((cmd.rfind("G1", 0) == 0 || cmd.rfind("G2", 0) == 0) && cmd.find('Z') != std::string::npos &&
+                cmd.find("F30000") != std::string::npos)
+                return true;
+            if (++look >= 12)
+                after_tool = false;
+        }
+        return false;
+    };
+    CHECK(k3_change_after_tool());
     // Profile-gated M109 fix: tool_change_temprature_wait=0 → M104, not wait-M109.
     CHECK(slice.gcode.find("set nozzle temperature and wait for it to be reached") == std::string::npos);
     CHECK(slice.gcode.find("M109") == std::string::npos);

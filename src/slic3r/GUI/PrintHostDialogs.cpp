@@ -606,7 +606,15 @@ void PrintHostSendDialog::apply_device_status()
         if (m_device_status.direct_rack) {
             if (!text.IsEmpty())
                 text += "  ";
-            text += _(from_u8(m_device_status.note.empty() ? Slic3r::CrealityPrintModel::k3_as_sliced_note() : m_device_status.note));
+            // Literals for xgettext. Do not wrap an English Status.note with from_u8.
+            if (m_device_status.slots.empty())
+                text += _L("The K3 did not report its four holders.");
+            else if (!m_device_status.slots_have_filaments)
+                text += _L("The K3 reported its four holders but none are loaded.");
+            else
+                text += _L("K3 holders below are what is loaded in each nozzle (read-only).");
+            text += " ";
+            text += _L("As sliced (T0-T3 go to nozzles 1-4). Mapping is set when slicing: assign filaments to extruders in the slicer. The send does not remap G-code. Start uses opGcodeFile (no CFS).");
         } else if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
             if (!text.IsEmpty())
                 text += "  ";
@@ -750,7 +758,7 @@ void PrintHostSendDialog::rebuild_mapping_rows()
             swatch->SetBackgroundColour(s.color.empty() ? wxColour("#DDDDDD") : swatch_colour(s.color));
             m_mapping_sizer->Add(swatch, 0, wxALIGN_CENTER_VERTICAL);
 
-            const wxString name = from_u8(s.name.empty() ? Slic3r::CrealityPrintModel::k3_tool_label(s.index) : s.name);
+            const wxString name = format_wxstr(_L("Nozzle %1% (T%2%)"), s.index + 1, s.index);
             m_mapping_sizer->Add(new wxStaticText(m_mapping_panel, wxID_ANY, name), 0, wxALIGN_CENTER_VERTICAL);
 
             wxString loaded = _L("empty");
@@ -956,7 +964,30 @@ wxString PrintHostSendDialog::mapping_warning() const
         h.loaded        = s.loaded;
         holders.push_back(std::move(h));
     }
-    return from_u8(Slic3r::CrealityPrintModel::k3_holder_mismatch_warning(filaments, holders));
+    wxString text;
+    for (const auto &m : Slic3r::CrealityPrintModel::k3_holder_mismatches(filaments, holders)) {
+        if (!text.IsEmpty())
+            text += "\n";
+        if (m.kind == Slic3r::CrealityPrintModel::K3MismatchKind::NoNozzle) {
+            text += format_wxstr(_L("Filament %1% has no matching nozzle (T0-T3 go to nozzles 1-4)."), m.index + 1);
+            continue;
+        }
+        const wxString label = format_wxstr(_L("Nozzle %1% (T%2%)"), m.index + 1, m.index);
+        if (m.kind == Slic3r::CrealityPrintModel::K3MismatchKind::Empty) {
+            text += format_wxstr(_L("Filament %1% (T%2%) does not match %3%: that holder is empty."), m.index + 1,
+                                 m.index, label);
+            continue;
+        }
+        wxString sliced = from_u8(m.sliced_type);
+        if (!m.sliced_colour.empty())
+            sliced += " " + from_u8(m.sliced_colour);
+        wxString holder = from_u8(m.holder_type);
+        if (!m.holder_colour.empty())
+            holder += " " + from_u8(m.holder_colour);
+        text += format_wxstr(_L("Filament %1% (T%2%) does not match %3%: sliced %4% vs holder %5%."), m.index + 1,
+                             m.index, label, sliced, holder);
+    }
+    return text;
 }
 
 void PrintHostSendDialog::update_mapping_note()

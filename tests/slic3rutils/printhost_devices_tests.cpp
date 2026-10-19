@@ -789,6 +789,8 @@ TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
         CHECK(k3_tool_label(0) == "Nozzle 1 (T0)");
         CHECK(k3_tool_label(3) == "Nozzle 4 (T3)");
         CHECK(k3_tool_label(4).empty());
+        CHECK(colour_rgb_dist_sq("#FF0000", "#FE1010") < k3_colour_mismatch_sq);
+        CHECK(colour_rgb_dist_sq("#FF0000", "#0000FF") > k3_colour_mismatch_sq);
         CHECK(k3_as_sliced_note().find("As sliced (T0-T3 go to nozzles 1-4)") != std::string::npos);
         CHECK(k3_as_sliced_note().find("assign filaments to extruders") != std::string::npos);
         CHECK(k3_holders_note().find("read-only") != std::string::npos);
@@ -1068,6 +1070,16 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(mismatch.find("Filament 3 (T2)") != std::string::npos); // holder 2 is empty
         CHECK(k3_holder_mismatch_warning({{0, "PETG", "#00FF00", true}}, r.slots).find("sliced PETG") !=
               std::string::npos);
+        // Near-identical shade of the same type must not warn; a different hue must.
+        CHECK(k3_holder_mismatch_warning({{0, "PLA", "#FE1010", true}}, r.slots).empty());
+        CHECK(k3_holder_mismatch_warning({{0, "PLA", "#0000FF", true}}, r.slots).find("sliced PLA") !=
+              std::string::npos);
+        CHECK(k3_holder_mismatch_warning({{4, "PLA", "#FF0000", true}}, r.slots).find("no matching nozzle") !=
+              std::string::npos);
+        const auto extra = k3_holder_mismatches({{4, "PLA", "#FF0000", true}}, r.slots);
+        REQUIRE(extra.size() == 1);
+        CHECK(extra[0].kind == K3MismatchKind::NoNozzle);
+        CHECK(extra[0].index == 4);
 
         const std::string one_box = R"({
             "boxsInfo": { "materialBoxs": [
