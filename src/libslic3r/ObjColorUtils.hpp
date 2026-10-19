@@ -117,6 +117,16 @@ public:
                 next_id++;
             }
         }
+        // k-means can emit an empty cluster. Those labels never appear in the first-seen
+        // walk, so the leftover centre slots would stay as the unpermuted originals.
+        // Park empty clusters at the end with their own centres so every id is remapped.
+        for (int old_id = 0; old_id < best_cluster; ++old_id) {
+            if (new_index[old_id] < 0) {
+                new_index[old_id]                          = next_id;
+                this->m_centers8UC3.at<cv::Vec3b>(next_id) = centers_sorted.at<cv::Vec3b>(old_id);
+                next_id++;
+            }
+        }
 
         cluster_results.clear();
         labels.clear();

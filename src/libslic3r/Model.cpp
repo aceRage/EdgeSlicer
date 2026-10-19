@@ -3537,8 +3537,8 @@ bool Model::import_volume_color_deal(const std::vector<unsigned char> &volume_fi
     obj->config.set("extruder", first_extruder_id);
     for (size_t i = 0; i < obj->volumes.size(); i++) {
         const unsigned char id = volume_filament_ids[i];
-        if (id == first_extruder_id)
-            continue;   // the part's own filament; the OBJ paint helpers skip it for the same reason
+        if (id <= 1)
+            continue;   // 1 is the default; the OBJ appliers skip it for the same reason
         obj->volumes[i]->config.set("extruder", (int) id);
     }
     return true;
@@ -3576,7 +3576,7 @@ bool Model::import_multi_volume_vertex_color_deal(const std::vector<unsigned cha
 // Model::obj_import_face_color_deal so the OBJ path and the glTF texture path share one
 // implementation - the same treatment the vertex path got.
 static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned char *face_filament_ids,
-                                          size_t face_count_in, unsigned char first_extruder_id)
+                                          size_t face_count_in)
 {
     const size_t face_count = volume->mesh().its.indices.size();
     if (face_count != face_count_in) { return false; }
@@ -3585,10 +3585,10 @@ static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned ch
     // through set_triangle_from_string. Same result, one writer - and the encoder is the one the
     // Image fill dialog uses, so a painted import and a painted image cannot drift apart.
     //
-    // Faces on first_extruder_id are the part's own filament and are left unpainted.
+    // The `<= 1` skip is kept exactly: id 1 is the part's own filament and was never painted.
     std::vector<int> states(face_count, 0);
     for (size_t i = 0; i < face_count; ++i)
-        states[i] = face_filament_ids[i] == first_extruder_id ? 0 : int(face_filament_ids[i]);
+        states[i] = face_filament_ids[i] <= 1 ? 0 : int(face_filament_ids[i]);
     TriangleSelector sel(volume->mesh());
     sel.deserialize(image_fill_encode(face_count, 0, states), /*needs_reset=*/true);
     volume->mmu_segmentation_facets.set(sel);
@@ -3622,8 +3622,7 @@ bool Model::obj_import_face_color_deal(const std::vector<unsigned char> &face_fi
         if (obj->volumes.size() == 1) {
             auto volume        = obj->volumes[0];
             volume->config.set("extruder", first_extruder_id);
-            return paint_volume_from_face_colors(volume, face_filament_ids.data(), face_filament_ids.size(),
-                                                 first_extruder_id);
+            return paint_volume_from_face_colors(volume, face_filament_ids.data(), face_filament_ids.size());
         }
     }
     return false;
@@ -3649,7 +3648,7 @@ bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char>
     for (ModelVolume *volume : obj->volumes) {
         const size_t count = volume->mesh().its.indices.size();
         volume->config.set("extruder", first_extruder_id);
-        if (!paint_volume_from_face_colors(volume, face_filament_ids.data() + offset, count, first_extruder_id))
+        if (!paint_volume_from_face_colors(volume, face_filament_ids.data() + offset, count))
             return false;
         offset += count;
     }
