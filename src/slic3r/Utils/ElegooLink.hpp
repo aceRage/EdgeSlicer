@@ -1,6 +1,7 @@
 #ifndef slic3r_ElegooLink_hpp_
 #define slic3r_ElegooLink_hpp_
 
+#include <map>
 #include <string>
 #include <wx/string.h>
 #include <boost/optional.hpp>
@@ -42,11 +43,9 @@ protected:
 
 private:
     bool elegoo_test(wxString& curl_msg) const;
-    bool print(WebSocketClient&  client,
-               std::string       timeLapse,
-               std::string       heatedBedLeveling,
-               std::string       bedType,
-               const std::string filename, ErrorFn error_fn) const;
+    bool print(WebSocketClient&                            client,
+               const std::map<std::string, std::string>&   extended_info,
+               const std::string                           filename, ErrorFn error_fn) const;
     bool checkResult(WebSocketClient&  client,
                ErrorFn           error_fn) const;
 

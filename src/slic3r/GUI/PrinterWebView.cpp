@@ -6,6 +6,7 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
 #include "slic3r/GUI/Widgets/Button.hpp"
+#include "slic3r/GUI/ElegooCanvasUI.hpp"
 #include "common_func/common_func.hpp"
 
 #include <wx/sizer.h>
@@ -86,6 +87,9 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
         evt.Skip();
         if (evt.IsShown())
             release_startup_hold("the Device tab was opened");
+        // The CANVAS card reads the printer when the tab is opened (at most every 10 s).
+        if (evt.IsShown() && m_canvas && m_canvas->has_target())
+            m_canvas->refresh(true);
         // The Storage tab reads the printer only while it is on screen.
         if (m_storage) {
             if (evt.IsShown() && m_storage_shown)
@@ -130,6 +134,9 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
     SetSizer(topsizer);
 
     topsizer->Add(m_device_bar, 0, wxEXPAND);
+    // The CANVAS card, hidden until set_canvas_device() names a Centauri Carbon 1 on Elegoo Link.
+    m_canvas = new ElegooCanvasPanel(this);
+    topsizer->Add(m_canvas, 0, wxEXPAND);
     topsizer->Add(m_browser, wxSizerFlags().Expand().Proportion(1));
 
     update_mode();
@@ -283,8 +290,21 @@ void PrinterWebView::load_picked_device()
     wxString wurl   = from_u8(url);
     wxString apikey = from_u8(d.apikey);
     load_url(wurl, apikey);
-    // The Storage tab follows the picker.
+    // The Storage tab and the CANVAS card follow the picker.
     set_storage_device(d, "ph:" + d.id);
+    set_canvas_device(d, m_canvas_model);
+}
+
+void PrinterWebView::set_canvas_device(const PrintHostDevices::Device& device, const std::string& preset_model)
+{
+    if (!m_canvas)
+        return;
+    m_canvas_model          = preset_model;
+    const std::string model = device.printer_model.empty() ? preset_model : device.printer_model;
+    const bool        was   = m_canvas->IsShown();
+    const bool        shown = m_canvas->set_target(device.host_type == "elegoolink" ? device.address : std::string(), model);
+    if (was != shown)
+        Layout();
 }
 
 void PrinterWebView::set_storage_device(const PrintHostDevices::Device& device, const std::string& key)
@@ -356,6 +376,8 @@ void PrinterWebView::update_bar()
 
 void PrinterWebView::sys_color_changed()
 {
+    if (m_canvas)
+        m_canvas->sys_color_changed();
     if (m_tab_page) {
         m_tab_page->Rescale();
         m_tab_storage->Rescale();
@@ -368,6 +390,8 @@ void PrinterWebView::sys_color_changed()
 
 void PrinterWebView::msw_rescale()
 {
+    if (m_canvas)
+        m_canvas->msw_rescale();
     if (m_tab_page) {
         m_tab_page->Rescale();
         m_tab_storage->Rescale();

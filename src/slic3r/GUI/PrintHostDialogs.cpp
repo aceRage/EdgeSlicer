@@ -546,7 +546,11 @@ void PrintHostSendDialog::build_device_ui()
     m_mapping_sizer = new wxFlexGridSizer(3, FromDIP(4), FromDIP(8));
     m_mapping_sizer->AddGrowableCol(2, 1);
     m_mapping_panel->SetSizer(m_mapping_sizer);
-    content_sizer->Add(m_mapping_panel, 0, wxEXPAND | wxBOTTOM, 2 * VERT_SPACING);
+    content_sizer->Add(m_mapping_panel, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
+    m_mapping_note = new wxStaticText(this, wxID_ANY, wxEmptyString);
+    m_mapping_note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#E8A33D")));
+    m_mapping_note->Hide();
+    content_sizer->Add(m_mapping_note, 0, wxBOTTOM, VERT_SPACING);
 
     m_combo_devices->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
         m_device_sel = m_combo_devices->GetSelection();
@@ -562,7 +566,12 @@ void PrintHostSendDialog::refresh_device_status()
     m_device_status = PrintHostDevices::Status();
     if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size()) {
         wxBusyCursor wait;
-        m_device_status = PrintHostDevices::probe(m_devices[m_device_sel], 3);
+        // A device saved before the store kept the model: the dialog knows it (the model key is the
+        // preset's printer_model), and the Elegoo probe asks a CANVAS only of a Centauri Carbon 1.
+        PrintHostDevices::Device d = m_devices[m_device_sel];
+        if (d.printer_model.empty())
+            d.printer_model = m_model_key;
+        m_device_status = PrintHostDevices::probe(d, 3);
     }
     if (m_device_note) {
         wxString text;
@@ -625,6 +634,7 @@ void PrintHostSendDialog::rebuild_mapping_rows()
     if (!can_map) {
         m_mapping_panel->Show(false);
         m_mapping_panel->Layout();
+        update_mapping_note(); // no rows, no warnings
         return;
     }
 
@@ -650,11 +660,17 @@ void PrintHostSendDialog::rebuild_mapping_rows()
         m_mapping_sizer->Add(new wxStaticText(m_mapping_panel, wxID_ANY, name), 0, wxALIGN_CENTER_VERTICAL);
 
         auto* choice = new wxChoice(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, slot_labels);
-        // Auto-match: the closest colour among the slots that have something in them, the same rule
-        // the Snapmaker LAN path uses. "As sliced" whenever nothing is close enough to be obvious.
+        // Auto-match: the dialog's own choice when it has one (the Elegoo dialog's remembered
+        // mapping), else the closest colour among the slots that have something in them, the same
+        // rule the Snapmaker LAN path uses. "As sliced" whenever nothing is close enough to be obvious.
         // A QIDI Box matches by material first and never by colour alone (auto_match_slot).
-        const int best = PrintHostDevices::auto_match_slot(m_device_status.slots, f.colour, f.type, m_device_status.qidi_box);
+        const int  preset_pos = preselect_slot(f);
+        const bool preset_ok  = preset_pos >= 0 && preset_pos < (int) m_device_status.slots.size();
+        const int  best       = preset_ok ? preset_pos + 1 :
+                                            PrintHostDevices::auto_match_slot(m_device_status.slots, f.colour, f.type,
+                                                                              m_device_status.qidi_box);
         choice->SetSelection(best);
+        choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { update_mapping_note(); });
         m_mapping_sizer->Add(choice, 1, wxEXPAND);
         m_mapping_choices.push_back(choice);
         m_mapping_filament.push_back(f.index);
@@ -662,6 +678,39 @@ void PrintHostSendDialog::rebuild_mapping_rows()
 
     m_mapping_panel->Show(!m_mapping_choices.empty());
     m_mapping_panel->Layout();
+    update_mapping_note();
+}
+
+std::vector<int> PrintHostSendDialog::mapping_choice_positions() const
+{
+    std::vector<int> out;
+    for (const wxChoice* c : m_mapping_choices)
+        out.push_back(c ? c->GetSelection() - 1 : -1); // 0 is "As sliced"
+    return out;
+}
+
+const SendPlateFilament* PrintHostSendDialog::plate_filament(int index) const
+{
+    for (const SendPlateFilament& f : m_plate_filaments)
+        if (f.index == index)
+            return &f;
+    return nullptr;
+}
+
+void PrintHostSendDialog::update_mapping_note()
+{
+    if (!m_mapping_note)
+        return;
+    const wxString text = m_mapping_choices.empty() ? wxString() : mapping_warning();
+    const bool     was  = m_mapping_note->IsShown();
+    m_mapping_note->SetLabel(text);
+    m_mapping_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+    m_mapping_note->Show(!text.IsEmpty());
+    if (was != !text.IsEmpty() || !text.IsEmpty()) {
+        content_sizer->Layout();
+        Layout();
+        Fit();
+    }
 }
 
 void PrintHostSendDialog::init()
@@ -1853,6 +1902,10 @@ void ElegooPrintHostSendDialog::init() {
     if (!bedType.empty())
         m_BedType = static_cast<BedType>(std::stoi(bedType));
 
+    // The target before the file name, as in the plain dialog: which of this model's printers the plate
+    // goes to, and the filament mapping when the printer reports its slots.
+    build_device_ui();
+
     auto* label_dir_hint = new wxStaticText(this, wxID_ANY, _L("Use forward slashes ( / ) as a directory separator if needed."));
     label_dir_hint->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
 
@@ -2101,6 +2154,8 @@ void ElegooPrintHostSendDialog::init() {
 void ElegooPrintHostSendDialog::EndModal(int ret)
 {
     if (ret == wxID_OK) {
+        if (!confirm_slot_map_still_valid())
+            return; // the dialog stays open on the re-read trays
 
         AppConfig* app_config = wxGetApp().app_config;
         app_config->set("recent", CONFIG_KEY_UPLOADANDPRINT, std::to_string(static_cast<int>(post_upload_action)));
@@ -2110,6 +2165,136 @@ void ElegooPrintHostSendDialog::EndModal(int ret)
     }
 
     PrintHostSendDialog::EndModal(ret);
+}
+
+std::vector<ElegooCanvasMapping::UsedFilament> ElegooPrintHostSendDialog::used_filaments() const
+{
+    std::vector<ElegooCanvasMapping::UsedFilament> out;
+    for (int index : m_mapping_filament) {
+        ElegooCanvasMapping::UsedFilament u;
+        u.index = index;
+        if (const SendPlateFilament* f = plate_filament(index)) {
+            u.type        = f->type;
+            u.colour      = f->colour;
+            u.alias       = f->alias;
+            u.nozzle_temp = f->nozzle_temp;
+        }
+        out.push_back(std::move(u));
+    }
+    return out;
+}
+
+std::vector<ElegooStartPrint::SlotMapEntry> ElegooPrintHostSendDialog::slot_map() const
+{
+    if (!m_device_status.canvas)
+        return {};
+    return ElegooCanvasMapping::slot_map_for(used_filaments(), mapping_choice_positions(), m_device_status.slots,
+                                             ElegooStartPrint::AS_SLICED_IDENTITY_MAP);
+}
+
+std::map<std::string, std::string> ElegooPrintHostSendDialog::extendedInfo() const
+{
+    std::map<std::string, std::string> info{{"bedType", std::to_string(static_cast<int>(m_BedType))},
+                                            {"timeLapse", std::to_string(m_timeLapse)},
+                                            {"heatedBedLeveling", std::to_string(m_heatedBedLeveling)}};
+    // Only when the dialog read a CANVAS: without one the start command keeps its old shape exactly.
+    if (m_device_status.canvas) {
+        info["canvasAttached"] = "1";
+        info["slotMap"]        = ElegooStartPrint::format_slot_map(slot_map());
+    }
+    return info;
+}
+
+int ElegooPrintHostSendDialog::preselect_slot(const SendPlateFilament& f) const
+{
+    if (!m_device_status.canvas)
+        return -1;
+    if (!m_memory_loaded) {
+        m_memory        = ElegooCanvasMapping::load();
+        m_memory_loaded = true;
+    }
+    ElegooCanvasMapping::UsedFilament u;
+    u.index  = f.index;
+    u.type   = f.type;
+    u.colour = f.colour;
+    u.alias  = f.alias;
+    return ElegooCanvasMapping::recall(m_memory, u, m_device_status.slots);
+}
+
+wxString ElegooPrintHostSendDialog::mapping_warning() const
+{
+    if (!m_device_status.canvas)
+        return wxString();
+    const auto used     = used_filaments();
+    const auto warnings = ElegooCanvasMapping::warnings_for(used, mapping_choice_positions(), m_device_status.slots);
+    wxString   text;
+    auto       add = [&text](const wxString& line) {
+        if (!text.IsEmpty())
+            text += "\n";
+        text += line;
+    };
+    for (const ElegooCanvasMapping::Warning& w : warnings) {
+        switch (w.kind) {
+        case ElegooCanvasMapping::WarningKind::MoreFilamentsThanTrays:
+            add(_L("This plate uses more filaments than the CANVAS has loaded trays."));
+            break;
+        case ElegooCanvasMapping::WarningKind::SharedTray:
+            add(format_wxstr(_L("Filament %1% prints from the same tray as another filament."), w.filament + 1));
+            break;
+        case ElegooCanvasMapping::WarningKind::TemperatureOutOfRange:
+            add(format_wxstr(_L("Filament %1%: its nozzle temperature is outside the range of tray %2%."), w.filament + 1, w.slot + 1));
+            break;
+        case ElegooCanvasMapping::WarningKind::EmptyTray:
+            add(format_wxstr(_L("Filament %1% is mapped to tray %2%, which is empty."), w.filament + 1, w.slot + 1));
+            break;
+        }
+    }
+    return text;
+}
+
+bool ElegooPrintHostSendDialog::confirm_slot_map_still_valid()
+{
+    if (post_upload_action != PrintHostPostUploadAction::StartPrint || !m_device_status.canvas)
+        return true;
+    const auto entries = slot_map();
+    // What goes out, in the log, so the owner's test print can settle what "As sliced" should be
+    // (design D4): an empty slot_map means the printer decides.
+    BOOST_LOG_TRIVIAL(info) << "CANVAS: slot_map for this print: ["
+                            << ElegooStartPrint::format_slot_map(entries) << "]"
+                            << (entries.empty() ? " (every filament as sliced: an empty slot_map is sent)" : "");
+    if (!entries.empty() && m_device_sel >= 0 && m_device_sel < (int) m_devices.size()) {
+        PrintHostDevices::Device d = m_devices[m_device_sel];
+        if (d.printer_model.empty())
+            d.printer_model = m_model_key;
+        PrintHostDevices::Status fresh;
+        {
+            wxBusyCursor wait;
+            fresh = PrintHostDevices::probe(d, 3);
+        }
+        if (fresh.canvas) {
+            const std::string why = ElegooCanvasMapping::validate(entries, fresh.slots);
+            if (!why.empty()) {
+                BOOST_LOG_TRIVIAL(warning) << "CANVAS: not sending, " << why;
+                show_error(this, _L("A CANVAS tray chosen for this print has changed since this dialog read the printer. "
+                                    "The trays have been read again; check the mapping and press Upload again."));
+                refresh_device_status();
+                return false;
+            }
+        } else {
+            // A second read that fails changes nothing: the start command itself will reach the
+            // printer or say why not.
+            BOOST_LOG_TRIVIAL(info) << "CANVAS: could not re-read the trays before sending (" << fresh.error << "); sending the mapping as chosen";
+        }
+    }
+    try {
+        if (!m_memory_loaded) {
+            m_memory        = ElegooCanvasMapping::load();
+            m_memory_loaded = true;
+        }
+        ElegooCanvasMapping::remember(m_memory, used_filaments(), mapping_choice_positions(), m_device_status.slots);
+        ElegooCanvasMapping::save(m_memory);
+    } catch (...) {}
+    return true;
 }
 
 BedType ElegooPrintHostSendDialog::appBedType() const

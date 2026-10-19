@@ -13,6 +13,7 @@
 #include "MsgDialog.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "../Utils/PrintHostDeviceStatus.hpp"
+#include "../Utils/ElegooCanvasMapping.hpp"
 #include "../Utils/Flashforge.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ProjectTask.hpp"
@@ -36,6 +37,8 @@ struct SendPlateFilament
     std::string type;          // "PLA"
     std::string colour;        // "#RRGGBB" or "#RRGGBBAA"
     bool        used { false }; // this plate's slice result actually used it
+    std::string alias;         // its filament preset's alias (or name), for remembered mappings
+    int         nozzle_temp { 0 }; // its nozzle temperature, 0 = unknown
 };
 
 class PrintHostSendDialog : public GUI::MsgDialog
@@ -96,6 +99,16 @@ protected:
     bool print_blocked() const;
     // "Upload and Print" follows print_blocked(). Safe before the buttons exist.
     void update_print_button();
+    // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
+    // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
+    virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
+    // One or more lines under the mapping table, refreshed whenever a choice changes; "" = none.
+    virtual wxString mapping_warning() const { return wxString(); }
+    void update_mapping_note();
+    // The rows' choices as positions in m_device_status.slots, -1 = "As sliced"; and the plate
+    // filament each row is for.
+    std::vector<int> mapping_choice_positions() const;
+    const SendPlateFilament* plate_filament(int index) const;
 
     wxTextCtrl *txt_filename;
     wxComboBox *combo_groups;
@@ -113,6 +126,7 @@ protected:
     wxFlexGridSizer*                      m_mapping_sizer { nullptr };
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
+    wxStaticText*                         m_mapping_note { nullptr };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
     bool                                  m_unload_default { false };
@@ -231,14 +245,23 @@ public:
     BedType      bedType() const { return m_BedType; }
 
     virtual void                               init() override;
-    virtual std::map<std::string, std::string> extendedInfo() const
-    {
-        return {{"bedType", std::to_string(static_cast<int>(m_BedType))},
-                {"timeLapse", std::to_string(m_timeLapse)},
-                {"heatedBedLeveling", std::to_string(m_heatedBedLeveling)}};
-    }
+    // The start command's options, plus the CANVAS slot map (ElegooStartPrint.hpp) when the dialog
+    // read a CANVAS from the printer.
+    virtual std::map<std::string, std::string> extendedInfo() const override;
+
+protected:
+    int      preselect_slot(const SendPlateFilament& f) const override;
+    wxString mapping_warning() const override;
 
 private:
+    // The plate's used filaments in the shape the CANVAS mapping code takes.
+    std::vector<ElegooCanvasMapping::UsedFilament> used_filaments() const;
+    std::vector<ElegooStartPrint::SlotMapEntry>    slot_map() const;
+    // On Upload and Print with a slot map: read the CANVAS again and stop if a mapped tray has gone.
+    bool confirm_slot_map_still_valid();
+    mutable bool                                                  m_memory_loaded { false };
+    mutable std::map<std::string, ElegooCanvasMapping::Remembered> m_memory;
+
     BedType appBedType() const;
     void    refresh();
 
