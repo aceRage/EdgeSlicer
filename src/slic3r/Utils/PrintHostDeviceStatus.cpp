@@ -1,5 +1,7 @@
 #include "PrintHostDeviceStatus.hpp"
 
+#include "CrealityPrint.hpp"
+#include "CrealityPrintModel.hpp"
 #include "Http.hpp"
 #include "PrusaLinkStatus.hpp"
 
@@ -8,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 
 namespace Slic3r {
 namespace PrintHostDevices {
@@ -18,6 +21,16 @@ using nlohmann::json;
 
 std::string Slot::label() const
 {
+    if (cfs_box >= 0) {
+        std::string out = name.empty() ? (cfs_external ? std::string("External") :
+                                                         std::string("CFS ") + char('A' + std::max(0, std::min(3, cfs_material)))) :
+                                         name;
+        if (loaded && !type.empty())
+            out += " " + type;
+        else if (!loaded)
+            out += " (empty)";
+        return out;
+    }
     if (unit >= 0) {
         // A CANVAS tray: numbered as the printer's screen counts them, 1..4 per unit.
         std::string out = "Tray " + std::to_string(index + 1);
@@ -120,11 +133,13 @@ bool can_probe(const std::string& host_type_key)
     // The host types this fork has a status client for. Adding one here means writing that client;
     // there is no generic "ask a print host how it is" in this codebase.
     return speaks_moonraker(host_type_key) || PrusaLinkStatus::speaks_prusalink(host_type_key) ||
-           host_type_key == "elegoolink";
+           host_type_key == "elegoolink" || host_type_key == "crealityprint";
 }
 
 std::string no_filament_note(const std::string& host_type_key)
 {
+    if (host_type_key == "crealityprint")
+        return "This Creality printer did not report CFS slots, so there is nothing to map. The plate is sent exactly as it was sliced.";
     if (host_type_key == "elegoolink")
         // A Centauri Carbon 1 with a CANVAS reports its trays (ElegooCanvas.hpp); anything else on
         // Elegoo Link - or a CC1 without a CANVAS, or one that did not answer - has nothing to map.
@@ -280,6 +295,106 @@ Status status_from_canvas(const CanvasQueryResult& r)
     return st;
 }
 
+Status status_from_cfs(const std::string& boxs_info_json)
+{
+    Status st;
+    st.probed = true;
+    const CrealityPrintModel::CfsParseResult parsed = CrealityPrintModel::parse_cfs_response(boxs_info_json);
+    if (!parsed.ok) {
+        st.note  = no_filament_note("crealityprint");
+        st.error = parsed.error;
+        return st;
+    }
+    st.online        = true;
+    st.cfs           = parsed.box_count > 0;
+    st.cfs_box_count = parsed.box_count;
+    st.cfs_variant   = parsed.variant;
+    int idx          = 0;
+    for (const CrealityPrintModel::CfsSlot& c : parsed.slots) {
+        Slot s;
+        s.index        = idx++;
+        s.type         = c.filament_type;
+        s.sub_type     = c.brand_name;
+        s.vendor       = c.vendor;
+        s.color        = c.color_hex;
+        s.loaded       = c.loaded;
+        s.cfs_box      = c.box_id;
+        s.cfs_material = c.slot_id;
+        s.cfs_external = c.external;
+        if (c.external)
+            s.name = "External";
+        else {
+            const std::string letter(1, static_cast<char>('A' + std::max(0, std::min(3, c.slot_id))));
+            s.name = (c.variant.empty() ? std::string("CFS") : c.variant) + " " + std::to_string(c.box_id) + letter;
+        }
+        if (s.loaded && (!s.type.empty() || !s.color.empty()))
+            st.slots_have_filaments = true;
+        st.slots.push_back(std::move(s));
+    }
+    if (!st.cfs)
+        st.note = no_filament_note("crealityprint");
+    else if (!st.slots_have_filaments)
+        st.note = "The CFS reports no loaded slots, so there is nothing to map. The plate is sent exactly as it was sliced.";
+    return st;
+}
+
+int auto_match_slot(const std::string& type, const std::string& colour, const std::vector<Slot>& slots, bool cfs_order)
+{
+    std::vector<CrealityPrintModel::CfsSlot> cfs;
+    cfs.reserve(slots.size());
+    for (const Slot& s : slots) {
+        CrealityPrintModel::CfsSlot c;
+        c.filament_type = s.type;
+        c.color_hex     = s.color;
+        c.loaded        = s.loaded;
+        c.external      = cfs_order ? s.cfs_external : false;
+        cfs.push_back(std::move(c));
+    }
+    return CrealityPrintModel::auto_match_index(type, colour, cfs);
+}
+
+// CrealityPrint: /info (first call, caller's timeout) then a 1 s boxsInfo WebSocket when the
+// model is CFS-capable. The extra call stays short because probe() runs on the send-dialog UI thread.
+static Status probe_creality(const Device& d, int timeout_s)
+{
+    Status st;
+    st.probed = true;
+    std::string body;
+    std::string info_err;
+    const std::string host = d.address;
+    if (host.empty()) {
+        st.note = "this device has no address";
+        return st;
+    }
+    std::string url = host;
+    if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0)
+        url = "http://" + url;
+    if (!url.empty() && url.back() == '/')
+        url.pop_back();
+    url += "/info";
+    if (!moonraker_get(url, body, info_err, timeout_s)) {
+        st.error = info_err;
+        st.note  = "this printer did not answer" + (info_err.empty() ? std::string() : (": " + info_err));
+        return st;
+    }
+    st.online              = true;
+    const std::string model = CrealityPrintModel::parse_model_from_info(body);
+    if (!CrealityPrintModel::model_supports_multi_color(model)) {
+        st.note = no_filament_note("crealityprint");
+        return st;
+    }
+    // Extra call: ~1 s so switching devices in the send dialog does not stall.
+    const std::string boxs = CrealityPrint::query_boxes_info(host, 1);
+    if (boxs.empty()) {
+        st.note = no_filament_note("crealityprint");
+        return st;
+    }
+    Status parsed = status_from_cfs(boxs);
+    parsed.probed = true;
+    parsed.online = true;
+    return parsed;
+}
+
 // A Centauri Carbon 1: its CANVAS over SDCP. Any other Elegoo model has nothing this fork can read.
 static Status probe_elegoo(const Device& d, int timeout_s)
 {
@@ -307,6 +422,8 @@ Status probe(const Device& d, int timeout_s)
     }
     if (d.host_type == "elegoolink")
         return probe_elegoo(d, timeout_s);
+    if (d.host_type == "crealityprint")
+        return probe_creality(d, timeout_s);
     st.probed = true;
     if (PrusaLinkStatus::speaks_prusalink(d.host_type))
         return probe_prusalink(d, timeout_s);

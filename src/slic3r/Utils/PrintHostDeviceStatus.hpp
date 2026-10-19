@@ -28,10 +28,12 @@
 //    state and both heaters, `/api/v1/job` the file it is printing. See PrusaLinkStatus.hpp. It
 //    names no filaments at all - the API has no filament-identity story - so it comes back online
 //    with a state and an empty slot list.
+//  * A CrealityPrint host (K1/K2 + CFS) answers /info and a port-9999 WebSocket `boxsInfo`. The
+//    extra WebSocket call is capped at about 1 s because the send dialog probes on the UI thread.
 //  * Everything else (Duet, Repetier, SimplyPrint, ...) is not probed: this fork has no client for
 //    their status APIs, and guessing would cost a timeout per address.
 //
-// Blocking. Never call it from the GUI thread.
+// Blocking. The send dialog calls it on the UI thread with a short timeout; extra calls stay ~1 s.
 
 namespace Slic3r {
 namespace PrintHostDevices {
@@ -53,6 +55,11 @@ struct Slot
     std::string name;           // what the remembered mapping matches it by ("ELEGOO PLA Silk")
     int         min_temp { 0 }; // the tray's nozzle range, 0 = unknown
     int         max_temp { 0 };
+    // A Creality CFS slot (port-9999 boxsInfo). boxId / materialId are what colorMatch sends;
+    // -1 for every other kind of slot. External spool holder: cfs_external.
+    int         cfs_box { -1 };
+    int         cfs_material { -1 };
+    bool        cfs_external { false };
 
     // Something to put in a dropdown.
     std::string label() const;
@@ -71,6 +78,10 @@ struct Status
     bool              slots_have_filaments { false };
     // The slots are CANVAS trays read over SDCP (Cmd 324), so the start command can carry a slot_map.
     bool              canvas { false };
+    // CrealityPrint host: the probe spoke the port-9999 boxsInfo WebSocket and found CFS boxes.
+    bool              cfs { false };
+    int               cfs_box_count { 0 };
+    std::string       cfs_variant; // "CFS", "CFS-C", ... when the printer named one
 };
 
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
@@ -83,6 +94,14 @@ Status parse_moonraker_status(const std::string& status_json, const std::string&
 
 // The half of the Elegoo probe that has no network in it: a CANVAS query result as slots.
 Status status_from_canvas(const CanvasQueryResult& result);
+
+// The half of the Creality probe that has no network in it: a boxsInfo body as slots.
+Status status_from_cfs(const std::string& boxs_info_json);
+
+// Material-first auto-match (research X3 / #610), with Creality's CFS-over-external ranking
+// when `cfs_order` is true: CFS type+colour > CFS type > ext type+colour > ext type.
+// Returns an index into `slots`, or -1.
+int auto_match_slot(const std::string& type, const std::string& colour, const std::vector<Slot>& slots, bool cfs_order);
 
 // What can be said before asking: false for every host type this fork has no status client for.
 bool   can_probe(const std::string& host_type_key);

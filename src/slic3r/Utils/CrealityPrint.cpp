@@ -151,7 +151,7 @@ bool CrealityPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, 
 
             if (upload_data.post_action == PrintHostPostUploadAction::StartPrint) {
                 wxString errormsg;
-                if (!start_print(errormsg, safe_upload_filename)) {
+                if (!start_print(errormsg, safe_upload_filename, upload_data.extended_info)) {
                     error_fn(std::move(errormsg));
                     res = false;
                 }
@@ -199,15 +199,17 @@ std::string CrealityPrint::safe_filename(const std::string &filename) const
     return safe_filename;
 }
 
-static void ws_connect(net::io_context &ioc, websocket::stream<beast::tcp_stream> &ws, const std::string &host_url, const std::string &port)
+static void ws_connect(net::io_context &ioc, websocket::stream<beast::tcp_stream> &ws, const std::string &host_url, const std::string &port,
+                       int timeout_s)
 {
     // Upstream Http::get_host_from_url; this fork's Http::url_host strips scheme and port.
     std::string host = CrealityPrintModel::ws_host(host_url);
     if (host.empty())
         throw std::runtime_error("CrealityPrint: empty print_host");
 
+    const int wait = std::max(1, timeout_s);
     tcp::resolver resolver{ioc};
-    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(5));
+    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(wait));
     auto const results = resolver.resolve(host, port);
     beast::get_lowest_layer(ws).connect(results);
     host += ':' + std::to_string(beast::get_lowest_layer(ws).socket().remote_endpoint().port());
@@ -220,30 +222,130 @@ static void ws_connect(net::io_context &ioc, websocket::stream<beast::tcp_stream
     ws.text(true);
 }
 
-bool CrealityPrint::start_print(wxString &msg, const std::string &filename) const
+static std::string ws_send_and_read(websocket::stream<beast::tcp_stream> &ws, const json &cmd, const std::string &expected_key, int max_reads = 20)
+{
+    ws.write(net::buffer(to_string(cmd)));
+
+    for (int reads = 0, total = 0; reads < max_reads && total < max_reads * 3; ++total) {
+        beast::flat_buffer buf;
+        beast::error_code  ec;
+        ws.read(buf, ec);
+        if (ec == net::error::would_block || ec == beast::error::timeout)
+            break;
+        if (ec)
+            throw beast::system_error{ec};
+        std::string msg = beast::buffers_to_string(buf.data());
+        // K1-family firmware sends periodic heartbeat pings; ack them so the
+        // printer does not close the connection, then keep reading.
+        if (msg.find("heart_beat") != std::string::npos) {
+            beast::error_code wr_ec;
+            ws.write(net::buffer(std::string("ok")), wr_ec);
+            continue;
+        }
+        ++reads;
+        if (msg.find(expected_key) != std::string::npos)
+            return msg;
+    }
+    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: No '" << expected_key << "' response after " << max_reads << " messages";
+    return {};
+}
+
+std::string CrealityPrint::query_boxes_info(const std::string &host, int timeout_s)
 {
     try {
-        const std::string gcode_path = CrealityPrintModel::gcode_path(m_model, filename);
+        net::io_context                      ioc;
+        websocket::stream<beast::tcp_stream> ws{ioc};
+        ws_connect(ioc, ws, host, "9999", timeout_s);
 
-        json j2 = {{"method", "set"}, {"params", {{"opGcodeFile", "printprt:" + gcode_path}}}};
+        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(std::max(1, timeout_s)));
+        json        boxs_query = {{"method", "get"}, {"params", {{"boxsInfo", 1}}}};
+        std::string result     = ws_send_and_read(ws, boxs_query, "boxsInfo");
+
+        beast::error_code close_ec;
+        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(1));
+        ws.close(websocket::close_code::normal, close_ec);
+        return result;
+    } catch (std::exception const &e) {
+        BOOST_LOG_TRIVIAL(error) << "CrealityPrint: Failed to query boxsInfo: " << e.what();
+        return {};
+    }
+}
+
+std::string CrealityPrint::query_boxes_info(int timeout_s) const { return query_boxes_info(m_host, timeout_s); }
+
+static int enable_self_test_of(const std::map<std::string, std::string> &extended_info)
+{
+    const auto it = extended_info.find("enableSelfTest");
+    if (it == extended_info.end() || it->second.empty())
+        return 0;
+    try {
+        const int n = std::stoi(it->second);
+        return n == 0 ? 0 : 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+static bool use_cfs_of(const std::map<std::string, std::string> &extended_info)
+{
+    const auto it = extended_info.find("useCFS");
+    return it != extended_info.end() && it->second == "1";
+}
+
+bool CrealityPrint::start_print(wxString &msg, const std::string &filename, const std::map<std::string, std::string> &extended_info) const
+{
+    try {
+        const std::string gcode_path        = CrealityPrintModel::gcode_path(m_model, filename);
+        const int         enable_self_test  = enable_self_test_of(extended_info);
+        const bool        use_cfs           = use_cfs_of(extended_info);
 
         net::io_context                      ioc;
         websocket::stream<beast::tcp_stream> ws{ioc};
-        ws_connect(ioc, ws, m_host, "9999");
+        ws_connect(ioc, ws, m_host, "9999", 5);
 
-        ws.write(net::buffer(to_string(j2)));
+        if (use_cfs) {
+            json color_list = json::array();
+            for (int i = 0;; ++i) {
+                const auto it = extended_info.find("colorMatch_" + std::to_string(i));
+                if (it == extended_info.end())
+                    break;
+                json item = CrealityPrintModel::color_match_item_from_value(it->second);
+                if (!item.empty())
+                    color_list.push_back(std::move(item));
+            }
 
-        // K1-family firmware closes the WebSocket right after accepting the
-        // start command, so a blocking read here surfaces a benign
-        // "End of file [asio.misc:2]" even though the print already started
-        // (the command is delivered by write()). Read best-effort, ignore errors.
-        beast::flat_buffer buffer;
-        beast::error_code  read_ec;
-        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
-        ws.read(buffer, read_ec);
+            const json color_match = CrealityPrintModel::color_match_cmd(gcode_path, color_list);
+            // Creality Print retries colorMatch; two extra attempts cover a dropped TEXT frame.
+            bool matched = false;
+            for (int attempt = 0; attempt < 3 && !matched; ++attempt) {
+                try {
+                    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(5));
+                    const std::string reply = ws_send_and_read(ws, color_match, "colorMatch", 8);
+                    matched = !reply.empty() || attempt == 2;
+                } catch (std::exception const &e) {
+                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1) << " failed: " << e.what();
+                    if (attempt == 2)
+                        throw;
+                }
+            }
 
-        // Same reason: the printer may have already closed the connection. A close
-        // error here is not a failure - the start command was sent above.
+            const json multi = CrealityPrintModel::multi_color_print_cmd(gcode_path, enable_self_test);
+            beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(5));
+            ws.write(net::buffer(to_string(multi)));
+        } else {
+            const json cmd = CrealityPrintModel::op_gcode_file_cmd(gcode_path, enable_self_test);
+            ws.write(net::buffer(to_string(cmd)));
+
+            // K1-family firmware closes the WebSocket right after accepting the
+            // start command, so a blocking read here surfaces a benign
+            // "End of file [asio.misc:2]" even though the print already started
+            // (the command is delivered by write()). Read best-effort, ignore errors.
+            beast::flat_buffer buffer;
+            beast::error_code  read_ec;
+            beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
+            ws.read(buffer, read_ec);
+        }
+
         beast::error_code close_ec;
         beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
         ws.close(websocket::close_code::normal, close_ec);

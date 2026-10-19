@@ -38,6 +38,7 @@
 #include "format.hpp"
 #include "WebPreprintDialog.hpp"
 #include "../Utils/PrintHostDevices.hpp"
+#include "../Utils/CrealityPrintModel.hpp"
 #include "../Utils/PrintHostDeviceStatus.hpp"
 #include <wx/choice.h>
 #include <wx/combobox.h>
@@ -450,6 +451,8 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 static const char *CONFIG_KEY_PATH  = "printhost_path";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
 static const char* CONFIG_KEY_STORAGE = "printhost_storage";
+static const char* CONFIG_KEY_CREALITY_CFS       = "creality_send_use_cfs";
+static const char* CONFIG_KEY_CREALITY_CALIBRATE = "creality_send_calibrate";
 
 PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUploadActions post_actions, const wxArrayString &groups, const wxArrayString& storage_paths, const wxArrayString& storage_names, bool switch_to_device_tab)
     : MsgDialog(static_cast<wxWindow*>(wxGetApp().mainframe), _L("Send G-code to printer host"), _L("Upload to Printer Host with the following filename:"), 0) // Set style = 0 to avoid default creation of the "OK" button. 
@@ -490,6 +493,8 @@ std::string PrintHostSendDialog::device_id() const
 
 std::string PrintHostSendDialog::filament_mapping() const
 {
+    if (m_creality_use_cfs && !m_creality_use_cfs->GetValue())
+        return {};
     std::string out;
     for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i) {
         const int sel = m_mapping_choices[i]->GetSelection();
@@ -559,6 +564,11 @@ void PrintHostSendDialog::build_device_ui()
     m_mapping_note->Hide();
     content_sizer->Add(m_mapping_note, 0, wxBOTTOM, VERT_SPACING);
 
+    m_creality_panel = new wxPanel(this, wxID_ANY);
+    m_creality_sizer = new wxBoxSizer(wxVERTICAL);
+    m_creality_panel->SetSizer(m_creality_sizer);
+    content_sizer->Add(m_creality_panel, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
+
     m_combo_devices->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
         m_device_sel = m_combo_devices->GetSelection();
         refresh_device_status();
@@ -591,12 +601,20 @@ void PrintHostSendDialog::refresh_device_status()
                 text += "  ";
             // The honest sentence: this protocol has no filament data, so there is nothing to map.
             text += _(from_u8(m_device_status.note));
+        } else if (m_device_status.cfs && m_device_status.slots_have_filaments) {
+            if (!text.IsEmpty())
+                text += "  ";
+            const std::string variant = m_device_status.cfs_variant.empty() ? std::string("CFS") : m_device_status.cfs_variant;
+            text += format_wxstr(_L("%1%: each filament is fed from the slot picked below. \"As sliced\" leaves the printer on the external spool."),
+                                 from_u8(variant));
         }
         m_device_note->SetLabel(text);
         m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
         m_device_note->Show(!text.IsEmpty());
     }
     rebuild_mapping_rows();
+    rebuild_creality_options();
+    update_creality_mapping_enabled();
     content_sizer->Layout();
     Layout();
     Fit();
@@ -647,17 +665,13 @@ void PrintHostSendDialog::rebuild_mapping_rows()
         // rule the Snapmaker LAN path uses. "As sliced" whenever nothing is close enough to be obvious.
         const int preset_pos = preselect_slot(f);
         const bool preset_ok  = preset_pos >= 0 && preset_pos < (int) m_device_status.slots.size();
-        int    best = preset_ok ? preset_pos + 1 : 0;
-        double best_d = 0;
-        for (size_t i = 0; !preset_ok && i < m_device_status.slots.size(); ++i) {
-            const PrintHostDevices::Slot& s = m_device_status.slots[i];
-            if (!s.loaded || s.color.empty())
-                continue;
-            const double dist = colour_distance(swatch_colour(f.colour), swatch_colour(s.color));
-            if (best == 0 || dist < best_d) {
-                best   = (int) i + 1;
-                best_d = dist;
-            }
+        int        best       = preset_ok ? preset_pos + 1 : 0;
+        // Material-first (research X3 / #610). On a CFS the ranking is
+        // CFS type+colour > CFS type > ext type+colour > ext type.
+        if (!preset_ok) {
+            const int idx = PrintHostDevices::auto_match_slot(f.type, f.colour, m_device_status.slots, m_device_status.cfs);
+            if (idx >= 0)
+                best = idx + 1;
         }
         choice->SetSelection(best);
         choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { update_mapping_note(); });
@@ -669,6 +683,89 @@ void PrintHostSendDialog::rebuild_mapping_rows()
     m_mapping_panel->Show(!m_mapping_choices.empty());
     m_mapping_panel->Layout();
     update_mapping_note();
+}
+
+void PrintHostSendDialog::rebuild_creality_options()
+{
+    if (!m_creality_panel || !m_creality_sizer)
+        return;
+    m_creality_sizer->Clear(true);
+    m_creality_use_cfs = m_creality_calibrate = nullptr;
+
+    const bool creality_host = (m_device_sel >= 0 && m_device_sel < (int) m_devices.size() &&
+                                m_devices[m_device_sel].host_type == "crealityprint") ||
+                               m_device_status.cfs;
+    if (!creality_host) {
+        m_creality_panel->Show(false);
+        m_creality_panel->Layout();
+        return;
+    }
+
+    const AppConfig* app_config = wxGetApp().app_config;
+    auto remembered = [app_config](const char* key, bool fallback) {
+        const std::string v = app_config ? app_config->get("recent", key) : std::string();
+        return v.empty() ? fallback : v == "1";
+    };
+    auto add = [this](const wxString& label, const wxString& tip, bool value) {
+        auto* box = new wxCheckBox(m_creality_panel, wxID_ANY, label);
+        box->SetValue(value);
+        box->SetToolTip(tip);
+        m_creality_sizer->Add(box, 0, wxBOTTOM, FromDIP(4));
+        return box;
+    };
+
+    m_creality_sizer->Add(new wxStaticText(m_creality_panel, wxID_ANY, _L("Print options") + ":"), 0, wxBOTTOM, FromDIP(4));
+    if (m_device_status.cfs) {
+        m_creality_use_cfs = add(_L("Use CFS"),
+                                 _L("Feed the filaments from the CFS slots picked above. Untick it to print from the "
+                                    "external spool instead."),
+                                 remembered(CONFIG_KEY_CREALITY_CFS, true));
+        m_creality_use_cfs->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { update_creality_mapping_enabled(); });
+    }
+    m_creality_calibrate = add(_L("Calibrate before printing"),
+                               _L("Run the printer's self-test (enableSelfTest) before this print."),
+                               remembered(CONFIG_KEY_CREALITY_CALIBRATE, false));
+    m_creality_panel->Show(true);
+    m_creality_panel->Layout();
+}
+
+void PrintHostSendDialog::update_creality_mapping_enabled()
+{
+    const bool cfs_on = !m_creality_use_cfs || m_creality_use_cfs->GetValue();
+    for (wxChoice* choice : m_mapping_choices)
+        choice->Enable(cfs_on);
+}
+
+std::map<std::string, std::string> PrintHostSendDialog::extendedInfo() const
+{
+    std::map<std::string, std::string> out;
+    const bool creality = m_creality_use_cfs || m_creality_calibrate || m_device_status.cfs;
+    if (!creality)
+        return out;
+    const bool use_cfs = m_creality_use_cfs && m_creality_use_cfs->GetValue();
+    out["useCFS"]         = use_cfs ? "1" : "0";
+    out["enableSelfTest"] = (m_creality_calibrate && m_creality_calibrate->GetValue()) ? "1" : "0";
+    if (!use_cfs)
+        return out;
+    int n = 0;
+    for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i) {
+        const int sel = m_mapping_choices[i]->GetSelection();
+        if (sel <= 0)
+            continue;
+        const int slot = sel - 1;
+        if (slot < 0 || slot >= (int) m_device_status.slots.size())
+            continue;
+        const PrintHostDevices::Slot& s = m_device_status.slots[slot];
+        if (s.cfs_box < 0)
+            continue;
+        const SendPlateFilament* f = plate_filament(m_mapping_filament[i]);
+        const std::string type  = f ? f->type : s.type;
+        const std::string color = f && !f->colour.empty() ? f->colour : s.color;
+        const std::string id    = Slic3r::CrealityPrintModel::color_match_id(s.cfs_box, s.cfs_material);
+        out["colorMatch_" + std::to_string(n++)] = id + "\t" + type + "\t" + color + "\t" +
+                                                   std::to_string(s.cfs_box) + "\t" + std::to_string(s.cfs_material);
+    }
+    return out;
 }
 
 std::vector<int> PrintHostSendDialog::mapping_choice_positions() const
@@ -928,6 +1025,10 @@ void PrintHostSendDialog::EndModal(int ret)
             wxString storage = combo_storage->GetValue();
             app_config->set("recent", CONFIG_KEY_STORAGE, into_u8(storage));
         }
+        if (m_creality_use_cfs)
+            app_config->set("recent", CONFIG_KEY_CREALITY_CFS, m_creality_use_cfs->GetValue() ? "1" : "0");
+        if (m_creality_calibrate)
+            app_config->set("recent", CONFIG_KEY_CREALITY_CALIBRATE, m_creality_calibrate->GetValue() ? "1" : "0");
     }
 
     MsgDialog::EndModal(ret);

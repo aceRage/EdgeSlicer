@@ -676,6 +676,7 @@ TEST_CASE("PrusaLinkStatus: what a PrusaLink printer says it is doing", "[PrintH
         CHECK(PrintHostDevices::can_probe("prusaconnect"));
         CHECK(PrintHostDevices::can_probe("octoprint"));
         CHECK(PrintHostDevices::can_probe("elegoolink")); // the CC1's CANVAS
+        CHECK(PrintHostDevices::can_probe("crealityprint")); // K-series CFS over WS 9999
         // It reports a state but never a filament, and the dialog has to say so.
         CHECK(PrintHostDevices::no_filament_note("prusalink").find("PrusaLink") != std::string::npos);
     }
@@ -787,5 +788,141 @@ TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
         CHECK(parse_model_from_info(R"({"model":1})").empty());
         CHECK(parse_model_from_info(R"({"name":"K1"})").empty());
         REQUIRE_NOTHROW(parse_model_from_info(std::string(64, '{')));
+    }
+}
+
+TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPrint]")
+{
+    using namespace Slic3r::CrealityPrintModel;
+    using Slic3r::PrintHostDevices::Status;
+    using Slic3r::PrintHostDevices::status_from_cfs;
+    using Slic3r::PrintHostDevices::auto_match_slot;
+
+    const std::string k2_boxs = R"({
+        "boxsInfo": { "materialBoxs": [
+            { "id": 0, "state": 1, "type": 1, "materials": [
+                { "id": 0, "state": 1, "vendor": "Creality", "type": "PLA", "name": "Generic PLA", "color": "#00FF0000" }
+            ]},
+            { "id": 1, "state": 1, "type": 0, "model": "MF003", "materials": [
+                { "id": 0, "state": 1, "vendor": "Creality", "type": "PLA", "name": "Hyper PLA", "color": "#0FF0000" },
+                { "id": 1, "state": 2, "vendor": "eSUN", "type": "PETG", "name": "PETG", "color": "#0000FF" },
+                { "id": 2, "state": 0, "vendor": "", "type": "", "name": "", "color": "" },
+                { "id": 3, "state": 1, "vendor": "Creality", "type": "ABS", "name": "ABS", "color": "#FFFFFF" }
+            ]}
+        ]}
+    })";
+
+    SECTION("parses CFS and the external holder") {
+        const CfsParseResult r = parse_cfs_response(k2_boxs);
+        CHECK(r.ok);
+        CHECK(r.box_count == 1);
+        CHECK(r.variant == "CFS");
+        REQUIRE(r.slots.size() == 5); // 1 external + 4 CFS
+        CHECK(r.slots[0].external);
+        CHECK(r.slots[0].filament_type == "PLA");
+        CHECK(r.slots[1].box_id == 1);
+        CHECK(r.slots[1].slot_id == 0);
+        CHECK(r.slots[1].filament_type == "PLA");
+        CHECK(r.slots[1].color_hex == "#FF0000"); // leading 0 stripped
+        CHECK(r.slots[1].loaded);
+        CHECK(r.slots[2].filament_type == "PETG");
+        CHECK(r.slots[2].loaded); // state 2 = loaded on K2 Plus
+        CHECK_FALSE(r.slots[3].loaded);
+        CHECK(r.slots[4].filament_type == "ABS");
+        CHECK(cfs_variant_name("MF050") == "CFS-C");
+        CHECK(cfs_variant_name("MF040") == "CFS Lite");
+        CHECK(cfs_variant_name("MF046") == "CFS Mini");
+        CHECK(cfs_variant_name("MF049") == "CFS Nano");
+        CHECK(cfs_variant_name("MF042") == "CFS Pro");
+        CHECK(cfs_variant_name("CFS Nano2") == "CFS Nano2");
+    }
+
+    SECTION("status_from_cfs fills the mapping-table slots") {
+        const Status st = status_from_cfs(k2_boxs);
+        CHECK(st.probed);
+        CHECK(st.online);
+        CHECK(st.cfs);
+        CHECK(st.cfs_box_count == 1);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 5);
+        CHECK(st.slots[1].cfs_box == 1);
+        CHECK(st.slots[1].cfs_material == 0);
+        CHECK_FALSE(st.slots[1].cfs_external);
+        CHECK(st.slots[0].cfs_external);
+        CHECK(st.slots[1].label().find("CFS") != std::string::npos);
+        CHECK(st.slots[0].label().find("External") != std::string::npos);
+    }
+
+    SECTION("hostile JSON is refused without throwing") {
+        CHECK_FALSE(parse_cfs_response("").ok);
+        CHECK_FALSE(parse_cfs_response("<html>").ok);
+        CHECK_FALSE(parse_cfs_response("[]").ok);
+        CHECK_FALSE(parse_cfs_response(R"({"boxsInfo":{}})").ok);
+        REQUIRE_NOTHROW(parse_cfs_response(std::string(128, '{')));
+        // Huge box/material arrays are capped, not thrown.
+        std::string huge = R"({"boxsInfo":{"materialBoxs":[)";
+        for (int i = 0; i < 40; ++i) {
+            if (i)
+                huge += ",";
+            huge += R"({"id":)" + std::to_string(i) + R"(,"state":1,"type":0,"materials":[)";
+            for (int m = 0; m < 20; ++m) {
+                if (m)
+                    huge += ",";
+                huge += R"({"id":)" + std::to_string(m) + R"(,"state":1,"type":"PLA","vendor":"X","color":"#FF0000"})";
+            }
+            huge += "]}";
+        }
+        huge += "]}}";
+        const CfsParseResult r = parse_cfs_response(huge);
+        CHECK(r.ok);
+        CHECK(r.box_count <= 8);
+        CHECK(r.slots.size() <= 32);
+    }
+
+    SECTION("wrong-type fields are skipped") {
+        const CfsParseResult r = parse_cfs_response(R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": "nope", "state": true, "type": [], "materials": "x" },
+                { "id": 2, "state": 1, "type": 0, "materials": [
+                    { "id": "3", "state": "1", "type": "PLA", "vendor": "Creality", "color": 12 }
+                ]}
+            ]}
+        })");
+        CHECK(r.ok);
+        REQUIRE(r.slots.size() == 4);
+        CHECK(r.slots[3].filament_type == "PLA");
+        CHECK(r.slots[3].color_hex.empty()); // colour was a number
+    }
+
+    SECTION("auto-match prefers CFS type+colour over external") {
+        const CfsParseResult r = parse_cfs_response(k2_boxs);
+        // Plate PLA red: CFS slot 0 beats the external PLA.
+        CHECK(auto_match_index("PLA", "#FF0000", r.slots) == 1);
+        // Plate PETG: the loaded CFS PETG.
+        CHECK(auto_match_index("PETG", "#0000FF", r.slots) == 2);
+        // Type-only PLA still prefers CFS over external.
+        CHECK(auto_match_index("PLA", "", r.slots) == 1);
+        const Status st = status_from_cfs(k2_boxs);
+        CHECK(auto_match_slot("PLA", "#FF0000", st.slots, true) == 1);
+        CHECK(auto_match_slot("ABS", "#FFFFFF", st.slots, true) == 4);
+    }
+
+    SECTION("start commands match Creality Print") {
+        const auto op = op_gcode_file_cmd("/mnt/UDISK/printer_data/gcodes/a.gcode", 1);
+        CHECK(op["params"]["opGcodeFile"] == "printprt:/mnt/UDISK/printer_data/gcodes/a.gcode");
+        CHECK(op["params"]["enableSelfTest"] == 1);
+        nlohmann::json list = nlohmann::json::array();
+        list.push_back(color_match_item_from_value("T1A\tPLA\t#FF0000\t1\t0"));
+        const auto cm = color_match_cmd("/mnt/UDISK/printer_data/gcodes/a.gcode", list);
+        CHECK(cm["params"]["colorMatch"]["path"] == "/mnt/UDISK/printer_data/gcodes/a.gcode");
+        CHECK(cm["params"]["colorMatch"]["list"][0]["id"] == "T1A");
+        CHECK(cm["params"]["colorMatch"]["list"][0]["boxId"] == 1);
+        const auto mc = multi_color_print_cmd("/usr/data/printer_data/gcodes/b.gcode", 0);
+        CHECK(mc["params"]["multiColorPrint"]["gcode"] == "/usr/data/printer_data/gcodes/b.gcode");
+        CHECK(mc["params"]["multiColorPrint"]["enableSelfTest"] == 0);
+        CHECK(color_match_id(1, 0) == "T1A");
+        CHECK(color_match_id(0, 3) == "T0D");
+        CHECK(color_match_item_from_value("bad").empty());
+        CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
     }
 }

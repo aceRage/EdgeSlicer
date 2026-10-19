@@ -1,6 +1,7 @@
 #ifndef slic3r_CrealityPrint_hpp_
 #define slic3r_CrealityPrint_hpp_
 
+#include <map>
 #include <string>
 #include <wx/string.h>
 #include <boost/optional.hpp>
@@ -30,6 +31,11 @@ public:
     PrintHostPostUploadActions         get_post_upload_actions() const;
     bool upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn) const override;
 
+    // Port-9999 WebSocket `get boxsInfo`. timeout_s is the connect+read budget (the send-dialog
+    // probe uses ~1 s so the UI thread does not stall). Empty on timeout or a refused handshake.
+    static std::string query_boxes_info(const std::string& host, int timeout_s);
+    std::string        query_boxes_info(int timeout_s = 10) const;
+
 protected:
     virtual void set_auth(Http& http) const;
 private:
@@ -42,7 +48,7 @@ private:
     mutable std::string m_model;
 
     std::string make_url(const std::string& path) const;
-    bool start_print(wxString& msg, const std::string& filename) const;
+    bool start_print(wxString& msg, const std::string& filename, const std::map<std::string, std::string>& extended_info) const;
     std::string safe_filename(const std::string& filename) const;
 };
 } // namespace Slic3r

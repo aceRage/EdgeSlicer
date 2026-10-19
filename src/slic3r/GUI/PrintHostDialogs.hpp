@@ -1,6 +1,7 @@
 #ifndef slic3r_PrintHostSendDialog_hpp_
 #define slic3r_PrintHostSendDialog_hpp_
 
+#include <map>
 #include <string>
 #include <vector>
 #include <boost/filesystem/path.hpp>
@@ -25,6 +26,8 @@ class wxDataViewListCtrl;
 class wxFlexGridSizer;
 class wxStaticText;
 class wxWrapSizer;
+class wxBoxSizer;
+class wxCheckBox;
 
 namespace Slic3r {
 
@@ -82,7 +85,8 @@ public:
 
     virtual void EndModal(int ret) override;
     virtual void init();
-    virtual std::map<std::string, std::string> extendedInfo() const { return {}; }
+    // CrealityPrint: useCFS, enableSelfTest, colorMatch_n. Empty for every other host.
+    virtual std::map<std::string, std::string> extendedInfo() const;
 
 protected:
     // Builds the device row and the mapping table into content_sizer. Called from init() before
@@ -92,6 +96,10 @@ protected:
     // cursor and a short timeout - the same shape as the devices dialog's Test button.
     void refresh_device_status();
     void rebuild_mapping_rows();
+    // CrealityPrint options (Use CFS, Calibrate before printing), shown when the picked
+    // device is a crealityprint host. Called with the mapping rows.
+    void rebuild_creality_options();
+    void update_creality_mapping_enabled();
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
@@ -120,6 +128,11 @@ protected:
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
     wxStaticText*                         m_mapping_note { nullptr };
+    // CrealityPrint: Use CFS + Calibrate, null when the device is not a Creality host.
+    wxWindow*                             m_creality_panel { nullptr };
+    wxBoxSizer*                           m_creality_sizer { nullptr };
+    wxCheckBox*                           m_creality_use_cfs { nullptr };
+    wxCheckBox*                           m_creality_calibrate { nullptr };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
     bool                                  m_unload_default { false };
