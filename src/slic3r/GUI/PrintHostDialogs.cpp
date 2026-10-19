@@ -586,8 +586,10 @@ PrintHostSendDialog::~PrintHostSendDialog()
         std::lock_guard<std::mutex> lock(m_probe_token->mtx);
         m_probe_token->alive = false;
     }
-    if (m_probe_thread.joinable())
+    if (m_probe_thread.joinable()) {
+        wxBusyCursor busy;
         m_probe_thread.join();
+    }
 }
 
 void PrintHostSendDialog::apply_device_status()
@@ -641,8 +643,10 @@ void PrintHostSendDialog::refresh_device_status()
     m_device_status = PrintHostDevices::Status();
     if (!m_probe_token)
         m_probe_token = std::make_shared<ProbeToken>();
-    if (m_probe_thread.joinable())
+    if (m_probe_thread.joinable()) {
+        wxBusyCursor busy;
         m_probe_thread.join();
+    }
     int gen = 0;
     {
         std::lock_guard<std::mutex> lock(m_probe_token->mtx);
@@ -695,11 +699,14 @@ void PrintHostSendDialog::refresh_device_status()
         if (!wxTheApp)
             return;
         wxGetApp().CallAfter([token, gen, st]() {
-            std::lock_guard<std::mutex> lock(token->mtx);
-            if (!token->alive || token->gen != gen)
-                return;
+            {
+                std::lock_guard<std::mutex> lock(token->mtx);
+                if (!token->alive || token->gen != gen)
+                    return;
+            }
             // Walk top-level windows for the still-alive send dialog rather than
-            // capturing `this` across a possible close.
+            // capturing `this` across a possible close. Token lock is released
+            // before apply_device_status() (same UI thread as the destructor).
             for (wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node; node = node->GetNext()) {
                 auto *dlg = dynamic_cast<PrintHostSendDialog *>(node->GetData());
                 if (!dlg || dlg->m_probe_token != token)
@@ -2322,6 +2329,8 @@ void ElegooPrintHostSendDialog::init() {
     txt_filename->SetFocus();
 
     add_button(wxID_CANCEL, false, _L("Cancel"));
+    if (m_probe_pending)
+        set_send_enabled(false);
     finalize();
 
 #ifdef __linux__
