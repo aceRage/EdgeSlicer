@@ -250,6 +250,7 @@
 
 #include "filamentsync/SyncConfirmDialog.hpp"
 #include "filamentsync/SyncFilamentColorDialog.hpp"
+#include "ElegooCanvasUI.hpp"
 
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include <chrono>
@@ -2190,9 +2191,11 @@ static wxString nozzle_type_key_to_label(const std::string& key)
 // Which filament sync the "Filaments" row's button performs for the printer
 // preset that is selected right now.  Snapmaker presets keep the fork's own
 // dialog (Sidebar::show_sync_filament_dialog, U1-only); Bambu presets get the
-// AMS sync, which works over the Bambu network and in LAN mode alike.  Every
-// other vendor has nothing to sync from, so the button is hidden.
-enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog };
+// AMS sync, which works over the Bambu network and in LAN mode alike.  An
+// Elegoo Centauri Carbon 1 on Elegoo Link reads its CANVAS into the same dialog
+// the Snapmaker path uses (Sidebar::show_canvas_sync_dialog).  Every other
+// vendor has nothing to sync from, so the button is hidden.
+enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog, ElegooCanvas };
 
 static FilamentSyncTarget filament_sync_target_for_current_preset()
 {
@@ -2205,6 +2208,8 @@ static FilamentSyncTarget filament_sync_target_for_current_preset()
         return FilamentSyncTarget::SnapmakerDialog;
     if (pb->is_bbl_vendor())
         return FilamentSyncTarget::BambuAms;
+    if (current_printer_reads_canvas())
+        return FilamentSyncTarget::ElegooCanvas;
     return FilamentSyncTarget::None;
 }
 
@@ -3328,8 +3333,11 @@ Sidebar::Sidebar(Plater *parent)
     ScalableButton* sync_filament_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "sync_filament");
     sync_filament_btn->SetToolTip(_L("Sync Filament Information"));
     sync_filament_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-        if (filament_sync_target_for_current_preset() == FilamentSyncTarget::BambuAms)
+        const FilamentSyncTarget target = filament_sync_target_for_current_preset();
+        if (target == FilamentSyncTarget::BambuAms)
             sync_ams_list();  // reports "select a printer in Device page" when none is connected
+        else if (target == FilamentSyncTarget::ElegooCanvas)
+            show_canvas_sync_dialog();
         else
             show_sync_filament_dialog();
     });
@@ -4077,6 +4085,12 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id);
                 else
                     p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host");
+                // The CANVAS card (a Centauri Carbon 1 on Elegoo Link) is for the same printer.
+                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
+                p_mainframe->m_printer_view->set_canvas_device((ph_picked && !ph_picked->address.empty()) ?
+                                                                   *ph_picked :
+                                                                   PrintHostDevices::from_config(cfg),
+                                                               preset_model);
             }
             is_sm_page = false;
 
@@ -4098,6 +4112,8 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     p_mainframe->m_printer_view->set_storage_source(PrinterStoragePanel::snapmaker_source());
                 else if (!takes_printhost_row)
                     p_mainframe->m_printer_view->set_storage_source(PrinterStoragePanel::Source());
+                if (!takes_printhost_row)
+                    p_mainframe->m_printer_view->set_canvas_device(PrintHostDevices::Device(), std::string());
             }
 
             if (is_snapmaker_u1) {
@@ -9829,6 +9845,10 @@ void Sidebar::update_filament_sync_button()
         p->m_bpButton_sync_filament->SetToolTip(_L("Sync Filament Information"));
         sizer->Show(p->m_bpButton_sync_filament);
         break;
+    case FilamentSyncTarget::ElegooCanvas:
+        p->m_bpButton_sync_filament->SetToolTip(_L("Sync filaments from CANVAS"));
+        sizer->Show(p->m_bpButton_sync_filament);
+        break;
     default:
         sizer->Hide(p->m_bpButton_sync_filament);
         break;
@@ -9925,6 +9945,52 @@ void Sidebar::show_sync_filament_dialog()
         return;
     }
 
+    apply_machine_filament_sync(machineFilamentList);
+}
+
+// The Elegoo Centauri Carbon 1's CANVAS into the same dialog the U1 uses (design D1): read the
+// trays over SDCP, then the shared tail below. No "Machine Filament" dropdown section and no
+// m_connect_machine_info_list - that state belongs to the Snapmaker connection.
+void Sidebar::show_canvas_sync_dialog()
+{
+    if (!wxGetApp().plater())
+        return;
+    const std::string address = canvas_address_for_current_printer();
+    if (address.empty()) {
+        SyncRichConfirmDialog dlg(this, _L("This printer has no address yet. Add one in its connection settings, then sync again."), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    const CanvasQueryResult result = query_canvas_with_progress(this, address);
+    if (!result.ok) {
+        SyncRichConfirmDialog dlg(this, canvas_failure_text(result), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    std::vector<FilamentData> machineFilamentList = canvas_machine_filaments(result.info);
+    if (result.info.loaded_count() == 0) {
+        SyncRichConfirmDialog dlg(this, _L("The CANVAS reports no loaded trays. Load the filaments, then sync again."), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    apply_machine_filament_sync(machineFilamentList, true);
+}
+
+// The part of the sync both sources share: the colour-matching dialog, then the project's
+// filaments, presets and colours from what it settled on. `canvas_generic`: a "Generic" filament
+// takes the Generic preset of its type (CANVAS).
+void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList, bool canvas_generic)
+{
+    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+    if (!preset_bundle || !wxGetApp().plater())
+        return;
+
     std::vector<FilamentData> designFilamentList;
     build_design_filament_list(preset_bundle, designFilamentList);
 
@@ -9989,8 +10055,20 @@ void Sidebar::show_sync_filament_dialog()
 
         for (size_t i = 0; i < effective_size; ++i) {
             const std::string synced_colour = into_u8(getMainColor(syncedData[i].m_color).GetAsString(wxC2S_HTML_SYNTAX));
-            Preset* matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
-                                                      syncedData[i].m_vendor, synced_colour);
+            Preset* matched = nullptr;
+            // CANVAS: an untagged or Generic spool takes the Generic preset of its type - the CC1's own
+            // ("Generic PLA @ECC") when the profiles have one - never a colour-picked look-alike such
+            // as "Generic PLA Silk" (owner decision 2026-10-18).
+            if (canvas_generic && boost::iequals(syncedData[i].m_vendor, "Generic") && !syncedData[i].m_type.empty()) {
+                if (Preset* own = preset_bundle->filaments.find_preset(canvas_generic_preset_name(syncedData[i].m_type));
+                    own != nullptr && own->is_compatible && own->name == canvas_generic_preset_name(syncedData[i].m_type))
+                    matched = own;
+                else
+                    matched = resolve_filament_preset(preset_bundle, "Generic " + syncedData[i].m_type, syncedData[i].m_type);
+            }
+            if (!matched)
+                matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
+                                                  syncedData[i].m_vendor, synced_colour);
             if (matched) {
                 preset_bundle->set_filament_preset(i, matched->name);
             }
@@ -24313,6 +24391,7 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
     const DynamicPrintConfig   full    = bundle->full_config();
     const ConfigOptionStrings* colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
     const ConfigOptionStrings* types   = full.option<ConfigOptionStrings>("filament_type");
+    const ConfigOptionInts*    temps   = full.option<ConfigOptionInts>("nozzle_temperature");
     std::map<size_t, double>   volumes;
     if (plate && plate->is_slice_result_valid() && plate->get_slice_result())
         for (const auto& kv : plate->get_slice_result()->print_statistics.total_volumes_per_extruder)
@@ -24322,6 +24401,12 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
         f.index  = (int) i;
         f.colour = (colours && i < colours->values.size()) ? colours->values[i] : std::string();
         f.type   = (types && i < types->values.size()) ? types->values[i] : std::string();
+        f.nozzle_temp = (temps && i < temps->values.size()) ? temps->values[i] : 0;
+        // The remembered CANVAS mapping keys on the preset as people know it: its alias, else its name.
+        if (const Preset* fp = bundle->filaments.find_preset(bundle->filament_presets[i]))
+            f.alias = fp->alias.empty() ? fp->name : fp->alias;
+        else
+            f.alias = bundle->filament_presets[i];
         auto it  = volumes.find(i);
         f.used   = it != volumes.end() && it->second > 0;
         out.push_back(std::move(f));
@@ -24565,6 +24650,11 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         host_type == htFlashforge &&
         ff_serial_opt != nullptr && !ff_serial_opt->value.empty() &&
         ff_code_opt != nullptr && !ff_code_opt->value.empty();
+    // ElegooLink takes its own dialog: the time-lapse / heated-bed-leveling / plate options it shows
+    // are what ElegooLink::print() puts in the SDCP start command. Without them the command went out
+    // with empty values and the printer never answered. Not derived from host_type above, whose
+    // fallback for a missing option is htElegooLink.
+    const bool elegoolink_host = host_type_opt != nullptr && host_type_opt->value == htElegooLink;
 
     if (flashforge_local_api) {
         use_3mf          = true;
@@ -24617,8 +24707,9 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
 
     // The send dialog is polymorphic: a Flashforge printer reached over its HTTP local API gets the
     // IFS (material-station) mapping dialog, everything else - our device/slot flow included - gets
-    // the plain one. Legacy Flashforge printers (no serial number / check code, i.e. the TCP 8899
-    // M-code console) take the plain dialog too, exactly as before.
+    // the plain one, except ElegooLink, which gets the Elegoo dialog. Legacy Flashforge printers
+    // (no serial number / check code, i.e. the TCP 8899 M-code console) take the plain dialog too,
+    // exactly as before.
     std::unique_ptr<PrintHostSendDialog> pDlg;
     if (flashforge_local_api) {
         auto* flashforge_host = dynamic_cast<Flashforge*>(upload_job.printhost.get());
@@ -24692,8 +24783,23 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
                                                               std::move(slots),
                                                               project_filaments);
     } else {
-        pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
-                                                    storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
+        // An Elegoo printer gets the Elegoo dialog (an ElegooLink preset reaches here with the same
+        // device list, plate filaments and unload offer as the plain dialog below). Upstream Orca
+        // selects it by host_type too.
+        // An Elegoo Link preset with no device list still has its own address: the dialog needs one
+        // device to read the CANVAS from. It has no id, so nothing is rebuilt or remembered from it.
+        if (elegoolink_host && ph_devices.empty()) {
+            PrintHostDevices::Device own = PrintHostDevices::from_config(*physical_printer_config);
+            if (!own.address.empty())
+                ph_devices.push_back(own);
+        }
+        if (elegoolink_host)
+            pDlg = std::make_unique<ElegooPrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
+                                                              storage_paths, storage_names,
+                                                              config->get_bool("open_device_tab_post_upload"));
+        else
+            pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
+                                                        storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
         pDlg->set_devices(ph_model_key, ph_devices, ph_preselect);
         pDlg->set_plate_filaments(plate_filaments_for_send(plate_idx));
         if (offer_unload_at_end)

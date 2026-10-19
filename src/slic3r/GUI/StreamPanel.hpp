@@ -26,6 +26,9 @@ private:
     void OnShow(wxShowEvent& evt);
     void OnIconize(wxIconizeEvent& evt);
     void OnPageLoaded(wxWebViewEvent& evt);
+    // Hand the page the Elegoo Link printers set up in Printer settings, so a Centauri Carbon shows
+    // up as a tile without anyone typing its address (window.__elegooSeed in stream_center.html).
+    void SeedElegoo();
 
     wxWebView* m_browser { nullptr };
     bool       m_active { true };   // what the page was last told (it starts out running)

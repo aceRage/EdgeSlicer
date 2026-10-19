@@ -5,20 +5,18 @@
 #include <vector>
 
 #include "PrintHostDevices.hpp"
+#include "ElegooCanvas.hpp"
 
 // Asking one print-host device what it is doing and what is loaded in it.
 //
 // This is the honest half of the "map the plate's filaments to the printer's slots" story, and the
 // honesty is the point: **most print hosts cannot answer the second question at all.**
 //
-//  * Elegoo Link (the Centauri Carbon) speaks SDCP over its own websocket on port 3030. The fork's
-//    ElegooLink only ever sends two commands - `Cmd 0` (status), whose answer it reads exactly one
-//    field of (`Status.CurrentStatus`, and only to notice the value 8, "checking the file"), and
-//    `Cmd 128` (start print). `Cmd 1` (Attributes), which is where an SDCP device would describe
-//    its materials, is declared in the enum and never sent; `PrintInfo` is never read. There is no
-//    filament, material, box or slot field anywhere in the Elegoo path, and the upload carries no
-//    per-extruder parameter. So for an Elegoo device this returns `probed = false` with a note that
-//    says so, and the send goes out exactly as the plate was sliced.
+//  * Elegoo Link (the Centauri Carbon) speaks SDCP over its own websocket on port 3030. The print
+//    status (`Cmd 0`) names no filament; a Centauri Carbon 1 with a CANVAS attached answers
+//    `Cmd 324` with its trays (ElegooCanvas.hpp, read by the sidebar sync). Without one, or for any
+//    other Elegoo model, this returns `probed = false` with a note that says so, and the send goes
+//    out exactly as the plate was sliced.
 //  * A Moonraker/Klipper box does answer. `/printer/objects/query` gives `print_stats.state`, and a
 //    Snapmaker-flavoured Moonraker also carries `print_task_config`, whose parallel arrays are the
 //    loaded filaments per toolhead (the same object SnapmakerLan::toolheads_of reads,
@@ -48,6 +46,13 @@ struct Slot
     std::string color;          // "#RRGGBB", "" = the printer did not say
     bool        loaded { false };
     double      nozzle { 0.0 };
+    // A CANVAS tray (Elegoo Centauri Carbon 1): the raw pair the start-print slot_map names, -1 for
+    // every other kind of slot. `index` stays the flat 0-based number shown and stored elsewhere.
+    int         unit { -1 };
+    int         tray { -1 };
+    std::string name;           // what the remembered mapping matches it by ("ELEGOO PLA Silk")
+    int         min_temp { 0 }; // the tray's nozzle range, 0 = unknown
+    int         max_temp { 0 };
 
     // Something to put in a dropdown.
     std::string label() const;
@@ -64,6 +69,8 @@ struct Status
     // The printer named the materials, not just the tools. Only then is a mapping table worth
     // showing: a bare tool list with nothing in it tells a person nothing they did not know.
     bool              slots_have_filaments { false };
+    // The slots are CANVAS trays read over SDCP (Cmd 324), so the start command can carry a slot_map.
+    bool              canvas { false };
 };
 
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
@@ -73,6 +80,9 @@ Status probe(const Device& d, int timeout_s = 3);
 // into slots and a state. Exposed so the parsing is exercised by the Catch2 suite instead of
 // only by a printer on somebody's desk. `status_json` is the JSON text of that object.
 Status parse_moonraker_status(const std::string& status_json, const std::string& host_type_key);
+
+// The half of the Elegoo probe that has no network in it: a CANVAS query result as slots.
+Status status_from_canvas(const CanvasQueryResult& result);
 
 // What can be said before asking: false for every host type this fork has no status client for.
 bool   can_probe(const std::string& host_type_key);

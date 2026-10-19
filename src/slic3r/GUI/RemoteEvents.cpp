@@ -840,8 +840,18 @@ static void snapshot_hosts(Snapshot& s, const std::vector<RemoteControl::HostTar
     try {
         for (const SnapmakerLan::Device& d : SnapmakerLan::devices()) lan.push_back(SnapmakerLan::base_url(d));
     } catch (...) {}
+    // An Elegoo printer the preset's print host points at is usually also one of the devices (ph:):
+    // one printer, one event, under the device's stable id.
+    std::vector<std::string> elegoo_devices;
     for (const RemoteControl::HostTarget& t : targets_in)
-        if (std::find(lan.begin(), lan.end(), t.base) == lan.end()) targets.push_back(t);
+        if (t.host_type == "elegoolink" && t.id.compare(0, 3, "ph:") == 0) elegoo_devices.push_back(t.base);
+    for (const RemoteControl::HostTarget& t : targets_in) {
+        if (std::find(lan.begin(), lan.end(), t.base) != lan.end()) continue;
+        if (t.host_type == "elegoolink" && t.id == "host" &&
+            std::find(elegoo_devices.begin(), elegoo_devices.end(), t.base) != elegoo_devices.end())
+            continue;
+        targets.push_back(t);
+    }
     if (targets.empty()) return;
     json printers = json::array();
     for (const RemoteControl::HostTarget& t : targets) printers.push_back(json { { "id", t.id } });
@@ -854,11 +864,14 @@ static void snapshot_hosts(Snapshot& s, const std::vector<RemoteControl::HostTar
         const json&  e = printers[i];
         PrinterState p;
         p.id   = targets[i].id;
-        p.name = targets[i].base.empty() ? targets[i].id : targets[i].base;
+        p.name = !targets[i].name.empty() ? targets[i].name : (targets[i].base.empty() ? targets[i].id : targets[i].base);
         p.kind = targets[i].id == "connect" ? "connect" : "printhost";
         p.raw_state = e.value("print_status", std::string());
         p.state     = klipper_state(p.raw_state);
-        p.job       = e.value("stage", std::string()); // fill_from_print_stats puts the file name there
+        // fill_from_print_stats puts the file name in `stage`; an Elegoo row has it in `task` and its
+        // step ("Preheating") in `stage`.
+        p.job       = e.value("task", std::string());
+        if (p.job.empty()) p.job = e.value("stage", std::string());
         // describe_hosts leaves print_status off entirely for an address that did not answer as a
         // Moonraker printer, and that is exactly the case where nothing may be inferred.
         p.online    = e.contains("print_status");

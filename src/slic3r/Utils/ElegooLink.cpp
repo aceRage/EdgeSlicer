@@ -26,6 +26,9 @@
 #include "Http.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "Bonjour.hpp"
+#include "ElegooStartPrint.hpp"
+#include "ElegooCanvas.hpp"
+#include "ElegooSdcpMonitor.hpp"
 #include "slic3r/GUI/BonjourDialog.hpp"
 
 namespace fs = boost::filesystem;
@@ -570,18 +573,11 @@ namespace Slic3r {
                     }
                     return false;
                 }
-                std::string timeLapse = "0";
-                std::string heatedBedLeveling = "0";
-                std::string bedType           = "0";
-                timeLapse         = upload_data.extended_info["timeLapse"];
-                heatedBedLeveling = upload_data.extended_info["heatedBedLeveling"];
-                bedType           = upload_data.extended_info["bedType"];
-                
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 if (checkResult(client, error_fn)) {
                     // send print command
                     std::this_thread::sleep_for(std::chrono::seconds(1));
-                    res = print(client, timeLapse, heatedBedLeveling, bedType, upload_filename, error_fn);
+                    res = print(client, upload_data.extended_info, upload_filename, error_fn);
                 }else{
                     res = false;
                 }
@@ -592,6 +588,9 @@ namespace Slic3r {
 
     bool ElegooLink::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn) const
     {
+        // An upload (and the start-print after it) is a request for the hub's connection to this
+        // printer: it opens now, so the phone and the Printers tab see the print begin.
+        SdcpMonitor::demand(sdcp_host_of(m_host));
     #ifndef WIN32
         return upload_inner_with_host(std::move(upload_data), prorgess_fn, error_fn, info_fn);
     #else
@@ -653,20 +652,11 @@ namespace Slic3r {
     #endif // WIN32
     }
 
-    bool ElegooLink::print(WebSocketClient&  client,
-                           std::string       timeLapse,
-                           std::string       heatedBedLeveling,
-                           std::string       bedType,
-                           const std::string filename,
-                           ErrorFn           error_fn) const
+    bool ElegooLink::print(WebSocketClient&                            client,
+                           const std::map<std::string, std::string>& extended_info,
+                           const std::string                         filename,
+                           ErrorFn                                   error_fn) const
     {
-
-        // convert bedType to 0 or 1, 0 is PTE, 1 is PC
-        if (bedType == std::to_string((int)BedType::btPC)){
-            bedType = "1";
-        }else{
-            bedType = "0";
-        }
         bool res = false;
         // create a random UUID generator
         boost::uuids::random_generator generator;
@@ -678,24 +668,11 @@ namespace Slic3r {
             auto now = std::chrono::system_clock::now();
             auto duration = now.time_since_epoch();
             auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-            std::string timestamp = std::to_string(milliseconds);     
-            std::string jsonString = R"({
-                                        "Id":"",
-                                        "Data":{
-                                            "Cmd":)"+std::to_string(ElegooLinkCommand::ELEGOO_START_PRINT)+R"(,
-                                            "Data":{
-                                                "Filename":"/local/)" + filename + R"(",
-                                                "StartLayer":0,
-                                                "Calibration_switch":)" + heatedBedLeveling + R"(,
-                                                "PrintPlatformType":)" + bedType + R"(,
-                                                "Tlp_Switch":)" + timeLapse + R"(
-                                            },
-                                            "RequestID":")"+ uuid_string + R"(",
-                                            "MainboardID":"",
-                                            "TimeStamp":)" + timestamp + R"(,
-                                            "From":1
-                                        }
-                                    })";
+            // Built by the JSON writer, so an option the dialog did not supply is 0 and the text is
+            // always valid JSON (see ElegooStartPrint.hpp). 0 is the PTE plate, 1 the PC plate.
+            const std::string jsonString = ElegooStartPrint::build_payload(extended_info, static_cast<int>(BedType::btPC), filename,
+                                                                           requestID, milliseconds,
+                                                                           ElegooLinkCommand::ELEGOO_START_PRINT);
                     std::cout << "send: " << jsonString << std::endl;
                     BOOST_LOG_TRIVIAL(info) << "start print, param: " << jsonString;
                     client.send(jsonString);
