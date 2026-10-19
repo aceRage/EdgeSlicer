@@ -406,6 +406,16 @@ uint16_t free_port()
     return a.local_endpoint().port();
 }
 
+bool loopback_connect_fails(uint16_t port)
+{
+    using boost::asio::ip::tcp;
+    boost::asio::io_context   io;
+    tcp::socket               sock(io);
+    boost::system::error_code ec;
+    sock.connect(tcp::endpoint(boost::asio::ip::make_address_v4("127.0.0.1"), port), ec);
+    return bool(ec);
+}
+
 std::string b64url(const std::string& s)
 {
     std::string out(boost::beast::detail::base64::encoded_size(s.size()), '\0');
@@ -534,9 +544,11 @@ TEST_CASE("http server start-stop after one request does not re-arm accept", "[P
         server.set_request_handler([](const std::string&) { return std::make_shared<HttpServer::ResponseNotFound>(); });
         server.start();
         server.stop_health_check();
-        const Reply r = http_get(server.get_port(), "/");
+        const uint16_t port = server.get_port();
+        const Reply    r    = http_get(port, "/");
         REQUIRE(r.status == 404);
         server.stop();
+        REQUIRE(loopback_connect_fails(port));
     }
 }
 

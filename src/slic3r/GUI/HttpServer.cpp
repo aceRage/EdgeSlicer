@@ -1017,30 +1017,6 @@ bool HttpServer::is_restart_requested() const
     return m_restart_requested;
 }
 
-void HttpServer::simulate_crash()
-{
-    BOOST_LOG_TRIVIAL(warning) << "Simulating HTTP server crash for testing restart mechanism...";
-    
-    try {
-        if (server_) {
-            // 关闭acceptor来模拟崩溃
-            server_->acceptor.close();
-            BOOST_LOG_TRIVIAL(info) << "Acceptor closed to simulate crash";
-            
-            // 停止io_service来模拟崩溃
-            server_->io_service.stop();
-            BOOST_LOG_TRIVIAL(info) << "IO service stopped to simulate crash";
-        }
-        
-        // 设置标志，让健康检查能够检测到崩溃
-        start_http_server = false;
-        BOOST_LOG_TRIVIAL(info) << "Server state set to crashed for health check detection";
-        
-    } catch (const std::exception& e) {
-        BOOST_LOG_TRIVIAL(error) << "Error during crash simulation: " << e.what();
-    }
-}
-
 void HttpServer::set_request_handler(const std::function<std::shared_ptr<Response>(const std::string&)>& request_handler)
 {
     this->m_request_handler = request_handler;
