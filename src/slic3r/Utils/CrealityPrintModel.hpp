@@ -111,6 +111,104 @@ inline std::string cfs_variant_name(const std::string &code)
     return it != variants.end() ? it->second : (code.empty() ? std::string("CFS") : code);
 }
 
+inline std::string normalize_filament_type(const std::string &filament_type)
+{
+    static const std::vector<std::string> bases = {"PETG", "PET", "PLA", "ABS", "ASA", "TPU", "PC", "PA", "PVA", "HIPS"};
+    for (const auto &base : bases) {
+        if (filament_type.rfind(base, 0) == 0)
+            return base;
+    }
+    return filament_type;
+}
+
+// Score visible compatible filament presets against CFS spool metadata (upstream
+// CrealityPrintAgent::match_filament_preset). Returns the winning filament_id, or empty.
+struct FilamentPresetRef
+{
+    std::string name;
+    std::string filament_id;
+    std::string type;
+    std::string vendor_name;
+    bool        is_system     = true;
+    bool        is_visible    = true;
+    bool        is_compatible = true;
+};
+
+inline std::vector<std::string> name_words(const std::string &name)
+{
+    std::vector<std::string> words;
+    std::string              word;
+    const std::string        stem = name.substr(0, name.find('@'));
+    for (char c : stem) {
+        if (std::isalnum(static_cast<unsigned char>(c)))
+            word += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        else if (!word.empty()) {
+            words.push_back(word);
+            word.clear();
+        }
+    }
+    if (!word.empty())
+        words.push_back(word);
+    return words;
+}
+
+inline std::string match_filament_preset(const std::vector<FilamentPresetRef> &presets,
+                                         const std::string &                   vendor,
+                                         const std::string &                   brand_name,
+                                         const std::string &                   base_type)
+{
+    auto to_lower = [](std::string s) {
+        for (char &c : s)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string vendor_lower = to_lower(vendor);
+    const std::string brand_lower  = to_lower(brand_name);
+    const std::string type_lower   = to_lower(base_type);
+
+    std::unordered_set<std::string> spool_words{"generic"};
+    for (const std::string &src : {brand_lower, vendor_lower, type_lower})
+        for (auto &w : name_words(src))
+            spool_words.insert(std::move(w));
+
+    struct Match
+    {
+        const FilamentPresetRef *preset;
+        int                      score;
+        bool                     is_user;
+    };
+    std::vector<Match> matches;
+    for (const auto &p : presets) {
+        if (!p.is_visible || !p.is_compatible)
+            continue;
+        if (to_lower(p.type) != type_lower)
+            continue;
+        const std::string name_lower = to_lower(p.name);
+        int               score      = 0;
+        if (!brand_lower.empty() && name_lower.find(brand_lower) != std::string::npos)
+            score += 20;
+        if (!vendor_lower.empty() &&
+            ((!p.vendor_name.empty() && to_lower(p.vendor_name) == vendor_lower) || name_lower.find(vendor_lower) != std::string::npos))
+            score += 10;
+        if (score == 0)
+            continue;
+        for (const auto &w : name_words(p.name))
+            if (spool_words.count(w) == 0)
+                score -= 5;
+        matches.push_back({&p, score, !p.is_system});
+    }
+    if (matches.empty())
+        return {};
+    std::sort(matches.begin(), matches.end(), [](const Match &a, const Match &b) {
+        if (a.score != b.score)
+            return a.score > b.score;
+        if (a.is_user != b.is_user)
+            return !a.is_user;
+        return a.preset->name < b.preset->name;
+    });
+    return matches.front().preset->filament_id.empty() ? matches.front().preset->name : matches.front().preset->filament_id;
+}
+
 inline std::string colour_hex(std::string raw)
 {
     if (!raw.empty() && raw[0] == '#')
