@@ -12,6 +12,7 @@
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
 #include "slic3r/Utils/CrealityPrint.hpp"
 #include "slic3r/Utils/CrealityPrintModel.hpp"
+#include "slic3r/GUI/ThirdPartyFilamentMap.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/filesystem.hpp>
@@ -19,8 +20,10 @@
 
 #include <chrono>
 #include <ctime>
+#include <map>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace Slic3r;
 using namespace Slic3r::PrintHostDevices;
@@ -380,6 +383,8 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK_FALSE(st.slots[2].loaded);
         CHECK(st.note.empty()); // there is something to map, so nothing to apologise for
         CHECK(st.slots[0].label() == "T1 PLA Basic");
+        CHECK_FALSE(st.qidi_box); // a U1 is never taken for a QIDI Box
+        CHECK_FALSE(st.qidi);     // nor for QIDI firmware: no QIDI options in its send dialog
     }
 
     SECTION("a stock Klipper names its tools and nothing in them") {
@@ -395,6 +400,225 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK(st.slots[1].index == 1);
         CHECK(st.slots[0].nozzle == Approx(0.4));
         CHECK_FALSE(st.note.empty());
+        CHECK_FALSE(st.qidi_box);
+        CHECK_FALSE(st.qidi);
+    }
+
+    SECTION("a QIDI Box names its slots and what is in them") {
+        // The shape QIDIStudio's QDSDevice::updateBoxDataByJson reads off an X-Max 4.
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"extruder\":{\"nozzle_diameter\":0.4},"
+            " \"multi_color_controller\":{\"box_count\":1,\"box\":{\"boxes\":[{"
+            "   \"box_inserted_0\":1,\"box_inserted_1\":1,\"box_inserted_2\":0,\"box_inserted_3\":true,"
+            "   \"filament_info\":["
+            "     {\"filament_type\":\"PLA\",\"filament_str\":\"PLA Rapido\",\"vendor_str\":\"QIDI\",\"color_rgb_str\":[\"#FFFFFF\"]},"
+            "     {\"filament_type\":\"ASA\",\"filament_str\":\"ASA\",\"vendor_str\":\"QIDI\",\"color_rgb_str\":[\"#202020\"]},"
+            "     {\"filament_type\":\"PETG\",\"color_rgb_str\":[\"#00FF00\"]},"
+            "     {\"filament_type\":\"ABS\",\"color_rgb_str\":[]}]}]}}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.online);
+        CHECK(st.qidi_box);
+        CHECK(st.qidi);
+        CHECK_FALSE(st.qidi_polar_cooler); // no polar cooler pin in the answer
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 4); // the Box's slots, not the one extruder
+        CHECK(st.slots[1].index == 1);
+        CHECK(st.slots[1].type == "ASA");
+        CHECK(st.slots[1].color == "#202020");
+        CHECK(st.slots[1].loaded);
+        CHECK(st.slots[1].label() == "Box 1 slot 2 ASA");
+        CHECK_FALSE(st.slots[2].loaded); // a tag left in the firmware from an unloaded spool
+        CHECK(st.slots[2].type.empty());
+        CHECK(st.slots[3].loaded);
+        CHECK(st.slots[3].color.empty());
+        CHECK(st.note.empty());
+    }
+
+    SECTION("a QIDI printer with no Box plugged in is a plain Klipper") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"extruder\":{\"nozzle_diameter\":0.4},"
+            " \"multi_color_controller\":{\"box_count\":0,\"boxes\":[]}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK_FALSE(st.qidi_box);
+        CHECK(st.qidi); // still QIDI firmware: the print options are offered without the Box
+        CHECK_FALSE(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 1);
+    }
+
+    SECTION("a QIDI printer with a polar cooler says so") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"output_pin polar_cooler\":{\"value\":0},"
+            " \"multi_color_controller\":{\"box_count\":0}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.qidi);
+        CHECK(st.qidi_polar_cooler);
+    }
+
+    SECTION("a stock Klipper is not taken for a QIDI") {
+        const Status st = parse_moonraker_status("{\"print_stats\":{\"state\":\"standby\"},"
+                                                 " \"output_pin polar_cooler\":{\"value\":0}}",
+                                                 "octoprint");
+        CHECK_FALSE(st.qidi);
+        CHECK_FALSE(st.qidi_polar_cooler);
+    }
+
+    SECTION("the QIDI print options go out the way QIDIStudio sends them, leveling on its own") {
+        QidiPrintOptions o;
+        CHECK(qidi_start_script(o, "") == ""); // nothing offered, nothing mapped: nothing sent
+        CHECK(qidi_leveling_script(o) == "");
+
+        o.use_box      = 1;
+        o.bed_leveling = 1;
+        o.polar_cooler = 0;
+        // The Box call carries the Box and the polar cooler, never G31/G32: a firmware that
+        // refuses the leveling must not take the Box mapping down with it.
+        CHECK(qidi_start_script(o, "0:4") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t0 VALUE=\"'slot4'\"\n"
+              "SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=0\n");
+        CHECK(qidi_leveling_script(o) == "G31\n");
+        // The Box on with nothing mapped still switches it on.
+        CHECK(qidi_start_script(o, "") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=0\n");
+
+        // The Box off: no mapping goes out, whatever the table said.
+        o.use_box      = 0;
+        o.bed_leveling = 0;
+        o.polar_cooler = -1;
+        CHECK(qidi_start_script(o, "0:4") == "SAVE_VARIABLE VARIABLE=enable_box VALUE=0\n");
+        CHECK(qidi_leveling_script(o) == "G32\n");
+
+        // Leveling only (no Box, no cooler offered): the Box call is empty, the leveling is not.
+        QidiPrintOptions level_only;
+        level_only.bed_leveling = 0;
+        CHECK(qidi_start_script(level_only, "") == "");
+        CHECK(qidi_leveling_script(level_only) == "G32\n");
+    }
+
+    SECTION("the QIDI options start off, the Box only when a slot is loaded") {
+        Status st;
+        st.qidi     = true;
+        st.qidi_box = true;
+        st.slots.resize(4);
+        // Nothing remembered: bed leveling, timelapse and cooler start off; an empty Box starts off.
+        QidiOptionDefaults d = qidi_option_defaults(st, "", "", "");
+        CHECK_FALSE(d.bed_leveling);
+        CHECK_FALSE(d.timelapse);
+        CHECK_FALSE(d.polar_cooler);
+        CHECK_FALSE(d.use_box);
+        // One loaded slot is enough for the Box.
+        st.slots[2].loaded = true;
+        d = qidi_option_defaults(st, "", "", "");
+        CHECK(d.use_box);
+        // The person's last choice wins over the default, both ways.
+        d = qidi_option_defaults(st, "1", "1", "1");
+        CHECK(d.bed_leveling);
+        CHECK(d.timelapse);
+        CHECK(d.polar_cooler);
+        d = qidi_option_defaults(st, "0", "0", "0");
+        CHECK_FALSE(d.bed_leveling);
+        CHECK_FALSE(d.timelapse);
+        CHECK_FALSE(d.polar_cooler);
+        // No Box at all: never on, loaded slots or not (those would be a U1's tools).
+        st.qidi_box = false;
+        d = qidi_option_defaults(st, "", "", "");
+        CHECK_FALSE(d.use_box);
+    }
+
+    SECTION("the QIDI Box mapping goes out the way QIDIStudio sends it") {
+        // QIDIStudio's own quoting, VALUE="'slotN'", character for character.
+        CHECK(qidi_box_mapping_script("0:1,2:15") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t0 VALUE=\"'slot1'\"\n"
+              "SAVE_VARIABLE VARIABLE=value_t2 VALUE=\"'slot15'\"\n");
+        // The firmware keeps 16 tools and 16 Box slots; anything past that is not sent.
+        CHECK(qidi_box_mapping_script("16:0,0:16") == "");
+        CHECK(qidi_box_mapping_script("") == "");
+        CHECK(qidi_box_mapping_script("x:y,1:2") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t1 VALUE=\"'slot2'\"\n");
+    }
+
+    SECTION("a printing or paused printer is busy, anything else is not") {
+        CHECK(busy_printing("printing"));
+        CHECK(busy_printing("paused"));
+        CHECK(busy_printing("Printing"));
+        CHECK_FALSE(busy_printing("standby"));
+        CHECK_FALSE(busy_printing("complete"));
+        CHECK_FALSE(busy_printing("cancelled"));
+        CHECK_FALSE(busy_printing("error"));
+        CHECK_FALSE(busy_printing(""));
+    }
+
+    SECTION("the state comes out of a print_stats query reply") {
+        CHECK(print_state_from_query("{\"result\":{\"eventtime\":1.0,\"status\":{\"print_stats\":{\"state\":\"printing\"}}}}") ==
+              "printing");
+        CHECK(print_state_from_query("{\"result\":{\"status\":{\"print_stats\":{\"state\":\"standby\"}}}}") == "standby");
+        // Anything that does not say comes back "", which the send path takes as "could not tell": no send.
+        CHECK(print_state_from_query("{\"result\":{\"status\":{}}}") == "");
+        CHECK(print_state_from_query("{\"error\":{\"message\":\"nope\"}}") == "");
+        CHECK(print_state_from_query("not json") == "");
+        CHECK(print_state_from_query("") == "");
+    }
+
+    SECTION("auto-match: every host but a QIDI Box keeps the nearest-colour rule") {
+        std::vector<Slot> slots(4);
+        for (int i = 0; i < 4; ++i)
+            slots[i].index = i;
+        slots[0].loaded = true; slots[0].type = "PLA"; slots[0].color = "#FF0000";
+        slots[1].loaded = true; slots[1].type = "ASA"; slots[1].color = "#202020";
+        slots[2].loaded = true; slots[2].type = "PETG"; // no colour: never auto-picked here
+        slots[3].loaded = false; slots[3].type = "ASA"; slots[3].color = "#000000";
+        // The nearest colour wins whatever the material says: the ASA plate filament in red goes
+        // to the red PLA, exactly as before the QIDI change.
+        CHECK(auto_match_slot(slots, "#F01010", "ASA", false) == 1);
+        CHECK(auto_match_slot(slots, "#101010", "PLA", false) == 2);
+        // A colourless slot is skipped even when it holds the same material.
+        CHECK(auto_match_slot(slots, "#101010", "PETG", false) == 2);
+        // An unloaded slot is skipped even when its colour is the exact one.
+        CHECK(auto_match_slot(slots, "#000000", "ASA", false) == 2);
+        // Nothing loaded with a colour: "As sliced".
+        std::vector<Slot> bare(1);
+        bare[0].loaded = true;
+        bare[0].type   = "PLA";
+        CHECK(auto_match_slot(bare, "#FF0000", "PLA", false) == 0);
+        CHECK(auto_match_slot({}, "#FF0000", "PLA", false) == 0);
+        // Equal distances keep the first slot.
+        std::vector<Slot> twins(2);
+        twins[0].loaded = twins[1].loaded = true;
+        twins[0].color = twins[1].color = "#00FF00";
+        CHECK(auto_match_slot(twins, "#00FF00", "", false) == 1);
+        // An unreadable colour is grey, as the dialog's swatch draws it.
+        std::vector<Slot> greys(2);
+        greys[0].loaded = greys[1].loaded = true;
+        greys[0].color = "#FFFFFF";
+        greys[1].color = "#A0A0A0";
+        CHECK(auto_match_slot(greys, "not a colour", "", false) == 2);
+    }
+
+    SECTION("auto-match: a QIDI Box goes by material and never by colour alone") {
+        std::vector<Slot> slots(4);
+        for (int i = 0; i < 4; ++i)
+            slots[i].index = i;
+        slots[0].loaded = true; slots[0].type = "PLA"; slots[0].color = "#FF0000";
+        slots[1].loaded = true; slots[1].type = "ASA"; slots[1].color = "#FFFFFF";
+        slots[2].loaded = true; slots[2].type = "asa"; // the printer gave no colour
+        slots[3].loaded = true; slots[3].type = "ASA"; slots[3].color = "#E00000";
+        // The red ASA, never the red PLA.
+        CHECK(auto_match_slot(slots, "#FF0000", "ASA", true) == 4);
+        // Of the same material, a slot with a colour beats one without, however far the colour.
+        slots[3].loaded = false;
+        CHECK(auto_match_slot(slots, "#FF0000", "ASA", true) == 2);
+        // Only a colourless match left: it still counts (case does not matter).
+        slots[1].loaded = false;
+        CHECK(auto_match_slot(slots, "#FF0000", "ASA", true) == 3);
+        // No slot of that material, or no material on the plate filament: "As sliced".
+        CHECK(auto_match_slot(slots, "#FF0000", "PETG", true) == 0);
+        CHECK(auto_match_slot(slots, "#FF0000", "", true) == 0);
     }
 
     SECTION("something that is not a Moonraker printer") {
@@ -904,6 +1128,24 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(st.slots[0].cfs_external);
         CHECK(st.slots[1].label().find("CFS") != std::string::npos);
         CHECK(st.slots[0].label().find("External") != std::string::npos);
+        // Tile labels 1A–1D from Slot::unit / tray (boxId 1 → unit 0). External stays ungrouped.
+        CHECK(st.slots[0].unit == -1);
+        CHECK(st.slots[1].unit == 0);
+        CHECK(st.slots[1].tray == 0);
+        CHECK(st.slots[2].tray == 1);
+        CHECK(st.slots[3].tray == 2);
+        CHECK(st.slots[4].unit == 0);
+        CHECK(st.slots[4].tray == 3);
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[1].unit, st.slots[1].tray) == "1A");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[2].unit, st.slots[2].tray) == "1B");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[3].unit, st.slots[3].tray) == "1C");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[4].unit, st.slots[4].tray) == "1D");
+        CHECK(st.slots[1].type == "PLA");
+        CHECK(st.slots[1].color == "#FF0000");
+        CHECK(st.slots[2].type == "PETG");
+        CHECK(st.slots[2].color == "#0000FF");
+        CHECK(st.slots[4].type == "ABS");
+        CHECK(st.slots[4].color == "#FFFFFF");
     }
 
     SECTION("hostile JSON is refused without throwing") {
@@ -1059,6 +1301,42 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(st.slots[0].name == "Nozzle 1 (T0)");
         CHECK(st.slots[0].label().find("T0") != std::string::npos);
         CHECK(st.slots[3].name == "Nozzle 4 (T3)");
+        // Read-only identity (#625 F13): mapping[i] is warning_slot_position (T-number),
+        // so tiles / highlight / note agree. encode_filament_mapping stays empty.
+        {
+            using namespace Slic3r::GUI;
+            ThirdPartyFilamentMapModel model;
+            ThirdPartySlicerFilament   f0;
+            f0.index  = 0;
+            f0.type   = "PLA";
+            f0.colour = "#FF0000";
+            ThirdPartySlicerFilament f1;
+            f1.index  = 1;
+            f1.type   = "PETG";
+            f1.colour = "#0000FF";
+            model.filaments = {f0, f1};
+            for (const auto &s : st.slots) {
+                ThirdPartyDeviceSlot ds;
+                ds.index  = s.index;
+                ds.colour = s.color;
+                ds.type   = s.type;
+                ds.name   = s.name;
+                ds.label  = s.name;
+                ds.empty  = !s.loaded;
+                model.slots.push_back(ds);
+            }
+            model.read_only = true;
+            model.mapping.resize(model.filaments.size(), -1);
+            for (size_t i = 0; i < model.filaments.size(); ++i)
+                model.mapping[i] = warning_slot_position(model, i);
+            REQUIRE(model.mapping.size() == 2);
+            CHECK(model.mapping[0] == 0);
+            CHECK(model.mapping[1] == 1);
+            CHECK(warning_slot_position(model, 0) == model.mapping[0]);
+            CHECK(warning_slot_position(model, 1) == model.mapping[1]);
+            CHECK(slot_display_label(model.slots[0]) == "Nozzle 1 (T0)");
+            CHECK(encode_filament_mapping(model).empty());
+        }
         CHECK(st.note.find("opGcodeFile") != std::string::npos);
         CHECK(st.note.find("As sliced (T0-T3 go to nozzles 1-4)") != std::string::npos);
         CHECK(st.note.find("read-only") != std::string::npos);
@@ -1128,6 +1406,60 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(match_filament_preset(presets, "Creality", "", "PLA") == "GPLA");
         CHECK(match_filament_preset(presets, "Creality", "Hyper PLA", "PETG") == "GPETG");
         CHECK(match_filament_preset(presets, "", "", "TPU").empty());
+    }
+
+    SECTION("color_match_from_positions is byte-identical to the old wxChoice loop") {
+        const Status st = status_from_cfs(k2_boxs);
+        std::vector<ColorMatchTarget> slots;
+        slots.reserve(st.slots.size());
+        for (const auto &s : st.slots)
+            slots.push_back({s.cfs_box, s.cfs_material, s.type, s.color});
+        const std::vector<ColorMatchFilament> filaments = {
+            {0, "PLA", "#FF0000"},
+            {1, "PETG", "#0000FF"},
+            {2, "ABS", ""},
+        };
+
+        auto legacy = [&](const std::vector<int> &positions) {
+            // Old extendedInfo loop: sel = GetSelection(), skip sel <= 0, slot = sel - 1.
+            // mapping_choice_positions() already stores sel - 1, so slot == positions[i].
+            std::map<std::string, std::string> out;
+            int                                n = 0;
+            for (size_t i = 0; i < positions.size() && i < filaments.size(); ++i) {
+                const int sel = positions[i] + 1;
+                if (sel <= 0)
+                    continue;
+                const int slot = sel - 1;
+                if (slot < 0 || slot >= (int) st.slots.size())
+                    continue;
+                const auto &s = st.slots[slot];
+                if (s.cfs_box < 0)
+                    continue;
+                const auto &        f     = filaments[i];
+                const std::string   type  = f.type;
+                const std::string   color = f.color.empty() ? s.color : f.color;
+                const std::string   value = color_match_value(f.index, type, color, s.cfs_box, s.cfs_material);
+                if (!value.empty())
+                    out["colorMatch_" + std::to_string(n++)] = value;
+            }
+            return out;
+        };
+
+        const std::vector<int> mapped     = {1, 2, 4};      // CFS 1A, 1B, 1D
+        const std::vector<int> with_skip  = {-1, 2, 4};     // first row as sliced
+        const std::vector<int> external   = {0, -1, -1};    // external holder (boxId 0)
+        CHECK(color_match_from_positions(mapped, filaments, slots) == legacy(mapped));
+        CHECK(color_match_from_positions(with_skip, filaments, slots) == legacy(with_skip));
+        CHECK(color_match_from_positions(external, filaments, slots) == legacy(external));
+        CHECK(color_match_from_positions(mapped, filaments, slots)["colorMatch_0"] ==
+              "T1A\tPLA\t#FF0000\t1\t0");
+        CHECK(color_match_from_positions(mapped, filaments, slots)["colorMatch_1"] ==
+              "T1B\tPETG\t#0000FF\t1\t1");
+        CHECK(color_match_from_positions(mapped, filaments, slots)["colorMatch_2"] ==
+              "T1C\tABS\t#FFFFFF\t1\t3");
+        CHECK(color_match_from_positions(with_skip, filaments, slots).count("colorMatch_0") == 1);
+        CHECK(color_match_from_positions(with_skip, filaments, slots).count("colorMatch_1") == 1);
+        CHECK(color_match_from_positions(with_skip, filaments, slots).count("colorMatch_2") == 0);
     }
 }
 

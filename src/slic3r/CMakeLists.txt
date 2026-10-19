@@ -293,6 +293,15 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_ObjectTableSettings.hpp
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
+    GUI/MainTabs.hpp
+    GUI/Showcase/ShowcaseRenderer.cpp
+    GUI/Showcase/ShowcaseRenderer.hpp
+    GUI/Showcase/ShowcaseTextures.cpp
+    GUI/Showcase/ShowcaseTextures.hpp
+    GUI/Showcase/ShowcaseView.cpp
+    GUI/Showcase/ShowcaseView.hpp
+    GUI/Showcase/ShowcaseWatermark.cpp
+    GUI/Showcase/ShowcaseWatermark.hpp
     GUI/GUI_Utils.cpp
     GUI/GUI_Utils.hpp
     GUI/HintNotification.cpp
@@ -1102,6 +1111,10 @@ set(SLIC3R_GUI_SOURCES
     # Last on purpose: a new source in the middle of the list reshuffles the unity batches (HomeVaults.cpp
     # and HomeVendors.cpp share file-local names and must not land in one batch).
     GUI/FavoriteFilamentsUI.cpp
+    GUI/ThirdPartyFilamentMap.cpp
+    GUI/ThirdPartyFilamentMap.hpp
+    GUI/ThirdPartyFilamentMapPanel.cpp
+    GUI/ThirdPartyFilamentMapPanel.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
@@ -1248,6 +1261,9 @@ slic3r_unity_build(libslic3r_gui SKIP
     Utils/StepMesh.cpp                            # OCCT's Handle() macro breaks CGAL headers in neighbours
     GUI/GLToolbar.cpp                             # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/GUI_Preview.cpp                           # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseView.cpp                 # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseRenderer.cpp             # glad + ImGui + wx image headers; file-local GL helpers
+    GUI/Showcase/ShowcaseTextures.cpp             # glad before wx image headers, like ShowcaseRenderer.cpp
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
@@ -1269,6 +1285,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Tab.cpp                                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/AMSMaterialsSetting.cpp                   # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/AmsMappingPopup.cpp                       # ::CheckBox members vs GUI::CheckBox (Field.hpp)
+    GUI/ThirdPartyFilamentMapPanel.cpp            # includes AmsMappingPopup.hpp (::CheckBox vs GUI::CheckBox)
     GUI/CalibrationWizardPage.cpp                 # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/ExtrusionCalibration.cpp                  # ::CheckBox members vs GUI::CheckBox (Field.hpp)
 )

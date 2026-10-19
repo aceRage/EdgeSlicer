@@ -40,6 +40,7 @@
 #include "NotificationManager.hpp"
 #include "ExtraRenderers.hpp"
 #include "format.hpp"
+#include "Widgets/StateColor.hpp"
 #include "WebPreprintDialog.hpp"
 #include "../Utils/PrintHostDevices.hpp"
 #include "../Utils/CrealityPrintModel.hpp"
@@ -71,14 +72,7 @@ static wxColour swatch_colour(const std::string& raw)
     return wxColour(160, 160, 160);
 }
 
-// Redmean, the same cheap perceptual distance SnapmakerLan::auto_match uses (SnapmakerLan.cpp:830)
-// so the two auto-matches agree about which slot is "the closest colour".
-static double colour_distance(const wxColour& a, const wxColour& b)
-{
-    const double rm = (a.Red() + b.Red()) / 2.0;
-    const double dr = a.Red() - b.Red(), dg = a.Green() - b.Green(), db = a.Blue() - b.Blue();
-    return (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db;
-}
+// The closest-colour auto-match lives in PrintHostDevices::auto_match_slot, where the tests reach it.
 
 namespace {
 
@@ -452,11 +446,80 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 
 } // namespace
 
+static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& s)
+{
+    ThirdPartyDeviceSlot ds;
+    ds.unit_id = s.unit;
+    ds.slot_id = s.tray >= 0 ? s.tray : s.index;
+    ds.colour  = s.color;
+    ds.type    = s.type;
+    ds.name    = s.name;
+    ds.empty   = !s.loaded;
+    ds.index   = s.index;
+    if (s.cfs_external)
+        ds.label = s.name.empty() ? "External" : s.name;
+    else if (s.unit < 0 && s.tray < 0 && !s.name.empty())
+        ds.label = s.name; // K3 "Nozzle N (Tn)"
+    return ds;
+}
+
+static wxString third_party_slot_tile_label(const PrintHostDevices::Slot& s)
+{
+    return from_u8(slot_display_label(third_party_slot_from(s)));
+}
+
+// 1-based wxChoice selection, 0 = "As sliced". CFS keeps type+colour over external; a QIDI Box
+// never matches on colour alone; everyone else is closest loaded colour.
+static int mapping_auto_match_choice(const PrintHostDevices::Status& st, const SendPlateFilament& f)
+{
+    if (st.cfs) {
+        const int idx = PrintHostDevices::auto_match_slot(f.type, f.colour, st.slots, true);
+        return idx >= 0 ? idx + 1 : 0;
+    }
+    return PrintHostDevices::auto_match_slot(st.slots, f.colour, f.type, st.qidi_box);
+}
+
+static void append_unique_mapping_lines(wxString& out, const wxString& block)
+{
+    size_t start = 0;
+    while (start <= block.size()) {
+        const size_t     nl   = block.find('\n', start);
+        const wxString   line = (nl == wxString::npos) ? block.Mid(start) : block.Mid(start, nl - start);
+        if (!line.IsEmpty()) {
+            bool seen = false;
+            size_t ostart = 0;
+            while (!seen && ostart <= out.size()) {
+                const size_t onl = out.find('\n', ostart);
+                const wxString existing = (onl == wxString::npos) ? out.Mid(ostart) : out.Mid(ostart, onl - ostart);
+                if (existing == line)
+                    seen = true;
+                if (onl == wxString::npos)
+                    break;
+                ostart = onl + 1;
+            }
+            if (!seen) {
+                if (!out.IsEmpty())
+                    out += "\n";
+                out += line;
+            }
+        }
+        if (nl == wxString::npos)
+            break;
+        start = nl + 1;
+    }
+}
+
 static const char *CONFIG_KEY_PATH  = "printhost_path";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
 static const char* CONFIG_KEY_STORAGE = "printhost_storage";
 static const char* CONFIG_KEY_CREALITY_CFS       = "creality_send_use_cfs";
 static const char* CONFIG_KEY_CREALITY_CALIBRATE = "creality_send_calibrate";
+// The QIDI print options, remembered between sends like QIDIStudio's own switches. The Box switch
+// is not: it starts on whenever a Box slot is loaded, so a mapping is never skipped by accident
+// (PrintHostDevices::qidi_option_defaults).
+static const char* CONFIG_KEY_QIDI_LEVELING  = "qidi_send_bed_leveling";
+static const char* CONFIG_KEY_QIDI_TIMELAPSE = "qidi_send_timelapse";
+static const char* CONFIG_KEY_QIDI_POLAR     = "qidi_send_polar_cooler";
 
 PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUploadActions post_actions, const wxArrayString &groups, const wxArrayString& storage_paths, const wxArrayString& storage_names, bool switch_to_device_tab)
     : MsgDialog(static_cast<wxWindow*>(wxGetApp().mainframe), _L("Send G-code to printer host"), _L("Upload to Printer Host with the following filename:"), 0) // Set style = 0 to avoid default creation of the "OK" button. 
@@ -502,6 +565,11 @@ std::string PrintHostSendDialog::filament_mapping() const
         return {};
     if (m_creality_use_cfs && !m_creality_use_cfs->GetValue())
         return {};
+    // The QIDI Box switched off: the print runs from the extruder's own spool, nothing is mapped.
+    if (m_qidi_use_box && !m_qidi_use_box->GetValue())
+        return {};
+    if (m_filament_map)
+        return m_filament_map->filament_mapping();
     std::string out;
     for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i) {
         const int sel = m_mapping_choices[i]->GetSelection();
@@ -515,6 +583,34 @@ std::string PrintHostSendDialog::filament_mapping() const
         out += std::to_string(m_mapping_filament[i]) + ":" + std::to_string(m_device_status.slots[slot].index);
     }
     return out;
+}
+
+std::string PrintHostSendDialog::qidi_start_script() const
+{
+    if (!m_device_status.qidi)
+        return {};
+    PrintHostDevices::QidiPrintOptions o;
+    if (m_qidi_use_box)
+        o.use_box = m_qidi_use_box->GetValue() ? 1 : 0;
+    if (m_qidi_leveling)
+        o.bed_leveling = m_qidi_leveling->GetValue() ? 1 : 0;
+    if (m_qidi_polar_cooler)
+        o.polar_cooler = m_qidi_polar_cooler->GetValue() ? 1 : 0;
+    return PrintHostDevices::qidi_start_script(o, filament_mapping());
+}
+
+std::string PrintHostSendDialog::qidi_leveling_script() const
+{
+    if (!m_device_status.qidi || !m_qidi_leveling)
+        return {};
+    PrintHostDevices::QidiPrintOptions o;
+    o.bed_leveling = m_qidi_leveling->GetValue() ? 1 : 0;
+    return PrintHostDevices::qidi_leveling_script(o);
+}
+
+int PrintHostSendDialog::qidi_timelapse() const
+{
+    return m_qidi_timelapse ? (m_qidi_timelapse->GetValue() ? 1 : 0) : -1;
 }
 
 void PrintHostSendDialog::offer_unload_at_end(bool preset_default)
@@ -562,8 +658,7 @@ void PrintHostSendDialog::build_device_ui()
     content_sizer->Add(m_device_note, 0, wxBOTTOM, VERT_SPACING);
 
     m_mapping_panel = new wxPanel(this, wxID_ANY);
-    m_mapping_sizer = new wxFlexGridSizer(3, FromDIP(4), FromDIP(8));
-    m_mapping_sizer->AddGrowableCol(2, 1);
+    m_mapping_sizer = new wxBoxSizer(wxVERTICAL);
     m_mapping_panel->SetSizer(m_mapping_sizer);
     content_sizer->Add(m_mapping_panel, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
     m_mapping_note = new wxStaticText(this, wxID_ANY, wxEmptyString);
@@ -575,6 +670,11 @@ void PrintHostSendDialog::build_device_ui()
     m_creality_sizer = new wxBoxSizer(wxVERTICAL);
     m_creality_panel->SetSizer(m_creality_sizer);
     content_sizer->Add(m_creality_panel, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
+
+    m_qidi_panel = new wxPanel(this, wxID_ANY);
+    m_qidi_sizer = new wxBoxSizer(wxVERTICAL);
+    m_qidi_panel->SetSizer(m_qidi_sizer);
+    content_sizer->Add(m_qidi_panel, 0, wxEXPAND | wxBOTTOM, 2 * VERT_SPACING);
 
     m_combo_devices->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
         m_device_sel = m_combo_devices->GetSelection();
@@ -625,6 +725,16 @@ void PrintHostSendDialog::apply_device_status()
             const std::string variant = m_device_status.cfs_variant.empty() ? std::string("CFS") : m_device_status.cfs_variant;
             text += format_wxstr(_L("%1%: each filament is fed from the slot picked below. \"As sliced\" leaves the printer on the external spool."),
                                  from_u8(variant));
+        } else if (m_device_status.qidi_box && m_device_status.slots_have_filaments) {
+            if (!text.IsEmpty())
+                text += "  ";
+            text += _L("QIDI Box: each filament is fed from the slot picked below. \"As sliced\" leaves the "
+                       "printer on whichever slot it last used for that filament.");
+        }
+        if (print_blocked()) {
+            if (!text.IsEmpty())
+                text += "  ";
+            text += _L("This printer is busy with a print, so this plate can be uploaded but not started.");
         }
         m_device_note->SetLabel(text);
         m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
@@ -632,9 +742,11 @@ void PrintHostSendDialog::apply_device_status()
     }
     rebuild_mapping_rows();
     rebuild_creality_options();
-    update_creality_mapping_enabled();
+    rebuild_qidi_options();
+    update_mapping_enabled();
     m_probe_pending = false;
     set_send_enabled(true);
+    update_print_button();
     content_sizer->Layout();
     Layout();
     Fit();
@@ -646,6 +758,22 @@ void PrintHostSendDialog::set_send_enabled(bool on)
         b->Enable(on);
     if (Button *b = get_button(wxID_YES))
         b->Enable(on);
+}
+
+bool PrintHostSendDialog::print_blocked() const
+{
+    return m_device_status.qidi && PrintHostDevices::busy_printing(m_device_status.state);
+}
+
+// A QIDI printer that is printing or paused is not started from here: the start sends the Box
+// mapping and print options ahead of the file, and they must never reach a running print. The queue checks again
+// just before it sends anything (PrintHostJobQueue::priv::perform_job). Upload stays available.
+void PrintHostSendDialog::update_print_button()
+{
+    if (m_probe_pending)
+        return;
+    if (Button* btn = get_button(wxID_YES))
+        btn->Enable(!print_blocked());
 }
 
 // Probe runs on a joinable worker owned by the dialog. An unreachable Creality
@@ -674,7 +802,8 @@ void PrintHostSendDialog::refresh_device_status()
     }
     rebuild_mapping_rows();
     rebuild_creality_options();
-    update_creality_mapping_enabled();
+    rebuild_qidi_options();
+    update_mapping_enabled();
     content_sizer->Layout();
     Layout();
     Fit();
@@ -682,6 +811,7 @@ void PrintHostSendDialog::refresh_device_status()
     if (m_device_sel < 0 || m_device_sel >= (int) m_devices.size()) {
         m_probe_pending = false;
         set_send_enabled(true);
+        update_print_button();
         return;
     }
 
@@ -740,50 +870,30 @@ void PrintHostSendDialog::rebuild_mapping_rows()
 {
     if (!m_mapping_panel || !m_mapping_sizer)
         return;
+    m_filament_map = nullptr;
     m_mapping_choices.clear();
     m_mapping_filament.clear();
     m_mapping_sizer->Clear(true);
 
-    // F039 / K3: holders are read-only. T0-T3 already name the nozzles; a choice would look
-    // applied and is not (start is opGcodeFile, filament_mapping() is empty).
-    if (m_device_status.direct_rack) {
-        if (m_device_status.slots.empty()) {
-            m_mapping_panel->Show(false);
-            m_mapping_panel->Layout();
-            update_mapping_note();
-            return;
-        }
-        for (const PrintHostDevices::Slot &s : m_device_status.slots) {
-            auto *swatch = new wxPanel(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(16), FromDIP(16)));
-            swatch->SetBackgroundColour(s.color.empty() ? wxColour("#DDDDDD") : swatch_colour(s.color));
-            m_mapping_sizer->Add(swatch, 0, wxALIGN_CENTER_VERTICAL);
-
-            const wxString name = format_wxstr(_L("Nozzle %1% (T%2%)"), s.index + 1, s.index);
-            m_mapping_sizer->Add(new wxStaticText(m_mapping_panel, wxID_ANY, name), 0, wxALIGN_CENTER_VERTICAL);
-
-            wxString loaded = _L("empty");
-            if (s.loaded) {
-                loaded = from_u8(s.type.empty() ? s.sub_type : s.type);
-                if (!s.vendor.empty())
-                    loaded += " " + from_u8(s.vendor);
-                if (loaded.empty())
-                    loaded = _L("loaded");
-            }
-            m_mapping_sizer->Add(new wxStaticText(m_mapping_panel, wxID_ANY, loaded), 1, wxALIGN_CENTER_VERTICAL);
-        }
-        m_mapping_panel->Show(true);
-        m_mapping_panel->Layout();
-        update_mapping_note();
-        return;
-    }
-
-    const bool can_map = m_device_status.slots_have_filaments && !m_device_status.slots.empty() && !m_plate_filaments.empty();
+    // Direct-rack (K3) still draws identity tiles when every holder is empty, so the note
+    // and the cards stay in the same place. Other hosts need a named filament in a slot.
+    const bool can_map = !m_device_status.slots.empty() && !m_plate_filaments.empty() &&
+                         (m_device_status.slots_have_filaments || m_device_status.direct_rack);
     if (!can_map) {
         m_mapping_panel->Show(false);
         m_mapping_panel->Layout();
         update_mapping_note(); // no rows, no warnings
         return;
     }
+
+    if (use_third_party_map_panel()) {
+        rebuild_third_party_map_rows();
+        return;
+    }
+
+    auto* grid = new wxFlexGridSizer(3, FromDIP(4), FromDIP(8));
+    grid->AddGrowableCol(2, 1);
+    m_mapping_sizer->Add(grid, 0, wxEXPAND);
 
     wxArrayString slot_labels;
     slot_labels.Add(_L("As sliced"));
@@ -799,47 +909,72 @@ void PrintHostSendDialog::rebuild_mapping_rows()
             continue;
         auto* swatch = new wxPanel(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(16), FromDIP(16)));
         swatch->SetBackgroundColour(swatch_colour(f.colour));
-        m_mapping_sizer->Add(swatch, 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(swatch, 0, wxALIGN_CENTER_VERTICAL);
 
         wxString name = format_wxstr(_L("Filament %1%"), f.index + 1);
         if (!f.type.empty())
             name += "  " + from_u8(f.type);
-        m_mapping_sizer->Add(new wxStaticText(m_mapping_panel, wxID_ANY, name), 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(new wxStaticText(m_mapping_panel, wxID_ANY, name), 0, wxALIGN_CENTER_VERTICAL);
 
         auto* choice = new wxChoice(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, slot_labels);
         // Auto-match: the dialog's own choice when it has one (the Elegoo dialog's remembered
         // mapping), else the closest colour among the slots that have something in them, the same
         // rule the Snapmaker LAN path uses. "As sliced" whenever nothing is close enough to be obvious.
-        const int preset_pos = preselect_slot(f);
+        // A QIDI Box matches by material first and never by colour alone (auto_match_slot).
+        const int  preset_pos = preselect_slot(f);
         const bool preset_ok  = preset_pos >= 0 && preset_pos < (int) m_device_status.slots.size();
-        int        best       = preset_ok ? preset_pos + 1 : 0;
-        if (!preset_ok && m_device_status.cfs) {
-            // Creality CFS only: CFS type+colour > CFS type > ext type+colour > ext type.
-            const int idx = PrintHostDevices::auto_match_slot(f.type, f.colour, m_device_status.slots, true);
-            if (idx >= 0)
-                best = idx + 1;
-        } else if (!preset_ok) {
-            // Snapmaker / Moonraker / Elegoo / everyone else: closest loaded colour (redmean).
-            double best_d = 0;
-            for (size_t i = 0; i < m_device_status.slots.size(); ++i) {
-                const PrintHostDevices::Slot& s = m_device_status.slots[i];
-                if (!s.loaded || s.color.empty())
-                    continue;
-                const double dist = colour_distance(swatch_colour(f.colour), swatch_colour(s.color));
-                if (best == 0 || dist < best_d) {
-                    best   = (int) i + 1;
-                    best_d = dist;
-                }
-            }
-        }
+        const int  best       = preset_ok ? preset_pos + 1 : mapping_auto_match_choice(m_device_status, f);
         choice->SetSelection(best);
         choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { update_mapping_note(); });
-        m_mapping_sizer->Add(choice, 1, wxEXPAND);
+        grid->Add(choice, 1, wxEXPAND);
         m_mapping_choices.push_back(choice);
         m_mapping_filament.push_back(f.index);
     }
 
     m_mapping_panel->Show(!m_mapping_choices.empty());
+    m_mapping_panel->Layout();
+    update_mapping_note();
+}
+
+void PrintHostSendDialog::rebuild_third_party_map_rows()
+{
+    ThirdPartyFilamentMapModel model;
+    for (const SendPlateFilament& f : m_plate_filaments) {
+        if (!f.used)
+            continue;
+        ThirdPartySlicerFilament sf;
+        sf.index     = f.index;
+        sf.colour    = f.colour;
+        sf.type      = f.type;
+        sf.name      = f.alias;
+        sf.nozzle_id = f.nozzle_id;
+        model.filaments.push_back(std::move(sf));
+        m_mapping_filament.push_back(f.index);
+    }
+    for (const PrintHostDevices::Slot& s : m_device_status.slots)
+        model.slots.push_back(third_party_slot_from(s));
+    model.read_only = third_party_map_read_only();
+    model.mapping.resize(model.filaments.size(), -1);
+    // Interactive: visual auto-match. Read-only (K3, #625 F13): identity T-number so the
+    // tiles, highlight and mapping_warning() all name the same holder. Sent map stays empty.
+    for (size_t i = 0; i < model.filaments.size(); ++i) {
+        if (model.read_only) {
+            model.mapping[i] = warning_slot_position(model, i);
+            continue;
+        }
+        const SendPlateFilament* f = plate_filament(model.filaments[i].index);
+        if (!f)
+            continue;
+        const int  preset_pos = preselect_slot(*f);
+        const bool preset_ok  = preset_pos >= 0 && preset_pos < (int) m_device_status.slots.size();
+        const int  best       = preset_ok ? preset_pos + 1 : mapping_auto_match_choice(m_device_status, *f);
+        model.mapping[i] = best - 1;
+    }
+
+    m_filament_map = new ThirdPartyFilamentMapPanel(m_mapping_panel);
+    m_filament_map->set_model(std::move(model), [this]() { update_mapping_note(); });
+    m_mapping_sizer->Add(m_filament_map, 0, wxEXPAND);
+    m_mapping_panel->Show(!m_mapping_filament.empty());
     m_mapping_panel->Layout();
     update_mapping_note();
 }
@@ -890,9 +1025,7 @@ void PrintHostSendDialog::rebuild_creality_options()
 
 void PrintHostSendDialog::update_creality_mapping_enabled()
 {
-    const bool cfs_on = !m_creality_use_cfs || m_creality_use_cfs->GetValue();
-    for (wxChoice* choice : m_mapping_choices)
-        choice->Enable(cfs_on);
+    update_mapping_enabled();
 }
 
 std::map<std::string, std::string> PrintHostSendDialog::extendedInfo() const
@@ -906,30 +1039,37 @@ std::map<std::string, std::string> PrintHostSendDialog::extendedInfo() const
     out["enableSelfTest"] = (m_creality_calibrate && m_creality_calibrate->GetValue()) ? "1" : "0";
     if (!use_cfs)
         return out;
-    int n = 0;
-    for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i) {
-        const int sel = m_mapping_choices[i]->GetSelection();
-        if (sel <= 0)
-            continue;
-        const int slot = sel - 1;
-        if (slot < 0 || slot >= (int) m_device_status.slots.size())
-            continue;
-        const PrintHostDevices::Slot& s = m_device_status.slots[slot];
-        if (s.cfs_box < 0)
-            continue;
-        const SendPlateFilament* f = plate_filament(m_mapping_filament[i]);
-        const std::string type  = f ? f->type : s.type;
-        const std::string color = f && !f->colour.empty() ? f->colour : s.color;
-        const std::string value = Slic3r::CrealityPrintModel::color_match_value(m_mapping_filament[i], type, color, s.cfs_box,
-                                                                               s.cfs_material);
-        if (!value.empty())
-            out["colorMatch_" + std::to_string(n++)] = value;
+    std::vector<Slic3r::CrealityPrintModel::ColorMatchFilament> filaments;
+    filaments.reserve(m_mapping_filament.size());
+    for (int idx : m_mapping_filament) {
+        const SendPlateFilament* f = plate_filament(idx);
+        Slic3r::CrealityPrintModel::ColorMatchFilament row;
+        row.index = idx;
+        if (f) {
+            row.type  = f->type;
+            row.color = f->colour;
+        }
+        filaments.push_back(std::move(row));
     }
+    std::vector<Slic3r::CrealityPrintModel::ColorMatchTarget> slots;
+    slots.reserve(m_device_status.slots.size());
+    for (const PrintHostDevices::Slot& s : m_device_status.slots) {
+        Slic3r::CrealityPrintModel::ColorMatchTarget t;
+        t.box_id      = s.cfs_box;
+        t.material_id = s.cfs_material;
+        t.type        = s.type;
+        t.color       = s.color;
+        slots.push_back(std::move(t));
+    }
+    auto matches = Slic3r::CrealityPrintModel::color_match_from_positions(mapping_choice_positions(), filaments, slots);
+    out.insert(matches.begin(), matches.end());
     return out;
 }
 
 std::vector<int> PrintHostSendDialog::mapping_choice_positions() const
 {
+    if (m_filament_map)
+        return m_filament_map->choice_positions();
     std::vector<int> out;
     for (const wxChoice* c : m_mapping_choices)
         out.push_back(c ? c->GetSelection() - 1 : -1); // 0 is "As sliced"
@@ -990,11 +1130,43 @@ wxString PrintHostSendDialog::mapping_warning() const
     return text;
 }
 
+wxString PrintHostSendDialog::third_party_mismatch_warning() const
+{
+    // K3 mapping_warning() already names identity mismatches; do not duplicate them.
+    if (m_device_status.direct_rack)
+        return wxString();
+    return m_filament_map ? m_filament_map->mismatch_warning() : wxString();
+}
+
+void PrintHostSendDialog::on_dpi_changed(const wxRect& suggested_rect)
+{
+    MsgDialog::on_dpi_changed(suggested_rect);
+    if (m_filament_map)
+        m_filament_map->msw_rescale();
+    Layout();
+    Fit();
+    Refresh();
+}
+
+void PrintHostSendDialog::on_sys_color_changed()
+{
+    if (m_filament_map)
+        m_filament_map->sys_color_changed();
+    if (m_mapping_note)
+        m_mapping_note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#E8A33D")));
+#ifdef _WIN32
+    wxGetApp().UpdateDlgDarkUI(this);
+#endif
+    Refresh();
+}
+
 void PrintHostSendDialog::update_mapping_note()
 {
     if (!m_mapping_note)
         return;
-    const wxString text = mapping_warning();
+    wxString text;
+    append_unique_mapping_lines(text, mapping_warning());
+    append_unique_mapping_lines(text, third_party_mismatch_warning());
     const bool     was  = m_mapping_note->IsShown();
     m_mapping_note->SetLabel(text);
     m_mapping_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
@@ -1004,6 +1176,68 @@ void PrintHostSendDialog::update_mapping_note()
         Layout();
         Fit();
     }
+}
+
+// QIDIStudio's print options, for a printer that answered as QIDI firmware. Each one goes to the
+// printer just before the print starts (PrintHost.cpp's perform_job), the way QIDIStudio's own
+// SelectMachine sends them, because the firmware keeps the last value it was given: a send that
+// says nothing leaves the bed leveling, timelapse and Box on whatever the previous print used.
+void PrintHostSendDialog::rebuild_qidi_options()
+{
+    if (!m_qidi_panel || !m_qidi_sizer)
+        return;
+    m_qidi_sizer->Clear(true);
+    m_qidi_use_box = m_qidi_leveling = m_qidi_timelapse = m_qidi_polar_cooler = nullptr;
+    if (!m_device_status.qidi) {
+        m_qidi_panel->Show(false);
+        m_qidi_panel->Layout();
+        return;
+    }
+
+    const AppConfig* app_config = wxGetApp().app_config;
+    auto stored = [app_config](const char* key) { return app_config ? app_config->get("recent", key) : std::string(); };
+    const PrintHostDevices::QidiOptionDefaults defaults =
+        PrintHostDevices::qidi_option_defaults(m_device_status, stored(CONFIG_KEY_QIDI_LEVELING), stored(CONFIG_KEY_QIDI_TIMELAPSE),
+                                               stored(CONFIG_KEY_QIDI_POLAR));
+    auto add = [this](const wxString& label, const wxString& tip, bool value) {
+        auto* box = new wxCheckBox(m_qidi_panel, wxID_ANY, label);
+        box->SetValue(value);
+        box->SetToolTip(tip);
+        m_qidi_sizer->Add(box, 0, wxBOTTOM, FromDIP(4));
+        return box;
+    };
+
+    m_qidi_sizer->Add(new wxStaticText(m_qidi_panel, wxID_ANY, _L("Print options") + ":"), 0, wxBOTTOM, FromDIP(4));
+    if (m_device_status.qidi_box) {
+        m_qidi_use_box = add(_L("Use QIDI Box"),
+                             _L("Feed the filaments from the QIDI Box slots picked above. Untick it to print from the "
+                                "spool on the extruder instead."),
+                             defaults.use_box);
+        m_qidi_use_box->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { update_mapping_enabled(); });
+    }
+    m_qidi_leveling = add(_L("Auto bed leveling"),
+                          _L("Probe a fresh bed mesh before this print. Untick it to use the mesh the printer has saved."),
+                          defaults.bed_leveling);
+    m_qidi_timelapse = add(_L("Timelapse"),
+                           _L("Record a timelapse of this print with the printer's camera."),
+                           defaults.timelapse);
+    if (m_device_status.qidi_polar_cooler)
+        m_qidi_polar_cooler = add(_L("Polar cooler"),
+                                  _L("Cool the extruder during the print, which keeps the filament from softening or "
+                                     "clogging inside it."),
+                                  defaults.polar_cooler);
+    m_qidi_panel->Show(true);
+    m_qidi_panel->Layout();
+}
+
+void PrintHostSendDialog::update_mapping_enabled()
+{
+    const bool on = (!m_qidi_use_box || m_qidi_use_box->GetValue()) &&
+                    (!m_creality_use_cfs || m_creality_use_cfs->GetValue());
+    if (m_filament_map)
+        m_filament_map->set_mapping_enabled(on);
+    for (wxChoice* choice : m_mapping_choices)
+        choice->Enable(on);
 }
 
 void PrintHostSendDialog::init()
@@ -1159,6 +1393,7 @@ void PrintHostSendDialog::init()
     // }
 
     add_button(wxID_CANCEL,false, L("Cancel"));
+    update_print_button();
     finalize();
 
 #ifdef __linux__
@@ -1237,6 +1472,12 @@ void PrintHostSendDialog::EndModal(int ret)
             app_config->set("recent", CONFIG_KEY_CREALITY_CFS, m_creality_use_cfs->GetValue() ? "1" : "0");
         if (m_creality_calibrate)
             app_config->set("recent", CONFIG_KEY_CREALITY_CALIBRATE, m_creality_calibrate->GetValue() ? "1" : "0");
+        if (m_qidi_leveling)
+            app_config->set("recent", CONFIG_KEY_QIDI_LEVELING, m_qidi_leveling->GetValue() ? "1" : "0");
+        if (m_qidi_timelapse)
+            app_config->set("recent", CONFIG_KEY_QIDI_TIMELAPSE, m_qidi_timelapse->GetValue() ? "1" : "0");
+        if (m_qidi_polar_cooler)
+            app_config->set("recent", CONFIG_KEY_QIDI_POLAR, m_qidi_polar_cooler->GetValue() ? "1" : "0");
     }
 
     MsgDialog::EndModal(ret);
@@ -2524,7 +2765,7 @@ int ElegooPrintHostSendDialog::preselect_slot(const SendPlateFilament& f) const
 wxString ElegooPrintHostSendDialog::mapping_warning() const
 {
     if (!m_device_status.canvas)
-        return wxString();
+        return PrintHostSendDialog::mapping_warning();
     const auto used     = used_filaments();
     const auto warnings = ElegooCanvasMapping::warnings_for(used, mapping_choice_positions(), m_device_status.slots);
     wxString   text;
@@ -2533,19 +2774,27 @@ wxString ElegooPrintHostSendDialog::mapping_warning() const
             text += "\n";
         text += line;
     };
+    auto slot_lbl = [this](int protocol_index) {
+        for (const PrintHostDevices::Slot& s : m_device_status.slots)
+            if (s.index == protocol_index)
+                return third_party_slot_tile_label(s);
+        return from_u8(bambu_style_slot_label(-1, protocol_index));
+    };
     for (const ElegooCanvasMapping::Warning& w : warnings) {
         switch (w.kind) {
         case ElegooCanvasMapping::WarningKind::MoreFilamentsThanTrays:
             add(_L("This plate uses more filaments than the CANVAS has loaded trays."));
             break;
         case ElegooCanvasMapping::WarningKind::SharedTray:
-            add(format_wxstr(_L("Filament %1% prints from the same tray as another filament."), w.filament + 1));
+            add(format_wxstr(_L("Filament %1% prints from the same slot (%2%) as another filament."), w.filament + 1,
+                             slot_lbl(w.slot)));
             break;
         case ElegooCanvasMapping::WarningKind::TemperatureOutOfRange:
-            add(format_wxstr(_L("Filament %1%: its nozzle temperature is outside the range of tray %2%."), w.filament + 1, w.slot + 1));
+            add(format_wxstr(_L("Filament %1%: its nozzle temperature is outside the range of %2%."), w.filament + 1,
+                             slot_lbl(w.slot)));
             break;
         case ElegooCanvasMapping::WarningKind::EmptyTray:
-            add(format_wxstr(_L("Filament %1% is mapped to tray %2%, which is empty."), w.filament + 1, w.slot + 1));
+            add(format_wxstr(_L("Filament %1% is mapped to %2%, which is empty."), w.filament + 1, slot_lbl(w.slot)));
             break;
         }
     }

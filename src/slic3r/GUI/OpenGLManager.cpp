@@ -276,6 +276,7 @@ OpenGLManager::EFramebufferType OpenGLManager::s_framebuffers_type = OpenGLManag
 unsigned int OpenGLManager::s_default_vao = 0;
 unsigned int OpenGLManager::s_fallback_texture_2d = 0;
 unsigned int OpenGLManager::s_fallback_texture_3d = 0;
+unsigned int OpenGLManager::s_fallback_texture_cube = 0;
 
 #ifdef __APPLE__
 // Part of hack to remove crash when closing the application on OSX 10.9.5 when building against newer wxWidgets
@@ -290,6 +291,7 @@ OpenGLManager::~OpenGLManager()
     // Same for the fallback textures (1x1 each; they go with the context).
     s_fallback_texture_2d = 0;
     s_fallback_texture_3d = 0;
+    s_fallback_texture_cube = 0;
     if (s_active == this)
         s_active = nullptr;
 
@@ -754,21 +756,28 @@ void OpenGLManager::set_gl_debug_enabled(bool enabled)
 
 unsigned int OpenGLManager::get_fallback_texture(unsigned int target)
 {
-    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_3D)
-        return 0;
-    unsigned int& id = (target == GL_TEXTURE_2D) ? s_fallback_texture_2d : s_fallback_texture_3d;
+    unsigned int* slot = nullptr;
+    GLenum        binding = 0;
+    switch (target) {
+    case GL_TEXTURE_2D: slot = &s_fallback_texture_2d; binding = GL_TEXTURE_BINDING_2D; break;
+    case GL_TEXTURE_3D: slot = &s_fallback_texture_3d; binding = GL_TEXTURE_BINDING_3D; break;
+    case GL_TEXTURE_CUBE_MAP: slot = &s_fallback_texture_cube; binding = GL_TEXTURE_BINDING_CUBE_MAP; break;
+    default: return 0;
+    }
+    unsigned int& id = *slot;
     if (id != 0)
         return id;
     if (glGenTextures == nullptr || (target == GL_TEXTURE_3D && glTexImage3D == nullptr))
         return 0;
 
     // Created on whichever unit is active, then that unit's binding is put back.
-    const GLenum binding = (target == GL_TEXTURE_2D) ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_3D;
     GLint previous = 0;
     ::glGetIntegerv(binding, &previous);
     GLint previous_alignment = 4;
     ::glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_alignment);
     const unsigned char white[4] = { 255, 255, 255, 255 };
+    // The cube is black: it stands in for "no environment", and an RGBM texel of zero decodes to no light.
+    const unsigned char black[4] = { 0, 0, 0, 255 };
     GLuint tex = 0;
     ::glGenTextures(1, &tex);
     ::glBindTexture(target, tex);
@@ -779,12 +788,17 @@ unsigned int OpenGLManager::get_fallback_texture(unsigned int target)
     ::glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 0);
     if (target == GL_TEXTURE_2D)
         ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
-    else
+    else if (target == GL_TEXTURE_3D)
         ::glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    else
+        // A cube is complete only with all six faces, square and of one size.
+        for (GLenum face = 0; face < 6; ++face)
+            ::glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, black);
     ::glPixelStorei(GL_UNPACK_ALIGNMENT, previous_alignment);
     ::glBindTexture(target, static_cast<GLuint>(previous));
     id = tex;
-    BOOST_LOG_TRIVIAL(info) << "OpenGL: " << (target == GL_TEXTURE_2D ? "2D" : "3D") << " fallback texture " << tex << " created";
+    BOOST_LOG_TRIVIAL(info) << "OpenGL: " << (target == GL_TEXTURE_2D ? "2D" : target == GL_TEXTURE_3D ? "3D" : "cube map")
+                            << " fallback texture " << tex << " created";
     return id;
 }
 
@@ -808,8 +822,12 @@ std::string OpenGLManager::describe_texture_incompleteness(unsigned int target, 
         binding = GL_TEXTURE_BINDING_2D;
     else if (target == GL_TEXTURE_3D)
         binding = GL_TEXTURE_BINDING_3D;
+    else if (target == GL_TEXTURE_CUBE_MAP)
+        binding = GL_TEXTURE_BINDING_CUBE_MAP;
     else
         return {};
+    // A cube's levels are queried on a face (+X stands for all six), its parameters on the cube.
+    const GLenum level_target = (target == GL_TEXTURE_CUBE_MAP) ? GLenum(GL_TEXTURE_CUBE_MAP_POSITIVE_X) : GLenum(target);
 
     GLint previous_unit = GL_TEXTURE0;
     ::glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_unit);
@@ -825,10 +843,10 @@ std::string OpenGLManager::describe_texture_incompleteness(unsigned int target, 
         ::glGetTexParameteriv(target, GL_TEXTURE_MIN_FILTER, &min_filter);
         ::glGetTexParameteriv(target, GL_TEXTURE_BASE_LEVEL, &base);
         ::glGetTexParameteriv(target, GL_TEXTURE_MAX_LEVEL, &max_level);
-        auto level_size = [target](GLint level, GLint& w, GLint& h, GLint& d) {
+        auto level_size = [target, level_target](GLint level, GLint& w, GLint& h, GLint& d) {
             w = h = d = 0;
-            ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_WIDTH, &w);
-            ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_HEIGHT, &h);
+            ::glGetTexLevelParameteriv(level_target, level, GL_TEXTURE_WIDTH, &w);
+            ::glGetTexLevelParameteriv(level_target, level, GL_TEXTURE_HEIGHT, &h);
             if (target == GL_TEXTURE_3D)
                 ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_DEPTH, &d);
             else
@@ -882,6 +900,7 @@ static const char* sampler_target_name(unsigned int target)
     case GL_TEXTURE_2D:     return "2D";
     case GL_TEXTURE_3D:     return "3D";
     case GL_TEXTURE_BUFFER: return "buffer";
+    case GL_TEXTURE_CUBE_MAP: return "CUBE_MAP";
     default:                return "?";
     }
 }

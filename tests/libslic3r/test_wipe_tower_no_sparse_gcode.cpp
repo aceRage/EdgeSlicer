@@ -646,6 +646,121 @@ TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCod
     CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
 }
 
+namespace {
+
+bool is_k3_change_filament_block(const std::string &block)
+{
+    if (block.find("I0.86 J0.86 P1") != std::string::npos)
+        return true;
+    std::istringstream in(block);
+    std::string        line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("G1", 0) == 0 && code.find('Y') != std::string::npos &&
+            code.find('Z') != std::string::npos && code.find("F30000") != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+bool is_tn_command(const std::string &line, int n)
+{
+    std::string cmd = line.substr(0, line.find(';'));
+    while (!cmd.empty() && (cmd.back() == ' ' || cmd.back() == '\t'))
+        cmd.pop_back();
+    size_t i = 0;
+    while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '\t'))
+        ++i;
+    return cmd.compare(i, std::string::npos, "T" + std::to_string(n)) == 0;
+}
+
+// T1-T3 whose most recent non-blank line is "; custom gcode end" (blank lines and
+// ;_FORCE_RESUME_FAN_SPEED may sit in between). A preceding T0 consumes that block
+// so a later T1-T3 cannot take credit for it (F10). Start G-code's bare T is ignored.
+struct K3ChangeTCount
+{
+    int tool_changes       = 0;
+    int k3_blocks_before_t = 0;
+};
+
+K3ChangeTCount count_k3_change_t_lines(const std::string &gcode)
+{
+    K3ChangeTCount     out;
+    std::istringstream in(gcode);
+    std::string        line, last_custom, collecting, last_significant;
+    bool               in_custom = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind("; custom gcode start", 0) == 0) {
+            in_custom  = true;
+            collecting = line + "\n";
+            continue;
+        }
+        if (in_custom) {
+            collecting += line + "\n";
+            if (line.rfind("; custom gcode end", 0) == 0) {
+                last_custom      = collecting;
+                in_custom        = false;
+                last_significant = line;
+            }
+            continue;
+        }
+        if (line.find_first_not_of(" \t") == std::string::npos ||
+            line.rfind(";_FORCE_RESUME_FAN_SPEED", 0) == 0)
+            continue;
+        if (is_tn_command(line, 0)) {
+            last_custom.clear();
+            last_significant = line;
+            continue;
+        }
+        if (is_tn_command(line, 1) || is_tn_command(line, 2) || is_tn_command(line, 3)) {
+            if (last_significant.rfind("; custom gcode end", 0) == 0) {
+                ++out.tool_changes;
+                if (is_k3_change_filament_block(last_custom))
+                    ++out.k3_blocks_before_t;
+            }
+            last_custom.clear();
+            last_significant = line;
+            continue;
+        }
+        last_significant = line;
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Creality K3 T1-T3 count ignores start T and a preceding T0 block", "[WipeTower][GCode][CrealityK3]")
+{
+    const std::string dodge = "; custom gcode start\nG1 Y45 Z0.4 F30000\n; custom gcode end\n";
+    SECTION("start G-code bare T1 is ignored") {
+        const auto c = count_k3_change_t_lines("START_PRINT\nT1\nG1 X0\n");
+        CHECK(c.tool_changes == 0);
+        CHECK(c.k3_blocks_before_t == 0);
+    }
+    SECTION("custom gcode end then T1 counts") {
+        const auto c = count_k3_change_t_lines(dodge + "T1\n");
+        CHECK(c.tool_changes == 1);
+        CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("FORCE_RESUME_FAN_SPEED may sit between custom gcode end and T") {
+        const auto c = count_k3_change_t_lines(dodge + "\n;_FORCE_RESUME_FAN_SPEED\nT2\n");
+        CHECK(c.tool_changes == 1);
+        CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("F10: a T1-3 change cannot take credit for a preceding T0 block") {
+        const auto c = count_k3_change_t_lines(dodge + "T0\nT1\n");
+        CHECK(c.tool_changes == 0);
+        CHECK(c.k3_blocks_before_t == 0);
+        const auto with_own = count_k3_change_t_lines(dodge + "T0\n" + dodge + "T1\n");
+        CHECK(with_own.tool_changes == 1);
+        CHECK(with_own.k3_blocks_before_t == 1);
+    }
+}
+
 TEST_CASE("Creality K3 system profile emits T0-T3 tool changes", "[WipeTower][GCode][CrealityK3]")
 {
     const std::string saved_data_dir = data_dir();
@@ -726,56 +841,11 @@ TEST_CASE("Creality K3 system profile emits T0-T3 tool changes", "[WipeTower][GC
     // wrapped in "; custom gcode start" ... "; custom gcode end". The K3 template is a
     // Y±5 dodge (`G1 Y… Z… F30000`) or the `I0.86 J0.86 P1` spiral — not a bare Z hop
     // (travel_speed 500 writes G1 Z… F30000 too). Cubes sit at Y=40 so the dodge is Y45.
-    auto is_k3_change_block = [](const std::string &block) {
-        if (block.find("I0.86 J0.86 P1") != std::string::npos)
-            return true;
-        std::istringstream in(block);
-        std::string        line;
-        while (std::getline(in, line)) {
-            if (!line.empty() && line.back() == '\r')
-                line.pop_back();
-            const std::string code = line.substr(0, line.find(';'));
-            if (code.rfind("G1", 0) == 0 && code.find('Y') != std::string::npos &&
-                code.find('Z') != std::string::npos && code.find("F30000") != std::string::npos)
-                return true;
-        }
-        return false;
-    };
-    int tool_changes = 0, k3_blocks_before_t = 0;
-    {
-        std::istringstream in(slice.gcode);
-        std::string        line, last_custom, collecting;
-        bool               in_custom = false;
-        while (std::getline(in, line)) {
-            if (!line.empty() && line.back() == '\r')
-                line.pop_back();
-            if (line.rfind("; custom gcode start", 0) == 0) {
-                in_custom  = true;
-                collecting = line + "\n";
-                continue;
-            }
-            if (in_custom) {
-                collecting += line + "\n";
-                if (line.rfind("; custom gcode end", 0) == 0) {
-                    last_custom = collecting;
-                    in_custom   = false;
-                }
-                continue;
-            }
-            const std::string code = line.substr(0, line.find(';'));
-            std::string       cmd  = code;
-            while (!cmd.empty() && (cmd.back() == ' ' || cmd.back() == '\t'))
-                cmd.pop_back();
-            if (cmd == "T1" || cmd == "T2" || cmd == "T3") {
-                ++tool_changes;
-                if (is_k3_change_block(last_custom))
-                    ++k3_blocks_before_t;
-                last_custom.clear();
-            }
-        }
-    }
-    REQUIRE(tool_changes >= 3);
-    CHECK(k3_blocks_before_t == tool_changes);
+    // Only T1-T3 whose previous non-blank line is "; custom gcode end" count (start G-code's
+    // bare T is ignored; T0's block cannot credit a later T1-T3).
+    const K3ChangeTCount counted = count_k3_change_t_lines(slice.gcode);
+    REQUIRE(counted.tool_changes >= 3);
+    CHECK(counted.k3_blocks_before_t == counted.tool_changes);
     // Profile-gated M109 fix: tool_change_temprature_wait=0 → M104, not wait-M109.
     CHECK(slice.gcode.find("set nozzle temperature and wait for it to be reached") == std::string::npos);
     CHECK(slice.gcode.find("M109") == std::string::npos);
