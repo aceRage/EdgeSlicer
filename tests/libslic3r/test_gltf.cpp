@@ -732,7 +732,7 @@ SCENARIO("A baseColorTexture becomes per-face colours", "[gltf]")
             std::vector<unsigned char> ids;
             for (const RGBA &c : pinfo.face_colors)
                 ids.push_back((unsigned char) (c[0] > 0.9f ? 2 : 3));
-            REQUIRE(Slic3r::Model::import_multi_volume_face_color_deal(ids, 2, &plain));
+            REQUIRE(Slic3r::Model::import_multi_volume_face_color_deal(ids, 1, &plain));
             const ModelVolume *pv = plain.objects.front()->volumes.front();
             size_t painted_2 = 0, painted_3 = 0;
             for (int i = 0; i < (int) pv->mesh().its.indices.size(); ++i) {
@@ -804,7 +804,7 @@ SCENARIO("glTF COLOR_0 becomes MMU painting", "[gltf]")
             ids.reserve(total);
             for (size_t i = 0; i < total; ++i)
                 ids.push_back((unsigned char) (2 + (i % 2)));
-            REQUIRE(Slic3r::Model::import_multi_volume_vertex_color_deal(ids, 2, &model));
+            REQUIRE(Slic3r::Model::import_multi_volume_vertex_color_deal(ids, 1, &model));
             for (const ModelVolume *v : model.objects.front()->volumes)
                 REQUIRE(v->is_mm_painted());
         }
@@ -832,9 +832,9 @@ SCENARIO("obj_import_vertex_color_deal serialisation is unchanged by the shared 
 
         THEN("every painted triangle serialises to its recorded golden string")
         {
-            REQUIRE(Slic3r::Model::obj_import_vertex_color_deal(ids, 2, &model));
-            REQUIRE(object->config.extruder() == 2);
-            REQUIRE(volume->config.extruder() == 2);
+            REQUIRE(Slic3r::Model::obj_import_vertex_color_deal(ids, 1, &model));
+            REQUIRE(object->config.extruder() == 1);
+            REQUIRE(volume->config.extruder() == 1);
             REQUIRE(volume->is_mm_painted());
             std::string serialised;
             for (int i = 0; i < (int) volume->mesh().its.indices.size(); ++i)
@@ -859,11 +859,52 @@ SCENARIO("obj_import_face_color_deal serialisation is unchanged", "[gltf][golden
 
         THEN("every painted triangle serialises to its recorded golden string")
         {
-            REQUIRE(Slic3r::Model::obj_import_face_color_deal(ids, 2, &model));
+            REQUIRE(Slic3r::Model::obj_import_face_color_deal(ids, 1, &model));
             std::string serialised;
             for (int i = 0; i < (int) volume->mesh().its.indices.size(); ++i)
                 serialised += volume->mmu_segmentation_facets.get_triangle_as_string(i) + "|";
             REQUIRE(serialised == GOLDEN_FACE_COLOR_SERIALISATION);
+        }
+    }
+}
+
+SCENARIO("paint helpers skip the first extruder instead of hardcoded ids 1/2", "[gltf]")
+{
+    GIVEN("a cube whose vertices are all the first extruder")
+    {
+        Slic3r::Model model;
+        ModelObject  *object = model.add_object();
+        object->add_volume(TriangleMesh(its_make_cube(10., 10., 10.)), ModelVolumeType::MODEL_PART);
+        ModelVolume *volume = object->volumes.front();
+        const std::vector<unsigned char> ids(volume->mesh().its.vertices.size(), 3);
+
+        THEN("faces matching first_extruder_id 3 are not painted")
+        {
+            REQUIRE(Slic3r::Model::obj_import_vertex_color_deal(ids, 3, &model));
+            REQUIRE(volume->config.extruder() == 3);
+            std::string serialised;
+            for (int i = 0; i < (int) volume->mesh().its.indices.size(); ++i)
+                serialised += volume->mmu_segmentation_facets.get_triangle_as_string(i);
+            REQUIRE(serialised.empty());
+        }
+    }
+
+    GIVEN("a cube whose faces are all the first extruder except one")
+    {
+        Slic3r::Model model;
+        ModelObject  *object = model.add_object();
+        object->add_volume(TriangleMesh(its_make_cube(10., 10., 10.)), ModelVolumeType::MODEL_PART);
+        ModelVolume *volume = object->volumes.front();
+        std::vector<unsigned char> ids(volume->mesh().its.indices.size(), 4);
+        ids.front() = 2;
+
+        THEN("only the face that is not first_extruder_id 4 is painted")
+        {
+            REQUIRE(Slic3r::Model::obj_import_face_color_deal(ids, 4, &model));
+            REQUIRE(volume->is_mm_painted());
+            REQUIRE(volume->mmu_segmentation_facets.get_triangle_as_string(0).empty() == false);
+            for (int i = 1; i < (int) volume->mesh().its.indices.size(); ++i)
+                REQUIRE(volume->mmu_segmentation_facets.get_triangle_as_string(i).empty());
         }
     }
 }

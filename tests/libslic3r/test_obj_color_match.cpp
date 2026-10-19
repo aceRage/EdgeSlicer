@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "libslic3r/ObjColorMatch.hpp"
+#include "libslic3r/ObjColorUtils.hpp"
 
 using namespace Slic3r;
 
@@ -182,4 +183,25 @@ SCENARIO("The headless colour distance is in real CIE units", "[objcolor]")
             REQUIRE(obj_color_distance(rgb(0.2f, 0.4f, 0.6f), rgb(0.2f, 0.4f, 0.6f)) == Approx(0.f).margin(1e-4));
         }
     }
+}
+
+TEST_CASE("QuantKMeans assigns cluster ids in first-seen colour order", "[objcolor]")
+{
+    std::vector<std::array<float, 4>> colors;
+    for (int i = 0; i < 24; ++i)
+        colors.push_back({1.f, 0.f, 0.f, 1.f});
+    for (int i = 0; i < 24; ++i)
+        colors.push_back({0.f, 0.f, 1.f, 1.f});
+
+    QuantKMeans                          quant;
+    std::vector<std::array<float, 4>>    clusters;
+    std::vector<int>                     labels;
+    quant.apply(colors, clusters, labels, 2);
+
+    REQUIRE(labels.size() == colors.size());
+    REQUIRE(clusters.size() == 2);
+    CHECK(labels.front() == 0);
+    CHECK(labels.back() == 1);
+    CHECK(clusters[0][0] > 0.8f);
+    CHECK(clusters[1][2] > 0.8f);
 }
