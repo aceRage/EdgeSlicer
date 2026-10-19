@@ -500,6 +500,48 @@ inline std::string color_match_value(int filament_index, const std::string &type
     return id + "\t" + type + "\t" + color + "\t" + std::to_string(box_id) + "\t" + std::to_string(material_id);
 }
 
+// One used plate filament for colorMatch_n. Parallel to mapping_choice_positions().
+struct ColorMatchFilament
+{
+    int         index { 0 };
+    std::string type;
+    std::string color;
+};
+
+// One PrintHostDevices::Slot as colorMatch sees it (cfs_box / cfs_material).
+struct ColorMatchTarget
+{
+    int         box_id { -1 };
+    int         material_id { -1 };
+    std::string type;
+    std::string color;
+};
+
+// Same colorMatch_* map the send dialog's extendedInfo() writes. `positions[i]` is
+// mapping_choice_positions()[i] (index into slots, -1 = as sliced). Byte-identical to the
+// old wxChoice GetSelection()-1 loop for the same choices.
+inline std::map<std::string, std::string> color_match_from_positions(const std::vector<int> &             positions,
+                                                                    const std::vector<ColorMatchFilament> &filaments,
+                                                                    const std::vector<ColorMatchTarget> &  slots)
+{
+    std::map<std::string, std::string> out;
+    int                                n = 0;
+    for (size_t i = 0; i < positions.size() && i < filaments.size(); ++i) {
+        const int slot = positions[i];
+        if (slot < 0 || slot >= (int) slots.size())
+            continue;
+        const ColorMatchTarget &s = slots[slot];
+        if (s.box_id < 0)
+            continue;
+        const std::string type  = filaments[i].type;
+        const std::string color = filaments[i].color.empty() ? s.color : filaments[i].color;
+        const std::string value = color_match_value(filaments[i].index, type, color, s.box_id, s.material_id);
+        if (!value.empty())
+            out["colorMatch_" + std::to_string(n++)] = value;
+    }
+    return out;
+}
+
 inline nlohmann::json op_gcode_file_cmd(const std::string &gcode_path, int enable_self_test)
 {
     return nlohmann::json{{"method", "set"},
