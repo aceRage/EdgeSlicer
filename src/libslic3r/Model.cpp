@@ -1151,7 +1151,21 @@ std::string Model::get_backup_path()
     if (backup_path.empty())
     {
         auto pid = get_current_pid();
-        boost::filesystem::path parent_path(temporary_dir());
+        // temporary_dir() is empty until set_temporary_dir() runs (the app does that at
+        // startup; headless tests often forget). An empty root concatenates to
+        // "/snapmaker_orca_model/..." at the filesystem root: macOS refuses to create it
+        // (read-only) and the 3MF reader then segfaults while unpacking. Fall back to the
+        // system temp directory so a missing set_temporary_dir cannot land there.
+        std::string tmp = temporary_dir();
+        if (tmp.empty()) {
+            try {
+                tmp = boost::filesystem::temp_directory_path().string();
+            } catch (const std::exception &ex) {
+                BOOST_LOG_TRIVIAL(error) << "temporary_dir unset and system temp unavailable: " << ex.what();
+                return backup_path;
+            }
+        }
+        boost::filesystem::path parent_path(tmp);
         std::time_t t = std::time(0);
         std::tm* now_time = std::localtime(&t);
         std::stringstream buf;
