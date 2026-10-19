@@ -676,9 +676,33 @@ bool is_tn_command(const std::string &line, int n)
     return cmd.compare(i, std::string::npos, "T" + std::to_string(n)) == 0;
 }
 
-// T1-T3 whose most recent non-blank line is "; custom gcode end" (blank lines and
-// ;_FORCE_RESUME_FAN_SPEED may sit in between). A preceding T0 consumes that block
-// so a later T1-T3 cannot take credit for it (F10). Start G-code's bare T is ignored.
+// CoolingBuffer replaces ;_FORCE_RESUME_FAN_SPEED with M106/M107 (CoolingBuffer.cpp ~1025,
+// ~1146; GCodeWriter::set_fan / set_additional_fan). Those sit between "; custom gcode end"
+// and T, so they must not count as a "last significant" line.
+bool is_k3_fan_line_between_custom_and_t(const std::string &line)
+{
+    if (line.rfind(";_FORCE_RESUME_FAN_SPEED", 0) == 0)
+        return true;
+    std::string cmd = line.substr(0, line.find(';'));
+    while (!cmd.empty() && (cmd.back() == ' ' || cmd.back() == '\t'))
+        cmd.pop_back();
+    size_t i = 0;
+    while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '\t'))
+        ++i;
+    auto is_word = [&](const char *word) {
+        const size_t n = std::char_traits<char>::length(word);
+        if (cmd.compare(i, n, word) != 0)
+            return false;
+        const size_t after = i + n;
+        return after == cmd.size() || cmd[after] == ' ' || cmd[after] == '\t';
+    };
+    return is_word("M106") || is_word("M107");
+}
+
+// T1-T3 whose most recent significant line is "; custom gcode end" (blanks,
+// ;_FORCE_RESUME_FAN_SPEED, and M106/M107 including P-indexed forms may sit in
+// between). A preceding T0 consumes that block so a later T1-T3 cannot take
+// credit for it (F10). Start G-code's bare T is ignored. M104 T3 is not a T.
 struct K3ChangeTCount
 {
     int tool_changes       = 0;
@@ -708,8 +732,7 @@ K3ChangeTCount count_k3_change_t_lines(const std::string &gcode)
             }
             continue;
         }
-        if (line.find_first_not_of(" \t") == std::string::npos ||
-            line.rfind(";_FORCE_RESUME_FAN_SPEED", 0) == 0)
+        if (line.find_first_not_of(" \t") == std::string::npos || is_k3_fan_line_between_custom_and_t(line))
             continue;
         if (is_tn_command(line, 0)) {
             last_custom.clear();
@@ -741,6 +764,11 @@ TEST_CASE("Creality K3 T1-T3 count ignores start T and a preceding T0 block", "[
         CHECK(c.tool_changes == 0);
         CHECK(c.k3_blocks_before_t == 0);
     }
+    SECTION("start G-code bare T3 is ignored") {
+        const auto c = count_k3_change_t_lines("START_PRINT\nT3\nG1 X0\n");
+        CHECK(c.tool_changes == 0);
+        CHECK(c.k3_blocks_before_t == 0);
+    }
     SECTION("custom gcode end then T1 counts") {
         const auto c = count_k3_change_t_lines(dodge + "T1\n");
         CHECK(c.tool_changes == 1);
@@ -750,6 +778,21 @@ TEST_CASE("Creality K3 T1-T3 count ignores start T and a preceding T0 block", "[
         const auto c = count_k3_change_t_lines(dodge + "\n;_FORCE_RESUME_FAN_SPEED\nT2\n");
         CHECK(c.tool_changes == 1);
         CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("CoolingBuffer M106 S128 between marker and T2 counts") {
+        const auto c = count_k3_change_t_lines(dodge + "M106 S128\nT2\n");
+        CHECK(c.tool_changes == 1);
+        CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("M106 P2 S255 and M107 between marker and T1 count") {
+        const auto c = count_k3_change_t_lines(dodge + "M106 P2 S255\nM107\nT1\n");
+        CHECK(c.tool_changes == 1);
+        CHECK(c.k3_blocks_before_t == 1);
+    }
+    SECTION("M104 T3 is not a T3 command") {
+        const auto c = count_k3_change_t_lines(dodge + "M104 T3\n");
+        CHECK(c.tool_changes == 0);
+        CHECK(c.k3_blocks_before_t == 0);
     }
     SECTION("F10: a T1-3 change cannot take credit for a preceding T0 block") {
         const auto c = count_k3_change_t_lines(dodge + "T0\nT1\n");
@@ -841,8 +884,9 @@ TEST_CASE("Creality K3 system profile emits T0-T3 tool changes", "[WipeTower][GC
     // wrapped in "; custom gcode start" ... "; custom gcode end". The K3 template is a
     // Y±5 dodge (`G1 Y… Z… F30000`) or the `I0.86 J0.86 P1` spiral — not a bare Z hop
     // (travel_speed 500 writes G1 Z… F30000 too). Cubes sit at Y=40 so the dodge is Y45.
-    // Only T1-T3 whose previous non-blank line is "; custom gcode end" count (start G-code's
-    // bare T is ignored; T0's block cannot credit a later T1-T3).
+    // Only T1-T3 whose previous significant line is "; custom gcode end" count (start G-code's
+    // bare T is ignored; blanks / ;_FORCE_RESUME_FAN_SPEED / M106/M107 may sit in between;
+    // T0's block cannot credit a later T1-T3).
     const K3ChangeTCount counted = count_k3_change_t_lines(slice.gcode);
     REQUIRE(counted.tool_changes >= 3);
     CHECK(counted.k3_blocks_before_t == counted.tool_changes);

@@ -117,6 +117,7 @@ protected:
     void update_creality_mapping_enabled();
     void set_send_enabled(bool on);
     // Elegoo CC, CFS, and K3 holders: Bambu-style MaterialItem rows instead of a text combo.
+    // Once #612 merges, this must be cfs || direct_rack || qidi_box || happy_hare || afc.
     virtual bool use_third_party_map_panel() const { return m_device_status.cfs || m_device_status.direct_rack; }
     // Creality K3 holders: identity T-number tiles, no popup. filament_mapping() stays empty.
     virtual bool third_party_map_read_only() const { return m_device_status.direct_rack; }

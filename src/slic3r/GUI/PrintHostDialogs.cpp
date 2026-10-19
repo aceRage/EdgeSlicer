@@ -446,7 +446,7 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 
 } // namespace
 
-static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& s)
+static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& s, bool direct_rack = false)
 {
     ThirdPartyDeviceSlot ds;
     ds.unit_id = s.unit;
@@ -458,8 +458,10 @@ static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& 
     ds.index   = s.index;
     if (s.cfs_external)
         ds.label = s.name.empty() ? "External" : s.name;
-    else if (s.unit < 0 && s.tray < 0 && !s.name.empty())
-        ds.label = s.name; // K3 "Nozzle N (Tn)"
+    else if (direct_rack && !s.name.empty())
+        // K3 "Nozzle N (Tn)". Do not apply this when unit/tray are unset: #612 groups
+        // QIDI/HH/AFC as 1A–1D from index, and a Slot name would steal that label.
+        ds.label = s.name;
     return ds;
 }
 
@@ -952,7 +954,7 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         m_mapping_filament.push_back(f.index);
     }
     for (const PrintHostDevices::Slot& s : m_device_status.slots)
-        model.slots.push_back(third_party_slot_from(s));
+        model.slots.push_back(third_party_slot_from(s, m_device_status.direct_rack));
     model.read_only = third_party_map_read_only();
     model.mapping.resize(model.filaments.size(), -1);
     // Interactive: visual auto-match. Read-only (K3, #625 F13): identity T-number so the
