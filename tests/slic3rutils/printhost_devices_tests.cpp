@@ -1218,6 +1218,30 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
     }
 
+    SECTION("normalize_filament_type strips subtypes") {
+        CHECK(normalize_filament_type("PLA Silk") == "PLA");
+        CHECK(normalize_filament_type("PLA+") == "PLA");
+        CHECK(normalize_filament_type("PLA-CF") == "PLA");
+        CHECK(normalize_filament_type("PCTG") == "PC");
+        CHECK(normalize_filament_type("PETG") == "PETG");
+        CHECK(normalize_filament_type("ABS Pro") == "ABS");
+        CHECK(normalize_filament_type("Nylon") == "Nylon");
+    }
+
+    SECTION("match_filament_preset scores brand then vendor, type-gated") {
+        const std::vector<FilamentPresetRef> presets = {
+            {"Generic PLA @K2", "GPLA", "PLA", "Creality", true, true, true},
+            {"Hyper PLA @K2", "HPLA", "PLA", "Creality", true, true, true},
+            {"Generic PLA Matte @K2", "GPLAM", "PLA", "Creality", true, true, true},
+            {"Generic PETG @K2", "GPETG", "PETG", "Creality", true, true, true},
+        };
+        CHECK(match_filament_preset(presets, "Creality", "Hyper PLA", "PLA") == "HPLA");
+        // Spool only said PLA: extra "matte" costs points, Generic PLA wins.
+        CHECK(match_filament_preset(presets, "Creality", "", "PLA") == "GPLA");
+        CHECK(match_filament_preset(presets, "Creality", "Hyper PLA", "PETG") == "GPETG");
+        CHECK(match_filament_preset(presets, "", "", "TPU").empty());
+    }
+
     SECTION("color_match_from_positions is byte-identical to the old wxChoice loop") {
         const Status st = status_from_cfs(k2_boxs);
         std::vector<ColorMatchTarget> slots;
