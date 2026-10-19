@@ -2199,6 +2199,17 @@ static wxString nozzle_type_key_to_label(const std::string& key)
 // vendor has nothing to sync from, so the button is hidden.
 enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog, ElegooCanvas, CrealityCFS };
 
+static bool preset_supports_cfs(const DynamicPrintConfig &cfg)
+{
+    const ConfigOptionString *model = cfg.option<ConfigOptionString>("printer_model");
+    const std::string         raw   = model ? model->value : std::string();
+    const std::string         resolved = CrealityPrintModel::resolve_model("", raw);
+    if (CrealityPrintModel::model_supports_multi_color(resolved) || CrealityPrintModel::looks_like_k1_family(resolved))
+        return true;
+    const std::string n = CrealityPrintModel::strip_vendor_prefix(raw);
+    return n.rfind("K2", 0) == 0 || n.find("SPARKX") != std::string::npos;
+}
+
 static FilamentSyncTarget filament_sync_target_for_current_preset()
 {
     PresetBundle *pb = wxGetApp().preset_bundle;
@@ -2212,7 +2223,7 @@ static FilamentSyncTarget filament_sync_target_for_current_preset()
         return FilamentSyncTarget::BambuAms;
     if (current_printer_reads_canvas())
         return FilamentSyncTarget::ElegooCanvas;
-    {
+    if (preset_supports_cfs(cfg)) {
         const auto *ht = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type");
         if (ht && ht->value == htCrealityPrint)
             return FilamentSyncTarget::CrealityCFS;
@@ -10042,10 +10053,50 @@ void Sidebar::show_cfs_sync_dialog()
         return;
     }
 
-    std::string boxs;
-    run_canvas_job(this, _L("Reading the CFS on the printer..."), [&boxs, address] {
-        boxs = CrealityPrint::query_boxes_info(address, 3);
+    std::string       boxs;
+    std::string       info_err;
+    bool              reached = false;
+    std::atomic<bool> done { false };
+    std::atomic<bool> cancel { false };
+    std::thread       worker([&] {
+        try {
+            std::string body;
+            if (CrealityPrint::fetch_info(address, body, info_err, 2) && !cancel.load()) {
+                reached = true;
+                boxs    = CrealityPrint::query_boxes_info(address, 2);
+            }
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << "CFS sync: " << e.what();
+            info_err = e.what();
+        } catch (...) {}
+        done = true;
     });
+    bool aborted = false;
+    {
+        wxProgressDialog progress(_L("CFS"), _L("Reading the CFS on the printer..."), 100, this,
+                                  wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH | wxPD_CAN_ABORT);
+        while (!done) {
+            if (!progress.Pulse()) {
+                cancel  = true;
+                aborted = true;
+                break;
+            }
+            wxMilliSleep(80);
+        }
+    }
+    worker.join();
+    if (aborted)
+        return;
+    if (!reached) {
+        SyncRichConfirmDialog dlg(this,
+            format_wxstr(_L("The printer did not answer (%1%). Check that it is on and on the network."),
+                         from_u8(info_err.empty() ? std::string("no /info") : info_err)),
+            wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
     const CrealityPrintModel::CfsParseResult parsed = CrealityPrintModel::parse_cfs_response(boxs);
     if (!parsed.ok || parsed.box_count == 0) {
         SyncRichConfirmDialog dlg(this,

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <sstream>
 #include <exception>
 #include <boost/format.hpp>
@@ -57,7 +58,8 @@ CrealityPrint::CrealityPrint(DynamicPrintConfig* config) :
     m_cafile(config->opt_string("printhost_cafile")),
     m_port(config->opt_string("printhost_port")),
     m_apikey(config->opt_string("printhost_apikey")),
-    m_ssl_revoke_best_effort(config->opt_bool("printhost_ssl_ignore_revoke"))
+    m_ssl_revoke_best_effort(config->opt_bool("printhost_ssl_ignore_revoke")),
+    m_printer_model(config->opt_string("printer_model"))
 {}
 
 const char* CrealityPrint::get_name() const { return "Creality Print"; }
@@ -142,7 +144,7 @@ bool CrealityPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, 
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     // Upstream Orca #14089: CFS-capable models reject (or ignore) the multipart path field.
-    if (!CrealityPrintModel::omit_upload_path(m_model))
+    if (!CrealityPrintModel::omit_upload_path(effective_model()))
         http.form_add("path", upload_parent_path.string());
     http.form_add_file("file", upload_data.source_path.string(), safe_upload_filename)
 
@@ -199,76 +201,276 @@ std::string CrealityPrint::safe_filename(const std::string &filename) const
     return safe_filename;
 }
 
-static void ws_connect(net::io_context &ioc, websocket::stream<beast::tcp_stream> &ws, const std::string &host_url, const std::string &port,
-                       int timeout_s)
+struct CrealityWsClient::Impl
 {
-    // Upstream Http::get_host_from_url; this fork's Http::url_host strips scheme and port.
-    std::string host = CrealityPrintModel::ws_host(host_url);
-    if (host.empty())
-        throw std::runtime_error("CrealityPrint: empty print_host");
+    net::io_context                                            ioc;
+    std::unique_ptr<websocket::stream<beast::tcp_stream>>      ws;
+    int                                                        step_ms  = 5000;
+    int                                                        total_ms = 0;
+    std::chrono::steady_clock::time_point                      start    = std::chrono::steady_clock::now();
+    bool                                                       open     = false;
+    bool                                                       timed_out = false;
 
-    const int wait = std::max(1, timeout_s);
-    tcp::resolver resolver{ioc};
-    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(wait));
-    auto const results = resolver.resolve(host, port);
-    beast::get_lowest_layer(ws).connect(results);
-    host += ':' + std::to_string(beast::get_lowest_layer(ws).socket().remote_endpoint().port());
+    int remaining() const
+    {
+        if (total_ms <= 0)
+            return step_ms;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        const auto left    = static_cast<long long>(total_ms) - static_cast<long long>(elapsed);
+        return left > 0 ? static_cast<int>(left) : 0;
+    }
 
-    ws.set_option(websocket::stream_base::decorator([](websocket::request_type &req) {
-        req.set(http::field::user_agent, std::string(BOOST_BEAST_VERSION_STRING) + " websocket-client-coro");
-    }));
-    ws.handshake(host, "/");
-    // K1-family firmware requires TEXT-mode WebSocket frames; K2-family accepts both.
-    ws.text(true);
+    int budget() const
+    {
+        if (total_ms <= 0)
+            return std::max(1, step_ms);
+        return std::max(0, std::min(step_ms, remaining()));
+    }
+
+    template<class Cancel> bool run(bool &done, int timeout_ms, Cancel on_timeout)
+    {
+        if (timeout_ms <= 0) {
+            on_timeout();
+            timed_out = true;
+            open      = false;
+            return false;
+        }
+        ioc.restart();
+        ioc.run_for(std::chrono::milliseconds(timeout_ms));
+        if (done)
+            return true;
+        on_timeout();
+        ioc.restart();
+        ioc.run();
+        timed_out = true;
+        open      = false;
+        return false;
+    }
+
+    void cancel_socket()
+    {
+        if (!ws)
+            return;
+        beast::error_code ignore;
+        beast::get_lowest_layer(*ws).socket().cancel(ignore);
+        beast::get_lowest_layer(*ws).socket().close(ignore);
+    }
+
+    bool fail(std::string &error, const char *step, const beast::error_code &ec)
+    {
+        if (timed_out)
+            error = std::string(step) + ": timed out";
+        else
+            error = std::string(step) + ": " + ec.message();
+        timed_out = false;
+        open      = false;
+        return false;
+    }
+};
+
+CrealityWsClient::CrealityWsClient(int step_timeout_ms, int total_timeout_ms) : m(std::make_unique<Impl>())
+{
+    m->step_ms  = std::max(1, step_timeout_ms);
+    m->total_ms = std::max(0, total_timeout_ms);
+    m->start    = std::chrono::steady_clock::now();
 }
 
-static std::string ws_send_and_read(websocket::stream<beast::tcp_stream> &ws, const json &cmd, const std::string &expected_key, int max_reads = 20)
-{
-    ws.write(net::buffer(to_string(cmd)));
+CrealityWsClient::~CrealityWsClient() { close(); }
 
-    for (int reads = 0, total = 0; reads < max_reads && total < max_reads * 3; ++total) {
-        beast::flat_buffer buf;
-        beast::error_code  ec;
-        ws.read(buf, ec);
-        if (ec == net::error::would_block || ec == beast::error::timeout)
-            break;
-        if (ec)
-            throw beast::system_error{ec};
-        std::string msg = beast::buffers_to_string(buf.data());
-        // K1-family firmware sends periodic heartbeat pings; ack them so the
-        // printer does not close the connection, then keep reading.
-        if (msg.find("heart_beat") != std::string::npos) {
-            beast::error_code wr_ec;
-            ws.write(net::buffer(std::string("ok")), wr_ec);
+bool CrealityWsClient::is_open() const { return m && m->open; }
+
+int CrealityWsClient::remaining_ms() const { return m ? m->remaining() : 0; }
+
+bool CrealityWsClient::open(const std::string &host_url, const std::string &port, std::string &error)
+{
+    close();
+    std::string host = CrealityPrintModel::ws_host(host_url);
+    if (host.empty()) {
+        error = "empty print_host";
+        return false;
+    }
+
+    m->start     = std::chrono::steady_clock::now();
+    m->timed_out = false;
+    m->ws        = std::make_unique<websocket::stream<beast::tcp_stream>>(m->ioc);
+    m->ws->read_message_max(1024 * 1024);
+    m->ws->set_option(websocket::stream_base::decorator([](websocket::request_type &req) {
+        req.set(http::field::user_agent, std::string(BOOST_BEAST_VERSION_STRING) + " creality-ws");
+    }));
+
+    tcp::resolver               resolver(m->ioc);
+    tcp::resolver::results_type results;
+    beast::error_code           ec;
+    bool                        done = false;
+    resolver.async_resolve(host, port, [&](const beast::error_code &e, tcp::resolver::results_type r) {
+        ec      = e;
+        results = std::move(r);
+        done    = true;
+    });
+    if (!m->run(done, m->budget(), [&] { resolver.cancel(); }) || ec)
+        return m->fail(error, "resolve", ec);
+
+    done = false;
+    beast::get_lowest_layer(*m->ws).async_connect(results, [&](const beast::error_code &e, const tcp::endpoint &) {
+        ec   = e;
+        done = true;
+    });
+    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+        return m->fail(error, "connect", ec);
+
+    try {
+        host += ':' + std::to_string(beast::get_lowest_layer(*m->ws).socket().remote_endpoint().port());
+    } catch (...) { host += ":9999"; }
+
+    done = false;
+    m->ws->async_handshake(host, "/", [&](const beast::error_code &e) {
+        ec   = e;
+        done = true;
+    });
+    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+        return m->fail(error, "handshake", ec);
+
+    // K1-family firmware requires TEXT-mode WebSocket frames; K2-family accepts both.
+    m->ws->text(true);
+    m->open = true;
+    return true;
+}
+
+bool CrealityWsClient::write(const std::string &payload, std::string &error)
+{
+    if (!m || !m->open || !m->ws) {
+        error = "not connected";
+        return false;
+    }
+    beast::error_code ec;
+    bool              done = false;
+    m->ws->async_write(net::buffer(payload), [&](const beast::error_code &e, std::size_t) {
+        ec   = e;
+        done = true;
+    });
+    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+        return m->fail(error, "write", ec);
+    return true;
+}
+
+bool CrealityWsClient::read_once(std::string &out, std::string &error)
+{
+    if (!m || !m->open || !m->ws) {
+        error = "not connected";
+        return false;
+    }
+    beast::flat_buffer buffer;
+    beast::error_code  ec;
+    bool               done = false;
+    m->ws->async_read(buffer, [&](const beast::error_code &e, std::size_t) {
+        ec   = e;
+        done = true;
+    });
+    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+        return m->fail(error, "read", ec);
+    out = beast::buffers_to_string(buffer.data());
+    return true;
+}
+
+bool CrealityWsClient::read_until(const std::string &expected_key, std::string &out, std::string &error)
+{
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(m->budget());
+    while (std::chrono::steady_clock::now() < until) {
+        std::string frame;
+        if (!read_once(frame, error))
+            return false;
+        if (frame.find("heart_beat") != std::string::npos) {
+            std::string wr_err;
+            write("ok", wr_err);
             continue;
         }
-        ++reads;
-        if (msg.find(expected_key) != std::string::npos)
-            return msg;
+        if (frame.find(expected_key) != std::string::npos) {
+            out = std::move(frame);
+            return true;
+        }
     }
-    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: No '" << expected_key << "' response after " << max_reads << " messages";
-    return {};
+    error = "read: no '" + expected_key + "' before deadline";
+    return false;
+}
+
+void CrealityWsClient::close()
+{
+    if (!m || !m->ws)
+        return;
+    if (m->open) {
+        beast::error_code ec;
+        bool              done = false;
+        m->ws->async_close(websocket::close_code::normal, [&](const beast::error_code &e) {
+            ec   = e;
+            done = true;
+        });
+        m->run(done, std::min(1000, std::max(1, m->budget())), [&] { m->cancel_socket(); });
+    }
+    m->cancel_socket();
+    m->open = false;
+    m->ws.reset();
+    m->ioc.restart();
+    m->ioc.poll();
+}
+
+std::string CrealityPrint::effective_model() const { return CrealityPrintModel::resolve_model(m_model, m_printer_model); }
+
+bool CrealityPrint::fetch_info(const std::string &host, std::string &body, std::string &error, int timeout_s)
+{
+    if (host.empty()) {
+        error = "empty print_host";
+        return false;
+    }
+    std::string url = host;
+    if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0)
+        url = "http://" + url;
+    if (!url.empty() && url.back() == '/')
+        url.pop_back();
+    url += "/info";
+
+    bool        ok        = false;
+    const int   wait      = std::max(1, timeout_s);
+    auto        http      = Http::get(std::move(url));
+    http.tls_policy(Http::TlsPolicy::PrintHost)
+        .timeout_connect(wait)
+        .timeout_max(wait)
+        .size_limit(512 * 1024)
+        .on_error([&](std::string reply, std::string err, unsigned status) {
+            error = err.empty() ? ("HTTP " + std::to_string(status)) : err;
+            if (!reply.empty())
+                body = std::move(reply);
+        })
+        .on_complete([&](std::string reply, unsigned) {
+            body = std::move(reply);
+            ok   = true;
+        })
+        .perform_sync();
+    if (!ok && error.empty())
+        error = "no answer";
+    return ok;
 }
 
 std::string CrealityPrint::query_boxes_info(const std::string &host, int timeout_s)
 {
-    try {
-        net::io_context                      ioc;
-        websocket::stream<beast::tcp_stream> ws{ioc};
-        ws_connect(ioc, ws, host, "9999", timeout_s);
-
-        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(std::max(1, timeout_s)));
-        json        boxs_query = {{"method", "get"}, {"params", {{"boxsInfo", 1}}}};
-        std::string result     = ws_send_and_read(ws, boxs_query, "boxsInfo");
-
-        beast::error_code close_ec;
-        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(1));
-        ws.close(websocket::close_code::normal, close_ec);
-        return result;
-    } catch (std::exception const &e) {
-        BOOST_LOG_TRIVIAL(error) << "CrealityPrint: Failed to query boxsInfo: " << e.what();
+    const int          budget_ms = std::max(1, timeout_s) * 1000;
+    CrealityWsClient   ws(budget_ms, budget_ms);
+    std::string        err;
+    if (!ws.open(host, "9999", err)) {
+        BOOST_LOG_TRIVIAL(error) << "CrealityPrint: boxsInfo open failed: " << err;
         return {};
     }
+    const json boxs_query = {{"method", "get"}, {"params", {{"boxsInfo", 1}}}};
+    if (!ws.write(to_string(boxs_query), err)) {
+        BOOST_LOG_TRIVIAL(error) << "CrealityPrint: boxsInfo write failed: " << err;
+        return {};
+    }
+    std::string result;
+    if (!ws.read_until("boxsInfo", result, err)) {
+        BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: boxsInfo read failed: " << err;
+        return {};
+    }
+    ws.close();
+    return result;
 }
 
 std::string CrealityPrint::query_boxes_info(int timeout_s) const { return query_boxes_info(m_host, timeout_s); }
@@ -292,19 +494,25 @@ static bool use_cfs_of(const std::map<std::string, std::string> &extended_info)
     return it != extended_info.end() && it->second == "1";
 }
 
+static bool send_op_gcode(CrealityWsClient &ws, const std::string &gcode_path, int enable_self_test, std::string &err)
+{
+    const json cmd = CrealityPrintModel::op_gcode_file_cmd(gcode_path, enable_self_test);
+    if (!ws.write(to_string(cmd), err))
+        return false;
+    std::string unused;
+    ws.read_once(unused, err);
+    return true;
+}
+
 bool CrealityPrint::start_print(wxString &msg, const std::string &filename, const std::map<std::string, std::string> &extended_info) const
 {
     try {
-        const std::string gcode_path        = CrealityPrintModel::gcode_path(m_model, filename);
-        const int         enable_self_test  = enable_self_test_of(extended_info);
-        const bool        use_cfs           = use_cfs_of(extended_info);
+        const std::string gcode_path       = CrealityPrintModel::gcode_path(effective_model(), filename);
+        const int         enable_self_test = enable_self_test_of(extended_info);
+        const bool        use_cfs          = use_cfs_of(extended_info);
 
-        net::io_context                      ioc;
-        websocket::stream<beast::tcp_stream> ws{ioc};
-        ws_connect(ioc, ws, m_host, "9999", 5);
-
+        json color_list = json::array();
         if (use_cfs) {
-            json color_list = json::array();
             for (int i = 0;; ++i) {
                 const auto it = extended_info.find("colorMatch_" + std::to_string(i));
                 if (it == extended_info.end())
@@ -313,42 +521,60 @@ bool CrealityPrint::start_print(wxString &msg, const std::string &filename, cons
                 if (!item.empty())
                     color_list.push_back(std::move(item));
             }
-
-            const json color_match = CrealityPrintModel::color_match_cmd(gcode_path, color_list);
-            // Creality Print retries colorMatch; two extra attempts cover a dropped TEXT frame.
-            bool matched = false;
-            for (int attempt = 0; attempt < 3 && !matched; ++attempt) {
-                try {
-                    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(5));
-                    const std::string reply = ws_send_and_read(ws, color_match, "colorMatch", 8);
-                    matched = !reply.empty() || attempt == 2;
-                } catch (std::exception const &e) {
-                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1) << " failed: " << e.what();
-                    if (attempt == 2)
-                        throw;
-                }
-            }
-
-            const json multi = CrealityPrintModel::multi_color_print_cmd(gcode_path, enable_self_test);
-            beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(5));
-            ws.write(net::buffer(to_string(multi)));
-        } else {
-            const json cmd = CrealityPrintModel::op_gcode_file_cmd(gcode_path, enable_self_test);
-            ws.write(net::buffer(to_string(cmd)));
-
-            // K1-family firmware closes the WebSocket right after accepting the
-            // start command, so a blocking read here surfaces a benign
-            // "End of file [asio.misc:2]" even though the print already started
-            // (the command is delivered by write()). Read best-effort, ignore errors.
-            beast::flat_buffer buffer;
-            beast::error_code  read_ec;
-            beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
-            ws.read(buffer, read_ec);
         }
 
-        beast::error_code close_ec;
-        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
-        ws.close(websocket::close_code::normal, close_ec);
+        std::string err;
+        // Empty match list: fall back to opGcodeFile + enableSelfTest (do not send colorMatch).
+        if (use_cfs && !color_list.empty()) {
+            const json color_match = CrealityPrintModel::color_match_cmd(gcode_path, color_list);
+            bool       matched     = false;
+            // Creality Print: send, retry up to 5x at 2 s, each attempt on its own deadline.
+            for (int attempt = 0; attempt < 5 && !matched; ++attempt) {
+                CrealityWsClient attempt_ws(2000, 2000);
+                if (!attempt_ws.open(m_host, "9999", err)) {
+                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
+                                               << " open failed: " << err;
+                    continue;
+                }
+                if (!attempt_ws.write(to_string(color_match), err)) {
+                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
+                                               << " write failed: " << err;
+                    continue;
+                }
+                std::string reply;
+                if (attempt_ws.read_until("colorMatch", reply, err))
+                    matched = true;
+                else
+                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
+                                               << " read failed: " << err;
+            }
+
+            CrealityWsClient ws(5000);
+            if (!ws.open(m_host, "9999", err)) {
+                msg = wxString::FromUTF8(err);
+                return false;
+            }
+            const json multi = CrealityPrintModel::multi_color_print_cmd(gcode_path, enable_self_test);
+            if (!ws.write(to_string(multi), err)) {
+                msg = wxString::FromUTF8(err);
+                return false;
+            }
+            ws.close();
+            return true;
+        }
+
+        CrealityWsClient ws(5000);
+        if (!ws.open(m_host, "9999", err)) {
+            BOOST_LOG_TRIVIAL(error) << "CrealityPrint: start_print open failed: " << err;
+            msg = wxString::FromUTF8(err);
+            return false;
+        }
+        if (!send_op_gcode(ws, gcode_path, enable_self_test, err)) {
+            BOOST_LOG_TRIVIAL(error) << "CrealityPrint: start_print write failed: " << err;
+            msg = wxString::FromUTF8(err);
+            return false;
+        }
+        ws.close();
         return true;
     } catch (std::exception const &e) {
         BOOST_LOG_TRIVIAL(error) << "CrealityPrint: Error starting print: " << e.what();

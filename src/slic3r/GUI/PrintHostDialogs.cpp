@@ -1,9 +1,12 @@
 #include "PrintHostDialogs.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <iomanip>
 #include <limits>
+#include <memory>
+#include <thread>
 
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include <wx/frame.h>
@@ -576,20 +579,14 @@ void PrintHostSendDialog::build_device_ui()
     refresh_device_status();
 }
 
-// Blocking with a busy cursor, exactly as the devices dialog's Test does: a modal send dialog can
-// afford one short request, and a worker thread would have to outlive a dialog the user can close.
-void PrintHostSendDialog::refresh_device_status()
+PrintHostSendDialog::~PrintHostSendDialog()
 {
-    m_device_status = PrintHostDevices::Status();
-    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size()) {
-        wxBusyCursor wait;
-        // A device saved before the store kept the model: the dialog knows it (the model key is the
-        // preset's printer_model), and the Elegoo probe asks a CANVAS only of a Centauri Carbon 1.
-        PrintHostDevices::Device d = m_devices[m_device_sel];
-        if (d.printer_model.empty())
-            d.printer_model = m_model_key;
-        m_device_status = PrintHostDevices::probe(d, 3);
-    }
+    if (m_probe_token)
+        m_probe_token->alive = false;
+}
+
+void PrintHostSendDialog::apply_device_status()
+{
     if (m_device_note) {
         wxString text;
         if (m_device_status.probed && m_device_status.online && !m_device_status.state.empty())
@@ -599,7 +596,6 @@ void PrintHostSendDialog::refresh_device_status()
         if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
             if (!text.IsEmpty())
                 text += "  ";
-            // The honest sentence: this protocol has no filament data, so there is nothing to map.
             text += _(from_u8(m_device_status.note));
         } else if (m_device_status.cfs && m_device_status.slots_have_filaments) {
             if (!text.IsEmpty())
@@ -618,6 +614,66 @@ void PrintHostSendDialog::refresh_device_status()
     content_sizer->Layout();
     Layout();
     Fit();
+}
+
+// Probe runs on a worker. An unreachable Creality printer returns in about 1 s
+// (CrealityWsClient deadline); the UI is not blocked while it waits.
+void PrintHostSendDialog::refresh_device_status()
+{
+    m_device_status = PrintHostDevices::Status();
+    if (!m_probe_token)
+        m_probe_token = std::make_shared<ProbeToken>();
+    const int gen = ++m_probe_token->gen;
+    if (m_device_note) {
+        m_device_note->SetLabel(_L("Checking printer..."));
+        m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+        m_device_note->Show(true);
+    }
+    rebuild_mapping_rows();
+    rebuild_creality_options();
+    update_creality_mapping_enabled();
+    content_sizer->Layout();
+    Layout();
+    Fit();
+
+    if (m_device_sel < 0 || m_device_sel >= (int) m_devices.size())
+        return;
+
+    PrintHostDevices::Device d = m_devices[m_device_sel];
+    if (d.printer_model.empty())
+        d.printer_model = m_model_key;
+    const int timeout_s = (d.host_type == "crealityprint") ? 1 : 3;
+    auto      token     = m_probe_token;
+    std::thread([token, gen, d, timeout_s]() {
+        PrintHostDevices::Status st;
+        try {
+            st = PrintHostDevices::probe(d, timeout_s);
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << "PrintHostSendDialog: probe failed: " << e.what();
+            st.probed = true;
+            st.error  = e.what();
+            st.note   = "this printer did not answer";
+        } catch (...) {
+            st.probed = true;
+            st.note   = "this printer did not answer";
+        }
+        if (!token->alive.load() || token->gen.load() != gen)
+            return;
+        wxGetApp().CallAfter([token, gen, st]() {
+            if (!token->alive.load() || token->gen.load() != gen)
+                return;
+            // Walk top-level windows for the still-alive send dialog rather than
+            // capturing `this` across a possible close.
+            for (wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node; node = node->GetNext()) {
+                auto *dlg = dynamic_cast<PrintHostSendDialog *>(node->GetData());
+                if (!dlg || dlg->m_probe_token != token)
+                    continue;
+                dlg->m_device_status = st;
+                dlg->apply_device_status();
+                break;
+            }
+        });
+    }).detach();
 }
 
 // One row per filament this plate actually uses: its colour, its type, and where it goes. Only when
@@ -666,12 +722,24 @@ void PrintHostSendDialog::rebuild_mapping_rows()
         const int preset_pos = preselect_slot(f);
         const bool preset_ok  = preset_pos >= 0 && preset_pos < (int) m_device_status.slots.size();
         int        best       = preset_ok ? preset_pos + 1 : 0;
-        // Material-first (research X3 / #610). On a CFS the ranking is
-        // CFS type+colour > CFS type > ext type+colour > ext type.
-        if (!preset_ok) {
-            const int idx = PrintHostDevices::auto_match_slot(f.type, f.colour, m_device_status.slots, m_device_status.cfs);
+        if (!preset_ok && m_device_status.cfs) {
+            // Creality CFS only: CFS type+colour > CFS type > ext type+colour > ext type.
+            const int idx = PrintHostDevices::auto_match_slot(f.type, f.colour, m_device_status.slots, true);
             if (idx >= 0)
                 best = idx + 1;
+        } else if (!preset_ok) {
+            // Snapmaker / Moonraker / Elegoo / everyone else: closest loaded colour (redmean).
+            double best_d = 0;
+            for (size_t i = 0; i < m_device_status.slots.size(); ++i) {
+                const PrintHostDevices::Slot& s = m_device_status.slots[i];
+                if (!s.loaded || s.color.empty())
+                    continue;
+                const double dist = colour_distance(swatch_colour(f.colour), swatch_colour(s.color));
+                if (best == 0 || dist < best_d) {
+                    best   = (int) i + 1;
+                    best_d = dist;
+                }
+            }
         }
         choice->SetSelection(best);
         choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { update_mapping_note(); });
@@ -761,7 +829,7 @@ std::map<std::string, std::string> PrintHostSendDialog::extendedInfo() const
         const SendPlateFilament* f = plate_filament(m_mapping_filament[i]);
         const std::string type  = f ? f->type : s.type;
         const std::string color = f && !f->colour.empty() ? f->colour : s.color;
-        const std::string id    = Slic3r::CrealityPrintModel::color_match_id(s.cfs_box, s.cfs_material);
+        const std::string id    = Slic3r::CrealityPrintModel::color_match_id(m_mapping_filament[i]);
         out["colorMatch_" + std::to_string(n++)] = id + "\t" + type + "\t" + color + "\t" +
                                                    std::to_string(s.cfs_box) + "\t" + std::to_string(s.cfs_material);
     }
