@@ -4,6 +4,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
+#include <boost/system/error_code.hpp>
 #include <future>
 #include <fstream>
 #include <chrono>
@@ -35,6 +36,25 @@ LiveRegistry& live_registry()
 long long steady_ms_since(const std::chrono::steady_clock::time_point& t0)
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// Paho ssl_options only take file paths (not in-memory PEMs). Write CA / client cert / key
+// owner-only (0600) so a printer or cloud private key is not world-readable in /tmp. The files
+// stay until cleanup_temp_files() (~MqttClient) because reconnect re-reads the same paths.
+bool write_pem_owner_only(const boost::filesystem::path& path, const std::string& content)
+{
+    boost::filesystem::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f)
+        return false;
+#ifndef _WIN32
+    {
+        boost::system::error_code ec;
+        boost::filesystem::permissions(path, boost::filesystem::owner_read | boost::filesystem::owner_write, ec);
+    }
+#endif
+    f << content;
+    f.close();
+    return static_cast<bool>(f);
 }
 
 } // namespace
@@ -142,10 +162,7 @@ MqttClient::MqttClient(const std::string& server_address,
 
         boost::filesystem::path ca_path = temp_dir / ("ca_" + client_id + std::to_string(int64_t(this)) + ".pem");
         if (!ca_content.empty()) {
-            boost::filesystem::ofstream ca_file(ca_path);
-            ca_file << ca_content;
-            ca_file.close();
-            if (!ca_file) {
+            if (!write_pem_owner_only(ca_path, ca_content)) {
                 BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] failed to save CA certificate: " << ca_path;
                 throw std::runtime_error("Failed to write CA certificate temporary file");
             }
@@ -154,10 +171,7 @@ MqttClient::MqttClient(const std::string& server_address,
         
         boost::filesystem::path cert_path = temp_dir / ("cert_" + client_id + std::to_string(int64_t(this)) + ".pem");
         if (!cert_content.empty()) {
-            boost::filesystem::ofstream cert_file(cert_path);
-            cert_file << cert_content;
-            cert_file.close();
-            if (!cert_file) {
+            if (!write_pem_owner_only(cert_path, cert_content)) {
                 BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] failed to save client certificate: " << cert_path;
                 throw std::runtime_error("Failed to write client certificate temporary file");
             }
@@ -166,10 +180,7 @@ MqttClient::MqttClient(const std::string& server_address,
         
         boost::filesystem::path key_path = temp_dir / ("key_" + client_id + std::to_string(int64_t(this)) + ".pem");
         if (!key_content.empty()) {
-            boost::filesystem::ofstream key_file(key_path);
-            key_file << key_content;
-            key_file.close();
-            if (!key_file) {
+            if (!write_pem_owner_only(key_path, key_content)) {
                 BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] failed to save private key: " << key_path;
                 throw std::runtime_error("Failed to write private key temporary file");
             }

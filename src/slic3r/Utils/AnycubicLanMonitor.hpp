@@ -27,6 +27,9 @@ struct CommandResult
 CommandResult command(const std::string &host, const std::string &type, const std::string &action, const nlohmann::json &inner,
                       int timeout_ms);
 
+// Tests only: merge a report into the snapshot under the monitor lock (no network).
+void apply_report_for_tests(const std::string &host, const std::string &topic, const std::string &payload);
+
 void shutdown();
 void reset_for_tests();
 

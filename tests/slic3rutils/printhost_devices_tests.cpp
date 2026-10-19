@@ -12,6 +12,7 @@
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
 #include "slic3r/Utils/AnycubicLan.hpp"
 #include "slic3r/Utils/AnycubicLanHost.hpp"
+#include "slic3r/Utils/AnycubicLanMonitor.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -19,8 +20,10 @@
 #include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <ctime>
 #include <string>
+#include <thread>
 
 using namespace Slic3r;
 using namespace Slic3r::PrintHostDevices;
@@ -971,5 +974,43 @@ TEST_CASE("Anycubic LAN: PrintHost factory and developer-only key", "[AnycubicLa
     const ConfigOptionDef *def = print_config_def.get("host_type");
     REQUIRE(def != nullptr);
     CHECK(std::find(def->enum_values.begin(), def->enum_values.end(), "anycubiclan") == def->enum_values.end());
+}
+
+TEST_CASE("Anycubic LAN: monitor snapshot copies under the lock", "[AnycubicLan]")
+{
+    AnycubicLanMonitor::reset_for_tests();
+    const std::string payload = R"({"type":"info","action":"report","data":{
+        "project":{"state":"printing","filename":"box.gcode","progress":7,"pause":0}}})";
+    std::atomic<int>  reads { 0 };
+    std::atomic<int>  writes { 0 };
+    std::thread writer([&] {
+        for (int i = 0; i < 200; ++i) {
+            AnycubicLanMonitor::apply_report_for_tests("192.0.2.10", "info/report", payload);
+            ++writes;
+        }
+    });
+    std::thread reader([&] {
+        for (int i = 0; i < 200; ++i) {
+            const AnycubicLan::Snapshot s = AnycubicLanMonitor::touch("192.0.2.10");
+            (void) AnycubicLan::hub_state(s.status);
+            (void) s.status.filename;
+            ++reads;
+        }
+    });
+    writer.join();
+    reader.join();
+    CHECK(writes == 200);
+    CHECK(reads == 200);
+    const AnycubicLan::Snapshot s = AnycubicLanMonitor::touch("192.0.2.10");
+    CHECK(s.status.filename == "box.gcode");
+    CHECK(AnycubicLan::hub_state(s.status) == "printing");
+
+    // timeout 0: do not start a handshake, fail at once if nothing is connected.
+    const auto r = AnycubicLanMonitor::command("192.0.2.10", "print", "pause", nlohmann::json::object(), 0);
+    CHECK_FALSE(r.sent);
+    CHECK_FALSE(r.error.empty());
+
+    AnycubicLanMonitor::shutdown();
+    AnycubicLanMonitor::reset_for_tests();
 }
 
