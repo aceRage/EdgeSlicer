@@ -60,9 +60,53 @@ inline std::string model_display_name(const std::string &model)
     return it != names.end() ? it->second : std::string{};
 }
 
+// Preset printer_model values are "Creality K1C", while /info uses "K1C".
+inline std::string strip_vendor_prefix(const std::string &model)
+{
+    const std::string prefix = "Creality ";
+    if (model.size() > prefix.size() && model.compare(0, prefix.size(), prefix) == 0)
+        return model.substr(prefix.size());
+    return model;
+}
+
+inline bool is_known_model(const std::string &model) { return is_k1_family(model) || model_supports_multi_color(model); }
+
+// /info codes and preset names ("Creality K1", "K1 Max", "K1C_CFS-C").
+inline bool looks_like_k1_family(const std::string &model)
+{
+    if (is_k1_family(model))
+        return true;
+    const std::string n = strip_vendor_prefix(model);
+    if (is_k1_family(n))
+        return true;
+    return n.size() >= 2 && n[0] == 'K' && n[1] == '1';
+}
+
+// Prefer a known /info model. An empty or unknown /info value falls back to the
+// preset's printer_model so a K1 never regresses to the K2 /mnt/UDISK root.
+inline std::string resolve_model(const std::string &info_model, const std::string &preset_model)
+{
+    if (is_known_model(info_model))
+        return info_model;
+    const std::string n = strip_vendor_prefix(preset_model);
+    if (is_known_model(n))
+        return n;
+    for (const auto &kv : cfs_capable_models())
+        if (kv.second == n || kv.second == preset_model)
+            return kv.first;
+    if (!n.empty())
+        return n;
+    return info_model;
+}
+
 // K1-family: /usr/data. Everything else (K2 / K2 Pro / K2 Plus / SPARKX i7, and an
-// unknown model) uses /mnt/UDISK, matching Creality Print and upstream Orca.
-inline std::string gcode_root(const std::string &model) { return is_k1_family(model) ? "/usr/data" : "/mnt/UDISK"; }
+// unknown model with no K1-like preset fallback) uses /mnt/UDISK.
+inline std::string gcode_root(const std::string &model) { return looks_like_k1_family(model) ? "/usr/data" : "/mnt/UDISK"; }
+
+inline std::string gcode_root_for(const std::string &info_model, const std::string &preset_model)
+{
+    return gcode_root(resolve_model(info_model, preset_model));
+}
 
 inline std::string gcode_path(const std::string &model, const std::string &filename)
 {
@@ -213,9 +257,16 @@ inline std::string colour_hex(std::string raw)
 {
     if (!raw.empty() && raw[0] == '#')
         raw = raw.substr(1);
-    // Creality reports "#0RRGGBB" (leading zero after '#') on some firmwares.
-    if (raw.size() == 7 && raw[0] == '0')
+    // 8-character HTML colours (#RRGGBBAA): keep RGB, drop alpha.
+    if (raw.size() >= 8) {
+        for (size_t i = 0; i < 8; ++i)
+            if (!std::isxdigit(static_cast<unsigned char>(raw[i])))
+                return {};
+        raw = raw.substr(0, 6);
+    } else if (raw.size() == 7 && raw[0] == '0') {
+        // Creality reports "#0RRGGBB" (leading zero after '#') on some firmwares.
         raw = raw.substr(1);
+    }
     if (raw.size() < 6)
         return {};
     for (size_t i = 0; i < 6; ++i)
@@ -265,9 +316,12 @@ inline int json_int(const nlohmann::json &j, const char *key, int fallback, int 
     try {
         if (v.is_number_integer())
             n = v.get<int>();
-        else if (v.is_number())
-            n = static_cast<int>(v.get<double>());
-        else if (v.is_string())
+        else if (v.is_number()) {
+            const double d = v.get<double>();
+            if (!std::isfinite(d) || d < static_cast<double>(lo) || d > static_cast<double>(hi))
+                return fallback;
+            n = static_cast<int>(d);
+        } else if (v.is_string())
             n = std::stoi(v.get<std::string>());
         else
             return fallback;
@@ -295,6 +349,11 @@ inline CfsParseResult parse_cfs_response(const std::string &response)
     CfsParseResult out;
     if (response.empty()) {
         out.error = "empty response";
+        return out;
+    }
+    constexpr size_t kMaxMessage = 1024 * 1024;
+    if (response.size() > kMaxMessage) {
+        out.error = "message too large";
         return out;
     }
     nlohmann::json resp;
@@ -417,11 +476,13 @@ inline CfsParseResult parse_cfs_response(const std::string &response)
     return out;
 }
 
-inline std::string color_match_id(int box_id, int slot_id)
+// G-code filament index, as Creality Print / upstream Orca:
+// T{idx/4+1}{'A'+idx%4}. Destination box/slot travel in the mapped fields.
+inline std::string color_match_id(int filament_index)
 {
-    if (slot_id < 0 || slot_id > 3)
+    if (filament_index < 0 || filament_index > 63)
         return {};
-    return "T" + std::to_string(box_id) + std::string(1, static_cast<char>('A' + slot_id));
+    return "T" + std::to_string(filament_index / 4 + 1) + std::string(1, static_cast<char>('A' + (filament_index % 4)));
 }
 
 inline nlohmann::json op_gcode_file_cmd(const std::string &gcode_path, int enable_self_test)
@@ -493,9 +554,12 @@ inline int auto_match_index(const std::string &type, const std::string &colour, 
         const CfsSlot &s = slots[i];
         if (!s.loaded)
             continue;
-        const bool type_ok   = !type.empty() && iequals_ascii(type, s.filament_type);
-        const bool colour_ok = !colour.empty() && !s.color_hex.empty();
-        int        rank      = 99;
+        const std::string plate_colour  = colour_hex(colour);
+        const std::string slot_colour   = colour_hex(s.color_hex);
+        const bool        type_ok       = !type.empty() && iequals_ascii(type, s.filament_type);
+        const bool        colour_ok     = !plate_colour.empty() && !slot_colour.empty();
+        const bool        type_conflict = !type.empty() && !s.filament_type.empty() && !iequals_ascii(type, s.filament_type);
+        int               rank          = 99;
         if (type_ok && colour_ok && !s.external)
             rank = 0;
         else if (type_ok && !s.external)
@@ -504,11 +568,11 @@ inline int auto_match_index(const std::string &type, const std::string &colour, 
             rank = 2;
         else if (type_ok && s.external)
             rank = 3;
-        else if (colour_ok)
+        else if (colour_ok && !type_conflict)
             rank = 4;
         else
             continue;
-        const double dist = colour_ok ? rgb_dist(colour, s.color_hex) : 1e9;
+        const double dist = colour_ok ? rgb_dist(plate_colour, slot_colour) : 1e9;
         if (best < 0 || rank < best_r || (rank == best_r && dist < best_d)) {
             best   = static_cast<int>(i);
             best_r = rank;

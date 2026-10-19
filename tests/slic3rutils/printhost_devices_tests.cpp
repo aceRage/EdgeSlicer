@@ -769,6 +769,22 @@ TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
         CHECK_FALSE(model_supports_multi_color("Ender-3"));
     }
 
+    SECTION("empty or unknown /info falls back to the preset printer_model") {
+        CHECK(resolve_model("K1C", "Creality K2 Plus") == "K1C");
+        CHECK(resolve_model("F021", "Creality K1C") == "F021");
+        CHECK(resolve_model("", "Creality K1C") == "K1C");
+        CHECK(resolve_model("unknown", "Creality K1") == "K1");
+        CHECK(resolve_model("", "Creality K2 Plus") == "F008");
+        CHECK(gcode_root_for("", "Creality K1C") == "/usr/data");
+        CHECK(gcode_root_for("garbage", "Creality K1 SE") == "/usr/data");
+        CHECK(gcode_root_for("", "Creality K1") == "/usr/data");
+        CHECK(gcode_root_for("", "Creality K2 Plus") == "/mnt/UDISK");
+        CHECK(gcode_root_for("K1C", "Creality K2 Plus") == "/usr/data");
+        CHECK(gcode_root_for("F021", "Creality K1C") == "/mnt/UDISK");
+        CHECK(looks_like_k1_family("Creality K1 Max"));
+        CHECK(gcode_root_for("", "Creality K1 Max") == "/usr/data");
+    }
+
     SECTION("ws_host strips scheme and port (Http::url_host)") {
         CHECK(ws_host("192.168.1.50") == "192.168.1.50");
         CHECK(ws_host("http://192.168.1.50") == "192.168.1.50");
@@ -859,6 +875,19 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK_FALSE(parse_cfs_response("[]").ok);
         CHECK_FALSE(parse_cfs_response(R"({"boxsInfo":{}})").ok);
         REQUIRE_NOTHROW(parse_cfs_response(std::string(128, '{')));
+        CHECK_FALSE(parse_cfs_response(std::string(1024 * 1024 + 1, 'x')).ok);
+        CHECK(parse_cfs_response(std::string(1024 * 1024 + 1, 'x')).error == "message too large");
+        // Huge doubles are range-checked before the int cast.
+        const CfsParseResult huge_id = parse_cfs_response(R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": 1e20, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "type": "PLA", "vendor": "X", "color": "#FF0000" }
+                ]}
+            ]}
+        })");
+        CHECK(huge_id.ok);
+        REQUIRE(huge_id.slots.size() == 4);
+        CHECK(huge_id.slots[0].box_id == 0); // fallback, not a truncated int
         // Huge box/material arrays are capped, not thrown.
         std::string huge = R"({"boxsInfo":{"materialBoxs":[)";
         for (int i = 0; i < 40; ++i) {
@@ -905,6 +934,15 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         const Status st = status_from_cfs(k2_boxs);
         CHECK(auto_match_slot("PLA", "#FF0000", st.slots, true) == 1);
         CHECK(auto_match_slot("ABS", "#FFFFFF", st.slots, true) == 4);
+        // Colour-only must not pick a slot whose material conflicts.
+        CfsSlot pla_only;
+        pla_only.loaded        = true;
+        pla_only.filament_type = "PLA";
+        pla_only.color_hex     = "#FF0000";
+        CHECK(auto_match_index("PETG", "#FF0000", {pla_only}) == -1);
+        CHECK(auto_match_index("PLA", "#FF0000FF", {pla_only}) == 0); // 8-char plate colour
+        CHECK(colour_hex("#FF0000FF") == "#FF0000");
+        CHECK(colour_hex("00FF00AA") == "#00FF00");
     }
 
     SECTION("start commands match Creality Print") {
@@ -920,8 +958,15 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         const auto mc = multi_color_print_cmd("/usr/data/printer_data/gcodes/b.gcode", 0);
         CHECK(mc["params"]["multiColorPrint"]["gcode"] == "/usr/data/printer_data/gcodes/b.gcode");
         CHECK(mc["params"]["multiColorPrint"]["enableSelfTest"] == 0);
-        CHECK(color_match_id(1, 0) == "T1A");
-        CHECK(color_match_id(0, 3) == "T0D");
+        CHECK(color_match_id(0) == "T1A");
+        CHECK(color_match_id(1) == "T1B");
+        CHECK(color_match_id(3) == "T1D");
+        CHECK(color_match_id(4) == "T2A");
+        // Non-identity mapping: filament 0 (T1A) sent to box 2 slot 1.
+        const auto mapped = color_match_item_from_value("T1A\tPLA\t#FF0000\t2\t1");
+        CHECK(mapped["id"] == "T1A");
+        CHECK(mapped["boxId"] == 2);
+        CHECK(mapped["materialId"] == 1);
         CHECK(color_match_item_from_value("bad").empty());
         CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
     }

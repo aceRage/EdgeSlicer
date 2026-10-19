@@ -353,8 +353,8 @@ int auto_match_slot(const std::string& type, const std::string& colour, const st
     return CrealityPrintModel::auto_match_index(type, colour, cfs);
 }
 
-// CrealityPrint: /info (first call, caller's timeout) then a 1 s boxsInfo WebSocket when the
-// model is CFS-capable. The extra call stays short because probe() runs on the send-dialog UI thread.
+// CrealityPrint: /info (reachability + model) then boxsInfo. Both use the caller's deadline
+// (about 1 s from the send dialog). An unreachable or silent printer returns when that expires.
 static Status probe_creality(const Device& d, int timeout_s)
 {
     Status st;
@@ -366,25 +366,20 @@ static Status probe_creality(const Device& d, int timeout_s)
         st.note = "this device has no address";
         return st;
     }
-    std::string url = host;
-    if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0)
-        url = "http://" + url;
-    if (!url.empty() && url.back() == '/')
-        url.pop_back();
-    url += "/info";
-    if (!moonraker_get(url, body, info_err, timeout_s)) {
+    const int wait = std::max(1, timeout_s);
+    if (!CrealityPrint::fetch_info(host, body, info_err, wait)) {
         st.error = info_err;
         st.note  = "this printer did not answer" + (info_err.empty() ? std::string() : (": " + info_err));
         return st;
     }
-    st.online              = true;
-    const std::string model = CrealityPrintModel::parse_model_from_info(body);
-    if (!CrealityPrintModel::model_supports_multi_color(model)) {
+    st.online               = true;
+    const std::string model = CrealityPrintModel::resolve_model(CrealityPrintModel::parse_model_from_info(body),
+                                                                d.printer_model);
+    if (!CrealityPrintModel::model_supports_multi_color(model) && !CrealityPrintModel::looks_like_k1_family(model)) {
         st.note = no_filament_note("crealityprint");
         return st;
     }
-    // Extra call: ~1 s so switching devices in the send dialog does not stall.
-    const std::string boxs = CrealityPrint::query_boxes_info(host, 1);
+    const std::string boxs = CrealityPrint::query_boxes_info(host, wait);
     if (boxs.empty()) {
         st.note = no_filament_note("crealityprint");
         return st;
