@@ -15,6 +15,7 @@
 #include "../Utils/PrintHostDeviceStatus.hpp"
 #include "../Utils/ElegooCanvasMapping.hpp"
 #include "../Utils/Flashforge.hpp"
+#include "ThirdPartyFilamentMapPanel.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ProjectTask.hpp"
 class wxButton;
@@ -41,6 +42,7 @@ struct SendPlateFilament
     bool        used { false }; // this plate's slice result actually used it
     std::string alias;         // its filament preset's alias (or name), for remembered mappings
     int         nozzle_temp { 0 }; // its nozzle temperature, 0 = unknown
+    int         nozzle_id { -1 };  // 0-based nozzle / toolhead; -1 = single-nozzle / unknown
 };
 
 class PrintHostSendDialog : public GUI::MsgDialog
@@ -102,6 +104,11 @@ protected:
     // cursor and a short timeout - the same shape as the devices dialog's Test button.
     void refresh_device_status();
     void rebuild_mapping_rows();
+    // Elegoo CC (and later CFS / MMU / ACE): Bambu-style MaterialItem rows instead of a text combo.
+    virtual bool use_third_party_map_panel() const { return false; }
+    // Creality K3 holders: show the two colours, no popup.
+    virtual bool third_party_map_read_only() const { return false; }
+    void rebuild_third_party_map_rows();
     // The picked QIDI printer said it is printing or paused: Upload only, no start.
     bool print_blocked() const;
     // "Upload and Print" follows print_blocked(). Safe before the buttons exist.
@@ -114,7 +121,8 @@ protected:
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
     // One or more lines under the mapping table, refreshed whenever a choice changes; "" = none.
-    virtual wxString mapping_warning() const { return wxString(); }
+    // The base implementation is the third-party panel's type/colour mismatch text.
+    virtual wxString mapping_warning() const;
     void update_mapping_note();
     // The rows' choices as positions in m_device_status.slots, -1 = "As sliced"; and the plate
     // filament each row is for.
@@ -134,7 +142,8 @@ protected:
     wxComboBox*                           m_combo_devices { nullptr };
     wxStaticText*                         m_device_note { nullptr };
     wxWindow*                             m_mapping_panel { nullptr };
-    wxFlexGridSizer*                      m_mapping_sizer { nullptr };
+    wxBoxSizer*                           m_mapping_sizer { nullptr };
+    ThirdPartyFilamentMapPanel*           m_filament_map { nullptr }; // Elegoo CC; null = wxChoice rows
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
     // QIDI printers: QIDIStudio's print options, null where the device does not have them.
@@ -268,6 +277,7 @@ public:
     virtual std::map<std::string, std::string> extendedInfo() const override;
 
 protected:
+    bool     use_third_party_map_panel() const override { return true; }
     int      preselect_slot(const SendPlateFilament& f) const override;
     wxString mapping_warning() const override;
 

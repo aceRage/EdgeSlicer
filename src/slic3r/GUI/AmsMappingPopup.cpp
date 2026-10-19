@@ -69,6 +69,22 @@ void MaterialItem::set_ams_info(wxColour col, wxString txt, int ctype, std::vect
     if (need_refresh) { Refresh();}
 }
 
+void MaterialItem::set_dropdown_visible(bool visible)
+{
+    if (m_dropdown_visible == visible)
+        return;
+    m_dropdown_visible = visible;
+    Refresh();
+}
+
+void MaterialItem::set_nozzle_badge(const wxString &badge)
+{
+    if (m_nozzle_badge == badge)
+        return;
+    m_nozzle_badge = badge;
+    Refresh();
+}
+
 void MaterialItem::disable()
 {
     if (IsEnabled()) {
@@ -179,6 +195,19 @@ void MaterialItem::render(wxDC &dc)
 
     auto mapping_txt_size = dc.GetTextExtent(mapping_txt);
     dc.DrawText(mapping_txt, wxPoint((MATERIAL_ITEM_SIZE.x - mapping_txt_size.x) / 2, FromDIP(30) + (FromDIP(16) - mapping_txt_size.y) / 2));
+
+    if (!m_nozzle_badge.empty()) {
+        const int     d = FromDIP(16);
+        const wxPoint o(FromDIP(2), FromDIP(2));
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(wxColour(0x26, 0x2E, 0x30)));
+        dc.DrawEllipse(o.x, o.y, d, d);
+        dc.SetFont(::Label::Body_10);
+        dc.SetTextForeground(*wxWHITE);
+        dc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
+        const wxSize ts = dc.GetTextExtent(m_nozzle_badge);
+        dc.DrawText(m_nozzle_badge, o.x + (d - ts.x) / 2, o.y + (d - ts.y) / 2);
+    }
 }
 
 void MaterialItem::doRender(wxDC &dc) 
@@ -273,12 +302,14 @@ void MaterialItem::doRender(wxDC &dc)
     }
 #endif
     //arrow
-    if ( (acolor.Red() > 160 && acolor.Green() > 160 && acolor.Blue() > 160) &&
-        (acolor.Red() < 180 && acolor.Green() < 180 && acolor.Blue() < 180)) {
-        dc.DrawBitmap(m_arraw_bitmap_white.bmp(), size.x - m_arraw_bitmap_white.GetBmpSize().x - FromDIP(7), size.y - m_arraw_bitmap_white.GetBmpSize().y);
-    }
-    else {
-        dc.DrawBitmap(m_arraw_bitmap_gray.bmp(), size.x - m_arraw_bitmap_gray.GetBmpSize().x - FromDIP(7), size.y - m_arraw_bitmap_gray.GetBmpSize().y);
+    if (m_dropdown_visible) {
+        if ( (acolor.Red() > 160 && acolor.Green() > 160 && acolor.Blue() > 160) &&
+            (acolor.Red() < 180 && acolor.Green() < 180 && acolor.Blue() < 180)) {
+            dc.DrawBitmap(m_arraw_bitmap_white.bmp(), size.x - m_arraw_bitmap_white.GetBmpSize().x - FromDIP(7), size.y - m_arraw_bitmap_white.GetBmpSize().y);
+        }
+        else {
+            dc.DrawBitmap(m_arraw_bitmap_gray.bmp(), size.x - m_arraw_bitmap_gray.GetBmpSize().x - FromDIP(7), size.y - m_arraw_bitmap_gray.GetBmpSize().y);
+        }
     }
 
     
