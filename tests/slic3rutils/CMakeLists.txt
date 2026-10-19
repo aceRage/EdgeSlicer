@@ -18,6 +18,7 @@ add_executable(${_TEST_NAME}_tests
     device_page_load_tests.cpp
     flutter_web_bundle_tests.cpp
     home_tab_tests.cpp
+    main_tabs_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp
     library_index_tests.cpp

@@ -20,6 +20,7 @@
 #include "../Utils/PrintHostDeviceStatus.hpp"
 #include "../Utils/ElegooCanvasMapping.hpp"
 #include "../Utils/Flashforge.hpp"
+#include "ThirdPartyFilamentMapPanel.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ProjectTask.hpp"
 class wxButton;
@@ -46,6 +47,7 @@ struct SendPlateFilament
     bool        used { false }; // this plate's slice result actually used it
     std::string alias;         // its filament preset's alias (or name), for remembered mappings
     int         nozzle_temp { 0 }; // its nozzle temperature, 0 = unknown
+    int         nozzle_id { -1 };  // 0-based nozzle / toolhead; -1 = single-nozzle / unknown
 };
 
 class PrintHostSendDialog : public GUI::MsgDialog
@@ -74,6 +76,14 @@ public:
     // "0:1,1:2" - the plate's filament 0 goes in slot 1, filament 1 in slot 2. Empty when nothing
     // was mapped, which is every host that reports no slots.
     std::string filament_mapping() const;
+    // ---- QIDI printers (PrintHostJob::qidi_start_script / qidi_leveling_script / qidi_timelapse) ----
+    //
+    // QIDIStudio's print options for the picked device - Box, bed leveling, timelapse, polar
+    // cooler - shown when it answered as QIDI firmware, remembered between sends. The scripts are
+    // empty, and the timelapse -1, for every other printer.
+    std::string qidi_start_script() const;
+    std::string qidi_leveling_script() const;
+    int         qidi_timelapse() const;
 
     // ---- "unload filaments when the print ends" (Snapmaker tool changers) ----
     //
@@ -106,11 +116,32 @@ protected:
     void rebuild_creality_options();
     void update_creality_mapping_enabled();
     void set_send_enabled(bool on);
+    // Elegoo CC and CFS: Bambu-style MaterialItem rows instead of a text combo.
+    virtual bool use_third_party_map_panel() const { return m_device_status.cfs; }
+    // Creality K3 holders: show the two colours, no popup.
+    virtual bool third_party_map_read_only() const { return false; }
+    void rebuild_third_party_map_rows();
+    // The picked QIDI printer said it is printing or paused: Upload only, no start.
+    bool print_blocked() const;
+    // "Upload and Print" follows print_blocked(). Safe before the buttons exist.
+    void update_print_button();
+    // The QIDI options for the picked device, from what it said. Called with the mapping rows.
+    void rebuild_qidi_options();
+    // "As sliced" and greyed out while the QIDI Box / Use CFS is switched off.
+    void update_mapping_enabled();
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
     // One or more lines under the mapping table, refreshed whenever a choice changes; "" = none.
-    virtual wxString mapping_warning() const { return wxString(); }
+    // Vendor PRs (#616/#619/#620/#622) override this; keep the name and signature.
+    // #625 F14: update_mapping_note() no longer gates on has_rows, so this is called even when
+    // the panel / combo has no rows. Overrides must return empty themselves in that case.
+    virtual wxString mapping_warning() const;
+    // Panel type/colour mismatch (identity slots when read-only). Combined with mapping_warning()
+    // in update_mapping_note(); vendor overrides of mapping_warning() still compile after rebase.
+    virtual wxString third_party_mismatch_warning() const;
+    void on_dpi_changed(const wxRect &suggested_rect) override;
+    void on_sys_color_changed() override;
     void update_mapping_note();
     // The rows' choices as positions in m_device_status.slots, -1 = "As sliced"; and the plate
     // filament each row is for.
@@ -130,9 +161,17 @@ protected:
     wxComboBox*                           m_combo_devices { nullptr };
     wxStaticText*                         m_device_note { nullptr };
     wxWindow*                             m_mapping_panel { nullptr };
-    wxFlexGridSizer*                      m_mapping_sizer { nullptr };
+    wxBoxSizer*                           m_mapping_sizer { nullptr };
+    ThirdPartyFilamentMapPanel*           m_filament_map { nullptr }; // Elegoo CC; null = wxChoice rows
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
+    // QIDI printers: QIDIStudio's print options, null where the device does not have them.
+    wxWindow*                             m_qidi_panel { nullptr };
+    wxBoxSizer*                           m_qidi_sizer { nullptr };
+    wxCheckBox*                           m_qidi_use_box { nullptr };
+    wxCheckBox*                           m_qidi_leveling { nullptr };
+    wxCheckBox*                           m_qidi_timelapse { nullptr };
+    wxCheckBox*                           m_qidi_polar_cooler { nullptr };
     wxStaticText*                         m_mapping_note { nullptr };
     // CrealityPrint: Use CFS + Calibrate, null when the device is not a Creality host.
     wxWindow*                             m_creality_panel { nullptr };
@@ -272,6 +311,7 @@ public:
     virtual std::map<std::string, std::string> extendedInfo() const override;
 
 protected:
+    bool     use_third_party_map_panel() const override { return true; }
     int      preselect_slot(const SendPlateFilament& f) const override;
     wxString mapping_warning() const override;
 
