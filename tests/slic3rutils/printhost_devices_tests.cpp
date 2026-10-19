@@ -865,7 +865,7 @@ TEST_CASE("Anycubic: stock OctoPrint and Rinkhals Moonraker host helpers", "[Pri
     CHECK_FALSE(anycubic_upload_reply_ok(401, "Unauthorized"));
     CHECK_FALSE(anycubic_upload_reply_ok(200, "<html>login</html>"));
     CHECK_FALSE(anycubic_upload_reply_ok(200, R"({"error":{"message":"nope"}})"));
-    CHECK_FALSE(anycubic_upload_reply_ok(200, R"({"result":{"error":{"message":"nope"}}}"));
+    CHECK_FALSE(anycubic_upload_reply_ok(200, R"({"result":{"error":{"message":"nope"}}})"));
 
     SECTION("retry :7125 only on a portal body, not a bare 401/403")
     {
