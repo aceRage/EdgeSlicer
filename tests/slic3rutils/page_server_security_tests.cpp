@@ -523,6 +523,23 @@ TEST_CASE("login callback server keeps its open CORS and needs no token", "[Page
     server.stop();
 }
 
+TEST_CASE("http server start-stop after one request does not re-arm accept", "[PageServer][PageServerHttp]")
+{
+    // Regression for a macOS kqueue crash: do_accept's completion handler started
+    // another async_accept after stop() closed the acceptor (login-callback test
+    // stopped the server right after one request).
+    static constexpr int k_rounds = 20;
+    for (int i = 0; i < k_rounds; ++i) {
+        HttpServer server(free_port());
+        server.set_request_handler([](const std::string&) { return std::make_shared<HttpServer::ResponseNotFound>(); });
+        server.start();
+        server.stop_health_check();
+        const Reply r = http_get(server.get_port(), "/");
+        REQUIRE(r.status == 404);
+        server.stop();
+    }
+}
+
 TEST_CASE("page server does not share a port another process holds", "[PageServer][PageServerHttp]")
 {
     using boost::asio::ip::tcp;

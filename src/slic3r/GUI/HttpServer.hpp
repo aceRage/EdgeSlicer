@@ -292,6 +292,7 @@ private:
         boost::asio::io_service           io_service;
         boost::asio::ip::tcp::acceptor    acceptor;
         std::set<std::shared_ptr<session>> sessions;
+        std::atomic<bool>                  stopping{false};
 
         // 只声明构造函数，不在头文件中定义
         IOServer(HttpServer& server);
@@ -302,6 +303,8 @@ private:
         bool bind_loopback(boost::asio::ip::port_type port, std::string* error);
 
         void do_accept();
+        // Sets stopping and closes the acceptor on the io thread, then stops io_service.
+        void request_stop();
         void start(std::shared_ptr<session> session);
         void stop(std::shared_ptr<session> session);
         void stop_all();
@@ -319,6 +322,8 @@ private:
     // health-check thread that is itself blocked in is_healthy() waiting for
     // m_server_mtx, so it must only be called after the lock is released.
     void start_locked();
+    // request_stop(), join the io thread, stop_all(), reset server_. Caller holds m_server_mtx.
+    void stop_io_locked();
 
     std::unique_ptr<IOServer> server_{nullptr};
 

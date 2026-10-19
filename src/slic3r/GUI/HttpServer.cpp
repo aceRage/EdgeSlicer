@@ -3,6 +3,7 @@
 #include "LoginTicketGate.hpp"
 #include <chrono>
 #include <functional>
+#include <boost/asio/post.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string.hpp>
@@ -457,10 +458,15 @@ void session::read_next_line()
 
 void HttpServer::IOServer::do_accept()
 {
+    if (stopping.load() || !acceptor.is_open())
+        return;
+
     acceptor.async_accept([this](boost::system::error_code ec, boost::asio::ip::tcp::socket socket) {
-        if (!acceptor.is_open()) {
+        // stop() posts acceptor.close() onto this io thread. Re-arming after that
+        // (or after operation_aborted) calls kqueue_reactor::start_op on a closing
+        // reactor — EXC_BAD_ACCESS on macOS when a test stops the server after one request.
+        if (stopping.load() || !acceptor.is_open() || ec == boost::asio::error::operation_aborted)
             return;
-        }
 
         if (!ec) {
             const auto ss = std::make_shared<session>(*this, std::move(socket));
@@ -468,6 +474,19 @@ void HttpServer::IOServer::do_accept()
         }
 
         do_accept();
+    });
+}
+
+void HttpServer::IOServer::request_stop()
+{
+    stopping.store(true);
+    // Close on the io thread so async_accept completions cannot race close()
+    // inside the reactor. Then stop the io_service so in-flight sessions cannot
+    // keep run() alive until join.
+    boost::asio::post(io_service, [this]() {
+        boost::system::error_code ignored_ec;
+        acceptor.close(ignored_ec);
+        io_service.stop();
     });
 }
 
@@ -680,15 +699,23 @@ void HttpServer::stop()
     // dispatching handlers, and handlers themselves call IOServer::stop(session)
     // — mutating the same sessions set from two threads at once.
     std::lock_guard<std::mutex> lock(m_server_mtx);
-    if (server_) {
-        boost::system::error_code ignored_ec;
-        server_->acceptor.close(ignored_ec);
-        server_->io_service.stop();
-    }
+    stop_io_locked();
+}
+
+void HttpServer::stop_io_locked()
+{
+    if (server_)
+        server_->request_stop();
     if (m_http_server_thread.joinable())
         m_http_server_thread.join();
-    if (server_)
+    if (server_) {
+        // run() has returned, so the reactor is idle. Close here if the posted
+        // close did not run (io_service already stopped / never started).
+        boost::system::error_code ignored_ec;
+        if (server_->acceptor.is_open())
+            server_->acceptor.close(ignored_ec);
         server_->stop_all();
+    }
     server_.reset();
 }
 
@@ -707,16 +734,7 @@ void HttpServer::restart()
         // restart-check threads stay running (Edge); only the io server
         // lifecycle is serialized here.
         std::lock_guard<std::mutex> lock(m_server_mtx);
-        if (server_) {
-            boost::system::error_code ignored_ec;
-            server_->acceptor.close(ignored_ec);
-            server_->io_service.stop();
-        }
-        if (m_http_server_thread.joinable())
-            m_http_server_thread.join();
-        if (server_)
-            server_->stop_all();
-        server_.reset();
+        stop_io_locked();
 
         BOOST_LOG_TRIVIAL(debug) << "Waiting for resources to be released...";
         std::this_thread::sleep_for(std::chrono::milliseconds(500)); // 等待资源释放
