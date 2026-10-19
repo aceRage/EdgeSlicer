@@ -546,6 +546,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HomeDownload.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
+    GUI/ElegooCamRelay.cpp
+    GUI/ElegooCamRelay.hpp
     GUI/RemoteAccess.cpp
     GUI/RemoteAccess.hpp
     GUI/RemoteControl.cpp
@@ -615,6 +617,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LiveActivityPush.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
+    GUI/ElegooCanvasUI.cpp
+    GUI/ElegooCanvasUI.hpp
     GUI/PrintHostDevicesDialog.cpp
     GUI/PrintHostDevicesDialog.hpp
     GUI/CostsDialog.cpp
@@ -963,9 +967,15 @@ set(SLIC3R_GUI_SOURCES
     Utils/Duet.hpp
     Utils/ElegooCanvas.cpp
     Utils/ElegooCanvas.hpp
+    Utils/ElegooCanvasMapping.cpp
+    Utils/ElegooCanvasMapping.hpp
     Utils/ElegooCanvasQuery.cpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
+    Utils/ElegooSdcp.cpp
+    Utils/ElegooSdcp.hpp
+    Utils/ElegooSdcpMonitor.cpp
+    Utils/ElegooSdcpMonitor.hpp
     Utils/EmbossStyleManager.cpp
     Utils/EmbossStyleManager.hpp
     Utils/ESP3D.cpp

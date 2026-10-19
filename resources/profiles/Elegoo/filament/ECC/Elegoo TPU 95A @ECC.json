@@ -11,7 +11,11 @@
     "pressure_advance": [
         "0.024"
     ],
+    "filament_cost": [
+        "20"
+    ],
     "compatible_printers": [
+        "Elegoo Centauri Carbon 0.2 nozzle",
         "Elegoo Centauri Carbon 0.4 nozzle",
         "Elegoo Centauri Carbon 0.6 nozzle",
         "Elegoo Centauri Carbon 0.8 nozzle"

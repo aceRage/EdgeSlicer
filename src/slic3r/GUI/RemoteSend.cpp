@@ -12,6 +12,7 @@
 #include "PlatePrintHistoryRecorder.hpp"
 #include "Plater.hpp"
 #include "RemoteAccess.hpp"
+#include "RemoteControl.hpp" // speaks_sdcp
 #include "SelectMachine.hpp" // CloudTaskNozzleId
 #include "SpoolmanDialog.hpp" // deduct_after_send_async
 #include "Jobs/PrintJob.hpp" // PrintPrepareData
@@ -1883,6 +1884,43 @@ void list_hosts(json& printers, int plate)
         }
     } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] listing devices failed: " << e.what();
+    } catch (...) {}
+    // Elegoo SDCP printers (a Centauri Carbon 1) of every other printer model too, and while a Bambu
+    // preset is selected: the hub watches them over its own connection (RemoteControl::describe_hosts
+    // fills their live state), so they are on the list like a Bambu printer or a LAN Snapmaker.
+    // Monitoring and control only: the current plate was sliced for another printer, so no send.
+    try {
+        const std::string current = bundle->use_bbl_network() ? std::string() : PrintHostDevices::current_model_key(*bundle);
+        for (const auto& kv : PrintHostDevices::all_devices()) {
+            if (!current.empty() && kv.first == current) continue; // listed above, with its send fields
+            for (const PrintHostDevices::Device& d : kv.second) {
+                const std::string model = d.printer_model.empty() ? kv.first : d.printer_model;
+                if (d.address.empty() || !RemoteControl::speaks_sdcp(d.host_type, model)) continue;
+                json p;
+                p["id"]            = "ph:" + d.id;
+                p["kind"]          = "printhost";
+                p["name"]          = d.display_name();
+                p["model"]         = model;
+                p["url"]           = d.address;
+                p["ip"]            = SnapmakerLan::host_of(d.address);
+                p["host_type"]     = d.host_type;
+                p["device_id"]     = d.id;
+                p["model_key"]     = kv.first;
+                p["alias"]         = d.alias;
+                p["last_used"]     = false;
+                p["is_current"]    = false;
+                p["online"]        = true; // until describe_hosts says otherwise
+                p["status"]        = "unknown";
+                p["model_matches"] = false;
+                p["can_upload"]    = false;
+                p["can_print"]     = false;
+                p["can_pause"]     = false;
+                p["can_resume"]    = false;
+                p["can_stop"]      = false;
+                p["print_error"]   = nullptr;
+                printers.push_back(p);
+            }
+        }
     } catch (...) {}
 
     std::shared_ptr<PrintHost> connected;

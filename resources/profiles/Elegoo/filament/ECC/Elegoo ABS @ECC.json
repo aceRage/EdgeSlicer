@@ -20,6 +20,12 @@
     "nozzle_temperature_initial_layer": [
         "270"
     ],
+    "cool_plate_temp": [
+        "30"
+    ],
+    "cool_plate_temp_initial_layer": [
+        "30"
+    ],
     "compatible_printers": [
         "Elegoo Centauri Carbon 0.2 nozzle",
         "Elegoo Centauri Carbon 0.4 nozzle",
