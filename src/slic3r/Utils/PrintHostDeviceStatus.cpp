@@ -20,6 +20,15 @@ using nlohmann::json;
 
 std::string Slot::label() const
 {
+    if (unit >= 0) {
+        // A CANVAS tray: numbered as the printer's screen counts them, 1..4 per unit.
+        std::string out = "Tray " + std::to_string(index + 1);
+        if (loaded && !type.empty())
+            out += " " + (sub_type.empty() ? type : sub_type);
+        else if (!loaded)
+            out += " (empty)";
+        return out;
+    }
     std::string out = name.empty() ? "T" + std::to_string(index + 1) : name;
     if (!type.empty()) {
         out += " " + type;
@@ -112,15 +121,16 @@ bool can_probe(const std::string& host_type_key)
 {
     // The host types this fork has a status client for. Adding one here means writing that client;
     // there is no generic "ask a print host how it is" in this codebase.
-    return speaks_moonraker(host_type_key) || PrusaLinkStatus::speaks_prusalink(host_type_key);
+    return speaks_moonraker(host_type_key) || PrusaLinkStatus::speaks_prusalink(host_type_key) ||
+           host_type_key == "elegoolink";
 }
 
 std::string no_filament_note(const std::string& host_type_key)
 {
     if (host_type_key == "elegoolink")
-        // Measured against the fork's own client, not guessed: see the header.
-        return "Elegoo Link reports no filament or slot data (its SDCP client asks only for the "
-               "print status), so there is nothing to map. The plate is sent exactly as it was sliced.";
+        // A Centauri Carbon 1 with a CANVAS reports its trays (ElegooCanvas.hpp); anything else on
+        // Elegoo Link - or a CC1 without a CANVAS, or one that did not answer - has nothing to map.
+        return "Elegoo Link reports no CANVAS slot data, so there is nothing to map. The plate is sent exactly as it was sliced.";
     if (PrusaLinkStatus::speaks_prusalink(host_type_key))
         // Measured against the API, not guessed: PrusaLink's /api/v1/status reports the printer's
         // state and its two heaters, and /api/v1/job the file it is on. Neither says what filament
@@ -290,6 +300,59 @@ static Status probe_prusalink(const Device& d, int timeout_s)
     return st;
 }
 
+Status status_from_canvas(const CanvasQueryResult& r)
+{
+    Status st;
+    st.probed = true;
+    st.online = r.reached;
+    st.error  = r.error;
+    if (!r.ok) {
+        if (r.no_canvas)
+            st.note = "The printer reports no CANVAS attached, so there is nothing to map. The plate is sent exactly as it was sliced.";
+        else if (!r.reached)
+            st.note = "this printer did not answer" + (r.error.empty() ? std::string() : (": " + r.error));
+        else
+            st.note = no_filament_note("elegoolink");
+        return st;
+    }
+    st.canvas = true;
+    for (const CanvasTray& t : r.info.trays) {
+        Slot s;
+        s.index    = t.slot_index;
+        s.unit     = t.canvas_id;
+        s.tray     = t.tray_id;
+        s.loaded   = t.has_filament;
+        s.min_temp = t.min_nozzle_temp;
+        s.max_temp = t.nozzle_temp;
+        if (t.has_filament) {
+            s.type     = t.tray_type;
+            s.sub_type = t.filament_name.empty() ? t.filament_type : t.filament_name;
+            s.vendor   = t.brand;
+            s.color    = t.colour_hex();
+            s.name     = canvas_tray_name(t);
+            st.slots_have_filaments = true;
+        }
+        st.slots.push_back(std::move(s));
+    }
+    if (!st.slots_have_filaments)
+        st.note = "The CANVAS reports no loaded trays, so there is nothing to map. The plate is sent exactly as it was sliced.";
+    return st;
+}
+
+// A Centauri Carbon 1: its CANVAS over SDCP. Any other Elegoo model has nothing this fork can read.
+static Status probe_elegoo(const Device& d, int timeout_s)
+{
+    if (!canvas_capable_model(d.printer_model)) {
+        Status st;
+        st.note = no_filament_note(d.host_type);
+        return st;
+    }
+    CanvasQueryOptions opts;
+    opts.frame_timeout_ms = std::max(1, timeout_s) * 1000;
+    opts.step_timeout_ms  = std::max(2, 2 * timeout_s) * 1000;
+    return status_from_canvas(canvas_query(d.address, opts));
+}
+
 Status probe(const Device& d, int timeout_s)
 {
     Status st;
@@ -301,6 +364,8 @@ Status probe(const Device& d, int timeout_s)
         st.note = no_filament_note(d.host_type);
         return st;
     }
+    if (d.host_type == "elegoolink")
+        return probe_elegoo(d, timeout_s);
     st.probed = true;
     if (PrusaLinkStatus::speaks_prusalink(d.host_type))
         return probe_prusalink(d, timeout_s);

@@ -620,18 +620,18 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK_FALSE(st.note.empty());
     }
 
-    SECTION("Elegoo Link is never asked, and says so") {
-        // Measured against this fork's own ElegooLink: it speaks SDCP over its own websocket and
-        // sends only Cmd 0 (status, one field read) and Cmd 128 (start print). Cmd 1 (Attributes),
-        // where an SDCP device would describe its materials, is declared and never sent.
-        CHECK_FALSE(can_probe("elegoolink"));
+    SECTION("Elegoo Link is asked only for a Centauri Carbon 1's CANVAS, and says so otherwise") {
+        // A CC1 answers Cmd 324 with its CANVAS trays (ElegooCanvas.hpp, tested with a scripted
+        // printer in elegoo_canvas_tests.cpp). Any other Elegoo model has nothing to read.
+        CHECK(can_probe("elegoolink"));
         CHECK(can_probe("octoprint"));
         const std::string note = no_filament_note("elegoolink");
         CHECK(note.find("Elegoo Link") != std::string::npos);
         CHECK(note.find("sent exactly as it was sliced") != std::string::npos);
 
-        Device d   = make_device("Centauri", "192.0.2.1", "elegoolink");
-        Status  st = probe(d, 1); // no network is touched: the host type is not probeable
+        Device d        = make_device("Neptune", "192.0.2.1", "elegoolink");
+        d.printer_model = "Elegoo Neptune 4";
+        Status  st = probe(d, 1); // no network is touched: not a model with a CANVAS
         CHECK_FALSE(st.probed);
         CHECK_FALSE(st.online);
         CHECK(st.slots.empty());
@@ -895,7 +895,7 @@ TEST_CASE("PrusaLinkStatus: what a PrusaLink printer says it is doing", "[PrintH
         CHECK(PrintHostDevices::can_probe("prusalink"));
         CHECK(PrintHostDevices::can_probe("prusaconnect"));
         CHECK(PrintHostDevices::can_probe("octoprint"));
-        CHECK_FALSE(PrintHostDevices::can_probe("elegoolink"));
+        CHECK(PrintHostDevices::can_probe("elegoolink")); // the CC1's CANVAS
         // It reports a state but never a filament, and the dialog has to say so.
         CHECK(PrintHostDevices::no_filament_note("prusalink").find("PrusaLink") != std::string::npos);
     }

@@ -16,6 +16,7 @@
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
 #include "PhysicalPrinterDialog.hpp"
+#include "ElegooCanvasUI.hpp"
 #include "format.hpp"
 #include "Widgets/Button.hpp"
 #include "../Utils/PrintHost.hpp"
@@ -210,6 +211,12 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
     m_btn_edit       = make(_L("Edit") + dots, ButtonStyle::Regular);
     m_btn_remove     = make(_L("Remove"), ButtonStyle::Alert);
     m_btn_test       = make(_L("Test"), ButtonStyle::Regular);
+    // A Centauri Carbon 1 on Elegoo Link: what its CANVAS says, redacted, into the log folder, so a
+    // payload can be sent in without anything identifying the printer.
+    m_btn_canvas     = make(_L("Capture Canvas data"), ButtonStyle::Regular);
+    m_btn_canvas->SetToolTip(_L("Read the CANVAS of the selected printer and save it, without its serial number, "
+                                "mainboard id or address, as a JSON file in the log folder"));
+    m_btn_canvas->Show(canvas_capable_model(m_model_key));
     m_btn_connection = make(_L("Edit connection") + dots, ButtonStyle::Regular);
     m_btn_connection->SetToolTip(_L("The printer preset's own address and credentials"));
     m_btn_close      = make(_L("Close"), ButtonStyle::Confirm);
@@ -219,6 +226,7 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
     btns->Add(m_btn_edit, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->Add(m_btn_remove, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->Add(m_btn_test, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
+    btns->Add(m_btn_canvas, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->AddStretchSpacer();
     btns->Add(m_btn_connection, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, gap);
     btns->Add(m_btn_close, 0, wxALIGN_CENTER_VERTICAL);
@@ -232,6 +240,7 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
     m_btn_edit->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_edit(); });
     m_btn_remove->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_remove(); });
     m_btn_test->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_test(); });
+    m_btn_canvas->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_capture_canvas(); });
     m_btn_connection->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_edit_connection(); });
     m_btn_close->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_CANCEL); });
     m_list->Bind(wxEVT_DATAVIEW_SELECTION_CHANGED, [this](wxDataViewEvent&) { update_buttons(); });
@@ -242,7 +251,8 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
     m_btn_edit->MoveAfterInTabOrder(m_btn_add);
     m_btn_remove->MoveAfterInTabOrder(m_btn_edit);
     m_btn_test->MoveAfterInTabOrder(m_btn_remove);
-    m_btn_connection->MoveAfterInTabOrder(m_btn_test);
+    m_btn_canvas->MoveAfterInTabOrder(m_btn_test);
+    m_btn_connection->MoveAfterInTabOrder(m_btn_canvas);
     m_btn_close->MoveAfterInTabOrder(m_btn_connection);
     SetEscapeId(wxID_CANCEL);
     m_list->SetFocus();
@@ -292,6 +302,8 @@ void PrintHostDevicesDialog::update_buttons()
     m_btn_edit->Enable(has);
     m_btn_remove->Enable(has);
     m_btn_test->Enable(has);
+    Device d;
+    m_btn_canvas->Enable(has && selected(d) && d.host_type == "elegoolink");
 }
 
 void PrintHostDevicesDialog::on_add()
@@ -372,6 +384,14 @@ void PrintHostDevicesDialog::on_test()
         show_info(this, host->get_test_ok_msg(), _L("Success!"));
     else
         show_error(this, host->get_test_failed_msg(msg));
+}
+
+void PrintHostDevicesDialog::on_capture_canvas()
+{
+    Device d;
+    if (!selected(d) || d.host_type != "elegoolink")
+        return;
+    capture_canvas_data(this, d.address, m_model_key);
 }
 
 // The preset's own address, for whoever wants exactly that. It is behind a click on purpose: the

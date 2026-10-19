@@ -430,7 +430,10 @@ void GLModel::init_from(const indexed_triangle_set& its)
     data.reserve_indices(3 * its.indices.size());
 
     // Orca #14080 / #14724: read user preference: smooth normals enabled (with or without the realistic view).
-    const bool smooth_normals_enabled = wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool(SETTING_OPENGL_PHONG_SMOOTH_NORMALS);
+    // wxTheApp first: the CLI thumbnail path and the GL tests build models with no wxApp, and wxGetApp() would
+    // dereference a null app there.
+    const bool smooth_normals_enabled = wxTheApp != nullptr && wxGetApp().app_config != nullptr &&
+                                        wxGetApp().app_config->get_bool(SETTING_OPENGL_PHONG_SMOOTH_NORMALS);
 
     if (smooth_normals_enabled) {
         // Use per-corner smooth normals (via IGL): faces meeting at less than 5 degrees share their normal.
