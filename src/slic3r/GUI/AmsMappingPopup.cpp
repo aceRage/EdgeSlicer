@@ -12,9 +12,11 @@
 #include "Widgets/ProgressDialog.hpp"
 #include "Widgets/RoundedRectangle.hpp"
 #include "Widgets/StaticBox.hpp"
+#include "Widgets/StateColor.hpp"
 
 #include <wx/progdlg.h>
 #include <wx/clipbrd.h>
+#include <wx/control.h>
 #include <wx/dcgraph.h>
 #include <wx/graphics.h>
 #include <miniz.h>
@@ -176,8 +178,20 @@ void MaterialItem::render(wxDC &dc)
         dc.SetFont(::Label::Body_10);
     }
 
-    auto material_txt_size = dc.GetTextExtent(m_material_name);
-    dc.DrawText(m_material_name, wxPoint((MATERIAL_ITEM_SIZE.x - material_txt_size.x) / 2, (FromDIP(28) - material_txt_size.y) / 2));
+    wxString material_txt      = m_material_name;
+    auto     material_txt_size = dc.GetTextExtent(material_txt);
+    int      name_x            = (MATERIAL_ITEM_SIZE.x - material_txt_size.x) / 2;
+    if (!m_nozzle_badge.empty()) {
+        // 12 DIP badge at top-left: long types (PETG-CF) on a 64-DIP tile must not sit under it.
+        const int name_x_pad = FromDIP(12) + FromDIP(4);
+        const int name_max_w = GetSize().x - name_x_pad - FromDIP(4);
+        if (material_txt_size.x > name_max_w) {
+            material_txt      = wxControl::Ellipsize(material_txt, dc, wxELLIPSIZE_END, name_max_w);
+            material_txt_size = dc.GetTextExtent(material_txt);
+        }
+        name_x = std::max(name_x, name_x_pad);
+    }
+    dc.DrawText(material_txt, wxPoint(name_x, (FromDIP(28) - material_txt_size.y) / 2));
 
     // mapping num
     dc.SetFont(::Label::Body_10);
@@ -197,13 +211,14 @@ void MaterialItem::render(wxDC &dc)
     dc.DrawText(mapping_txt, wxPoint((MATERIAL_ITEM_SIZE.x - mapping_txt_size.x) / 2, FromDIP(30) + (FromDIP(16) - mapping_txt_size.y) / 2));
 
     if (!m_nozzle_badge.empty()) {
-        const int     d = FromDIP(16);
-        const wxPoint o(FromDIP(2), FromDIP(2));
+        const int      d        = FromDIP(12);
+        const wxPoint  o(FromDIP(2), FromDIP(2));
+        const wxColour badge_bg = StateColor::darkModeColorFor(wxColour(0x26, 0x2E, 0x30));
         dc.SetPen(*wxTRANSPARENT_PEN);
-        dc.SetBrush(wxBrush(wxColour(0x26, 0x2E, 0x30)));
+        dc.SetBrush(wxBrush(badge_bg));
         dc.DrawEllipse(o.x, o.y, d, d);
         dc.SetFont(::Label::Body_10);
-        dc.SetTextForeground(*wxWHITE);
+        dc.SetTextForeground(badge_bg.GetLuminance() < 0.6 ? *wxWHITE : wxColour(0x26, 0x2E, 0x30));
         dc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
         const wxSize ts = dc.GetTextExtent(m_nozzle_badge);
         dc.DrawText(m_nozzle_badge, o.x + (d - ts.x) / 2, o.y + (d - ts.y) / 2);

@@ -65,7 +65,7 @@ enum class ThirdPartyMapMismatch {
 std::string normalize_map_colour(const std::string& colour);
 
 // Bambu-style unit+slot: unit 0 slot 0 → "1A", unit 0 slot 3 → "1D", unit 1 slot 0 → "2A".
-// unit_id < 0: slot 0 → "A", slot 1 → "B", ...
+// unit_id < 0: 1-based slot numbers ("1", "2", ...) so slots past four do not repeat A–D.
 std::string bambu_style_slot_label(int unit_id, int slot_id);
 
 // The label a tile should show: slot.label if set, else bambu_style_slot_label().
@@ -94,7 +94,8 @@ std::string filament_badge_text(const ThirdPartySlicerFilament& filament, const 
 // Slots grouped by nozzle (when several) then unit, preserving first-seen order.
 std::vector<ThirdPartySlotGroup> group_slots(const std::vector<ThirdPartyDeviceSlot>& slots);
 
-// "0:1,1:2" — filament index to Slot::index. Skips "As sliced" (-1) rows. Same shape as
+// "0:1,1:2" — filament index to Slot::index. Empty when model.read_only (the cards may still
+// show an auto-match) or when every row is "As sliced". Same shape as
 // PrintHostSendDialog::filament_mapping().
 std::string encode_filament_mapping(const ThirdPartyFilamentMapModel& model);
 
