@@ -875,6 +875,19 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK_FALSE(parse_cfs_response("[]").ok);
         CHECK_FALSE(parse_cfs_response(R"({"boxsInfo":{}})").ok);
         REQUIRE_NOTHROW(parse_cfs_response(std::string(128, '{')));
+        CHECK_FALSE(parse_cfs_response(std::string(1024 * 1024 + 1, 'x')).ok);
+        CHECK(parse_cfs_response(std::string(1024 * 1024 + 1, 'x')).error == "message too large");
+        // Huge doubles are range-checked before the int cast.
+        const CfsParseResult huge_id = parse_cfs_response(R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": 1e20, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "type": "PLA", "vendor": "X", "color": "#FF0000" }
+                ]}
+            ]}
+        })");
+        CHECK(huge_id.ok);
+        REQUIRE(huge_id.slots.size() == 4);
+        CHECK(huge_id.slots[0].box_id == 0); // fallback, not a truncated int
         // Huge box/material arrays are capped, not thrown.
         std::string huge = R"({"boxsInfo":{"materialBoxs":[)";
         for (int i = 0; i < 40; ++i) {
@@ -921,6 +934,15 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         const Status st = status_from_cfs(k2_boxs);
         CHECK(auto_match_slot("PLA", "#FF0000", st.slots, true) == 1);
         CHECK(auto_match_slot("ABS", "#FFFFFF", st.slots, true) == 4);
+        // Colour-only must not pick a slot whose material conflicts.
+        CfsSlot pla_only;
+        pla_only.loaded        = true;
+        pla_only.filament_type = "PLA";
+        pla_only.color_hex     = "#FF0000";
+        CHECK(auto_match_index("PETG", "#FF0000", {pla_only}) == -1);
+        CHECK(auto_match_index("PLA", "#FF0000FF", {pla_only}) == 0); // 8-char plate colour
+        CHECK(colour_hex("#FF0000FF") == "#FF0000");
+        CHECK(colour_hex("00FF00AA") == "#00FF00");
     }
 
     SECTION("start commands match Creality Print") {
@@ -936,8 +958,15 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         const auto mc = multi_color_print_cmd("/usr/data/printer_data/gcodes/b.gcode", 0);
         CHECK(mc["params"]["multiColorPrint"]["gcode"] == "/usr/data/printer_data/gcodes/b.gcode");
         CHECK(mc["params"]["multiColorPrint"]["enableSelfTest"] == 0);
-        CHECK(color_match_id(1, 0) == "T1A");
-        CHECK(color_match_id(0, 3) == "T0D");
+        CHECK(color_match_id(0) == "T1A");
+        CHECK(color_match_id(1) == "T1B");
+        CHECK(color_match_id(3) == "T1D");
+        CHECK(color_match_id(4) == "T2A");
+        // Non-identity mapping: filament 0 (T1A) sent to box 2 slot 1.
+        const auto mapped = color_match_item_from_value("T1A\tPLA\t#FF0000\t2\t1");
+        CHECK(mapped["id"] == "T1A");
+        CHECK(mapped["boxId"] == 2);
+        CHECK(mapped["materialId"] == 1);
         CHECK(color_match_item_from_value("bad").empty());
         CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
     }

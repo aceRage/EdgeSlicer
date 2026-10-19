@@ -1,7 +1,9 @@
 #ifndef slic3r_PrintHostSendDialog_hpp_
 #define slic3r_PrintHostSendDialog_hpp_
 
+#include <atomic>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 #include <boost/filesystem/path.hpp>
@@ -48,7 +50,7 @@ class PrintHostSendDialog : public GUI::MsgDialog
 {
 public:
     PrintHostSendDialog(const boost::filesystem::path &path, PrintHostPostUploadActions post_actions, const wxArrayString& groups, const wxArrayString& storage_paths, const wxArrayString& storage_names, bool switch_to_device_tab);
-    virtual ~PrintHostSendDialog() {}
+    virtual ~PrintHostSendDialog();
     boost::filesystem::path filename() const;
     PrintHostPostUploadAction post_action() const;
     std::string group() const;
@@ -92,9 +94,10 @@ protected:
     // Builds the device row and the mapping table into content_sizer. Called from init() before
     // the file name, so the target is the first thing read and the first thing tabbed to.
     void build_device_ui();
-    // Asks the picked device what is loaded and rebuilds the mapping table. Blocking, with a busy
-    // cursor and a short timeout - the same shape as the devices dialog's Test button.
+    // Asks the picked device what is loaded and rebuilds the mapping table. The Creality
+    // (and other) probe runs off the UI thread; apply_device_status() paints the result.
     void refresh_device_status();
+    void apply_device_status();
     void rebuild_mapping_rows();
     // CrealityPrint options (Use CFS, Calibrate before printing), shown when the picked
     // device is a crealityprint host. Called with the mapping rows.
@@ -133,6 +136,12 @@ protected:
     wxBoxSizer*                           m_creality_sizer { nullptr };
     wxCheckBox*                           m_creality_use_cfs { nullptr };
     wxCheckBox*                           m_creality_calibrate { nullptr };
+    // Lets a late probe result drop itself if the dialog closed or the user switched devices.
+    struct ProbeToken {
+        std::atomic<int>  gen { 0 };
+        std::atomic<bool> alive { true };
+    };
+    std::shared_ptr<ProbeToken>           m_probe_token;
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
     bool                                  m_unload_default { false };

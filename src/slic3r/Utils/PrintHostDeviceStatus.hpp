@@ -28,12 +28,14 @@
 //    state and both heaters, `/api/v1/job` the file it is printing. See PrusaLinkStatus.hpp. It
 //    names no filaments at all - the API has no filament-identity story - so it comes back online
 //    with a state and an empty slot list.
-//  * A CrealityPrint host (K1/K2 + CFS) answers /info and a port-9999 WebSocket `boxsInfo`. The
-//    extra WebSocket call is capped at about 1 s because the send dialog probes on the UI thread.
+//  * A CrealityPrint host (K1/K2 + CFS) answers /info and a port-9999 WebSocket `boxsInfo`.
+//    Both calls use a real deadline (CrealityWsClient / Http timeout); the send dialog runs
+//    this probe off the UI thread and posts the result back.
 //  * Everything else (Duet, Repetier, SimplyPrint, ...) is not probed: this fork has no client for
 //    their status APIs, and guessing would cost a timeout per address.
 //
-// Blocking. The send dialog calls it on the UI thread with a short timeout; extra calls stay ~1 s.
+// Blocking. The send dialog must not call this on the UI thread; it runs the probe on a
+// worker and posts the result. timeout_s is the per-call deadline (Creality uses ~1 s).
 
 namespace Slic3r {
 namespace PrintHostDevices {
@@ -84,7 +86,7 @@ struct Status
     std::string       cfs_variant; // "CFS", "CFS-C", ... when the printer named one
 };
 
-// Blocking, off the GUI thread. `timeout_s` is per HTTP call.
+// Blocking. Callers that own a GUI run this on a worker. `timeout_s` is the per-call deadline.
 Status probe(const Device& d, int timeout_s = 3);
 
 // The half of probe() that has no network in it: a Moonraker `result.status` object turned
