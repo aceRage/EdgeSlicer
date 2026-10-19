@@ -11,29 +11,37 @@
 // `_Creality-<MAC-derived-hex>._udp.local.`, so a fixed-name Bonjour query
 // (the Physical Printer "Browse" button, which CrealityPrint::has_auto_discovery
 // already enables) does not see them. Upstream finds them with a DNS-SD
-// meta-query (`_services._dns-sd._udp.local.`) via a vendored library:
+// meta-query (`_services._dns-sd._udp.local.`) via vendored mdns.
 //
-//   deps_src/mdns/          (~110 KB source, new CMake static lib)
-//     mdns.c / mdns.h       mjansson/mdns, public domain (~45 + 57 KB)
-//     cxmdns.cpp / cxmdns.h CrealityPrint v7.1.1 wrapper, AGPL-3.0 (~8 KB)
-//     CMakeLists.txt        add_library(mdns STATIC ...); MSVC + Iphlpapi Ws2_32
+// Approach (do this, not Creality's cxmdns):
 //
-//   src/slic3r/Utils/CrealityHostDiscovery.cpp  (~120 lines)
-//     cxnet::syncDiscoveryService({"Creality","creality"}), dedupe by IP,
-//     optional GET http://<ip>/info for model/MAC (CrealityPrintModel table).
+//   1. Vendor only public-domain mjansson/mdns:
+//        deps_src/mdns/mdns.c + mdns.h   (~45 + 57 KB)
+//        deps_src/mdns/CMakeLists.txt    add_library(mdns STATIC mdns.c)
+//                                        MSVC: Iphlpapi + Ws2_32
+//      Do **not** vendor CrealityPrint's cxmdns.cpp / cxmdns.h (AGPL-3.0,
+//      ~8 KB). Write a thin wrapper of our own (~100 lines) that sends the
+//      DNS-SD meta-query and keeps replies whose type contains "Creality".
 //
-//   src/slic3r/GUI/CrealityDiscoveryDialog.*    (upstream #13752 UI)
-//     Better fit here: feed IPs into PrintHostDevices (the existing device
-//     store) rather than a second dialog — same pattern as the CFS probe.
+//   2. src/slic3r/Utils/CrealityHostDiscovery.cpp
+//        - scan() runs **off the UI thread**
+//        - every multicast send/recv step has a real deadline (same idea as
+//          CrealityWsClient: async + run_for, close the socket on expiry)
+//        - overall budget ~5 s for the browse, plus optional GET /info
+//          per host via CrealityPrint::fetch_info (already deadline-bound)
+//        - dedupe by IP; fill model/MAC from /info using CrealityPrintModel
+//
+//   3. Do **not** port CrealityDiscoveryDialog. Feed IPs into PrintHostDevices
+//      (alias = hostname, host_type = crealityprint) so the existing send-dialog
+//      device picker sees them — same architecture as the CFS probe.
 //
 // CMake wiring (not done): add_subdirectory(deps_src/mdns), link `mdns` into
-// libslic3r_gui, add the two .cpp files to that target. That is a dependency
-// bump and needs a review of the AGPL wrapper vs this fork's license.
+// libslic3r_gui, add CrealityHostDiscovery.cpp. That follow-up needs a CMake
+// review; this stack does not edit CMake.
 //
 // Alternative that avoids the vendor lib: extend Bonjour.cpp to send a
-// DNS-SD meta-query and keep replies whose type contains "Creality". That is
-// more work and still needs a multicast DNS sender/receiver; this fork's
-// Bonjour client is service-name specific today.
+// DNS-SD meta-query. More work; this fork's Bonjour client is service-name
+// specific today.
 
 namespace Slic3r {
 
@@ -52,7 +60,8 @@ class CrealityHostDiscovery
 {
 public:
     // Would block ~5 s plus ~2-4 s per host when probe_info is true.
-    // Stub: returns nothing until deps_src/mdns is vendored (see header comment).
+    // Must be called off the UI thread, with a real deadline, once implemented.
+    // Stub: returns nothing until mjansson/mdns is vendored (see header comment).
     static std::vector<CrealityHost> scan(bool /*probe_info*/ = true) { return {}; }
 };
 

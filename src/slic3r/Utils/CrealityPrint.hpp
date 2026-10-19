@@ -56,9 +56,10 @@ public:
     virtual bool can_test() const { return true; };
     std::string  get_host() const override;
     // Browse uses the stock Bonjour dialog (OctoPrint-style names). K-series
-    // printers announce `_Creality-<id>._udp.local.` and need a DNS-SD meta-query
-    // (upstream CrealityHostDiscovery + vendored deps_src/mdns). That dependency
-    // is not added in this stack; see CrealityHostDiscovery.hpp.
+    // printers announce `_Creality-<id>._udp.local.` and need a DNS-SD meta-query.
+    // Plan: a thin wrapper of our own around public-domain mjansson/mdns
+    // (not Creality's AGPL cxmdns), off the UI thread, with a real deadline.
+    // Not added in this stack; see CrealityHostDiscovery.hpp.
     bool has_auto_discovery() const override { return true; }
 
     wxString                           get_test_ok_msg() const override;
