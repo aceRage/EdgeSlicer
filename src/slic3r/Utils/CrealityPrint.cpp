@@ -1,6 +1,8 @@
 #include "CrealityPrint.hpp"
+#include "CrealityPrintModel.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <sstream>
 #include <exception>
 #include <boost/format.hpp>
@@ -97,6 +99,11 @@ bool CrealityPrint::test(wxString& msg) const
         })
         .on_complete([&, this](std::string body, unsigned) {
             BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: Got version: %2%") % name % body;
+            const std::string model = CrealityPrintModel::parse_model_from_info(body);
+            if (!model.empty()) {
+                m_model = model;
+                BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Detected model: %2%") % name % m_model;
+            }
         })
 #ifdef WIN32
         .ssl_revoke_best_effort(m_ssl_revoke_best_effort)
@@ -134,14 +141,20 @@ bool CrealityPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, 
     auto  http = Http::post(url); // std::move(url));
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
-    http.form_add("path", upload_parent_path.string())
-        .form_add_file("file", upload_data.source_path.string(), safe_upload_filename)
+    // Upstream Orca #14089: CFS-capable models reject (or ignore) the multipart path field.
+    if (!CrealityPrintModel::omit_upload_path(m_model))
+        http.form_add("path", upload_parent_path.string());
+    http.form_add_file("file", upload_data.source_path.string(), safe_upload_filename)
 
         .on_complete([&](std::string body, unsigned status) {
             BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: File uploaded: HTTP %2%: %3%") % name % status % body;
 
             if (upload_data.post_action == PrintHostPostUploadAction::StartPrint) {
-                start_print(safe_upload_filename);
+                wxString errormsg;
+                if (!start_print(errormsg, safe_upload_filename)) {
+                    error_fn(std::move(errormsg));
+                    res = false;
+                }
             }
         })
         .on_error([&](std::string body, std::string error, unsigned status) {
@@ -186,42 +199,38 @@ std::string CrealityPrint::safe_filename(const std::string &filename) const
     return safe_filename;
 }
 
-void CrealityPrint::start_print(const std::string &filename) const
+static void ws_connect(net::io_context &ioc, websocket::stream<beast::tcp_stream> &ws, const std::string &host_url, const std::string &port)
+{
+    // Upstream Http::get_host_from_url; this fork's Http::url_host strips scheme and port.
+    std::string host = CrealityPrintModel::ws_host(host_url);
+    if (host.empty())
+        throw std::runtime_error("CrealityPrint: empty print_host");
+
+    tcp::resolver resolver{ioc};
+    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(5));
+    auto const results = resolver.resolve(host, port);
+    beast::get_lowest_layer(ws).connect(results);
+    host += ':' + std::to_string(beast::get_lowest_layer(ws).socket().remote_endpoint().port());
+
+    ws.set_option(websocket::stream_base::decorator([](websocket::request_type &req) {
+        req.set(http::field::user_agent, std::string(BOOST_BEAST_VERSION_STRING) + " websocket-client-coro");
+    }));
+    ws.handshake(host, "/");
+    // K1-family firmware requires TEXT-mode WebSocket frames; K2-family accepts both.
+    ws.text(true);
+}
+
+bool CrealityPrint::start_print(wxString &msg, const std::string &filename) const
 {
     try {
-        std::string host = m_host;
-        auto const port = "9999";
+        const std::string gcode_path = CrealityPrintModel::gcode_path(m_model, filename);
 
-        json j2 = {
-            { "method", "set" },
-            {
-                "params", {
-                    { "opGcodeFile", "printprt:/usr/data/printer_data/gcodes/" + filename }
-                }    
-            }
-        };
+        json j2 = {{"method", "set"}, {"params", {{"opGcodeFile", "printprt:" + gcode_path}}}};
 
-        net::io_context ioc;
+        net::io_context                      ioc;
+        websocket::stream<beast::tcp_stream> ws{ioc};
+        ws_connect(ioc, ws, m_host, "9999");
 
-        tcp::resolver resolver{ioc};
-        websocket::stream<tcp::socket> ws{ioc};
-
-        auto const results = resolver.resolve(host, port);
-
-        auto ep = net::connect(ws.next_layer(), results);
-
-        host += ':' + std::to_string(ep.port());
-
-        ws.set_option(websocket::stream_base::decorator(
-            [](websocket::request_type& req)
-            {
-                req.set(http::field::user_agent,
-                    std::string(BOOST_BEAST_VERSION_STRING) +
-                        " websocket-client-coro");
-            }));
-
-        ws.handshake(host, "/");
-        
         ws.write(net::buffer(to_string(j2)));
 
         // K1-family firmware closes the WebSocket right after accepting the
@@ -230,16 +239,20 @@ void CrealityPrint::start_print(const std::string &filename) const
         // (the command is delivered by write()). Read best-effort, ignore errors.
         beast::flat_buffer buffer;
         beast::error_code  read_ec;
+        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
         ws.read(buffer, read_ec);
 
         // Same reason: the printer may have already closed the connection. A close
         // error here is not a failure - the start command was sent above.
         beast::error_code close_ec;
+        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
         ws.close(websocket::close_code::normal, close_ec);
-    } catch(std::exception const& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        return true;
+    } catch (std::exception const &e) {
+        BOOST_LOG_TRIVIAL(error) << "CrealityPrint: Error starting print: " << e.what();
+        msg = wxString::FromUTF8(e.what());
+        return false;
     }
-    
 }
 
 }

@@ -10,6 +10,7 @@
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
+#include "slic3r/Utils/CrealityPrintModel.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -721,4 +722,70 @@ TEST_CASE("PrintHost: get_err_code_from_body does not throw on malformed JSON", 
     // A successful Duet connect often has no err field; that is success (0), not unknown (-1).
     CHECK(PrintHost::get_err_code_from_body(R"({})") == 0);
     REQUIRE_NOTHROW(PrintHost::get_err_code_from_body("<html>404</html>"));
+}
+
+TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
+{
+    using namespace Slic3r::CrealityPrintModel;
+
+    SECTION("K1-family uses /usr/data") {
+        CHECK(is_k1_family("K1"));
+        CHECK(is_k1_family("K1 SE"));
+        CHECK(is_k1_family("K1C"));
+        CHECK(is_k1_family("K1_CFS-C"));
+        CHECK(gcode_root("K1") == "/usr/data");
+        CHECK(gcode_path("K1C", "cube.gcode") == "/usr/data/printer_data/gcodes/cube.gcode");
+        CHECK(omit_upload_path("K1"));
+        CHECK(omit_upload_path("K1_CFS-C"));
+    }
+
+    SECTION("K2-platform uses /mnt/UDISK") {
+        CHECK_FALSE(is_k1_family("F008"));
+        CHECK_FALSE(is_k1_family("F012"));
+        CHECK_FALSE(is_k1_family("F021"));
+        CHECK_FALSE(is_k1_family("F022"));
+        CHECK_FALSE(is_k1_family("K2"));
+        CHECK(gcode_root("F008") == "/mnt/UDISK");
+        CHECK(gcode_root("F012") == "/mnt/UDISK");
+        CHECK(gcode_root("F021") == "/mnt/UDISK");
+        CHECK(gcode_root("F022") == "/mnt/UDISK");
+        CHECK(gcode_path("F021", "benchy.gcode") == "/mnt/UDISK/printer_data/gcodes/benchy.gcode");
+        CHECK(omit_upload_path("F008"));
+        CHECK(omit_upload_path("F012"));
+        CHECK(omit_upload_path("F021"));
+        CHECK(omit_upload_path("F022"));
+        CHECK(model_display_name("F008") == "K2 Plus");
+        CHECK(model_display_name("F012") == "K2 Pro");
+        CHECK(model_display_name("F021") == "K2");
+        CHECK(model_display_name("F022") == "SPARKX i7");
+    }
+
+    SECTION("an unknown model is not treated as K1, so the K2-platform root applies") {
+        CHECK_FALSE(is_k1_family(""));
+        CHECK_FALSE(is_k1_family("Ender-3"));
+        CHECK(gcode_root("") == "/mnt/UDISK");
+        CHECK_FALSE(omit_upload_path(""));
+        CHECK_FALSE(model_supports_multi_color("Ender-3"));
+    }
+
+    SECTION("ws_host strips scheme and port (Http::url_host)") {
+        CHECK(ws_host("192.168.1.50") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50/") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50:80") == "192.168.1.50");
+        CHECK(ws_host("https://k2.local:443/path") == "k2.local");
+        CHECK(ws_host("http://Printer.Local:7125") == "printer.local");
+        CHECK(ws_host("").empty());
+    }
+
+    SECTION("parse_model_from_info is hostile-JSON safe") {
+        CHECK(parse_model_from_info(R"({"model":"K1C"})") == "K1C");
+        CHECK(parse_model_from_info(R"({"model":"F021","mac":"aa"})") == "F021");
+        CHECK(parse_model_from_info("").empty());
+        CHECK(parse_model_from_info("<html>").empty());
+        CHECK(parse_model_from_info("[]").empty());
+        CHECK(parse_model_from_info(R"({"model":1})").empty());
+        CHECK(parse_model_from_info(R"({"name":"K1"})").empty());
+        REQUIRE_NOTHROW(parse_model_from_info(std::string(64, '{')));
+    }
 }

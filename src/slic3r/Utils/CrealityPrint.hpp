@@ -39,9 +39,10 @@ private:
     std::string m_cafile;
     std::string m_web_ui;
     bool        m_ssl_revoke_best_effort;
+    mutable std::string m_model;
 
     std::string make_url(const std::string& path) const;
-    void start_print(const std::string& path) const;
+    bool start_print(wxString& msg, const std::string& filename) const;
     std::string safe_filename(const std::string& filename) const;
 };
 } // namespace Slic3r
