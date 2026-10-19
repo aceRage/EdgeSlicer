@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <sstream>
 #include <exception>
 #include <boost/format.hpp>
@@ -57,7 +58,8 @@ CrealityPrint::CrealityPrint(DynamicPrintConfig* config) :
     m_cafile(config->opt_string("printhost_cafile")),
     m_port(config->opt_string("printhost_port")),
     m_apikey(config->opt_string("printhost_apikey")),
-    m_ssl_revoke_best_effort(config->opt_bool("printhost_ssl_ignore_revoke"))
+    m_ssl_revoke_best_effort(config->opt_bool("printhost_ssl_ignore_revoke")),
+    m_printer_model(config->opt_string("printer_model"))
 {}
 
 const char* CrealityPrint::get_name() const { return "Creality Print"; }
@@ -142,7 +144,7 @@ bool CrealityPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, 
     apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     // Upstream Orca #14089: CFS-capable models reject (or ignore) the multipart path field.
-    if (!CrealityPrintModel::omit_upload_path(m_model))
+    if (!CrealityPrintModel::omit_upload_path(effective_model()))
         http.form_add("path", upload_parent_path.string());
     http.form_add_file("file", upload_data.source_path.string(), safe_upload_filename)
 
@@ -199,54 +201,278 @@ std::string CrealityPrint::safe_filename(const std::string &filename) const
     return safe_filename;
 }
 
-static void ws_connect(net::io_context &ioc, websocket::stream<beast::tcp_stream> &ws, const std::string &host_url, const std::string &port)
+struct CrealityWsClient::Impl
 {
-    // Upstream Http::get_host_from_url; this fork's Http::url_host strips scheme and port.
+    net::io_context                                            ioc;
+    std::unique_ptr<websocket::stream<beast::tcp_stream>>      ws;
+    int                                                        step_ms  = 5000;
+    int                                                        total_ms = 0;
+    std::chrono::steady_clock::time_point                      start    = std::chrono::steady_clock::now();
+    bool                                                       open     = false;
+    bool                                                       timed_out = false;
+
+    int remaining() const
+    {
+        if (total_ms <= 0)
+            return step_ms;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        const auto left    = static_cast<long long>(total_ms) - static_cast<long long>(elapsed);
+        return left > 0 ? static_cast<int>(left) : 0;
+    }
+
+    int budget() const
+    {
+        if (total_ms <= 0)
+            return std::max(1, step_ms);
+        return std::max(0, std::min(step_ms, remaining()));
+    }
+
+    template<class Cancel> bool run(bool &done, int timeout_ms, Cancel on_timeout)
+    {
+        if (timeout_ms <= 0) {
+            on_timeout();
+            timed_out = true;
+            open      = false;
+            return false;
+        }
+        ioc.restart();
+        ioc.run_for(std::chrono::milliseconds(timeout_ms));
+        if (done)
+            return true;
+        on_timeout();
+        ioc.restart();
+        ioc.run();
+        timed_out = true;
+        open      = false;
+        return false;
+    }
+
+    void cancel_socket()
+    {
+        if (!ws)
+            return;
+        beast::error_code ignore;
+        beast::get_lowest_layer(*ws).socket().cancel(ignore);
+        beast::get_lowest_layer(*ws).socket().close(ignore);
+    }
+
+    bool fail(std::string &error, const char *step, const beast::error_code &ec)
+    {
+        if (timed_out)
+            error = std::string(step) + ": timed out";
+        else
+            error = std::string(step) + ": " + ec.message();
+        timed_out = false;
+        open      = false;
+        return false;
+    }
+};
+
+CrealityWsClient::CrealityWsClient(int step_timeout_ms, int total_timeout_ms) : m(std::make_unique<Impl>())
+{
+    m->step_ms  = std::max(1, step_timeout_ms);
+    m->total_ms = std::max(0, total_timeout_ms);
+    m->start    = std::chrono::steady_clock::now();
+}
+
+CrealityWsClient::~CrealityWsClient() { close(); }
+
+bool CrealityWsClient::is_open() const { return m && m->open; }
+
+int CrealityWsClient::remaining_ms() const { return m ? m->remaining() : 0; }
+
+bool CrealityWsClient::open(const std::string &host_url, const std::string &port, std::string &error)
+{
+    close();
     std::string host = CrealityPrintModel::ws_host(host_url);
-    if (host.empty())
-        throw std::runtime_error("CrealityPrint: empty print_host");
+    if (host.empty()) {
+        error = "empty print_host";
+        return false;
+    }
 
-    tcp::resolver resolver{ioc};
-    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(5));
-    auto const results = resolver.resolve(host, port);
-    beast::get_lowest_layer(ws).connect(results);
-    host += ':' + std::to_string(beast::get_lowest_layer(ws).socket().remote_endpoint().port());
-
-    ws.set_option(websocket::stream_base::decorator([](websocket::request_type &req) {
-        req.set(http::field::user_agent, std::string(BOOST_BEAST_VERSION_STRING) + " websocket-client-coro");
+    m->start     = std::chrono::steady_clock::now();
+    m->timed_out = false;
+    m->ws        = std::make_unique<websocket::stream<beast::tcp_stream>>(m->ioc);
+    m->ws->read_message_max(1024 * 1024);
+    m->ws->set_option(websocket::stream_base::decorator([](websocket::request_type &req) {
+        req.set(http::field::user_agent, std::string(BOOST_BEAST_VERSION_STRING) + " creality-ws");
     }));
-    ws.handshake(host, "/");
+
+    tcp::resolver               resolver(m->ioc);
+    tcp::resolver::results_type results;
+    beast::error_code           ec;
+    bool                        done = false;
+    resolver.async_resolve(host, port, [&](const beast::error_code &e, tcp::resolver::results_type r) {
+        ec      = e;
+        results = std::move(r);
+        done    = true;
+    });
+    if (!m->run(done, m->budget(), [&] { resolver.cancel(); }) || ec)
+        return m->fail(error, "resolve", ec);
+
+    done = false;
+    beast::get_lowest_layer(*m->ws).async_connect(results, [&](const beast::error_code &e, const tcp::endpoint &) {
+        ec   = e;
+        done = true;
+    });
+    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+        return m->fail(error, "connect", ec);
+
+    try {
+        host += ':' + std::to_string(beast::get_lowest_layer(*m->ws).socket().remote_endpoint().port());
+    } catch (...) { host += ":9999"; }
+
+    done = false;
+    m->ws->async_handshake(host, "/", [&](const beast::error_code &e) {
+        ec   = e;
+        done = true;
+    });
+    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+        return m->fail(error, "handshake", ec);
+
     // K1-family firmware requires TEXT-mode WebSocket frames; K2-family accepts both.
-    ws.text(true);
+    m->ws->text(true);
+    m->open = true;
+    return true;
+}
+
+bool CrealityWsClient::write(const std::string &payload, std::string &error)
+{
+    if (!m || !m->open || !m->ws) {
+        error = "not connected";
+        return false;
+    }
+    beast::error_code ec;
+    bool              done = false;
+    m->ws->async_write(net::buffer(payload), [&](const beast::error_code &e, std::size_t) {
+        ec   = e;
+        done = true;
+    });
+    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+        return m->fail(error, "write", ec);
+    return true;
+}
+
+bool CrealityWsClient::read_once(std::string &out, std::string &error)
+{
+    if (!m || !m->open || !m->ws) {
+        error = "not connected";
+        return false;
+    }
+    beast::flat_buffer buffer;
+    beast::error_code  ec;
+    bool               done = false;
+    m->ws->async_read(buffer, [&](const beast::error_code &e, std::size_t) {
+        ec   = e;
+        done = true;
+    });
+    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+        return m->fail(error, "read", ec);
+    out = beast::buffers_to_string(buffer.data());
+    return true;
+}
+
+bool CrealityWsClient::read_until(const std::string &expected_key, std::string &out, std::string &error)
+{
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(m->budget());
+    while (std::chrono::steady_clock::now() < until) {
+        std::string frame;
+        if (!read_once(frame, error))
+            return false;
+        if (frame.find("heart_beat") != std::string::npos) {
+            std::string wr_err;
+            write("ok", wr_err);
+            continue;
+        }
+        if (frame.find(expected_key) != std::string::npos) {
+            out = std::move(frame);
+            return true;
+        }
+    }
+    error = "read: no '" + expected_key + "' before deadline";
+    return false;
+}
+
+void CrealityWsClient::close()
+{
+    if (!m || !m->ws)
+        return;
+    if (m->open) {
+        beast::error_code ec;
+        bool              done = false;
+        m->ws->async_close(websocket::close_code::normal, [&](const beast::error_code &e) {
+            ec   = e;
+            done = true;
+        });
+        m->run(done, std::min(1000, std::max(1, m->budget())), [&] { m->cancel_socket(); });
+    }
+    m->cancel_socket();
+    m->open = false;
+    m->ws.reset();
+    m->ioc.restart();
+    m->ioc.poll();
+}
+
+std::string CrealityPrint::effective_model() const { return CrealityPrintModel::resolve_model(m_model, m_printer_model); }
+
+bool CrealityPrint::fetch_info(const std::string &host, std::string &body, std::string &error, int timeout_s)
+{
+    if (host.empty()) {
+        error = "empty print_host";
+        return false;
+    }
+    std::string url = host;
+    if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0)
+        url = "http://" + url;
+    if (!url.empty() && url.back() == '/')
+        url.pop_back();
+    url += "/info";
+
+    bool        ok        = false;
+    const int   wait      = std::max(1, timeout_s);
+    auto        http      = Http::get(std::move(url));
+    http.tls_policy(Http::TlsPolicy::PrintHost)
+        .timeout_connect(wait)
+        .timeout_max(wait)
+        .size_limit(512 * 1024)
+        .on_error([&](std::string reply, std::string err, unsigned status) {
+            error = err.empty() ? ("HTTP " + std::to_string(status)) : err;
+            if (!reply.empty())
+                body = std::move(reply);
+        })
+        .on_complete([&](std::string reply, unsigned) {
+            body = std::move(reply);
+            ok   = true;
+        })
+        .perform_sync();
+    if (!ok && error.empty())
+        error = "no answer";
+    return ok;
 }
 
 bool CrealityPrint::start_print(wxString &msg, const std::string &filename) const
 {
     try {
-        const std::string gcode_path = CrealityPrintModel::gcode_path(m_model, filename);
+        const std::string gcode_path = CrealityPrintModel::gcode_path(effective_model(), filename);
+        const json        cmd        = {{"method", "set"}, {"params", {{"opGcodeFile", "printprt:" + gcode_path}}}};
 
-        json j2 = {{"method", "set"}, {"params", {{"opGcodeFile", "printprt:" + gcode_path}}}};
-
-        net::io_context                      ioc;
-        websocket::stream<beast::tcp_stream> ws{ioc};
-        ws_connect(ioc, ws, m_host, "9999");
-
-        ws.write(net::buffer(to_string(j2)));
-
-        // K1-family firmware closes the WebSocket right after accepting the
-        // start command, so a blocking read here surfaces a benign
-        // "End of file [asio.misc:2]" even though the print already started
-        // (the command is delivered by write()). Read best-effort, ignore errors.
-        beast::flat_buffer buffer;
-        beast::error_code  read_ec;
-        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
-        ws.read(buffer, read_ec);
-
-        // Same reason: the printer may have already closed the connection. A close
-        // error here is not a failure - the start command was sent above.
-        beast::error_code close_ec;
-        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(3));
-        ws.close(websocket::close_code::normal, close_ec);
+        CrealityWsClient ws(5000);
+        std::string      err;
+        if (!ws.open(m_host, "9999", err)) {
+            BOOST_LOG_TRIVIAL(error) << "CrealityPrint: start_print open failed: " << err;
+            msg = wxString::FromUTF8(err);
+            return false;
+        }
+        if (!ws.write(to_string(cmd), err)) {
+            BOOST_LOG_TRIVIAL(error) << "CrealityPrint: start_print write failed: " << err;
+            msg = wxString::FromUTF8(err);
+            return false;
+        }
+        // K1-family firmware closes the WebSocket right after accepting the start command.
+        // The command is delivered by write(); a failed read is not a start failure.
+        std::string unused;
+        ws.read_once(unused, err);
+        ws.close();
         return true;
     } catch (std::exception const &e) {
         BOOST_LOG_TRIVIAL(error) << "CrealityPrint: Error starting print: " << e.what();

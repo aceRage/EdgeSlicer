@@ -56,9 +56,53 @@ inline std::string model_display_name(const std::string &model)
     return it != names.end() ? it->second : std::string{};
 }
 
+// Preset printer_model values are "Creality K1C", while /info uses "K1C".
+inline std::string strip_vendor_prefix(const std::string &model)
+{
+    const std::string prefix = "Creality ";
+    if (model.size() > prefix.size() && model.compare(0, prefix.size(), prefix) == 0)
+        return model.substr(prefix.size());
+    return model;
+}
+
+inline bool is_known_model(const std::string &model) { return is_k1_family(model) || model_supports_multi_color(model); }
+
+// /info codes and preset names ("Creality K1", "K1 Max", "K1C_CFS-C").
+inline bool looks_like_k1_family(const std::string &model)
+{
+    if (is_k1_family(model))
+        return true;
+    const std::string n = strip_vendor_prefix(model);
+    if (is_k1_family(n))
+        return true;
+    return n.size() >= 2 && n[0] == 'K' && n[1] == '1';
+}
+
+// Prefer a known /info model. An empty or unknown /info value falls back to the
+// preset's printer_model so a K1 never regresses to the K2 /mnt/UDISK root.
+inline std::string resolve_model(const std::string &info_model, const std::string &preset_model)
+{
+    if (is_known_model(info_model))
+        return info_model;
+    const std::string n = strip_vendor_prefix(preset_model);
+    if (is_known_model(n))
+        return n;
+    for (const auto &kv : cfs_capable_models())
+        if (kv.second == n || kv.second == preset_model)
+            return kv.first;
+    if (!n.empty())
+        return n;
+    return info_model;
+}
+
 // K1-family: /usr/data. Everything else (K2 / K2 Pro / K2 Plus / SPARKX i7, and an
-// unknown model) uses /mnt/UDISK, matching Creality Print and upstream Orca.
-inline std::string gcode_root(const std::string &model) { return is_k1_family(model) ? "/usr/data" : "/mnt/UDISK"; }
+// unknown model with no K1-like preset fallback) uses /mnt/UDISK.
+inline std::string gcode_root(const std::string &model) { return looks_like_k1_family(model) ? "/usr/data" : "/mnt/UDISK"; }
+
+inline std::string gcode_root_for(const std::string &info_model, const std::string &preset_model)
+{
+    return gcode_root(resolve_model(info_model, preset_model));
+}
 
 inline std::string gcode_path(const std::string &model, const std::string &filename)
 {
