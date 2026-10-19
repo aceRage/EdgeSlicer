@@ -209,7 +209,7 @@ struct CrealityWsClient::Impl
     int                                                        step_ms  = 5000;
     int                                                        total_ms = 0;
     std::chrono::steady_clock::time_point                      start    = std::chrono::steady_clock::now();
-    bool                                                       open     = false;
+    std::atomic<bool>                                          open { false };
     bool                                                       timed_out = false;
     std::atomic<bool>                                          cancelled { false };
 
@@ -241,17 +241,17 @@ struct CrealityWsClient::Impl
             on_timeout();
             drain();
             timed_out = timeout_ms <= 0;
-            open      = false;
+            open.store(false);
             return false;
         }
         ioc.restart();
         ioc.run_for(std::chrono::milliseconds(timeout_ms));
-        if (done)
+        if (done && !cancelled.load())
             return true;
         on_timeout();
         drain();
-        timed_out = true;
-        open      = false;
+        timed_out = !cancelled.load();
+        open.store(false);
         return false;
     }
 
@@ -273,7 +273,7 @@ struct CrealityWsClient::Impl
         else
             error = std::string(step) + ": " + ec.message();
         timed_out = false;
-        open      = false;
+        open.store(false);
         return false;
     }
 
@@ -281,7 +281,7 @@ struct CrealityWsClient::Impl
     bool ready_to_start(const char *step, std::string &error)
     {
         if (cancelled.load()) {
-            open = false;
+            open.store(false);
             error = std::string(step) + ": cancelled";
             return false;
         }
@@ -303,7 +303,7 @@ CrealityWsClient::CrealityWsClient(int step_timeout_ms, int total_timeout_ms) : 
 
 CrealityWsClient::~CrealityWsClient() { close(); }
 
-bool CrealityWsClient::is_open() const { return m && m->open; }
+bool CrealityWsClient::is_open() const { return m && m->open.load(); }
 
 bool CrealityWsClient::is_cancelled() const { return m && m->cancelled.load(); }
 
@@ -314,9 +314,7 @@ void CrealityWsClient::cancel()
     if (!m)
         return;
     m->cancelled.store(true);
-    m->open = false;
-    m->cancel_socket();
-    m->ioc.stop();
+    net::post(m->ioc, [impl = m.get()] { impl->cancel_socket(); });
 }
 
 bool CrealityWsClient::open(const std::string &host_url, const std::string &port, std::string &error)
@@ -328,7 +326,6 @@ bool CrealityWsClient::open(const std::string &host_url, const std::string &port
         return false;
     }
 
-    m->cancelled.store(false);
     m->timed_out = false;
     // A total budget is measured from construction so an already-expired client
     // fails in ready_to_start() instead of resetting the clock here.
@@ -409,7 +406,7 @@ bool CrealityWsClient::open(const std::string &host_url, const std::string &port
 
     // K1-family firmware requires TEXT-mode WebSocket frames; K2-family accepts both.
     m->ws->text(true);
-    m->open = true;
+    m->open.store(true);
     return true;
 }
 
@@ -478,7 +475,7 @@ void CrealityWsClient::close()
 {
     if (!m || !m->ws)
         return;
-    if (m->open && !m->cancelled.load() && m->budget() > 0) {
+    if (m->open.load() && !m->cancelled.load() && m->budget() > 0) {
         beast::error_code ec;
         bool              done = false;
         m->ws->async_close(websocket::close_code::normal, [&](const beast::error_code &e) {
@@ -492,7 +489,7 @@ void CrealityWsClient::close()
         m->ioc.run();
     }
     m->cancel_socket();
-    m->open = false;
+    m->open.store(false);
     m->ws.reset();
     m->ioc.restart();
     m->ioc.poll();
@@ -617,38 +614,23 @@ bool CrealityPrint::start_print(wxString &msg, const std::string &filename, cons
         // Empty match list: fall back to opGcodeFile + enableSelfTest (do not send colorMatch).
         if (use_cfs && !color_list.empty()) {
             const json color_match = CrealityPrintModel::color_match_cmd(gcode_path, color_list);
-            // Creality Print: colorMatch (retry 5× at 2 s) then multiColorPrint on ONE socket.
-            // A 2 s silence kills the Beast stream; we then fail rather than open a second
-            // connection. Do not send multiColorPrint if every colorMatch attempt failed.
-            CrealityWsClient ws(2000, 10000);
+            const json multi       = CrealityPrintModel::multi_color_print_cmd(gcode_path, enable_self_test);
+            // Upstream Orca / Creality Print: one socket, write colorMatch then
+            // multiColorPrint, fire-and-forget. Do not wait for a colorMatch reply —
+            // a timed read would cancel the Beast stream. Write failure is an error.
+            CrealityWsClient ws(5000);
             if (!ws.open(m_host, "9999", err)) {
                 BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch open failed: " << err;
                 msg = wxString::FromUTF8(err);
                 return false;
             }
-            bool matched = false;
-            for (int attempt = 0; attempt < 5 && !matched && ws.is_open(); ++attempt) {
-                if (!ws.write(to_string(color_match), err)) {
-                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
-                                               << " write failed: " << err;
-                    break;
-                }
-                std::string reply;
-                if (ws.read_until("colorMatch", reply, err))
-                    matched = true;
-                else
-                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
-                                               << " read failed: " << err;
-            }
-            if (!matched) {
-                if (err.empty())
-                    err = "colorMatch failed";
-                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch failed: " << err;
+            if (!ws.write(to_string(color_match), err)) {
+                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch write failed: " << err;
                 msg = wxString::FromUTF8(err);
                 return false;
             }
-            const json multi = CrealityPrintModel::multi_color_print_cmd(gcode_path, enable_self_test);
             if (!ws.write(to_string(multi), err)) {
+                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: multiColorPrint write failed: " << err;
                 msg = wxString::FromUTF8(err);
                 return false;
             }

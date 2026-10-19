@@ -1025,4 +1025,34 @@ TEST_CASE("CrealityPrint: WebSocket budget 0 does not start and does not UAF", "
         CHECK(err.find("timed out") != std::string::npos);
         CHECK_FALSE(ws.is_open());
     }
+
+    SECTION("cancel from another thread before open") {
+        CrealityWsClient ws(200, 200);
+        std::thread t([&] { ws.cancel(); });
+        t.join();
+        std::string err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", "1", err));
+        CHECK(ws.is_cancelled());
+        CHECK(err.find("cancelled") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+
+    SECTION("cancel from another thread during a never-accepting connect") {
+        namespace net = boost::asio;
+        using tcp     = net::ip::tcp;
+        net::io_context ioc;
+        tcp::acceptor   acc(ioc, tcp::endpoint(tcp::v4(), 0));
+        const auto      port = std::to_string(acc.local_endpoint().port());
+        CrealityWsClient ws(2000, 2000);
+        std::string      err;
+        std::thread      t([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            ws.cancel();
+        });
+        REQUIRE_FALSE(ws.open("127.0.0.1", port, err));
+        t.join();
+        CHECK(ws.is_cancelled());
+        CHECK(err.find("cancelled") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
 }
