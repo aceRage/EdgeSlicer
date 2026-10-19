@@ -1,6 +1,7 @@
 #ifndef slic3r_CrealityPrint_hpp_
 #define slic3r_CrealityPrint_hpp_
 
+#include <map>
 #include <memory>
 #include <string>
 #include <wx/string.h>
@@ -72,6 +73,10 @@ public:
 
     // GET /info with a real connect+read timeout. Empty host returns false.
     static bool fetch_info(const std::string &host, std::string &body, std::string &error, int timeout_s);
+    // Port-9999 WebSocket `get boxsInfo`. timeout_s is the total deadline (probe uses ~1 s).
+    // Empty on timeout or a refused handshake. Uses CrealityWsClient.
+    static std::string query_boxes_info(const std::string& host, int timeout_s);
+    std::string        query_boxes_info(int timeout_s = 10) const;
 
 protected:
     virtual void set_auth(Http& http) const;
@@ -86,7 +91,7 @@ private:
     std::string         m_printer_model;
 
     std::string make_url(const std::string& path) const;
-    bool start_print(wxString& msg, const std::string& filename) const;
+    bool start_print(wxString& msg, const std::string& filename, const std::map<std::string, std::string>& extended_info) const;
     std::string safe_filename(const std::string& filename) const;
     std::string effective_model() const;
 };

@@ -1,13 +1,18 @@
 #include "PrintHostDeviceStatus.hpp"
 
+#include "CrealityPrint.hpp"
+#include "CrealityPrintModel.hpp"
 #include "Http.hpp"
 #include "PrusaLinkStatus.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <limits>
 
 namespace Slic3r {
 namespace PrintHostDevices {
@@ -18,6 +23,16 @@ using nlohmann::json;
 
 std::string Slot::label() const
 {
+    if (cfs_box >= 0) {
+        std::string out = name.empty() ? (cfs_external ? std::string("External") :
+                                                         std::string("CFS ") + char('A' + std::max(0, std::min(3, cfs_material)))) :
+                                         name;
+        if (loaded && !type.empty())
+            out += " " + type;
+        else if (!loaded)
+            out += " (empty)";
+        return out;
+    }
     if (unit >= 0) {
         // A CANVAS tray: numbered as the printer's screen counts them, 1..4 per unit.
         std::string out = "Tray " + std::to_string(index + 1);
@@ -27,7 +42,7 @@ std::string Slot::label() const
             out += " (empty)";
         return out;
     }
-    std::string out = "T" + std::to_string(index + 1);
+    std::string out = name.empty() ? "T" + std::to_string(index + 1) : name;
     if (!type.empty()) {
         out += " " + type;
         if (!sub_type.empty() && sub_type != type)
@@ -120,11 +135,13 @@ bool can_probe(const std::string& host_type_key)
     // The host types this fork has a status client for. Adding one here means writing that client;
     // there is no generic "ask a print host how it is" in this codebase.
     return speaks_moonraker(host_type_key) || PrusaLinkStatus::speaks_prusalink(host_type_key) ||
-           host_type_key == "elegoolink";
+           host_type_key == "elegoolink" || host_type_key == "crealityprint";
 }
 
 std::string no_filament_note(const std::string& host_type_key)
 {
+    if (host_type_key == "crealityprint")
+        return "This Creality printer did not report CFS slots, so there is nothing to map. The plate is sent exactly as it was sliced.";
     if (host_type_key == "elegoolink")
         // A Centauri Carbon 1 with a CANVAS reports its trays (ElegooCanvas.hpp); anything else on
         // Elegoo Link - or a CC1 without a CANVAS, or one that did not answer - has nothing to map.
@@ -178,6 +195,59 @@ static void slots_from_print_task_config(const json& status, std::vector<Slot>& 
     }
 }
 
+// A number or a boolean, as the QIDI firmware is not consistent about which it sends.
+static bool truthy_at(const json& j, const std::string& key)
+{
+    if (!j.is_object() || !j.contains(key))
+        return false;
+    const json& v = j[key];
+    return v.is_boolean() ? v.get<bool>() : (v.is_number() ? v.get<double>() != 0.0 : false);
+}
+
+static int int_at(const json& j, const char* key, int fallback)
+{
+    return j.is_object() && j.contains(key) && j[key].is_number() ? j[key].get<int>() : fallback;
+}
+
+// A QIDI Box (X-Max 4, X-Plus 4, Q2): `multi_color_controller`, read the way QIDIStudio's
+// QDSDevice::updateBoxDataByJson reads it - `box_count` and `boxes` either at the top level or
+// under `box`, each box a `filament_info` array of four slots and a `box_inserted_<n>` flag per
+// slot. Slot n of box b is Box slot b * 4 + n, the number the firmware's `value_t<tool>` names.
+// The extruder's own spool (`extra`) is left out: QIDIStudio's numbering for it is not settled.
+static void slots_from_qidi_box(const json& status, std::vector<Slot>& out, bool& have_filaments, bool& is_box)
+{
+    if (!status.is_object() || !status.contains("multi_color_controller") || !status["multi_color_controller"].is_object())
+        return;
+    const json& mcc   = status["multi_color_controller"];
+    const json& boxes = mcc.contains("box") && mcc["box"].is_object() ? mcc["box"] : mcc;
+    const int   count = int_at(mcc, "box_count", int_at(boxes, "box_count", 0));
+    if (count <= 0)
+        return; // the controller is there, the Box is not plugged in
+    const json& list = array_at(boxes, "boxes");
+    for (size_t b = 0; b < list.size() && b < 4; ++b) {
+        const json& box   = list[b];
+        const json& infos = array_at(box, "filament_info");
+        for (size_t n = 0; n < infos.size() && n < 4; ++n) {
+            const json& fi = infos[n];
+            Slot s;
+            s.index  = (int) (b * 4 + n);
+            s.name   = "Box " + std::to_string(b + 1) + " slot " + std::to_string(n + 1);
+            s.loaded = truthy_at(box, "box_inserted_" + std::to_string(n));
+            if (s.loaded) {
+                s.type     = str_at(fi, "filament_type");
+                s.sub_type = str_at(fi, "filament_str"); // "PLA Rapido"
+                s.vendor   = str_at(fi, "vendor_str");
+                const json& colours = array_at(fi, "color_rgb_str");
+                s.color    = colour_of(arr_str(colours, 0));
+                if (!s.type.empty() || !s.color.empty())
+                    have_filaments = true;
+            }
+            out.push_back(std::move(s));
+        }
+    }
+    is_box = !out.empty();
+}
+
 // No print_task_config: the extruder objects still say how many tools there are. A slot list with
 // no materials in it - the caller shows it as tools, not as filaments.
 static void slots_from_extruders(const json& status, std::vector<Slot>& out)
@@ -208,7 +278,11 @@ static Status fill_from_status(const json& status, const std::string& host_type_
     st.online = true;
     if (status.contains("print_stats") && status["print_stats"].is_object())
         st.state = str_at(status["print_stats"], "state");
+    st.qidi              = status.contains("multi_color_controller") && status["multi_color_controller"].is_object();
+    st.qidi_polar_cooler = st.qidi && status.contains("output_pin polar_cooler") && status["output_pin polar_cooler"].is_object();
     slots_from_print_task_config(status, st.slots, st.slots_have_filaments);
+    if (st.slots.empty())
+        slots_from_qidi_box(status, st.slots, st.slots_have_filaments, st.qidi_box);
     if (st.slots.empty())
         slots_from_extruders(status, st.slots);
     if (st.slots.empty() || !st.slots_have_filaments)
@@ -280,6 +354,106 @@ Status status_from_canvas(const CanvasQueryResult& r)
     return st;
 }
 
+Status status_from_cfs(const std::string& boxs_info_json)
+{
+    Status st;
+    st.probed = true;
+    const CrealityPrintModel::CfsParseResult parsed = CrealityPrintModel::parse_cfs_response(boxs_info_json);
+    if (!parsed.ok) {
+        st.note  = no_filament_note("crealityprint");
+        st.error = parsed.error;
+        return st;
+    }
+    st.online        = true;
+    st.cfs           = parsed.box_count > 0;
+    st.cfs_box_count = parsed.box_count;
+    st.cfs_variant   = parsed.variant;
+    int idx          = 0;
+    for (const CrealityPrintModel::CfsSlot& c : parsed.slots) {
+        Slot s;
+        s.index        = idx++;
+        s.type         = c.filament_type;
+        s.sub_type     = c.brand_name;
+        s.vendor       = c.vendor;
+        s.color        = c.color_hex;
+        s.loaded       = c.loaded;
+        s.cfs_box      = c.box_id;
+        s.cfs_material = c.slot_id;
+        s.cfs_external = c.external;
+        if (c.external) {
+            s.name = "External";
+            s.unit = -1;
+            s.tray = -1;
+        } else {
+            // boxId is 1-based on the wire; tiles use 0-based unit so box 1 is 1A–1D.
+            s.unit = std::max(0, c.box_id - 1);
+            s.tray = c.slot_id;
+            const std::string letter(1, static_cast<char>('A' + std::max(0, std::min(3, c.slot_id))));
+            s.name = (c.variant.empty() ? std::string("CFS") : c.variant) + " " + std::to_string(c.box_id) + letter;
+        }
+        if (s.loaded && (!s.type.empty() || !s.color.empty()))
+            st.slots_have_filaments = true;
+        st.slots.push_back(std::move(s));
+    }
+    if (!st.cfs)
+        st.note = no_filament_note("crealityprint");
+    else if (!st.slots_have_filaments)
+        st.note = "The CFS reports no loaded slots, so there is nothing to map. The plate is sent exactly as it was sliced.";
+    return st;
+}
+
+int auto_match_slot(const std::string& type, const std::string& colour, const std::vector<Slot>& slots, bool cfs_order)
+{
+    std::vector<CrealityPrintModel::CfsSlot> cfs;
+    cfs.reserve(slots.size());
+    for (const Slot& s : slots) {
+        CrealityPrintModel::CfsSlot c;
+        c.filament_type = s.type;
+        c.color_hex     = s.color;
+        c.loaded        = s.loaded;
+        c.external      = cfs_order ? s.cfs_external : false;
+        cfs.push_back(std::move(c));
+    }
+    return CrealityPrintModel::auto_match_index(type, colour, cfs);
+}
+
+// CrealityPrint: /info (reachability + model) then boxsInfo. Both use the caller's deadline
+// (about 1 s from the send dialog). An unreachable or silent printer returns when that expires.
+static Status probe_creality(const Device& d, int timeout_s)
+{
+    Status st;
+    st.probed = true;
+    std::string body;
+    std::string info_err;
+    const std::string host = d.address;
+    if (host.empty()) {
+        st.note = "this device has no address";
+        return st;
+    }
+    const int wait = std::max(1, timeout_s);
+    if (!CrealityPrint::fetch_info(host, body, info_err, wait)) {
+        st.error = info_err;
+        st.note  = "this printer did not answer" + (info_err.empty() ? std::string() : (": " + info_err));
+        return st;
+    }
+    st.online               = true;
+    const std::string model = CrealityPrintModel::resolve_model(CrealityPrintModel::parse_model_from_info(body),
+                                                                d.printer_model);
+    if (!CrealityPrintModel::model_supports_multi_color(model) && !CrealityPrintModel::looks_like_k1_family(model)) {
+        st.note = no_filament_note("crealityprint");
+        return st;
+    }
+    const std::string boxs = CrealityPrint::query_boxes_info(host, wait);
+    if (boxs.empty()) {
+        st.note = no_filament_note("crealityprint");
+        return st;
+    }
+    Status parsed = status_from_cfs(boxs);
+    parsed.probed = true;
+    parsed.online = true;
+    return parsed;
+}
+
 // A Centauri Carbon 1: its CANVAS over SDCP. Any other Elegoo model has nothing this fork can read.
 static Status probe_elegoo(const Device& d, int timeout_s)
 {
@@ -307,6 +481,8 @@ Status probe(const Device& d, int timeout_s)
     }
     if (d.host_type == "elegoolink")
         return probe_elegoo(d, timeout_s);
+    if (d.host_type == "crealityprint")
+        return probe_creality(d, timeout_s);
     st.probed = true;
     if (PrusaLinkStatus::speaks_prusalink(d.host_type))
         return probe_prusalink(d, timeout_s);
@@ -316,9 +492,12 @@ Status probe(const Device& d, int timeout_s)
         return st;
     }
     // One call, read-only, never a command - the same objects RemoteControl::describe_hosts asks
-    // for plus print_task_config, which is where the loaded filaments live when there are any.
+    // for plus print_task_config (Snapmaker) and multi_color_controller (QIDI Box), which is where
+    // the loaded filaments live when there are any, and the QIDI polar cooler's pin, which says
+    // whether to offer its switch. Moonraker leaves out the ones a printer lacks.
     std::string body;
-    if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&extruder&extruder1&extruder2&extruder3",
+    if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&multi_color_controller"
+                              "&output_pin%20polar_cooler&extruder&extruder1&extruder2&extruder3",
                        body, st.error, timeout_s)) {
         st.note = "this printer did not answer" + (st.error.empty() ? std::string() : (": " + st.error));
         return st;
@@ -349,6 +528,192 @@ Status parse_moonraker_status(const std::string& status_json, const std::string&
     Status st = fill_from_status(status, host_type_key);
     st.probed = can_probe(host_type_key);
     return st;
+}
+
+std::string qidi_box_mapping_script(const std::string& mapping)
+{
+    // value_t0..value_t15 and slot0..slot15 are what the firmware's save_variables declares.
+    constexpr int max_tools = 16, max_slots = 16;
+    std::string   lines;
+    std::string   pair;
+    for (size_t i = 0; i <= mapping.size(); ++i) {
+        if (i < mapping.size() && mapping[i] != ',') {
+            pair += mapping[i];
+            continue;
+        }
+        const size_t colon = pair.find(':');
+        if (colon != std::string::npos) {
+            try {
+                const int tool = std::stoi(pair.substr(0, colon));
+                const int slot = std::stoi(pair.substr(colon + 1));
+                // Quoted exactly as QIDIStudio's own SelectMachine quotes it, VALUE="'slotN'": the
+                // double quotes are Klipper's shlex parse, the single ones SAVE_VARIABLE's
+                // literal_eval, so the variable lands as the string slotN.
+                if (tool >= 0 && tool < max_tools && slot >= 0 && slot < max_slots)
+                    lines += "SAVE_VARIABLE VARIABLE=value_t" + std::to_string(tool) + " VALUE=\"'slot" + std::to_string(slot) + "'\"\n";
+            } catch (...) {}
+        }
+        pair.clear();
+    }
+    if (lines.empty())
+        return lines;
+    return "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n" + lines;
+}
+
+bool busy_printing(const std::string& state)
+{
+    return boost::iequals(state, "printing") || boost::iequals(state, "paused");
+}
+
+std::string print_state_from_query(const std::string& reply_json)
+{
+    try {
+        const json j = json::parse(reply_json);
+        if (!j.is_object() || !j.contains("result") || !j["result"].is_object())
+            return {};
+        const json& status = j["result"].contains("status") ? j["result"]["status"] : json();
+        if (!status.is_object() || !status.contains("print_stats"))
+            return {};
+        return str_at(status["print_stats"], "state");
+    } catch (...) {
+        return {};
+    }
+}
+
+bool query_print_state(const std::string& base_url, std::string& state, std::string& error, int timeout_s)
+{
+    state.clear();
+    error.clear();
+    if (base_url.empty()) {
+        error = "no address";
+        return false;
+    }
+    std::string body;
+    if (!moonraker_get(base_url + "/printer/objects/query?print_stats", body, error, timeout_s))
+        return false;
+    state = print_state_from_query(body);
+    if (state.empty()) {
+        error = "the printer did not say what it is doing";
+        return false;
+    }
+    return true;
+}
+
+// The send dialog's swatch_colour: "#RRGGBB" (anything after the sixth digit ignored), grey for
+// anything that is not a colour.
+static void rgb_of(const std::string& raw, int& r, int& g, int& b)
+{
+    r = g = b = 160;
+    std::string s = raw;
+    if (!s.empty() && s[0] == '#')
+        s = s.substr(1);
+    if (s.size() < 6)
+        return;
+    int v[6];
+    for (int i = 0; i < 6; ++i) {
+        const char c = s[i];
+        if (c >= '0' && c <= '9')
+            v[i] = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            v[i] = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            v[i] = c - 'A' + 10;
+        else
+            return;
+    }
+    r = v[0] * 16 + v[1];
+    g = v[2] * 16 + v[3];
+    b = v[4] * 16 + v[5];
+}
+
+// Redmean, the send dialog's colour_distance and SnapmakerLan::auto_match's, so the auto-matches
+// agree about which slot is "the closest colour".
+static double colour_distance(const std::string& a, const std::string& b)
+{
+    int ar, ag, ab, br, bg, bb;
+    rgb_of(a, ar, ag, ab);
+    rgb_of(b, br, bg, bb);
+    const double rm = (ar + br) / 2.0;
+    const double dr = ar - br, dg = ag - bg, db = ab - bb;
+    return (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db;
+}
+
+int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, const std::string& type, bool qidi_box)
+{
+    int    best   = 0;
+    double best_d = 0;
+    if (!qidi_box) {
+        // Every other host: the closest colour among the loaded slots the printer gave a colour
+        // for, the rule this dialog has always used.
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const Slot& s = slots[i];
+            if (!s.loaded || s.color.empty())
+                continue;
+            const double dist = colour_distance(colour, s.color);
+            if (best == 0 || dist < best_d) {
+                best   = (int) i + 1;
+                best_d = dist;
+            }
+        }
+        return best;
+    }
+    // A QIDI Box never matches on colour alone: its firmware heats for the plate's material
+    // whatever is fed, so an ASA plate auto-sent to the PLA that happens to be the right shade is
+    // a failed print. Only a slot holding the filament's own material is a candidate - the closest
+    // colour among those, then one the printer gave no colour for - and "As sliced" otherwise, so
+    // the person picks the slot.
+    if (type.empty())
+        return 0;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const Slot& s = slots[i];
+        if (!s.loaded || !boost::iequals(type, s.type))
+            continue;
+        const double dist = s.color.empty() ? std::numeric_limits<double>::max() : colour_distance(colour, s.color);
+        if (best == 0 || dist < best_d) {
+            best   = (int) i + 1;
+            best_d = dist;
+        }
+    }
+    return best;
+}
+
+std::string qidi_start_script(const QidiPrintOptions& options, const std::string& mapping)
+{
+    std::string out;
+    if (options.use_box == 0) {
+        // The Box off: the print runs from the extruder's own spool, and a mapping means nothing.
+        out += "SAVE_VARIABLE VARIABLE=enable_box VALUE=0\n";
+    } else {
+        out += qidi_box_mapping_script(mapping);
+        if (out.empty() && options.use_box == 1)
+            out += "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n";
+    }
+    if (options.polar_cooler >= 0)
+        out += std::string("SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=") + (options.polar_cooler ? "1" : "0") + "\n";
+    return out;
+}
+
+std::string qidi_leveling_script(const QidiPrintOptions& options)
+{
+    // The firmware's G31/G32 set _km_globals.bedmesh_before_print, which its G29 reads: probe a
+    // fresh mesh before this print, or load the saved one.
+    if (options.bed_leveling < 0)
+        return {};
+    return options.bed_leveling ? "G31\n" : "G32\n";
+}
+
+QidiOptionDefaults qidi_option_defaults(const Status& st, const std::string& remembered_leveling,
+                                        const std::string& remembered_timelapse, const std::string& remembered_polar_cooler)
+{
+    auto remembered = [](const std::string& v, bool fallback) { return v.empty() ? fallback : v == "1"; };
+    QidiOptionDefaults d;
+    // A Box with nothing loaded in it has nothing to feed: start on the extruder's own spool.
+    d.use_box = st.qidi_box && std::any_of(st.slots.begin(), st.slots.end(), [](const Slot& s) { return s.loaded; });
+    // Off unless the person turned it on last time: a mesh probe adds minutes to every print.
+    d.bed_leveling = remembered(remembered_leveling, false);
+    d.timelapse    = remembered(remembered_timelapse, false);
+    d.polar_cooler = remembered(remembered_polar_cooler, false);
+    return d;
 }
 
 } // namespace PrintHostDevices

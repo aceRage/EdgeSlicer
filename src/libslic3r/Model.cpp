@@ -106,6 +106,7 @@ Model& Model::assign_copy(const Model &rhs)
 
     // Image Fill (Phase 2): a plain value member, so it copies like any other. Costs no id.
     this->image_assets = rhs.image_assets;
+    this->showcase     = rhs.showcase;
 
     return *this;
 }
@@ -154,6 +155,8 @@ Model& Model::assign_copy(Model &&rhs)
     // Image Fill (Phase 2): move the image store with everything else.
     this->image_assets = std::move(rhs.image_assets);
     rhs.image_assets.clear();
+    this->showcase = std::move(rhs.showcase);
+    rhs.showcase.clear();
     return *this;
 }
 
