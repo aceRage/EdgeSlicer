@@ -10,13 +10,17 @@
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
+#include "slic3r/Utils/CrealityPrint.hpp"
 #include "slic3r/Utils/CrealityPrintModel.hpp"
 
+#include <boost/asio.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include <chrono>
 #include <ctime>
 #include <string>
+#include <thread>
 
 using namespace Slic3r;
 using namespace Slic3r::PrintHostDevices;
@@ -962,11 +966,12 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(color_match_id(1) == "T1B");
         CHECK(color_match_id(3) == "T1D");
         CHECK(color_match_id(4) == "T2A");
-        // Non-identity mapping: filament 0 (T1A) sent to box 2 slot 1.
-        const auto mapped = color_match_item_from_value("T1A\tPLA\t#FF0000\t2\t1");
+        // B2 / F18: the same helper extendedInfo() uses, not a rebuilt id string.
+        const auto mapped = color_match_item_from_value(color_match_value(0, "PLA", "#FF0000", 2, 1));
         CHECK(mapped["id"] == "T1A");
         CHECK(mapped["boxId"] == 2);
         CHECK(mapped["materialId"] == 1);
+        CHECK(color_match_value(0, "PLA", "#FF0000", 2, 1) == "T1A\tPLA\t#FF0000\t2\t1");
         CHECK(color_match_item_from_value("bad").empty());
         CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
     }
@@ -993,5 +998,31 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(match_filament_preset(presets, "Creality", "", "PLA") == "GPLA");
         CHECK(match_filament_preset(presets, "Creality", "Hyper PLA", "PETG") == "GPETG");
         CHECK(match_filament_preset(presets, "", "", "TPU").empty());
+    }
+}
+
+TEST_CASE("CrealityPrint: WebSocket budget 0 does not start and does not UAF", "[CrealityPrint]")
+{
+    SECTION("expired total budget fails before any I/O") {
+        CrealityWsClient ws(200, 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::string err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", "1", err));
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+        CHECK(ws.remaining_ms() == 0);
+    }
+
+    SECTION("local acceptor that never accepts times out and drains") {
+        namespace net = boost::asio;
+        using tcp     = net::ip::tcp;
+        net::io_context ioc;
+        tcp::acceptor   acc(ioc, tcp::endpoint(tcp::v4(), 0));
+        const auto      port = std::to_string(acc.local_endpoint().port());
+        CrealityWsClient ws(150, 150);
+        std::string      err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", port, err));
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
     }
 }

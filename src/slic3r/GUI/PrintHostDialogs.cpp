@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 #include "sentry_wrapper/SentryWrapper.hpp"
@@ -581,8 +582,12 @@ void PrintHostSendDialog::build_device_ui()
 
 PrintHostSendDialog::~PrintHostSendDialog()
 {
-    if (m_probe_token)
+    if (m_probe_token) {
+        std::lock_guard<std::mutex> lock(m_probe_token->mtx);
         m_probe_token->alive = false;
+    }
+    if (m_probe_thread.joinable())
+        m_probe_thread.join();
 }
 
 void PrintHostSendDialog::apply_device_status()
@@ -611,19 +616,38 @@ void PrintHostSendDialog::apply_device_status()
     rebuild_mapping_rows();
     rebuild_creality_options();
     update_creality_mapping_enabled();
+    m_probe_pending = false;
+    set_send_enabled(true);
     content_sizer->Layout();
     Layout();
     Fit();
 }
 
-// Probe runs on a worker. An unreachable Creality printer returns in about 1 s
-// (CrealityWsClient deadline); the UI is not blocked while it waits.
+void PrintHostSendDialog::set_send_enabled(bool on)
+{
+    if (Button *b = get_button(wxID_OK))
+        b->Enable(on);
+    if (Button *b = get_button(wxID_YES))
+        b->Enable(on);
+}
+
+// Probe runs on a joinable worker owned by the dialog. An unreachable Creality
+// printer returns in about 1 s (CrealityWsClient deadline). Upload/Print stay
+// disabled while "Checking printer..." is up so an early press cannot send an
+// empty filament_mapping() (F16). Non-Creality hosts stay on this same async
+// path rather than a synchronous probe.
 void PrintHostSendDialog::refresh_device_status()
 {
     m_device_status = PrintHostDevices::Status();
     if (!m_probe_token)
         m_probe_token = std::make_shared<ProbeToken>();
-    const int gen = ++m_probe_token->gen;
+    if (m_probe_thread.joinable())
+        m_probe_thread.join();
+    int gen = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_probe_token->mtx);
+        gen = ++m_probe_token->gen;
+    }
     if (m_device_note) {
         m_device_note->SetLabel(_L("Checking printer..."));
         m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
@@ -636,15 +660,21 @@ void PrintHostSendDialog::refresh_device_status()
     Layout();
     Fit();
 
-    if (m_device_sel < 0 || m_device_sel >= (int) m_devices.size())
+    if (m_device_sel < 0 || m_device_sel >= (int) m_devices.size()) {
+        m_probe_pending = false;
+        set_send_enabled(true);
         return;
+    }
+
+    m_probe_pending = true;
+    set_send_enabled(false);
 
     PrintHostDevices::Device d = m_devices[m_device_sel];
     if (d.printer_model.empty())
         d.printer_model = m_model_key;
     const int timeout_s = (d.host_type == "crealityprint") ? 1 : 3;
     auto      token     = m_probe_token;
-    std::thread([token, gen, d, timeout_s]() {
+    m_probe_thread      = std::thread([token, gen, d, timeout_s]() {
         PrintHostDevices::Status st;
         try {
             st = PrintHostDevices::probe(d, timeout_s);
@@ -657,10 +687,16 @@ void PrintHostSendDialog::refresh_device_status()
             st.probed = true;
             st.note   = "this printer did not answer";
         }
-        if (!token->alive.load() || token->gen.load() != gen)
+        {
+            std::lock_guard<std::mutex> lock(token->mtx);
+            if (!token->alive || token->gen != gen)
+                return;
+        }
+        if (!wxTheApp)
             return;
         wxGetApp().CallAfter([token, gen, st]() {
-            if (!token->alive.load() || token->gen.load() != gen)
+            std::lock_guard<std::mutex> lock(token->mtx);
+            if (!token->alive || token->gen != gen)
                 return;
             // Walk top-level windows for the still-alive send dialog rather than
             // capturing `this` across a possible close.
@@ -673,7 +709,7 @@ void PrintHostSendDialog::refresh_device_status()
                 break;
             }
         });
-    }).detach();
+    });
 }
 
 // One row per filament this plate actually uses: its colour, its type, and where it goes. Only when
@@ -829,9 +865,10 @@ std::map<std::string, std::string> PrintHostSendDialog::extendedInfo() const
         const SendPlateFilament* f = plate_filament(m_mapping_filament[i]);
         const std::string type  = f ? f->type : s.type;
         const std::string color = f && !f->colour.empty() ? f->colour : s.color;
-        const std::string id    = Slic3r::CrealityPrintModel::color_match_id(m_mapping_filament[i]);
-        out["colorMatch_" + std::to_string(n++)] = id + "\t" + type + "\t" + color + "\t" +
-                                                   std::to_string(s.cfs_box) + "\t" + std::to_string(s.cfs_material);
+        const std::string value = Slic3r::CrealityPrintModel::color_match_value(m_mapping_filament[i], type, color, s.cfs_box,
+                                                                               s.cfs_material);
+        if (!value.empty())
+            out["colorMatch_" + std::to_string(n++)] = value;
     }
     return out;
 }
@@ -1006,6 +1043,8 @@ void PrintHostSendDialog::init()
             }
         });
     }
+    if (m_probe_pending)
+        set_send_enabled(false);
 
     // if (post_actions.has(PrintHostPostUploadAction::StartSimulation)) {
     //     // Using wxID_MORE as a button identifier to be different from the other buttons, wxID_MORE has no other meaning here.
