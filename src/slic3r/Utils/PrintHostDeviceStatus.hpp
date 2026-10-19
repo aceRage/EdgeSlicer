@@ -90,11 +90,30 @@ struct QidiPrintOptions
     int polar_cooler { -1 }; // SAVE_VARIABLE enable_polar_cooler
 };
 
-// Everything QIDIStudio sends as G-code before a LAN start, in its order: the Box (on with the
-// slot mapping, or off), the bed leveling, the polar cooler. Newline-separated for one
-// /printer/gcode/script call; empty when there is nothing to send. The timelapse is not here: it
-// is Moonraker's own setting, not G-code.
+// The G-code QIDIStudio sends before a LAN start, less the bed leveling: the Box (on with the
+// slot mapping, or off), then the polar cooler. Newline-separated for one /printer/gcode/script
+// call; empty when there is nothing to send. The send stops if the printer refuses it - a Box
+// left on the previous print's slots prints the wrong material. The bed leveling is
+// qidi_leveling_script(), its own call, and the timelapse is Moonraker's own setting, not G-code.
 std::string qidi_start_script(const QidiPrintOptions& options, const std::string& mapping);
+
+// "G31\n" (probe a fresh mesh before the print) / "G32\n" (use the saved one) / "" (not offered).
+// Its own /printer/gcode/script call after qidi_start_script(): a refusal is logged and the print
+// goes ahead, it never blocks the Box mapping or the print.
+std::string qidi_leveling_script(const QidiPrintOptions& options);
+
+// The send dialog's starting values for a QIDI printer. The Box starts on only when the printer
+// said at least one Box slot is loaded; bed leveling, timelapse and polar cooler start off unless
+// the person's last choice was remembered ("1" / "0" from the app config, "" = never chosen).
+struct QidiOptionDefaults
+{
+    bool use_box { false };
+    bool bed_leveling { false };
+    bool timelapse { false };
+    bool polar_cooler { false };
+};
+QidiOptionDefaults qidi_option_defaults(const Status& st, const std::string& remembered_leveling,
+                                        const std::string& remembered_timelapse, const std::string& remembered_polar_cooler);
 
 // "0:3,1:5" (filament:slot, PrintHostSendDialog::filament_mapping) -> the commands QIDIStudio
 // sends before a QIDI Box print: enable the Box, then point each tool's `value_t<n>` at its slot.

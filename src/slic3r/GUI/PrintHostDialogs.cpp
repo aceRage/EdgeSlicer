@@ -444,7 +444,8 @@ static const char *CONFIG_KEY_PATH  = "printhost_path";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
 static const char* CONFIG_KEY_STORAGE = "printhost_storage";
 // The QIDI print options, remembered between sends like QIDIStudio's own switches. The Box switch
-// is not: it starts on whenever a Box is there, so a mapping is never skipped by accident.
+// is not: it starts on whenever a Box slot is loaded, so a mapping is never skipped by accident
+// (PrintHostDevices::qidi_option_defaults).
 static const char* CONFIG_KEY_QIDI_LEVELING  = "qidi_send_bed_leveling";
 static const char* CONFIG_KEY_QIDI_TIMELAPSE = "qidi_send_timelapse";
 static const char* CONFIG_KEY_QIDI_POLAR     = "qidi_send_polar_cooler";
@@ -518,6 +519,15 @@ std::string PrintHostSendDialog::qidi_start_script() const
     if (m_qidi_polar_cooler)
         o.polar_cooler = m_qidi_polar_cooler->GetValue() ? 1 : 0;
     return PrintHostDevices::qidi_start_script(o, filament_mapping());
+}
+
+std::string PrintHostSendDialog::qidi_leveling_script() const
+{
+    if (!m_device_status.qidi || !m_qidi_leveling)
+        return {};
+    PrintHostDevices::QidiPrintOptions o;
+    o.bed_leveling = m_qidi_leveling->GetValue() ? 1 : 0;
+    return PrintHostDevices::qidi_leveling_script(o);
 }
 
 int PrintHostSendDialog::qidi_timelapse() const
@@ -633,11 +643,11 @@ void PrintHostSendDialog::refresh_device_status()
 
 bool PrintHostSendDialog::print_blocked() const
 {
-    return m_device_status.qidi_box && PrintHostDevices::busy_printing(m_device_status.state);
+    return m_device_status.qidi && PrintHostDevices::busy_printing(m_device_status.state);
 }
 
 // A QIDI printer that is printing or paused is not started from here: the start sends the Box
-// mapping ahead of the file, and that must never reach a running print. The queue checks again
+// mapping and print options ahead of the file, and they must never reach a running print. The queue checks again
 // just before it sends anything (PrintHostJobQueue::priv::perform_job). Upload stays available.
 void PrintHostSendDialog::update_print_button()
 {
@@ -715,10 +725,10 @@ void PrintHostSendDialog::rebuild_qidi_options()
     }
 
     const AppConfig* app_config = wxGetApp().app_config;
-    auto remembered = [app_config](const char* key, bool fallback) {
-        const std::string v = app_config ? app_config->get("recent", key) : std::string();
-        return v.empty() ? fallback : v == "1";
-    };
+    auto stored = [app_config](const char* key) { return app_config ? app_config->get("recent", key) : std::string(); };
+    const PrintHostDevices::QidiOptionDefaults defaults =
+        PrintHostDevices::qidi_option_defaults(m_device_status, stored(CONFIG_KEY_QIDI_LEVELING), stored(CONFIG_KEY_QIDI_TIMELAPSE),
+                                               stored(CONFIG_KEY_QIDI_POLAR));
     auto add = [this](const wxString& label, const wxString& tip, bool value) {
         auto* box = new wxCheckBox(m_qidi_panel, wxID_ANY, label);
         box->SetValue(value);
@@ -732,20 +742,20 @@ void PrintHostSendDialog::rebuild_qidi_options()
         m_qidi_use_box = add(_L("Use QIDI Box"),
                              _L("Feed the filaments from the QIDI Box slots picked above. Untick it to print from the "
                                 "spool on the extruder instead."),
-                             true);
+                             defaults.use_box);
         m_qidi_use_box->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { update_mapping_enabled(); });
     }
     m_qidi_leveling = add(_L("Auto bed leveling"),
                           _L("Probe a fresh bed mesh before this print. Untick it to use the mesh the printer has saved."),
-                          remembered(CONFIG_KEY_QIDI_LEVELING, true));
+                          defaults.bed_leveling);
     m_qidi_timelapse = add(_L("Timelapse"),
                            _L("Record a timelapse of this print with the printer's camera."),
-                           remembered(CONFIG_KEY_QIDI_TIMELAPSE, false));
+                           defaults.timelapse);
     if (m_device_status.qidi_polar_cooler)
         m_qidi_polar_cooler = add(_L("Polar cooler"),
                                   _L("Cool the extruder during the print, which keeps the filament from softening or "
                                      "clogging inside it."),
-                                  remembered(CONFIG_KEY_QIDI_POLAR, false));
+                                  defaults.polar_cooler);
     m_qidi_panel->Show(true);
     m_qidi_panel->Layout();
 }

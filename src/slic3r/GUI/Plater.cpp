@@ -24735,6 +24735,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         }
         upload_job.filament_mapping        = dlg.filament_mapping();
         upload_job.qidi_start_script       = dlg.qidi_start_script();
+        upload_job.qidi_leveling_script    = dlg.qidi_leveling_script();
         upload_job.qidi_timelapse          = dlg.qidi_timelapse();
         upload_job.unload_at_end           = dlg.unload_at_end();
         upload_job.switch_to_device_tab    = dlg.switch_to_device_tab();

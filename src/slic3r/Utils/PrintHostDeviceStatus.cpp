@@ -506,13 +506,32 @@ std::string qidi_start_script(const QidiPrintOptions& options, const std::string
         if (out.empty() && options.use_box == 1)
             out += "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n";
     }
-    // The firmware's G31/G32 set _km_globals.bedmesh_before_print, which its G29 reads: probe a
-    // fresh mesh before this print, or load the saved one.
-    if (options.bed_leveling >= 0)
-        out += options.bed_leveling ? "G31\n" : "G32\n";
     if (options.polar_cooler >= 0)
         out += std::string("SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=") + (options.polar_cooler ? "1" : "0") + "\n";
     return out;
+}
+
+std::string qidi_leveling_script(const QidiPrintOptions& options)
+{
+    // The firmware's G31/G32 set _km_globals.bedmesh_before_print, which its G29 reads: probe a
+    // fresh mesh before this print, or load the saved one.
+    if (options.bed_leveling < 0)
+        return {};
+    return options.bed_leveling ? "G31\n" : "G32\n";
+}
+
+QidiOptionDefaults qidi_option_defaults(const Status& st, const std::string& remembered_leveling,
+                                        const std::string& remembered_timelapse, const std::string& remembered_polar_cooler)
+{
+    auto remembered = [](const std::string& v, bool fallback) { return v.empty() ? fallback : v == "1"; };
+    QidiOptionDefaults d;
+    // A Box with nothing loaded in it has nothing to feed: start on the extruder's own spool.
+    d.use_box = st.qidi_box && std::any_of(st.slots.begin(), st.slots.end(), [](const Slot& s) { return s.loaded; });
+    // Off unless the person turned it on last time: a mesh probe adds minutes to every print.
+    d.bed_leveling = remembered(remembered_leveling, false);
+    d.timelapse    = remembered(remembered_timelapse, false);
+    d.polar_cooler = remembered(remembered_polar_cooler, false);
+    return d;
 }
 
 } // namespace PrintHostDevices

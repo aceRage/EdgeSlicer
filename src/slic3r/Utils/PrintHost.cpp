@@ -559,7 +559,9 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
         }
         return true;
     };
-    if (archive_print && (!the_job.qidi_start_script.empty() || the_job.qidi_timelapse >= 0) && !qidi_printer_idle())
+    const bool qidi_send = archive_print && (!the_job.qidi_start_script.empty() || !the_job.qidi_leveling_script.empty() ||
+                                             the_job.qidi_timelapse >= 0);
+    if (qidi_send && !qidi_printer_idle())
         return;
 
     // QIDI printers: the send dialog's QIDI options and Box mapping, sent the way QIDIStudio's own
@@ -579,13 +581,22 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
         }
         BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent the QIDI print options (Box mapping " << archive_mapping << ")";
     }
+    // The bed leveling (G31 / G32) is a call of its own, after the Box: a firmware that refuses it
+    // is logged and the print goes ahead on the saved mesh. It never blocks the mapping or the print.
+    if (archive_print && !the_job.qidi_leveling_script.empty()) {
+        std::string err;
+        if (!GUI::SnapmakerLan::run_script(script_target(), the_job.qidi_leveling_script, err))
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI bed leveling choice (" << err
+                                     << "); the print goes ahead without it";
+        else
+            BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent the QIDI bed leveling choice";
+    }
     // The timelapse is Moonraker's own setting (its timelapse component's /machine/timelapse/settings,
     // which QIDIStudio posts to as well), so it goes out on its own. A refusal is logged and the print
     // goes ahead: a missing timelapse does not spoil the part.
     if (archive_print && the_job.qidi_timelapse >= 0) {
-        const GUI::SnapmakerLan::Device d   = script_target();
-        const std::string               url = "http://" + d.ip + (d.port > 0 && d.port != 80 ? ":" + std::to_string(d.port) : "") +
-                                "/machine/timelapse/settings?enabled=" + (the_job.qidi_timelapse ? "true" : "false");
+        const std::string url = PrinterStorage::base_url_of(host_url) + "/machine/timelapse/settings?enabled=" +
+                                (the_job.qidi_timelapse ? "true" : "false");
         bool        ok = false;
         std::string err;
         Http::post(url)

@@ -250,9 +250,11 @@ struct PrintHostJob
     // QIDI printers: what the send dialog's QIDI options and Box mapping come to, sent before the
     // print starts the way QIDIStudio does (PrintHostDevices::qidi_start_script). The Box firmware
     // feeds T<n> from whichever slot the saved variable value_t<n> names, and only the sending
-    // slicer sets that, so a script that will not go through stops the send. The timelapse is
-    // Moonraker's own setting rather than G-code: -1 leave it alone, 0 off, 1 on.
+    // slicer sets that, so a script that will not go through stops the send. The bed leveling
+    // (G31/G32) is its own call whose refusal is only logged, and the timelapse is Moonraker's own
+    // setting rather than G-code: -1 leave it alone, 0 off, 1 on.
     std::string qidi_start_script;
+    std::string qidi_leveling_script;
     int         qidi_timelapse { -1 };
     // Snapmaker tool changers: this print should end with the printer unloading the toolheads it
     // used. The send dialog's checkbox, defaulted from the printer preset's
@@ -277,6 +279,7 @@ struct PrintHostJob
         , device_name(std::move(other.device_name))
         , filament_mapping(std::move(other.filament_mapping))
         , qidi_start_script(std::move(other.qidi_start_script))
+        , qidi_leveling_script(std::move(other.qidi_leveling_script))
         , qidi_timelapse(other.qidi_timelapse)
         , unload_at_end(other.unload_at_end)
         , history_plates(std::move(other.history_plates))
@@ -299,6 +302,7 @@ struct PrintHostJob
         device_name      = std::move(other.device_name);
         filament_mapping = std::move(other.filament_mapping);
         qidi_start_script = std::move(other.qidi_start_script);
+        qidi_leveling_script = std::move(other.qidi_leveling_script);
         qidi_timelapse    = other.qidi_timelapse;
         unload_at_end    = other.unload_at_end;
         history_plates        = std::move(other.history_plates);

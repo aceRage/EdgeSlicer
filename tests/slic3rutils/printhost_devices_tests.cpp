@@ -376,6 +376,7 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK(st.note.empty()); // there is something to map, so nothing to apologise for
         CHECK(st.slots[0].label() == "T1 PLA Basic");
         CHECK_FALSE(st.qidi_box); // a U1 is never taken for a QIDI Box
+        CHECK_FALSE(st.qidi);     // nor for QIDI firmware: no QIDI options in its send dialog
     }
 
     SECTION("a stock Klipper names its tools and nothing in them") {
@@ -392,6 +393,7 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK(st.slots[0].nozzle == Approx(0.4));
         CHECK_FALSE(st.note.empty());
         CHECK_FALSE(st.qidi_box);
+        CHECK_FALSE(st.qidi);
     }
 
     SECTION("a QIDI Box names its slots and what is in them") {
@@ -455,31 +457,68 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK_FALSE(st.qidi_polar_cooler);
     }
 
-    SECTION("the QIDI print options go out the way QIDIStudio sends them") {
+    SECTION("the QIDI print options go out the way QIDIStudio sends them, leveling on its own") {
         QidiPrintOptions o;
         CHECK(qidi_start_script(o, "") == ""); // nothing offered, nothing mapped: nothing sent
+        CHECK(qidi_leveling_script(o) == "");
 
         o.use_box      = 1;
         o.bed_leveling = 1;
         o.polar_cooler = 0;
+        // The Box call carries the Box and the polar cooler, never G31/G32: a firmware that
+        // refuses the leveling must not take the Box mapping down with it.
         CHECK(qidi_start_script(o, "0:4") ==
               "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
-              "SAVE_VARIABLE VARIABLE=value_t0 VALUE='\"slot4\"'\n"
-              "G31\n"
+              "SAVE_VARIABLE VARIABLE=value_t0 VALUE=\"'slot4'\"\n"
               "SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=0\n");
+        CHECK(qidi_leveling_script(o) == "G31\n");
         // The Box on with nothing mapped still switches it on.
         CHECK(qidi_start_script(o, "") ==
               "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
-              "G31\n"
               "SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=0\n");
 
         // The Box off: no mapping goes out, whatever the table said.
         o.use_box      = 0;
         o.bed_leveling = 0;
         o.polar_cooler = -1;
-        CHECK(qidi_start_script(o, "0:4") ==
-              "SAVE_VARIABLE VARIABLE=enable_box VALUE=0\n"
-              "G32\n");
+        CHECK(qidi_start_script(o, "0:4") == "SAVE_VARIABLE VARIABLE=enable_box VALUE=0\n");
+        CHECK(qidi_leveling_script(o) == "G32\n");
+
+        // Leveling only (no Box, no cooler offered): the Box call is empty, the leveling is not.
+        QidiPrintOptions level_only;
+        level_only.bed_leveling = 0;
+        CHECK(qidi_start_script(level_only, "") == "");
+        CHECK(qidi_leveling_script(level_only) == "G32\n");
+    }
+
+    SECTION("the QIDI options start off, the Box only when a slot is loaded") {
+        Status st;
+        st.qidi     = true;
+        st.qidi_box = true;
+        st.slots.resize(4);
+        // Nothing remembered: bed leveling, timelapse and cooler start off; an empty Box starts off.
+        QidiOptionDefaults d = qidi_option_defaults(st, "", "", "");
+        CHECK_FALSE(d.bed_leveling);
+        CHECK_FALSE(d.timelapse);
+        CHECK_FALSE(d.polar_cooler);
+        CHECK_FALSE(d.use_box);
+        // One loaded slot is enough for the Box.
+        st.slots[2].loaded = true;
+        d = qidi_option_defaults(st, "", "", "");
+        CHECK(d.use_box);
+        // The person's last choice wins over the default, both ways.
+        d = qidi_option_defaults(st, "1", "1", "1");
+        CHECK(d.bed_leveling);
+        CHECK(d.timelapse);
+        CHECK(d.polar_cooler);
+        d = qidi_option_defaults(st, "0", "0", "0");
+        CHECK_FALSE(d.bed_leveling);
+        CHECK_FALSE(d.timelapse);
+        CHECK_FALSE(d.polar_cooler);
+        // No Box at all: never on, loaded slots or not (those would be a U1's tools).
+        st.qidi_box = false;
+        d = qidi_option_defaults(st, "", "", "");
+        CHECK_FALSE(d.use_box);
     }
 
     SECTION("the QIDI Box mapping goes out the way QIDIStudio sends it") {
