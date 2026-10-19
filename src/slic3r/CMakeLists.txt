@@ -967,6 +967,12 @@ set(SLIC3R_GUI_SOURCES
     Utils/ElegooSdcp.hpp
     Utils/ElegooSdcpMonitor.cpp
     Utils/ElegooSdcpMonitor.hpp
+    Utils/AnycubicLan.cpp
+    Utils/AnycubicLan.hpp
+    Utils/AnycubicLanHost.cpp
+    Utils/AnycubicLanHost.hpp
+    Utils/AnycubicLanMonitor.cpp
+    Utils/AnycubicLanMonitor.hpp
     Utils/EmbossStyleManager.cpp
     Utils/EmbossStyleManager.hpp
     Utils/ESP3D.cpp

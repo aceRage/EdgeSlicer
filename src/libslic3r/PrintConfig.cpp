@@ -97,7 +97,10 @@ static t_config_enum_values s_keys_map_PrintHostType {
     { "obico",          htObico },
     { "flashforge",     htFlashforge },
     { "simplyprint",    htSimplyPrint },
-    { "elegoolink",     htElegooLink }
+    { "elegoolink",     htElegooLink },
+    // Developer-only LAN host (not in host_type enum_values: Field.cpp maps that list by index,
+    // and htMoonRaker* already occupy the next two enumerators without GUI rows).
+    { "anycubiclan",    htAnycubicLan }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrintHostType)
 

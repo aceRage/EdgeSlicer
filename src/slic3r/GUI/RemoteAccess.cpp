@@ -38,6 +38,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/ElegooSdcpMonitor.hpp"
+#include "slic3r/Utils/AnycubicLanMonitor.hpp"
 #include "slic3r/Utils/LoopbackAcceptLoop.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -569,6 +570,7 @@ void RemoteAccess::stop()
         RemoteEvents::stop();
         RemoteTimelapse::shutdown();
         SdcpMonitor::shutdown(); // the Elegoo printers' connections
+        AnycubicLanMonitor::shutdown();
         if (s_heartbeat) s_heartbeat->Stop();
         boost::system::error_code ig;
         fs::remove(fs::path(RemoteHub::instances_dir()) / (std::to_string(wxGetProcessId()) + ".json"), ig);

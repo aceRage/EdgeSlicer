@@ -10,10 +10,15 @@
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
+#include "slic3r/Utils/AnycubicLan.hpp"
+#include "slic3r/Utils/AnycubicLanHost.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include <algorithm>
 #include <ctime>
 #include <string>
 
@@ -404,6 +409,7 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         // printer in elegoo_canvas_tests.cpp). Any other Elegoo model has nothing to read.
         CHECK(can_probe("elegoolink"));
         CHECK(can_probe("octoprint"));
+        CHECK(can_probe("anycubiclan"));
         const std::string note = no_filament_note("elegoolink");
         CHECK(note.find("Elegoo Link") != std::string::npos);
         CHECK(note.find("sent exactly as it was sliced") != std::string::npos);
@@ -515,9 +521,14 @@ TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path r
 
     CHECK(host_type_enum("elegoolink") == htElegooLink);
     CHECK(host_type_key(htElegooLink) == "elegoolink");
+    CHECK(host_type_enum("anycubiclan") == htAnycubicLan);
+    CHECK(host_type_key(htAnycubicLan) == "anycubiclan");
     CHECK(host_type_enum("nonsense") == htOctoPrint); // an unknown key is never a crash
     CHECK(speaks_moonraker("octoprint"));
     CHECK_FALSE(speaks_moonraker("elegoolink"));
+    CHECK(speaks_anycubic_lan("anycubiclan"));
+    CHECK_FALSE(speaks_anycubic_lan("octoprint"));
+    CHECK_FALSE(speaks_moonraker("anycubiclan"));
 
     CHECK(normalize_address(" 192.168.1.41/ ") == "192.168.1.41");
     CHECK(normalize_address("HTTP://Printer.local/") == "http://printer.local");
@@ -675,8 +686,10 @@ TEST_CASE("PrusaLinkStatus: what a PrusaLink printer says it is doing", "[PrintH
         CHECK(PrintHostDevices::can_probe("prusaconnect"));
         CHECK(PrintHostDevices::can_probe("octoprint"));
         CHECK(PrintHostDevices::can_probe("elegoolink")); // the CC1's CANVAS
+        CHECK(PrintHostDevices::can_probe("anycubiclan"));
         // It reports a state but never a filament, and the dialog has to say so.
         CHECK(PrintHostDevices::no_filament_note("prusalink").find("PrusaLink") != std::string::npos);
+        CHECK(PrintHostDevices::no_filament_note("anycubiclan").find("ACE") != std::string::npos);
     }
 }
 
@@ -722,3 +735,241 @@ TEST_CASE("PrintHost: get_err_code_from_body does not throw on malformed JSON", 
     CHECK(PrintHost::get_err_code_from_body(R"({})") == 0);
     REQUIRE_NOTHROW(PrintHost::get_err_code_from_body("<html>404</html>"));
 }
+
+// Anycubic LAN protocol: parsers, the published /ctrl signature, AES-CBC of a constructed
+// ciphertext, SSDP, MQTT topics and print/start JSON. No printer on the network.
+//
+// Sources (clean-room; no Anycubic binary, no community source pasted):
+//  * Rinkhals #356 — GET /info body and POST /ctrl?ts&nonce&sign=79206e4c… vector
+//  * grunna/anycubic-kobra-x-lan NOTES.md — sign = md5(md5(token[0:16])+ts+nonce), AES-128-CBC
+//  * rvanderp3/kobra-connect README — nested command envelope and topics
+//  * Rinkhals gkapi MQTT docs — print/start fields and info/report JSON
+TEST_CASE("Anycubic LAN: /info parser (Rinkhals #356 capture)", "[AnycubicLan]")
+{
+    const std::string body = R"({
+        "deviceType": "fdm",
+        "modelId": "20025",
+        "modelName": "Anycubic Kobra S1",
+        "cn": "XXXX-XXXX-XXXX-XXXX",
+        "ctrlType": "lan",
+        "ctrlInfoUrl": "http://192.168.200.35:18910/ctrl",
+        "ip": "192.168.200.35",
+        "deviceName": "Anycubic Kobra S1",
+        "zone": "global",
+        "env": "prod",
+        "usn": "uuid:fdm:XX-XX-XX-XX-XX-XX",
+        "fileUploadurl": "http://192.168.200.35:18910/gcode_upload?s=vSqLSUdun37jv12kHZEiwwk4EocOzWnc",
+        "rtspUrl": "http://192.168.200.35:18088/flv",
+        "token": "riRpv8pfYd8HKPKUMvXJjOCCKUGQ6PWB"
+    })";
+    AnycubicLan::Info info;
+    REQUIRE(AnycubicLan::parse_info(body, info));
+    CHECK(info.model_id == "20025");
+    CHECK(info.model_name == "Anycubic Kobra S1");
+    CHECK(info.ctrl_type == "lan");
+    CHECK(info.ip == "192.168.200.35");
+    CHECK(info.file_upload_url.find("gcode_upload") != std::string::npos);
+    CHECK(info.rtsp_url.find(":18088/flv") != std::string::npos);
+    CHECK(info.token == "riRpv8pfYd8HKPKUMvXJjOCCKUGQ6PWB");
+    CHECK(AnycubicLan::signed_handshake_supported(info.token));
+    CHECK_FALSE(AnycubicLan::signed_handshake_supported("short"));
+    CHECK_FALSE(AnycubicLan::parse_info("<html>", info));
+}
+
+TEST_CASE("Anycubic LAN: /ctrl sign matches the Rinkhals #356 vector", "[AnycubicLan]")
+{
+    // POST /ctrl?ts=1767108707864&nonce=yJlmFt&sign=79206e4c242846769910d678d75e8697&did=…
+    // token from the same capture. did is sent but not signed.
+    const std::string token = "riRpv8pfYd8HKPKUMvXJjOCCKUGQ6PWB";
+    const std::string ts    = "1767108707864";
+    const std::string nonce = "yJlmFt";
+    CHECK(AnycubicLan::sign_ctrl(token, ts, nonce) == "79206e4c242846769910d678d75e8697");
+    CHECK(AnycubicLan::sign_ctrl(token, ts, nonce) != AnycubicLan::sign_ctrl(token, ts, "xxxxxx"));
+    CHECK(AnycubicLan::sign_ctrl("short", ts, nonce).empty());
+}
+
+TEST_CASE("Anycubic LAN: AES-128-CBC decrypt of /ctrl credentials", "[AnycubicLan]")
+{
+    // No published ciphertext (Rinkhals #356 redacted the blob). Ciphertext built with the
+    // documented key = token[16:32], IV = ctrl.data.token, AES-128-CBC/PKCS7, independently of
+    // this tree, then decrypted here.
+    AnycubicLan::Info info;
+    info.token = "riRpv8pfYd8HKPKUMvXJjOCCKUGQ6PWB";
+    AnycubicLan::CtrlBlob blob;
+    blob.iv = "mVftosNQ2zwoXuS6";
+    blob.info_b64 = "2PsBlWPr3WJjP8q7I8TqqJfYdnL3SgkffcZBvTv9/5dn7VubVoYPmvJWCL38xDOf"
+                    "CJtgr1skoVcXi0aRL0Mm1ZArvzmOn9jr8docBXlD6UVVU/lWXFbAFeDyDS4CobBf"
+                    "deExEmSODuGL3/we0LIG8DDsWP7kWS8qkyOyKK+AiiTUrFtz4pJEko+ZHHeNNsWc"
+                    "sa693ndQtDhLVZoYoJaFbVBA9fXKOxUrRyF+VICI1NxgCeRt4qF/Sd4l2PnAPbo6"
+                    "4perYPabL2GLed+fl61Gt2HDEq5sTGdF6FWpu5xN0bV9xvMzkwQLDNLluSjs+OlL"
+                    "O2Wydb9+JND2BF8yt/sy7S/yWRvceC7n3HVRXW13V7PbRTG3haplywTPNsDAYAYN"
+                    "LwNBAPCc/6TpukEhE3iTuHZZvZnCAvOXG/Bs6QBdiqLa62ISxLSxXMnrWBYppviq"
+                    "In1hIh4C9SY9FqZOdjrDSRKZsEJw1TdgSEfOZU8kqXg=";
+    AnycubicLan::Credentials creds;
+    REQUIRE(AnycubicLan::decrypt_ctrl(info, blob, creds));
+    CHECK(creds.broker_host == "192.168.200.35");
+    CHECK(creds.broker_port == 9883);
+    CHECK(creds.username == "lanuser");
+    CHECK(creds.password == "lanpass");
+    CHECK(creds.device_id == "DEVICECN");
+    CHECK(creds.model_id == "20025");
+    CHECK(creds.cert.find("BEGIN CERTIFICATE") != std::string::npos);
+    CHECK(creds.key.find("BEGIN PRIVATE KEY") != std::string::npos);
+
+    const std::string ctrl_json = R"({"code":200,"message":"success","data":{"info":"QQ==","token":"mVftosNQ2zwoXuS6"}})";
+    AnycubicLan::CtrlBlob parsed;
+    REQUIRE(AnycubicLan::parse_ctrl_response(ctrl_json, parsed));
+    CHECK(parsed.code == 200);
+    CHECK(parsed.iv == "mVftosNQ2zwoXuS6");
+    CHECK(parsed.info_b64 == "QQ==");
+}
+
+TEST_CASE("Anycubic LAN: SSDP M-SEARCH and response parsing", "[AnycubicLan]")
+{
+    const std::string req = AnycubicLan::ssdp_msearch_request("Kobra S1");
+    CHECK(req.find("M-SEARCH * HTTP/1.1") != std::string::npos);
+    CHECK(req.find("HOST: 239.255.255.250:1900") != std::string::npos);
+    CHECK(req.find("MAN: \"ssdp:discover\"") != std::string::npos);
+    CHECK(req.find("ST: ac:3dprinter:Kobra S1") != std::string::npos);
+    CHECK(AnycubicLan::ssdp_msearch_request().find("ST: ac:3dprinter:") != std::string::npos);
+
+    const std::string reply =
+        "HTTP/1.1 200 OK\r\n"
+        "CACHE-CONTROL: max-age=1800\r\n"
+        "ST: ac:3dprinter:Kobra S1\r\n"
+        "USN: uuid:fdm:AA-BB-CC-DD-EE-FF\r\n"
+        "LOCATION: http://192.168.200.35:18910/info\r\n"
+        "SERVER: Anycubic UPnP/1.0\r\n"
+        "\r\n";
+    AnycubicLan::SsdpDevice d;
+    REQUIRE(AnycubicLan::parse_ssdp_message(reply, d));
+    CHECK(d.model == "Kobra S1");
+    CHECK(d.usn == "uuid:fdm:AA-BB-CC-DD-EE-FF");
+    CHECK(d.ip == "192.168.200.35");
+    CHECK(d.location.find("18910/info") != std::string::npos);
+
+    const std::string notify =
+        "NOTIFY * HTTP/1.1\r\n"
+        "NT: ac:3dprinter:Kobra X\r\n"
+        "USN: uuid:fdm:11-22-33-44-55-66\r\n"
+        "LOCATION: 10.0.0.9\r\n"
+        "\r\n";
+    AnycubicLan::SsdpDevice n;
+    REQUIRE(AnycubicLan::parse_ssdp_message(notify, n));
+    CHECK(n.model == "Kobra X");
+    CHECK(n.ip == "10.0.0.9");
+
+    AnycubicLan::SsdpDevice junk;
+    const std::string bambu =
+        "HTTP/1.1 200 OK\r\nST: urn:bambulab-com:device:3dprinter:1\r\nLOCATION: 1.2.3.4\r\n\r\n";
+    CHECK_FALSE(AnycubicLan::parse_ssdp_message(bambu, junk));
+}
+
+TEST_CASE("Anycubic LAN: MQTT topics, command envelope and print/start", "[AnycubicLan]")
+{
+    CHECK(AnycubicLan::mqtt_slicer_topic("20025", "CN1", "print") ==
+          "anycubic/anycubicCloud/v1/slicer/printer/20025/CN1/print");
+    CHECK(AnycubicLan::mqtt_public_filter("20025", "CN1") ==
+          "anycubic/anycubicCloud/v1/printer/public/20025/CN1/#");
+    CHECK(AnycubicLan::mqtt_broker_uri("192.0.2.10") == "mqtts://192.0.2.10:9883");
+    CHECK(AnycubicLan::info_url("192.0.2.10") == "http://192.0.2.10:18910/info");
+    CHECK(AnycubicLan::info_url("http://192.0.2.10:80/") == "http://192.0.2.10:18910/info");
+    CHECK(AnycubicLan::ctrl_url("192.0.2.10", "1", "abc123", "deadbeef", "DID")
+              .find("/ctrl?ts=1&nonce=abc123&sign=deadbeef&did=DID") != std::string::npos);
+
+    const nlohmann::json env = AnycubicLan::command_envelope("mid", "CN1", "20025", "print", "pause",
+                                                             nlohmann::json{ { "taskid", "-1" } });
+    CHECK(env["msgid"] == "mid");
+    CHECK(env["data"]["did"] == "CN1");
+    CHECK(env["data"]["bid"] == "20025");
+    CHECK(env["data"]["type"] == "print");
+    CHECK(env["data"]["action"] == "pause");
+    CHECK(env["data"]["data"]["taskid"] == "-1");
+
+    AnycubicLan::PrintStart job;
+    job.filename = "box.gcode";
+    job.filetype = 1;
+    job.filesize = 188000;
+    job.md5      = "943c0dff568dd508e21af2d894bb6b49";
+    job.ams      = AnycubicLan::ams_from_filament_mapping("0:1,1:2");
+    job.use_ams  = true;
+    const nlohmann::json start = AnycubicLan::print_start_data(job);
+    CHECK(start["taskid"] == "-1");
+    CHECK(start["filename"] == "box.gcode");
+    CHECK(start["filetype"] == 1);
+    CHECK(start["filesize"] == 188000);
+    CHECK(start["ams_settings"]["use_ams"] == true);
+    REQUIRE(start["ams_settings"]["ams_box_mapping"].size() == 2);
+    CHECK(start["ams_settings"]["ams_box_mapping"][0]["paint_index"] == 0);
+    CHECK(start["ams_settings"]["ams_box_mapping"][0]["ams_index"] == 1);
+    CHECK(start["task_settings"]["auto_leveling"] == 0);
+    CHECK(start["task_settings"]["vibration_compensation"] == 0);
+
+    AnycubicLan::Status st;
+    REQUIRE(AnycubicLan::parse_report("info/report", R"({
+        "type":"info","action":"report","data":{
+            "printerName":"My Kobra 3","model":"Anycubic Kobra 3","version":"2.3.5.3",
+            "state":"free","ip":"192.0.2.10",
+            "temp":{"curr_hotbed_temp":23,"curr_nozzle_temp":28,"target_hotbed_temp":0,"target_nozzle_temp":0},
+            "fan_speed_pct":0,"project":{"state":"printing","filename":"a.gcode","progress":41,"curr_layer":3,"total_layers":10,"remain_time":12,"pause":0}
+        }})", st));
+
+    // Nested slicer envelope (kobra-connect / ACSN): data.{did,bid,type,action,data}.
+    AnycubicLan::Status nested;
+    REQUIRE(AnycubicLan::parse_report("print/report", R"({
+        "msgid":"mid","data":{"did":"CN1","bid":"20025","type":"print","action":"report",
+            "data":{"pause":1,"project":{"state":"pause","filename":"b.gcode","progress":10}}}})", nested));
+    CHECK(AnycubicLan::hub_state(nested) == "paused");
+    CHECK(AnycubicLan::can_resume(nested));
+    CHECK_FALSE(AnycubicLan::can_pause(nested));
+    CHECK(st.has_nozzle);
+    CHECK(st.nozzle == 28);
+    CHECK(st.has_bed);
+    CHECK(st.bed == 23);
+    CHECK(st.filename == "a.gcode");
+    CHECK(st.progress == 41);
+    CHECK(AnycubicLan::hub_state(st) == "printing");
+    CHECK(AnycubicLan::can_pause(st));
+    CHECK(AnycubicLan::can_stop(st));
+    CHECK_FALSE(AnycubicLan::can_resume(st));
+
+    AnycubicLan::Snapshot snap;
+    snap.connected     = true;
+    snap.status        = st;
+    nlohmann::json row = nlohmann::json::object();
+    AnycubicLan::fill_row(snap, "192.0.2.10", row);
+    CHECK(row["online"] == true);
+    CHECK(row["status"] == "printing");
+    CHECK(row["percent"] == 41);
+    CHECK(row["left_time_s"] == 12 * 60);
+    CHECK(row["anycubic"]["protocol"] == "anycubic-lan");
+}
+
+TEST_CASE("Anycubic LAN: PrintHost factory and developer-only key", "[AnycubicLan]")
+{
+    CHECK(AnycubicLan::host_type_key() == std::string("anycubiclan"));
+    CHECK(AnycubicLan::is_developer_host_type("anycubiclan"));
+    CHECK_FALSE(AnycubicLan::is_developer_host_type("elegoolink"));
+
+    DynamicPrintConfig config;
+    Device             d = make_device("S1", "192.0.2.35", "anycubiclan");
+    apply_to_config(d, config);
+    REQUIRE(config.option<ConfigOptionEnum<PrintHostType>>("host_type") != nullptr);
+    CHECK(config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value == htAnycubicLan);
+    std::unique_ptr<PrintHost> host(PrintHost::get_print_host(&config, false));
+    REQUIRE(host);
+    CHECK(std::string(host->get_name()) == "Anycubic LAN");
+    CHECK(host->get_host() == "192.0.2.35");
+    CHECK(host->can_test());
+    CHECK_FALSE(host->has_auto_discovery());
+
+    const Device round = from_config(config);
+    CHECK(round.host_type == "anycubiclan");
+
+    // Not in host_type enum_values: Field.cpp maps that list by index, and Moonraker already
+    // occupies the next two enumerators without GUI rows. Developer mode offers the key separately.
+    const ConfigOptionDef *def = print_config_def.get("host_type");
+    REQUIRE(def != nullptr);
+    CHECK(std::find(def->enum_values.begin(), def->enum_values.end(), "anycubiclan") == def->enum_values.end());
+}
+

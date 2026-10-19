@@ -10,6 +10,7 @@
 
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/AppConfig.hpp"
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -37,6 +38,12 @@ static void host_type_choices(std::vector<std::string>& keys, wxArrayString& lab
         keys.push_back(def->enum_values[i]);
         labels.Add(i < def->enum_labels.size() ? _(def->enum_labels[i]) : from_u8(def->enum_values[i]));
     }
+    // Anycubic LAN is a developer spike: not in enum_values (Field.cpp maps that list by index)
+    // and not in any profile. Offer it only with Develop mode on.
+    if (wxGetApp().app_config && wxGetApp().app_config->get_bool("developer_mode")) {
+        keys.push_back("anycubiclan");
+        labels.Add(_L("Anycubic LAN (dev)"));
+    }
 }
 
 static wxString host_type_label(const std::string& key)
@@ -47,6 +54,8 @@ static wxString host_type_label(const std::string& key)
     for (size_t i = 0; i < keys.size(); ++i)
         if (keys[i] == key)
             return labels[i];
+    if (key == "anycubiclan")
+        return _L("Anycubic LAN (dev)");
     return from_u8(key);
 }
 

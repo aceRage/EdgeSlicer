@@ -2,6 +2,7 @@
 
 #include "Http.hpp"
 #include "PrusaLinkStatus.hpp"
+#include "AnycubicLan.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -120,11 +121,13 @@ bool can_probe(const std::string& host_type_key)
     // The host types this fork has a status client for. Adding one here means writing that client;
     // there is no generic "ask a print host how it is" in this codebase.
     return speaks_moonraker(host_type_key) || PrusaLinkStatus::speaks_prusalink(host_type_key) ||
-           host_type_key == "elegoolink";
+           host_type_key == "elegoolink" || host_type_key == "anycubiclan";
 }
 
 std::string no_filament_note(const std::string& host_type_key)
 {
+    if (host_type_key == "anycubiclan")
+        return "Anycubic LAN ACE slot mapping is not in this spike, so there is nothing to map. The plate is sent exactly as it was sliced.";
     if (host_type_key == "elegoolink")
         // A Centauri Carbon 1 with a CANVAS reports its trays (ElegooCanvas.hpp); anything else on
         // Elegoo Link - or a CC1 without a CANVAS, or one that did not answer - has nothing to map.
@@ -307,6 +310,27 @@ Status probe(const Device& d, int timeout_s)
     }
     if (d.host_type == "elegoolink")
         return probe_elegoo(d, timeout_s);
+    if (d.host_type == "anycubiclan") {
+        Status st;
+        st.probed = true;
+        st.note   = no_filament_note(d.host_type);
+        std::string body, error;
+        const std::string url = "http://" + AnycubicLan::bare_host(d.address) + ":18910/info";
+        if (!moonraker_get(url, body, error, timeout_s)) {
+            st.note  = "this printer did not answer" + (error.empty() ? std::string() : (": " + error));
+            st.error = error;
+            return st;
+        }
+        AnycubicLan::Info info;
+        if (!AnycubicLan::parse_info(body, info)) {
+            st.note = "the printer answered, but not with Anycubic LAN /info JSON";
+            return st;
+        }
+        st.online = true;
+        if (info.ctrl_type != "lan")
+            st.note = "the printer is not in LAN mode";
+        return st;
+    }
     st.probed = true;
     if (PrusaLinkStatus::speaks_prusalink(d.host_type))
         return probe_prusalink(d, timeout_s);

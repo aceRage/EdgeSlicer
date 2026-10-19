@@ -35,6 +35,7 @@
 #include "Flashforge.hpp"
 #include "SimplyPrint.hpp"
 #include "ElegooLink.hpp"
+#include "AnycubicLanHost.hpp"
 
 namespace fs = boost::filesystem;
 using boost::optional;
@@ -92,6 +93,7 @@ static PrintHost* make_print_host(DynamicPrintConfig *config, bool change_engine
             case htFlashforge: return new Flashforge(config);
             case htSimplyPrint: return new SimplyPrint(config);
             case htElegooLink: return new ElegooLink(config);
+            case htAnycubicLan: return new AnycubicLanHost(config);
             default:          return nullptr;
         }
     } else {
@@ -580,6 +582,9 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
         else
             BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent " << script;
     }
+
+    if (!archive_mapping.empty())
+        the_job.upload_data.extended_info.emplace("filament_mapping", archive_mapping);
 
     bool success = false;
     try {
