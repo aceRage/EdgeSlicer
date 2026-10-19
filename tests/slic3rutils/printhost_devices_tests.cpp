@@ -974,6 +974,8 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
     SECTION("normalize_filament_type strips subtypes") {
         CHECK(normalize_filament_type("PLA Silk") == "PLA");
         CHECK(normalize_filament_type("PLA+") == "PLA");
+        CHECK(normalize_filament_type("PLA-CF") == "PLA");
+        CHECK(normalize_filament_type("PCTG") == "PC");
         CHECK(normalize_filament_type("PETG") == "PETG");
         CHECK(normalize_filament_type("ABS Pro") == "ABS");
         CHECK(normalize_filament_type("Nylon") == "Nylon");

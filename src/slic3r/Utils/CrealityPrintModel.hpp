@@ -157,6 +157,11 @@ inline std::string cfs_variant_name(const std::string &code)
 
 inline std::string normalize_filament_type(const std::string &filament_type)
 {
+    // Upstream CrealityPrintAgent: PCTG is treated as PC, PLA-CF as PLA.
+    if (filament_type.rfind("PCTG", 0) == 0)
+        return "PC";
+    if (filament_type.rfind("PLA-CF", 0) == 0 || filament_type.rfind("PLA_CF", 0) == 0)
+        return "PLA";
     static const std::vector<std::string> bases = {"PETG", "PET", "PLA", "ABS", "ASA", "TPU", "PC", "PA", "PVA", "HIPS"};
     for (const auto &base : bases) {
         if (filament_type.rfind(base, 0) == 0)
