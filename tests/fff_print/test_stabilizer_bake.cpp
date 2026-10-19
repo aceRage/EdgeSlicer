@@ -234,10 +234,49 @@ ScopedTemporaryDir use_test_temporary_dir()
     return ScopedTemporaryDir(tmp_root);
 }
 
+// get_backup_path() writes .../snapmaker_orca_model/<day>/<HH_MM_SS>#pid#id. Remove only that
+// leaf (remove_all). Then drop <day> and snapmaker_orca_model only if they are empty (remove,
+// not remove_all): on Windows the GUI shares %TEMP%/snapmaker_orca_model with a running or
+// crashed EdgeSlicer. error_code overloads so this never throws out of a destructor.
+void remove_own_model_backup(const std::string &backup)
+{
+    if (backup.empty())
+        return;
+    const boost::filesystem::path leaf(backup);
+    const boost::filesystem::path day  = leaf.parent_path();
+    const boost::filesystem::path root = day.parent_path();
+    if (root.filename() != "snapmaker_orca_model")
+        return;
+    boost::system::error_code ec;
+    boost::filesystem::remove_all(leaf, ec);
+    boost::filesystem::remove(day, ec);
+    boost::filesystem::remove(root, ec);
+}
+
+struct OwnBackupCleanup
+{
+    std::vector<std::string> paths;
+    ~OwnBackupCleanup()
+    {
+        for (const std::string &p : paths)
+            remove_own_model_backup(p);
+    }
+    void add(const std::string &p)
+    {
+        if (!p.empty())
+            paths.push_back(p);
+    }
+};
+
 // Loads the owner's project. The caller checks the model has objects.
 bool load_project(Bench &b, DynamicPrintConfig &config)
 {
     const ScopedTemporaryDir tmp = use_test_temporary_dir();
+    struct Cleanup
+    {
+        Model &m;
+        ~Cleanup() { remove_own_model_backup(m.backup_path); }
+    } own{b.model};
     const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
     ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
     PlateDataPtrs             plate_data;
@@ -263,8 +302,17 @@ bool slice_project(Bench &b)
 // Stores `model` as a project and loads it back.
 bool round_trip(Model &model, Model &loaded, const char *name)
 {
-    const ScopedTemporaryDir      tmp  = use_test_temporary_dir();
-    const std::string             file = (tmp.path / name).string();
+    const ScopedTemporaryDir tmp  = use_test_temporary_dir();
+    struct Cleanup
+    {
+        Model &a, &b;
+        ~Cleanup()
+        {
+            remove_own_model_backup(a.backup_path);
+            remove_own_model_backup(b.backup_path);
+        }
+    } own{model, loaded};
+    const std::string        file = (tmp.path / name).string();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
 
     StoreParams store_params;
@@ -351,19 +399,11 @@ TEST_CASE("A stabilizer project loads when temporary_dir was never set", "[Stabi
     // is not a prefix of ".../T/snapmaker_orca_model/...". Strip the trailing separator first.
     boost::filesystem::path sys_tmp = boost::filesystem::temp_directory_path();
     sys_tmp.remove_trailing_separator();
-    // Fallback writes under T/snapmaker_orca_model/...; remove it even if a REQUIRE throws.
-    struct RemoveAll
-    {
-        boost::filesystem::path p;
-        ~RemoveAll()
-        {
-            boost::system::error_code ec;
-            boost::filesystem::remove_all(p, ec);
-        }
-    } leftover{sys_tmp / "snapmaker_orca_model"};
+    OwnBackupCleanup leftover;
 
     Model model;
     const std::string backup = model.get_backup_path();
+    leftover.add(backup);
     REQUIRE_FALSE(backup.empty());
     const boost::filesystem::path backup_path(backup);
     const std::string backup_norm = backup_path.lexically_normal().string();
@@ -382,6 +422,7 @@ TEST_CASE("A stabilizer project loads when temporary_dir was never set", "[Stabi
     const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
     const bool ok = load_bbs_3mf(path.c_str(), &config, &ctxt, &b.model, &plate_data, &project_presets, &is_bbl,
                                  &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    leftover.add(b.model.backup_path);
     release_PlateData_list(plate_data);
     REQUIRE(ok);
     REQUIRE_FALSE(b.model.objects.empty());
