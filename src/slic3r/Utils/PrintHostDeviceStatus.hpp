@@ -82,6 +82,23 @@ struct Status
 // usable (the firmware keeps 16 tools and 16 Box slots, 0-based).
 std::string qidi_box_mapping_script(const std::string& mapping);
 
+// print_stats.state names a print in progress: "printing" or "paused". A QIDI printer in either
+// state is not sent its start-of-print script - re-pointing value_t<n> or enable_box under a
+// running print would change what it feeds - and the send dialog does not offer to start a print.
+bool busy_printing(const std::string& state);
+// print_stats.state out of a /printer/objects/query?print_stats reply; "" when it does not say.
+std::string print_state_from_query(const std::string& reply_json);
+// Blocking, off the GUI thread: one read-only /printer/objects/query?print_stats against
+// `base_url` (http(s)://host[:port], PrinterStorage::base_url_of). False with `error` when the
+// printer did not answer or did not say.
+bool query_print_state(const std::string& base_url, std::string& state, std::string& error, int timeout_s = 5);
+
+// The send dialog's auto-match for one plate filament (`colour` "#RRGGBB", `type` "PLA"): the
+// 1-based index into `slots` it preselects, 0 = "As sliced". Every host but a QIDI Box: the
+// closest colour (redmean) among the loaded slots that have a colour. A QIDI Box: only loaded
+// slots of the filament's own material, closest colour first, then one with no colour.
+int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, const std::string& type, bool qidi_box);
+
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
 Status probe(const Device& d, int timeout_s = 3);
 

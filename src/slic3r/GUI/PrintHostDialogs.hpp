@@ -92,6 +92,10 @@ protected:
     // cursor and a short timeout - the same shape as the devices dialog's Test button.
     void refresh_device_status();
     void rebuild_mapping_rows();
+    // The picked QIDI printer said it is printing or paused: Upload only, no start.
+    bool print_blocked() const;
+    // "Upload and Print" follows print_blocked(). Safe before the buttons exist.
+    void update_print_button();
 
     wxTextCtrl *txt_filename;
     wxComboBox *combo_groups;

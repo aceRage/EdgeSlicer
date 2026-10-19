@@ -33,6 +33,7 @@
 #include "../GUI/SnapmakerLan.hpp" // Ultra: END_UNLOAD_FILAMENT, built in one place for every send path
 #include "Obico.hpp"
 #include "PrintHostDeviceStatus.hpp"
+#include "PrinterStorage.hpp"
 #include "Flashforge.hpp"
 #include "SimplyPrint.hpp"
 #include "ElegooLink.hpp"
@@ -524,7 +525,10 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
             h = h.substr(scheme + 3);
         if (const size_t slash = h.find('/'); slash != std::string::npos)
             h = h.substr(0, slash);
-        if (const size_t colon = h.rfind(':'); colon != std::string::npos) {
+        // The port is the colon after the host: "[fe80::1]:7125" has one, "[fe80::1]" has none.
+        const size_t close = h.rfind(']');
+        const size_t colon = h.rfind(':');
+        if (colon != std::string::npos && (close != std::string::npos ? colon > close : h.find(':') == colon)) {
             try {
                 d.port = std::stoi(h.substr(colon + 1));
             } catch (...) {}
@@ -532,6 +536,28 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
         }
         d.ip = h;
         return d;
+    };
+
+    // A QIDI printer that is printing or paused is left alone: its start-of-print script re-points
+    // the Box (value_t<n>, enable_box) and would change what a running print is fed. So before any
+    // of it goes out, one read-only print_stats query; busy, or no answer, and the send stops here
+    // with nothing sent. The send dialog already greys out "Upload and Print" for a busy printer;
+    // this is the check at the moment it matters, which the dialog's probe was not.
+    auto qidi_printer_idle = [&]() -> bool {
+        std::string state, err;
+        if (!PrintHostDevices::query_print_state(PrinterStorage::base_url_of(host_url), state, err)) {
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: could not read the QIDI printer's state (" << err << "), nothing sent";
+            error_fn(_L("Could not read what the printer is doing, so nothing was sent to it and the print was not started:") + " " +
+                     wxString::FromUTF8(err.c_str()));
+            return false;
+        }
+        if (PrintHostDevices::busy_printing(state)) {
+            BOOST_LOG_TRIVIAL(warning) << "PrintHostJobQueue: the QIDI printer is " << state << ", nothing sent";
+            error_fn(_L("The printer is busy with another print, so nothing was sent to it and this plate was not started. "
+                        "Send it again once that print has finished."));
+            return false;
+        }
+        return true;
     };
 
     // QIDI Box: which slot feeds each tool. The firmware's T<n> loads from the slot the saved
@@ -543,6 +569,8 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     if (the_job.qidi_box && archive_print) {
         const std::string script = PrintHostDevices::qidi_box_mapping_script(archive_mapping);
         if (!script.empty()) {
+            if (!qidi_printer_idle())
+                return;
             std::string err;
             if (!GUI::SnapmakerLan::run_script(script_target(), script, err)) {
                 BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI Box slot mapping (" << err << ")";

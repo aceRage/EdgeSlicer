@@ -66,14 +66,7 @@ static wxColour swatch_colour(const std::string& raw)
     return wxColour(160, 160, 160);
 }
 
-// Redmean, the same cheap perceptual distance SnapmakerLan::auto_match uses (SnapmakerLan.cpp:830)
-// so the two auto-matches agree about which slot is "the closest colour".
-static double colour_distance(const wxColour& a, const wxColour& b)
-{
-    const double rm = (a.Red() + b.Red()) / 2.0;
-    const double dr = a.Red() - b.Red(), dg = a.Green() - b.Green(), db = a.Blue() - b.Blue();
-    return (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db;
-}
+// The closest-colour auto-match lives in PrintHostDevices::auto_match_slot, where the tests reach it.
 
 namespace {
 
@@ -588,14 +581,34 @@ void PrintHostSendDialog::refresh_device_status()
             text += _L("QIDI Box: each filament is fed from the slot picked below. \"As sliced\" leaves the "
                        "printer on whichever slot it last used for that filament.");
         }
+        if (print_blocked()) {
+            if (!text.IsEmpty())
+                text += "  ";
+            text += _L("This printer is busy with a print, so this plate can be uploaded but not started.");
+        }
         m_device_note->SetLabel(text);
         m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
         m_device_note->Show(!text.IsEmpty());
     }
     rebuild_mapping_rows();
+    update_print_button();
     content_sizer->Layout();
     Layout();
     Fit();
+}
+
+bool PrintHostSendDialog::print_blocked() const
+{
+    return m_device_status.qidi_box && PrintHostDevices::busy_printing(m_device_status.state);
+}
+
+// A QIDI printer that is printing or paused is not started from here: the start sends the Box
+// mapping ahead of the file, and that must never reach a running print. The queue checks again
+// just before it sends anything (PrintHostJobQueue::priv::perform_job). Upload stays available.
+void PrintHostSendDialog::update_print_button()
+{
+    if (Button* btn = get_button(wxID_YES))
+        btn->Enable(!print_blocked());
 }
 
 // One row per filament this plate actually uses: its colour, its type, and where it goes. Only when
@@ -639,34 +652,8 @@ void PrintHostSendDialog::rebuild_mapping_rows()
         auto* choice = new wxChoice(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, slot_labels);
         // Auto-match: the closest colour among the slots that have something in them, the same rule
         // the Snapmaker LAN path uses. "As sliced" whenever nothing is close enough to be obvious.
-        // A slot holding the plate filament's own material wins over any colour: an ASA plate must
-        // not be auto-sent to the PLA that happens to be the right shade. A QIDI Box goes further
-        // and never falls back to colour - its firmware heats for the plate's material whatever is
-        // fed, so a wrong material is a failed print, and the person picks the slot instead.
-        auto same_type = [&f](const PrintHostDevices::Slot& s) {
-            return !f.type.empty() && boost::iequals(f.type, s.type);
-        };
-        bool any_same_type = false;
-        for (const PrintHostDevices::Slot& s : m_device_status.slots)
-            any_same_type |= s.loaded && same_type(s);
-        int    best = 0;
-        double best_d = 0;
-        for (size_t i = 0; i < m_device_status.slots.size(); ++i) {
-            const PrintHostDevices::Slot& s = m_device_status.slots[i];
-            if (!s.loaded)
-                continue;
-            if ((any_same_type || m_device_status.qidi_box) && !same_type(s))
-                continue;
-            // A material match the printer gave no colour for still counts, behind any that has one.
-            if (s.color.empty() && !same_type(s))
-                continue;
-            const double dist = s.color.empty() ? std::numeric_limits<double>::max() :
-                                                  colour_distance(swatch_colour(f.colour), swatch_colour(s.color));
-            if (best == 0 || dist < best_d) {
-                best   = (int) i + 1;
-                best_d = dist;
-            }
-        }
+        // A QIDI Box matches by material first and never by colour alone (auto_match_slot).
+        const int best = PrintHostDevices::auto_match_slot(m_device_status.slots, f.colour, f.type, m_device_status.qidi_box);
         choice->SetSelection(best);
         m_mapping_sizer->Add(choice, 1, wxEXPAND);
         m_mapping_choices.push_back(choice);
@@ -828,6 +815,7 @@ void PrintHostSendDialog::init()
     // }
 
     add_button(wxID_CANCEL,false, L("Cancel"));
+    update_print_button();
     finalize();
 
 #ifdef __linux__

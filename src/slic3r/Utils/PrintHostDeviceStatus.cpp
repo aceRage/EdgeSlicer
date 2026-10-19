@@ -3,11 +3,13 @@
 #include "Http.hpp"
 #include "PrusaLinkStatus.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <limits>
 
 namespace Slic3r {
 namespace PrintHostDevices {
@@ -358,10 +360,11 @@ std::string qidi_box_mapping_script(const std::string& mapping)
             try {
                 const int tool = std::stoi(pair.substr(0, colon));
                 const int slot = std::stoi(pair.substr(colon + 1));
-                // QIDIStudio's own SelectMachine sends the value quoted twice: once for Klipper's
-                // shlex parse, once for SAVE_VARIABLE's literal_eval, so it lands as the string slotN.
+                // Quoted exactly as QIDIStudio's own SelectMachine quotes it, VALUE="'slotN'": the
+                // double quotes are Klipper's shlex parse, the single ones SAVE_VARIABLE's
+                // literal_eval, so the variable lands as the string slotN.
                 if (tool >= 0 && tool < max_tools && slot >= 0 && slot < max_slots)
-                    lines += "SAVE_VARIABLE VARIABLE=value_t" + std::to_string(tool) + " VALUE='\"slot" + std::to_string(slot) + "\"'\n";
+                    lines += "SAVE_VARIABLE VARIABLE=value_t" + std::to_string(tool) + " VALUE=\"'slot" + std::to_string(slot) + "'\"\n";
             } catch (...) {}
         }
         pair.clear();
@@ -369,6 +372,123 @@ std::string qidi_box_mapping_script(const std::string& mapping)
     if (lines.empty())
         return lines;
     return "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n" + lines;
+}
+
+bool busy_printing(const std::string& state)
+{
+    return boost::iequals(state, "printing") || boost::iequals(state, "paused");
+}
+
+std::string print_state_from_query(const std::string& reply_json)
+{
+    try {
+        const json j = json::parse(reply_json);
+        if (!j.is_object() || !j.contains("result") || !j["result"].is_object())
+            return {};
+        const json& status = j["result"].contains("status") ? j["result"]["status"] : json();
+        if (!status.is_object() || !status.contains("print_stats"))
+            return {};
+        return str_at(status["print_stats"], "state");
+    } catch (...) {
+        return {};
+    }
+}
+
+bool query_print_state(const std::string& base_url, std::string& state, std::string& error, int timeout_s)
+{
+    state.clear();
+    error.clear();
+    if (base_url.empty()) {
+        error = "no address";
+        return false;
+    }
+    std::string body;
+    if (!moonraker_get(base_url + "/printer/objects/query?print_stats", body, error, timeout_s))
+        return false;
+    state = print_state_from_query(body);
+    if (state.empty()) {
+        error = "the printer did not say what it is doing";
+        return false;
+    }
+    return true;
+}
+
+// The send dialog's swatch_colour: "#RRGGBB" (anything after the sixth digit ignored), grey for
+// anything that is not a colour.
+static void rgb_of(const std::string& raw, int& r, int& g, int& b)
+{
+    r = g = b = 160;
+    std::string s = raw;
+    if (!s.empty() && s[0] == '#')
+        s = s.substr(1);
+    if (s.size() < 6)
+        return;
+    int v[6];
+    for (int i = 0; i < 6; ++i) {
+        const char c = s[i];
+        if (c >= '0' && c <= '9')
+            v[i] = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            v[i] = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            v[i] = c - 'A' + 10;
+        else
+            return;
+    }
+    r = v[0] * 16 + v[1];
+    g = v[2] * 16 + v[3];
+    b = v[4] * 16 + v[5];
+}
+
+// Redmean, the send dialog's colour_distance and SnapmakerLan::auto_match's, so the auto-matches
+// agree about which slot is "the closest colour".
+static double colour_distance(const std::string& a, const std::string& b)
+{
+    int ar, ag, ab, br, bg, bb;
+    rgb_of(a, ar, ag, ab);
+    rgb_of(b, br, bg, bb);
+    const double rm = (ar + br) / 2.0;
+    const double dr = ar - br, dg = ag - bg, db = ab - bb;
+    return (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db;
+}
+
+int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, const std::string& type, bool qidi_box)
+{
+    int    best   = 0;
+    double best_d = 0;
+    if (!qidi_box) {
+        // Every other host: the closest colour among the loaded slots the printer gave a colour
+        // for, the rule this dialog has always used.
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const Slot& s = slots[i];
+            if (!s.loaded || s.color.empty())
+                continue;
+            const double dist = colour_distance(colour, s.color);
+            if (best == 0 || dist < best_d) {
+                best   = (int) i + 1;
+                best_d = dist;
+            }
+        }
+        return best;
+    }
+    // A QIDI Box never matches on colour alone: its firmware heats for the plate's material
+    // whatever is fed, so an ASA plate auto-sent to the PLA that happens to be the right shade is
+    // a failed print. Only a slot holding the filament's own material is a candidate - the closest
+    // colour among those, then one the printer gave no colour for - and "As sliced" otherwise, so
+    // the person picks the slot.
+    if (type.empty())
+        return 0;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const Slot& s = slots[i];
+        if (!s.loaded || !boost::iequals(type, s.type))
+            continue;
+        const double dist = s.color.empty() ? std::numeric_limits<double>::max() : colour_distance(colour, s.color);
+        if (best == 0 || dist < best_d) {
+            best   = (int) i + 1;
+            best_d = dist;
+        }
+    }
+    return best;
 }
 
 } // namespace PrintHostDevices
