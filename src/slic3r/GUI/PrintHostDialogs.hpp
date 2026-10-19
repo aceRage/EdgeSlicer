@@ -24,6 +24,8 @@ class wxDataViewListCtrl;
 class wxFlexGridSizer;
 class wxStaticText;
 class wxWrapSizer;
+class wxBoxSizer;
+class wxCheckBox;
 
 namespace Slic3r {
 
@@ -64,9 +66,13 @@ public:
     // "0:1,1:2" - the plate's filament 0 goes in slot 1, filament 1 in slot 2. Empty when nothing
     // was mapped, which is every host that reports no slots.
     std::string filament_mapping() const;
-    // The picked device is a QIDI printer with a QIDI Box, so filament_mapping() names Box slots and
-    // has to reach the printer before the print starts (PrintHostJob::qidi_box).
-    bool qidi_box() const { return m_device_status.qidi_box; }
+    // ---- QIDI printers (PrintHostJob::qidi_start_script / qidi_timelapse) ----
+    //
+    // QIDIStudio's print options for the picked device - Box, bed leveling, timelapse, polar
+    // cooler - shown when it answered as QIDI firmware, remembered between sends. The script is
+    // empty, and the timelapse -1, for every other printer.
+    std::string qidi_start_script() const;
+    int         qidi_timelapse() const;
 
     // ---- "unload filaments when the print ends" (Snapmaker tool changers) ----
     //
@@ -96,6 +102,10 @@ protected:
     bool print_blocked() const;
     // "Upload and Print" follows print_blocked(). Safe before the buttons exist.
     void update_print_button();
+    // The QIDI options for the picked device, from what it said. Called with the mapping rows.
+    void rebuild_qidi_options();
+    // "As sliced" and greyed out while the QIDI Box is switched off: nothing is fed from it.
+    void update_mapping_enabled();
 
     wxTextCtrl *txt_filename;
     wxComboBox *combo_groups;
@@ -113,6 +123,13 @@ protected:
     wxFlexGridSizer*                      m_mapping_sizer { nullptr };
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
+    // QIDI printers: QIDIStudio's print options, null where the device does not have them.
+    wxWindow*                             m_qidi_panel { nullptr };
+    wxBoxSizer*                           m_qidi_sizer { nullptr };
+    wxCheckBox*                           m_qidi_use_box { nullptr };
+    wxCheckBox*                           m_qidi_leveling { nullptr };
+    wxCheckBox*                           m_qidi_timelapse { nullptr };
+    wxCheckBox*                           m_qidi_polar_cooler { nullptr };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
     bool                                  m_unload_default { false };
@@ -283,6 +300,10 @@ private:
     void load_slots();
     bool ensure_slots_loaded(bool force_reload = false);
     void rebuild_mapping_rows();
+    // The QIDI options for the picked device, from what it said. Called with the mapping rows.
+    void rebuild_qidi_options();
+    // "As sliced" and greyed out while the QIDI Box is switched off: nothing is fed from it.
+    void update_mapping_enabled();
     void auto_assign_mappings();
     void refresh_mapping_card(MappingRow& row);
     void sync_mapping_section_visibility();

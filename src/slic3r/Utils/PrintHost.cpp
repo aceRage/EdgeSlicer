@@ -559,27 +559,51 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
         }
         return true;
     };
+    if (archive_print && (!the_job.qidi_start_script.empty() || the_job.qidi_timelapse >= 0) && !qidi_printer_idle())
+        return;
 
-    // QIDI Box: which slot feeds each tool. The firmware's T<n> loads from the slot the saved
-    // variable value_t<n> names and nothing in the G-code sets it - QIDIStudio sends these same
-    // SAVE_VARIABLE lines before every start - so without them the printer reuses the slots of
-    // whatever it printed last, and an ASA plate runs on the PLA still loaded from that print, at
-    // ASA temperatures. Unlike the unload preference below this is not a convenience: if the
-    // printer will not take the mapping, the send stops here rather than print the wrong material.
-    if (the_job.qidi_box && archive_print) {
-        const std::string script = PrintHostDevices::qidi_box_mapping_script(archive_mapping);
-        if (!script.empty()) {
-            if (!qidi_printer_idle())
-                return;
-            std::string err;
-            if (!GUI::SnapmakerLan::run_script(script_target(), script, err)) {
-                BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI Box slot mapping (" << err << ")";
-                error_fn(_L("The printer did not accept the QIDI Box slot mapping, so the print was not started:") + " " +
-                         wxString::FromUTF8(err.c_str()));
-                return;
-            }
-            BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent the QIDI Box slot mapping " << archive_mapping;
+    // QIDI printers: the send dialog's QIDI options and Box mapping, sent the way QIDIStudio's own
+    // SelectMachine sends them before every LAN start. The Box firmware's T<n> loads from the slot
+    // the saved variable value_t<n> names and nothing in the G-code sets it, so without the mapping
+    // the printer reuses the slots of whatever it printed last - an ASA plate runs on the PLA still
+    // loaded from that print, at ASA temperatures. Unlike the unload preference below this is not a
+    // convenience: if the printer will not take the script, the send stops here rather than print
+    // the wrong material.
+    if (archive_print && !the_job.qidi_start_script.empty()) {
+        std::string err;
+        if (!GUI::SnapmakerLan::run_script(script_target(), the_job.qidi_start_script, err)) {
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI print options (" << err << ")";
+            error_fn(_L("The printer did not accept the QIDI print options or Box slot mapping, so the print was not started:") + " " +
+                     wxString::FromUTF8(err.c_str()));
+            return;
         }
+        BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent the QIDI print options (Box mapping " << archive_mapping << ")";
+    }
+    // The timelapse is Moonraker's own setting (its timelapse component's /machine/timelapse/settings,
+    // which QIDIStudio posts to as well), so it goes out on its own. A refusal is logged and the print
+    // goes ahead: a missing timelapse does not spoil the part.
+    if (archive_print && the_job.qidi_timelapse >= 0) {
+        const GUI::SnapmakerLan::Device d   = script_target();
+        const std::string               url = "http://" + d.ip + (d.port > 0 && d.port != 80 ? ":" + std::to_string(d.port) : "") +
+                                "/machine/timelapse/settings?enabled=" + (the_job.qidi_timelapse ? "true" : "false");
+        bool        ok = false;
+        std::string err;
+        Http::post(url)
+            .tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
+            .timeout_connect(5)
+            .timeout_max(15)
+            .header("Content-Type", "application/json")
+            .set_post_body(std::string("{}"))
+            .on_complete([&ok](std::string, unsigned) { ok = true; })
+            .on_error([&err](std::string, std::string error, unsigned status) {
+                err = error.empty() ? ("HTTP " + std::to_string(status)) : error;
+            })
+            .perform_sync();
+        if (ok)
+            BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: set the QIDI timelapse " << (the_job.qidi_timelapse ? "on" : "off");
+        else
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the timelapse setting (" << err
+                                     << "); the print goes ahead without it";
     }
 
     // "Unload filaments after print", for a Snapmaker tool changer only. The flag cannot

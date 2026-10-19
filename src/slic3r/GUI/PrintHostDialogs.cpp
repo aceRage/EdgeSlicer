@@ -443,6 +443,11 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 static const char *CONFIG_KEY_PATH  = "printhost_path";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
 static const char* CONFIG_KEY_STORAGE = "printhost_storage";
+// The QIDI print options, remembered between sends like QIDIStudio's own switches. The Box switch
+// is not: it starts on whenever a Box is there, so a mapping is never skipped by accident.
+static const char* CONFIG_KEY_QIDI_LEVELING  = "qidi_send_bed_leveling";
+static const char* CONFIG_KEY_QIDI_TIMELAPSE = "qidi_send_timelapse";
+static const char* CONFIG_KEY_QIDI_POLAR     = "qidi_send_polar_cooler";
 
 PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUploadActions post_actions, const wxArrayString &groups, const wxArrayString& storage_paths, const wxArrayString& storage_names, bool switch_to_device_tab)
     : MsgDialog(static_cast<wxWindow*>(wxGetApp().mainframe), _L("Send G-code to printer host"), _L("Upload to Printer Host with the following filename:"), 0) // Set style = 0 to avoid default creation of the "OK" button. 
@@ -483,6 +488,9 @@ std::string PrintHostSendDialog::device_id() const
 
 std::string PrintHostSendDialog::filament_mapping() const
 {
+    // The QIDI Box switched off: the print runs from the extruder's own spool, nothing is mapped.
+    if (m_qidi_use_box && !m_qidi_use_box->GetValue())
+        return {};
     std::string out;
     for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i) {
         const int sel = m_mapping_choices[i]->GetSelection();
@@ -496,6 +504,25 @@ std::string PrintHostSendDialog::filament_mapping() const
         out += std::to_string(m_mapping_filament[i]) + ":" + std::to_string(m_device_status.slots[slot].index);
     }
     return out;
+}
+
+std::string PrintHostSendDialog::qidi_start_script() const
+{
+    if (!m_device_status.qidi)
+        return {};
+    PrintHostDevices::QidiPrintOptions o;
+    if (m_qidi_use_box)
+        o.use_box = m_qidi_use_box->GetValue() ? 1 : 0;
+    if (m_qidi_leveling)
+        o.bed_leveling = m_qidi_leveling->GetValue() ? 1 : 0;
+    if (m_qidi_polar_cooler)
+        o.polar_cooler = m_qidi_polar_cooler->GetValue() ? 1 : 0;
+    return PrintHostDevices::qidi_start_script(o, filament_mapping());
+}
+
+int PrintHostSendDialog::qidi_timelapse() const
+{
+    return m_qidi_timelapse ? (m_qidi_timelapse->GetValue() ? 1 : 0) : -1;
 }
 
 void PrintHostSendDialog::offer_unload_at_end(bool preset_default)
@@ -548,6 +575,11 @@ void PrintHostSendDialog::build_device_ui()
     m_mapping_panel->SetSizer(m_mapping_sizer);
     content_sizer->Add(m_mapping_panel, 0, wxEXPAND | wxBOTTOM, 2 * VERT_SPACING);
 
+    m_qidi_panel = new wxPanel(this, wxID_ANY);
+    m_qidi_sizer = new wxBoxSizer(wxVERTICAL);
+    m_qidi_panel->SetSizer(m_qidi_sizer);
+    content_sizer->Add(m_qidi_panel, 0, wxEXPAND | wxBOTTOM, 2 * VERT_SPACING);
+
     m_combo_devices->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
         m_device_sel = m_combo_devices->GetSelection();
         refresh_device_status();
@@ -591,6 +623,8 @@ void PrintHostSendDialog::refresh_device_status()
         m_device_note->Show(!text.IsEmpty());
     }
     rebuild_mapping_rows();
+    rebuild_qidi_options();
+    update_mapping_enabled();
     update_print_button();
     content_sizer->Layout();
     Layout();
@@ -662,6 +696,65 @@ void PrintHostSendDialog::rebuild_mapping_rows()
 
     m_mapping_panel->Show(!m_mapping_choices.empty());
     m_mapping_panel->Layout();
+}
+
+// QIDIStudio's print options, for a printer that answered as QIDI firmware. Each one goes to the
+// printer just before the print starts (PrintHost.cpp's perform_job), the way QIDIStudio's own
+// SelectMachine sends them, because the firmware keeps the last value it was given: a send that
+// says nothing leaves the bed leveling, timelapse and Box on whatever the previous print used.
+void PrintHostSendDialog::rebuild_qidi_options()
+{
+    if (!m_qidi_panel || !m_qidi_sizer)
+        return;
+    m_qidi_sizer->Clear(true);
+    m_qidi_use_box = m_qidi_leveling = m_qidi_timelapse = m_qidi_polar_cooler = nullptr;
+    if (!m_device_status.qidi) {
+        m_qidi_panel->Show(false);
+        m_qidi_panel->Layout();
+        return;
+    }
+
+    const AppConfig* app_config = wxGetApp().app_config;
+    auto remembered = [app_config](const char* key, bool fallback) {
+        const std::string v = app_config ? app_config->get("recent", key) : std::string();
+        return v.empty() ? fallback : v == "1";
+    };
+    auto add = [this](const wxString& label, const wxString& tip, bool value) {
+        auto* box = new wxCheckBox(m_qidi_panel, wxID_ANY, label);
+        box->SetValue(value);
+        box->SetToolTip(tip);
+        m_qidi_sizer->Add(box, 0, wxBOTTOM, FromDIP(4));
+        return box;
+    };
+
+    m_qidi_sizer->Add(new wxStaticText(m_qidi_panel, wxID_ANY, _L("Print options") + ":"), 0, wxBOTTOM, FromDIP(4));
+    if (m_device_status.qidi_box) {
+        m_qidi_use_box = add(_L("Use QIDI Box"),
+                             _L("Feed the filaments from the QIDI Box slots picked above. Untick it to print from the "
+                                "spool on the extruder instead."),
+                             true);
+        m_qidi_use_box->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { update_mapping_enabled(); });
+    }
+    m_qidi_leveling = add(_L("Auto bed leveling"),
+                          _L("Probe a fresh bed mesh before this print. Untick it to use the mesh the printer has saved."),
+                          remembered(CONFIG_KEY_QIDI_LEVELING, true));
+    m_qidi_timelapse = add(_L("Timelapse"),
+                           _L("Record a timelapse of this print with the printer's camera."),
+                           remembered(CONFIG_KEY_QIDI_TIMELAPSE, false));
+    if (m_device_status.qidi_polar_cooler)
+        m_qidi_polar_cooler = add(_L("Polar cooler"),
+                                  _L("Cool the extruder during the print, which keeps the filament from softening or "
+                                     "clogging inside it."),
+                                  remembered(CONFIG_KEY_QIDI_POLAR, false));
+    m_qidi_panel->Show(true);
+    m_qidi_panel->Layout();
+}
+
+void PrintHostSendDialog::update_mapping_enabled()
+{
+    const bool box_on = !m_qidi_use_box || m_qidi_use_box->GetValue();
+    for (wxChoice* choice : m_mapping_choices)
+        choice->Enable(box_on);
 }
 
 void PrintHostSendDialog::init()
@@ -890,6 +983,12 @@ void PrintHostSendDialog::EndModal(int ret)
             wxString storage = combo_storage->GetValue();
             app_config->set("recent", CONFIG_KEY_STORAGE, into_u8(storage));
         }
+        if (m_qidi_leveling)
+            app_config->set("recent", CONFIG_KEY_QIDI_LEVELING, m_qidi_leveling->GetValue() ? "1" : "0");
+        if (m_qidi_timelapse)
+            app_config->set("recent", CONFIG_KEY_QIDI_TIMELAPSE, m_qidi_timelapse->GetValue() ? "1" : "0");
+        if (m_qidi_polar_cooler)
+            app_config->set("recent", CONFIG_KEY_QIDI_POLAR, m_qidi_polar_cooler->GetValue() ? "1" : "0");
     }
 
     MsgDialog::EndModal(ret);

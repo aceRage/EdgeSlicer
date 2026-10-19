@@ -74,7 +74,27 @@ struct Status
     // The slots are a QIDI Box's: a filament left "As sliced" is fed from whichever slot the
     // printer last used for that tool, so the dialog matches by material, never by colour alone.
     bool              qidi_box { false };
+    // QIDI firmware (X-Max 4, X-Plus 4, Q2, X-Plus 5 - the ones with a multi_color_controller,
+    // Box or not): the send dialog offers QIDIStudio's print options. qidi_polar_cooler: the
+    // printer has the extruder cooler that QIDIStudio's "Polar cooler" switch drives.
+    bool              qidi { false };
+    bool              qidi_polar_cooler { false };
 };
+
+// QIDIStudio's print options, as the send dialog's checkboxes answered them. -1 = not offered, so
+// the printer keeps its own setting; 0 = off; 1 = on.
+struct QidiPrintOptions
+{
+    int use_box { -1 };      // SAVE_VARIABLE enable_box
+    int bed_leveling { -1 }; // G31 (mesh before the print) / G32 (use the saved mesh)
+    int polar_cooler { -1 }; // SAVE_VARIABLE enable_polar_cooler
+};
+
+// Everything QIDIStudio sends as G-code before a LAN start, in its order: the Box (on with the
+// slot mapping, or off), the bed leveling, the polar cooler. Newline-separated for one
+// /printer/gcode/script call; empty when there is nothing to send. The timelapse is not here: it
+// is Moonraker's own setting, not G-code.
+std::string qidi_start_script(const QidiPrintOptions& options, const std::string& mapping);
 
 // "0:3,1:5" (filament:slot, PrintHostSendDialog::filament_mapping) -> the commands QIDIStudio
 // sends before a QIDI Box print: enable the Box, then point each tool's `value_t<n>` at its slot.

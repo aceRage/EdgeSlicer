@@ -253,6 +253,8 @@ static Status fill_from_status(const json& status, const std::string& host_type_
     st.online = true;
     if (status.contains("print_stats") && status["print_stats"].is_object())
         st.state = str_at(status["print_stats"], "state");
+    st.qidi              = status.contains("multi_color_controller") && status["multi_color_controller"].is_object();
+    st.qidi_polar_cooler = st.qidi && status.contains("output_pin polar_cooler") && status["output_pin polar_cooler"].is_object();
     slots_from_print_task_config(status, st.slots, st.slots_have_filaments);
     if (st.slots.empty())
         slots_from_qidi_box(status, st.slots, st.slots_have_filaments, st.qidi_box);
@@ -309,9 +311,11 @@ Status probe(const Device& d, int timeout_s)
     }
     // One call, read-only, never a command - the same objects RemoteControl::describe_hosts asks
     // for plus print_task_config (Snapmaker) and multi_color_controller (QIDI Box), which is where
-    // the loaded filaments live when there are any. Moonraker leaves out the ones a printer lacks.
+    // the loaded filaments live when there are any, and the QIDI polar cooler's pin, which says
+    // whether to offer its switch. Moonraker leaves out the ones a printer lacks.
     std::string body;
-    if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&multi_color_controller&extruder&extruder1&extruder2&extruder3",
+    if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&multi_color_controller"
+                              "&output_pin%20polar_cooler&extruder&extruder1&extruder2&extruder3",
                        body, st.error, timeout_s)) {
         st.note = "this printer did not answer" + (st.error.empty() ? std::string() : (": " + st.error));
         return st;
@@ -489,6 +493,26 @@ int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, c
         }
     }
     return best;
+}
+
+std::string qidi_start_script(const QidiPrintOptions& options, const std::string& mapping)
+{
+    std::string out;
+    if (options.use_box == 0) {
+        // The Box off: the print runs from the extruder's own spool, and a mapping means nothing.
+        out += "SAVE_VARIABLE VARIABLE=enable_box VALUE=0\n";
+    } else {
+        out += qidi_box_mapping_script(mapping);
+        if (out.empty() && options.use_box == 1)
+            out += "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n";
+    }
+    // The firmware's G31/G32 set _km_globals.bedmesh_before_print, which its G29 reads: probe a
+    // fresh mesh before this print, or load the saved one.
+    if (options.bed_leveling >= 0)
+        out += options.bed_leveling ? "G31\n" : "G32\n";
+    if (options.polar_cooler >= 0)
+        out += std::string("SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=") + (options.polar_cooler ? "1" : "0") + "\n";
+    return out;
 }
 
 } // namespace PrintHostDevices

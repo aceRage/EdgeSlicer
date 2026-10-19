@@ -409,6 +409,8 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         const Status st = parse_moonraker_status(status, "octoprint");
         CHECK(st.online);
         CHECK(st.qidi_box);
+        CHECK(st.qidi);
+        CHECK_FALSE(st.qidi_polar_cooler); // no polar cooler pin in the answer
         CHECK(st.slots_have_filaments);
         REQUIRE(st.slots.size() == 4); // the Box's slots, not the one extruder
         CHECK(st.slots[1].index == 1);
@@ -430,8 +432,54 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
             " \"multi_color_controller\":{\"box_count\":0,\"boxes\":[]}}";
         const Status st = parse_moonraker_status(status, "octoprint");
         CHECK_FALSE(st.qidi_box);
+        CHECK(st.qidi); // still QIDI firmware: the print options are offered without the Box
         CHECK_FALSE(st.slots_have_filaments);
         REQUIRE(st.slots.size() == 1);
+    }
+
+    SECTION("a QIDI printer with a polar cooler says so") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"output_pin polar_cooler\":{\"value\":0},"
+            " \"multi_color_controller\":{\"box_count\":0}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.qidi);
+        CHECK(st.qidi_polar_cooler);
+    }
+
+    SECTION("a stock Klipper is not taken for a QIDI") {
+        const Status st = parse_moonraker_status("{\"print_stats\":{\"state\":\"standby\"},"
+                                                 " \"output_pin polar_cooler\":{\"value\":0}}",
+                                                 "octoprint");
+        CHECK_FALSE(st.qidi);
+        CHECK_FALSE(st.qidi_polar_cooler);
+    }
+
+    SECTION("the QIDI print options go out the way QIDIStudio sends them") {
+        QidiPrintOptions o;
+        CHECK(qidi_start_script(o, "") == ""); // nothing offered, nothing mapped: nothing sent
+
+        o.use_box      = 1;
+        o.bed_leveling = 1;
+        o.polar_cooler = 0;
+        CHECK(qidi_start_script(o, "0:4") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t0 VALUE='\"slot4\"'\n"
+              "G31\n"
+              "SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=0\n");
+        // The Box on with nothing mapped still switches it on.
+        CHECK(qidi_start_script(o, "") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "G31\n"
+              "SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=0\n");
+
+        // The Box off: no mapping goes out, whatever the table said.
+        o.use_box      = 0;
+        o.bed_leveling = 0;
+        o.polar_cooler = -1;
+        CHECK(qidi_start_script(o, "0:4") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=0\n"
+              "G32\n");
     }
 
     SECTION("the QIDI Box mapping goes out the way QIDIStudio sends it") {

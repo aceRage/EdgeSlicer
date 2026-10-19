@@ -247,10 +247,13 @@ struct PrintHostJob
     // "0:1,1:2" - the plate's filament 0 goes in the printer's slot 1. Empty for every host that
     // reports no slots, which is most of them.
     std::string filament_mapping;
-    // filament_mapping names the slots of a QIDI Box. Its firmware feeds T<n> from whichever slot
-    // the saved variable value_t<n> names, and only the sending slicer sets that, so the queue
-    // sends the mapping (PrintHostDevices::qidi_box_mapping_script) before the print starts.
-    bool        qidi_box { false };
+    // QIDI printers: what the send dialog's QIDI options and Box mapping come to, sent before the
+    // print starts the way QIDIStudio does (PrintHostDevices::qidi_start_script). The Box firmware
+    // feeds T<n> from whichever slot the saved variable value_t<n> names, and only the sending
+    // slicer sets that, so a script that will not go through stops the send. The timelapse is
+    // Moonraker's own setting rather than G-code: -1 leave it alone, 0 off, 1 on.
+    std::string qidi_start_script;
+    int         qidi_timelapse { -1 };
     // Snapmaker tool changers: this print should end with the printer unloading the toolheads it
     // used. The send dialog's checkbox, defaulted from the printer preset's
     // unload_filaments_at_end and overridable per send. The flag cannot ride in the G-code (the
@@ -273,7 +276,8 @@ struct PrintHostJob
         , device_id(std::move(other.device_id))
         , device_name(std::move(other.device_name))
         , filament_mapping(std::move(other.filament_mapping))
-        , qidi_box(other.qidi_box)
+        , qidi_start_script(std::move(other.qidi_start_script))
+        , qidi_timelapse(other.qidi_timelapse)
         , unload_at_end(other.unload_at_end)
         , history_plates(std::move(other.history_plates))
         , history_printer_name(std::move(other.history_printer_name))
@@ -294,7 +298,8 @@ struct PrintHostJob
         device_id        = std::move(other.device_id);
         device_name      = std::move(other.device_name);
         filament_mapping = std::move(other.filament_mapping);
-        qidi_box         = other.qidi_box;
+        qidi_start_script = std::move(other.qidi_start_script);
+        qidi_timelapse    = other.qidi_timelapse;
         unload_at_end    = other.unload_at_end;
         history_plates        = std::move(other.history_plates);
         history_printer_name  = std::move(other.history_printer_name);
