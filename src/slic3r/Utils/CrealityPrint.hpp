@@ -41,7 +41,8 @@ public:
     // One frame, best-effort. False on timeout or a closed peer (not always an error).
     bool read_once(std::string &out, std::string &error);
     void close();
-    // Abort an in-flight step from another thread: close the socket and stop the ioc.
+    // Thread-safe abort: sets cancelled and posts cancel_socket() on this
+    // client's io_context. Does not call ioc.stop() or touch open/ws.
     void cancel();
     bool is_open() const;
     bool is_cancelled() const;

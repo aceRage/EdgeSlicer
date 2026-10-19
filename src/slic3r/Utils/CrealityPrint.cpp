@@ -209,7 +209,7 @@ struct CrealityWsClient::Impl
     int                                                        step_ms  = 5000;
     int                                                        total_ms = 0;
     std::chrono::steady_clock::time_point                      start    = std::chrono::steady_clock::now();
-    bool                                                       open     = false;
+    std::atomic<bool>                                          open { false };
     bool                                                       timed_out = false;
     std::atomic<bool>                                          cancelled { false };
 
@@ -241,17 +241,17 @@ struct CrealityWsClient::Impl
             on_timeout();
             drain();
             timed_out = timeout_ms <= 0;
-            open      = false;
+            open.store(false);
             return false;
         }
         ioc.restart();
         ioc.run_for(std::chrono::milliseconds(timeout_ms));
-        if (done)
+        if (done && !cancelled.load())
             return true;
         on_timeout();
         drain();
-        timed_out = true;
-        open      = false;
+        timed_out = !cancelled.load();
+        open.store(false);
         return false;
     }
 
@@ -273,7 +273,7 @@ struct CrealityWsClient::Impl
         else
             error = std::string(step) + ": " + ec.message();
         timed_out = false;
-        open      = false;
+        open.store(false);
         return false;
     }
 
@@ -281,7 +281,7 @@ struct CrealityWsClient::Impl
     bool ready_to_start(const char *step, std::string &error)
     {
         if (cancelled.load()) {
-            open = false;
+            open.store(false);
             error = std::string(step) + ": cancelled";
             return false;
         }
@@ -303,7 +303,7 @@ CrealityWsClient::CrealityWsClient(int step_timeout_ms, int total_timeout_ms) : 
 
 CrealityWsClient::~CrealityWsClient() { close(); }
 
-bool CrealityWsClient::is_open() const { return m && m->open; }
+bool CrealityWsClient::is_open() const { return m && m->open.load(); }
 
 bool CrealityWsClient::is_cancelled() const { return m && m->cancelled.load(); }
 
@@ -314,9 +314,7 @@ void CrealityWsClient::cancel()
     if (!m)
         return;
     m->cancelled.store(true);
-    m->open = false;
-    m->cancel_socket();
-    m->ioc.stop();
+    net::post(m->ioc, [impl = m.get()] { impl->cancel_socket(); });
 }
 
 bool CrealityWsClient::open(const std::string &host_url, const std::string &port, std::string &error)
@@ -328,7 +326,6 @@ bool CrealityWsClient::open(const std::string &host_url, const std::string &port
         return false;
     }
 
-    m->cancelled.store(false);
     m->timed_out = false;
     // A total budget is measured from construction so an already-expired client
     // fails in ready_to_start() instead of resetting the clock here.
@@ -409,7 +406,7 @@ bool CrealityWsClient::open(const std::string &host_url, const std::string &port
 
     // K1-family firmware requires TEXT-mode WebSocket frames; K2-family accepts both.
     m->ws->text(true);
-    m->open = true;
+    m->open.store(true);
     return true;
 }
 
@@ -478,7 +475,7 @@ void CrealityWsClient::close()
 {
     if (!m || !m->ws)
         return;
-    if (m->open && !m->cancelled.load() && m->budget() > 0) {
+    if (m->open.load() && !m->cancelled.load() && m->budget() > 0) {
         beast::error_code ec;
         bool              done = false;
         m->ws->async_close(websocket::close_code::normal, [&](const beast::error_code &e) {
@@ -492,7 +489,7 @@ void CrealityWsClient::close()
         m->ioc.run();
     }
     m->cancel_socket();
-    m->open = false;
+    m->open.store(false);
     m->ws.reset();
     m->ioc.restart();
     m->ioc.poll();
