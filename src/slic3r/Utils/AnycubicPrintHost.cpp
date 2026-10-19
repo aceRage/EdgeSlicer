@@ -7,6 +7,12 @@
 
 #include <nlohmann/json.hpp>
 
+// Identity marker for xgettext (--keyword=L). Do not include GUI I18N.hpp here: this file is
+// unit-tested without wx. Call sites wrap the returned English with _L() / _().
+#ifndef L
+#define L(s) s
+#endif
+
 namespace Slic3r {
 
 namespace {
@@ -393,20 +399,20 @@ bool anycubic_prefer_start_print(const std::string &printer_model)
 
 const char *anycubic_connection_hint()
 {
-    return "Anycubic: stock firmware uses Host Type Octo/Klipper on port 80 (the printer IP; API key optional). "
-           "Rinkhals: uploads go to Moonraker on port 7125 (http://IP:7125). Since Rinkhals PR #68 the bare IP is "
-           "the web portal, not the slicer API. Native LAN mode is Anycubic Slicer Next only.";
+    return L("Anycubic: stock firmware uses Host Type Octo/Klipper on port 80 (the printer IP; API key optional). "
+             "Rinkhals: uploads go to Moonraker on port 7125 (http://IP:7125). Since Rinkhals PR #68 the bare IP is "
+             "the web portal, not the slicer API. Native LAN mode is Anycubic Slicer Next only.");
 }
 
 const char *anycubic_upload_only_warning()
 {
-    return "Stock Anycubic firmware can hang on \"Checking files\" after Upload (OrcaSlicer #14349). "
-           "Upload and Print works. Use Upload and Print, or confirm you want to upload only.";
+    return L("Stock Anycubic firmware can hang on \"Checking files\" after Upload (OrcaSlicer #14349). "
+             "Upload and Print works. Use Upload and Print, or confirm you want to upload only.");
 }
 
 const char *anycubic_rinkhals_port_hint()
 {
-    return "If this printer runs Rinkhals, put :7125 on the hostname (Moonraker). Port 80 is the Rinkhals web portal.";
+    return L("If this printer runs Rinkhals, put :7125 on the hostname (Moonraker). Port 80 is the Rinkhals web portal.");
 }
 
 } // namespace Slic3r

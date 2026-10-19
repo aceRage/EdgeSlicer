@@ -563,8 +563,40 @@ void PrintHostSendDialog::build_device_ui()
     m_combo_devices->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
         m_device_sel = m_combo_devices->GetSelection();
         refresh_device_status();
+        update_anycubic_send_actions();
     });
     refresh_device_status();
+}
+
+bool PrintHostSendDialog::anycubic_start_print_default() const
+{
+    if (!anycubic_prefer_start_print(m_model_key))
+        return false;
+    if (!m_post_actions.has(PrintHostPostUploadAction::StartPrint))
+        return false;
+    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size() &&
+        anycubic_is_moonraker_host(m_devices[m_device_sel].host_type, m_devices[m_device_sel].address))
+        return false;
+    return true;
+}
+
+void PrintHostSendDialog::update_anycubic_send_actions()
+{
+    const bool prefer = anycubic_start_print_default();
+    if (m_anycubic_warn) {
+        m_anycubic_warn->Show(prefer);
+        m_anycubic_warn->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+    }
+    // Enter in the filename field follows the dialog default item (these buttons are not wxButton).
+    if (prefer && get_button(wxID_YES))
+        SetDefaultItem(get_button(wxID_YES));
+    else if (get_button(wxID_OK))
+        SetDefaultItem(get_button(wxID_OK));
+    if (content_sizer && m_anycubic_warn) {
+        content_sizer->Layout();
+        Layout();
+        Fit();
+    }
 }
 
 // Blocking with a busy cursor, exactly as the devices dialog's Test does: a modal send dialog can
@@ -812,23 +844,17 @@ void PrintHostSendDialog::init()
         return true;
     };
 
-    bool rinkhals_or_moonraker = false;
-    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size())
-        rinkhals_or_moonraker = anycubic_is_moonraker_host(m_devices[m_device_sel].host_type,
-                                                          m_devices[m_device_sel].address);
-    const bool anycubic_print = anycubic_prefer_start_print(m_model_key) &&
-                                post_actions.has(PrintHostPostUploadAction::StartPrint) &&
-                                !rinkhals_or_moonraker;
-    if (anycubic_print) {
-        auto* warn = new wxStaticText(this, wxID_ANY, _L(anycubic_upload_only_warning()));
-        warn->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
-        content_sizer->Add(warn, 0, wxBOTTOM, VERT_SPACING);
+    if (anycubic_prefer_start_print(m_model_key) &&
+        post_actions.has(PrintHostPostUploadAction::StartPrint)) {
+        m_anycubic_warn = new wxStaticText(this, wxID_ANY, _L(anycubic_upload_only_warning()));
+        m_anycubic_warn->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+        content_sizer->Add(m_anycubic_warn, 0, wxBOTTOM, VERT_SPACING);
     }
 
-    auto* btn_ok = add_button(wxID_OK, !anycubic_print, _L("Upload"));
-    btn_ok->Bind(wxEVT_BUTTON, [this, validate_path, anycubic_print](wxCommandEvent&) {
+    auto* btn_ok = add_button(wxID_OK, false, _L("Upload"));
+    btn_ok->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
         sentryReportLog(SENTRY_LOG_TRACE, BP_UPLOAD, BP_UPLOAD);
-        if (anycubic_print) {
+        if (anycubic_start_print_default()) {
             MessageDialog ask(this,
                 _L(anycubic_upload_only_warning()) + "\n\n" + _L("Continue with Upload only?"),
                 _L("Upload only"), wxYES_NO | wxICON_WARNING);
@@ -840,7 +866,6 @@ void PrintHostSendDialog::init()
             EndDialog(wxID_OK);
         }
     });
-    txt_filename->SetFocus();
     
     // if (post_actions.has(PrintHostPostUploadAction::QueuePrint)) {
     //     auto* btn_print = add_button(wxID_ADD, false, _L("Upload to Queue"));
@@ -853,9 +878,7 @@ void PrintHostSendDialog::init()
     // }
 
     if (post_actions.has(PrintHostPostUploadAction::StartPrint)) {
-        auto* btn_print = add_button(wxID_YES, anycubic_print, _L("Upload and Print"));
-        if (anycubic_print)
-            btn_print->SetDefault();
+        auto* btn_print = add_button(wxID_YES, false, _L("Upload and Print"));
         btn_print->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
             sentryReportLog(SENTRY_LOG_TRACE, BP_UPLOAD_AND_PRINT, BP_UPLOAD_AND_PRINT);
             if (validate_path(txt_filename->GetValue())) {
@@ -877,6 +900,8 @@ void PrintHostSendDialog::init()
     // }
 
     add_button(wxID_CANCEL,false, L("Cancel"));
+    update_anycubic_send_actions();
+    txt_filename->SetFocus();
     finalize();
 
 #ifdef __linux__

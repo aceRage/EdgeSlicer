@@ -39,7 +39,7 @@ After slicing: **Print** / **Send** → Upload or Upload and Print.
 
 If Test on a bare Anycubic IP sees the **Rinkhals portal** (HTML / non-JSON), EdgeSlicer retries port 7125 and asks you to save `http://IP:7125`. A bare 401/403 (Pi OctoPrint with no API key) is **not** retried. Saving a device does **not** silently append `:7125` — a Klipper-behind-nginx box on port 80 would break if it did.
 
-Non-Anycubic Moonraker boxes are never rewritten.
+Non-Anycubic Moonraker boxes are never rewritten. Rinkhals on a **Kobra 2 Pro / Plus / Max** has no automatic hint or :80→:7125 retry — enter `:7125` on the hostname yourself.
 
 ### Upload vs Upload and Print
 

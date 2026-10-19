@@ -349,7 +349,7 @@ wxString OctoPrint::get_test_failed_msg (wxString &msg) const
 {
     wxString extra = _L("Note: OctoPrint version 1.1.0 or higher is required.");
     if (is_anycubic_stock_network_printer(m_printer_model))
-        extra = _L(anycubic_rinkhals_port_hint());
+        extra = _(anycubic_rinkhals_port_hint());
     return GUI::format_wxstr("%s: %s\n\n%s"
         , _L("Could not connect to OctoPrint")
         , msg

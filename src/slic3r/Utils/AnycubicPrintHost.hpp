@@ -73,7 +73,7 @@ bool anycubic_upload_reply_ok(unsigned status, const std::string &body);
 // Upload and print works. Research found no slicer-side root cause (firmware).
 bool anycubic_prefer_start_print(const std::string &printer_model);
 
-// English, for tests and for the GUI to wrap with _L(). One copy of each string (F6).
+// English (L() so xgettext extracts them). Call sites translate with _L() / _().
 const char *anycubic_connection_hint();
 const char *anycubic_upload_only_warning();
 const char *anycubic_rinkhals_port_hint();

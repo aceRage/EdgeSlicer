@@ -92,6 +92,10 @@ protected:
     // cursor and a short timeout - the same shape as the devices dialog's Test button.
     void refresh_device_status();
     void rebuild_mapping_rows();
+    // Stock-network Anycubic, Upload and Print available, and the selected device is not
+    // Rinkhals/Moonraker. Recomputed when the device combo changes.
+    bool anycubic_start_print_default() const;
+    void update_anycubic_send_actions();
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
@@ -120,6 +124,7 @@ protected:
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
     wxStaticText*                         m_mapping_note { nullptr };
+    wxStaticText*                         m_anycubic_warn { nullptr };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
     bool                                  m_unload_default { false };
