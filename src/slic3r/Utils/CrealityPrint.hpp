@@ -20,7 +20,11 @@ class Http;
 // tcp_stream::expires_after does nothing on synchronous Beast calls, so every
 // step (resolve, connect, handshake, write, read, close) is async and run with
 // io_context::run_for. A step that expires closes the socket and drains handlers.
-// Shared by start_print, the CFS probe, and CFS filament sync.
+// budget() == 0 refuses to start an op (no handler). run(timeout_ms <= 0) still
+// cancels and drains so a queued handler cannot write to dead stack locals.
+// resolver.cancel() cannot interrupt getaddrinfo; that wait is OS-bounded.
+// Literal IPv4/IPv6 skip resolve. Shared by start_print, the CFS probe, and CFS
+// filament sync.
 class CrealityWsClient
 {
 public:
@@ -38,7 +42,10 @@ public:
     // One frame, best-effort. False on timeout or a closed peer (not always an error).
     bool read_once(std::string &out, std::string &error);
     void close();
+    // Abort an in-flight step from another thread: close the socket and stop the ioc.
+    void cancel();
     bool is_open() const;
+    bool is_cancelled() const;
     int  remaining_ms() const;
 
 private:
@@ -72,7 +79,8 @@ public:
     static bool fetch_info(const std::string &host, std::string &body, std::string &error, int timeout_s);
     // Port-9999 WebSocket `get boxsInfo`. timeout_s is the total deadline (probe uses ~1 s).
     // Empty on timeout or a refused handshake. Uses CrealityWsClient.
-    static std::string query_boxes_info(const std::string& host, int timeout_s);
+    // session, when set, is the connection the caller can cancel() from another thread.
+    static std::string query_boxes_info(const std::string& host, int timeout_s, CrealityWsClient *session = nullptr);
     std::string        query_boxes_info(int timeout_s = 10) const;
 
 protected:

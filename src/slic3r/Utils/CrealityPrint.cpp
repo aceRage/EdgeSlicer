@@ -2,6 +2,7 @@
 #include "CrealityPrintModel.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <sstream>
@@ -210,6 +211,7 @@ struct CrealityWsClient::Impl
     std::chrono::steady_clock::time_point                      start    = std::chrono::steady_clock::now();
     bool                                                       open     = false;
     bool                                                       timed_out = false;
+    std::atomic<bool>                                          cancelled { false };
 
     int remaining() const
     {
@@ -227,11 +229,18 @@ struct CrealityWsClient::Impl
         return std::max(0, std::min(step_ms, remaining()));
     }
 
+    // Always drain after cancel: a queued handler must run before the caller's
+    // stack locals (ec, done, results, flat_buffer) go out of scope.
     template<class Cancel> bool run(bool &done, int timeout_ms, Cancel on_timeout)
     {
-        if (timeout_ms <= 0) {
+        auto drain = [this]() {
+            ioc.restart();
+            ioc.run();
+        };
+        if (timeout_ms <= 0 || cancelled.load()) {
             on_timeout();
-            timed_out = true;
+            drain();
+            timed_out = timeout_ms <= 0;
             open      = false;
             return false;
         }
@@ -240,8 +249,7 @@ struct CrealityWsClient::Impl
         if (done)
             return true;
         on_timeout();
-        ioc.restart();
-        ioc.run();
+        drain();
         timed_out = true;
         open      = false;
         return false;
@@ -258,13 +266,31 @@ struct CrealityWsClient::Impl
 
     bool fail(std::string &error, const char *step, const beast::error_code &ec)
     {
-        if (timed_out)
+        if (cancelled.load())
+            error = std::string(step) + ": cancelled";
+        else if (timed_out)
             error = std::string(step) + ": timed out";
         else
             error = std::string(step) + ": " + ec.message();
         timed_out = false;
         open      = false;
         return false;
+    }
+
+    // False = do not start an async op (no handler, nothing to drain).
+    bool ready_to_start(const char *step, std::string &error)
+    {
+        if (cancelled.load()) {
+            open = false;
+            error = std::string(step) + ": cancelled";
+            return false;
+        }
+        if (budget() <= 0) {
+            timed_out = true;
+            fail(error, step, {});
+            return false;
+        }
+        return true;
     }
 };
 
@@ -279,7 +305,19 @@ CrealityWsClient::~CrealityWsClient() { close(); }
 
 bool CrealityWsClient::is_open() const { return m && m->open; }
 
+bool CrealityWsClient::is_cancelled() const { return m && m->cancelled.load(); }
+
 int CrealityWsClient::remaining_ms() const { return m ? m->remaining() : 0; }
+
+void CrealityWsClient::cancel()
+{
+    if (!m)
+        return;
+    m->cancelled.store(true);
+    m->open = false;
+    m->cancel_socket();
+    m->ioc.stop();
+}
 
 bool CrealityWsClient::open(const std::string &host_url, const std::string &port, std::string &error)
 {
@@ -290,38 +328,77 @@ bool CrealityWsClient::open(const std::string &host_url, const std::string &port
         return false;
     }
 
-    m->start     = std::chrono::steady_clock::now();
+    m->cancelled.store(false);
     m->timed_out = false;
-    m->ws        = std::make_unique<websocket::stream<beast::tcp_stream>>(m->ioc);
+    // A total budget is measured from construction so an already-expired client
+    // fails in ready_to_start() instead of resetting the clock here.
+    if (m->total_ms <= 0)
+        m->start = std::chrono::steady_clock::now();
+    if (!m->ready_to_start("open", error))
+        return false;
+
+    m->ws = std::make_unique<websocket::stream<beast::tcp_stream>>(m->ioc);
     m->ws->read_message_max(1024 * 1024);
     m->ws->set_option(websocket::stream_base::decorator([](websocket::request_type &req) {
         req.set(http::field::user_agent, std::string(BOOST_BEAST_VERSION_STRING) + " creality-ws");
     }));
 
-    tcp::resolver               resolver(m->ioc);
-    tcp::resolver::results_type results;
-    beast::error_code           ec;
-    bool                        done = false;
-    resolver.async_resolve(host, port, [&](const beast::error_code &e, tcp::resolver::results_type r) {
-        ec      = e;
-        results = std::move(r);
-        done    = true;
-    });
-    if (!m->run(done, m->budget(), [&] { resolver.cancel(); }) || ec)
-        return m->fail(error, "resolve", ec);
+    beast::error_code ec;
+    bool              done = false;
 
-    done = false;
-    beast::get_lowest_layer(*m->ws).async_connect(results, [&](const beast::error_code &e, const tcp::endpoint &) {
-        ec   = e;
-        done = true;
-    });
-    if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
-        return m->fail(error, "connect", ec);
+    boost::system::error_code addr_ec;
+    const auto                addr = net::ip::make_address(host, addr_ec);
+    unsigned short            port_num = 0;
+    {
+        char *     end = nullptr;
+        const long p   = std::strtol(port.c_str(), &end, 10);
+        if (end != port.c_str() && *end == '\0' && p > 0 && p <= 65535)
+            port_num = static_cast<unsigned short>(p);
+    }
+
+    if (!addr_ec && port_num != 0) {
+        // Literal IP: skip getaddrinfo. resolver.cancel() cannot interrupt it.
+        if (!m->ready_to_start("connect", error))
+            return false;
+        const tcp::endpoint ep(addr, port_num);
+        done = false;
+        beast::get_lowest_layer(*m->ws).socket().async_connect(ep, [&](const beast::error_code &e) {
+            ec   = e;
+            done = true;
+        });
+        if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+            return m->fail(error, "connect", ec);
+    } else {
+        if (!m->ready_to_start("resolve", error))
+            return false;
+        tcp::resolver               resolver(m->ioc);
+        tcp::resolver::results_type results;
+        done = false;
+        resolver.async_resolve(host, port, [&](const beast::error_code &e, tcp::resolver::results_type r) {
+            ec      = e;
+            results = std::move(r);
+            done    = true;
+        });
+        if (!m->run(done, m->budget(), [&] { resolver.cancel(); }) || ec)
+            return m->fail(error, "resolve", ec);
+
+        if (!m->ready_to_start("connect", error))
+            return false;
+        done = false;
+        beast::get_lowest_layer(*m->ws).async_connect(results, [&](const beast::error_code &e, const tcp::endpoint &) {
+            ec   = e;
+            done = true;
+        });
+        if (!m->run(done, m->budget(), [&] { m->cancel_socket(); }) || ec)
+            return m->fail(error, "connect", ec);
+    }
 
     try {
         host += ':' + std::to_string(beast::get_lowest_layer(*m->ws).socket().remote_endpoint().port());
     } catch (...) { host += ":9999"; }
 
+    if (!m->ready_to_start("handshake", error))
+        return false;
     done = false;
     m->ws->async_handshake(host, "/", [&](const beast::error_code &e) {
         ec   = e;
@@ -342,6 +419,8 @@ bool CrealityWsClient::write(const std::string &payload, std::string &error)
         error = "not connected";
         return false;
     }
+    if (!m->ready_to_start("write", error))
+        return false;
     beast::error_code ec;
     bool              done = false;
     m->ws->async_write(net::buffer(payload), [&](const beast::error_code &e, std::size_t) {
@@ -359,6 +438,8 @@ bool CrealityWsClient::read_once(std::string &out, std::string &error)
         error = "not connected";
         return false;
     }
+    if (!m->ready_to_start("read", error))
+        return false;
     beast::flat_buffer buffer;
     beast::error_code  ec;
     bool               done = false;
@@ -397,14 +478,18 @@ void CrealityWsClient::close()
 {
     if (!m || !m->ws)
         return;
-    if (m->open) {
+    if (m->open && !m->cancelled.load() && m->budget() > 0) {
         beast::error_code ec;
         bool              done = false;
         m->ws->async_close(websocket::close_code::normal, [&](const beast::error_code &e) {
             ec   = e;
             done = true;
         });
-        m->run(done, std::min(1000, std::max(1, m->budget())), [&] { m->cancel_socket(); });
+        m->run(done, std::min(1000, m->budget()), [&] { m->cancel_socket(); });
+    } else {
+        m->cancel_socket();
+        m->ioc.restart();
+        m->ioc.run();
     }
     m->cancel_socket();
     m->open = false;
@@ -450,26 +535,31 @@ bool CrealityPrint::fetch_info(const std::string &host, std::string &body, std::
     return ok;
 }
 
-std::string CrealityPrint::query_boxes_info(const std::string &host, int timeout_s)
+std::string CrealityPrint::query_boxes_info(const std::string &host, int timeout_s, CrealityWsClient *session)
 {
-    const int          budget_ms = std::max(1, timeout_s) * 1000;
-    CrealityWsClient   ws(budget_ms, budget_ms);
-    std::string        err;
-    if (!ws.open(host, "9999", err)) {
+    const int                         budget_ms = std::max(1, timeout_s) * 1000;
+    std::unique_ptr<CrealityWsClient> owned;
+    CrealityWsClient                 *ws = session;
+    if (!ws) {
+        owned = std::make_unique<CrealityWsClient>(budget_ms, budget_ms);
+        ws    = owned.get();
+    }
+    std::string err;
+    if (!ws->open(host, "9999", err)) {
         BOOST_LOG_TRIVIAL(error) << "CrealityPrint: boxsInfo open failed: " << err;
         return {};
     }
     const json boxs_query = {{"method", "get"}, {"params", {{"boxsInfo", 1}}}};
-    if (!ws.write(to_string(boxs_query), err)) {
+    if (!ws->write(to_string(boxs_query), err)) {
         BOOST_LOG_TRIVIAL(error) << "CrealityPrint: boxsInfo write failed: " << err;
         return {};
     }
     std::string result;
-    if (!ws.read_until("boxsInfo", result, err)) {
+    if (!ws->read_until("boxsInfo", result, err)) {
         BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: boxsInfo read failed: " << err;
         return {};
     }
-    ws.close();
+    ws->close();
     return result;
 }
 
@@ -527,30 +617,33 @@ bool CrealityPrint::start_print(wxString &msg, const std::string &filename, cons
         // Empty match list: fall back to opGcodeFile + enableSelfTest (do not send colorMatch).
         if (use_cfs && !color_list.empty()) {
             const json color_match = CrealityPrintModel::color_match_cmd(gcode_path, color_list);
-            bool       matched     = false;
-            // Creality Print: send, retry up to 5x at 2 s, each attempt on its own deadline.
-            for (int attempt = 0; attempt < 5 && !matched; ++attempt) {
-                CrealityWsClient attempt_ws(2000, 2000);
-                if (!attempt_ws.open(m_host, "9999", err)) {
-                    BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
-                                               << " open failed: " << err;
-                    continue;
-                }
-                if (!attempt_ws.write(to_string(color_match), err)) {
+            // Creality Print: colorMatch (retry 5× at 2 s) then multiColorPrint on ONE socket.
+            // A 2 s silence kills the Beast stream; we then fail rather than open a second
+            // connection. Do not send multiColorPrint if every colorMatch attempt failed.
+            CrealityWsClient ws(2000, 10000);
+            if (!ws.open(m_host, "9999", err)) {
+                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch open failed: " << err;
+                msg = wxString::FromUTF8(err);
+                return false;
+            }
+            bool matched = false;
+            for (int attempt = 0; attempt < 5 && !matched && ws.is_open(); ++attempt) {
+                if (!ws.write(to_string(color_match), err)) {
                     BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
                                                << " write failed: " << err;
-                    continue;
+                    break;
                 }
                 std::string reply;
-                if (attempt_ws.read_until("colorMatch", reply, err))
+                if (ws.read_until("colorMatch", reply, err))
                     matched = true;
                 else
                     BOOST_LOG_TRIVIAL(warning) << "CrealityPrint: colorMatch attempt " << (attempt + 1)
                                                << " read failed: " << err;
             }
-
-            CrealityWsClient ws(5000);
-            if (!ws.open(m_host, "9999", err)) {
+            if (!matched) {
+                if (err.empty())
+                    err = "colorMatch failed";
+                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch failed: " << err;
                 msg = wxString::FromUTF8(err);
                 return false;
             }

@@ -10058,12 +10058,13 @@ void Sidebar::show_cfs_sync_dialog()
     bool              reached = false;
     std::atomic<bool> done { false };
     std::atomic<bool> cancel { false };
+    CrealityWsClient  session(2000, 2000);
     std::thread       worker([&] {
         try {
             std::string body;
             if (CrealityPrint::fetch_info(address, body, info_err, 2) && !cancel.load()) {
                 reached = true;
-                boxs    = CrealityPrint::query_boxes_info(address, 2);
+                boxs    = CrealityPrint::query_boxes_info(address, 2, &session);
             }
         } catch (const std::exception &e) {
             BOOST_LOG_TRIVIAL(error) << "CFS sync: " << e.what();
@@ -10077,14 +10078,18 @@ void Sidebar::show_cfs_sync_dialog()
                                   wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH | wxPD_CAN_ABORT);
         while (!done) {
             if (!progress.Pulse()) {
-                cancel  = true;
+                cancel = true;
+                session.cancel();
                 aborted = true;
                 break;
             }
             wxMilliSleep(80);
         }
     }
-    worker.join();
+    {
+        wxBusyCursor busy;
+        worker.join();
+    }
     if (aborted)
         return;
     if (!reached) {
