@@ -32,6 +32,7 @@
 #include "../GUI/PlatePrintHistoryRecorder.hpp"
 #include "../GUI/SnapmakerLan.hpp" // Ultra: END_UNLOAD_FILAMENT, built in one place for every send path
 #include "Obico.hpp"
+#include "PrintHostDeviceStatus.hpp"
 #include "Flashforge.hpp"
 #include "SimplyPrint.hpp"
 #include "ElegooLink.hpp"
@@ -514,6 +515,45 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     const std::string history_printer = !the_job.history_printer_name.empty() ? the_job.history_printer_name : host_name;
     const std::string history_model   = the_job.history_printer_model;
 
+    // "http://192.0.2.106:80/" and friends: SnapmakerLan::run_script wants the bare host and a port.
+    auto script_target = [&the_job]() {
+        GUI::SnapmakerLan::Device d;
+        std::string h = the_job.printhost->get_host();
+        const size_t scheme = h.find("://");
+        if (scheme != std::string::npos)
+            h = h.substr(scheme + 3);
+        if (const size_t slash = h.find('/'); slash != std::string::npos)
+            h = h.substr(0, slash);
+        if (const size_t colon = h.rfind(':'); colon != std::string::npos) {
+            try {
+                d.port = std::stoi(h.substr(colon + 1));
+            } catch (...) {}
+            h = h.substr(0, colon);
+        }
+        d.ip = h;
+        return d;
+    };
+
+    // QIDI Box: which slot feeds each tool. The firmware's T<n> loads from the slot the saved
+    // variable value_t<n> names and nothing in the G-code sets it - QIDIStudio sends these same
+    // SAVE_VARIABLE lines before every start - so without them the printer reuses the slots of
+    // whatever it printed last, and an ASA plate runs on the PLA still loaded from that print, at
+    // ASA temperatures. Unlike the unload preference below this is not a convenience: if the
+    // printer will not take the mapping, the send stops here rather than print the wrong material.
+    if (the_job.qidi_box && archive_print) {
+        const std::string script = PrintHostDevices::qidi_box_mapping_script(archive_mapping);
+        if (!script.empty()) {
+            std::string err;
+            if (!GUI::SnapmakerLan::run_script(script_target(), script, err)) {
+                BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI Box slot mapping (" << err << ")";
+                error_fn(_L("The printer did not accept the QIDI Box slot mapping, so the print was not started:") + " " +
+                         wxString::FromUTF8(err.c_str()));
+                return;
+            }
+            BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent the QIDI Box slot mapping " << archive_mapping;
+        }
+    }
+
     // "Unload filaments after print", for a Snapmaker tool changer only. The flag cannot
     // ride inside the G-code: the firmware refuses SET_PRINT_PREFERENCES while print_stats.state is
     // "printing", so it has to reach the printer before the job starts. This queue uploads with
@@ -522,27 +562,10 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     // Nothing here runs unless the send dialog offered the checkbox and it was ticked, and the
     // dialog only offers it for a Snapmaker tool changer starting a print. Every other host - every
     // Moonraker, OctoPrint, Duet, Elegoo ... send - reaches the upload below having executed not one
-    // extra statement, and a failure to set the preference is logged and never fails the send: the
+    // extra statement for it, and a failure to set the preference is logged and never fails the send: the
     // print is what the person asked for, the unload is a convenience on top of it.
     if (archive_unload && archive_print) {
-        GUI::SnapmakerLan::Device d;
-        d.ip = the_job.printhost->get_host();
-        // "http://192.0.2.106:80/" and friends: SnapmakerLan wants the bare host and a port.
-        {
-            std::string h = d.ip;
-            const size_t scheme = h.find("://");
-            if (scheme != std::string::npos)
-                h = h.substr(scheme + 3);
-            if (const size_t slash = h.find('/'); slash != std::string::npos)
-                h = h.substr(0, slash);
-            if (const size_t colon = h.rfind(':'); colon != std::string::npos) {
-                try {
-                    d.port = std::stoi(h.substr(colon + 1));
-                } catch (...) {}
-                h = h.substr(0, colon);
-            }
-            d.ip = h;
-        }
+        const GUI::SnapmakerLan::Device d = script_target();
         // Which toolheads this print uses: the dialog's own mapping ("0:1,1:2" - filament:slot),
         // and, when nothing was mapped, the file goes out as sliced and toolhead 0 is the one it
         // runs on.

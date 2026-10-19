@@ -25,6 +25,12 @@
 //    SnapmakerLan.cpp:456, and the same one SSWCP's machine filament info comes from). Where there
 //    is no `print_task_config`, the `extruder`/`extruder1`... objects still say how many tools the
 //    machine has, which is a slot list without materials in it.
+//  * A QIDI printer with a QIDI Box (X-Max 4, X-Plus 4, Q2) is a Moonraker box too, and its
+//    `multi_color_controller` object lists every Box slot with the material the printer read off
+//    its RFID tag or was told on the touchscreen - the same object QIDIStudio's device page reads.
+//    The Box firmware decides which slot feeds `T<n>` from the saved variable `value_t<n>`, which
+//    only the sending slicer sets, so for these printers the mapping is not a nicety:
+//    qidi_box_mapping_script() is what the send path runs before the print starts.
 //  * A PrusaLink / PrusaConnect printer (a Buddy board on an MK4/MK4S/MINI/CORE One, or the
 //    PrusaLink daemon in front of an MK3S) answers its own REST API: `/api/v1/status` gives the
 //    state and both heaters, `/api/v1/job` the file it is printing. See PrusaLinkStatus.hpp. It
@@ -41,7 +47,8 @@ namespace PrintHostDevices {
 // One place a filament can be, as the printer describes it.
 struct Slot
 {
-    int         index { 0 };    // 0-based, the tool/extruder number
+    int         index { 0 };    // 0-based, the tool/extruder number (QIDI Box: box * 4 + slot)
+    std::string name;           // "Box 1 slot 2" - shown instead of "T<n>" when it is not a tool
     std::string type;           // "PLA", "" = the printer did not say
     std::string sub_type;
     std::string vendor;
@@ -64,7 +71,16 @@ struct Status
     // The printer named the materials, not just the tools. Only then is a mapping table worth
     // showing: a bare tool list with nothing in it tells a person nothing they did not know.
     bool              slots_have_filaments { false };
+    // The slots are a QIDI Box's: a filament left "As sliced" is fed from whichever slot the
+    // printer last used for that tool, so the dialog matches by material, never by colour alone.
+    bool              qidi_box { false };
 };
+
+// "0:3,1:5" (filament:slot, PrintHostSendDialog::filament_mapping) -> the commands QIDIStudio
+// sends before a QIDI Box print: enable the Box, then point each tool's `value_t<n>` at its slot.
+// Newline-separated, for one /printer/gcode/script call. Empty when nothing in the mapping is
+// usable (the firmware keeps 16 tools and 16 Box slots, 0-based).
+std::string qidi_box_mapping_script(const std::string& mapping);
 
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
 Status probe(const Device& d, int timeout_s = 3);

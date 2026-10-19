@@ -582,6 +582,11 @@ void PrintHostSendDialog::refresh_device_status()
                 text += "  ";
             // The honest sentence: this protocol has no filament data, so there is nothing to map.
             text += _(from_u8(m_device_status.note));
+        } else if (m_device_status.qidi_box && m_device_status.slots_have_filaments) {
+            if (!text.IsEmpty())
+                text += "  ";
+            text += _L("QIDI Box: each filament is fed from the slot picked below. \"As sliced\" leaves the "
+                       "printer on whichever slot it last used for that filament.");
         }
         m_device_note->SetLabel(text);
         m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
@@ -634,13 +639,29 @@ void PrintHostSendDialog::rebuild_mapping_rows()
         auto* choice = new wxChoice(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, slot_labels);
         // Auto-match: the closest colour among the slots that have something in them, the same rule
         // the Snapmaker LAN path uses. "As sliced" whenever nothing is close enough to be obvious.
+        // A slot holding the plate filament's own material wins over any colour: an ASA plate must
+        // not be auto-sent to the PLA that happens to be the right shade. A QIDI Box goes further
+        // and never falls back to colour - its firmware heats for the plate's material whatever is
+        // fed, so a wrong material is a failed print, and the person picks the slot instead.
+        auto same_type = [&f](const PrintHostDevices::Slot& s) {
+            return !f.type.empty() && boost::iequals(f.type, s.type);
+        };
+        bool any_same_type = false;
+        for (const PrintHostDevices::Slot& s : m_device_status.slots)
+            any_same_type |= s.loaded && same_type(s);
         int    best = 0;
         double best_d = 0;
         for (size_t i = 0; i < m_device_status.slots.size(); ++i) {
             const PrintHostDevices::Slot& s = m_device_status.slots[i];
-            if (!s.loaded || s.color.empty())
+            if (!s.loaded)
                 continue;
-            const double dist = colour_distance(swatch_colour(f.colour), swatch_colour(s.color));
+            if ((any_same_type || m_device_status.qidi_box) && !same_type(s))
+                continue;
+            // A material match the printer gave no colour for still counts, behind any that has one.
+            if (s.color.empty() && !same_type(s))
+                continue;
+            const double dist = s.color.empty() ? std::numeric_limits<double>::max() :
+                                                  colour_distance(swatch_colour(f.colour), swatch_colour(s.color));
             if (best == 0 || dist < best_d) {
                 best   = (int) i + 1;
                 best_d = dist;

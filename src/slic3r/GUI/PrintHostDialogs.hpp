@@ -64,6 +64,9 @@ public:
     // "0:1,1:2" - the plate's filament 0 goes in slot 1, filament 1 in slot 2. Empty when nothing
     // was mapped, which is every host that reports no slots.
     std::string filament_mapping() const;
+    // The picked device is a QIDI printer with a QIDI Box, so filament_mapping() names Box slots and
+    // has to reach the printer before the print starts (PrintHostJob::qidi_box).
+    bool qidi_box() const { return m_device_status.qidi_box; }
 
     // ---- "unload filaments when the print ends" (Snapmaker tool changers) ----
     //

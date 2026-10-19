@@ -392,6 +392,59 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK_FALSE(st.note.empty());
     }
 
+    SECTION("a QIDI Box names its slots and what is in them") {
+        // The shape QIDIStudio's QDSDevice::updateBoxDataByJson reads off an X-Max 4.
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"extruder\":{\"nozzle_diameter\":0.4},"
+            " \"multi_color_controller\":{\"box_count\":1,\"box\":{\"boxes\":[{"
+            "   \"box_inserted_0\":1,\"box_inserted_1\":1,\"box_inserted_2\":0,\"box_inserted_3\":true,"
+            "   \"filament_info\":["
+            "     {\"filament_type\":\"PLA\",\"filament_str\":\"PLA Rapido\",\"vendor_str\":\"QIDI\",\"color_rgb_str\":[\"#FFFFFF\"]},"
+            "     {\"filament_type\":\"ASA\",\"filament_str\":\"ASA\",\"vendor_str\":\"QIDI\",\"color_rgb_str\":[\"#202020\"]},"
+            "     {\"filament_type\":\"PETG\",\"color_rgb_str\":[\"#00FF00\"]},"
+            "     {\"filament_type\":\"ABS\",\"color_rgb_str\":[]}]}]}}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.online);
+        CHECK(st.qidi_box);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 4); // the Box's slots, not the one extruder
+        CHECK(st.slots[1].index == 1);
+        CHECK(st.slots[1].type == "ASA");
+        CHECK(st.slots[1].color == "#202020");
+        CHECK(st.slots[1].loaded);
+        CHECK(st.slots[1].label() == "Box 1 slot 2 ASA");
+        CHECK_FALSE(st.slots[2].loaded); // a tag left in the firmware from an unloaded spool
+        CHECK(st.slots[2].type.empty());
+        CHECK(st.slots[3].loaded);
+        CHECK(st.slots[3].color.empty());
+        CHECK(st.note.empty());
+    }
+
+    SECTION("a QIDI printer with no Box plugged in is a plain Klipper") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"extruder\":{\"nozzle_diameter\":0.4},"
+            " \"multi_color_controller\":{\"box_count\":0,\"boxes\":[]}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK_FALSE(st.qidi_box);
+        CHECK_FALSE(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 1);
+    }
+
+    SECTION("the QIDI Box mapping goes out the way QIDIStudio sends it") {
+        CHECK(qidi_box_mapping_script("0:1,2:15") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t0 VALUE='\"slot1\"'\n"
+              "SAVE_VARIABLE VARIABLE=value_t2 VALUE='\"slot15\"'\n");
+        // The firmware keeps 16 tools and 16 Box slots; anything past that is not sent.
+        CHECK(qidi_box_mapping_script("16:0,0:16") == "");
+        CHECK(qidi_box_mapping_script("") == "");
+        CHECK(qidi_box_mapping_script("x:y,1:2") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t1 VALUE='\"slot2\"'\n");
+    }
+
     SECTION("something that is not a Moonraker printer") {
         const Status st = parse_moonraker_status("{}", "octoprint");
         CHECK_FALSE(st.online);

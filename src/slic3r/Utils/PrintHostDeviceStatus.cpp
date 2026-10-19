@@ -18,7 +18,7 @@ using nlohmann::json;
 
 std::string Slot::label() const
 {
-    std::string out = "T" + std::to_string(index + 1);
+    std::string out = name.empty() ? "T" + std::to_string(index + 1) : name;
     if (!type.empty()) {
         out += " " + type;
         if (!sub_type.empty() && sub_type != type)
@@ -168,6 +168,59 @@ static void slots_from_print_task_config(const json& status, std::vector<Slot>& 
     }
 }
 
+// A number or a boolean, as the QIDI firmware is not consistent about which it sends.
+static bool truthy_at(const json& j, const std::string& key)
+{
+    if (!j.is_object() || !j.contains(key))
+        return false;
+    const json& v = j[key];
+    return v.is_boolean() ? v.get<bool>() : (v.is_number() ? v.get<double>() != 0.0 : false);
+}
+
+static int int_at(const json& j, const char* key, int fallback)
+{
+    return j.is_object() && j.contains(key) && j[key].is_number() ? j[key].get<int>() : fallback;
+}
+
+// A QIDI Box (X-Max 4, X-Plus 4, Q2): `multi_color_controller`, read the way QIDIStudio's
+// QDSDevice::updateBoxDataByJson reads it - `box_count` and `boxes` either at the top level or
+// under `box`, each box a `filament_info` array of four slots and a `box_inserted_<n>` flag per
+// slot. Slot n of box b is Box slot b * 4 + n, the number the firmware's `value_t<tool>` names.
+// The extruder's own spool (`extra`) is left out: QIDIStudio's numbering for it is not settled.
+static void slots_from_qidi_box(const json& status, std::vector<Slot>& out, bool& have_filaments, bool& is_box)
+{
+    if (!status.is_object() || !status.contains("multi_color_controller") || !status["multi_color_controller"].is_object())
+        return;
+    const json& mcc   = status["multi_color_controller"];
+    const json& boxes = mcc.contains("box") && mcc["box"].is_object() ? mcc["box"] : mcc;
+    const int   count = int_at(mcc, "box_count", int_at(boxes, "box_count", 0));
+    if (count <= 0)
+        return; // the controller is there, the Box is not plugged in
+    const json& list = array_at(boxes, "boxes");
+    for (size_t b = 0; b < list.size() && b < 4; ++b) {
+        const json& box   = list[b];
+        const json& infos = array_at(box, "filament_info");
+        for (size_t n = 0; n < infos.size() && n < 4; ++n) {
+            const json& fi = infos[n];
+            Slot s;
+            s.index  = (int) (b * 4 + n);
+            s.name   = "Box " + std::to_string(b + 1) + " slot " + std::to_string(n + 1);
+            s.loaded = truthy_at(box, "box_inserted_" + std::to_string(n));
+            if (s.loaded) {
+                s.type     = str_at(fi, "filament_type");
+                s.sub_type = str_at(fi, "filament_str"); // "PLA Rapido"
+                s.vendor   = str_at(fi, "vendor_str");
+                const json& colours = array_at(fi, "color_rgb_str");
+                s.color    = colour_of(arr_str(colours, 0));
+                if (!s.type.empty() || !s.color.empty())
+                    have_filaments = true;
+            }
+            out.push_back(std::move(s));
+        }
+    }
+    is_box = !out.empty();
+}
+
 // No print_task_config: the extruder objects still say how many tools there are. A slot list with
 // no materials in it - the caller shows it as tools, not as filaments.
 static void slots_from_extruders(const json& status, std::vector<Slot>& out)
@@ -199,6 +252,8 @@ static Status fill_from_status(const json& status, const std::string& host_type_
     if (status.contains("print_stats") && status["print_stats"].is_object())
         st.state = str_at(status["print_stats"], "state");
     slots_from_print_task_config(status, st.slots, st.slots_have_filaments);
+    if (st.slots.empty())
+        slots_from_qidi_box(status, st.slots, st.slots_have_filaments, st.qidi_box);
     if (st.slots.empty())
         slots_from_extruders(status, st.slots);
     if (st.slots.empty() || !st.slots_have_filaments)
@@ -251,9 +306,10 @@ Status probe(const Device& d, int timeout_s)
         return st;
     }
     // One call, read-only, never a command - the same objects RemoteControl::describe_hosts asks
-    // for plus print_task_config, which is where the loaded filaments live when there are any.
+    // for plus print_task_config (Snapmaker) and multi_color_controller (QIDI Box), which is where
+    // the loaded filaments live when there are any. Moonraker leaves out the ones a printer lacks.
     std::string body;
-    if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&extruder&extruder1&extruder2&extruder3",
+    if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&multi_color_controller&extruder&extruder1&extruder2&extruder3",
                        body, st.error, timeout_s)) {
         st.note = "this printer did not answer" + (st.error.empty() ? std::string() : (": " + st.error));
         return st;
@@ -284,6 +340,35 @@ Status parse_moonraker_status(const std::string& status_json, const std::string&
     Status st = fill_from_status(status, host_type_key);
     st.probed = can_probe(host_type_key);
     return st;
+}
+
+std::string qidi_box_mapping_script(const std::string& mapping)
+{
+    // value_t0..value_t15 and slot0..slot15 are what the firmware's save_variables declares.
+    constexpr int max_tools = 16, max_slots = 16;
+    std::string   lines;
+    std::string   pair;
+    for (size_t i = 0; i <= mapping.size(); ++i) {
+        if (i < mapping.size() && mapping[i] != ',') {
+            pair += mapping[i];
+            continue;
+        }
+        const size_t colon = pair.find(':');
+        if (colon != std::string::npos) {
+            try {
+                const int tool = std::stoi(pair.substr(0, colon));
+                const int slot = std::stoi(pair.substr(colon + 1));
+                // QIDIStudio's own SelectMachine sends the value quoted twice: once for Klipper's
+                // shlex parse, once for SAVE_VARIABLE's literal_eval, so it lands as the string slotN.
+                if (tool >= 0 && tool < max_tools && slot >= 0 && slot < max_slots)
+                    lines += "SAVE_VARIABLE VARIABLE=value_t" + std::to_string(tool) + " VALUE='\"slot" + std::to_string(slot) + "\"'\n";
+            } catch (...) {}
+        }
+        pair.clear();
+    }
+    if (lines.empty())
+        return lines;
+    return "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n" + lines;
 }
 
 } // namespace PrintHostDevices
