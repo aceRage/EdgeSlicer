@@ -15,6 +15,7 @@
 #include "../Utils/PrintHostDeviceStatus.hpp"
 #include "../Utils/ElegooCanvasMapping.hpp"
 #include "../Utils/Flashforge.hpp"
+#include "ThirdPartyFilamentMapPanel.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ProjectTask.hpp"
 class wxButton;
@@ -41,6 +42,7 @@ struct SendPlateFilament
     bool        used { false }; // this plate's slice result actually used it
     std::string alias;         // its filament preset's alias (or name), for remembered mappings
     int         nozzle_temp { 0 }; // its nozzle temperature, 0 = unknown
+    int         nozzle_id { -1 };  // 0-based nozzle / toolhead; -1 = single-nozzle / unknown
 };
 
 class PrintHostSendDialog : public GUI::MsgDialog
@@ -106,6 +108,13 @@ protected:
     // cursor and a short timeout - the same shape as the devices dialog's Test button.
     void refresh_device_status();
     void rebuild_mapping_rows();
+    // Bambu-style MaterialItem swatches (ThirdPartyFilamentMapPanel) for every host that names its
+    // slots: Elegoo CANVAS, Snapmaker U1 toolheads, QIDI Box. A dialog that still wants the old
+    // wxChoice rows overrides this with false. No slots: no rows at all, as before.
+    virtual bool use_third_party_map_panel() const { return true; }
+    // Creality K3 holders: show the two colours, no popup.
+    virtual bool third_party_map_read_only() const { return false; }
+    void rebuild_third_party_map_rows();
     // The picked QIDI printer said it is printing or paused: Upload only, no start.
     bool print_blocked() const;
     // "Upload and Print" follows print_blocked(). Safe before the buttons exist.
@@ -132,7 +141,13 @@ protected:
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
     // One or more lines under the mapping table, refreshed whenever a choice changes; "" = none.
-    virtual wxString mapping_warning() const { return wxString(); }
+    // Vendor PRs (#616/#619/#620/#622) override this; keep the name and signature.
+    virtual wxString mapping_warning() const;
+    // Panel type/colour mismatch (identity slots when read-only). Combined with mapping_warning()
+    // in update_mapping_note(); vendor overrides of mapping_warning() still compile after rebase.
+    virtual wxString third_party_mismatch_warning() const;
+    void on_dpi_changed(const wxRect &suggested_rect) override;
+    void on_sys_color_changed() override;
     void update_mapping_note();
     // The rows' choices as positions in m_device_status.slots, -1 = "As sliced"; and the plate
     // filament each row is for.
@@ -153,7 +168,8 @@ protected:
     wxComboBox*                           m_combo_devices { nullptr };
     wxStaticText*                         m_device_note { nullptr };
     wxWindow*                             m_mapping_panel { nullptr };
-    wxFlexGridSizer*                      m_mapping_sizer { nullptr };
+    wxBoxSizer*                           m_mapping_sizer { nullptr };
+    ThirdPartyFilamentMapPanel*           m_filament_map { nullptr }; // the swatch rows; null = wxChoice rows or none
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
     // QIDI printers: QIDIStudio's print options, null where the device does not have them.
