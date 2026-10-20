@@ -36,6 +36,7 @@
 #include "NotificationManager.hpp"
 #include "ExtraRenderers.hpp"
 #include "format.hpp"
+#include "Widgets/StateColor.hpp"
 #include "WebPreprintDialog.hpp"
 #include "../Utils/PrintHostDevices.hpp"
 #include "../Utils/PrintHostDeviceStatus.hpp"
@@ -440,6 +441,24 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 
 } // namespace
 
+static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& s)
+{
+    ThirdPartyDeviceSlot ds;
+    ds.unit_id = s.unit;
+    ds.slot_id = s.tray >= 0 ? s.tray : s.index;
+    ds.colour  = s.color;
+    ds.type    = s.type;
+    ds.name    = s.name;
+    ds.empty   = !s.loaded;
+    ds.index   = s.index;
+    return ds;
+}
+
+static wxString third_party_slot_tile_label(const PrintHostDevices::Slot& s)
+{
+    return from_u8(slot_display_label(third_party_slot_from(s)));
+}
+
 static const char *CONFIG_KEY_PATH  = "printhost_path";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
 static const char* CONFIG_KEY_STORAGE = "printhost_storage";
@@ -751,20 +770,12 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         model.filaments.push_back(std::move(sf));
         m_mapping_filament.push_back(f.index);
     }
-    for (const PrintHostDevices::Slot& s : m_device_status.slots) {
-        ThirdPartyDeviceSlot ds;
-        ds.unit_id = s.unit;
-        ds.slot_id = s.tray >= 0 ? s.tray : s.index;
-        ds.label   = s.unit >= 0 ? bambu_style_slot_label(s.unit, ds.slot_id) : bambu_style_slot_label(-1, s.index);
-        ds.colour  = s.color;
-        ds.type    = s.type;
-        ds.name    = s.name;
-        ds.empty   = !s.loaded;
-        ds.index   = s.index;
-        model.slots.push_back(std::move(ds));
-    }
+    for (const PrintHostDevices::Slot& s : m_device_status.slots)
+        model.slots.push_back(third_party_slot_from(s));
     model.read_only = third_party_map_read_only();
     model.mapping.resize(model.filaments.size(), -1);
+    // Always fill the visual auto-match, including read-only (K3): the cards show the match, but
+    // encode_filament_mapping() / filament_mapping() return empty when read_only.
     for (size_t i = 0; i < model.filaments.size(); ++i) {
         const SendPlateFilament* f = plate_filament(model.filaments[i].index);
         if (!f)
@@ -803,9 +814,31 @@ const SendPlateFilament* PrintHostSendDialog::plate_filament(int index) const
     return nullptr;
 }
 
-wxString PrintHostSendDialog::mapping_warning() const
+wxString PrintHostSendDialog::third_party_mismatch_warning() const
 {
     return m_filament_map ? m_filament_map->mismatch_warning() : wxString();
+}
+
+void PrintHostSendDialog::on_dpi_changed(const wxRect& suggested_rect)
+{
+    MsgDialog::on_dpi_changed(suggested_rect);
+    if (m_filament_map)
+        m_filament_map->msw_rescale();
+    Layout();
+    Fit();
+    Refresh();
+}
+
+void PrintHostSendDialog::on_sys_color_changed()
+{
+    if (m_filament_map)
+        m_filament_map->sys_color_changed();
+    if (m_mapping_note)
+        m_mapping_note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#E8A33D")));
+#ifdef _WIN32
+    wxGetApp().UpdateDlgDarkUI(this);
+#endif
+    Refresh();
 }
 
 void PrintHostSendDialog::update_mapping_note()
@@ -813,7 +846,7 @@ void PrintHostSendDialog::update_mapping_note()
     if (!m_mapping_note)
         return;
     const bool has_rows = m_filament_map || !m_mapping_choices.empty();
-    const wxString text = has_rows ? mapping_warning() : wxString();
+    const wxString text = has_rows ? third_party_mismatch_warning() : wxString();
     const bool     was  = m_mapping_note->IsShown();
     m_mapping_note->SetLabel(text);
     m_mapping_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
@@ -2400,10 +2433,10 @@ int ElegooPrintHostSendDialog::preselect_slot(const SendPlateFilament& f) const
     return ElegooCanvasMapping::recall(m_memory, u, m_device_status.slots);
 }
 
-wxString ElegooPrintHostSendDialog::mapping_warning() const
+wxString ElegooPrintHostSendDialog::third_party_mismatch_warning() const
 {
     if (!m_device_status.canvas)
-        return PrintHostSendDialog::mapping_warning();
+        return PrintHostSendDialog::third_party_mismatch_warning();
     const auto used     = used_filaments();
     const auto warnings = ElegooCanvasMapping::warnings_for(used, mapping_choice_positions(), m_device_status.slots);
     wxString   text;
@@ -2412,23 +2445,31 @@ wxString ElegooPrintHostSendDialog::mapping_warning() const
             text += "\n";
         text += line;
     };
+    auto slot_lbl = [this](int protocol_index) {
+        for (const PrintHostDevices::Slot& s : m_device_status.slots)
+            if (s.index == protocol_index)
+                return third_party_slot_tile_label(s);
+        return from_u8(bambu_style_slot_label(-1, protocol_index));
+    };
     for (const ElegooCanvasMapping::Warning& w : warnings) {
         switch (w.kind) {
         case ElegooCanvasMapping::WarningKind::MoreFilamentsThanTrays:
             add(_L("This plate uses more filaments than the CANVAS has loaded trays."));
             break;
         case ElegooCanvasMapping::WarningKind::SharedTray:
-            add(format_wxstr(_L("Filament %1% prints from the same tray as another filament."), w.filament + 1));
+            add(format_wxstr(_L("Filament %1% prints from the same slot (%2%) as another filament."), w.filament + 1,
+                             slot_lbl(w.slot)));
             break;
         case ElegooCanvasMapping::WarningKind::TemperatureOutOfRange:
-            add(format_wxstr(_L("Filament %1%: its nozzle temperature is outside the range of tray %2%."), w.filament + 1, w.slot + 1));
+            add(format_wxstr(_L("Filament %1%: its nozzle temperature is outside the range of %2%."), w.filament + 1,
+                             slot_lbl(w.slot)));
             break;
         case ElegooCanvasMapping::WarningKind::EmptyTray:
-            add(format_wxstr(_L("Filament %1% is mapped to tray %2%, which is empty."), w.filament + 1, w.slot + 1));
+            add(format_wxstr(_L("Filament %1% is mapped to %2%, which is empty."), w.filament + 1, slot_lbl(w.slot)));
             break;
         }
     }
-    if (const wxString extra = PrintHostSendDialog::mapping_warning(); !extra.IsEmpty())
+    if (const wxString extra = PrintHostSendDialog::third_party_mismatch_warning(); !extra.IsEmpty())
         add(extra);
     return text;
 }

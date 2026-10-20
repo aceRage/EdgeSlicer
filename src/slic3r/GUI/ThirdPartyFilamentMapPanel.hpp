@@ -47,8 +47,9 @@ public:
     bool mapping_enabled() const { return m_mapping_enabled; }
 
     // Positions in model.slots, -1 = "As sliced". Same shape as PrintHostSendDialog::mapping_choice_positions().
+    // Still filled in read-only (the visual auto-match); filament_mapping() is empty then.
     std::vector<int> choice_positions() const { return m_model.mapping; }
-    // "0:1,1:2" — filament index to Slot::index. Empty when every row is "As sliced".
+    // "0:1,1:2" — filament index to Slot::index. Empty when read_only or every row is "As sliced".
     std::string filament_mapping() const;
 
     // Type / colour mismatch sentences for the dialog's mapping note; "" = none. Translated.

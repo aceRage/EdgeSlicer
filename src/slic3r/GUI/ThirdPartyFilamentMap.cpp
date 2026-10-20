@@ -82,10 +82,10 @@ std::string normalize_map_colour(const std::string& colour)
 std::string bambu_style_slot_label(int unit_id, int slot_id)
 {
     const int slot = slot_id < 0 ? 0 : slot_id;
-    const int letter_i = slot % 4;
-    const char letter  = static_cast<char>('A' + letter_i);
     if (unit_id < 0)
-        return std::string(1, letter);
+        return std::to_string(slot + 1);
+    const int  letter_i = slot % 4;
+    const char letter   = static_cast<char>('A' + letter_i);
     return std::to_string(unit_id + 1) + letter;
 }
 
@@ -201,6 +201,8 @@ std::vector<ThirdPartySlotGroup> group_slots(const std::vector<ThirdPartyDeviceS
 
 std::string encode_filament_mapping(const ThirdPartyFilamentMapModel& model)
 {
+    if (model.read_only)
+        return {};
     std::string out;
     for (size_t i = 0; i < model.filaments.size() && i < model.mapping.size(); ++i) {
         const int pos = model.mapping[i];

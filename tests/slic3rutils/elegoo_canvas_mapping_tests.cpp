@@ -331,8 +331,17 @@ TEST_CASE("Third-party filament map: Bambu-style slot labels and grouping", "[Th
     CHECK(bambu_style_slot_label(0, 1) == "1B");
     CHECK(bambu_style_slot_label(0, 3) == "1D");
     CHECK(bambu_style_slot_label(1, 0) == "2A");
-    CHECK(bambu_style_slot_label(-1, 0) == "A");
-    CHECK(bambu_style_slot_label(-1, 2) == "C");
+    CHECK(bambu_style_slot_label(-1, 0) == "1");
+    CHECK(bambu_style_slot_label(-1, 2) == "3");
+    CHECK(bambu_style_slot_label(-1, 3) == "4");
+    CHECK(bambu_style_slot_label(-1, 4) == "5");
+    CHECK(bambu_style_slot_label(-1, 7) == "8");
+
+    ThirdPartyDeviceSlot unitless;
+    unitless.unit_id = -1;
+    unitless.slot_id = -1;
+    unitless.index   = 5;
+    CHECK(slot_display_label(unitless) == "6");
 
     ThirdPartyDeviceSlot a;
     a.unit_id = 0;
@@ -386,6 +395,11 @@ TEST_CASE("Third-party filament map: encode matches the send dialog's filament:s
     CHECK(encode_filament_mapping(model) == "0:5,2:7");
     model.mapping = { -1, -1 };
     CHECK(encode_filament_mapping(model).empty());
+    model.mapping   = { 0, 1 };
+    model.read_only = true;
+    CHECK(encode_filament_mapping(model).empty());
+    model.read_only = false;
+    CHECK(encode_filament_mapping(model) == "0:5,2:7");
 }
 
 TEST_CASE("Third-party filament map: type and colour mismatch, badges, colour parse", "[ThirdPartyFilamentMap]")

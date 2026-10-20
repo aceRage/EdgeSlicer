@@ -21,15 +21,30 @@ namespace GUI {
 
 namespace {
 
+wxColour unknown_slot_colour()
+{
+    return StateColor::darkModeColorFor(wxColour(0xCE, 0xCE, 0xCE));
+}
+
+wxColour warning_text_colour()
+{
+    return StateColor::darkModeColorFor(wxColour(0xFF, 0x6F, 0x00));
+}
+
+wxColour popup_border_colour()
+{
+    return StateColor::darkModeColorFor(wxColour(0xAC, 0xAC, 0xAC));
+}
+
 wxColour parse_slot_colour(const std::string& raw)
 {
     std::string s = normalize_map_colour(raw);
     if (s.empty())
-        return wxColour(0xCE, 0xCE, 0xCE);
+        return unknown_slot_colour();
     wxColour c;
     if (c.Set(wxString::FromUTF8(s.c_str())))
         return c;
-    return wxColour(0xCE, 0xCE, 0xCE);
+    return unknown_slot_colour();
 }
 
 wxString from_utf8(const std::string& s)
@@ -87,9 +102,9 @@ public:
         m_as_sliced->SetMaxSize(m_as_sliced->GetSize());
         TrayData sliced;
         sliced.type = TrayType::EMPTY;
-        sliced.colour = wxColour(0xCE, 0xCE, 0xCE);
+        sliced.colour = unknown_slot_colour();
         m_as_sliced->set_tray_index("-");
-        m_as_sliced->set_data(wxColour(0xCE, 0xCE, 0xCE), _L("As sliced"), sliced);
+        m_as_sliced->set_data(unknown_slot_colour(), _L("As sliced"), sliced);
         m_as_sliced->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) {
             if (m_panel)
                 m_panel->pick_slot(m_filament_row, -1);
@@ -97,7 +112,7 @@ public:
         });
 
         m_warning = new wxStaticText(this, wxID_ANY, wxEmptyString);
-        m_warning->SetForegroundColour(wxColour(0xFF, 0x6F, 0x00));
+        m_warning->SetForegroundColour(warning_text_colour());
         m_warning->SetFont(::Label::Body_12);
         m_warning->Hide();
 
@@ -170,9 +185,9 @@ public:
                     const wxString idx = from_utf8(slot_display_label(slot));
                     item->set_tray_index(idx);
                     if (td.type == TrayType::EMPTY)
-                        item->set_data(wxColour(0xCE, 0xCE, 0xCE), "-", td);
+                        item->set_data(unknown_slot_colour(), "-", td);
                     else if (td.type == TrayType::THIRD)
-                        item->set_data(wxColour(0xCE, 0xCE, 0xCE), "?", td);
+                        item->set_data(unknown_slot_colour(), "?", td);
                     else if (type_unmatch)
                         item->set_data(wxColour(0xEE, 0xEE, 0xEE), from_utf8(td.name), td, true);
                     else
@@ -212,11 +227,35 @@ public:
         PopupWindow::OnDismiss();
     }
 
+    void msw_rescale()
+    {
+        for (MappingItem* t : m_tiles)
+            if (t)
+                t->msw_rescale();
+        if (m_as_sliced)
+            m_as_sliced->msw_rescale();
+        Layout();
+    }
+
+    void sys_color_changed()
+    {
+        SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
+        if (m_warning)
+            m_warning->SetForegroundColour(warning_text_colour());
+        if (m_as_sliced) {
+            TrayData sliced;
+            sliced.type   = TrayType::EMPTY;
+            sliced.colour = unknown_slot_colour();
+            m_as_sliced->set_data(unknown_slot_colour(), _L("As sliced"), sliced);
+        }
+        Refresh();
+    }
+
 private:
     void on_paint(wxPaintEvent&)
     {
         wxPaintDC dc(this);
-        dc.SetPen(wxColour(0xAC, 0xAC, 0xAC));
+        dc.SetPen(popup_border_colour());
         dc.SetBrush(*wxTRANSPARENT_BRUSH);
         dc.DrawRoundedRectangle(0, 0, GetSize().x, GetSize().y, 0);
     }
@@ -317,6 +356,8 @@ void ThirdPartyFilamentMapPanel::msw_rescale()
     for (MaterialItem* item : m_items)
         if (item)
             item->msw_rescale();
+    if (m_popup)
+        m_popup->msw_rescale();
     Layout();
 }
 
@@ -324,6 +365,10 @@ void ThirdPartyFilamentMapPanel::sys_color_changed()
 {
     SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
     wxGetApp().UpdateDarkUI(this);
+    for (size_t i = 0; i < m_items.size(); ++i)
+        apply_slot_to_item(i);
+    if (m_popup)
+        m_popup->sys_color_changed();
     Refresh();
 }
 
@@ -361,12 +406,12 @@ void ThirdPartyFilamentMapPanel::apply_slot_to_item(size_t row)
     MaterialItem* item = m_items[row];
     const int pos = row < m_model.mapping.size() ? m_model.mapping[row] : -1;
     if (pos < 0 || pos >= (int) m_model.slots.size()) {
-        item->set_ams_info(wxColour(0xCE, 0xCE, 0xCE), "-");
+        item->set_ams_info(unknown_slot_colour(), "-");
         item->on_normal();
         return;
     }
     const ThirdPartyDeviceSlot& slot = m_model.slots[pos];
-    const wxColour col = slot.empty ? wxColour(0xCE, 0xCE, 0xCE) : colour_of(slot.colour);
+    const wxColour col = slot.empty ? unknown_slot_colour() : colour_of(slot.colour);
     item->set_ams_info(col, from_utf8(slot_display_label(slot)));
     item->on_normal();
     if (mismatch_at(m_model, row) != ThirdPartyMapMismatch::None)
@@ -417,7 +462,7 @@ wxString ThirdPartyFilamentMapPanel::material_label(const ThirdPartySlicerFilame
         return from_utf8(f.type);
     if (!f.name.empty())
         return from_utf8(f.name);
-    return format_wxstr("F%1%", f.index + 1);
+    return format_wxstr(_L("F%1%"), f.index + 1);
 }
 
 } // namespace GUI
