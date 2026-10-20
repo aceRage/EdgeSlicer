@@ -146,6 +146,73 @@ bool query_print_state(const std::string& base_url, std::string& state, std::str
 // slots of the filament's own material, closest colour first, then one with no colour.
 int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, const std::string& type, bool qidi_box);
 
+// ---- Starting a print on a QIDI Box printer -----------------------------------------------------
+//
+// The Box firmware feeds T<n> from the slot its saved variable value_t<n> names, and only the
+// sending slicer sets it. A print started without a fresh mapping runs on whatever the printer was
+// told for its previous print: a PLA plate fed from the ASA slot, at PLA settings. So every path
+// that starts a print on such a printer - the desktop send dialog, the hub / phone / Stream tab
+// send, an archive reprint - asks qidi_send_policy() first, and only Start lets it go.
+
+// The profile's printer_model names a QIDI that can carry a QIDI Box (Q2 / Q2C, X-Max 4,
+// X-Plus 4, X-Plus 5). Used only when the printer itself could not be asked: such a printer is
+// then treated as having a Box, so nothing is started on a mapping nobody has seen.
+bool qidi_box_capable_model(const std::string& printer_model);
+
+// A plate filament's material against a Box slot's ("PLA" vs "ASA"). Case and surrounding blanks
+// do not count; an unknown material on either side is not a match.
+bool filament_types_match(const std::string& plate_type, const std::string& slot_type);
+
+// One plate filament, as the policy and the automatic mapping need it.
+struct SendFilament
+{
+    int         index { 0 };    // 0-based, the slicer's filament/extruder number (T<index>)
+    std::string type;           // "PLA"
+    std::string colour;         // "#RRGGBB"
+    bool        used { false }; // this plate prints with it
+};
+
+// What is known when a print is about to start.
+struct QidiSendFacts
+{
+    bool model_may_have_box { false }; // qidi_box_capable_model(printer_model)
+    bool probe_ok { false };           // the printer answered the status query (Status::online)
+    bool qidi { false };               // it answered as QIDI firmware (Status::qidi)
+    bool box_present { false };        // with a QIDI Box plugged in (Status::qidi_box)
+    bool busy { false };               // printing or paused
+    bool use_box { true };             // the Box is used for this print (the dialog's switch)
+    int  used_filaments { 0 };         // filaments this plate prints with
+    int  mapped_filaments { 0 };       // ... that have a Box slot picked
+    int  type_mismatches { 0 };        // ... whose slot holds another material (or an unknown one)
+};
+
+enum class QidiSendPolicy
+{
+    NotApplicable,       // not a QIDI Box printer: the send goes on exactly as before
+    Start,               // mapping complete (or the Box is off / absent): start the print
+    UploadOnlyBusy,      // the printer is printing or paused: never re-point its Box under a print
+    UploadOnlyNoProbe,   // a Box printer that could not be read: upload only unless the person chooses to print
+    NeedsMapping,        // a used filament has no Box slot: the printer would use its stale value_t<n>
+    ConfirmTypeMismatch, // a filament goes to a slot holding another material: ask first
+};
+
+QidiSendPolicy qidi_send_policy(const QidiSendFacts& facts);
+
+// The automatic material-first mapping (auto_match_slot with qidi_box) for every used filament,
+// as the send dialog would preselect it. For sends with nobody at a dialog: the hub, the phone,
+// an archive reprint. `mapping` is "filament:slot,..." for qidi_start_script(); `facts` is filled
+// from `st` and the filaments (model_may_have_box is left to the caller).
+struct QidiAutoMapping
+{
+    std::string   mapping;
+    QidiSendFacts facts;
+};
+QidiAutoMapping qidi_auto_mapping(const Status& st, const std::vector<SendFilament>& filaments);
+
+// Plain English, for the hub / phone job result and the log: why the print was not started.
+// Empty for NotApplicable and Start.
+std::string qidi_send_refusal(QidiSendPolicy policy);
+
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
 Status probe(const Device& d, int timeout_s = 3);
 

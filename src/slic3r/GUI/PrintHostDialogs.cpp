@@ -629,8 +629,16 @@ void PrintHostSendDialog::refresh_device_status()
         } else if (m_device_status.qidi_box && m_device_status.slots_have_filaments) {
             if (!text.IsEmpty())
                 text += "  ";
-            text += _L("QIDI Box: each filament is fed from the slot picked below. \"As sliced\" leaves the "
-                       "printer on whichever slot it last used for that filament.");
+            text += _L("QIDI Box: each filament is fed from the slot picked below. A print is only started "
+                       "once every filament has a slot.");
+        }
+        // A printer that may carry a QIDI Box and did not answer: nobody knows what its Box would
+        // feed, so a print is not started without the person saying so.
+        if (!m_device_status.online && qidi_send_facts().model_may_have_box) {
+            if (!text.IsEmpty())
+                text += "  ";
+            text += _L("Couldn't read the QIDI Box, so this plate is uploaded only unless you choose to print anyway. "
+                       "Pick the printer again to retry.");
         }
         if (print_blocked()) {
             if (!text.IsEmpty())
@@ -662,6 +670,155 @@ void PrintHostSendDialog::update_print_button()
 {
     if (Button* btn = get_button(wxID_YES))
         btn->Enable(!print_blocked());
+}
+
+PrintHostDevices::QidiSendFacts PrintHostSendDialog::qidi_send_facts() const
+{
+    PrintHostDevices::QidiSendFacts f;
+    f.model_may_have_box = PrintHostDevices::qidi_box_capable_model(m_printer_model) ||
+                           PrintHostDevices::qidi_box_capable_model(m_model_key);
+    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size())
+        f.model_may_have_box = f.model_may_have_box || PrintHostDevices::qidi_box_capable_model(m_devices[m_device_sel].printer_model);
+    f.probe_ok    = m_device_status.online;
+    f.qidi        = m_device_status.qidi;
+    f.box_present = m_device_status.qidi_box;
+    f.busy        = PrintHostDevices::busy_printing(m_device_status.state);
+    f.use_box     = m_qidi_use_box ? m_qidi_use_box->GetValue() : m_device_status.qidi_box;
+    for (const SendPlateFilament& p : m_plate_filaments)
+        if (p.used)
+            ++f.used_filaments;
+    for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i) {
+        const int sel = m_mapping_choices[i] ? m_mapping_choices[i]->GetSelection() : 0;
+        if (sel <= 0 || sel > (int) m_device_status.slots.size())
+            continue;
+        ++f.mapped_filaments;
+        const SendPlateFilament* p = plate_filament(m_mapping_filament[i]);
+        if (!PrintHostDevices::filament_types_match(p ? p->type : std::string(), m_device_status.slots[sel - 1].type))
+            ++f.type_mismatches;
+    }
+    return f;
+}
+
+wxString PrintHostSendDialog::qidi_mapping_problems(bool& unmapped, bool& mismatched) const
+{
+    unmapped = mismatched = false;
+    wxString out;
+    auto add = [&out](const wxString& line) {
+        if (!out.IsEmpty())
+            out += "\n";
+        out += line;
+    };
+    auto filament_name = [](const SendPlateFilament& p) {
+        wxString n = format_wxstr(_L("Filament %1%"), p.index + 1);
+        if (!p.type.empty())
+            n += " (" + from_u8(p.type) + ")";
+        return n;
+    };
+    for (const SendPlateFilament& p : m_plate_filaments) {
+        if (!p.used)
+            continue;
+        int sel = 0;
+        for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i)
+            if (m_mapping_filament[i] == p.index && m_mapping_choices[i])
+                sel = m_mapping_choices[i]->GetSelection();
+        if (sel <= 0 || sel > (int) m_device_status.slots.size()) {
+            unmapped = true;
+            add(format_wxstr(_L("%1%: no QIDI Box slot picked."), filament_name(p)));
+            continue;
+        }
+        const PrintHostDevices::Slot& s = m_device_status.slots[sel - 1];
+        if (!PrintHostDevices::filament_types_match(p.type, s.type)) {
+            mismatched = true;
+            add(format_wxstr(_L("%1% goes to %2%, which holds %3%."), filament_name(p), from_u8(s.label()),
+                             s.type.empty() ? _L("an unknown material") : from_u8(s.type)));
+        }
+    }
+    return out;
+}
+
+namespace {
+// A question whose affirmative answer (Yes, which a phone request auto-answers) is the safe one,
+// and whose risky answer is a button of its own that nothing auto-answers.
+class QidiStartQuestion : public MessageDialog
+{
+public:
+    QidiStartQuestion(wxWindow* parent, const wxString& message, const wxString& safe_label, const wxString& risky_label, bool retry)
+        : MessageDialog(parent, message, _L("QIDI Box"), wxYES | (retry ? wxCANCEL : 0) | wxICON_WARNING)
+    {
+        SetButtonLabel(wxID_YES, safe_label, true);
+        if (retry)
+            SetButtonLabel(wxID_CANCEL, _L("Retry"));
+        add_button(wxID_IGNORE, false, risky_label);
+        finalize();
+    }
+};
+} // namespace
+
+// The QIDI Box firmware feeds T<n> from its saved value_t<n>, and only the sending slicer sets it:
+// a print started without a complete, checked mapping runs on whatever the previous print left
+// there - a PLA plate fed the ASA from another slot, at PLA settings. PrintHostDevices::
+// qidi_send_policy decides; this only asks the person where it says to.
+bool PrintHostSendDialog::confirm_qidi_start()
+{
+    using PrintHostDevices::QidiSendPolicy;
+    const QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(qidi_send_facts());
+    switch (policy) {
+    case QidiSendPolicy::NotApplicable:
+    case QidiSendPolicy::Start: return true;
+    case QidiSendPolicy::UploadOnlyBusy: {
+        MessageDialog(this, _L("This printer is busy with a print, so this plate can be uploaded but not started."), _L("QIDI Box"),
+                      wxOK | wxICON_WARNING)
+            .ShowModal();
+        return false;
+    }
+    case QidiSendPolicy::NeedsMapping: {
+        bool           unmapped = false, mismatched = false;
+        const wxString lines    = qidi_mapping_problems(unmapped, mismatched);
+        wxString       msg      = _L("The print was not started: the QIDI Box would feed these filaments from whatever slot the "
+                                     "printer used last time, which may hold another material.");
+        if (!lines.IsEmpty())
+            msg += "\n\n" + lines;
+        msg += "\n\n" + _L("Pick a slot for every filament, untick \"Use QIDI Box\" to print from the extruder's own spool, "
+                          "or press Upload to send the file without starting it.");
+        MessageDialog(this, msg, _L("QIDI Box"), wxOK | wxICON_WARNING).ShowModal();
+        BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: QIDI Box print not started, a used filament has no slot";
+        return false;
+    }
+    case QidiSendPolicy::ConfirmTypeMismatch: {
+        bool           unmapped = false, mismatched = false;
+        const wxString lines    = qidi_mapping_problems(unmapped, mismatched);
+        const wxString msg      = _L("The material in a QIDI Box slot does not match the filament it was sliced for. The printer "
+                                     "heats and prints with the plate's settings whatever is fed:") +
+                             "\n\n" + lines + "\n\n" + _L("Print with these slots anyway?");
+        QidiStartQuestion q(this, msg, _L("Change the slots"), _L("Print anyway"), false);
+        const bool        anyway = q.ShowModal() == wxID_IGNORE;
+        BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: QIDI Box material mismatch, " << (anyway ? "printed anyway" : "not started");
+        return anyway;
+    }
+    case QidiSendPolicy::UploadOnlyNoProbe: {
+        const wxString msg = _L("Couldn't read the QIDI Box. Without it this slicer cannot tell the printer which slot feeds "
+                                "each filament, and the printer would use whatever slots it was told for its last print - "
+                                "possibly another material.") +
+                             "\n\n" + _L("Upload the file only, retry reading the printer, or print anyway on the printer's "
+                                         "current slot assignment.");
+        QidiStartQuestion q(this, msg, _L("Upload only"), _L("Print anyway"), true);
+        const int answer = q.ShowModal();
+        if (answer == wxID_YES) {
+            post_upload_action = PrintHostPostUploadAction::None;
+            BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: QIDI Box unreadable, uploaded only";
+            return true;
+        }
+        if (answer == wxID_IGNORE) {
+            BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: QIDI Box unreadable, the person chose to print anyway";
+            return true;
+        }
+        // Retry: ask the printer again and leave the dialog open with what it says now.
+        if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size())
+            refresh_device_status();
+        return false;
+    }
+    }
+    return false;
 }
 
 // One row per filament this plate actually uses: its colour, its type, and where it goes. Only when
@@ -745,7 +902,17 @@ void PrintHostSendDialog::update_mapping_note()
 {
     if (!m_mapping_note)
         return;
-    const wxString text = m_mapping_choices.empty() ? wxString() : mapping_warning();
+    wxString text = m_mapping_choices.empty() ? wxString() : mapping_warning();
+    // A QIDI Box: say before the click which filament has no slot or a slot of another material.
+    if (!m_mapping_choices.empty() && m_device_status.qidi_box && (!m_qidi_use_box || m_qidi_use_box->GetValue())) {
+        bool           unmapped = false, mismatched = false;
+        const wxString lines    = qidi_mapping_problems(unmapped, mismatched);
+        if (!lines.IsEmpty()) {
+            if (!text.IsEmpty())
+                text += "\n";
+            text += lines;
+        }
+    }
     const bool     was  = m_mapping_note->IsShown();
     m_mapping_note->SetLabel(text);
     m_mapping_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
@@ -814,6 +981,7 @@ void PrintHostSendDialog::update_mapping_enabled()
     const bool box_on = !m_qidi_use_box || m_qidi_use_box->GetValue();
     for (wxChoice* choice : m_mapping_choices)
         choice->Enable(box_on);
+    update_mapping_note(); // the QIDI Box lines follow the switch
 }
 
 void PrintHostSendDialog::init()
@@ -950,6 +1118,10 @@ void PrintHostSendDialog::init()
             sentryReportLog(SENTRY_LOG_TRACE, BP_UPLOAD_AND_PRINT, BP_UPLOAD_AND_PRINT);
             if (validate_path(txt_filename->GetValue())) {
                 post_upload_action = PrintHostPostUploadAction::StartPrint;
+                // A QIDI Box printer is never started on its stale slot mapping (it may turn the
+                // send into an upload only, or keep the dialog open).
+                if (!confirm_qidi_start())
+                    return;
                 EndDialog(wxID_OK);
             }
         });

@@ -4,11 +4,13 @@
 #include "PrusaLinkStatus.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 
 namespace Slic3r {
@@ -558,6 +560,104 @@ int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, c
         }
     }
     return best;
+}
+
+bool qidi_box_capable_model(const std::string& printer_model)
+{
+    // Spaces, dashes and underscores dropped, so "Qidi X-Max 4", "QIDI XMax4" and "qidi x-plus 4"
+    // all read the same. The QIDI Box works with the Q2 (and Q2C), X-Max 4, X-Plus 4 and X-Plus 5.
+    std::string m;
+    for (char c : printer_model)
+        if (c != ' ' && c != '-' && c != '_')
+            m += (char) std::tolower((unsigned char) c);
+    if (m.find("qidi") == std::string::npos)
+        return false;
+    for (const char* family : { "q2", "max4", "plus4", "plus5" })
+        if (m.find(family) != std::string::npos)
+            return true;
+    return false;
+}
+
+bool filament_types_match(const std::string& plate_type, const std::string& slot_type)
+{
+    const std::string a = boost::algorithm::trim_copy(plate_type);
+    const std::string b = boost::algorithm::trim_copy(slot_type);
+    if (a.empty() || b.empty())
+        return false;
+    return boost::iequals(a, b);
+}
+
+QidiSendPolicy qidi_send_policy(const QidiSendFacts& f)
+{
+    if (!f.probe_ok)
+        // Nobody knows what is in the Box or what value_t<n> says. A model that may carry a Box is
+        // uploaded only unless the person explicitly chooses to print; anything else is not ours.
+        return f.model_may_have_box ? QidiSendPolicy::UploadOnlyNoProbe : QidiSendPolicy::NotApplicable;
+    if (!f.qidi)
+        return QidiSendPolicy::NotApplicable;
+    if (f.busy)
+        return QidiSendPolicy::UploadOnlyBusy;
+    // No Box plugged in, or switched off for this print (enable_box 0 goes out): the extruder's own
+    // spool feeds every tool, there is no saved slot to go stale.
+    if (!f.box_present || !f.use_box)
+        return QidiSendPolicy::Start;
+    // No used filament known at all is not "nothing to map": T0 still loads from value_t0.
+    if (f.used_filaments <= 0 || f.mapped_filaments < f.used_filaments)
+        return QidiSendPolicy::NeedsMapping;
+    if (f.type_mismatches > 0)
+        return QidiSendPolicy::ConfirmTypeMismatch;
+    return QidiSendPolicy::Start;
+}
+
+QidiAutoMapping qidi_auto_mapping(const Status& st, const std::vector<SendFilament>& filaments)
+{
+    QidiAutoMapping out;
+    QidiSendFacts&  f = out.facts;
+    f.probe_ok    = st.online;
+    f.qidi        = st.qidi;
+    f.box_present = st.qidi_box;
+    f.busy        = busy_printing(st.state);
+    // The send dialog's own starting value (qidi_option_defaults): the Box on whenever one of its
+    // slots is loaded.
+    f.use_box = st.qidi_box && std::any_of(st.slots.begin(), st.slots.end(), [](const Slot& s) { return s.loaded; });
+    for (const SendFilament& fil : filaments) {
+        if (!fil.used)
+            continue;
+        ++f.used_filaments;
+        if (!st.qidi_box)
+            continue;
+        const int pos = auto_match_slot(st.slots, fil.colour, fil.type, true);
+        if (pos <= 0 || pos > (int) st.slots.size())
+            continue;
+        const Slot& s = st.slots[pos - 1];
+        ++f.mapped_filaments;
+        if (!filament_types_match(fil.type, s.type))
+            ++f.type_mismatches;
+        if (!out.mapping.empty())
+            out.mapping += ",";
+        out.mapping += std::to_string(fil.index) + ":" + std::to_string(s.index);
+    }
+    return out;
+}
+
+std::string qidi_send_refusal(QidiSendPolicy policy)
+{
+    switch (policy) {
+    case QidiSendPolicy::UploadOnlyBusy:
+        return "The QIDI printer is busy with another print, so this plate was not sent or started.";
+    case QidiSendPolicy::UploadOnlyNoProbe:
+        return "Couldn't read the QIDI Box, so the print was not started: the printer would feed whatever slots it used "
+               "last time. Send it as an upload only, or retry once the printer answers.";
+    case QidiSendPolicy::NeedsMapping:
+        return "A filament on this plate has no QIDI Box slot of the same material, so the print was not started: the "
+               "printer would feed whatever slot it used last time. Load that material in the Box, or send from the PC's "
+               "send dialog and pick the slots there.";
+    case QidiSendPolicy::ConfirmTypeMismatch:
+        return "A filament on this plate would be fed from a QIDI Box slot holding another material, so the print was "
+               "not started. Send it from the PC's send dialog to confirm the slots.";
+    default:
+        return {};
+    }
 }
 
 std::string qidi_start_script(const QidiPrintOptions& options, const std::string& mapping)
