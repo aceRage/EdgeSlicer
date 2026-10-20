@@ -812,6 +812,13 @@ bool qidi_box_capable_model(const std::string& printer_model)
     return false;
 }
 
+bool qidi_polar_cooler_model(const std::string& printer_model)
+{
+    // QIDIStudio 2.07's machine profiles set is_support_polar_cooler for exactly the Box-capable
+    // models (Q2, Q2C, fdm_machine_x_common -> X-Max 4 / X-Plus 4, X-Plus 5).
+    return qidi_box_capable_model(printer_model);
+}
+
 bool filament_types_match(const std::string& plate_type, const std::string& slot_type)
 {
     const std::string a = boost::algorithm::trim_copy(plate_type);

@@ -159,6 +159,9 @@ int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, c
 // X-Plus 4, X-Plus 5). Used only when the printer itself could not be asked: such a printer is
 // then treated as having a Box, so nothing is started on a mapping nobody has seen.
 bool qidi_box_capable_model(const std::string& printer_model);
+// The model has QIDIStudio's "Polar cooler" (its profiles' is_support_polar_cooler: the Q2 / Q2C,
+// the X 4 series and the X-Plus 5). Used to offer the switch when the printer did not answer.
+bool qidi_polar_cooler_model(const std::string& printer_model);
 
 // A plate filament's material against a Box slot's ("PLA" vs "ASA"). Case and surrounding blanks
 // do not count; an unknown material on either side is not a match.

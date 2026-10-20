@@ -376,6 +376,15 @@ TEST_CASE("the Box mapping is read back before the print starts", "[qidi][send]"
     }
 }
 
+TEST_CASE("the polar cooler is offered from the profile for the models QIDIStudio offers it on", "[qidi][send]")
+{
+    for (const char* m : { "Qidi Q2", "Qidi Q2C", "Qidi X-Max 4", "Qidi X-Plus 4", "Qidi X-Plus 5" })
+        DYNAMIC_SECTION(m) { CHECK(qidi_polar_cooler_model(m)); }
+    CHECK_FALSE(qidi_polar_cooler_model("Qidi Q1 Pro"));
+    CHECK_FALSE(qidi_polar_cooler_model("Qidi X-Max 3"));
+    CHECK_FALSE(qidi_polar_cooler_model("Snapmaker U1"));
+}
+
 TEST_CASE("the probe waits longer for a QIDI Box printer only", "[qidi][send]")
 {
     CHECK(probe_timeout_for("Qidi X-Max 4") > 3);

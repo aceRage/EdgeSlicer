@@ -125,6 +125,9 @@ protected:
     // Every host that names its slots' materials: one line per mapped filament whose slot holds
     // another material (both named). Empty when there is none.
     wxString slot_type_mismatches() const;
+    // Where the notes under the printer row wrap: the dialog's usual width, DPI-scaled.
+    // (CONTENT_WIDTH * em_unit is some 2400 px, so a long note stretched the dialog.)
+    int note_wrap_width() const { return FromDIP(460); }
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
@@ -160,6 +163,8 @@ protected:
     wxCheckBox*                           m_qidi_leveling { nullptr };
     wxCheckBox*                           m_qidi_timelapse { nullptr };
     wxCheckBox*                           m_qidi_polar_cooler { nullptr };
+    // The QIDI options are shown from the profile because the printer did not answer.
+    bool                                  m_qidi_blind { false };
     wxStaticText*                         m_mapping_note { nullptr };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };

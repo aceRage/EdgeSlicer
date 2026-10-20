@@ -509,7 +509,7 @@ std::string PrintHostSendDialog::filament_mapping() const
 
 std::string PrintHostSendDialog::qidi_start_script() const
 {
-    if (!m_device_status.qidi)
+    if (!m_device_status.qidi && !m_qidi_blind)
         return {};
     PrintHostDevices::QidiPrintOptions o;
     if (m_qidi_use_box)
@@ -523,7 +523,7 @@ std::string PrintHostSendDialog::qidi_start_script() const
 
 std::string PrintHostSendDialog::qidi_leveling_script() const
 {
-    if (!m_device_status.qidi || !m_qidi_leveling)
+    if ((!m_device_status.qidi && !m_qidi_blind) || !m_qidi_leveling)
         return {};
     PrintHostDevices::QidiPrintOptions o;
     o.bed_leveling = m_qidi_leveling->GetValue() ? 1 : 0;
@@ -576,7 +576,7 @@ void PrintHostSendDialog::build_device_ui()
     content_sizer->Add(m_combo_devices, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
 
     m_device_note = new wxStaticText(this, wxID_ANY, wxEmptyString);
-    m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+    m_device_note->Wrap(note_wrap_width());
     content_sizer->Add(m_device_note, 0, wxBOTTOM, VERT_SPACING);
 
     m_mapping_panel = new wxPanel(this, wxID_ANY);
@@ -644,10 +644,8 @@ void PrintHostSendDialog::refresh_device_status()
         if (PrintHostDevices::qidi_send_policy(qidi_send_facts()) == PrintHostDevices::QidiSendPolicy::UploadOnlyNoProbe) {
             if (!text.IsEmpty())
                 text += "\n";
-            text += _L("Couldn't read the QIDI Box: the printer would use its last saved slot mapping, which may feed "
-                       "another material. Upload is the safe choice; Upload and Print asks first and offers a retry. "
-                       "The QIDI print options need the printer to answer, so they are not shown. Pick the printer "
-                       "again to retry.");
+            text += _L("Couldn't read the QIDI Box. The printer would use its last saved slots, which may hold another "
+                       "material. Upload is the safe choice; Upload and Print will ask first.");
         }
         if (print_blocked()) {
             if (!text.IsEmpty())
@@ -655,7 +653,7 @@ void PrintHostSendDialog::refresh_device_status()
             text += _L("This printer is busy with a print, so this plate can be uploaded but not started.");
         }
         m_device_note->SetLabel(text);
-        m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+        m_device_note->Wrap(note_wrap_width());
         m_device_note->Show(!text.IsEmpty());
     }
     rebuild_mapping_rows();
@@ -963,7 +961,7 @@ void PrintHostSendDialog::update_mapping_note()
     }
     const bool     was  = m_mapping_note->IsShown();
     m_mapping_note->SetLabel(text);
-    m_mapping_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+    m_mapping_note->Wrap(note_wrap_width());
     m_mapping_note->Show(!text.IsEmpty());
     if (was != !text.IsEmpty() || !text.IsEmpty()) {
         content_sizer->Layout();
@@ -982,7 +980,12 @@ void PrintHostSendDialog::rebuild_qidi_options()
         return;
     m_qidi_sizer->Clear(true);
     m_qidi_use_box = m_qidi_leveling = m_qidi_timelapse = m_qidi_polar_cooler = nullptr;
-    if (!m_device_status.qidi) {
+    // A Box-capable QIDI that did not answer still gets its options, from the profile: they are
+    // remembered as usual and go out at send time only if the printer answers then (the queue
+    // reads its state first and stops the send, saying so, when it does not).
+    m_qidi_blind = !m_device_status.qidi &&
+                   PrintHostDevices::qidi_send_policy(qidi_send_facts()) == PrintHostDevices::QidiSendPolicy::UploadOnlyNoProbe;
+    if (!m_device_status.qidi && !m_qidi_blind) {
         m_qidi_panel->Show(false);
         m_qidi_panel->Layout();
         return;
@@ -1002,11 +1005,11 @@ void PrintHostSendDialog::rebuild_qidi_options()
     };
 
     m_qidi_sizer->Add(new wxStaticText(m_qidi_panel, wxID_ANY, _L("Print options") + ":"), 0, wxBOTTOM, FromDIP(4));
-    if (m_device_status.qidi_box) {
+    if (m_device_status.qidi_box || m_qidi_blind) {
         m_qidi_use_box = add(_L("Use QIDI Box"),
                              _L("Feed the filaments from the QIDI Box slots picked above. Untick it to print from the "
                                 "spool on the extruder instead."),
-                             defaults.use_box);
+                             defaults.use_box || m_qidi_blind); // unread: on, never a silent spool print
         m_qidi_use_box->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { update_mapping_enabled(); });
     }
     m_qidi_leveling = add(_L("Auto bed leveling"),
@@ -1015,7 +1018,9 @@ void PrintHostSendDialog::rebuild_qidi_options()
     m_qidi_timelapse = add(_L("Timelapse"),
                            _L("Record a timelapse of this print with the printer's camera."),
                            defaults.timelapse);
-    if (m_device_status.qidi_polar_cooler)
+    if (m_device_status.qidi_polar_cooler ||
+        (m_qidi_blind && (PrintHostDevices::qidi_polar_cooler_model(m_printer_model) ||
+                          PrintHostDevices::qidi_polar_cooler_model(m_model_key))))
         m_qidi_polar_cooler = add(_L("Polar cooler"),
                                   _L("Cool the extruder during the print, which keeps the filament from softening or "
                                      "clogging inside it."),
