@@ -1,5 +1,6 @@
 #include "MQTT.hpp"
 #include "MqttReconnectPolicy.hpp"
+#include "MqttLogRedact.hpp"
 #include <thread>
 #include <boost/log/trivial.hpp>
 #include <boost/filesystem.hpp>
@@ -133,9 +134,10 @@ MqttClient::MqttClient(const std::string& server_address,
                       bool clean_session)
     : MqttClient(server_address, client_id, username, password, clean_session)
 {
-    BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] initializing MQTT SSL connection, server_address: " << server_address << ", client_id: " << client_id
-                            << ", ca_content: " << ca_content << ", cert_content: " << cert_content << ", username: " << username
-                            << ", password: " << password;
+    // Lengths and presence only: users share these logs (see MqttLogRedact.hpp).
+    BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] "
+                            << Slic3r::MqttLogRedact::ssl_init_summary(server_address, client_id, ca_content, cert_content,
+                                                                       key_content, username, password);
     
     try {
         boost::filesystem::path temp_dir = boost::filesystem::temp_directory_path();
