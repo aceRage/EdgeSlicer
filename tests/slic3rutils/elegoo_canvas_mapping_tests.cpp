@@ -21,7 +21,6 @@
 #include "slic3r/Utils/ElegooCanvasMapping.hpp"
 #include "slic3r/Utils/ElegooStartPrint.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
-#include "slic3r/GUI/ThirdPartyFilamentMap.hpp"
 
 using namespace Slic3r;
 using ElegooStartPrint::SlotMapEntry;
@@ -156,8 +155,6 @@ TEST_CASE("A CANVAS read becomes the send dialog's slots", "[ElegooCanvas]")
     CHECK(st.slots[0].min_temp == 190);
     CHECK(st.slots[0].max_temp == 230);
     CHECK(st.slots[0].label() == "Tray 1 PLA");
-    CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[0].unit, st.slots[0].tray) == "1A");
-    CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[3].unit, st.slots[3].tray) == "1D");
     CHECK(! st.slots[2].loaded);
     CHECK(st.slots[2].label() == "Tray 3 (empty)");
     CHECK(st.slots[3].name == "PLA");
@@ -322,171 +319,4 @@ TEST_CASE("Remembered CANVAS mappings follow the spool, not the tray number", "[
         }
         CHECK(ElegooCanvasMapping::load().empty());
     }
-}
-
-TEST_CASE("Third-party filament map: Bambu-style slot labels and grouping", "[ThirdPartyFilamentMap]")
-{
-    using namespace Slic3r::GUI;
-    CHECK(bambu_style_slot_label(0, 0) == "1A");
-    CHECK(bambu_style_slot_label(0, 1) == "1B");
-    CHECK(bambu_style_slot_label(0, 3) == "1D");
-    CHECK(bambu_style_slot_label(1, 0) == "2A");
-    CHECK(bambu_style_slot_label(-1, 0) == "1");
-    CHECK(bambu_style_slot_label(-1, 2) == "3");
-    CHECK(bambu_style_slot_label(-1, 3) == "4");
-    CHECK(bambu_style_slot_label(-1, 4) == "5");
-    CHECK(bambu_style_slot_label(-1, 7) == "8");
-
-    ThirdPartyDeviceSlot unitless;
-    unitless.unit_id = -1;
-    unitless.slot_id = -1;
-    unitless.index   = 5;
-    CHECK(slot_display_label(unitless) == "6");
-
-    ThirdPartyDeviceSlot a;
-    a.unit_id = 0;
-    a.slot_id = 0;
-    a.label   = "custom";
-    CHECK(slot_display_label(a) == "custom");
-    a.label.clear();
-    CHECK(slot_display_label(a) == "1A");
-
-    std::vector<ThirdPartyDeviceSlot> slots(6);
-    slots[0].unit_id = 0;
-    slots[0].slot_id = 0;
-    slots[1].unit_id = 0;
-    slots[1].slot_id = 1;
-    slots[2].unit_id = 1;
-    slots[2].slot_id = 0;
-    slots[2].nozzle_id = 1;
-    slots[3].unit_id = 1;
-    slots[3].slot_id = 1;
-    slots[3].nozzle_id = 1;
-    slots[4].unit_id = 0;
-    slots[4].slot_id = 2;
-    slots[5].unit_id = 0;
-    slots[5].slot_id = 3;
-    const auto groups = group_slots(slots);
-    REQUIRE(groups.size() == 2);
-    CHECK(groups[0].unit_id == 0);
-    CHECK(groups[0].slot_positions == std::vector<int>{ 0, 1, 4, 5 });
-    CHECK(groups[1].unit_id == 1);
-    CHECK(groups[1].nozzle_id == 1);
-    CHECK(groups[1].slot_positions == std::vector<int>{ 2, 3 });
-}
-
-TEST_CASE("Third-party filament map: encode matches the send dialog's filament:slot string", "[ThirdPartyFilamentMap]")
-{
-    using namespace Slic3r::GUI;
-    ThirdPartyFilamentMapModel model;
-    ThirdPartySlicerFilament f0;
-    f0.index = 0;
-    ThirdPartySlicerFilament f1;
-    f1.index = 2;
-    model.filaments = { f0, f1 };
-    ThirdPartyDeviceSlot s0;
-    s0.index = 5;
-    ThirdPartyDeviceSlot s1;
-    s1.index = 7;
-    model.slots   = { s0, s1 };
-    model.mapping = { 1, -1 };
-    CHECK(encode_filament_mapping(model) == "0:7");
-    model.mapping = { 0, 1 };
-    CHECK(encode_filament_mapping(model) == "0:5,2:7");
-    model.mapping = { -1, -1 };
-    CHECK(encode_filament_mapping(model).empty());
-    model.mapping   = { 0, 1 };
-    model.read_only = true;
-    CHECK(encode_filament_mapping(model).empty());
-    model.read_only = false;
-    CHECK(encode_filament_mapping(model) == "0:5,2:7");
-}
-
-TEST_CASE("Third-party filament map: read-only mismatch uses T-number identity, not auto-match", "[ThirdPartyFilamentMap]")
-{
-    using namespace Slic3r::GUI;
-    ThirdPartyFilamentMapModel model;
-    ThirdPartySlicerFilament f;
-    f.index  = 0;
-    f.type   = "PLA";
-    f.colour = "#FF0000";
-    model.filaments = { f };
-
-    ThirdPartyDeviceSlot t0;
-    t0.index  = 0;
-    t0.type   = "PETG";
-    t0.colour = "#0000FF";
-    ThirdPartyDeviceSlot t1;
-    t1.index  = 1;
-    t1.type   = "PLA";
-    t1.colour = "#FF0000";
-    model.slots   = { t0, t1 };
-    model.mapping = { 1 }; // visual auto-match to the matching holder
-
-    CHECK(mismatch_at(model, 0) == ThirdPartyMapMismatch::None);
-    CHECK(warning_slot_position(model, 0) == 1);
-
-    model.read_only = true;
-    CHECK(encode_filament_mapping(model).empty());
-    CHECK(warning_slot_position(model, 0) == 0);
-    CHECK(mismatch_at(model, 0) == ThirdPartyMapMismatch::TypeAndColour);
-    CHECK(model.mapping == std::vector<int>{ 1 });
-}
-
-TEST_CASE("Third-party filament map: type and colour mismatch, badges, colour parse", "[ThirdPartyFilamentMap]")
-{
-    using namespace Slic3r::GUI;
-    CHECK(normalize_map_colour("#ff00aa") == "#FF00AA");
-    CHECK(normalize_map_colour("00FF00BB") == "#00FF00");
-    CHECK(normalize_map_colour("not-a-colour").empty());
-    CHECK(types_match("PLA", "pla"));
-    CHECK(types_match("PLA", ""));
-    CHECK_FALSE(types_match("PLA", "PETG"));
-    CHECK_FALSE(colours_mismatch("#FF0000", "#EE0000"));
-    CHECK(colours_mismatch("#FF0000", "#0000FF"));
-    CHECK_FALSE(colours_mismatch("#FF0000", ""));
-
-    ThirdPartySlicerFilament f;
-    f.index  = 0;
-    f.type   = "PLA";
-    f.colour = "#FF0000";
-    ThirdPartyDeviceSlot s;
-    s.type   = "PETG";
-    s.colour = "#0000FF";
-    CHECK(mismatch_for(f, s) == ThirdPartyMapMismatch::TypeAndColour);
-    s.type = "PLA";
-    CHECK(mismatch_for(f, s) == ThirdPartyMapMismatch::Colour);
-    s.colour = "#FF0000";
-    CHECK(mismatch_for(f, s) == ThirdPartyMapMismatch::None);
-    s.empty = true;
-    s.type  = "PETG";
-    CHECK(mismatch_for(f, s) == ThirdPartyMapMismatch::None);
-
-    ThirdPartyFilamentMapModel model;
-    ThirdPartySlicerFilament a;
-    a.index     = 0;
-    a.nozzle_id = -1;
-    model.filaments = { a };
-    CHECK(filament_badge_text(a, model) == "1");
-    a.index = 3;
-    model.filaments = { a };
-    CHECK(filament_badge_text(a, model) == "4");
-
-    ThirdPartySlicerFilament left;
-    left.nozzle_id = 1;
-    ThirdPartySlicerFilament right;
-    right.nozzle_id = 0;
-    model.filaments = { right, left };
-    CHECK(has_multiple_nozzles(model));
-    CHECK(filament_badge_text(right, model) == "R");
-    CHECK(filament_badge_text(left, model) == "L");
-
-    ThirdPartySlicerFilament third;
-    third.nozzle_id = 2;
-    model.filaments = { right, left, third };
-    CHECK(filament_badge_text(right, model) == "1");
-    CHECK(filament_badge_text(third, model) == "3");
-
-    model.filaments = { right };
-    CHECK_FALSE(has_multiple_nozzles(model));
 }

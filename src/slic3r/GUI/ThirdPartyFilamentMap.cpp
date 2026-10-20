@@ -1,5 +1,7 @@
 #include "ThirdPartyFilamentMap.hpp"
 
+#include "../Utils/PrintHostDeviceStatus.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -84,9 +86,53 @@ std::string bambu_style_slot_label(int unit_id, int slot_id)
     const int slot = slot_id < 0 ? 0 : slot_id;
     if (unit_id < 0)
         return std::to_string(slot + 1);
-    const int  letter_i = slot % 4;
-    const char letter   = static_cast<char>('A' + letter_i);
+    if (slot >= 26)
+        return std::to_string(unit_id + 1) + "-" + std::to_string(slot + 1);
+    const char letter = static_cast<char>('A' + slot);
     return std::to_string(unit_id + 1) + letter;
+}
+
+std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<PrintHostDevices::Slot>& slots, bool qidi_box)
+{
+    std::vector<ThirdPartyDeviceSlot> out;
+    out.reserve(slots.size());
+    std::vector<int> raw_units;   // raw Slot::unit in order of appearance; position = unit number
+    std::vector<int> unit_counts; // trays seen so far per unit
+    for (const PrintHostDevices::Slot& s : slots) {
+        ThirdPartyDeviceSlot ds;
+        ds.colour = s.color;
+        ds.type   = s.type;
+        ds.name   = s.name;
+        ds.empty  = !s.loaded;
+        ds.index  = s.index;
+        if (s.unit >= 0) {
+            auto it = std::find(raw_units.begin(), raw_units.end(), s.unit);
+            int  u  = (int) (it - raw_units.begin());
+            if (it == raw_units.end()) {
+                raw_units.push_back(s.unit);
+                unit_counts.push_back(0);
+            }
+            ds.unit_id = u;
+            ds.slot_id = unit_counts[u]++;
+        } else if (qidi_box && s.index >= 0) {
+            ds.unit_id = s.index / 4;
+            ds.slot_id = s.index % 4;
+        } else {
+            ds.unit_id = -1;
+            ds.slot_id = s.index;
+            ds.label   = "T" + std::to_string(s.index + 1);
+        }
+        out.push_back(std::move(ds));
+    }
+    return out;
+}
+
+int initial_slot_position(const std::vector<PrintHostDevices::Slot>& slots, int remembered_pos, const std::string& colour,
+                          const std::string& type, bool qidi_box)
+{
+    if (remembered_pos >= 0 && remembered_pos < (int) slots.size())
+        return remembered_pos;
+    return PrintHostDevices::auto_match_slot(slots, colour, type, qidi_box) - 1; // 0 = "As sliced"
 }
 
 std::string slot_display_label(const ThirdPartyDeviceSlot& slot)
@@ -179,7 +225,9 @@ bool has_multiple_nozzles(const ThirdPartyFilamentMapModel& model)
 std::string filament_badge_text(const ThirdPartySlicerFilament& filament, const ThirdPartyFilamentMapModel& model)
 {
     const std::vector<int> nozzles = distinct_nozzle_ids(model);
-    if (filament.nozzle_id >= 0 && nozzles.size() > 1) {
+    const bool slots_name_nozzles = std::any_of(model.slots.begin(), model.slots.end(),
+                                                [](const ThirdPartyDeviceSlot& s) { return s.nozzle_id >= 0; });
+    if (filament.nozzle_id >= 0 && nozzles.size() > 1 && slots_name_nozzles) {
         if (nozzles.size() == 2 && nozzles[0] == 0 && nozzles[1] == 1) {
             // Bambu H2D: physical 0 is the right nozzle, 1 is the left.
             if (filament.nozzle_id == 0)

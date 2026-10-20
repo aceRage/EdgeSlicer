@@ -4,14 +4,17 @@
 // Vendor-neutral filament → device-slot mapping for third-party send/upload dialogs
 // (Elegoo CANVAS, Creality CFS, K3 holders, Happy Hare / AFC / QIDI Box, Anycubic ACE).
 //
-// wx-free and printer-protocol-free: the dialog fills this model, the panel shows it, and
-// encode_filament_mapping() returns the same "filament:slot" string PrintHostSendDialog already
-// sends. Bambu's SelectMachineDialog is unchanged.
+// wx-free: the dialog fills this model (third_party_slots_from() turns the probe's slot list into
+// tiles), the panel shows it, and encode_filament_mapping() returns the same "filament:slot"
+// string PrintHostSendDialog already sends. Bambu's SelectMachineDialog is unchanged.
 
 #include <string>
 #include <vector>
 
 namespace Slic3r {
+namespace PrintHostDevices {
+struct Slot;
+}
 namespace GUI {
 
 // One filament of the plate being sent.
@@ -65,8 +68,26 @@ enum class ThirdPartyMapMismatch {
 std::string normalize_map_colour(const std::string& colour);
 
 // Bambu-style unit+slot: unit 0 slot 0 → "1A", unit 0 slot 3 → "1D", unit 1 slot 0 → "2A".
-// unit_id < 0: 1-based slot numbers ("1", "2", ...) so slots past four do not repeat A–D.
+// Both are positions (0-based), never raw protocol ids. A unit with more than 26 slots falls
+// back to "1-27". unit_id < 0: 1-based slot numbers ("1", "2", ...).
 std::string bambu_style_slot_label(int unit_id, int slot_id);
+
+// The probe's slot list (PrintHostDevices::Status::slots) as tiles, labelled by position so a
+// printer's own numbering (0- or 1-based tray ids) never shows:
+//  * grouped trays (Elegoo CANVAS, Slot::unit >= 0): units numbered in order of appearance,
+//    trays lettered by their position inside the unit: "1A".."1D", "2A"...;
+//  * a QIDI Box (qidi_box): Box slot b * 4 + n is "<b+1><A+n>", the same "1A".."4D";
+//  * tool slots (Snapmaker U1, Moonraker toolheads, Slot::unit < 0): "T1".."T4", as Slot::label()
+//    and the Device card name them.
+// `index` keeps Slot::index, which is what the mapping string and the remembered mapping use.
+std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<PrintHostDevices::Slot>& slots, bool qidi_box);
+
+// The slot a filament row starts on, as a position in `slots` (-1 = "As sliced"): the dialog's
+// remembered slot (`remembered_pos`, Elegoo preselect_slot; -1 = none) when it is a position in
+// `slots`, else PrintHostDevices::auto_match_slot - the closest colour, or a QIDI Box's
+// material-first rule when `qidi_box`.
+int initial_slot_position(const std::vector<PrintHostDevices::Slot>& slots, int remembered_pos, const std::string& colour,
+                          const std::string& type, bool qidi_box);
 
 // The label a tile should show: slot.label if set, else bambu_style_slot_label().
 std::string slot_display_label(const ThirdPartyDeviceSlot& slot);
@@ -92,7 +113,9 @@ bool             has_multiple_nozzles(const ThirdPartyFilamentMapModel& model);
 
 // Badge on the slicer-filament colour box: "L"/"R" when the printer has exactly two nozzles
 // numbered 0/1 (Bambu H2D: 0 = right, 1 = left), else the 1-based nozzle number, else the
-// 1-based filament index on a single nozzle.
+// 1-based filament index on a single nozzle. Nozzle badges need the device's slots to say which
+// nozzle they feed: on a printer whose slots are the toolheads (U1) the project's filament_map is
+// not a nozzle the popup groups by, so the badge stays the filament number.
 std::string filament_badge_text(const ThirdPartySlicerFilament& filament, const ThirdPartyFilamentMapModel& model);
 
 // Slots grouped by nozzle (when several) then unit, preserving first-seen order.

@@ -104,8 +104,10 @@ protected:
     // cursor and a short timeout - the same shape as the devices dialog's Test button.
     void refresh_device_status();
     void rebuild_mapping_rows();
-    // Elegoo CC (and later CFS / MMU / ACE): Bambu-style MaterialItem rows instead of a text combo.
-    virtual bool use_third_party_map_panel() const { return false; }
+    // Bambu-style MaterialItem swatches (ThirdPartyFilamentMapPanel) for every host that names its
+    // slots: Elegoo CANVAS, Snapmaker U1 toolheads, QIDI Box. A dialog that still wants the old
+    // wxChoice rows overrides this with false. No slots: no rows at all, as before.
+    virtual bool use_third_party_map_panel() const { return true; }
     // Creality K3 holders: show the two colours, no popup.
     virtual bool third_party_map_read_only() const { return false; }
     void rebuild_third_party_map_rows();
@@ -148,7 +150,7 @@ protected:
     wxStaticText*                         m_device_note { nullptr };
     wxWindow*                             m_mapping_panel { nullptr };
     wxBoxSizer*                           m_mapping_sizer { nullptr };
-    ThirdPartyFilamentMapPanel*           m_filament_map { nullptr }; // Elegoo CC; null = wxChoice rows
+    ThirdPartyFilamentMapPanel*           m_filament_map { nullptr }; // the swatch rows; null = wxChoice rows or none
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
     // QIDI printers: QIDIStudio's print options, null where the device does not have them.
@@ -282,7 +284,6 @@ public:
     virtual std::map<std::string, std::string> extendedInfo() const override;
 
 protected:
-    bool     use_third_party_map_panel() const override { return true; }
     int      preselect_slot(const SendPlateFilament& f) const override;
     wxString mapping_warning() const override;
 

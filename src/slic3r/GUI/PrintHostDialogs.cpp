@@ -441,22 +441,14 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 
 } // namespace
 
-static ThirdPartyDeviceSlot third_party_slot_from(const PrintHostDevices::Slot& s)
+// The tile label ("1B", "T2") of the slot whose Slot::index is `protocol_index`, so a warning names
+// the tray the way the swatches do. Positional (third_party_slots_from), never the raw tray id.
+static wxString third_party_slot_tile_label(const PrintHostDevices::Status& st, int protocol_index)
 {
-    ThirdPartyDeviceSlot ds;
-    ds.unit_id = s.unit;
-    ds.slot_id = s.tray >= 0 ? s.tray : s.index;
-    ds.colour  = s.color;
-    ds.type    = s.type;
-    ds.name    = s.name;
-    ds.empty   = !s.loaded;
-    ds.index   = s.index;
-    return ds;
-}
-
-static wxString third_party_slot_tile_label(const PrintHostDevices::Slot& s)
-{
-    return from_u8(slot_display_label(third_party_slot_from(s)));
+    for (const ThirdPartyDeviceSlot& ds : third_party_slots_from(st.slots, st.qidi_box))
+        if (ds.index == protocol_index)
+            return from_u8(slot_display_label(ds));
+    return wxString::Format("%d", protocol_index + 1);
 }
 
 static void append_unique_mapping_lines(wxString& out, const wxString& block)
@@ -800,8 +792,7 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         model.filaments.push_back(std::move(sf));
         m_mapping_filament.push_back(f.index);
     }
-    for (const PrintHostDevices::Slot& s : m_device_status.slots)
-        model.slots.push_back(third_party_slot_from(s));
+    model.slots     = third_party_slots_from(m_device_status.slots, m_device_status.qidi_box);
     model.read_only = third_party_map_read_only();
     model.mapping.resize(model.filaments.size(), -1);
     // Always fill the visual auto-match, including read-only (K3): the cards show the match, but
@@ -810,12 +801,10 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         const SendPlateFilament* f = plate_filament(model.filaments[i].index);
         if (!f)
             continue;
-        const int  preset_pos = preselect_slot(*f);
-        const bool preset_ok  = preset_pos >= 0 && preset_pos < (int) m_device_status.slots.size();
-        const int  best       = preset_ok ? preset_pos + 1 :
-                                            PrintHostDevices::auto_match_slot(m_device_status.slots, f->colour, f->type,
-                                                                              m_device_status.qidi_box);
-        model.mapping[i] = best - 1;
+        // The remembered slot first (Elegoo), else the closest colour - or, on a QIDI Box, the
+        // filament's own material first and never colour alone. Same rule as the wxChoice rows.
+        model.mapping[i] = initial_slot_position(m_device_status.slots, preselect_slot(*f), f->colour, f->type,
+                                                 m_device_status.qidi_box);
     }
 
     m_filament_map = new ThirdPartyFilamentMapPanel(m_mapping_panel);
@@ -880,9 +869,13 @@ void PrintHostSendDialog::update_mapping_note()
 {
     if (!m_mapping_note)
         return;
+    // No rows (the printer named no filaments): no warnings either. Overrides of mapping_warning()
+    // can then assume there is a mapping to judge.
     wxString text;
-    append_unique_mapping_lines(text, mapping_warning());
-    append_unique_mapping_lines(text, third_party_mismatch_warning());
+    if (!m_mapping_filament.empty()) {
+        append_unique_mapping_lines(text, mapping_warning());
+        append_unique_mapping_lines(text, third_party_mismatch_warning());
+    }
     const bool     was  = m_mapping_note->IsShown();
     m_mapping_note->SetLabel(text);
     m_mapping_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
@@ -2481,27 +2474,22 @@ wxString ElegooPrintHostSendDialog::mapping_warning() const
             text += "\n";
         text += line;
     };
-    auto slot_lbl = [this](int protocol_index) {
-        for (const PrintHostDevices::Slot& s : m_device_status.slots)
-            if (s.index == protocol_index)
-                return third_party_slot_tile_label(s);
-        return from_u8(bambu_style_slot_label(-1, protocol_index));
-    };
+    // The msgids are the ones the wxChoice rows used, so existing translations still apply; the
+    // tray is named by its tile label ("1B") rather than the old flat number.
+    auto slot_lbl = [this](int protocol_index) { return third_party_slot_tile_label(m_device_status, protocol_index); };
     for (const ElegooCanvasMapping::Warning& w : warnings) {
         switch (w.kind) {
         case ElegooCanvasMapping::WarningKind::MoreFilamentsThanTrays:
             add(_L("This plate uses more filaments than the CANVAS has loaded trays."));
             break;
         case ElegooCanvasMapping::WarningKind::SharedTray:
-            add(format_wxstr(_L("Filament %1% prints from the same slot (%2%) as another filament."), w.filament + 1,
-                             slot_lbl(w.slot)));
+            add(format_wxstr(_L("Filament %1% prints from the same tray as another filament."), w.filament + 1));
             break;
         case ElegooCanvasMapping::WarningKind::TemperatureOutOfRange:
-            add(format_wxstr(_L("Filament %1%: its nozzle temperature is outside the range of %2%."), w.filament + 1,
-                             slot_lbl(w.slot)));
+            add(format_wxstr(_L("Filament %1%: its nozzle temperature is outside the range of tray %2%."), w.filament + 1, slot_lbl(w.slot)));
             break;
         case ElegooCanvasMapping::WarningKind::EmptyTray:
-            add(format_wxstr(_L("Filament %1% is mapped to %2%, which is empty."), w.filament + 1, slot_lbl(w.slot)));
+            add(format_wxstr(_L("Filament %1% is mapped to tray %2%, which is empty."), w.filament + 1, slot_lbl(w.slot)));
             break;
         }
     }
