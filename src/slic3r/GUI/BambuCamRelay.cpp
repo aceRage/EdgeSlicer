@@ -1,4 +1,5 @@
 #include "BambuCamRelay.hpp"
+#include "ElegooCamRelay.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -67,6 +68,15 @@ static void serve_client(tcp::socket client)
         std::istream is(&req);
         std::string method, target;
         is >> method >> target;
+        if (method == "GET" && ElegooCam::is_elegoo_target(target)) {
+            // The Centauri Carbon's camera has its own relay (one shared connection per printer).
+            try {
+                ElegooCam::serve_client(client, target);
+            } catch (const std::exception& e) {
+                BOOST_LOG_TRIVIAL(info) << "ElegooCam: viewer ended: " << e.what();
+            }
+            return;
+        }
         if (method != "GET" || target.find("/bambu") != 0) {
             static const char nf[] = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
             write_all(client, nf, sizeof(nf) - 1);

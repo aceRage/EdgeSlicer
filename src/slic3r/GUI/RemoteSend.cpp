@@ -12,6 +12,7 @@
 #include "PlatePrintHistoryRecorder.hpp"
 #include "Plater.hpp"
 #include "RemoteAccess.hpp"
+#include "RemoteControl.hpp" // speaks_sdcp
 #include "SelectMachine.hpp" // CloudTaskNozzleId
 #include "SpoolmanDialog.hpp" // deduct_after_send_async
 #include "Jobs/PrintJob.hpp" // PrintPrepareData
@@ -1814,7 +1815,31 @@ void list_hosts(json& printers, int plate)
     const bool          use_3mf = bundle->is_bbl_vendor();
     const std::string   upload_name = export_name_for(plate, use_3mf ? ".gcode.3mf" : ".gcode");
     const std::string   url         = cfg.opt_string("print_host");
-    if (!url.empty() && !bundle->use_bbl_network()) {
+    const bool          bbl         = bundle->use_bbl_network();
+    // Every saved print-host device of every printer model (<datadir>/hub/print_host_devices.json),
+    // whatever printer preset is selected: like a Bambu printer or a LAN Snapmaker, a saved printer
+    // is on the list all the time. Only the selected model's devices offer a send (the plate was
+    // sliced for that model); the rest are there to be watched. Their live state is filled in off
+    // this thread by RemoteControl::describe_hosts (Moonraker / PrusaLink probes, and the hub's own
+    // on-demand SDCP connection for an Elegoo Centauri Carbon); the rest stay "unknown".
+    PrintHostDevices::HostListing listing;
+    std::string                   model_key;
+    try {
+        PrintHostDevices::migrate_from_presets(*bundle); // every visible preset's address becomes a device
+        model_key = bbl ? std::string() : PrintHostDevices::current_model_key(*bundle);
+        listing   = PrintHostDevices::host_listing(PrintHostDevices::all_devices(), model_key, bbl ? std::string() : url,
+                                                   PrintHostDevices::from_config(cfg).host_type);
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] listing devices failed: " << e.what();
+        listing          = {};
+        listing.host_row = !url.empty() && !bbl;
+    } catch (...) {
+        listing          = {};
+        listing.host_row = !url.empty() && !bbl;
+    }
+    // The preset's own print host - unless it is one of the devices below (an Elegoo printer the
+    // preset points at is listed once, under the device's stable id).
+    if (listing.host_row) {
         std::unique_ptr<PrintHost> host(PrintHost::get_print_host(&cfg, false));
         json p;
         p["id"]          = "host";
@@ -1829,60 +1854,58 @@ void list_hosts(json& printers, int plate)
         p["upload_name"] = upload_name;
         printers.push_back(p);
     }
-    // The printers of this model, by address (<datadir>/hub/print_host_devices.json). Read-only in
-    // phase 1: the phone's Devices tab can see the whole list, but a send still goes through the one
-    // address the preset holds (the "host" entry above, which is whichever device is current).
-    // Their live state is filled in off this thread by RemoteControl::describe_hosts, which probes
-    // only the Moonraker-shaped ones through its own probe cache; the rest stay "unknown".
-    // A Bambu printer is left out: it has its own device list, in the Device tab.
-    if (!bundle->use_bbl_network()) try {
-        PrintHostDevices::migrate_from_presets(*bundle); // the preset's own address becomes device 1
-        const std::string          model_key = PrintHostDevices::current_model_key(*bundle);
-        const std::string          selected  = PrintHostDevices::last_used_id(model_key);
-        const std::string          norm_url  = PrintHostDevices::normalize_address(url);
-        for (const PrintHostDevices::Device& d : PrintHostDevices::devices(model_key)) {
-            json p;
-            p["id"]           = "ph:" + d.id;
-            p["kind"]         = "printhost";
-            p["name"]         = d.display_name();
-            p["model"]        = d.printer_model.empty() ? cfg.opt_string("printer_model") : d.printer_model;
-            p["url"]          = d.address;
-            // Same address, reduced to a bare host: what the hub's camera join compares against
-            // (RemoteHub::summary_json), same as the "connect" card below. Never set for a device
-            // whose stored address is itself empty.
-            if (!d.address.empty()) p["ip"] = SnapmakerLan::host_of(d.address);
-            p["host_type"]    = d.host_type;
-            p["device_id"]    = d.id;
-            p["model_key"]    = model_key;
-            p["alias"]        = d.alias;
+    const std::string selected = model_key.empty() ? std::string() : PrintHostDevices::last_used_id(model_key);
+    const std::string norm_url = PrintHostDevices::normalize_address(url);
+    for (const PrintHostDevices::ListedDevice& l : listing.devices) try {
+        const PrintHostDevices::Device& d = l.device;
+        json p;
+        p["id"]           = "ph:" + d.id;
+        p["kind"]         = "printhost";
+        p["name"]         = d.display_name();
+        p["url"]          = d.address;
+        // Same address, reduced to a bare host: what the hub's camera join compares against
+        // (RemoteHub::summary_json), same as the "connect" card below.
+        p["ip"]           = SnapmakerLan::host_of(d.address);
+        p["host_type"]    = d.host_type;
+        p["device_id"]    = d.id;
+        p["model_key"]    = l.model_key;
+        p["alias"]        = d.alias;
+        p["online"]       = true; // no live status until describe_hosts answers for it
+        p["status"]       = "unknown";
+        p["can_pause"]    = false;
+        p["can_resume"]   = false;
+        p["can_stop"]     = false;
+        p["print_error"]  = nullptr;
+        if (l.selected_model) {
+            p["model"] = d.printer_model.empty() ? cfg.opt_string("printer_model") : d.printer_model;
             // Not "the main printer" - the one the last plate went to, which is what the desktop
             // send dialog and the Device tab preselect. Falls back to whichever device happens to
             // carry the preset's own address when nothing was ever sent.
             const bool is_last = (!selected.empty() && d.id == selected) ||
                                  (selected.empty() && !norm_url.empty() && PrintHostDevices::normalize_address(d.address) == norm_url);
-            p["last_used"]    = is_last;
-            p["is_current"]   = is_last; // phase 1's name for it, kept so the phone's list still reads
-            p["online"]       = true;   // no live status until describe_hosts answers for it
-            p["status"]       = "unknown";
-            // A device with an address can be sent to, whatever the preset's own print_host says:
+            p["last_used"]  = is_last;
+            p["is_current"] = is_last; // phase 1's name for it, kept so the phone's list still reads
+            // A device can be sent to, whatever the preset's own print_host says:
             // POST /api/plates/{i}/send?printer=ph:<id> builds the host from this device.
-            std::unique_ptr<PrintHost> dev_host;
-            if (!d.address.empty()) {
-                DynamicPrintConfig dev_cfg = PrintHostDevices::config_for(d, cfg);
-                dev_host.reset(PrintHost::get_print_host(&dev_cfg, false));
-            }
-            p["can_upload"]   = dev_host != nullptr;
-            p["can_print"]    = dev_host && dev_host->get_post_upload_actions().has(PrintHostPostUploadAction::StartPrint) &&
-                                (dynamic_cast<Moonraker*>(dev_host.get()) == nullptr || dynamic_cast<Moonraker_Mqtt*>(dev_host.get()) != nullptr);
-            p["can_pause"]    = false;
-            p["can_resume"]   = false;
-            p["can_stop"]     = false;
-            p["print_error"]  = nullptr;
-            p["upload_name"]  = upload_name;
-            printers.push_back(p);
+            DynamicPrintConfig         dev_cfg = PrintHostDevices::config_for(d, cfg);
+            std::unique_ptr<PrintHost> dev_host(PrintHost::get_print_host(&dev_cfg, false));
+            p["can_upload"]  = dev_host != nullptr;
+            p["can_print"]   = dev_host && dev_host->get_post_upload_actions().has(PrintHostPostUploadAction::StartPrint) &&
+                               (dynamic_cast<Moonraker*>(dev_host.get()) == nullptr || dynamic_cast<Moonraker_Mqtt*>(dev_host.get()) != nullptr);
+            p["upload_name"] = upload_name;
+        } else {
+            // Another printer model's device: monitoring (and, for an Elegoo Centauri Carbon,
+            // control) only - the current plate was sliced for another printer, so no send.
+            p["model"]         = d.printer_model.empty() ? l.model_key : d.printer_model;
+            p["last_used"]     = false;
+            p["is_current"]    = false;
+            p["model_matches"] = false;
+            p["can_upload"]    = false;
+            p["can_print"]     = false;
         }
+        printers.push_back(p);
     } catch (const std::exception& e) {
-        BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] listing devices failed: " << e.what();
+        BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] listing a device failed: " << e.what();
     } catch (...) {}
 
     std::shared_ptr<PrintHost> connected;

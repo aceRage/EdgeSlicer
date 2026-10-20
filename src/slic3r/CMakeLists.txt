@@ -293,6 +293,15 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_ObjectTableSettings.hpp
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
+    GUI/MainTabs.hpp
+    GUI/Showcase/ShowcaseRenderer.cpp
+    GUI/Showcase/ShowcaseRenderer.hpp
+    GUI/Showcase/ShowcaseTextures.cpp
+    GUI/Showcase/ShowcaseTextures.hpp
+    GUI/Showcase/ShowcaseView.cpp
+    GUI/Showcase/ShowcaseView.hpp
+    GUI/Showcase/ShowcaseWatermark.cpp
+    GUI/Showcase/ShowcaseWatermark.hpp
     GUI/GUI_Utils.cpp
     GUI/GUI_Utils.hpp
     GUI/HintNotification.cpp
@@ -537,6 +546,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HomeDownload.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
+    GUI/ElegooCamRelay.cpp
+    GUI/ElegooCamRelay.hpp
     GUI/RemoteAccess.cpp
     GUI/RemoteAccess.hpp
     GUI/RemoteControl.cpp
@@ -606,6 +617,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LiveActivityPush.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
+    GUI/ElegooCanvasUI.cpp
+    GUI/ElegooCanvasUI.hpp
     GUI/PrintHostDevicesDialog.cpp
     GUI/PrintHostDevicesDialog.hpp
     GUI/CostsDialog.cpp
@@ -954,9 +967,15 @@ set(SLIC3R_GUI_SOURCES
     Utils/Duet.hpp
     Utils/ElegooCanvas.cpp
     Utils/ElegooCanvas.hpp
+    Utils/ElegooCanvasMapping.cpp
+    Utils/ElegooCanvasMapping.hpp
     Utils/ElegooCanvasQuery.cpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
+    Utils/ElegooSdcp.cpp
+    Utils/ElegooSdcp.hpp
+    Utils/ElegooSdcpMonitor.cpp
+    Utils/ElegooSdcpMonitor.hpp
     Utils/EmbossStyleManager.cpp
     Utils/EmbossStyleManager.hpp
     Utils/ESP3D.cpp
@@ -1238,6 +1257,9 @@ slic3r_unity_build(libslic3r_gui SKIP
     Utils/StepMesh.cpp                            # OCCT's Handle() macro breaks CGAL headers in neighbours
     GUI/GLToolbar.cpp                             # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/GUI_Preview.cpp                           # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseView.cpp                 # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseRenderer.cpp             # glad + ImGui + wx image headers; file-local GL helpers
+    GUI/Showcase/ShowcaseTextures.cpp             # glad before wx image headers, like ShowcaseRenderer.cpp
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad

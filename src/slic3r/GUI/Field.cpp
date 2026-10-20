@@ -316,10 +316,11 @@ void Field::PostInitialize()
 		    if ((evt.GetModifiers() & wxMOD_CONTROL) != 0) {
 			    int tab_id = -1;
 			    switch (evt.GetKeyCode()) {
-			    case '1': { tab_id = 0; break; }
-			    case '2': { tab_id = 1; break; }
-				case '3': { tab_id = 2; break; }
-				case '4': { tab_id = 3; break; }
+			    // Home, Prepare, Preview, Device: the tabs these keys always opened (MainTabs.hpp).
+			    case '1':
+			    case '2':
+				case '3':
+				case '4': { tab_id = MainTabs::tab_for_field_shortcut(char(evt.GetKeyCode())); break; }
 #ifdef __APPLE__
 				case 'f':
 #else /* __APPLE__ */

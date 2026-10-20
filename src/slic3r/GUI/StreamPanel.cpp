@@ -1,11 +1,15 @@
 #include "StreamPanel.hpp"
 
+#include "ElegooCamRelay.hpp"
 #include "RemoteAccess.hpp"
 #include "RemoteHub.hpp"
 #include "GUI_App.hpp"
 #include "HttpServer.hpp"
 #include "slic3r/GUI/Widgets/WebView.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include <nlohmann/json.hpp>
 #include <wx/sizer.h>
@@ -67,6 +71,34 @@ void StreamPanel::OnShow(wxShowEvent& evt)
 {
     evt.Skip();
     SetPageActive(evt.IsShown() && !m_iconized);
+    // A printer added in Printer settings since the page loaded.
+    if (evt.IsShown())
+        SeedElegoo();
+}
+
+void StreamPanel::SeedElegoo()
+{
+    if (m_browser == nullptr)
+        return;
+    nlohmann::json list = nlohmann::json::array();
+    if (PresetBundle* bundle = wxGetApp().preset_bundle) {
+        for (const PhysicalPrinter& printer : bundle->physical_printers) {
+            const DynamicPrintConfig& cfg = printer.config;
+            if (!cfg.has("host_type") || cfg.opt_enum<PrintHostType>("host_type") != htElegooLink)
+                continue;
+            // The Centauri (Carbon) 2 uses the same host type but a different camera.
+            bool cc2 = ElegooCam::is_cc2_name(printer.name);
+            for (const std::string& preset : printer.get_preset_names())
+                cc2 = cc2 || ElegooCam::is_cc2_name(preset);
+            if (cc2)
+                continue;
+            const std::string host = ElegooCam::host_from_address(cfg.has("print_host") ? cfg.opt_string("print_host") : std::string());
+            if (host.empty())
+                continue;
+            list.push_back({ { "ip", host }, { "name", printer.name } });
+        }
+    }
+    WebView::RunScript(m_browser, wxString::Format("if (window.__elegooSeed) window.__elegooSeed(%s);", wxString::FromUTF8(list.dump())));
 }
 
 void StreamPanel::OnIconize(wxIconizeEvent& evt)
@@ -85,6 +117,7 @@ void StreamPanel::OnPageLoaded(wxWebViewEvent& evt)
         m_active = true; // force the call: the new page has not been told anything
         SetPageActive(false);
     }
+    SeedElegoo();
 }
 
 void StreamPanel::OnScriptMessage(wxWebViewEvent& evt)
