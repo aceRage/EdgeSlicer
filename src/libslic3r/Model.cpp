@@ -26,6 +26,9 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#ifdef _WIN32
+#include <boost/nowide/convert.hpp>
+#endif
 #include <boost/nowide/iostream.hpp>
 
 #include "SVG.hpp"
@@ -1199,7 +1202,15 @@ std::string Model::get_backup_path()
         boost::system::error_code ec;
         const boost::filesystem::path system_temp = boost::filesystem::temp_directory_path(ec);
         if (!ec && !system_temp.empty()) {
-            backup_path = new_backup_path(system_temp.string(), this->id().id);
+#ifdef _WIN32
+            // Wide path to UTF-8: path::string() is a narrow ACP conversion on Windows and mangles a
+            // non-ASCII %TEMP% (an accented user name). wstring() can throw under a C locale on POSIX,
+            // so this stays Windows only.
+            const std::string system_temp_utf8 = boost::nowide::narrow(system_temp.wstring());
+#else
+            const std::string system_temp_utf8 = system_temp.string();
+#endif
+            backup_path = new_backup_path(system_temp_utf8, this->id().id);
             BOOST_LOG_TRIVIAL(warning) << boost::format("model %1%, id %2%, backup path falls back to %3%")%this%this->id().id%backup_path;
             create_backup_dirs();
         }
