@@ -594,7 +594,9 @@ QidiSendPolicy qidi_send_policy(const QidiSendFacts& f)
         // uploaded only unless the person explicitly chooses to print; anything else is not ours.
         return f.model_may_have_box ? QidiSendPolicy::UploadOnlyNoProbe : QidiSendPolicy::NotApplicable;
     if (!f.qidi)
-        return QidiSendPolicy::NotApplicable;
+        // It answered, but without the multi_color_controller that names the Box: for a model that
+        // may carry one that is the same as not reading it at all.
+        return f.model_may_have_box ? QidiSendPolicy::UploadOnlyNoProbe : QidiSendPolicy::NotApplicable;
     if (f.busy)
         return QidiSendPolicy::UploadOnlyBusy;
     // No Box plugged in, or switched off for this print (enable_box 0 goes out): the extruder's own

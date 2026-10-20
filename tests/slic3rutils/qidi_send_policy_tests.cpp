@@ -156,13 +156,28 @@ TEST_CASE("qidi_send_policy only starts a QIDI Box print on a complete, checked 
         f.model_may_have_box = false;
         CHECK(qidi_send_policy(f) == QidiSendPolicy::NotApplicable);
     }
-    SECTION("a printer that answered but is not QIDI firmware") {
+    SECTION("a Box-capable profile whose printer answered without naming the Box: treated as unreadable") {
         QidiSendFacts f = good_facts();
         f.qidi          = false;
         f.box_present   = false;
-        CHECK(qidi_send_policy(f) == QidiSendPolicy::NotApplicable);
+        CHECK(qidi_send_policy(f) == QidiSendPolicy::UploadOnlyNoProbe);
+    }
+    SECTION("any other printer that answered but is not QIDI firmware") {
+        QidiSendFacts f      = good_facts();
+        f.qidi               = false;
+        f.box_present        = false;
         f.model_may_have_box = false;
         CHECK(qidi_send_policy(f) == QidiSendPolicy::NotApplicable);
+    }
+    SECTION("the owner's repro: Qidi X-Max 4 preset, probe answered HTTP 404, plain dialog") {
+        // What the dialog had: Status::online false, qidi false, no Box rows, no QIDI options.
+        QidiSendFacts f;
+        f.model_may_have_box = qidi_box_capable_model("Qidi X-Max 4");
+        f.probe_ok           = false;
+        f.used_filaments     = 1;
+        REQUIRE(f.model_may_have_box);
+        CHECK(qidi_send_policy(f) == QidiSendPolicy::UploadOnlyNoProbe);
+        CHECK(qidi_send_refusal(qidi_send_policy(f)).find("Couldn't read the QIDI Box") != std::string::npos);
     }
 }
 

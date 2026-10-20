@@ -634,11 +634,16 @@ void PrintHostSendDialog::refresh_device_status()
         }
         // A printer that may carry a QIDI Box and did not answer: nobody knows what its Box would
         // feed, so a print is not started without the person saying so.
-        if (!m_device_status.online && qidi_send_facts().model_may_have_box) {
+        // The QIDI options are not offered blind either: they go out as G-code to a printer that has
+        // to answer first (PrintHostJobQueue checks it is idle), and one that did not answer the
+        // probe would stop the whole send.
+        if (PrintHostDevices::qidi_send_policy(qidi_send_facts()) == PrintHostDevices::QidiSendPolicy::UploadOnlyNoProbe) {
             if (!text.IsEmpty())
-                text += "  ";
-            text += _L("Couldn't read the QIDI Box, so this plate is uploaded only unless you choose to print anyway. "
-                       "Pick the printer again to retry.");
+                text += "\n";
+            text += _L("Couldn't read the QIDI Box: the printer would use its last saved slot mapping, which may feed "
+                       "another material. Upload is the safe choice; Upload and Print asks first and offers a retry. "
+                       "The QIDI print options need the printer to answer, so they are not shown. Pick the printer "
+                       "again to retry.");
         }
         if (print_blocked()) {
             if (!text.IsEmpty())
