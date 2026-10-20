@@ -1093,6 +1093,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/MQTT.hpp
     Utils/MQTT.cpp
     Utils/MqttReconnectPolicy.hpp
+    Utils/MqttLogRedact.hpp
     Utils/U1LocalFirst.cpp
     Utils/U1LocalFirst.hpp
     Utils/U1MoonrakerProbe.cpp

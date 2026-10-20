@@ -79,6 +79,10 @@ public:
     std::string qidi_start_script() const;
     std::string qidi_leveling_script() const;
     int         qidi_timelapse() const;
+    // The preset's printer_model. Call before init(). A model that can carry a QIDI Box
+    // (PrintHostDevices::qidi_box_capable_model) is never started on the printer's stale Box
+    // mapping: when its Box cannot be read, "Upload and Print" asks before starting anything.
+    void set_printer_model(const std::string& printer_model) { m_printer_model = printer_model; }
 
     // ---- "unload filaments when the print ends" (Snapmaker tool changers) ----
     //
@@ -119,6 +123,20 @@ protected:
     void rebuild_qidi_options();
     // "As sliced" and greyed out while the QIDI Box is switched off: nothing is fed from it.
     void update_mapping_enabled();
+    // What PrintHostDevices::qidi_send_policy needs, from the picked device and the rows.
+    PrintHostDevices::QidiSendFacts qidi_send_facts() const;
+    // "Upload and Print" pressed: true = start the print. May instead turn the send into an upload
+    // only (post_upload_action None, true returned) or keep the dialog open (false).
+    bool confirm_qidi_start();
+    // The lines naming each used filament with no Box slot, and each one whose slot holds another
+    // material. Empty when there is nothing to say.
+    wxString qidi_mapping_problems(bool& unmapped, bool& mismatched) const;
+    // Every host that names its slots' materials: one line per mapped filament whose slot holds
+    // another material (both named). Empty when there is none.
+    wxString slot_type_mismatches() const;
+    // Where the notes under the printer row wrap: the dialog's usual width, DPI-scaled.
+    // (CONTENT_WIDTH * em_unit is some 2400 px, so a long note stretched the dialog.)
+    int note_wrap_width() const { return FromDIP(460); }
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
@@ -141,6 +159,7 @@ protected:
     wxComboBox* combo_storage;
     // The devices of this printer model, the one that is picked, and what it said.
     std::string                           m_model_key;
+    std::string                           m_printer_model;
     std::vector<PrintHostDevices::Device>  m_devices;
     std::string                           m_preselect_id;
     int                                   m_device_sel { -1 };
@@ -160,6 +179,8 @@ protected:
     wxCheckBox*                           m_qidi_leveling { nullptr };
     wxCheckBox*                           m_qidi_timelapse { nullptr };
     wxCheckBox*                           m_qidi_polar_cooler { nullptr };
+    // The QIDI options are shown from the profile because the printer did not answer.
+    bool                                  m_qidi_blind { false };
     wxStaticText*                         m_mapping_note { nullptr };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };

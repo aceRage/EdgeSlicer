@@ -2,6 +2,7 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     printhost_devices_tests.cpp
+    qidi_send_policy_tests.cpp
     printhost_error_tests.cpp
     snapmaker_unload_tests.cpp
     snapmaker_probe_tests.cpp
@@ -51,6 +52,7 @@ add_executable(${_TEST_NAME}_tests
     live_activity_push_tests.cpp
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
+    mqtt_log_redact_tests.cpp
     first_request_gate_tests.cpp
     bind_list_refresh_tests.cpp
     ssdp_connect_type_tests.cpp

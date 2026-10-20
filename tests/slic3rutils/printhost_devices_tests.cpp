@@ -492,18 +492,20 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK(qidi_leveling_script(level_only) == "G32\n");
     }
 
-    SECTION("the QIDI options start off, the Box only when a slot is loaded") {
+    SECTION("the QIDI options start off, the Box on whenever there is one") {
         Status st;
         st.qidi     = true;
         st.qidi_box = true;
         st.slots.resize(4);
-        // Nothing remembered: bed leveling, timelapse and cooler start off; an empty Box starts off.
+        // Nothing remembered: bed leveling, timelapse and cooler start off. An empty Box starts on
+        // too: printing from the toolhead spool is the person's choice (it may hold the last
+        // print's material), never a silent default.
         QidiOptionDefaults d = qidi_option_defaults(st, "", "", "");
         CHECK_FALSE(d.bed_leveling);
         CHECK_FALSE(d.timelapse);
         CHECK_FALSE(d.polar_cooler);
-        CHECK_FALSE(d.use_box);
-        // One loaded slot is enough for the Box.
+        CHECK(d.use_box);
+        // And with a loaded slot.
         st.slots[2].loaded = true;
         d = qidi_option_defaults(st, "", "", "");
         CHECK(d.use_box);
