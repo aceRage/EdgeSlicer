@@ -1,6 +1,7 @@
 #ifndef slic3r_PrintHostDeviceStatus_hpp_
 #define slic3r_PrintHostDeviceStatus_hpp_
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -212,6 +213,36 @@ QidiAutoMapping qidi_auto_mapping(const Status& st, const std::vector<SendFilame
 // Plain English, for the hub / phone job result and the log: why the print was not started.
 // Empty for NotApplicable and Start.
 std::string qidi_send_refusal(QidiSendPolicy policy);
+
+// ---- QIDIStudio's own LAN read of the Box -------------------------------------------------------
+//
+// QIDIStudio 2.07 does not read a `multi_color_controller` object at all. Over the LAN it reads
+// Klipper's save_variables (`/printer/objects/query?save_variables=variables`): box_count, and per
+// Box slot n (box * 4 + slot, 0-based) filament_slot<n> / color_slot<n> / vendor_slot<n>, which
+// are indexes into the printer's own `config/officiall_filas_list.cfg` ([fila<id>] type = PLA ...,
+// [colordict] <id> = #RRGGBB). The same variables hold value_t<tool> and enable_box, which is what
+// the start-of-print script writes and what is read back to confirm it took.
+
+struct QidiFilaList
+{
+    std::map<int, std::string> type;   // fila id -> "PLA"
+    std::map<int, std::string> name;   // fila id -> "PLA Rapido"
+    std::map<int, std::string> colour; // colordict id -> "#RRGGBB"
+};
+// The INI text of officiall_filas_list.cfg.
+QidiFilaList parse_qidi_filas_cfg(const std::string& text);
+// save_variables' `variables` object (JSON text) -> the Box slots it describes; empty when it names
+// no Box. A slot counts as loaded when its filament_slot<n> names a material the list knows.
+std::vector<Slot> slots_from_qidi_variables(const std::string& variables_json, const QidiFilaList& list, bool& have_filaments);
+// After the start-of-print script: do the printer's variables now say what was sent? enable_box
+// as `use_box` (1 / 0, -1 = not sent) and value_t<tool> == 'slot<n>' for every pair of `mapping`.
+// False with `why` otherwise - the print must not start on a mapping that did not take.
+bool qidi_mapping_confirmed(const std::string& variables_json, const std::string& mapping, int use_box, std::string& why);
+// Blocking, off the GUI thread: the `variables` object of save_variables, as JSON text.
+bool query_qidi_variables(const std::string& base_url, std::string& variables_json, std::string& error, int timeout_s = 10);
+// The probe timeout for a model: a QIDI Box printer's Moonraker is slow to answer (3 s timed out
+// on a real one), every other printer keeps the short wait.
+int probe_timeout_for(const std::string& printer_model);
 
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
 Status probe(const Device& d, int timeout_s = 3);

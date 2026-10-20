@@ -122,6 +122,9 @@ protected:
     // The lines naming each used filament with no Box slot, and each one whose slot holds another
     // material. Empty when there is nothing to say.
     wxString qidi_mapping_problems(bool& unmapped, bool& mismatched) const;
+    // Every host that names its slots' materials: one line per mapped filament whose slot holds
+    // another material (both named). Empty when there is none.
+    wxString slot_type_mismatches() const;
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }

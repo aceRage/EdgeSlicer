@@ -261,3 +261,124 @@ TEST_CASE("qidi_send_refusal says why for every refusal and nothing otherwise", 
     const std::string no_probe = qidi_send_refusal(QidiSendPolicy::UploadOnlyNoProbe);
     CHECK(no_probe.find("Couldn't read the QIDI Box") != std::string::npos);
 }
+
+// QIDIStudio 2.07 reads the Box over the LAN from save_variables and the printer's own
+// officiall_filas_list.cfg, not from multi_color_controller. These are the shapes it reads.
+static const char* k_filas_cfg =
+    "# QIDI filament list\n"
+    "[fila1]\n"
+    "filament = PLA Rapido\n"
+    "type = PLA\n"
+    "[fila5]\n"
+    "filament = ASA\n"
+    "type = ASA\n"
+    "[colordict]\n"
+    "1 = #FAFAFA\n"
+    "2 = #060606\n";
+
+TEST_CASE("the QIDI filament list parses types, names and colours", "[qidi][send]")
+{
+    const QidiFilaList l = parse_qidi_filas_cfg(k_filas_cfg);
+    CHECK(l.type.at(1) == "PLA");
+    CHECK(l.name.at(1) == "PLA Rapido");
+    CHECK(l.type.at(5) == "ASA");
+    CHECK(l.colour.at(1) == "#FAFAFA");
+    CHECK(l.colour.at(2) == "#060606");
+    CHECK(l.type.count(2) == 0);
+}
+
+TEST_CASE("save_variables give the Box slots when multi_color_controller names no material", "[qidi][send]")
+{
+    const QidiFilaList l    = parse_qidi_filas_cfg(k_filas_cfg);
+    // Box 1: slot 1 PLA white, slot 2 ASA black, slots 3 and 4 empty. value_t0 still on the ASA
+    // slot from the last print - the state the reported printer was in.
+    const std::string vars  = "{\"box_count\":1,\"enable_box\":1,\"value_t0\":\"slot1\","
+                              "\"filament_slot0\":1,\"color_slot0\":1,\"filament_slot1\":5,\"color_slot1\":2,"
+                              "\"filament_slot2\":0,\"filament_slot3\":0}";
+    bool              have  = false;
+    const std::vector<Slot> slots = slots_from_qidi_variables(vars, l, have);
+    REQUIRE(slots.size() == 4);
+    CHECK(have);
+    CHECK(slots[0].loaded);
+    CHECK(slots[0].type == "PLA");
+    CHECK(slots[0].color == "#FAFAFA");
+    CHECK(slots[1].type == "ASA");
+    CHECK(slots[1].index == 1);
+    CHECK_FALSE(slots[2].loaded);
+
+    SECTION("through the status parse: QIDI firmware with a Box, even without multi_color_controller") {
+        const Status st = parse_moonraker_status("{\"print_stats\":{\"state\":\"standby\"},\"save_variables\":{\"variables\":" + vars + "}}",
+                                                 "octoprint");
+        CHECK(st.qidi);
+        CHECK(st.qidi_box); // box_count 1: a Box, whether or not its slots could be read
+        // Without the filament list the materials are unknown, so nothing is mapped and the
+        // plate is refused rather than started on value_t0 = slot1 (the ASA).
+        SendFilament pla;
+        pla.index  = 0;
+        pla.type   = "PLA";
+        pla.colour = "#FFFFFF";
+        pla.used   = true;
+        const QidiAutoMapping am = qidi_auto_mapping(st, { pla });
+        CHECK(am.mapping.empty());
+        CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::NeedsMapping);
+    }
+    SECTION("with the slots read, the PLA plate goes to the PLA slot") {
+        Status st;
+        st.online = st.qidi = st.qidi_box = st.slots_have_filaments = true;
+        st.state = "standby";
+        st.slots = slots;
+        SendFilament pla;
+        pla.index  = 0;
+        pla.type   = "PLA";
+        pla.colour = "#FFFFFF";
+        pla.used   = true;
+        const QidiAutoMapping am = qidi_auto_mapping(st, { pla });
+        CHECK(am.mapping == "0:0");
+        CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::Start);
+    }
+}
+
+TEST_CASE("an empty or unreadable QIDI Box never defaults to the toolhead spool", "[qidi][send]")
+{
+    // enable_box 0 prints whatever is in the toolhead, which may be the last print's material.
+    Status st;
+    st.online = st.qidi = st.qidi_box = true;
+    st.state = "standby";
+    st.slots.resize(4);
+    SendFilament pla;
+    pla.type = "PLA";
+    pla.used = true;
+    const QidiAutoMapping am = qidi_auto_mapping(st, { pla });
+    CHECK(am.facts.use_box);
+    CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::NeedsMapping);
+}
+
+TEST_CASE("the Box mapping is read back before the print starts", "[qidi][send]")
+{
+    std::string why;
+    SECTION("the reported state: value_t0 still on slot1 (ASA) after a PLA send is caught") {
+        CHECK_FALSE(qidi_mapping_confirmed("{\"enable_box\":1,\"value_t0\":\"slot1\"}", "0:0", 1, why));
+        CHECK(why.find("value_t0") != std::string::npos);
+    }
+    SECTION("what QIDIStudio's quoting leaves: the string slotN") {
+        CHECK(qidi_mapping_confirmed("{\"enable_box\":1,\"value_t0\":\"slot0\",\"value_t1\":\"slot5\"}", "0:0,1:5", 1, why));
+    }
+    SECTION("enable_box not taken") {
+        CHECK_FALSE(qidi_mapping_confirmed("{\"enable_box\":0,\"value_t0\":\"slot0\"}", "0:0", 1, why));
+        CHECK_FALSE(qidi_mapping_confirmed("{\"value_t0\":\"slot0\"}", "0:0", 1, why));
+    }
+    SECTION("Box off: only enable_box 0 matters") {
+        CHECK(qidi_mapping_confirmed("{\"enable_box\":0,\"value_t0\":\"slot3\"}", "", 0, why));
+        CHECK_FALSE(qidi_mapping_confirmed("{\"enable_box\":1}", "", 0, why));
+    }
+    SECTION("not JSON") {
+        CHECK_FALSE(qidi_mapping_confirmed("<html>", "0:0", 1, why));
+    }
+}
+
+TEST_CASE("the probe waits longer for a QIDI Box printer only", "[qidi][send]")
+{
+    CHECK(probe_timeout_for("Qidi X-Max 4") > 3);
+    CHECK(probe_timeout_for("Snapmaker U1") == 3);
+    CHECK(probe_timeout_for("") == 3);
+}

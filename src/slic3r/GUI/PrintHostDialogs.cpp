@@ -612,8 +612,12 @@ void PrintHostSendDialog::refresh_device_status()
         // preset's printer_model), and the Elegoo probe asks a CANVAS only of a Centauri Carbon 1.
         PrintHostDevices::Device d = m_devices[m_device_sel];
         if (d.printer_model.empty())
-            d.printer_model = m_model_key;
-        m_device_status = PrintHostDevices::probe(d, 3);
+            d.printer_model = !m_printer_model.empty() ? m_printer_model : m_model_key;
+        // A QIDI Box printer's Moonraker can take longer than 3 s (a real one timed out at 3 s),
+        // and a probe that times out means no Box rows and no mapping.
+        const int timeout = std::max(PrintHostDevices::probe_timeout_for(d.printer_model),
+                                     PrintHostDevices::probe_timeout_for(m_printer_model));
+        m_device_status = PrintHostDevices::probe(d, timeout);
     }
     if (m_device_note) {
         wxString text;
@@ -745,14 +749,36 @@ wxString PrintHostSendDialog::qidi_mapping_problems(bool& unmapped, bool& mismat
     return out;
 }
 
+wxString PrintHostSendDialog::slot_type_mismatches() const
+{
+    wxString               out;
+    const std::vector<int> positions = mapping_choice_positions();
+    for (size_t i = 0; i < positions.size() && i < m_mapping_filament.size(); ++i) {
+        const int pos = positions[i];
+        if (pos < 0 || pos >= (int) m_device_status.slots.size())
+            continue;
+        const SendPlateFilament*      p = plate_filament(m_mapping_filament[i]);
+        const PrintHostDevices::Slot& s = m_device_status.slots[pos];
+        // Only where both sides name a material: an unnamed slot is not evidence of a mismatch here.
+        if (p == nullptr || p->type.empty() || s.type.empty() || PrintHostDevices::filament_types_match(p->type, s.type))
+            continue;
+        if (!out.IsEmpty())
+            out += "\n";
+        out += format_wxstr(_L("Filament %1% (%2%) goes to %3%, which holds %4%."), p->index + 1, from_u8(p->type),
+                            from_u8(s.label()), from_u8(s.type));
+    }
+    return out;
+}
+
 namespace {
 // A question whose affirmative answer (Yes, which a phone request auto-answers) is the safe one,
 // and whose risky answer is a button of its own that nothing auto-answers.
 class QidiStartQuestion : public MessageDialog
 {
 public:
-    QidiStartQuestion(wxWindow* parent, const wxString& message, const wxString& safe_label, const wxString& risky_label, bool retry)
-        : MessageDialog(parent, message, _L("QIDI Box"), wxYES | (retry ? wxCANCEL : 0) | wxICON_WARNING)
+    QidiStartQuestion(wxWindow* parent, const wxString& message, const wxString& safe_label, const wxString& risky_label, bool retry,
+                      const wxString& caption = wxString())
+        : MessageDialog(parent, message, caption.IsEmpty() ? _L("QIDI Box") : caption, wxYES | (retry ? wxCANCEL : 0) | wxICON_WARNING)
     {
         SetButtonLabel(wxID_YES, safe_label, true);
         if (retry)
@@ -772,7 +798,20 @@ bool PrintHostSendDialog::confirm_qidi_start()
     using PrintHostDevices::QidiSendPolicy;
     const QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(qidi_send_facts());
     switch (policy) {
-    case QidiSendPolicy::NotApplicable:
+    case QidiSendPolicy::NotApplicable: {
+        // Any other printer that names what is in its slots (a CANVAS, a U1's toolheads): a
+        // filament sent to a slot of another material is asked about, never sent silently.
+        const wxString lines = slot_type_mismatches();
+        if (lines.IsEmpty())
+            return true;
+        const wxString msg = _L("The material in a picked slot does not match the filament it was sliced for. The printer "
+                                "heats and prints with the plate's settings whatever is fed:") +
+                             "\n\n" + lines + "\n\n" + _L("Print with these slots anyway?");
+        QidiStartQuestion q(this, msg, _L("Change the slots"), _L("Print anyway"), false, _L("Material mismatch"));
+        const bool        anyway = q.ShowModal() == wxID_IGNORE;
+        BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: slot material mismatch, " << (anyway ? "printed anyway" : "not started");
+        return anyway;
+    }
     case QidiSendPolicy::Start: return true;
     case QidiSendPolicy::UploadOnlyBusy: {
         MessageDialog(this, _L("This printer is busy with a print, so this plate can be uploaded but not started."), _L("QIDI Box"),
@@ -2409,6 +2448,9 @@ void ElegooPrintHostSendDialog::init() {
     btn_ok->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
         if (validate_path(txt_filename->GetValue())) {
             // post_upload_action = PrintHostPostUploadAction::None;
+            // A CANVAS tray of another material than the filament: ask before starting.
+            if (post_upload_action == PrintHostPostUploadAction::StartPrint && !confirm_qidi_start())
+                return;
             EndDialog(wxID_OK);
         }
     });

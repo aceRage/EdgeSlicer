@@ -27,6 +27,7 @@
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
+#include "slic3r/Utils/PrinterStorage.hpp"
 #include "slic3r/Utils/Spoolman.hpp"
 
 #include <boost/filesystem.hpp>
@@ -1647,7 +1648,7 @@ static SnapmakerLan::Device script_target_of(std::string h)
 // sends it. Anything else: false with the reason, and nothing has been sent.
 static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
 {
-    const PrintHostDevices::Status st = PrintHostDevices::probe(p.qidi_device, 3);
+    const PrintHostDevices::Status st = PrintHostDevices::probe(p.qidi_device, p.qidi_model_box ? 10 : 3);
     std::vector<PrintHostDevices::SendFilament> filaments;
     for (const SnapmakerLan::FileFilament& f : p.file_filaments) {
         PrintHostDevices::SendFilament s;
@@ -1693,9 +1694,20 @@ static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
         BOOST_LOG_TRIVIAL(error) << "RemoteSend: " << why;
         return false;
     }
+    // Read it back: a script Moonraker answered "ok" for is still not proof the Box took it.
+    {
+        std::string vars, verr, mismatch;
+        if (!PrintHostDevices::query_qidi_variables(PrinterStorage::base_url_of(p.host->get_host()), vars, verr) ||
+            !PrintHostDevices::qidi_mapping_confirmed(vars, am.mapping, o.use_box, mismatch)) {
+            why = "The QIDI Box mapping could not be confirmed on the printer (" + (verr.empty() ? mismatch : verr) +
+                  "), so nothing was sent and the print was not started.";
+            BOOST_LOG_TRIVIAL(error) << "RemoteSend: " << why;
+            return false;
+        }
+    }
     q["sent"]      = true;
     result["qidi"] = q;
-    BOOST_LOG_TRIVIAL(info) << "RemoteSend: sent the QIDI Box mapping " << am.mapping;
+    BOOST_LOG_TRIVIAL(warning) << "RemoteSend: sent and confirmed the QIDI Box mapping '" << am.mapping << "' (use_box " << o.use_box << ")";
     return true;
 }
 
