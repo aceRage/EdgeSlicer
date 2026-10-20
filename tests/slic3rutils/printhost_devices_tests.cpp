@@ -14,6 +14,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include <algorithm>
 #include <ctime>
 #include <string>
 
@@ -942,4 +943,133 @@ TEST_CASE("PrintHost: get_err_code_from_body does not throw on malformed JSON", 
     // A successful Duet connect often has no err field; that is success (0), not unknown (-1).
     CHECK(PrintHost::get_err_code_from_body(R"({})") == 0);
     REQUIRE_NOTHROW(PrintHost::get_err_code_from_body("<html>404</html>"));
+}
+
+// ---- the printer lists: every saved device, whatever preset is selected ----
+//
+// The owner's report (2026-10-19): an Elegoo Centauri Carbon saved as a print-host device only
+// showed in the Printers tab and the app's /api/printers while a Centauri Carbon preset was
+// selected; Bambu printers and LAN Snapmakers show whatever is selected. host_listing is the one
+// rule RemoteSend::list_hosts (the rows) and RemoteControl::list_host_targets (their live state)
+// now both follow.
+
+static const ListedDevice* listed(const HostListing& l, const std::string& alias)
+{
+    for (const ListedDevice& d : l.devices)
+        if (d.device.alias == alias) return &d;
+    return nullptr;
+}
+
+// Two models' device lists, as print_host_devices.json holds them.
+static void two_models()
+{
+    std::string error;
+    for (const char* name : { "CC1", "CC2", "CC3" }) {
+        Device d = make_device(name, std::string("192.0.2.") + (name[2] == '1' ? "11" : name[2] == '2' ? "12" : "13"), "elegoolink");
+        REQUIRE(add("Elegoo Centauri Carbon", d, error));
+    }
+    Device v = make_device("Voron", "http://192.0.2.20:7125", "octoprint");
+    v.printer_model = "Voron 2.4 350";
+    REQUIRE(add("Voron 2.4 350", v, error));
+}
+
+TEST_CASE("PrintHostDevices: a Bambu preset selected still lists every saved device", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_bambu");
+    two_models();
+    // A Bambu preset on the Bambu network: no selected print-host model, no "host" row.
+    const HostListing l = host_listing(all_devices(), "", "", "");
+    REQUIRE(l.devices.size() == 4);
+    CHECK_FALSE(l.host_row);
+    for (const char* name : { "CC1", "CC2", "CC3", "Voron" }) {
+        const ListedDevice* d = listed(l, name);
+        REQUIRE(d != nullptr);
+        CHECK_FALSE(d->selected_model); // listed for monitoring: no send for another model
+    }
+    CHECK(listed(l, "CC3")->model_key == "Elegoo Centauri Carbon");
+    CHECK(listed(l, "Voron")->model_key == "Voron 2.4 350");
+}
+
+TEST_CASE("PrintHostDevices: another print-host model selected still lists the Elegoo printers", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_other");
+    two_models();
+    const HostListing l = host_listing(all_devices(), "Voron 2.4 350", "http://192.0.2.20:7125", "octoprint");
+    REQUIRE(l.devices.size() == 4);
+    // The selected model's devices first, and only they may offer a send.
+    CHECK(l.devices.front().device.alias == "Voron");
+    CHECK(l.devices.front().selected_model);
+    for (const char* name : { "CC1", "CC2", "CC3" }) {
+        const ListedDevice* d = listed(l, name);
+        REQUIRE(d != nullptr);
+        CHECK_FALSE(d->selected_model);
+    }
+    // A Moonraker preset keeps its "host" row (its controls live there), as before.
+    CHECK(l.host_row);
+}
+
+TEST_CASE("PrintHostDevices: a selected model with no saved devices lists the others", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_u1");
+    two_models();
+    const HostListing l = host_listing(all_devices(), "Snapmaker U1", "", "");
+    CHECK(l.devices.size() == 4);
+    CHECK_FALSE(l.host_row);
+    for (const ListedDevice& d : l.devices)
+        CHECK_FALSE(d.selected_model);
+}
+
+TEST_CASE("PrintHostDevices: the Elegoo preset's own address is listed once", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_cc");
+    two_models();
+
+    SECTION("the preset points at a saved device: no separate host row")
+    {
+        const HostListing l = host_listing(all_devices(), "Elegoo Centauri Carbon", "192.0.2.13", "elegoolink");
+        CHECK_FALSE(l.host_row);
+        REQUIRE(l.devices.size() == 4);
+        // Each saved device once, the selected model's three first.
+        std::vector<std::string> ids;
+        for (const ListedDevice& d : l.devices) ids.push_back(d.device.id);
+        std::sort(ids.begin(), ids.end());
+        CHECK(std::unique(ids.begin(), ids.end()) == ids.end());
+        for (size_t i = 0; i < 3; ++i) {
+            CHECK(l.devices[i].model_key == "Elegoo Centauri Carbon");
+            CHECK(l.devices[i].selected_model);
+        }
+        CHECK_FALSE(listed(l, "Voron")->selected_model);
+    }
+    SECTION("the same printer written another way still matches")
+    {
+        CHECK_FALSE(host_listing(all_devices(), "Elegoo Centauri Carbon", "http://192.0.2.13:3030/", "elegoolink").host_row);
+    }
+    SECTION("an address no device has keeps the host row")
+    {
+        CHECK(host_listing(all_devices(), "Elegoo Centauri Carbon", "192.0.2.99", "elegoolink").host_row);
+    }
+    SECTION("another model's device at that address does not hide the host row")
+    {
+        CHECK(host_listing(all_devices(), "Voron 2.4 350", "192.0.2.13", "elegoolink").host_row);
+    }
+}
+
+TEST_CASE("PrintHostDevices: an empty store lists nothing and keeps the host row", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_empty");
+    const HostListing l = host_listing(all_devices(), "Elegoo Centauri Carbon", "192.0.2.13", "elegoolink");
+    CHECK(l.devices.empty());
+    CHECK(l.host_row);
+    CHECK_FALSE(host_listing(all_devices(), "", "", "").host_row);
+}
+
+TEST_CASE("PrintHostDevices: bare_host reduces an address to its host", "[PrintHostDevices][listing]")
+{
+    CHECK(bare_host("192.0.2.13") == "192.0.2.13");
+    CHECK(bare_host(" HTTP://192.0.2.13:3030/ ") == "192.0.2.13");
+    CHECK(bare_host("ws://192.0.2.13:3030/websocket") == "192.0.2.13");
+    CHECK(bare_host("user:pw@printer.local:80") == "printer.local");
+    CHECK(bare_host("[fe80::1]:3030") == "fe80::1");
+    CHECK(bare_host("fe80::1") == "fe80::1");
+    CHECK(bare_host("").empty());
 }
