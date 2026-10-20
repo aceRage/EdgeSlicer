@@ -275,7 +275,7 @@ bool load_project(Bench &b, DynamicPrintConfig &config)
     struct Cleanup
     {
         Model &m;
-        ~Cleanup() { remove_own_model_backup(m.backup_path); }
+        ~Cleanup() { remove_own_model_backup(m.get_backup_path()); }
     } own{b.model};
     const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
     ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
@@ -308,8 +308,8 @@ bool round_trip(Model &model, Model &loaded, const char *name)
         Model &a, &b;
         ~Cleanup()
         {
-            remove_own_model_backup(a.backup_path);
-            remove_own_model_backup(b.backup_path);
+            remove_own_model_backup(a.get_backup_path());
+            remove_own_model_backup(b.get_backup_path());
         }
     } own{model, loaded};
     const std::string        file = (tmp.path / name).string();
@@ -422,7 +422,7 @@ TEST_CASE("A stabilizer project loads when temporary_dir was never set", "[Stabi
     const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
     const bool ok = load_bbs_3mf(path.c_str(), &config, &ctxt, &b.model, &plate_data, &project_presets, &is_bbl,
                                  &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
-    leftover.add(b.model.backup_path);
+    leftover.add(b.model.get_backup_path());
     release_PlateData_list(plate_data);
     REQUIRE(ok);
     REQUIRE_FALSE(b.model.objects.empty());
