@@ -256,10 +256,15 @@ void remove_own_model_backup(const std::string &backup)
 struct OwnBackupCleanup
 {
     std::vector<std::string> paths;
+    // Never call get_backup_path() from here: if the model never got a backup, that
+    // empty-path branch creates a leaf and remove_all()s it outside a try, which
+    // std::terminate()s during unwind. Only paths captured after a load/store are removed.
     ~OwnBackupCleanup()
     {
-        for (const std::string &p : paths)
-            remove_own_model_backup(p);
+        try {
+            for (const std::string &p : paths)
+                remove_own_model_backup(p);
+        } catch (...) {}
     }
     void add(const std::string &p)
     {
@@ -272,11 +277,7 @@ struct OwnBackupCleanup
 bool load_project(Bench &b, DynamicPrintConfig &config)
 {
     const ScopedTemporaryDir tmp = use_test_temporary_dir();
-    struct Cleanup
-    {
-        Model &m;
-        ~Cleanup() { remove_own_model_backup(m.get_backup_path()); }
-    } own{b.model};
+    OwnBackupCleanup         own;
     const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
     ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
     PlateDataPtrs             plate_data;
@@ -286,6 +287,7 @@ bool load_project(Bench &b, DynamicPrintConfig &config)
     const bool ok = load_bbs_3mf(path.c_str(), &config, &ctxt, &b.model, &plate_data, &project_presets, &is_bbl,
                                  &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
     release_PlateData_list(plate_data);
+    own.add(b.model.get_backup_path());
     return ok;
 }
 
@@ -303,15 +305,7 @@ bool slice_project(Bench &b)
 bool round_trip(Model &model, Model &loaded, const char *name)
 {
     const ScopedTemporaryDir tmp  = use_test_temporary_dir();
-    struct Cleanup
-    {
-        Model &a, &b;
-        ~Cleanup()
-        {
-            remove_own_model_backup(a.get_backup_path());
-            remove_own_model_backup(b.get_backup_path());
-        }
-    } own{model, loaded};
+    OwnBackupCleanup         own;
     const std::string        file = (tmp.path / name).string();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
 
@@ -320,8 +314,10 @@ bool round_trip(Model &model, Model &loaded, const char *name)
     store_params.model    = &model;
     store_params.config   = &config;
     store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
-    if (! store_bbs_3mf(store_params))
+    if (! store_bbs_3mf(store_params)) {
+        own.add(model.get_backup_path());
         return false;
+    }
 
     DynamicPrintConfig        dst_config;
     ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
@@ -335,6 +331,8 @@ bool round_trip(Model &model, Model &loaded, const char *name)
                                             LoadStrategy::Silence);
     release_PlateData_list(plate_data);
     boost::filesystem::remove(file);
+    own.add(model.get_backup_path());
+    own.add(loaded.get_backup_path());
     return loaded_ok;
 }
 
