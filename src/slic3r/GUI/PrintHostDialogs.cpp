@@ -692,13 +692,16 @@ PrintHostDevices::QidiSendFacts PrintHostSendDialog::qidi_send_facts() const
     for (const SendPlateFilament& p : m_plate_filaments)
         if (p.used)
             ++f.used_filaments;
-    for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i) {
-        const int sel = m_mapping_choices[i] ? m_mapping_choices[i]->GetSelection() : 0;
-        if (sel <= 0 || sel > (int) m_device_status.slots.size())
+    // Through mapping_choice_positions(), not the wxChoice rows themselves, so a swatch panel that
+    // answers it (the third-party map panel) is read the same way.
+    const std::vector<int> positions = mapping_choice_positions();
+    for (size_t i = 0; i < positions.size() && i < m_mapping_filament.size(); ++i) {
+        const int pos = positions[i];
+        if (pos < 0 || pos >= (int) m_device_status.slots.size())
             continue;
         ++f.mapped_filaments;
         const SendPlateFilament* p = plate_filament(m_mapping_filament[i]);
-        if (!PrintHostDevices::filament_types_match(p ? p->type : std::string(), m_device_status.slots[sel - 1].type))
+        if (!PrintHostDevices::filament_types_match(p ? p->type : std::string(), m_device_status.slots[pos].type))
             ++f.type_mismatches;
     }
     return f;
@@ -719,19 +722,20 @@ wxString PrintHostSendDialog::qidi_mapping_problems(bool& unmapped, bool& mismat
             n += " (" + from_u8(p.type) + ")";
         return n;
     };
+    const std::vector<int> positions = mapping_choice_positions();
     for (const SendPlateFilament& p : m_plate_filaments) {
         if (!p.used)
             continue;
-        int sel = 0;
-        for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i)
-            if (m_mapping_filament[i] == p.index && m_mapping_choices[i])
-                sel = m_mapping_choices[i]->GetSelection();
-        if (sel <= 0 || sel > (int) m_device_status.slots.size()) {
+        int pos = -1;
+        for (size_t i = 0; i < positions.size() && i < m_mapping_filament.size(); ++i)
+            if (m_mapping_filament[i] == p.index)
+                pos = positions[i];
+        if (pos < 0 || pos >= (int) m_device_status.slots.size()) {
             unmapped = true;
             add(format_wxstr(_L("%1%: no QIDI Box slot picked."), filament_name(p)));
             continue;
         }
-        const PrintHostDevices::Slot& s = m_device_status.slots[sel - 1];
+        const PrintHostDevices::Slot& s = m_device_status.slots[pos];
         if (!PrintHostDevices::filament_types_match(p.type, s.type)) {
             mismatched = true;
             add(format_wxstr(_L("%1% goes to %2%, which holds %3%."), filament_name(p), from_u8(s.label()),
@@ -909,7 +913,7 @@ void PrintHostSendDialog::update_mapping_note()
         return;
     wxString text = m_mapping_choices.empty() ? wxString() : mapping_warning();
     // A QIDI Box: say before the click which filament has no slot or a slot of another material.
-    if (!m_mapping_choices.empty() && m_device_status.qidi_box && (!m_qidi_use_box || m_qidi_use_box->GetValue())) {
+    if (!m_mapping_filament.empty() && m_device_status.qidi_box && (!m_qidi_use_box || m_qidi_use_box->GetValue())) {
         bool           unmapped = false, mismatched = false;
         const wxString lines    = qidi_mapping_problems(unmapped, mismatched);
         if (!lines.IsEmpty()) {
