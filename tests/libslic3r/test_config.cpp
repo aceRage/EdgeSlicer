@@ -419,6 +419,60 @@ TEST_CASE("prime_tower_brim_width accepts the -1 auto sentinel shipped by BBL/Qi
     CHECK(config.validate(true).count("prime_tower_brim_width") == 1);
 }
 
+// Bambu Studio writes subnormals such as 1.04632e-311 into flush_volumes_matrix. libc++'s stream fails them (strtod's
+// ERANGE) while MSVC's reads them, so a stream check dropped those projects' settings on macOS only.
+TEST_CASE("Float options read a subnormal on every platform and still reject garbage", "[Config][FloatParse]")
+{
+    const double subnormal = 1.04632e-311;
+    REQUIRE(std::fpclassify(subnormal) == FP_SUBNORMAL);
+
+    SECTION("vectors keep the subnormal's value") {
+        ConfigOptionFloats floats;
+        REQUIRE(floats.deserialize("0, 1.04632e-311, 0.5"));
+        CHECK(floats.values == std::vector<double>{ 0., subnormal, 0.5 });
+
+        ConfigOptionFloatsNullable nullable;
+        REQUIRE(nullable.deserialize("nil,1.04632e-311"));
+        REQUIRE(nullable.values.size() == 2);
+        CHECK(std::isnan(nullable.values[0]));
+        CHECK(nullable.values[1] == subnormal);
+
+        DynamicPrintConfig config;
+        CHECK_NOTHROW(config.set_deserialize_strict("flush_volumes_matrix", "0,1.04632e-311,280,0"));
+        CHECK(config.opt<ConfigOptionFloats>("flush_volumes_matrix")->values == std::vector<double>{ 0., subnormal, 280., 0. });
+    }
+    SECTION("scalars and percents keep it too") {
+        ConfigOptionFloat f;
+        REQUIRE(f.deserialize("1.04632e-311"));
+        CHECK(f.value == subnormal);
+        ConfigOptionPercent p;
+        REQUIRE(p.deserialize("1.04632e-311%"));
+        CHECK(p.value == subnormal);
+        ConfigOptionFloatOrPercent fp;
+        REQUIRE(fp.deserialize("1.04632e-311%"));
+        CHECK(fp.value == subnormal);
+        CHECK(fp.percent);
+    }
+    SECTION("the stream's leading-number reading is kept") {
+        ConfigOptionFloats floats;
+        REQUIRE(floats.deserialize(" +1.5 ,-2e1,250%"));
+        CHECK(floats.values == std::vector<double>{ 1.5, -20., 250. });
+    }
+    SECTION("garbage, infinities and overflow are still rejected") {
+        for (const char *bad : { "zzzz", "1e999", "-1e999", "inf", "nan", "+-1", "+", "%" }) {
+            INFO(bad);
+            ConfigOptionFloats floats;
+            CHECK(! floats.deserialize(bad));
+            ConfigOptionFloat f;
+            CHECK(! f.deserialize(bad));
+        }
+        ConfigOptionFloats floats;
+        CHECK(! floats.deserialize("1,zzzz"));
+        DynamicPrintConfig config;
+        CHECK_THROWS_AS(config.set_deserialize_strict("flush_volumes_matrix", "0,abc"), BadOptionValueException);
+    }
+}
+
 // Orca #13812: the printer tab keeps Wipe on with firmware retraction when the whole retraction is done before
 // the wipe, so the config check that the CLI and the 3MF loader run has to accept that state too.
 TEST_CASE("Firmware retraction allows wipe only with the whole retraction before the wipe", "[Config]")
@@ -1580,4 +1634,129 @@ TEST_CASE("G-code flavor menu lists Repetier and keeps the C++ enum values", "[C
     CHECK(enum_choice_value_at_index(*def, repetier_row) == int(gcfRepetier));
     // Marlin 2 moved down one row but keeps its value.
     CHECK(enum_choice_value_at_index(*def, enum_choice_index_of_value(*def, int(gcfMarlinFirmware))) == int(gcfMarlinFirmware));
+}
+
+// ---- Snapmaker #975: enum options read through the base option and getInt() ----------------------
+//
+// A DynamicConfig can hold an enum as ConfigOptionEnumGeneric (e.g. one cloned from another config
+// or created from its definition without a typed constructor). option<ConfigOptionEnum<T>>() only
+// checks type() == coEnum and then static_casts, so reading ->value from a generic option is UB.
+// min_object_distance, normalize_fdm and normalize_fdm_2 now read enums through getInt(), and the
+// two normalize functions no longer dereference a missing print_sequence.
+
+namespace {
+
+// The generic form of an enum option, with the key map from its definition.
+template<typename T> ConfigOptionEnumGeneric *generic_enum(const char *key, T value)
+{
+    const ConfigOptionDef *def = print_config_def.get(key);
+    REQUIRE(def != nullptr);
+    REQUIRE(def->enum_keys_map != nullptr);
+    return new ConfigOptionEnumGeneric(def->enum_keys_map, int(value));
+}
+
+} // namespace
+
+TEST_CASE("min_object_distance reads generic enum options", "[Config][Regression][EnumGeneric]")
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(40.));
+    cfg.set_key_value("printer_technology", generic_enum("printer_technology", ptFFF));
+
+    cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByObject));
+    CHECK(min_object_distance(cfg) == Approx(40.));
+
+    cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByLayer));
+    CHECK(min_object_distance(cfg) == Approx(6.));
+
+    cfg.set_key_value("printer_technology", generic_enum("printer_technology", ptSLA));
+    CHECK(min_object_distance(cfg) == Approx(6.));
+
+    // An option of the wrong type under the key is not read as an enum.
+    DynamicPrintConfig wrong;
+    wrong.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(40.));
+    wrong.set_key_value("print_sequence", new ConfigOptionString("by object"));
+    CHECK(min_object_distance(wrong) == Approx(0.));
+}
+
+TEST_CASE("normalize_fdm_2 reads generic enum options and tolerates a missing print_sequence", "[Config][Regression][EnumGeneric]")
+{
+    SECTION("by object with two objects turns the prime tower off")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByObject));
+        cfg.set_key_value("timelapse_type", generic_enum("timelapse_type", TimelapseType::tlTraditional));
+        const t_config_option_keys changed = cfg.normalize_fdm_2(2, 2);
+        CHECK_FALSE(cfg.opt_bool("enable_prime_tower"));
+        CHECK(std::find(changed.begin(), changed.end(), "enable_prime_tower") != changed.end());
+    }
+    SECTION("a smooth timelapse keeps the prime tower")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByObject));
+        cfg.set_key_value("timelapse_type", generic_enum("timelapse_type", TimelapseType::tlSmooth));
+        cfg.normalize_fdm_2(2, 2);
+        CHECK(cfg.opt_bool("enable_prime_tower"));
+    }
+    SECTION("no print_sequence at all")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        REQUIRE_NOTHROW(cfg.normalize_fdm_2(2, 2));
+        CHECK(cfg.opt_bool("enable_prime_tower"));
+    }
+}
+
+TEST_CASE("normalize_fdm reads generic enum options and tolerates a missing print_sequence", "[Config][Regression][EnumGeneric]")
+{
+    SECTION("by object turns the prime tower off")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        cfg.set_key_value("print_sequence", generic_enum("print_sequence", PrintSequence::ByObject));
+        cfg.normalize_fdm(2);
+        CHECK_FALSE(cfg.opt_bool("enable_prime_tower"));
+    }
+    SECTION("no print_sequence at all")
+    {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+        REQUIRE_NOTHROW(cfg.normalize_fdm(2));
+        CHECK(cfg.opt_bool("enable_prime_tower"));
+    }
+}
+
+TEST_CASE("Orca's initial_layer_travel_acceleration / _jerk names are not process options; ours are first_layer_travel_*", "[Config][ConfigDefs][Orca11674][Snap937]")
+{
+    // Orca #11674 adds first-layer travel acceleration / jerk as initial_layer_travel_acceleration and
+    // initial_layer_travel_jerk. EdgeSlicer has the same feature as first_layer_travel_acceleration /
+    // first_layer_travel_jerk (Snapmaker #937 + #980, PR #497). Orca's acceleration name is also Bambu
+    // Studio's per-extruder key, carried with values such as 6000 by 74 BBL process presets and one QIDI
+    // preset: declaring it (or aliasing it) would make those presets change their first-layer travels.
+    CHECK(print_config_def.get("initial_layer_travel_acceleration") == nullptr);
+    CHECK(print_config_def.get("initial_layer_travel_jerk") == nullptr);
+    for (const char *key : {"initial_layer_travel_acceleration", "initial_layer_travel_jerk"}) {
+        INFO(key);
+        const std::vector<std::string> &opts = Preset::print_options();
+        CHECK(std::find(opts.begin(), opts.end(), key) == opts.end());
+    }
+    // Orca #11674 / #13320 are reconciled onto these keys: the same feature (float or percent of the travel
+    // acceleration / jerk, in the print options), with EdgeSlicer's default 0 = "keep the initial layer value".
+    const std::pair<const char *, const char *> ours[] = {{"first_layer_travel_acceleration", "travel_acceleration"},
+                                                         {"first_layer_travel_jerk", "travel_jerk"}};
+    for (const auto &[key, ratio_over] : ours) {
+        INFO(key);
+        const ConfigOptionDef *def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->type == coFloatOrPercent);
+        CHECK(def->ratio_over == ratio_over);
+        const std::vector<std::string> &opts = Preset::print_options();
+        CHECK(std::find(opts.begin(), opts.end(), key) != opts.end());
+        const auto *opt = dynamic_cast<const ConfigOptionFloatOrPercent *>(def->default_value.get());
+        REQUIRE(opt != nullptr);
+        CHECK(opt->value == 0.);
+        CHECK_FALSE(opt->percent);
+    }
 }

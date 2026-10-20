@@ -8,6 +8,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include "FlowVariantEdit.hpp"
 #include "Plater.hpp"
 
@@ -119,6 +120,33 @@ void ConfigManipulation::check_nozzle_temperature_initial_layer_range(DynamicPri
     }
 }
 
+
+// Orca #14198: tell the user when the adaptive pressure advance model they typed is not valid.
+// Edge: each value (filament / flow variant) is checked on its own rather than joined into one text.
+void ConfigManipulation::check_adaptive_pressure_advance_model(DynamicPrintConfig* config)
+{
+    if (is_msg_dlg_already_exist || !config->has("adaptive_pressure_advance_model"))
+        return;
+
+    const auto* model = config->option<ConfigOptionStrings>("adaptive_pressure_advance_model");
+    if (model == nullptr || model->values.empty())
+        return;
+
+    std::string error;
+    for (const std::string& value : model->values) {
+        error = AdaptivePAProcessor::validate_adaptive_pa_model(value);
+        if (!error.empty())
+            break;
+    }
+    if (!error.empty()) {
+        wxString msg_text = _L("Adaptive Pressure Advance model validation failed:\n");
+        msg_text += from_u8(error);
+        MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxOK);
+        is_msg_dlg_already_exist = true;
+        dialog.ShowModal();
+        is_msg_dlg_already_exist = false;
+    }
+}
 
 void ConfigManipulation::check_filament_max_volumetric_speed(DynamicPrintConfig *config)
 {
@@ -819,7 +847,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool have_default_acceleration = process_flow_float("default_acceleration", 0) > 0;
 
     for (auto el : {"outer_wall_acceleration", "inner_wall_acceleration", "initial_layer_acceleration",
-        "top_surface_acceleration", "travel_acceleration", "bridge_acceleration", "sparse_infill_acceleration", "internal_solid_infill_acceleration"})
+        "first_layer_travel_acceleration", "top_surface_acceleration", "travel_acceleration", "bridge_acceleration", "sparse_infill_acceleration", "internal_solid_infill_acceleration"})
         toggle_field(el, have_default_acceleration);
 
     // Marlin 2 plans with the junction deviation once the printer's machine value is above zero: the
@@ -837,7 +865,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     const std::initializer_list<const char*> jerk_options = {
         "outer_wall_jerk", "inner_wall_jerk", "initial_layer_jerk",
-        "top_surface_jerk", "travel_jerk", "infill_jerk"
+        "first_layer_travel_jerk", "top_surface_jerk", "travel_jerk", "infill_jerk"
     };
 
     if (junction_deviation_enabled) {
@@ -875,8 +903,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("brim_ears_max_angle", have_brim_ear);
     toggle_line("brim_ears_detection_length", have_brim_ear);
 
-    // Hide Elephant foot compensation layers if elefant_foot_compensation is not enabled
-    toggle_line("elefant_foot_compensation_layers", config->opt_float("elefant_foot_compensation") > 0);
+    // Hide Elephant foot compensation layers if neither elefant_foot_compensation nor the
+    // elephant foot layers density (Orca #11526) is in use.
+    const auto *opt_elefant_density = config->option<ConfigOptionPercent>("elefant_foot_layers_density");
+    toggle_line("elefant_foot_compensation_layers", config->opt_float("elefant_foot_compensation") > 0 ||
+                (opt_elefant_density != nullptr && opt_elefant_density->get_abs_value(1.0) < 1.0));
 
     bool have_raft = config->opt_int("raft_layers") > 0;
     bool have_support_material = config->opt_bool("enable_support") || have_raft;
@@ -1078,6 +1109,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("prime_tower_width", have_prime_tower && wipe_tower_wall_type != WipeTowerWallType::wtwRib);
 
     toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && !is_BBL_Printer);
+    toggle_line("wipe_tower_stagger_toolchange_start", have_prime_tower && !is_BBL_Printer);
 
     bool use_cyclic_ordering = config->has("toolchange_ordering") &&
         config->opt_enum<ToolChangeOrderingType>("toolchange_ordering") == ToolChangeOrderingType::Cyclic;

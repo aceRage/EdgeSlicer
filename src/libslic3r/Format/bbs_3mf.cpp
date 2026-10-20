@@ -32,6 +32,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <boost/system/errc.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/nowide/cstdio.hpp>
@@ -758,6 +759,45 @@ static std::vector<int> parse_int_list(const std::string& value)
     return out;
 }
 
+// The 1-based filament -> extruder map a plate's metadata reports, as slice_info.config writes it:
+// the map the plate was sliced with (PlateData::filament_maps, empty for an unsliced plate), else
+// the project's filament_map; on a machine with identical independent toolheads an all-1s map
+// becomes the real per-toolhead assignment (see identity_filament_map); padded with 1 to the
+// filament count, with every entry at least 1. model_settings.config writes the same map for a
+// plate that is not hand-grouped, so the files a reader (Bambu Connect, the printer) cross-checks
+// agree. Reported metadata only: the live config, routing and the G-code are untouched.
+static std::vector<int> reported_filament_maps(const PlateData& plate_data, const DynamicPrintConfig& config)
+{
+    std::vector<int> filament_maps = plate_data.filament_maps;
+    if (filament_maps.empty()) {
+        if (auto* opt = config.option<ConfigOptionInts>("filament_map"))
+            filament_maps = opt->values;
+    }
+
+    size_t filaments_count = 0;
+    if (auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour")))
+        filaments_count = colours->values.size();
+
+    // A machine with several identical independent toolheads (Snapmaker U1, Flashforge
+    // Creator 5) never goes through ToolOrdering's grouping engine - that path is gated on
+    // distinct extruder variants - so filament_map is left at its preset default of all-1s
+    // while the G-code drives T0..T3. Bambu-derived firmware reads this map to resolve a
+    // filament to a physical nozzle, so report the assignment the machine actually prints with.
+    const std::vector<int> identity = identity_filament_map(config, filaments_count);
+    if (!identity.empty()) {
+        const bool map_is_trivial = filament_maps.empty() ||
+                                    std::all_of(filament_maps.begin(), filament_maps.end(), [](int v) { return v <= 1; });
+        if (map_is_trivial)
+            filament_maps = identity;
+    }
+
+    if (filament_maps.size() < filaments_count)
+        filament_maps.resize(filaments_count, 1);
+    for (int& v : filament_maps)
+        if (v < 1) v = 1;
+    return filament_maps;
+}
+
 static std::string join_int_list_comma(const std::vector<int>& values)
 {
     std::stringstream stream;
@@ -1338,6 +1378,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         // Image Fill (Phase 2): one Metadata/image_fill/<sha256>.png into Model::image_assets.
         void _extract_image_fill_asset_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
+        // Showcase tab: Metadata/showcase/scenes.json and the images it names, into Model::showcase.
+        void _extract_showcase_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
 
         void _extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, const std::string& archive_filename);
         //BBS: add project config file logic
@@ -2152,6 +2194,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // dropped rather than trusted - the annotation then simply finds no image.
                     if (!boost::algorithm::iequals(name, IMAGE_FILL_MANIFEST_FILE))
                         _extract_image_fill_asset_from_archive(archive, stat, model);
+                }
+                else if (boost::algorithm::istarts_with(name, Showcase::ARCHIVE_DIR)) {
+                    // Showcase scenes and their images. Before the generic Metadata/*.png branch
+                    // below, which would otherwise take a backdrop picture for a plate thumbnail.
+                    _extract_showcase_from_archive(archive, stat, model);
                 }
                 else if (boost::algorithm::istarts_with(name, AUXILIARY_DIR)) {
                     // extract auxiliary directory to temp directory, do nothing for restore
@@ -3343,6 +3390,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 add_error("Error load config from json:"+reason);
                 return;
             }
+            // Edge (Orca #11582): a Bambu Lab project from before the option keeps its M1003.
+            if (upgrade_missing_power_loss_recovery(config))
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": project has no enable_power_loss_recovery; Bambu Lab printer, set to enable";
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", load project config file successfully from %1%\n") %dest_file;
         }
     }
@@ -3411,6 +3461,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //skip this file
                 return;
             }
+
+            // Edge (Orca #11582): the same for an embedded printer preset from before the option.
+            if (type == Preset::TYPE_PRINTER)
+                upgrade_missing_power_loss_recovery(config);
 
             Preset *preset = new Preset(type, preset_name, false);
             preset->file = dest_file;
@@ -3992,6 +4046,47 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         if (!expect.empty() && !boost::iequals(expect, stored))
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": image fill asset " << stat.m_filename
                                        << " does not match its own hash (" << stored << ")";
+    }
+
+    void _BBS_3MF_Importer::_extract_showcase_from_archive(::mz_zip_archive &archive, const mz_zip_archive_file_stat &stat, Model &model)
+    {
+        // Never fatal: a damaged or unknown file just means the project opens without its scenes.
+        if (stat.m_uncomp_size == 0 || stat.m_uncomp_size > 64ull * 1024ull * 1024ull) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase entry " << stat.m_filename << " has an implausible size, skipped";
+            return;
+        }
+        std::vector<uint8_t> bytes(size_t(stat.m_uncomp_size));
+        if (!mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, bytes.data(), bytes.size(), 0)) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not read showcase entry " << stat.m_filename;
+            return;
+        }
+        const std::string name = stat.m_filename;
+        if (boost::algorithm::iequals(name, Showcase::ARCHIVE_SCENES)) {
+            Showcase::Project loaded;
+            std::string       error;
+            if (!Showcase::scenes_from_json(std::string(bytes.begin(), bytes.end()), loaded, &error)) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << error << "; the project opens without showcase scenes";
+                return;
+            }
+            if (loaded.read_only())
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase scenes use schema " << loaded.schema
+                                           << ", newer than this build's " << Showcase::SCHEMA_VERSION << "; kept read-only";
+            // Images read before the scenes file (archive order) stay.
+            loaded.images  = std::move(model.showcase.images);
+            model.showcase = std::move(loaded);
+            return;
+        }
+        std::string sha, ext;
+        if (!Showcase::parse_image_archive_path(name, sha, ext)) {
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": unknown showcase entry " << name << " ignored";
+            return;
+        }
+        // The file name is the content hash; a file whose bytes do not match it is dropped.
+        if (image_fill_sha256_hex(bytes) != sha) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase image " << name << " does not match its own hash, dropped";
+            return;
+        }
+        model.showcase.add_image(std::move(bytes), ext);
     }
 
     void _BBS_3MF_Importer::_extract_custom_gcode_per_print_z_from_archive(::mz_zip_archive &archive, const mz_zip_archive_file_stat &stat)
@@ -6817,6 +6912,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // per distinct pre-cut mesh. The mesh is written ONCE however many objects refer to it,
         // which is what keeps the two halves of one cut to a single copy.
         bool _add_cut_recipe_file_to_archive(mz_zip_archive &archive, Model &model);
+        // Showcase tab: "Metadata/showcase/scenes.json" plus the images the scenes use.
+        bool _add_showcase_to_archive(mz_zip_archive &archive, const Model &model);
         bool _add_slice_info_config_file_to_archive(mz_zip_archive &archive, const Model &model, PlateDataPtrs &plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config);
         // Ultra (H2C 3MF schema): "Metadata/filament_sequence.json" (filament / nozzle entry order).
         bool _add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list);
@@ -7097,7 +7194,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     }
 
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(",add no light thumbnail %1%'s data into 3mf") % (index + 1);
-                    thumbnail_status[index] = true;
+                    no_light_thumbnail_status[index] = true;
                 }
             }
             // Adds the file Metadata/top_i.png and Metadata/pick_i.png
@@ -7377,6 +7474,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // that carry one, so a project with no editable cut gains nothing at all.
         if (!_add_cut_recipe_file_to_archive(archive, model)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_cut_recipe_file_to_archive failed\n");
+            return false;
+        }
+
+        // Showcase scenes (D9): project saves and backups only. Not in "Export Bambu 3MF" (a file
+        // for another slicer) and not in a sliced-plate file (sent to a printer).
+        if (!m_bambu_compat && !m_skip_model && (!m_save_gcode || m_from_backup_save) && !_add_showcase_to_archive(archive, model)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << ", _add_showcase_to_archive failed";
             return false;
         }
 
@@ -8792,9 +8896,29 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             return true;
         }
+        // A sliced-plate file (.gcode.3mf: Send to Bambu Connect, export plate sliced file, send to a
+        // printer) carries filament_map as long as filament_colour / filament_type / filament_ids,
+        // one entry per filament, as Bambu Studio always writes it. This fork leaves filament_map at
+        // its one-entry default on a single-nozzle machine (X1C, P1S, A1...), and a reader that indexes
+        // the per-filament arrays together - Bambu Connect builds its filament / AMS list from them -
+        // found no map entry for filament 2 and on. A missing entry means extruder 1 everywhere in
+        // this fork, so the padding changes nothing for the slicer itself. Project saves are written
+        // as they are, so a saved project reloads and re-slices exactly as before.
+        const DynamicPrintConfig* to_write = &config;
+        DynamicPrintConfig        aligned;
+        if (m_save_gcode) {
+            const auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour"));
+            const auto* map     = config.option<ConfigOptionInts>("filament_map");
+            if (colours != nullptr && map != nullptr && map->values.size() < colours->values.size()) {
+                aligned = config;
+                aligned.option<ConfigOptionInts>("filament_map")->values.resize(colours->values.size(), 1);
+                to_write = &aligned;
+            }
+        }
+
         const std::string& temp_path = model.get_backup_path();
         std::string temp_file = temp_path + std::string("/") + "_temp_1.config";
-        if (!config.save_to_json(temp_file, std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION))) {
+        if (!to_write->save_to_json(temp_file, std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION))) {
             add_error("Unable to write project config file");
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << " failed to write " << temp_file;
             return false;
@@ -9166,11 +9290,29 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 // Ultra (Phase 8): write the real per-filament nozzle map (1-based) when present, so a saved
                 // project keeps the dual-nozzle grouping. Falls back to 1 (single nozzle) per filament when
                 // filament_map is absent/short (classic machines, or not yet grouped).
-                const auto* fmap_opt = plate_manual ? plate_map_opt : dynamic_cast<const ConfigOptionInts*>(config.option("filament_map"));
-                for (int i = 0; i < filaments_count; ++i) {
-                    int v = (fmap_opt && i < (int)fmap_opt->values.size() && fmap_opt->values[i] >= 1) ? fmap_opt->values[i] : 1;
-                    stream << v;
-                    if (i != (filaments_count - 1))
+                // A hand-grouped plate writes its own explicit map. Every other plate writes the map
+                // slice_info.config reports for it (reported_filament_maps): for a sliced plate the
+                // map it was sliced with, otherwise the project's map - with the identical-toolhead
+                // substitution on a Snapmaker U1 / Flashforge Creator 5. This file used to write the
+                // project-level map for every plate, so a sliced plate's two metadata files could
+                // disagree: an all-1s map on a U1, or on a dual-nozzle Bambu (H2D/H2C) the map of
+                // whichever plate was sliced last ("send all plates", the CLI) - and Bambu Connect
+                // reads the per-plate map here. Reported metadata only: the live config is untouched,
+                // and the loader ignores this map for a plate that is not "Manual".
+                std::vector<int> filament_map;
+                if (plate_manual) {
+                    filament_map.reserve(filaments_count);
+                    for (int i = 0; i < (int)filaments_count; ++i)
+                        filament_map.push_back(
+                            (i < (int)plate_map_opt->values.size() && plate_map_opt->values[i] >= 1) ? plate_map_opt->values[i] : 1);
+                } else {
+                    filament_map = reported_filament_maps(*plate_data, config);
+                    filament_map.resize(filaments_count, 1);
+                }
+
+                for (int i = 0; i < (int)filaments_count; ++i) {
+                    stream << filament_map[i];
+                    if (i != (int)(filaments_count - 1))
                         stream << " ";
                 }
                 stream << "\"/>\n";
@@ -9316,6 +9458,40 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
     // COMPATIBILITY. Neither the recipe nor the blobs are referenced from the main
     // <resources> model, so a slicer that knows nothing about them loads the two halves and
     // ignores these entries - the same contract Metadata/cut_information.xml keeps.
+    bool _BBS_3MF_Exporter::_add_showcase_to_archive(mz_zip_archive &archive, const Model &model)
+    {
+        const Showcase::Project &project = model.showcase;
+        if (project.empty() && !project.read_only())
+            return true;
+        const std::string text = Showcase::scenes_to_json(project);
+        if (!mz_zip_writer_add_mem(&archive, Showcase::ARCHIVE_SCENES, (const void *) text.data(), text.size(), MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add the showcase scenes to archive");
+            return false;
+        }
+        // A read-only (newer schema) project keeps every image it came with: this build cannot tell
+        // which ones its scenes use.
+        std::vector<std::string> images = project.used_images();
+        if (project.read_only()) {
+            images.clear();
+            for (const auto &it : project.images)
+                images.push_back(it.first);
+        }
+        for (const std::string &sha : images) {
+            const Showcase::ImageBlob *blob = project.find_image(sha);
+            if (blob == nullptr) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase image " << sha << " is referenced but not present; not written";
+                continue;
+            }
+            const std::string path = Showcase::image_archive_path(sha, blob->ext);
+            // Stored, not deflated: the payload is already compressed (PNG / JPEG).
+            if (!mz_zip_writer_add_mem(&archive, path.c_str(), (const void *) blob->bytes.data(), blob->bytes.size(), MZ_NO_COMPRESSION)) {
+                add_error("Unable to add a showcase image to archive");
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool _BBS_3MF_Exporter::_add_cut_recipe_file_to_archive(mz_zip_archive &archive, Model &model)
     {
         pt::ptree tree;
@@ -9656,39 +9832,8 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
 
                 // filament -> extruder map, 1 based. BBS always carries a full-length filament_map;
                 // this fork leaves it short on classic single-nozzle machines, so pad with 1 there.
-                std::vector<int> filament_maps = plate_data->filament_maps;
-                if (filament_maps.empty()) {
-                    if (auto* opt = config.option<ConfigOptionInts>("filament_map"))
-                        filament_maps = opt->values;
-                }
-                {
-                    size_t filaments_count = 0;
-                    if (auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour")))
-                        filaments_count = colours->values.size();
-
-                    // A machine with several identical independent toolheads (Snapmaker U1,
-                    // Flashforge Creator 5) never goes through ToolOrdering's grouping engine -
-                    // that path is gated on distinct extruder variants - so filament_map is left
-                    // at its preset default of all-1s and this file used to claim every filament
-                    // sat in toolhead 1 while the G-code drove T0..T3. Bambu-derived firmware
-                    // reads this map to resolve a filament to a physical nozzle, so report the
-                    // assignment the machine actually prints with. Reported metadata only: the
-                    // live config is untouched, so routing, flush volumes and the emitted G-code
-                    // are unchanged (see identity_filament_map's comment).
-                    const std::vector<int> identity = identity_filament_map(config, filaments_count);
-                    if (!identity.empty()) {
-                        const bool map_is_trivial = filament_maps.empty() ||
-                                                    std::all_of(filament_maps.begin(), filament_maps.end(),
-                                                                [](int v) { return v <= 1; });
-                        if (map_is_trivial)
-                            filament_maps = identity;
-                    }
-
-                    if (filament_maps.size() < filaments_count)
-                        filament_maps.resize(filaments_count, 1);
-                    for (int& v : filament_maps)
-                        if (v < 1) v = 1;
-                }
+                // model_settings.config writes the same map (reported_filament_maps).
+                const std::vector<int> filament_maps = reported_filament_maps(*plate_data, config);
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
                 add_vector<int>(stream, filament_maps);
                 stream << "\"/>\n";
@@ -10669,10 +10814,14 @@ bool has_restore_data(std::string & path, std::string& origin)
         origin = "<lock>";
         return false;
     }
-    if (boost::filesystem::exists(path + "/lock.txt")) {
+    // The caller (Plater EVT_RESTORE_PROJECT) removes this directory unless origin is
+    // "<lock>", so every way of failing to establish the backup's state has to claim
+    // the lock instead (Orca #16431). Edge PR #475 is a different backup-thread race.
+    boost::system::error_code ec;
+    if (boost::filesystem::exists(path + "/lock.txt", ec)) {
         std::string pid;
-        load_string_file(path + "/lock.txt", pid);
         try {
+            load_string_file(path + "/lock.txt", pid);
             if (get_process_name(boost::lexical_cast<int>(pid)) ==
                 get_process_name(0)) {
                 origin = "<lock>";
@@ -10680,12 +10829,23 @@ bool has_restore_data(std::string & path, std::string& origin)
             }
         }
         catch (...) {
+            origin = "<lock>";
             return false;
         }
+    } else if (ec && ec != boost::system::errc::no_such_file_or_directory &&
+               ec != boost::system::errc::not_a_directory) {
+        origin = "<lock>";
+        return false;
     }
     std::string file3mf = path + "/.3mf";
-    if (!boost::filesystem::exists(file3mf))
+    if (!boost::filesystem::exists(file3mf, ec)) {
+        // A .3mf that is simply absent is a spent backup and stays collectable. A
+        // probe that could not look must not be: only a different error means unknown.
+        if (ec && ec != boost::system::errc::no_such_file_or_directory &&
+            ec != boost::system::errc::not_a_directory)
+            origin = "<lock>";
         return false;
+    }
     try {
         if (boost::filesystem::exists(path + "/origin.txt"))
             load_string_file(path + "/origin.txt", origin);

@@ -3141,3 +3141,180 @@ TEST_CASE("Importing a preset JSON whose name climbs out of the preset directory
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+// ---- Bambu 7930283f2: bounded 3MF / AMF importer error formatting -------------------------------
+//
+// The PrusaSlicer 3MF importer and the zipped AMF importer formatted their XML parse errors with
+// ::sprintf into 1024-byte stack buffers, with the archive entry name and the parser's message as
+// %s arguments. They now use snprintf. A malformed entry with a long name must fail to load
+// cleanly (the message is truncated, never written past the buffer).
+
+namespace {
+
+// An archive entry name close to miniz's 512-byte limit.
+std::string long_entry_name(const std::string &prefix, const std::string &suffix)
+{
+    return prefix + std::string(480 - prefix.size() - suffix.size(), 'a') + suffix;
+}
+
+// The importers report a malformed entry either by returning false or by throwing the formatted
+// message (FileIOError, as Plater shows it). Either is a clean failure; the message fits the buffer.
+// load() runs outside the Catch macros: they would catch the exception themselves.
+template<typename Load> void check_load_fails_cleanly(Load load)
+{
+    bool        loaded = true;
+    bool        threw  = false;
+    std::string message;
+    try {
+        loaded = load();
+    } catch (const std::exception &e) {
+        threw   = true;
+        message = e.what();
+    }
+    INFO(message);
+    if (threw) {
+        CHECK_FALSE(message.empty());
+        CHECK(message.size() < 1024);
+    } else {
+        CHECK_FALSE(loaded);
+    }
+}
+
+} // namespace
+
+TEST_CASE("A malformed 3MF model entry with a long name fails to load cleanly", "[3mf][untrusted]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "malformed_long_name.3mf";
+
+    SECTION("model XML (streamed parser)")
+    {
+        write_zip_entries(path, { { long_entry_name("3D/", ".model"), "<model unit=\"millimeter\"><resources><object" } });
+    }
+    SECTION("config XML (buffered parser)")
+    {
+        write_zip_entries(path, { { "3D/3dmodel.model", "<model unit=\"millimeter\"><resources/><build/></model>" },
+                                  { "Metadata/Slic3r_PE_model.config", "<config><object id=\"1\"" } });
+    }
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    check_load_fails_cleanly([&] { return load_3mf(path.string().c_str(), config, ctxt, &model, false); });
+}
+
+TEST_CASE("A malformed zipped AMF entry with a long name fails to load cleanly", "[amf][untrusted]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "malformed_long_name.zip.amf";
+    write_zip_entries(path, { { long_entry_name("", ".amf"), "<?xml version=\"1.0\"?><amf unit=\"millimeter\"><object id=\"0\"><mesh" } });
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    bool                      use_inches = false;
+    check_load_fails_cleanly([&] { return load_amf(path.string().c_str(), &config, &ctxt, &model, &use_inches); });
+}
+
+// ---- Bambu 04de87fc2: OBJ UV indices near the int limits ----------------------------------------
+//
+// Upstream rejects such a file because its get_uv() bound check, (uv_idx + 1) * 2, overflowed for an
+// index near 2^30. This tree already bounds the index against the pair count before multiplying and
+// rebases negative indices by pairs (4338b78266, Orca #15948 OBJ part); it keeps loading the face and
+// falls back to (0,0), as the cases above pin. These cover the overflow-sized indices themselves.
+TEST_CASE("A vt index at the int limits loads and the UV falls back to (0,0)", "[obj][untrusted]")
+{
+    for (const char *face : { "f 1/1073741824 3/1 2/1", "f 1/1073741825 3/1 2/1", "f 1/2147483647 3/1 2/1", "f 1/-2147483647 3/1 2/1",
+                              "f 1/-3 3/1 2/1" }) {
+        INFO(face);
+        const LoadedObj loaded = load_textured_tetrahedron(face);
+        REQUIRE(loaded.ok);
+        CHECK(loaded.mesh.facets_count() == 4);
+        REQUIRE(loaded.info.uvs.size() == 4);
+        check_uv(loaded.info.uvs.front()[0], 0.f, 0.f);
+        check_uv(loaded.info.uvs.front()[1], 0.25f, 0.5f);
+    }
+}
+
+// ---- Bambu 0067891f2: 3MF auxiliary entries spelled with fullwidth dots and slashes ---------------
+//
+// Upstream narrows the name with encode_path() (WideCharToMultiByte with best-fit), where U+FF0E and
+// U+FF0F become '.' and '/', so "Auxiliaries/．．／evil" became "../evil" only at fopen() time.
+// This tree refuses such look-alikes in normalize_archive_entry_path() before extraction and writes
+// through the wide API (extract_entry_to_file), so the BBS reader never narrows the name. This pins
+// it end to end through the reader.
+TEST_CASE("3MF auxiliary entries spelled with fullwidth dots and slashes are not extracted", "[Untrusted][ZipSlip][3mf]")
+{
+    Scratch        scratch;
+    const fs::path path = scratch.root / "fullwidth_aux.3mf";
+    {
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->name        = "cube";
+        object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+        object->add_instance();
+        object->ensure_on_bed();
+        DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+        PlateData          plate;
+        plate.plate_index = 0;
+        const std::string path_str = path.string();
+        StoreParams       sp;
+        sp.path            = path_str.c_str();
+        sp.model           = &model;
+        sp.config          = &cfg;
+        sp.plate_data_list = { &plate };
+        sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+        REQUIRE(store_bbs_3mf(sp));
+    }
+
+    // Re-pack the project with three auxiliary entries.
+    std::vector<std::pair<std::string, std::string>> entries;
+    {
+        mz_zip_archive zip;
+        mz_zip_zero_struct(&zip);
+        REQUIRE(open_zip_reader(&zip, path.string()));
+        const mz_uint n = mz_zip_reader_get_num_files(&zip);
+        for (mz_uint i = 0; i < n; ++i) {
+            mz_zip_archive_file_stat st;
+            REQUIRE(mz_zip_reader_file_stat(&zip, i, &st));
+            std::string data;
+            if (st.m_uncomp_size > 0) {
+                size_t size = 0;
+                void  *mem  = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
+                REQUIRE(mem != nullptr);
+                data.assign(static_cast<const char *>(mem), size);
+                mz_free(mem);
+            }
+            entries.emplace_back(st.m_filename, std::move(data));
+        }
+        close_zip_reader(&zip);
+    }
+    const std::string fullwidth_up = "\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\x8F"; // U+FF0E U+FF0E U+FF0F, best-fit "../"
+    entries.emplace_back("Auxiliaries/Other Files/edge_fw_ok.txt", "ok");
+    entries.emplace_back("Auxiliaries/" + fullwidth_up + fullwidth_up + "edge_fw_escape_a.txt", "escape");
+    entries.emplace_back("Auxiliaries/Other Files/" + fullwidth_up + fullwidth_up + fullwidth_up + "edge_fw_escape_b.txt", "escape");
+    write_zip_entries(path, entries);
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs             plates;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    bool                      loaded     = false;
+    REQUIRE_NOTHROW(loaded = load_bbs_3mf(path.string().c_str(), &config, &ctxt, &model, &plates, &project_presets, &is_bbl_3mf,
+                                         &file_version, nullptr,
+                                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary |
+                                             LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    release_PlateData_list(plates);
+    for (Preset *p : project_presets)
+        delete p;
+    REQUIRE(loaded);
+
+    // The ordinary attachment is extracted; neither look-alike entry is written anywhere.
+    const fs::path aux(model.get_auxiliary_file_temp_path());
+    CHECK(fs::exists(aux / "Other Files" / "edge_fw_ok.txt"));
+    for (fs::recursive_directory_iterator it(scratch.root), end; it != end; ++it)
+        CHECK(it->path().filename().wstring().find(L"edge_fw_escape") == std::wstring::npos); // wide: no narrowing
+}

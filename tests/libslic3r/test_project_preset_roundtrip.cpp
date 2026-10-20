@@ -500,3 +500,31 @@ TEST_CASE("Unticking Use-for-every-printer gives a project preset its parent's p
     bundle->prints.set_project_preset_printers(user, ProjectPresetPrinters::EveryPrinter);
     CHECK_FALSE(Preset::fits_every_printer(user.config));
 }
+
+// Snapmaker #996: a 3MF pads filament_settings_id to the machine's slot count with empty names
+// (e.g. a dual-head Bambu project using two of four slots). validate_presets() took each empty
+// name for a preset that inherits from nothing and reported the project as using customized
+// presets. An empty name is an unused slot and is skipped; a real non-system name still counts.
+TEST_CASE("validate_presets skips the empty names of padded filament slots", "[Preset][Bundle][Regression]")
+{
+    PresetBundle      bundle;
+    const std::string printer  = bundle.printers.default_preset().name;
+    const std::string filament = bundle.filaments.default_preset().name;
+    REQUIRE_FALSE(printer.empty());
+    REQUIRE_FALSE(filament.empty());
+
+    DynamicPrintConfig config;
+    config.set_key_value("printer_settings_id", new ConfigOptionString(printer));
+    config.set_key_value("filament_diameter", new ConfigOptionFloats({ 1.75, 1.75, 1.75, 1.75 }));
+
+    config.set_key_value("filament_settings_id", new ConfigOptionStrings({ filament, filament, "", "" }));
+    std::set<std::string> different;
+    CHECK(bundle.validate_presets("padded.3mf", config, different) == VALIDATE_PRESETS_SUCCESS);
+    CHECK(different.empty());
+
+    // Control: a named filament that is neither a system nor a default preset is still reported.
+    config.set_key_value("filament_settings_id", new ConfigOptionStrings({ filament, "Edge Test Custom PLA", "", "" }));
+    different.clear();
+    CHECK(bundle.validate_presets("padded.3mf", config, different) == VALIDATE_PRESETS_FILAMENTS_NOT_FOUND);
+    CHECK(different == std::set<std::string>{ "Edge Test Custom PLA" });
+}

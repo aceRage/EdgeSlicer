@@ -2,6 +2,7 @@
 #define slic3r_DeviceManager_hpp_
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -20,9 +21,11 @@
 #include "LanReconnectLadder.hpp"
 #include "FirstRequestGate.hpp"
 #include "SsdpConnectType.hpp"
+#include "BindListRefresh.hpp"
 #include "AmsDrying.hpp"
 #include "PrintErrorCommands.hpp"
 #include "BambuFans.hpp"
+#include "NozzleInfo.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
 #define USE_LOCAL_SOCKET_BIND 0
@@ -186,7 +189,7 @@ struct NozzleData
 
 struct Extder
 {
-    int id; // 0-right 1-left
+    int id{0}; // 0-right 1-left (initialised: the default extruder pushed when none is reported is the main one)
 
     int ext_has_filament{0};
     int buffer_has_filament{0};
@@ -209,7 +212,9 @@ struct Extder
 
     //current nozzle
     NozzleType     current_nozzle_type{NozzleType::ntUndefine};            // 0-hardened_steel 1-stainless_steel
-    float current_nozzle_diameter = {0.4f}; // 0-0.2mm  1-0.4mm 2-0.6 mm3-0.8mm
+    // 0 = unknown until the printer reports it (Orca #12814; NozzleInfo.hpp). Was 0.4, which made a
+    // printer that never reports its nozzle look like a 0.4 mm one.
+    float current_nozzle_diameter = {0.0f};
     // Ultra: reported nozzle flow variant (nvtStandard=Standard, nvtBigTraffic=High Flow),
     // used to auto-match the sliced nozzle_volume_type to the installed nozzle.
     NozzleVolumeType current_nozzle_flow{NozzleVolumeType::nvtStandard};
@@ -530,6 +535,9 @@ public:
     /* properties */
     std::string dev_name;
     std::string dev_ip;
+    // The address the printer reports in push_status net.info. Only the camera falls back to it
+    // while dev_ip is empty (no SSDP announcement got through); see BambuNetInfo.hpp.
+    std::string net_reported_ip;
     std::string dev_id;
     bool        local_use_ssl_for_mqtt { true };
     bool        local_use_ssl_for_ftp { true };
@@ -1013,6 +1021,7 @@ public:
     bool is_support_auto_recovery_step_loss{false};
     bool is_support_ams_humidity {false};
     bool is_support_remote_dry {false}; // fun2 bit 5: "ams_filament_drying" is accepted
+    bool is_support_print_with_emmc {false}; // fun2 bit 0: the printer can print from its internal storage
     bool is_support_prompt_sound{false};
     bool is_support_filament_tangle_detect{false};
     bool is_support_1080dpi {false};
@@ -1067,6 +1076,22 @@ public:
     // and Developer Mode are not both on. Written on the GUI thread, read by the send jobs, which
     // compare it before and after a send (BambuSendDiagnosis).
     std::atomic<int> project_file_refusals { 0 };
+
+    // Secured mode (Developer Mode off). Bambu firmware with Authorization Control rejects every
+    // control command that is not signed by Bambu, and EdgeSlicer never signs. The push_status
+    // field print.fun carries the mode in bit 29 (clear: Developer Mode, set: secured). Unknown
+    // until the first report that carries "fun"; unknown is never treated as secured. When no report
+    // has carried the bit, a printer's own "mqtt message verify failed" answer stands in for it.
+    bool is_secured_mode() const;
+    void update_secured_mode_from_fun(const std::string& fun);
+    // A reply to a command was the printer refusing it as unsigned (err_code 84033543..84033548 /
+    // "mqtt message verify failed"). Shows the Developer Mode message once per printer per session.
+    void note_unsigned_refusal(const std::string& command, int err_code);
+    // For commands the host fires on its own: true when the printer is secured and the command must
+    // not be sent (logged once per command per printer, no message to the user).
+    bool skip_auto_command_if_secured(const char* what) const;
+    // Tells the user why a user-initiated command was not sent (rate limited per printer).
+    void show_secured_mode_message(bool once_per_session);
     BBLSliceInfo* slice_info {nullptr};
     boost::thread* get_slice_info_thread { nullptr };
     boost::thread* get_model_task_thread { nullptr };
@@ -1317,7 +1342,28 @@ public:
     bool check_enable_np(const json& print) const;
     void parse_new_info(json print);
     bool is_nozzle_data_invalid();
+    // The diameter of the nozzle on extruder extder_id (0 = main/right, 1 = deputy/left); 0 when
+    // the printer has not reported it (Orca #12814).
+    float nozzle_diameter(int extder_id) const
+    {
+        for (const Extder& e : m_extder_data.extders)
+            if (e.id == extder_id)
+                return e.current_nozzle_diameter;
+        return 0.f;
+    }
+    // Orca #13330 (DevExtderSystem::NozzleDiameterMatchesOrUnknown): true when the nozzle on
+    // extder_id has target_diameter, or when the printer has not reported its diameter.
+    bool nozzle_diameter_matches_or_unknown(int extder_id, float target_diameter) const
+    {
+        return GUI::NozzleInfo::diameter_matches_or_unknown(nozzle_diameter(extder_id), target_diameter);
+    }
+    // Orca #13255: the diameter to look filament and calibration presets up by - the reported one,
+    // or the selected printer preset's first nozzle while the printer has not reported it (a "0.0"
+    // lookup finds nothing and empties the filament lists).
+    float nozzle_diameter_or_preset(int extder_id) const;
     int  get_flag_bits(std::string str, int start, int count = 1) const;
+    std::atomic<int>  m_secured_state { 0 };        // 0 unknown, 1 Developer Mode, 2 secured (print.fun bit 29)
+    std::atomic<bool> m_unsigned_refused { false }; // the printer refused an unsigned command (used while the bit is unknown)
     int get_flag_bits(int num, int start, int count = 1, int base = 10) const;
 
     /* Device Filament Check */
@@ -1472,6 +1518,18 @@ public:
                                  const std::string& announced_bind, bool saved_lan, bool has_access_code, long long now_ms);
     std::map<std::string, std::string>                     m_ssdp_outcome_logged; // "<dev_id>|<list>" -> last line
     std::map<std::string, SsdpConnectType::LanMemory>      m_ssdp_lan_memory;     // dev_id -> what it announced lately
+    // Bind-list refresh (BindListRefresh.hpp): the gate that rate-limits and debounces it, and each
+    // local printer's last state after the SSDP rules, to see a change in.
+    BindListRefresh::Gate                                  m_bind_refresh;
+    std::map<std::string, BindListRefresh::PrinterState>   m_ssdp_state;
+    class RefreshTimer;                                    // wxTimer with a callback (the .cpp)
+    RefreshTimer*                                          m_auto_refresh_timer { nullptr };
+    RefreshTimer*                                          m_probe_timer { nullptr };
+    std::shared_ptr<int>                                   m_refresh_token { std::make_shared<int>(0) };
+    // Fetch the account's bind list off the GUI thread, parse it on the GUI thread, then `done`.
+    void fetch_bind_list_async(std::function<void()> done);
+    void arm_auto_refresh();
+    void set_probe_sending(bool sending);
     static long long                                       ssdp_now_ms();
     // The printer announced "lan" within SsdpConnectType::LAN_MEMORY_MS.
     bool lan_announced_recently(const std::string& dev_id) const;
@@ -1480,6 +1538,20 @@ public:
     // bind; if a run of non-"lan" announcements had already switched it, it is made "lan" again
     // here so the access code can be entered. Logs the decision (never the access code).
     SsdpConnectType::PickerOffer picker_offer_for(MachineObject* obj, const char* panel_list);
+
+    // "Refresh printers" (the Device tab's printer picker, the send dialogs): re-read SSDP
+    // discovery (an active search for a few seconds, then back to listening) and, when signed in,
+    // fetch the account's bind list again - without signing out. Rate-limited
+    // (BindListRefresh::Gate). `done`, if given, runs on the GUI thread once the list is up to
+    // date (immediately when signed out); it does not run when the press was too soon (the
+    // return value is false then) or there is no network agent.
+    bool refresh_printers(const char* why, std::function<void()> done = {});
+    // Only the discovery half: the send dialogs fetch the bind list themselves. `rate_limited`:
+    // from a button press, shares the Refresh button's minimum gap.
+    bool restart_discovery(const char* why, bool rate_limited = false);
+    // A known printer's connect_type / bind_state changed (LAN <-> cloud, bound <-> free) after
+    // the SSDP rules: schedule a debounced, rate-limited re-fetch of the bind list.
+    void note_printer_state_change(const std::string& dev_id, const std::string& connect_type, const std::string& bind_state);
     MachineObject* insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code);
     /* disconnect all machine connections */
     void disconnect_all();

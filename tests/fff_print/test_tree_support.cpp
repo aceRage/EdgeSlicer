@@ -19,6 +19,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -272,4 +273,83 @@ TEST_CASE("Organic tree support: a zero top Z distance does not leak into the ne
     REQUIRE(first.size() > 1000);
     REQUIRE(second.size() == first.size());
     REQUIRE(first_difference(first, second) == first.size());
+}
+
+// Snapmaker #995: tree (manual) support grows only where the user painted or placed an enforcer.
+// Snapmaker's port of Bambu c03e13340 (STUDIO-11484) ran the full-layer automatic overhang detection on
+// every layer that had an enforcer, so one painted corner put supports under every overhang of that
+// layer. This tree never took that port: in manual mode TreeSupport::detect_overhangs() skips the
+// automatic detection above enforce_support_layers and appends the enforced overhangs on their own. The
+// case pins that, so a later port of the transition-layer rework (Snapmaker #937) cannot bring the leak in.
+namespace {
+// A T: a 10 mm column under a 50 mm slab whose two 20 mm arms overhang open air on either side.
+TriangleMesh t_mesh()
+{
+    TriangleMesh column = make_cube(10, 10, 15);
+    TriangleMesh slab   = make_cube(50, 10, 3);
+    column.translate(20.f, 0.f, 0.f);
+    slab.translate(0.f, 0.f, 14.f);
+    TriangleMesh mesh = column;
+    mesh.merge(slab);
+    return mesh;
+}
+
+// Support points of the T with an enforcer under its left arm only, and the X of the column centre
+// in the same (object) coordinates.
+Points t_support_points(const char *support_type, const char *style, coord_t &column_center_x)
+{
+    Slic3r::Model model;
+    ModelObject  *object = model.add_object();
+    object->name = "t.stl";
+    object->add_volume(t_mesh());
+    TriangleMesh enforcer = make_cube(22, 12, 6);
+    enforcer.translate(-1.f, -1.f, 12.f);
+    object->add_volume(std::move(enforcer), ModelVolumeType::SUPPORT_ENFORCER);
+    object->add_instance();
+    object->instances.front()->set_offset(Vec3d(100., 100., 0.));
+    object->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_support",          1 },
+        { "support_type",            support_type },
+        { "support_style",           style },
+        { "support_threshold_angle", 30 },
+        { "layer_height",            0.2 },
+    });
+    Slic3r::Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+
+    const PrintObject *print_object = print.objects().front();
+    REQUIRE(print_object->layer_count() > 20);
+    // Layer 10 (about 2 mm up) is the column alone.
+    column_center_x = get_extents(print_object->get_layer(10)->lslices).center().x();
+    return support_points(print);
+}
+
+size_t points_right_of(const Points &points, coord_t x)
+{
+    return size_t(std::count_if(points.begin(), points.end(), [x](const Point &p) { return p.x() > x; }));
+}
+} // namespace
+
+TEST_CASE("Tree (manual) support grows only under the enforced overhang", "[TreeSupport][Snap995]")
+{
+    // The right arm starts 5 mm right of the column centre; nothing enforced reaches past it.
+    for (const char *style : { "tree_slim", "organic" }) {
+        INFO("support_style = " << style);
+        coord_t center_auto = 0, center_manual = 0;
+        const Points automatic = t_support_points("tree(auto)", style, center_auto);
+        const Points manual    = t_support_points("tree(manual)", style, center_manual);
+        // Automatic support holds up both arms, so the right-hand check below is not vacuous.
+        REQUIRE(points_right_of(automatic, center_auto + scaled<coord_t>(6.)) > 100);
+        // Manual support exists under the enforced left arm...
+        REQUIRE(manual.size() > 100);
+        // ...and nowhere under the unpainted right arm.
+        CHECK(points_right_of(manual, center_manual + scaled<coord_t>(6.)) == 0);
+    }
 }

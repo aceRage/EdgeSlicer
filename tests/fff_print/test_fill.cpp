@@ -1139,3 +1139,65 @@ TEST_CASE("Solid infill direction offsets every layer when no template is set", 
         CHECK(delta == 30);
     }
 }
+
+// Orca #11526 / #13523: the elephant foot layers density thins the internal solid infill of the layers above the
+// first one, up to elefant_foot_compensation_layers; the second layer gets the set density and the following
+// layers get linearly denser.
+TEST_CASE("Elephant foot layers density thins the solid layers above the first one", "[Fill][ElefantFootDensity]")
+{
+    // Six bottom shell layers: layers 1..5 are internal solid infill, layer 0 the bottom surface.
+    auto solid_lengths = [](std::initializer_list<ConfigBase::SetDeserializeItem> items) {
+        Print print;
+        Model model;
+        process_surface_density_cube(print, model, items);
+        const PrintObject &object = *print.objects().front();
+        std::vector<double> lengths;
+        lengths.push_back(fill_length_mm(fill_polylines(*object.get_layer(0), erBottomSurface)));
+        for (int layer = 1; layer <= 5; ++layer)
+            lengths.push_back(fill_length_mm(fill_polylines(*object.get_layer(layer), erSolidInfill)));
+        return lengths;
+    };
+
+    SECTION("The default is 100% and changes nothing") {
+        const auto config = DynamicPrintConfig::full_print_config();
+        REQUIRE(config.option<ConfigOptionPercent>("elefant_foot_layers_density") != nullptr);
+        CHECK(config.option<ConfigOptionPercent>("elefant_foot_layers_density")->value == Approx(100.));
+
+        const std::vector<double> unset         = solid_lengths({{"bottom_shell_layers", 6}, {"elefant_foot_compensation_layers", 3}});
+        const std::vector<double> explicit_full = solid_lengths({{"bottom_shell_layers", 6}, {"elefant_foot_compensation_layers", 3},
+                                                                 {"elefant_foot_layers_density", "100%"}});
+        CHECK(unset == explicit_full);
+    }
+
+    SECTION("80% over three layers: 80%, 86.7%, 93.3%, then full density") {
+        const std::vector<double> full    = solid_lengths({{"bottom_shell_layers", 6}, {"elefant_foot_compensation_layers", 3}});
+        const std::vector<double> thinned = solid_lengths({{"bottom_shell_layers", 6}, {"elefant_foot_compensation_layers", 3},
+                                                           {"elefant_foot_layers_density", "80%"}});
+        REQUIRE(full.size() == 6);
+        REQUIRE(thinned.size() == 6);
+        for (double length : full)
+            REQUIRE(length > 0.);
+        // The bottom surface and the layers above the compensation layers are untouched.
+        CHECK(thinned[0] == Approx(full[0]));
+        CHECK(thinned[4] == Approx(full[4]));
+        CHECK(thinned[5] == Approx(full[5]));
+        // Fillers divide their line spacing by the density, so the printed length scales with it.
+        const double expected[] = {0.8, 1. - 0.2 * 2. / 3., 1. - 0.2 / 3.};
+        for (int layer = 1; layer <= 3; ++layer) {
+            const double ratio = thinned[layer] / full[layer];
+            CAPTURE(layer, ratio, expected[layer - 1]);
+            CHECK(ratio == Approx(expected[layer - 1]).margin(0.05));
+        }
+        // #13523: denser going up, not sparser.
+        CHECK(thinned[1] < thinned[2]);
+        CHECK(thinned[2] < thinned[3]);
+    }
+
+    SECTION("EdgeSlicer: not applied on a raft, like the elephant foot compensation itself") {
+        const std::vector<double> full    = solid_lengths({{"bottom_shell_layers", 6}, {"elefant_foot_compensation_layers", 3},
+                                                           {"raft_layers", 2}});
+        const std::vector<double> thinned = solid_lengths({{"bottom_shell_layers", 6}, {"elefant_foot_compensation_layers", 3},
+                                                           {"raft_layers", 2}, {"elefant_foot_layers_density", "80%"}});
+        CHECK(thinned == full);
+    }
+}

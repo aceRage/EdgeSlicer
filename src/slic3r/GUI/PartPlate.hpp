@@ -629,6 +629,8 @@ class PartPlateList : public ObjectBase
     // "Left / right nozzle only" label textures: [0] English, [1] Chinese; each [left, right].
     GLTexture m_extruder_label_textures[2][2];
     bool      m_extruder_label_textures_loaded = false;
+    // Raster size the bed-type textures were loaded at (they are kept across re-layouts while it holds).
+    int       m_bedtype_tex_size = 0;
     void      load_extruder_label_textures();
     BoundingBoxf3 m_bounding_box;
     bool m_intialized;
@@ -812,6 +814,9 @@ public:
     void set_filament_group_dirty(bool dirty) { m_filament_group_dirty = dirty; }
 
     std::vector<PartPlate*>& get_plate_list() { return m_plate_list; };
+    // Orca #15916 / BBS: reset every plate's local bed type that is not in cur_bed_types to
+    // "same as global". False when one was reset.
+    bool check_all_plate_local_bed_type(const std::vector<BedType>& cur_bed_types);
 
     PartPlate* get_selected_plate();
 

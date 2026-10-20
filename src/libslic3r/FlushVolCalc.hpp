@@ -9,7 +9,11 @@ namespace Slic3r {
 
 extern const int g_min_flush_volume_from_support;
 extern const int g_flush_volume_to_support;
-extern const int g_max_flush_volume;
+// Orca #11778: relaxed from 800 so printers that need more purge (high flow, U1 colour changes) can keep it;
+// the clamp only guards against extreme values typed in the UI.
+inline constexpr int g_max_flush_volume = 20000;
+// The upper end of the "Suggestion: Flushing Volume in range [min, max]" guidance (the old cap).
+inline constexpr int g_typical_max_flush_volume = 800;
 
 class FlushVolCalculator
 {

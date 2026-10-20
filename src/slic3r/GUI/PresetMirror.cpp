@@ -14,6 +14,7 @@
 #include <map>
 #include <set>
 #include <ctime>
+#include <mutex>
 
 namespace bfs = boost::filesystem;
 
@@ -180,13 +181,51 @@ mirror::SourceListing list_source(const bfs::path& src_uid)
     return out;
 }
 
+// One writer at a time: the switch-time sync runs on a worker thread, while startup, Preferences
+// "Sync now" and "Re-pull all" run on the UI thread. All of them read and replace the manifest.
+std::mutex& mirror_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+
 } // namespace
 
 int mirror_bambu_user_presets(const std::string& logged_in_uid)
 {
+    return mirror_bambu_user_presets_ex(logged_in_uid).copied;
+}
+
+std::string mirror_change_fingerprint(const std::string& logged_in_uid)
+{
+    try {
+        const bfs::path src_uid = find_bambu_user_dir(logged_in_uid);
+        std::string     fp      = "uid=" + logged_in_uid + "\nsrc=" + src_uid.string() + "\n";
+        if (!src_uid.empty()) {
+            const std::string tree = mirror::source_tree_fingerprint(src_uid.string());
+            if (tree.empty())
+                return std::string();
+            fp += tree;
+        }
+        const bfs::path man_path = bfs::path(Slic3r::data_dir()) / "user" / "default" / ".bs_mirror_manifest.json";
+        fp += "manifest=" + mirror::file_stamp(man_path.string()) + "\n";
+        return fp;
+    } catch (...) {
+        return std::string();
+    }
+}
+
+MirrorRunResult mirror_bambu_user_presets_ex(const std::string& logged_in_uid)
+{
+    std::lock_guard<std::mutex> lock(mirror_mutex());
+    MirrorRunResult result;
     try {
         bfs::path src_uid = find_bambu_user_dir(logged_in_uid);
-        if (src_uid.empty()) { BOOST_LOG_TRIVIAL(info) << "[preset-mirror] no Bambu Studio user dir found; skipping"; return 0; }
+        if (src_uid.empty()) {
+            BOOST_LOG_TRIVIAL(info) << "[preset-mirror] no Bambu Studio user dir found; skipping";
+            result.clean = true;   // nothing to mirror is a settled state, not a failure
+            return result;
+        }
 
         bfs::path dst_root = bfs::path(Slic3r::data_dir()) / "user" / "default";
         boost::system::error_code ec;
@@ -200,7 +239,7 @@ int mirror_bambu_user_presets(const std::string& logged_in_uid)
         if (!src.ok) {
             BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] could not enumerate " << src_uid.string()
                                        << "; skipping this run (no presets touched)";
-            return 0;
+            return result;
         }
 
         // Which of our tracked/listed files are on disk right now. Bytes are
@@ -326,17 +365,20 @@ int mirror_bambu_user_presets(const std::string& logged_in_uid)
         if (skipped > 0)
             BOOST_LOG_TRIVIAL(info) << "[preset-mirror] " << skipped << " Bambu preset(s) use per-extruder 'nil' "
                                        "values this slicer cannot read; they stay in Bambu Studio only";
-        return copied;
+        result.copied = copied;
+        result.clean  = errors == 0;
+        return result;
     } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(error) << "[preset-mirror] failed: " << e.what();
     } catch (...) {
         BOOST_LOG_TRIVIAL(error) << "[preset-mirror] failed (unknown)";
     }
-    return 0;
+    return result;
 }
 
 int repull_mirrored_presets()
 {
+    std::lock_guard<std::mutex> lock(mirror_mutex());
     // Recovery affordance: clear every "deleted" flag so the next sync re-pulls anything that was
     // removed from this slicer but that Bambu Studio still has.
     try {

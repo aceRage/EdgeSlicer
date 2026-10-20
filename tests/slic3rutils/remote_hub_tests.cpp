@@ -540,6 +540,25 @@ TEST_CASE("a non-loopback peer never gets Tailscale-User-Login trusted", "[Remot
     REQUIRE_FALSE(trusted_proxy_headers(true, true));
 }
 
+TEST_CASE("a Serve request with no tailnet login is refused, not left to the token", "[RemoteHub]")
+{
+    using SR = ServeRequest;
+    // Signed-in tailnet user through Serve: the allow-list decides.
+    REQUIRE(classify_serve_request(true, "someone@example.com", true, false) == SR::Tailnet);
+    // A tagged device: Serve forwards it (X-Forwarded-*) but names nobody. Used to reach the token
+    // check with the allow-list skipped.
+    REQUIRE(classify_serve_request(true, "", true, false) == SR::NoLogin);
+    // Funnel: from the public internet, never a login - and a login claimed next to it is not believed.
+    REQUIRE(classify_serve_request(true, "", true, true) == SR::NoLogin);
+    REQUIRE(classify_serve_request(true, "", false, true) == SR::NoLogin);
+    REQUIRE(classify_serve_request(true, "someone@example.com", true, true) == SR::NoLogin);
+    // Plain loopback (the PC's own pages and tools) carries none of Serve's marks.
+    REQUIRE(classify_serve_request(true, "", false, false) == SR::Local);
+    // Headers not trusted (a LAN peer, a relayed stream): whatever it sent is ignored.
+    REQUIRE(classify_serve_request(false, "someone@example.com", true, true) == SR::Local);
+    REQUIRE(classify_serve_request(false, "", true, false) == SR::Local);
+}
+
 // ---- joining a camera to the printer it watches (summary_json's "camera" field) -------------
 
 TEST_CASE("camera_for_printer matches a camera added as the printer itself", "[RemoteHub][camera]")

@@ -522,6 +522,10 @@ private:
     bool show_3d_navigator() const { return app_config->get_bool("show_3d_navigator"); }
     void toggle_show_3d_navigator() const { app_config->set_bool("show_3d_navigator", !show_3d_navigator()); }
 
+    // Orca #16291: center of mass markers in Prepare and Preview.
+    bool show_center_of_mass() const { return app_config->get_bool("show_center_of_mass"); }
+    void toggle_show_center_of_mass() const { app_config->set_bool("show_center_of_mass", !show_center_of_mass()); }
+
     wxString get_inf_dialog_contect () {return m_info_dialog_content;};
 
     std::vector<std::string> split_str(std::string src, std::string separator);
@@ -764,8 +768,13 @@ private:
     void            enable_user_preset_folder(bool enable);
     // Ultra: re-mirror the logged-in Bambu Studio user presets into user\default\; when new/updated
     // files were pulled (or force_refresh), reload user presets + refresh the preset UI. Used by the
-    // "Sync now" button and the printer-switch trigger. No-op if the toggle is off.
+    // "Sync now" button (force_refresh: synchronous) and the printer-switch trigger (skipped when the
+    // Bambu Studio folder has not changed since the last clean run, otherwise run on a worker thread
+    // with the reload marshalled back to the UI thread). No-op if the toggle is off.
     void            sync_bambu_user_presets(bool force_refresh);
+    // Remember a mirror run for the printer-switch skip check (UI thread).
+    void            record_bambu_preset_mirror_run(bool clean, const std::string& fingerprint_before, const std::string& logged_in_uid);
+    void            reload_after_bambu_preset_mirror(int copied);
 
     // BBS
     bool            is_studio_active();

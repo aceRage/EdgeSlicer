@@ -2,8 +2,10 @@
 #include "MsgDialog.hpp"
 #include "Widgets/DialogButtons.hpp"
 
+#include <algorithm>
 #include <boost/algorithm/string/predicate.hpp>
 #include "libslic3r/Config.hpp"
+#include "libslic3r/PlateBedTypes.hpp"
 
 namespace Slic3r { namespace GUI {
 static constexpr int MIN_LAYER_VALUE = 2;
@@ -391,12 +393,22 @@ PlateSettingsDialog::PlateSettingsDialog(wxWindow* parent, const wxString& title
 
     m_bed_type_choice = new ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(240), -1), 0,
                                      NULL, wxCB_READONLY);
-    for (BedType i = btDefault; i < btCount; i = BedType(int(i) + 1)) {
-      m_bed_type_choice->Append(to_bed_type_name(i));
-    }
+    // Orca #15916: the choice is enabled when the printer takes per-plate bed types (Bambu, or
+    // support_multi_bed_types). Edge: the U1 takes its own three plates (#502), so it is enabled
+    // with only those rows.
+    auto &preset_bundle = *wxGetApp().preset_bundle;
+    const PlateBedTypes::Allowed allowed_bed_types =
+        PlateBedTypes::allowed_bed_types(preset_bundle.printers.get_edited_preset().config, preset_bundle.is_bbl_vendor());
+    m_bed_type_values.push_back(btDefault);
+    if (!allowed_bed_types.any && !allowed_bed_types.types.empty())
+        m_bed_type_values.insert(m_bed_type_values.end(), allowed_bed_types.types.begin(), allowed_bed_types.types.end());
+    else
+        for (BedType i = BedType(int(btDefault) + 1); i < btCount; i = BedType(int(i) + 1))
+            m_bed_type_values.push_back(i);
+    for (BedType bed_type : m_bed_type_values)
+      m_bed_type_choice->Append(to_bed_type_name(bed_type));
 
-    if (!wxGetApp().preset_bundle->is_bbl_vendor())
-      m_bed_type_choice->Disable();
+    m_bed_type_choice->Enable(PlateBedTypes::supports_bed_type_choice(allowed_bed_types));
 
     wxStaticText* m_bed_type_txt = new wxStaticText(this, wxID_ANY, _L("Bed type"));
     m_bed_type_txt->SetFont(Label::Body_14);
@@ -516,7 +528,8 @@ PlateSettingsDialog::~PlateSettingsDialog()
 void PlateSettingsDialog::sync_bed_type(BedType type)
 {
     if (m_bed_type_choice != nullptr) {
-        m_bed_type_choice->SetSelection(int(type));
+        auto it = std::find(m_bed_type_values.begin(), m_bed_type_values.end(), type);
+        m_bed_type_choice->SetSelection(it == m_bed_type_values.end() ? 0 : int(it - m_bed_type_values.begin()));
     }
 }
 

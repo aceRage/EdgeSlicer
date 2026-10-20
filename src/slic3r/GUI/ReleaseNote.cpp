@@ -32,6 +32,8 @@
 #include "BitmapCache.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "MsgDialog.hpp"
+#include "slic3r/Utils/BambuConnectStatus.hpp"
 
 namespace Slic3r { namespace GUI {
 
@@ -2241,26 +2243,40 @@ void InputIpAddressDialog::workerThreadFunc(std::string str_ip, std::string str_
         return;
     }
 
-    if (detectData.bind_state == "occupied") {
-        post_update_test_msg(wxEmptyString, true);
-        post_update_test_msg(_L("The printer has already been bound."), false);
-        return;
-    }
+    // Bound to a Bambu account (cloud mode): the printer refuses print commands EdgeSlicer could
+    // send, but still reports its status over LAN to the access code. Offer it for status only:
+    // EdgeSlicer reads AMS, nozzles and errors, and prints go through Bambu Connect
+    // (Utils/BambuConnectStatus.hpp). Nothing is signed and no print command is sent to it.
+    const bool account_bound = detectData.bind_state == "occupied" || detectData.connect_type == "cloud";
 
-    if (detectData.connect_type == "cloud") {
-        post_update_test_msg(wxEmptyString, true);
-        post_update_test_msg(_L("The printer mode is incorrect, please switch to LAN Only."), false);
-        return;
-    }
-
-    CallAfter([this, detectData, str_ip, str_access_code]() {
+    CallAfter([this, detectData, str_ip, str_access_code, account_bound]() {
+        bool status_only = false;
+        if (account_bound) {
+            MessageDialog ask(this,
+                _L("This printer is bound to a Bambu account (cloud mode). EdgeSlicer cannot start prints on it, "
+                   "but it can read its status over LAN with the access code: AMS filaments, nozzles and errors. "
+                   "Print on it with Send to Bambu Connect.\n\nAdd it for status only?"),
+                _L("Printer bound to a Bambu account"), wxYES_NO | wxICON_QUESTION);
+            if (ask.ShowModal() != wxID_YES) {
+                post_update_test_msg(wxEmptyString, true);
+                post_update_test_msg(_L("The printer is bound to a Bambu account. Switch it to LAN Only, or add it for status only."), false);
+                return;
+            }
+            status_only = true;
+        }
         DeviceManager* dev = wxGetApp().getDeviceManager();
         BBLocalMachine machine;
         machine.dev_name = detectData.dev_name;
         machine.dev_ip = str_ip;
         machine.dev_id = detectData.dev_id;
         machine.printer_type = detectData.model_id;
-        m_obj = dev->insert_local_device(machine, detectData.connect_type, detectData.bind_state, detectData.version, str_access_code);
+        // Before the printer is inserted and selected: the connect that follows already sends it
+        // only the status requests. A printer added the normal way stops being status-only.
+        if (AppConfig* cfg = wxGetApp().app_config)
+            BambuConnectStatus::set_status_only(*cfg, machine.dev_id, status_only);
+        // A status-only printer is kept as a saved LAN printer, so the LAN session reads its status.
+        m_obj = dev->insert_local_device(machine, status_only ? std::string("lan") : detectData.connect_type,
+                                         status_only ? std::string("free") : detectData.bind_state, detectData.version, str_access_code);
 
         if (!m_obj) {
             post_update_test_msg(wxEmptyString, true);

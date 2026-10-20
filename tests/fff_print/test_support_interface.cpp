@@ -477,3 +477,55 @@ TEST_CASE("Bottom-only support interface keeps the dense interface density", "[S
     SupportParameters sp(*print.objects().front());
     REQUIRE(sp.bottom_interface_density > sp.support_density);
 }
+
+// Snapmaker #696: the top contact layer must not be trimmed by the object layer it supports. That layer
+// enters the trimming window whenever the gap synced to the object layers is shorter than the configured
+// top Z distance: with variable layer heights (the upstream report), and equally with a fixed layer
+// height that does not divide the distance (here 0.15 mm layers under a 0.2 mm gap, synced down to 0.15).
+namespace {
+
+// Support interface extrusion length (mm) on the highest layer below `z_below` that has some, and that Z.
+std::pair<double, double> top_interface_below(const std::string &gcode, double z_below)
+{
+    std::map<long, double> length_by_z; // keyed by Z in micrometres
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&length_by_z, z_below](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.extruding(self) && self.z() < z_below - 1e-3 &&
+            line.comment().find("support material interface") != std::string_view::npos)
+            length_by_z[std::lround(self.z() * 1000.)] += line.dist_XY(self);
+    });
+    if (length_by_z.empty())
+        return {0., 0.};
+    return {length_by_z.rbegin()->first / 1000., length_by_z.rbegin()->second};
+}
+
+} // namespace
+
+TEST_CASE("The top contact layer is not trimmed by the overhang it supports", "[Support][Interface][Snap696]")
+{
+    // A T: a 10 x 10 x 10 mm pillar under a 30 x 30 x 2 mm plate.
+    TriangleMesh t(its_make_cube(10., 10., 10.));
+    TriangleMesh plate(its_make_cube(30., 30., 2.));
+    plate.translate(-10.f, -10.f, 10.f);
+    t.merge(plate);
+
+    // 0.15 mm layers from 0.3 mm: the plate's first layer is 10.05 - 10.2 mm, and the contact layer under it
+    // is at 9.9 mm with either distance (0.15 synced from 0.15, and from 0.2).
+    auto slice_t = [&t](double top_z_distance) {
+        return slice_with_comments({t}, {
+            {"layer_height", 0.15},
+            {"initial_layer_print_height", 0.3},
+            {"enable_support", 1},
+            {"support_type", "normal(auto)"},
+            {"independent_support_layer_height", 0},
+            {"support_top_z_distance", top_z_distance},
+        });
+    };
+    const auto synced    = top_interface_below(slice_t(0.15), 10.05);
+    const auto shortened = top_interface_below(slice_t(0.2), 10.05);
+    CAPTURE(synced.first, synced.second, shortened.first, shortened.second);
+    REQUIRE(synced.second > 100.);
+    CHECK(shortened.first == Approx(synced.first));
+    // Before the fix the overhang's own slices cut away most of the contact layer under a 0.2 mm distance.
+    CHECK(shortened.second > 0.9 * synced.second);
+}

@@ -16,6 +16,9 @@
 #include "slic3r/GUI/Jobs/PlaterWorker.hpp"
 #include "../GUI/MsgDialog.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/path.hpp>
+
 
 namespace Slic3r {
 namespace GUI {
@@ -142,7 +145,8 @@ static bool is_same_nozzle_diameters(const DynamicPrintConfig &full_config, cons
         auto opt_nozzle_diameters = full_config.option<ConfigOptionFloats>("nozzle_diameter");
         if (opt_nozzle_diameters != nullptr) {
             float preset_nozzle_diameter = opt_nozzle_diameters->get_at(0);
-            if (preset_nozzle_diameter != obj->m_extder_data.extders[0].current_nozzle_diameter) {
+            // Orca #13330: a diameter the printer has not reported does not block calibration.
+            if (!obj->nozzle_diameter_matches_or_unknown(MAIN_NOZZLE_ID, preset_nozzle_diameter)) {
                 wxString nozzle_in_preset  = wxString::Format(_L("nozzle in preset: %s %s"), wxString::Format("%.1f", preset_nozzle_diameter).ToStdString(), to_wstring_name(nozzle_type));
                 wxString nozzle_in_printer = wxString::Format(_L("nozzle memorized: %.1f %s"), obj->m_extder_data.extders[0].current_nozzle_diameter, to_wstring_name(NozzleTypeEumnToStr[obj->m_extder_data.extders[0].current_nozzle_type]));
 
@@ -357,8 +361,15 @@ static void read_model_from_file(const std::string& input_file, Model& model)
         &is_bbl_3mf, &file_version, nullptr, nullptr, nullptr, plate_to_slice);
 
     model.add_default_instances();
-    for (auto object : model.objects)
-        object->ensure_on_bed();
+
+    // Orca #13252: centre mesh models (STL, STEP, ...) on their origin; project files keep their placement.
+    const std::string extension       = boost::filesystem::path(input_file).extension().string();
+    const bool        is_project_file = boost::iequals(extension, ".3mf") || boost::iequals(extension, ".amf");
+    for (auto object : model.objects) {
+        if (!is_project_file)
+            object->center_around_origin(false);
+        object->ensure_on_bed(is_project_file);
+    }
 }
 
 std::array<Vec3d, 4> get_cut_plane_points(const BoundingBoxf3 &bbox, const double &cut_height)
@@ -395,6 +406,9 @@ void CalibUtils::emit_get_PA_calib_results(float nozzle_diameter)
     if (obj_ == nullptr)
         return;
 
+    // Polled by the calibration page every second; a secured printer would reject it as unsigned.
+    if (obj_->skip_auto_command_if_secured("extrusion_cali_get_result"))
+        return;
     obj_->command_get_pa_calibration_result(nozzle_diameter);
 }
 
@@ -507,6 +521,9 @@ void CalibUtils::emit_get_flow_ratio_calib_results(float nozzle_diameter)
     if (obj_ == nullptr)
         return;
 
+    // Polled by the calibration page every second; a secured printer would reject it as unsigned.
+    if (obj_->skip_auto_command_if_secured("flowrate_get_result"))
+        return;
     obj_->command_get_flow_ratio_calibration_result(nozzle_diameter);
 }
 
@@ -896,6 +913,20 @@ void CalibUtils::calib_VFA(const CalibInfo &calib_info, wxString &error_message)
     DynamicPrintConfig filament_config = calib_info.filament_prest->config;
     DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
 
+    // Orca #14759: size the tower to the nozzle.
+    const ConfigOptionFloats* nozzle_diameter_config = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+    size_t nozzle_id = static_cast<size_t>(std::max(params.extruder_id, 0));
+    double nozzle_diameter = vfa_base_nozzle_diameter;
+    if (nozzle_diameter_config && !nozzle_diameter_config->values.empty()) {
+        nozzle_id = std::min(nozzle_id, nozzle_diameter_config->values.size() - 1);
+        nozzle_diameter = nozzle_diameter_config->values[nozzle_id];
+    }
+    if (nozzle_diameter <= 0.0)
+        nozzle_diameter = vfa_base_nozzle_diameter;
+
+    // Resolved layer height: the (possibly auto-adjusted) value if provided, else nozzle/2.
+    const double layer_height = params.vfa_layer_height > 0.0 ? params.vfa_layer_height : nozzle_diameter / 2.0;
+
     filament_config.set_key_value("slow_down_layer_time", new ConfigOptionInts{0});
     size_t max_speed_variants = 1;
     if (const auto *flow_support = filament_config.option<ConfigOptionStrings>("filament_flow_support");
@@ -915,13 +946,17 @@ void CalibUtils::calib_VFA(const CalibInfo &calib_info, wxString &error_message)
     print_config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
     print_config.set_key_value("spiral_mode", new ConfigOptionBool(true));
+    print_config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(layer_height));
+    model.objects[0]->config.set_key_value("layer_height", new ConfigOptionFloat(layer_height));
     model.objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
     model.objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
     model.objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
 
-    // cut upper
+    // cut upper (on the unscaled model, using the base block height); the scaling below keeps the physical
+    // block height (vfa_layers_per_block * layer_height) in sync with the speed stepping in GCode::process_layer.
+    // Subtract EPSILON so the cut lands just below the flat block surface, not on it.
     auto obj_bb = model.objects[0]->bounding_box_exact();
-    auto height = 5 * ((params.end - params.start) / params.step + 1);
+    auto height = vfa_base_block_height * ((params.end - params.start) / params.step + 1) - EPSILON;
     if (height < obj_bb.size().z()) {
         cut_model(model, height, ModelObjectCutAttribute::KeepLower);
     }
@@ -930,13 +965,23 @@ void CalibUtils::calib_VFA(const CalibInfo &calib_info, wxString &error_message)
         return;
     }
 
+    // XY scales with the nozzle; Z so that each base block becomes vfa_layers_per_block layers of layer_height.
+    const double xy_scale = nozzle_diameter / vfa_base_nozzle_diameter;
+    const double z_scale  = (vfa_layers_per_block * layer_height) / vfa_base_block_height;
+    if (std::abs(xy_scale - 1.0) > EPSILON || std::abs(z_scale - 1.0) > EPSILON)
+        model.objects[0]->scale(xy_scale, xy_scale, z_scale);
+    model.objects[0]->ensure_on_bed();
+
     DynamicPrintConfig full_config;
     full_config.apply(FullPrintConfig::defaults());
     full_config.apply(print_config);
     full_config.apply(filament_config);
     full_config.apply(printer_config);
 
-    process_and_store_3mf(&model, full_config, params, error_message);
+    // Pass the resolved layer height on so the G-code speed stepping matches the geometry.
+    Calib_Params store_params     = params;
+    store_params.vfa_layer_height = layer_height;
+    process_and_store_3mf(&model, full_config, store_params, error_message);
     if (!error_message.empty())
         return;
 

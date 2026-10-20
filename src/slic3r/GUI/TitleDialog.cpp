@@ -285,7 +285,7 @@ void WebDialog::OnNavigated(wxWebViewEvent& evt)
             }, 100)
             console.log("googleJs injure success")
         )";
-        CallAfter([=]() { m_browser->RunScript(jsCode); });
+        CallAfter([=]() { WebView::RunScript(m_browser, jsCode); });
     }
 }
 

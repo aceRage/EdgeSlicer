@@ -393,8 +393,14 @@ TEST_CASE("a failed removal is counted and reported, not hidden", "[WinFirewall]
 
 TEST_CASE("the helper only writes its log to a file it recognises", "[WinFirewall]")
 {
+#ifdef _WIN32
     CHECK(is_valid_fix_log_path("C:\\Users\\me\\AppData\\Local\\Temp\\edgeslicer_firewall_fix_1234.log"));
     CHECK(is_valid_fix_log_path("C:\\Temp\\EdgeSlicer_Firewall_Fix_9.LOG"));
+#else
+    // "C:\..." is not an absolute path outside Windows; the file name rules are the same.
+    CHECK(is_valid_fix_log_path("/var/folders/xy/T/edgeslicer_firewall_fix_1234.log"));
+    CHECK(is_valid_fix_log_path("/tmp/EdgeSlicer_Firewall_Fix_9.LOG"));
+#endif
     CHECK_FALSE(is_valid_fix_log_path("edgeslicer_firewall_fix_1234.log"));                 // relative
     CHECK_FALSE(is_valid_fix_log_path("C:\\Windows\\System32\\drivers\\etc\\hosts"));
     CHECK_FALSE(is_valid_fix_log_path("C:\\Temp\\edgeslicer_firewall_fix_.log"));
@@ -461,4 +467,40 @@ TEST_CASE("the fix is offered only while it can change something", "[WinFirewall
     CHECK_FALSE(diagnose(snapshot(installer_rules()), EXE, GO2RTC).fix_would_help(false));
     Snapshot unreadable;
     CHECK_FALSE(diagnose(unreadable, EXE, GO2RTC).fix_would_help(true));
+}
+
+TEST_CASE("the Public box starts ticked only when this Public network is what is left to fix", "[WinFirewall]")
+{
+    // Owner, 2026-10-16: Wi-Fi filed as Public (Tailscale Private beside it), the installer's
+    // Private/Domain rules in place. Discovery, the camera and the Stream tab stayed broken until
+    // the box was ticked by hand.
+    CHECK(default_allow_public(diagnose(snapshot(installer_rules(), ProfilePrivate | ProfilePublic), EXE, GO2RTC)));
+    CHECK(default_allow_public(diagnose(snapshot(installer_rules(), ProfilePublic), EXE, GO2RTC)));
+    // No rules at all on a Public network: the fix adds them, for Public too.
+    CHECK(default_allow_public(diagnose(snapshot({}, ProfilePublic), EXE, GO2RTC)));
+
+    // A Private network: the box stays off, as before.
+    CHECK_FALSE(default_allow_public(diagnose(snapshot(installer_rules()), EXE, GO2RTC)));
+    CHECK_FALSE(default_allow_public(diagnose(snapshot({}), EXE, GO2RTC)));
+
+    // Public, but rules already cover it (an earlier fix with the box ticked): nothing to default.
+    std::vector<Rule> everywhere;
+    for (Rule r : installer_rules()) { r.profiles = ProfileAll; everywhere.push_back(r); }
+    CHECK_FALSE(default_allow_public(diagnose(snapshot(everywhere, ProfilePublic), EXE, GO2RTC)));
+
+    // The firewall is off for Public: nothing is blocked there.
+    Snapshot off = snapshot(installer_rules(), ProfilePublic);
+    off.firewall_on[2] = false;
+    CHECK_FALSE(default_allow_public(diagnose(off, EXE, GO2RTC)));
+
+    // "Block all incoming connections" on Public: no allow rule gets past it, so ticking would
+    // only promise something the fix cannot do.
+    Snapshot block_all = snapshot(installer_rules(), ProfilePublic);
+    block_all.block_all_inbound[2] = true;
+    CHECK_FALSE(default_allow_public(diagnose(block_all, EXE, GO2RTC)));
+
+    // A firewall that could not be read: never guess.
+    Snapshot unreadable;
+    unreadable.current_profiles = ProfilePublic;
+    CHECK_FALSE(default_allow_public(diagnose(unreadable, EXE, GO2RTC)));
 }

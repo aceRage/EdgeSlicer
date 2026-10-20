@@ -62,7 +62,7 @@ TEST_CASE("Print settings carry: key classification", "[Preset][PrintSettingsCar
                              "prime_tower_width", "prime_tower_brim_width", "wipe_tower_rotation_angle", "wipe_tower_x", "wipe_tower_no_sparse_layers",
                              "filename_format", "enable_arc_fitting", "timelapse_type", "exclude_object", "gcode_label_objects",
                              "flush_into_infill", "toolchange_ordering", "default_jerk", "default_junction_deviation", "post_process",
-                             "xy_hole_compensation", "elefant_foot_compensation" }) {
+                             "xy_hole_compensation", "elefant_foot_compensation", "elefant_foot_layers_density" }) {
         INFO(key);
         CHECK(print_carry_is_printer_coupled(key));
     }
@@ -84,7 +84,7 @@ TEST_CASE("Print settings carry: key classification", "[Preset][PrintSettingsCar
     // The listed keys are real process options, so the lists cannot silently rot.
     for (const char *key : { "standby_temperature_delta", "ooze_prevention", "enable_prime_tower", "filename_format", "enable_arc_fitting",
                              "print_extruder_id", "print_extruder_variant", "timelapse_type", "exclude_object", "support_top_z_distance",
-                             "support_bottom_z_distance", "initial_layer_print_height" }) {
+                             "support_bottom_z_distance", "initial_layer_print_height", "elefant_foot_layers_density" }) {
         INFO(key);
         CHECK(contains(Preset::print_options(), key));
     }

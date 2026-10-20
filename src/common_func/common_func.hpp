@@ -24,7 +24,7 @@
 // "the directory this fork started out in".
 #define SLIC3R_LEGACY_APP_KEY "Snapmaker_Orca"
 #define SLIC3R_VERSION "01.10.01.50"
-#define Snapmaker_VERSION "2.4.5.5" // the one version number; version.inc reads it back for CMake/CPack
+#define Snapmaker_VERSION "2.4.6.2" // the one version number; version.inc reads it back for CMake/CPack
 #define MIN_FIRM_VER "2.0.0"
 #ifndef GIT_COMMIT_HASH
 #define GIT_COMMIT_HASH "0000000" // 0000000 means uninitialized
@@ -84,7 +84,8 @@ namespace common
 
 	std::string get_pc_name();
 
-	std::string get_flutter_version();
+	// version.json of the bundled web pages (resources/web/flutter_web/version.json)
+	std::string get_flutter_version(const std::string& version_json_path);
 
 	std::string get_profile_version();
 

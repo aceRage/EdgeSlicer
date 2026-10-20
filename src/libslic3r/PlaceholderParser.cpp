@@ -716,6 +716,26 @@ namespace client
         static void regex_matches     (expr &lhs, IteratorRange &rhs) { return regex_op(lhs, rhs, '=', lhs); }
         static void regex_doesnt_match(expr &lhs, IteratorRange &rhs) { return regex_op(lhs, rhs, '!', lhs); }
 
+        // Replace every match of the regular expression 'pattern' in the string 'subject' with 'replacement'.
+        // The replacement may reference capture groups ($1, $2, ...). Store the result into subject.
+        static void regex_replace(expr &subject, IteratorRange &pattern, expr &replacement)
+        {
+            if (subject.type() == TYPE_EMPTY)
+                // Inside an if / else block to be skipped
+                return;
+            if (subject.type() != TYPE_STRING)
+                subject.throw_exception("regex_replace() first parameter must be a string.");
+            try {
+                std::string re(++ pattern.begin(), -- pattern.end());
+                std::string result = SLIC3R_REGEX_NAMESPACE::regex_replace(subject.s(), SLIC3R_REGEX_NAMESPACE::regex(re), replacement.to_string());
+                subject.set_s(std::move(result));
+            } catch (SLIC3R_REGEX_NAMESPACE::regex_error &ex) {
+                // Syntax error in the regular expression
+                boost::throw_exception(qi::expectation_failure<Iterator>(
+                    pattern.begin(), pattern.end(), spirit::info(std::string("*Regular expression compilation failed: ") + ex.what())));
+            }
+        }
+
         static void one_of_test_init(expr &out) {
             out.set_b(false);
         }
@@ -1069,8 +1089,8 @@ namespace client
                 const ConfigOption *opt_parent = opt_def->ratio_over.empty() ? nullptr : ctx->resolve_symbol(opt_def->ratio_over);
                 if (opt_parent == nullptr)
                     ctx->throw_exception("FloatOrPercent variable failed to resolve the \"ratio_over\" dependencies", it_range);
-                if (boost::ends_with(opt_def->ratio_over, "extrusion_width")) {
-                    // Extrusion width supports defaults and a complex graph of dependencies.
+                if (boost::ends_with(opt_def->ratio_over, "line_width")) {
+                    // Line width supports defaults and a complex graph of dependencies.
                     assert(opt_parent->type() == coFloatOrPercent);
                     v *= Flow::extrusion_width(opt_def->ratio_over, static_cast<const ConfigOptionFloatOrPercent*>(opt_parent), *ctx, static_cast<unsigned int>(ctx->current_extruder_id));
                     break;
@@ -1114,8 +1134,8 @@ namespace client
             case coFloatOrPercent:
             {
                 std::string opt_key(opt.it_range.begin(), opt.it_range.end());
-                if (boost::ends_with(opt_key, "extrusion_width")) {
-                    // Extrusion width supports defaults and a complex graph of dependencies.
+                if (boost::ends_with(opt_key, "line_width")) {
+                    // Line width supports defaults and a complex graph of dependencies.
                     output.set_d(Flow::extrusion_width(opt_key, *ctx, static_cast<unsigned int>(ctx->current_extruder_id)));
                 } else if (! static_cast<const ConfigOptionFloatOrPercent*>(opt.opt)->percent) {
                     // Not a percent, just return the value.
@@ -2236,9 +2256,13 @@ namespace client
                         initializer_list(_r1)[px::bind(&MyContext::vector_variable_new_from_initializer_list, _r1, _a, _b, _1)]
                         // Process it before conditional_expression, as conditional_expression requires a vector reference to be augmented with an index.
                         // Only process such variable references, which return a naked vector variable.
-                    // Orca todo: following code cause strange build errors with MSVC C++17
-                    // |  eps(px::bind(&MyContext::could_be_vector_variable_reference, _b)) >>
-                    //         variable_reference(_r1)[px::val(qi::_pass) = px::bind(&MyContext::vector_variable_new_from_copy, _r1, _a, _b, _1)]
+                        // Edge: only when the naked vector reference is the whole right hand side. A bare vector
+                        // in a scalar expression resolves to the current extruder's element (BambuStudio rule, see
+                        // vector_element_to_expr), so "local t = nozzle_temperature + 5" must keep falling through
+                        // to conditional_expression instead of copying the vector and failing on the "+".
+                    |  eps(px::bind(&MyContext::could_be_vector_variable_reference, _b)) >>
+                            (variable_reference(_r1) >> &(lit(';') | lit('}') | kw["elsif"] | kw["else"] | kw["endif"]))
+                                [qi::_pass = px::bind(&MyContext::vector_variable_new_from_copy, _r1, _a, _b, _1)]
                        // Would NOT consume '(' conditional_expression ')' because such value was consumed with the expression above.
                     |  conditional_expression(_r1)
                             [px::bind(&MyContext::scalar_variable_new_from_scalar_expression, _r1, _a, _b, _1)]
@@ -2269,6 +2293,8 @@ namespace client
                                                                     [ px::bind(&expr::digits<false>, _val, _2, _3) ]
                 |   (kw["zdigits"] > '(' > conditional_expression(_r1) [_val = _1] > ',' > conditional_expression(_r1) > optional_parameter(_r1))
                                                                     [ px::bind(&expr::digits<true>, _val, _2, _3) ]
+                |   (kw["regex_replace"] > '(' > conditional_expression(_r1) [_val = _1] > ',' > regular_expression > ',' > conditional_expression(_r1) > ')')
+                                                                    [ px::bind(&expr::regex_replace, _val, _2, _3) ]
                 |   (kw["int"]   > '(' > conditional_expression(_r1) > ')') [ px::bind(&FactorActions::to_int,  _1, _val) ]
                 |   (kw["round"] > '(' > conditional_expression(_r1) > ')') [ px::bind(&FactorActions::round,   _1, _val) ]
                 |   (kw["ceil"]  > '(' > conditional_expression(_r1) > ')') [ px::bind(&FactorActions::ceil,    _1, _val) ]
@@ -2350,6 +2376,7 @@ namespace client
                 ("min")
                 ("max")
                 ("random")
+                ("regex_replace")
                 ("repeat")
                 ("round")
                 ("ceil")

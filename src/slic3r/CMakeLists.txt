@@ -22,6 +22,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/AmsMappingPopup.hpp
     GUI/AMSMaterialsSetting.cpp
     GUI/AMSMaterialsSetting.hpp
+    GUI/AmsFilamentOrder.hpp
+    GUI/FavoriteFilaments.hpp
+    GUI/FavoritePresets.hpp
+    GUI/FavoriteFilamentsUI.hpp
     GUI/AMSSetting.cpp
     GUI/AMSSetting.hpp
     GUI/AmsWidgets.cpp
@@ -289,6 +293,15 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_ObjectTableSettings.hpp
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
+    GUI/MainTabs.hpp
+    GUI/Showcase/ShowcaseRenderer.cpp
+    GUI/Showcase/ShowcaseRenderer.hpp
+    GUI/Showcase/ShowcaseTextures.cpp
+    GUI/Showcase/ShowcaseTextures.hpp
+    GUI/Showcase/ShowcaseView.cpp
+    GUI/Showcase/ShowcaseView.hpp
+    GUI/Showcase/ShowcaseWatermark.cpp
+    GUI/Showcase/ShowcaseWatermark.hpp
     GUI/GUI_Utils.cpp
     GUI/GUI_Utils.hpp
     GUI/HintNotification.cpp
@@ -478,6 +491,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ParamsPanel.hpp
     GUI/PartPlate.cpp
     GUI/PartPlate.hpp
+    GUI/BedTexturePool.hpp
+    GUI/PlateRecentre.hpp
     GUI/PhysicalPrinterDialog.cpp
     GUI/PhysicalPrinterDialog.hpp
     GUI/Plater.cpp
@@ -502,6 +517,11 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrinterCloudAuthDialog.hpp
     GUI/Printer/PrinterFileSystem.cpp
     GUI/Printer/PrinterFileSystem.h
+    GUI/Printer/IFileGridModel.h
+    GUI/Printer/RemoteFileGridModel.cpp
+    GUI/Printer/RemoteFileGridModel.h
+    GUI/PrinterStoragePanel.cpp
+    GUI/PrinterStoragePanel.hpp
     GUI/PrinterWebView.cpp
     GUI/PrinterWebView.hpp
     GUI/StreamPanel.cpp
@@ -526,6 +546,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HomeDownload.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
+    GUI/ElegooCamRelay.cpp
+    GUI/ElegooCamRelay.hpp
     GUI/RemoteAccess.cpp
     GUI/RemoteAccess.hpp
     GUI/RemoteControl.cpp
@@ -533,6 +555,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LanReconnectLadder.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
+    GUI/BambuNetInfo.hpp
+    GUI/BindListRefresh.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
@@ -550,6 +574,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteSnapmaker.cpp
     GUI/RemoteSnapmaker.hpp
     GUI/SnapmakerLan.cpp
+    GUI/U1LanRoute.cpp
+    GUI/U1LanRoute.hpp
+    GUI/U1WsRoute.cpp
+    GUI/U1WsRoute.hpp
     GUI/SnapmakerTaskConfig.hpp
     GUI/SnapmakerTaskConfig.cpp
     GUI/WizardNetworking.hpp
@@ -560,6 +588,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/BambuSendDiagnosis.cpp
     GUI/DeviceModelCode.hpp
     GUI/DeviceModelCode.cpp
+    GUI/NozzleInfo.hpp
     GUI/NozzleTempRows.hpp
     GUI/DeviceControls.hpp
     GUI/BambuFans.hpp
@@ -588,6 +617,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LiveActivityPush.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
+    GUI/ElegooCanvasUI.cpp
+    GUI/ElegooCanvasUI.hpp
     GUI/PrintHostDevicesDialog.cpp
     GUI/PrintHostDevicesDialog.hpp
     GUI/CostsDialog.cpp
@@ -905,6 +936,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp
+    Utils/BambuConnect.cpp
+    Utils/BambuConnect.hpp
+    Utils/BambuConnectStatus.cpp
+    Utils/BambuConnectStatus.hpp
     Utils/BambuStudioLauncher.cpp
     Utils/BambuStudioLauncher.hpp
     Utils/BlenderLauncher.cpp
@@ -932,9 +967,15 @@ set(SLIC3R_GUI_SOURCES
     Utils/Duet.hpp
     Utils/ElegooCanvas.cpp
     Utils/ElegooCanvas.hpp
+    Utils/ElegooCanvasMapping.cpp
+    Utils/ElegooCanvasMapping.hpp
     Utils/ElegooCanvasQuery.cpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
+    Utils/ElegooSdcp.cpp
+    Utils/ElegooSdcp.hpp
+    Utils/ElegooSdcpMonitor.cpp
+    Utils/ElegooSdcpMonitor.hpp
     Utils/EmbossStyleManager.cpp
     Utils/EmbossStyleManager.hpp
     Utils/ESP3D.cpp
@@ -1023,6 +1064,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintHostDeviceStatus.hpp
     Utils/MoonrakerProgress.cpp
     Utils/MoonrakerProgress.hpp
+    Utils/PrinterStorage.cpp
+    Utils/PrinterStorage.hpp
     Utils/PrusaLinkStatus.cpp
     Utils/PrusaLinkStatus.hpp
     Utils/Process.cpp
@@ -1041,6 +1084,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/SimplyPrint.hpp
     Utils/TCPConsole.cpp
     Utils/TCPConsole.hpp
+    Utils/TeardownJoin.hpp
     Utils/UndoRedo.cpp
     Utils/UndoRedo.hpp
     Utils/WebSocketClient.hpp
@@ -1050,6 +1094,12 @@ set(SLIC3R_GUI_SOURCES
     Utils/MQTT.cpp
     Utils/MqttReconnectPolicy.hpp
     Utils/MqttLogRedact.hpp
+    Utils/U1LocalFirst.cpp
+    Utils/U1LocalFirst.hpp
+    Utils/U1MoonrakerProbe.cpp
+    Utils/U1MoonrakerProbe.hpp
+    Utils/MoonrakerWs.cpp
+    Utils/MoonrakerWs.hpp
     Utils/MoonRaker.cpp
     Utils/MoonRaker.hpp
     Utils/TimeSyncManager.cpp
@@ -1059,6 +1109,9 @@ set(SLIC3R_GUI_SOURCES
     Utils/WinFirewall.hpp
     Utils/BambuSetupNotice.cpp
     Utils/BambuSetupNotice.hpp
+    # Last on purpose: a new source in the middle of the list reshuffles the unity batches (HomeVaults.cpp
+    # and HomeVendors.cpp share file-local names and must not land in one batch).
+    GUI/FavoriteFilamentsUI.cpp
 )
 
 add_subdirectory(GUI/DeviceTab)
@@ -1077,6 +1130,7 @@ if (APPLE)
     list(APPEND SLIC3R_GUI_SOURCES
             Utils/RetinaHelperImpl.mm
             Utils/MacDarkMode.mm
+            Utils/BambuConnectMac.mm
             GUI/RemovableDriveManagerMM.mm
             GUI/RemovableDriveManagerMM.h
             GUI/Mouse3DHandlerMac.mm
@@ -1170,6 +1224,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/IconManager.cpp                           # defines STB_RECT_PACK_IMPLEMENTATION before its include
     GUI/Search.cpp                                # defines FTS_FUZZY_MATCH_IMPLEMENTATION before its include
     GUI/DualNozzleSliceDialog.cpp                 # namespace-scope using namespace DualNozzleSync
+    GUI/HomeVaults.cpp                            # lower/read_file/write_atomic/LIST_LIMIT also in HomeVendors.cpp
     GUI/DualNozzleState.cpp                       # namespace-scope using namespace DualNozzleSync
     GUI/Gizmos/GLGizmoCut.cpp                     # namespace-scope using namespace Geometry
     GUI/Gizmos/GLGizmosCommon.cpp                 # namespace-scope using-directives for the gizmo data objects
@@ -1203,6 +1258,9 @@ slic3r_unity_build(libslic3r_gui SKIP
     Utils/StepMesh.cpp                            # OCCT's Handle() macro breaks CGAL headers in neighbours
     GUI/GLToolbar.cpp                             # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/GUI_Preview.cpp                           # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseView.cpp                 # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Showcase/ShowcaseRenderer.cpp             # glad + ImGui + wx image headers; file-local GL helpers
+    GUI/Showcase/ShowcaseTextures.cpp             # glad before wx image headers, like ShowcaseRenderer.cpp
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad

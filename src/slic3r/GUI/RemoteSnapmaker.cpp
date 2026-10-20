@@ -16,6 +16,7 @@
 #include "slic3r/Utils/MQTT.hpp"
 #include "slic3r/Utils/MoonRaker.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
+#include "slic3r/Utils/U1LocalFirst.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio.hpp>
@@ -57,8 +58,21 @@ static bool on_main(std::function<void()> fn, int timeout_ms = 15000)
 // difference between the phone being able to connect a printer and not - and it is also a private
 // key at rest, so it happens only when the person turns it on:
 //     app_config  app / snapmaker_remember_keys = "1"
-// The file is <datadir>/hub/snapmaker_keys.json, keyed by the printer's serial number; deleting it
-// (or clearing the setting) takes the phone's connect away again.
+// The file is <datadir>/hub/snapmaker_keys.json, keyed by the printer's serial number and then by
+// the page origin (the page server's port) that connected it; deleting it (or clearing the setting)
+// takes the phone's connect away again.
+//
+// Only LAN connects are kept (U1LocalFirst::should_remember_keys). A cloud connect's certificate
+// and client id are that instance's own cloud session: kept here they were shared by every
+// instance on the data dir (last writer wins), and a phone connect with them kicked the page off
+// the cloud. The page's LAN client id lives in its origin's storage, so only the process serving
+// that origin reuses an entry: two slicers side by side never borrow each other's id.
+
+static std::string page_origin()
+{
+    const unsigned port = (unsigned) wxGetApp().get_page_http_port();
+    return port ? std::to_string(port) : std::string();
+}
 
 static std::string keys_path() { return (fs::path(RemoteHub::hub_dir()) / "snapmaker_keys.json").string(); }
 
@@ -87,7 +101,10 @@ static json load_keys()
 
 void remember_credentials(const std::string& sn, const json& params)
 {
-    if (sn.empty() || !remember_keys_on())
+    if (sn.empty() || !remember_keys_on() || !U1LocalFirst::should_remember_keys(params))
+        return;
+    const std::string origin = page_origin();
+    if (origin.empty())
         return;
     auto str = [&params](const char* k) {
         return params.count(k) && params[k].is_string() ? params[k].get<std::string>() : std::string();
@@ -98,11 +115,7 @@ void remember_credentials(const std::string& sn, const json& params)
     entry["key"]      = str("key");
     entry["clientId"] = str("clientId");
     entry["port"]     = params.count("port") && params["port"].is_number_integer() ? params["port"].get<int>() : 8883;
-    if (entry["ca"].get<std::string>().empty() || entry["cert"].get<std::string>().empty() ||
-        entry["key"].get<std::string>().empty())
-        return; // nothing a later connect could use
-    json all = load_keys();
-    all[sn]  = entry;
+    json all = U1LocalFirst::keys_put(load_keys(), sn, origin, entry);
     try {
         boost::system::error_code ec;
         fs::create_directories(RemoteHub::hub_dir(), ec);
@@ -121,10 +134,9 @@ static void apply_stored_credentials(DeviceInfo& d)
 {
     if (d.sn.empty() || (!d.ca.empty() && !d.cert.empty() && !d.key.empty()))
         return;
-    const json all = load_keys();
-    if (!all.contains(d.sn) || !all[d.sn].is_object())
+    const json e = U1LocalFirst::keys_get(load_keys(), d.sn, page_origin());
+    if (!e.is_object())
         return;
-    const json& e   = all[d.sn];
     auto        str = [&e](const char* k) { return e.count(k) && e[k].is_string() ? e[k].get<std::string>() : std::string(); };
     d.ca   = str("ca");
     d.cert = str("cert");

@@ -99,6 +99,8 @@ protected:
     TextInput* m_tiStart;
     TextInput* m_tiEnd;
     TextInput* m_tiStep;
+    CheckBox*  m_cbAutoAdjust; // Orca #14759
+    CheckBox*  m_cbResize;     // Orca #14759
     Plater* m_plater;
 };
 

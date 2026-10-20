@@ -194,6 +194,22 @@ Slic3r::PrintEstimatedStatistics::ETimeMode convert(const ETimeMode& mode)
     }
 }
 
+// libvgcode finds where a path starts from a phantom vertex placed at the previous move's
+// position. Every move that is not an option marker (extrusions, travels, wipes, and Noop or
+// unmapped moves) starts a path when it is the first move, or when it differs from the previous
+// move in type, role or a value the preview colors by. convert() sizes its vertex array by
+// counting these, so the count and the fill must both use this test.
+static bool starts_path(const Slic3r::GCodeProcessorResult::MoveVertex& prev,
+                        const Slic3r::GCodeProcessorResult::MoveVertex& curr, bool first_move)
+{
+    const EOptionType option_type = move_type_to_option(convert(curr.type));
+    if (option_type != EOptionType::COUNT && option_type != EOptionType::Travels && option_type != EOptionType::Wipes)
+        return false;
+    return first_move || prev.type != curr.type || prev.extrusion_role != curr.extrusion_role
+        // ORCA: Split the path when a preview value changes.
+        || prev.mm3_per_mm != curr.mm3_per_mm || prev.acceleration != curr.acceleration || prev.jerk != curr.jerk;
+}
+
 GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::vector<std::string>& str_tool_colors,
     const std::vector<std::string>& str_color_print_colors, const Viewer& viewer)
 {
@@ -213,38 +229,41 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
     }
 
     const std::vector<Slic3r::GCodeProcessorResult::MoveVertex>& moves = result.moves;
-    ret.vertices.reserve(2 * moves.size());
+    // One vertex per move after the first, plus a phantom in front of every path start. Reserving
+    // the exact count leaves nothing to shrink afterwards, and shrinking would copy the whole array
+    // while both copies are alive (Orca #16440). convert_summary (Stream) already keeps a thin
+    // per-run buffer and is unchanged. Edge PR #487 is a different reset-capacity issue.
+    size_t vertices_count = moves.empty() ? 0 : moves.size() - 1;
+    for (size_t i = 1; i < moves.size(); ++i)
+        if (starts_path(moves[i - 1], moves[i], i == 1))
+            ++vertices_count;
+    ret.vertices.reserve(vertices_count);
     for (size_t i = 1; i < moves.size(); ++i) {
         const Slic3r::GCodeProcessorResult::MoveVertex& curr = moves[i];
         const Slic3r::GCodeProcessorResult::MoveVertex& prev = moves[i - 1];
         const EMoveType curr_type = convert(curr.type);
-        const EOptionType option_type = move_type_to_option(curr_type);
-        if (option_type == EOptionType::COUNT || option_type == EOptionType::Travels || option_type == EOptionType::Wipes) {
-            if (ret.vertices.empty() || prev.type != curr.type || prev.extrusion_role != curr.extrusion_role
-                // ORCA: Split the path when a preview value changes.
-                || prev.mm3_per_mm != curr.mm3_per_mm || prev.acceleration != curr.acceleration || prev.jerk != curr.jerk) {
-                // to allow libvgcode to properly detect the start/end of a path we need to add a 'phantom' vertex
-                // equal to the current one with the exception of the position, which should match the previous move position,
-                // and the times, which are set to zero
+        if (starts_path(prev, curr, i == 1)) {
+            // to allow libvgcode to properly detect the start/end of a path we need to add a 'phantom' vertex
+            // equal to the current one with the exception of the position, which should match the previous move position,
+            // and the times, which are set to zero
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
-                const libvgcode::PathVertex vertex = { convert(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
-                    curr.mm3_per_mm, curr.fan_speed, curr.temperature, 0.0f, convert(curr.extrusion_role), curr_type,
-                    static_cast<uint32_t>(curr.gcode_id), static_cast<uint32_t>(curr.layer_id),
-                    static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), { 0.0f, 0.0f },
-                    /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
-                    /* ORCA: Add Acceleration visualization support */ curr.acceleration,
-                    /* ORCA: Add Jerk visualization support */ curr.jerk };
+            const libvgcode::PathVertex vertex = { convert(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
+                curr.mm3_per_mm, curr.fan_speed, curr.temperature, 0.0f, convert(curr.extrusion_role), curr_type,
+                static_cast<uint32_t>(curr.gcode_id), static_cast<uint32_t>(curr.layer_id),
+                static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), { 0.0f, 0.0f },
+                /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
+                /* ORCA: Add Acceleration visualization support */ curr.acceleration,
+                /* ORCA: Add Jerk visualization support */ curr.jerk };
 #else
-              const libvgcode::PathVertex vertex = { convert(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
-                    curr.mm3_per_mm, curr.fan_speed, curr.temperature, convert(curr.extrusion_role), curr_type,
-                    static_cast<uint32_t>(curr.gcode_id), static_cast<uint32_t>(curr.layer_id),
-                    static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), { 0.0f, 0.0f },
-                    /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
-                    /* ORCA: Add Acceleration visualization support */ curr.acceleration,
-                    /* ORCA: Add Jerk visualization support */ curr.jerk };
+            const libvgcode::PathVertex vertex = { convert(prev.position), curr.height, curr.width, curr.feedrate, prev.actual_feedrate,
+                curr.mm3_per_mm, curr.fan_speed, curr.temperature, convert(curr.extrusion_role), curr_type,
+                static_cast<uint32_t>(curr.gcode_id), static_cast<uint32_t>(curr.layer_id),
+                static_cast<uint8_t>(curr.extruder_id), static_cast<uint8_t>(curr.cp_color_id), { 0.0f, 0.0f },
+                /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
+                /* ORCA: Add Acceleration visualization support */ curr.acceleration,
+                /* ORCA: Add Jerk visualization support */ curr.jerk };
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
-                ret.vertices.emplace_back(vertex);
-            }
+            ret.vertices.emplace_back(vertex);
         }
 
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
@@ -267,6 +286,7 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
         ret.vertices.emplace_back(vertex);
     }
+    assert(ret.vertices.size() == vertices_count);
     ret.vertices.shrink_to_fit();
 
     ret.spiral_vase_mode = result.spiral_vase_mode;
@@ -523,13 +543,17 @@ public:
                 m_priming.emplace_back(wipe_tower_data.priming.get()->at(i));
             }
         }
-        if (wipe_tower_data.final_purge)
+        // Orca #15917 / Edge #184: draw the final purge only when it is the on-tower (drop) variant.
+        // process() re-picks final_purge_drop with the current positions and clearance, so this
+        // stays in lockstep with WipeTowerIntegration::finalize() after a drag that skipped the
+        // tower step. The no-drop variant unloads at the object's top, off the tower.
+        if (wipe_tower_data.final_purge && wipe_tower_data.final_purge_drop && !wipe_tower_data.final_purge->gcode.empty())
             m_final.emplace_back(*wipe_tower_data.final_purge.get());
 
         m_angle = print.model().wipe_tower.rotation / 180.0f * PI;
         // ORCA/BBS: plate index
         m_position = print.model().wipe_tower.positions[print.get_plate_index()].cast<float>();
-        m_layers_count = wipe_tower_data.tool_changes.size() + (m_priming.empty() ? 0 : 1);
+        m_layers_count = wipe_tower_data.tool_changes.size() + (m_priming.empty() ? 0 : 1) + (m_final.empty() ? 0 : 1);
     }
 
     const std::vector<Slic3r::WipeTower::ToolChangeResult>& tool_change(size_t idx) {

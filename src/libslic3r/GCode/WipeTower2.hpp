@@ -34,6 +34,24 @@ public:
 	// used to reserve wipe tower space before the tower is generated.
 	static float estimate_semm_flush_volume(const ConfigBase& config, size_t filaments_cnt);
 
+    // Wipe-tower entry stagger (Snap #934). Slot is (layer*7 + tc*5) % 17 when enabled.
+    // The Edge-safe offset is 0 on the first printed tower layer, on local-Z changes
+    // (tc_idx_in_normal == size_t(-1)), on tower-interface changes, and on the extra
+    // end-of-print layer (final purge rams in place; do not walk the start). Otherwise
+    // it is min(slot * line_spacing, max(0, required_depth - ramming_depth - 4 * line_width)).
+    static size_t toolchange_entry_stagger_slot(bool enabled, size_t layer_idx, size_t toolchange_idx);
+    static float  toolchange_entry_stagger_offset(bool enabled, size_t layer_idx, size_t toolchange_idx, float line_spacing);
+    static float  stagger_offset_for(bool     enabled,
+                                     size_t   layer_id,
+                                     size_t   first_layer_idx,
+                                     size_t   tc_idx_in_normal,
+                                     bool     is_interface,
+                                     float    line_spacing,
+                                     float    required_depth,
+                                     float    ramming_depth,
+                                     float    line_width,
+                                     bool     is_final_purge = false);
+
     
     // Construct ToolChangeResult from current state of WipeTower2 and WipeTowerWriter2.
     // WipeTowerWriter2 is moved from !
@@ -76,6 +94,19 @@ public:
 
 
 
+
+	// The extra set_layer used for the end-of-print purge sits one step past m_plan.
+	// Without this flag, is_over_tower_height would skip ramming on that last unload.
+	void set_final_purge_on_tower(bool v = true) { m_final_purge_on_tower = v; }
+	// One-layer towers reset m_num_layer_changes in set_layer (is_first_layer stays true
+	// because the iterator cannot advance past the only plan entry), so the height guard
+	// never trips. The no-drop final-purge variant sets this so toolchange_Unload skips
+	// ramming even then.
+	void set_suppress_ramming(bool v = true) { m_suppress_ramming = v; }
+
+	// Copy that reseats m_layer_info / m_active_tool_change into this instance's m_plan.
+	WipeTower2(const WipeTower2 &other);
+	WipeTower2 &operator=(const WipeTower2 &other);
 
 	// Switch to a next layer.
 	void set_layer(
@@ -134,6 +165,7 @@ public:
     WipeTower::ToolChangeResult tool_change(size_t new_tool);
     WipeTower::ToolChangeResult local_z_tool_change(size_t new_tool, const WipeTower::box_coordinates& cleaning_box, float wipe_volume);
     void set_current_tool(size_t tool) { m_current_tool = tool; }
+    size_t current_tool() const { return m_current_tool; }
 
 	// Fill the unfilled space with a sparse infill.
 	// Call this method only if layer_finished() is false.
@@ -235,6 +267,7 @@ private:
 	int m_wall_type;
     bool   m_used_fillet                  = true;
     bool   m_use_gap_wall                 = true;
+    bool   m_stagger_toolchange_start     = false;
     float  m_rib_width                    = 10;
     float  m_extra_rib_length             = 0;
     std::vector<std::vector<Vec2f>> m_wall_skip_points;
@@ -285,6 +318,8 @@ private:
 
 	float           m_depth_traversed = 0.f; // Current y position at the wipe tower.
     bool            m_current_layer_finished = false;
+    bool            m_final_purge_on_tower = false;
+    bool            m_suppress_ramming     = false;
 	bool 			m_left_to_right   = true;
 	float			m_extra_flow      = 1.f;
 	float			m_extra_spacing_wipe    = 1.f;
@@ -362,6 +397,7 @@ private:
             const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const;
     bool layer_has_soluble_toolchange(const WipeTowerInfo &layer) const;
     float cumulative_toolchange_depth_before(const WipeTowerInfo::ToolChange *tool_change) const;
+    float stagger_offset_for(size_t layer_id, const WipeTowerInfo::ToolChange &tc, size_t tc_idx_in_normal) const;
     WipeTower::ToolChangeResult emit_planned_tool_change(const WipeTowerInfo::ToolChange *tool_change);
 
 	void toolchange_Unload(
@@ -421,6 +457,9 @@ private:
     Polygon generate_rib_polygon(const WipeTower::box_coordinates& wt_box);
 
     WipeTowerInfo::ToolChange set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume);
+
+    void copy_assign_from(const WipeTower2 &other);
+    friend void reseat_wipe_tower2_iterators(WipeTower2 &dst, const WipeTower2 &src);
 };
 
 

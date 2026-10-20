@@ -598,7 +598,7 @@ Evaluation evaluate(const Printer& pr, const Job& job, const Request& req, const
         if (problems.empty() && BambuNozzleMapping::query_applies(qc)) {
             BambuNozzleMapping::RequestInput rin;
             rin.calibration              = ev.flow_cali ? 1 : 0;
-            rin.extrude_cali_manual_mode = 1;
+            rin.extrude_cali_manual_mode = 0; // Bambu Studio's default PA mode
             rin.filament_change_sequence = job.filament_change_sequence;
             for (const FilamentInfo& r : ev.result)
                 rin.mapped.push_back({ r.id, r.ams_id, r.slot_id, r.tray_id, r.filament_id, r.color });

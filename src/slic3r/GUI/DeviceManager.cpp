@@ -8,6 +8,7 @@
 #include "DeviceModelCode.hpp"
 #include "ChamberLights.hpp"
 #include "BambuSendDiagnosis.hpp"
+#include "BambuNetInfo.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
@@ -20,6 +21,9 @@
 #include "GUI_App.hpp"
 #include "ReleaseNote.hpp"
 #include <thread>
+#include <cstring>
+#include <functional>
+#include <wx/timer.h>
 #include <mutex>
 #include <set>
 #include <codecvt>
@@ -32,6 +36,7 @@
 #include <boost/uuid/uuid_io.hpp>
 #include "fast_float/fast_float.h"
 #include <wx/dir.h>
+#include "slic3r/Utils/BambuConnectStatus.hpp"
 
 #define CALI_DEBUG
 #define MINUTE_30 1800000    //ms
@@ -3274,8 +3279,38 @@ void MachineObject::note_status_received()
         BOOST_LOG_TRIVIAL(info) << "connect: dev=" << dev_id << " first status " << ms << " ms after selection";
 }
 
+// Whether a payload ({"print":{"command":...}}) is a command a secured printer rejects unsigned.
+static bool payload_needs_signature(const std::string& json_str)
+{
+    const json parsed = json::parse(json_str, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object())
+        return false;
+    for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+        if (!it.value().is_object()) continue;
+        auto cmd = it.value().find("command");
+        if (cmd == it.value().end() || !cmd->is_string()) continue;
+        return GUI::bambu_command_needs_signature(it.key(), cmd->get<std::string>());
+    }
+    return false;
+}
+
 int MachineObject::publish_json(std::string json_str, int qos, int flag)
 {
+    // A status-only printer (bound to a Bambu account, printing through Bambu Connect) is sent the
+    // two status requests and nothing else (Utils/BambuConnectStatus.hpp).
+    if (const AppConfig *cfg = Slic3r::GUI::wxGetApp().app_config;
+        cfg != nullptr && BambuConnectStatus::is_status_only(*cfg, dev_id) && !BambuConnectStatus::status_only_allows(json_str)) {
+        BOOST_LOG_TRIVIAL(info) << "publish_json: status-only printer, " << BambuConnectStatus::command_label(json_str) << " not sent";
+        return -1;
+    }
+    // Secured printer (Developer Mode off): it rejects every command that is not signed by Bambu and
+    // EdgeSlicer does not sign. Commands the host fires on its own never get here (they check
+    // skip_auto_command_if_secured first), so one that does is the user's: say why it is not sent.
+    if (is_secured_mode() && payload_needs_signature(json_str)) {
+        BOOST_LOG_TRIVIAL(info) << "publish_json: " << dev_id << " is in secured mode, not sending an unsigned command";
+        show_secured_mode_message(false);
+        return -1;
+    }
     // This selection's session is still being dialled: the plug-in has nothing to publish on and
     // would refuse the command (-1). Keep it and send it once the session is up
     // (note_session_up). The caller gets 0 - the command is accepted, it just waits.
@@ -3341,6 +3376,10 @@ void MachineObject::note_agent_command_sent(const std::string& command)
 
 std::string MachineObject::command_get_auto_nozzle_mapping(const std::string& request_json)
 {
+    // Fired by the send dialog on its own; a secured printer would reject it as unsigned. "" is the
+    // "could not publish" answer, which the callers already treat as "ask again at send time".
+    if (skip_auto_command_if_secured("get_auto_nozzle_mapping"))
+        return "";
     try {
         json j = json::parse(request_json);
         const std::string seq = std::to_string(MachineObject::m_sequence_id++);
@@ -3384,6 +3423,89 @@ static bool log_first_time(const std::string &key)
     if (s_seen.size() > 1024)
         s_seen.clear();
     return s_seen.insert(key).second;
+}
+
+bool MachineObject::is_secured_mode() const
+{
+    const int state = m_secured_state.load();
+    if (state != 0)
+        return state == 2;
+    return m_unsigned_refused.load();
+}
+
+void MachineObject::update_secured_mode_from_fun(const std::string& fun)
+{
+    bool secured = false;
+    if (!GUI::bambu_fun_secured_bit(fun, secured))
+        return;
+    const int next = secured ? 2 : 1;
+    const int prev = m_secured_state.exchange(next);
+    if (prev != next)
+        BOOST_LOG_TRIVIAL(info) << "secured mode: " << dev_id << " reports "
+                                << (secured ? "secured (Developer Mode off), unsigned control commands are not sent"
+                                            : "Developer Mode on")
+                                << (prev == 0 ? " (first report)" : " (changed)");
+}
+
+bool MachineObject::skip_auto_command_if_secured(const char* what) const
+{
+    if (!is_secured_mode())
+        return false;
+    if (log_first_time(std::string("secured_skip|") + dev_id + "|" + what))
+        BOOST_LOG_TRIVIAL(info) << "secured mode: " << dev_id << " not sending " << what << " (printer rejects unsigned commands)";
+    return true;
+}
+
+void MachineObject::show_secured_mode_message(bool once_per_session)
+{
+    if (once_per_session) {
+        if (!log_first_time("secured_msg|" + dev_id))
+            return;
+    } else if (wxIsMainThread()) {
+        // A button or dialog on the GUI thread: the user pressed something and must see why nothing
+        // happened. A toast hides behind a modal dialog, so this is a modal box over the active
+        // window, every press. It opens after the handler returns, so one press that sends several
+        // commands (AMS filament edit: setting + calibration select) shows it once; a press that
+        // lands while it is pending or open is swallowed by it.
+        static bool s_pending = false;
+        if (s_pending)
+            return;
+        s_pending = true;
+        BOOST_LOG_TRIVIAL(warning) << "secured mode: " << dev_id << " " << GUI::bambu_secured_mode_message(false);
+        GUI::wxGetApp().CallAfter([] {
+            wxWindow* parent = wxGetTopLevelParent(wxGetActiveWindow());
+            if (!parent)
+                parent = GUI::wxGetApp().GetTopWindow();
+            GUI::MessageDialog dlg(parent, wxString::FromUTF8(GUI::bambu_secured_mode_message().c_str()), _L("Developer Mode is off"),
+                                   wxOK | wxICON_WARNING);
+            dlg.ShowModal();
+            s_pending = false;
+        });
+        return;
+    } else {
+        // Not from a button (another thread): a toast, and a retry loop must not stack them.
+        static std::mutex s_mutex;
+        static std::map<std::string, std::chrono::steady_clock::time_point> s_last;
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(s_mutex);
+        auto it = s_last.find(dev_id);
+        if (it != s_last.end() && now - it->second < std::chrono::seconds(20))
+            return;
+        s_last[dev_id] = now;
+    }
+    BOOST_LOG_TRIVIAL(warning) << "secured mode: " << dev_id << " " << GUI::bambu_secured_mode_message(false);
+    const wxString text = wxString::FromUTF8(GUI::bambu_secured_mode_message().c_str());
+    GUI::wxGetApp().CallAfter([text] { GUI::wxGetApp().push_notification(text); });
+}
+
+void MachineObject::note_unsigned_refusal(const std::string& command, int err_code)
+{
+    m_unsigned_refused = true;
+    const int state = m_secured_state.load();
+    BOOST_LOG_TRIVIAL(info) << "secured mode: " << dev_id << " refused \"" << command << "\" as unsigned (err_code "
+                            << err_code << "), print.fun says "
+                            << (state == 2 ? "secured" : state == 1 ? "Developer Mode on" : "nothing yet");
+    show_secured_mode_message(true);
 }
 
 std::string MachineObject::setting_id_to_type(std::string setting_id, std::string tray_type)
@@ -3924,7 +4046,16 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                     int         command_err = 0;
                     json        action_json;
                     std::string refused_command;
-                    if (GUI::accept_command_refusal(jj, m_sent_commands, GUI::SentCommandTracker::Clock::now(),
+                    // An unsigned-command refusal from a secured printer (err_code 84033543..84033548 /
+                    // "mqtt message verify failed") is not an error to dig into: say once that
+                    // Developer Mode is off, and do not open the raw error dialog for it.
+                    const int         reply_err    = jj.contains("err_code") && jj["err_code"].is_number_integer() ? jj["err_code"].get<int>() : 0;
+                    const std::string reply_result = jj.contains("result") && jj["result"].is_string() ? jj["result"].get<std::string>() : std::string();
+                    const std::string reply_reason = jj.contains("reason") && jj["reason"].is_string() ? jj["reason"].get<std::string>() : std::string();
+                    if (GUI::bambu_reply_is_unsigned_refusal(reply_err, reply_result, reply_reason)) {
+                        const std::string reply_cmd = jj.contains("command") && jj["command"].is_string() ? jj["command"].get<std::string>() : std::string();
+                        note_unsigned_refusal(reply_cmd, reply_err);
+                    } else if (GUI::accept_command_refusal(jj, m_sent_commands, GUI::SentCommandTracker::Clock::now(),
                                                     command_err, action_json, refused_command)) {
                         add_command_error_code_dlg(command_err, action_json, refused_command);
                     } else if (!refused_command.empty() && !GUI::is_status_or_info_command(refused_command)) {
@@ -4022,6 +4153,15 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         if (jj.contains("net")) {
                             if (jj["net"].contains("conf")) {
                                 network_wired = (jj["net"]["conf"].get<int>() & (0x1)) != 0;
+                            }
+                            // The printer's own LAN address, for the camera when no announcement
+                            // has given us one (BambuNetInfo.hpp). Never written into dev_ip.
+                            const std::string reported_ip = BambuNetInfo::first_ip(jj["net"]);
+                            if (!reported_ip.empty() && reported_ip != net_reported_ip) {
+                                if (net_reported_ip.empty() && dev_ip.empty())
+                                    BOOST_LOG_TRIVIAL(info) << "MachineObject: the printer reported its LAN address; the camera can use it "
+                                                               "until discovery finds the printer";
+                                net_reported_ip = reported_ip;
                             }
                         }
                     }
@@ -6217,6 +6357,8 @@ void MachineObject::parse_new_info(json print)
 
     if (!fun.empty()) {
 
+        update_secured_mode_from_fun(fun);
+
         is_support_agora    = get_flag_bits(fun, 1);
         if (is_support_agora) is_support_tunnel_mqtt = false;
 
@@ -6250,8 +6392,12 @@ void MachineObject::parse_new_info(json print)
     /*fun2 - may be longer than 64 bits, read without a border (Bambu DevUtil::get_flag_bits_no_border)*/
     if (print.contains("fun2") && print["fun2"].is_string()) {
         const std::string fun2 = print["fun2"].get<std::string>();
-        if (!fun2.empty())
+        if (!fun2.empty()) {
             is_support_remote_dry = GUI::AmsDual::fun2_supports_remote_dry(fun2);
+            // Bambu Studio: is_support_print_with_emmc = fun2 bit 0 (H2 series, P2S). A LAN print
+            // may then go to the printer's internal storage when no card is inserted.
+            is_support_print_with_emmc = GUI::AmsDual::flag_bits_no_border(fun2, 0) == 1;
+        }
     }
 
     /*aux*/
@@ -6409,7 +6555,7 @@ void MachineObject::parse_new_info(json print)
                 //current nozzle info
                 if (extder_obj.nozzle_id == 0xff) {
                     extder_obj.current_nozzle_type = NozzleType::ntUndefine;
-                    extder_obj.current_nozzle_diameter = 0.4f;
+                    extder_obj.current_nozzle_diameter = 0.0f; // no nozzle mounted: unknown (Orca #12814)
                 } else {
                     for (auto i = 0; i < m_nozzle_data.nozzles.size(); i++) {
                         if (m_nozzle_data.nozzles[i].id == extder_obj.nozzle_id) {
@@ -6460,6 +6606,16 @@ bool MachineObject::is_nozzle_data_invalid()
     }
 
     return false;
+}
+
+float MachineObject::nozzle_diameter_or_preset(int extder_id) const
+{
+    float fallback = 0.f;
+    if (const PresetBundle* bundle = Slic3r::GUI::wxGetApp().preset_bundle)
+        if (const auto* opt = bundle->printers.get_selected_preset().config.option<ConfigOptionFloats>("nozzle_diameter"))
+            if (!opt->values.empty())
+                fallback = float(opt->values.front());
+    return GUI::NozzleInfo::diameter_or(nozzle_diameter(extder_id), fallback);
 }
 
 bool MachineObject::has_nozzle_rack() const
@@ -6615,6 +6771,9 @@ void MachineObject::update_printer_preset_name()
 
 void MachineObject::check_ams_filament_valid()
 {
+    // Resets AMS slots on its own when a preset is unknown; a secured printer rejects that as unsigned.
+    if (skip_auto_command_if_secured("ams_filament_setting"))
+        return;
     PresetBundle * preset_bundle = Slic3r::GUI::wxGetApp().preset_bundle;
     auto printer_model = MachineObject::get_preset_printer_model_name(this->printer_type);
     std::map<std::string, std::set<std::string>> need_checked_filament_id;
@@ -6831,8 +6990,24 @@ void DeviceManager::update_local_machine(const MachineObject& m)
     }
 }
 
+// A wxTimer that calls a function: DeviceManager is not an event handler.
+class DeviceManager::RefreshTimer : public wxTimer
+{
+public:
+    explicit RefreshTimer(std::function<void()> fn) : m_fn(std::move(fn)) {}
+    void Notify() override { if (m_fn) m_fn(); }
+private:
+    std::function<void()> m_fn;
+};
+
 DeviceManager::~DeviceManager()
 {
+    // The timers call back into this object: stop them first.
+    m_refresh_token.reset();
+    delete m_auto_refresh_timer;
+    m_auto_refresh_timer = nullptr;
+    delete m_probe_timer;
+    m_probe_timer = nullptr;
     for (auto it = localMachineList.begin(); it != localMachineList.end(); it++) {
         if (it->second) {
             delete it->second;
@@ -6921,7 +7096,12 @@ void DeviceManager::check_pushing()
 {
     keep_alive();
     MachineObject* obj = this->get_selected_machine();
-    if (obj && !obj->is_support_mqtt_alive) {
+    // Orca #13802: the selected machine can be missing or stale when the timer fires. Having no
+    // selection is normal (no warning, this runs every tick); the early return keeps every later
+    // use of obj behind one check.
+    if (!obj)
+        return;
+    if (!obj->is_support_mqtt_alive) {
         std::chrono::system_clock::time_point start = std::chrono::system_clock::now();
         auto internal = std::chrono::duration_cast<std::chrono::milliseconds>(start - obj->last_update_time);
         if (internal.count() > TIMEOUT_FOR_STRAT && internal.count() < 1000 * 60 * 60 * 300) {
@@ -7311,10 +7491,26 @@ void DeviceManager::apply_ssdp_connect_type(MachineObject* obj, const char* list
     if (!obj) return;
     const std::string                 before = obj->dev_connection_type;
     const SsdpConnectType::LanMemory& mem    = m_ssdp_lan_memory[obj->dev_id];
+    // Who is looking. The cloud list's copy of a printer is in the account's bind list by
+    // definition; the local copy is when the account is signed in and lists the same serial.
+    SsdpConnectType::Account account;
+    account.signed_in = Slic3r::GUI::wxGetApp().is_user_login();
+    account.bound     = account.signed_in && (std::strcmp(list, "user") == 0 || userMachineList.count(obj->dev_id) > 0);
     const SsdpConnectType::Result     r      = SsdpConnectType::after_announcement(before, announced, announced_bind, saved_lan,
-                                                                                   has_access_code, mem, now_ms);
+                                                                                   has_access_code, mem, now_ms, account);
     obj->dev_connection_type = r.connect_type;
     obj->bind_state          = r.bind_state;
+    // A status-only printer announces "occupied" (it is bound to the account Bambu Connect uses);
+    // for EdgeSlicer it is a saved LAN printer, which the LAN lists only show while "free".
+    if (r.connect_type == "lan" && Slic3r::GUI::wxGetApp().app_config &&
+        BambuConnectStatus::is_status_only(*Slic3r::GUI::wxGetApp().app_config, obj->dev_id))
+        obj->bind_state = "free";
+
+    // A known printer changed mode (after the hysteresis, so a stray "cloud" does not count) or
+    // announced a different binding (as announced: a LAN-kept printer announcing "occupied" is
+    // just the evidence the account's bind list may be stale about it).
+    if (std::strcmp(list, "local") == 0)
+        note_printer_state_change(obj->dev_id, r.connect_type, announced_bind);
 
     // Warning level: the release build logs nothing below it, and this is what the "Log in
     // printer" question is decided on. Written whenever the outcome for this printer and list
@@ -7345,7 +7541,8 @@ SsdpConnectType::PickerOffer DeviceManager::picker_offer_for(MachineObject* obj,
     if (!obj) return SsdpConnectType::PickerOffer::Bind;
     const bool is_lan = obj->is_lan_mode_printer();
     const bool recent = lan_announced_recently(obj->dev_id);
-    const SsdpConnectType::PickerOffer offer = SsdpConnectType::picker_offer(is_lan, recent);
+    const bool signed_in = Slic3r::GUI::wxGetApp().is_user_login();
+    const SsdpConnectType::PickerOffer offer = SsdpConnectType::picker_offer(is_lan, recent, signed_in);
     const char* object_list = get_local_machine(obj->dev_id) == obj ? "local" : get_user_machine(obj->dev_id) == obj ? "user" : "other";
     BOOST_LOG_TRIVIAL(warning) << "printer picker: " << obj->dev_id << " clicked in '" << panel_list << "' (" << object_list
                                << " list object): dev_connection_type='" << obj->dev_connection_type << "' bind_state='"
@@ -7356,11 +7553,112 @@ SsdpConnectType::PickerOffer DeviceManager::picker_offer_for(MachineObject* obj,
         // Switched by a run of "cloud" announcements, but it was LAN a moment ago: the access code
         // is what the user is about to enter, and ConnectPrinterDialog / update_local_machine only
         // treat a "lan" printer as a LAN printer.
+        // Signed out, a cloud-mode printer is offered the same dialog (there is no account to bind
+        // it to); "occupied" would hide it from the LAN lists once its code is in.
         obj->dev_connection_type = "lan";
-        if (obj->bind_state.empty()) obj->bind_state = "free";
-        BOOST_LOG_TRIVIAL(warning) << "printer picker: " << obj->dev_id << " made LAN again for the access-code dialog";
+        if (obj->bind_state.empty() || obj->bind_state == "occupied") obj->bind_state = "free";
+        BOOST_LOG_TRIVIAL(warning) << "printer picker: " << obj->dev_id << " made LAN again for the access-code dialog"
+                                   << (signed_in ? "" : " (signed out)");
     }
     return offer;
+}
+
+void DeviceManager::fetch_bind_list_async(std::function<void()> done)
+{
+    NetworkAgent* agent = m_agent;
+    if (!agent || !Slic3r::GUI::wxGetApp().is_user_login()) {
+        if (done) done();
+        return;
+    }
+    m_bind_refresh.note_fetched(ssdp_now_ms());
+    std::thread([this, agent, token = std::weak_ptr<int>(m_refresh_token), done = std::move(done)]() mutable {
+        unsigned int http_code = 0;
+        std::string  body;
+        const int    result = agent->get_user_print_info(&http_code, &body);
+        Slic3r::GUI::wxGetApp().CallAfter([this, token, result, body = std::move(body), done = std::move(done)]() {
+            if (token.expired())
+                return;
+            if (result == 0)
+                parse_user_print_info(body);
+            else
+                BOOST_LOG_TRIVIAL(warning) << "Printer refresh: the account's printer list could not be fetched (result " << result << ")";
+            if (done) done();
+        });
+    }).detach();
+}
+
+void DeviceManager::set_probe_sending(bool sending)
+{
+    if (!m_agent) return;
+    // Bambu Studio's printer picker does the same while it is open: discovery on, with active
+    // search requests (start_discovery's second argument) so printers answer now rather than at
+    // their next periodic announcement.
+    m_agent->start_discovery(true, sending);
+}
+
+bool DeviceManager::restart_discovery(const char* why, bool rate_limited)
+{
+    if (!m_agent) return false;
+    if (rate_limited && !m_bind_refresh.take_manual(ssdp_now_ms())) {
+        BOOST_LOG_TRIVIAL(info) << "Printer refresh (" << why << "): too soon after the last one, ignored";
+        return false;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Printer refresh (" << why << "): re-reading SSDP discovery";
+    set_probe_sending(true);
+    if (!m_probe_timer)
+        m_probe_timer = new RefreshTimer([this]() { set_probe_sending(false); });
+    m_probe_timer->Stop();
+    m_probe_timer->StartOnce(8000);
+    return true;
+}
+
+bool DeviceManager::refresh_printers(const char* why, std::function<void()> done)
+{
+    if (!m_agent) return false;
+    if (!m_bind_refresh.take_manual(ssdp_now_ms())) {
+        BOOST_LOG_TRIVIAL(info) << "Printer refresh (" << why << "): too soon after the last one, ignored";
+        return false;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Printer refresh (" << why << "): "
+                            << (Slic3r::GUI::wxGetApp().is_user_login() ? "re-requesting the account's printer list" : "signed out, discovery only");
+    restart_discovery(why, /* rate_limited */ false); // the gate was taken above
+    fetch_bind_list_async(std::move(done));
+    return true;
+}
+
+void DeviceManager::note_printer_state_change(const std::string& dev_id, const std::string& connect_type, const std::string& bind_state)
+{
+    auto it = m_ssdp_state.find(dev_id);
+    const bool known = it != m_ssdp_state.end();
+    BindListRefresh::PrinterState now_state { connect_type, bind_state };
+    const bool changed = BindListRefresh::is_state_change(known, known ? it->second : BindListRefresh::PrinterState{}, now_state);
+    if (known) it->second = now_state; else m_ssdp_state.emplace(dev_id, now_state);
+    if (!changed)
+        return;
+    if (!Slic3r::GUI::wxGetApp().is_user_login())
+        return; // no account list to refresh; the lists follow the announcements directly
+    BOOST_LOG_TRIVIAL(info) << "Printer refresh: " << dev_id.substr(0, 3) << "... changed to connect_type='" << connect_type
+                            << "' announced bind_state='" << bind_state << "', the account's printer list will be re-requested";
+    m_bind_refresh.note_change(ssdp_now_ms());
+    arm_auto_refresh();
+}
+
+void DeviceManager::arm_auto_refresh()
+{
+    const long long delay = m_bind_refresh.auto_delay(ssdp_now_ms());
+    if (delay < 0) return;
+    if (!m_auto_refresh_timer) {
+        m_auto_refresh_timer = new RefreshTimer([this]() {
+            if (m_bind_refresh.take_auto(ssdp_now_ms())) {
+                BOOST_LOG_TRIVIAL(info) << "Printer refresh: re-requesting the account's printer list after a printer changed state";
+                fetch_bind_list_async({});
+            } else {
+                arm_auto_refresh(); // not due yet (more changes, or the minimum gap): wait again
+            }
+        });
+    }
+    m_auto_refresh_timer->Stop();
+    m_auto_refresh_timer->StartOnce((int) std::max(delay, 100LL));
 }
 
 MachineObject* DeviceManager::insert_local_device(const BBLocalMachine& machine, std::string connection_type, std::string bind_state, std::string version, std::string access_code)

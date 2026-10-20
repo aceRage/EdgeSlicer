@@ -10,7 +10,7 @@ namespace Slic3r {
 const int g_min_flush_volume_from_support = 420.f;
 const int g_flush_volume_to_support = 230;
 
-const int g_max_flush_volume = 800;
+// Orca #11778: g_max_flush_volume (20000) and g_typical_max_flush_volume (800) live in FlushVolCalc.hpp.
 
 static float to_radians(float degree)
 {

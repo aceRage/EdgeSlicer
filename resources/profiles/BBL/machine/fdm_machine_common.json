@@ -21,6 +21,7 @@
     ],
     "gcode_flavor": "marlin",
     "silent_mode": "0",
+    "enable_power_loss_recovery": "enable",
     "long_retractions_when_cut": [
         "0"
     ],

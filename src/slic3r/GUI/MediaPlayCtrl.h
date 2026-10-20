@@ -122,6 +122,7 @@ private:
     boost::mutex m_mutex;
     boost::condition_variable m_cond;
     boost::thread m_thread;
+    bool m_exiting = false; // set under m_mutex by the destructor; the worker leaves at its next task
 
     bool m_streaming = false;
     bool m_user_triggered = false;

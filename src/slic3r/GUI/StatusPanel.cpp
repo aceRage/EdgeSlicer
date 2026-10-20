@@ -1053,7 +1053,7 @@ wxBoxSizer *StatusBasePanel::create_monitoring_page()
         const std::string js_request_pip = R"(
             document.querySelector('video').requestPictureInPicture();
         )";
-        m_custom_camera_view->RunScript(js_request_pip);
+        WebView::RunScript(m_custom_camera_view, js_request_pip);
     });
     m_camera_switch_button->Hide();
 
@@ -2786,10 +2786,11 @@ void StatusPanel::update_ams(MachineObject *obj)
     }
     if (m_filament_setting_dlg) { m_filament_setting_dlg->obj = obj; }
 
-    if (obj && (obj->last_cali_version != obj->cali_version)) {
+    // Fired by the panel on its own (extrusion_cali_get); a secured printer would reject it as unsigned.
+    if (obj && (obj->last_cali_version != obj->cali_version) && !obj->skip_auto_command_if_secured("extrusion_cali_get")) {
         last_cali_version = obj->cali_version;
         PACalibExtruderInfo cali_info;
-        cali_info.nozzle_diameter = obj->m_extder_data.extders[0].current_nozzle_diameter;
+        cali_info.nozzle_diameter = obj->nozzle_diameter_or_preset(MAIN_NOZZLE_ID); // Orca #13255
         cali_info.use_extruder_id = false;
         cali_info.use_nozzle_volume_type = false;
         CalibUtils::emit_get_PA_calib_infos(cali_info);
@@ -4530,7 +4531,7 @@ void StatusBasePanel::remove_controls()
         }
         })();
     )";
-    m_custom_camera_view->RunScript(js_cleanup_video_element);
+    WebView::RunScript(m_custom_camera_view, js_cleanup_video_element);
 }
 
 void StatusPanel::on_camera_leave(wxMouseEvent& event)

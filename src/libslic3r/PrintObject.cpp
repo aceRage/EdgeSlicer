@@ -1055,6 +1055,7 @@ void PrintObject::clear_support_layers()
             l->sharp_tails.clear();
             l->sharp_tails_height.clear();
             l->cantilevers.clear();
+            l->support_overhangs.clear();
         }
     }
 }
@@ -1222,6 +1223,7 @@ bool PrintObject::invalidate_state_by_config_options(
 		} else if (
                opt_key == "elefant_foot_compensation"
             || opt_key == "elefant_foot_compensation_layers"
+            || opt_key == "elefant_foot_layers_density"
             || opt_key == "support_top_z_distance"
             || opt_key == "support_bottom_z_distance"
             || opt_key == "xy_hole_compensation"
@@ -4252,6 +4254,41 @@ void PrintObject::generate_support_preview()
     profiler.duration2 = (ts3 - ts2).total_milliseconds();
 }
 
+// Edge (support highlight, phase 5): see Print.hpp.
+void PrintObject::detect_support_overhangs_only()
+{
+    // The steps a slice runs before the support step that the detection reads: the slices, and for
+    // bridge removal the perimeters and the bottom bridge surfaces of the infill preparation. Always
+    // both, so the layers are exactly as the slice has them when its support step starts.
+    this->make_perimeters();
+    this->prepare_infill();
+    this->throw_if_canceled();
+    this->clear_support_layers();
+    if (m_layers.size() < 2 || ! m_config.enable_support.value)
+        return;
+    if (is_tree(m_config.support_type.value)) {
+        // Every tree style, organic too, detects with TreeSupport::detect_overhangs().
+        TreeSupport tree_support(*this, m_slicing_params);
+        tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
+        tree_support.detect_overhangs();
+        this->clear_tree_support_preview_cache();
+    } else {
+        PrintObjectSupportMaterial support_material(this, m_slicing_params);
+        support_material.detect_overhangs_only(*this);
+    }
+    this->throw_if_canceled();
+}
+
+// Edge (support highlight, phase 6): see Print.hpp.
+void PrintObject::generate_support_for_preview()
+{
+    this->clear_support_layers();
+    if ((m_config.enable_support.value && m_layers.size() > 1) || (this->has_raft() && ! m_layers.empty()))
+        this->_generate_support_material();
+    this->clear_tree_support_preview_cache();
+    this->throw_if_canceled();
+}
+
 void PrintObject::update_slicing_parameters()
 {
     // Orca: updated function call for XYZ shrinkage compensation
@@ -5003,7 +5040,12 @@ bool PrintObject::update_layer_height_profile(const ModelObject          &model_
             std::abs(layer_height_profile[layer_height_profile.size() - 2] - slicing_parameters.object_print_z_uncompensated_max + slicing_parameters.object_print_z_min) > 1e-3))
         layer_height_profile.clear();
 
-    if (layer_height_profile.empty() || layer_height_profile[1] != slicing_parameters.first_object_layer_height || has_dithering_ranges) {
+    // Snapmaker #757: a differing first layer height must NOT force regeneration: doing so discards a
+    // valid variable layer height profile (e.g. loaded from a 3MF) and replaces it with a fixed-height
+    // profile. generate_object_layers() applies the first layer height itself whenever it is fixed
+    // (no raft, or a bridging first object layer over a raft), so the profile's first segment does not
+    // need to match it here. Edge: the dithering / mixed-height ranges still regenerate the profile.
+    if (layer_height_profile.empty() || has_dithering_ranges) {
         //layer_height_profile = layer_height_profile_adaptive(slicing_parameters, model_object.layer_config_ranges, model_object.volumes);
         layer_height_profile = layer_height_profile_from_ranges(slicing_parameters, *ranges_to_use);
         // The layer height profile is already compressed.

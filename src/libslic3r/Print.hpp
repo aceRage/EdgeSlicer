@@ -421,6 +421,16 @@ public:
 
     // BBS
     void generate_support_preview();
+    // Edge (support highlight, phase 5): run the object steps the support generators' overhang
+    // detection reads (slicing, perimeters and the infill preparation, which bridge removal reads)
+    // and then only that detection - normal or tree, as the object's config says - so each layer's
+    // Layer::support_overhangs holds exactly what the generator would hold up. No support layers
+    // are made. For a private Print in a background job (the support painting highlight).
+    void detect_support_overhangs_only();
+    // Edge (support highlight, phase 6): after detect_support_overhangs_only(), generate the support
+    // itself (the support step's generator, without the side stabilizers), so a tree's real contact
+    // can be read from the support layers. For the same private Print.
+    void generate_support_for_preview();
     const std::vector<VolumeSlices>& firstLayerObjSlice() const { return firstLayerObjSliceByVolume; }
     std::vector<VolumeSlices>& firstLayerObjSliceMod() { return firstLayerObjSliceByVolume; }
     const std::vector<groupedVolumeSlices>& firstLayerObjGroups() const { return firstLayerObjSliceByGroups; }
@@ -974,6 +984,18 @@ struct WipeTowerData
     std::vector<std::vector<WipeTower::ToolChangeResult>> tool_changes;
     std::vector<std::vector<WipeTower::ToolChangeResult>> local_z_tool_changes;
     std::unique_ptr<WipeTower::ToolChangeResult>          final_purge;
+    // Two TCRs generated in _make_wipe_tower: drop+ramming, and unload at object-top with
+    // ramming suppressed. select_final_purge_variant() copies one into final_purge using a
+    // fresh clearance check. #189 reads final_purge / final_purge_drop, which remain the
+    // currently selected pair.
+    std::unique_ptr<WipeTower::ToolChangeResult>          final_purge_on_tower;
+    std::unique_ptr<WipeTower::ToolChangeResult>          final_purge_no_drop;
+    // True when the selected final purge is the on-tower (drop + ramming) variant.
+    // Recomputed on every process() and again just before G-code export.
+    bool                                                  final_purge_drop { false };
+    bool                                                  final_purge_will_ram { false };
+    coordf_t                                              final_purge_last_z { 0 };
+    coordf_t                                              final_purge_layer_height { 0 };
     std::vector<float>                                    used_filament;
     int                                                   number_of_toolchanges;
 
@@ -1001,6 +1023,12 @@ struct WipeTowerData
         tool_changes.clear();
         local_z_tool_changes.clear();
         final_purge.reset(nullptr);
+        final_purge_on_tower.reset(nullptr);
+        final_purge_no_drop.reset(nullptr);
+        final_purge_drop = false;
+        final_purge_will_ram = false;
+        final_purge_last_z = 0;
+        final_purge_layer_height = 0;
         used_filament.clear();
         number_of_toolchanges = -1;
         depth = 0.f;
@@ -1283,6 +1311,10 @@ public:
     // Wipe tower support.
     bool                        has_wipe_tower() const;
     const WipeTowerData&        wipe_tower_data(size_t filaments_cnt = 0) const;
+    // Re-run clearance with current instance / tower / z_offset / toolhead values and
+    // copy the matching TCR into wipe_tower_data().final_purge. Safe when the tower
+    // step was skipped (N2: drag object or tower, change clearance, change z_offset).
+    void                        select_final_purge_variant();
     const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
 
     bool                        enable_timelapse_print() const;
@@ -1544,6 +1576,10 @@ struct CompactedTowerClearance
 // allowed_rise. It also selects the horizontal tier, so the two cannot disagree.
 CompactedTowerClearance compacted_wipe_tower_clearance(const PrintConfig &config, const CompactedTowerZone &zone,
                                                       const Polygon &inst_hull, double object_rise);
+
+// True when dropping the nozzle from each object's top down to purge_z would still pass the
+// compacted-tower clearance rules (toolhead body, nozzle cone, and the rod's shared-Y band).
+bool final_purge_drop_clearance_ok(const Print &print, double purge_z);
 
 // This object was judged on a tier reaching past the bare nozzle cone, so the wide ring is the one its
 // outline has to be drawn against.

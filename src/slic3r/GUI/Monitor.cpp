@@ -359,13 +359,22 @@ void MonitorPanel::update_all()
 
     //BBS check mqtt connections if user is login
     if (wxGetApp().is_user_login()) {
-        dev->check_pushing();
+        // Orca #13802: one throwing step must not skip the other, or the rest of the refresh.
+        try {
+            dev->check_pushing();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "MonitorPanel::update_all check_pushing exception=" << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "MonitorPanel::update_all check_pushing unknown exception";
+        }
         // check mqtt connection and reconnect if disconnected
         try {
-            m_agent->refresh_connection();
-        }
-        catch (...) {
-            ;
+            if (m_agent)
+                m_agent->refresh_connection();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "MonitorPanel::update_all refresh_connection exception=" << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "MonitorPanel::update_all refresh_connection unknown exception";
         }
     }
 

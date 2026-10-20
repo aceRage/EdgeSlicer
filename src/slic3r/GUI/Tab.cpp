@@ -37,11 +37,14 @@
 #include "slic3r/GUI/OptionsGroup.hpp"
 #include "wxExtensions.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FavoriteFilamentsUI.hpp"
 #include <wx/wupdlock.h>
 
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
 #include "Plater.hpp"
+#include "ParamsDialog.hpp"
+#include "libslic3r/PlateBedTypes.hpp"
 #include "MainFrame.hpp"
 #include "format.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -315,6 +318,16 @@ void Tab::create_preset_tab()
     //add_scaled_button(panel, &m_btn_compare_preset, "compare");
     add_scaled_button(m_top_panel, &m_btn_save_preset, "save");
     add_scaled_button(m_top_panel, &m_btn_delete_preset, "cross");
+    if (FavoritePresets::Kind favorite_kind; FavoriteFilamentsUI::kind_of(m_type, favorite_kind)) {
+        // Favourite filaments / process presets: the star toggles the selected preset; the combo's
+        // context menu (right-click, context-menu key, Shift+F10) and the stars in its list do the same.
+        add_scaled_button(m_top_panel, &m_btn_favorite, into_u8(FavoriteFilamentsUI::star_icon_name(false)));
+        m_btn_favorite->Bind(wxEVT_BUTTON, [this, favorite_kind](wxCommandEvent &) {
+            FavoriteFilamentsUI::toggle(FavoriteFilamentsUI::key_for(m_presets->get_selected_preset()), favorite_kind);
+            update_favorite_button();
+        });
+        m_favorite_subscription = FavoriteFilamentsUI::subscribe([this]() { update_favorite_button(); }, favorite_kind);
+    }
     //if (m_type == Preset::Type::TYPE_PRINTER)
     //    add_scaled_button(panel, &m_btn_edit_ph_printer, "cog");
 
@@ -388,6 +401,8 @@ void Tab::create_preset_tab()
 
         m_btn_save_preset->Show();
         m_btn_delete_preset->Show(); // ORCA: fixes delete preset button visible while search box focused
+        if (m_btn_favorite)
+            m_btn_favorite->Show();
         m_undo_btn->Show();          // ORCA: fixes revert preset button visible while search box focused
         m_btn_search->Show();
         m_search_item->Hide();
@@ -418,6 +433,8 @@ void Tab::create_preset_tab()
 
          m_btn_save_preset->Hide();
          m_btn_delete_preset->Hide(); // ORCA: fixes delete preset button visible while search box focused
+         if (m_btn_favorite)
+             m_btn_favorite->Hide();
          m_undo_btn->Hide();          // ORCA: fixes revert preset button visible while search box focused
          m_btn_search->Hide();
          m_search_item->Show();
@@ -458,6 +475,8 @@ void Tab::create_preset_tab()
     m_top_sizer->Add(m_undo_to_sys_btn, 0, wxALIGN_CENTER_VERTICAL);
     m_top_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
 #endif
+    if (m_btn_favorite)
+        m_top_sizer->Add(m_btn_favorite, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_save_preset, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_delete_preset, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     m_top_sizer->Add(m_btn_search, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
@@ -2744,6 +2763,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("xy_hole_compensation", "quality_settings_precision#x-y-compensation");
         optgroup->append_single_option_line("xy_contour_compensation", "quality_settings_precision#x-y-compensation");
         optgroup->append_single_option_line("elefant_foot_compensation", "quality_settings_precision#elephant-foot-compensation");
+        optgroup->append_single_option_line("elefant_foot_layers_density", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("elefant_foot_compensation_layers", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("precise_outer_wall", "quality_settings_precision#precise-wall");
         optgroup->append_single_option_line("precise_z_height", "quality_settings_precision#precise-z-height");
@@ -2950,6 +2970,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("sparse_infill_acceleration", "speed_settings_acceleration#sparse-infill");
         optgroup->append_single_option_line("internal_solid_infill_acceleration", "speed_settings_acceleration#internal-solid-infill");
         optgroup->append_single_option_line("initial_layer_acceleration", "speed_settings_acceleration#initial-layer");
+        optgroup->append_single_option_line("first_layer_travel_acceleration", "speed_settings_acceleration#first-layer-travel");
         optgroup->append_single_option_line("top_surface_acceleration", "speed_settings_acceleration#top-surface");
         optgroup->append_single_option_line("travel_acceleration", "speed_settings_acceleration#travel");
         optgroup->append_single_option_line("accel_to_decel_enable", "speed_settings_acceleration");
@@ -2965,6 +2986,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("infill_jerk", "speed_settings_jerk_xy#infill");
         optgroup->append_single_option_line("top_surface_jerk", "speed_settings_jerk_xy#top-surface");
         optgroup->append_single_option_line("initial_layer_jerk", "speed_settings_jerk_xy#initial-layer");
+        optgroup->append_single_option_line("first_layer_travel_jerk", "speed_settings_jerk_xy#first-layer-travel");
         optgroup->append_single_option_line("travel_jerk", "speed_settings_jerk_xy#travel");
 
         optgroup = page->new_optgroup(L("Advanced"), L"param_advanced", 15);
@@ -3117,6 +3139,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
+        optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
         // Tower interface options (per-filament values on the filament Multimaterial page).
         optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
@@ -3641,6 +3664,13 @@ void TabPrint::toggle_options()
     }
 
     m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT, flow_variant_view_index());
+
+    if (m_type == Preset::TYPE_PLATE) {
+        // Orca #15916: the plate bed type is editable only when the printer takes per-plate bed types
+        // (Edge: the U1 takes its three plates).
+        toggle_option("curr_bed_type", PlateBedTypes::supports_bed_type_choice(PlateBedTypes::allowed_bed_types(
+                                           m_preset_bundle->printers.get_edited_preset().config, m_preset_bundle->is_bbl_vendor())));
+    }
 
     Field *field = m_active_page->get_field("support_style");
     auto   support_type = m_config->opt_enum<SupportType>("support_type");
@@ -4761,6 +4791,16 @@ void TabFilament::build()
         option.opt.is_code = true;
         option.opt.height = 15;
         optgroup->append_single_option_line(option);
+        // Orca #14198: check the adaptive PA model when it is edited.
+        optgroup->m_on_change = [this](const t_config_option_key& opt_key, const boost::any& value) {
+            DynamicPrintConfig& filament_config = m_preset_bundle->filaments.get_edited_preset().config;
+
+            update_dirty();
+            if (opt_key.substr(0, opt_key.find('#')) == "adaptive_pressure_advance_model")
+                m_config_manipulation.check_adaptive_pressure_advance_model(&filament_config);
+
+            on_value_change(opt_key, value);
+        };
         //
 
         optgroup = page->new_optgroup(L("Print chamber temperature"), L"param_chamber_temp");
@@ -4898,6 +4938,8 @@ void TabFilament::build()
         //optgroup->append_line(line);
         optgroup = page->new_optgroup(L("Cooling for specific layer"), L"param_cooling_specific_layer");
         optgroup->append_single_option_line("close_fan_the_first_x_layers");
+        // ORCA: explicit override for the part cooling fan on layer 0; also anchors the ramp when "Full fan speed at layer" is set.
+        optgroup->append_single_option_line("initial_layer_fan_speed");
         optgroup->append_single_option_line("full_fan_speed_layer");
 
         optgroup = page->new_optgroup(L("Part cooling fan"), L"param_cooling_part_fan");
@@ -4931,11 +4973,13 @@ void TabFilament::build()
         optgroup->append_single_option_line("activate_air_filtration", "air-filtration");
 
         line = {L("During print"), ""};
+        line.append_option(optgroup->get_option("activate_air_filtration_during_print"));
         line.append_option(optgroup->get_option("during_print_exhaust_fan_speed"));
         optgroup->append_line(line);
 
 
         line = {L("Complete print"), ""};
+        line.append_option(optgroup->get_option("activate_air_filtration_on_completion"));
         line.append_option(optgroup->get_option("complete_print_exhaust_fan_speed"));
         optgroup->append_line(line);
         //BBS
@@ -5151,9 +5195,39 @@ void TabFilament::toggle_options()
 
       toggle_option("additional_cooling_fan_speed", cfg.opt_bool("auxiliary_fan"));
 
+      // Orca #13228: the exhaust fan speeds apply only where their override is on.
+      bool activate_air_filtration = m_config->opt_bool("activate_air_filtration", 0);
+      toggle_option("activate_air_filtration_during_print", activate_air_filtration);
+      toggle_option("activate_air_filtration_on_completion", activate_air_filtration);
+      toggle_option("during_print_exhaust_fan_speed", activate_air_filtration && m_config->opt_bool("activate_air_filtration_during_print", 0));
+      toggle_option("complete_print_exhaust_fan_speed", activate_air_filtration && m_config->opt_bool("activate_air_filtration_on_completion", 0));
+
       // Orca: toggle dont slow down for external perimeters if
       bool has_slow_down_for_layer_cooling = m_config->opt_bool("slow_down_for_layer_cooling", 0);
       toggle_option("dont_slow_down_outer_wall", has_slow_down_for_layer_cooling);
+
+      // ORCA: First layer fan speed override only makes sense when no layers are gated off ("No cooling for
+      // the first" == 0). Otherwise the override would set layer 0 to a non-zero value while the gate forces
+      // layers 1..N-1 to zero, producing a confusing non-monotonic profile. When the gate is active we both
+      // grey out the UI line and force the underlying value to -1 so the cooling buffer never enters the
+      // override branch.
+      const int close_fan_first_n = m_config->opt_int("close_fan_the_first_x_layers", 0);
+      const bool initial_layer_fan_speed_enabled = close_fan_first_n <= 0;
+      toggle_line("initial_layer_fan_speed", initial_layer_fan_speed_enabled);
+      if (!initial_layer_fan_speed_enabled) {
+          if (auto* opt = dynamic_cast<const ConfigOptionInts*>(m_config->option("initial_layer_fan_speed"))) {
+              bool needs_reset = false;
+              for (int v : opt->values) {
+                  if (v != -1) { needs_reset = true; break; }
+              }
+              if (needs_reset) {
+                  std::vector<int> reset_values(opt->values.size(), -1);
+                  m_config->set_key_value("initial_layer_fan_speed", new ConfigOptionInts(reset_values));
+                  update_dirty();
+                  reload_config();
+              }
+          }
+      }
     }
     if (m_active_page->title() == L("Filament"))
     {
@@ -5184,11 +5258,11 @@ void TabFilament::toggle_options()
             supertack_line->label_tooltip = _L("Bed temperature when this plate is installed. A value of 0 means the filament does not support printing on this plate.");
         }
         if (is_snapmaker_u1 && !support_multi_bed_types) {
-            // U1 default show 3 plates; Cool Steel Plate only appears with support_multi_bed_types
+            // U1 default shows its 3 plates + Cool Plate (Edge); Cool Steel Plate only appears with support_multi_bed_types
             toggle_line("supertack_plate_temp_initial_layer", false);
             toggle_line("supertack_plate_temp", false);
-            toggle_line("cool_plate_temp_initial_layer", false);
-            toggle_line("cool_plate_temp", false);
+            toggle_line("cool_plate_temp_initial_layer", true);
+            toggle_line("cool_plate_temp", true);
             toggle_line("textured_cool_plate_temp_initial_layer", false);
             toggle_line("textured_cool_plate_temp", false);
             toggle_line("eng_plate_temp_initial_layer", false);
@@ -5385,6 +5459,7 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("gcode_flavor");
         optgroup->append_single_option_line("pellet_modded_printer", "pellet-flow-coefficient");
         optgroup->append_single_option_line("bbl_use_printhost");
+        optgroup->append_single_option_line("enable_power_loss_recovery"); // Orca #11582
         optgroup->append_single_option_line("disable_m73");
         option = optgroup->get_option("thumbnails");
         option.opt.full_width = true;
@@ -5444,6 +5519,8 @@ void TabPrinter::build_fff()
         line.append_option(optgroup->get_option("fan_speedup_overhangs"));
         optgroup->append_line(line);
         optgroup->append_single_option_line("fan_kickstart");
+        // ORCA: minimum non-zero part cooling fan speed.
+        optgroup->append_single_option_line("part_cooling_fan_min_pwm");
 
         optgroup = page->new_optgroup(L("Extruder Clearance"), "param_extruder_clearence");
         optgroup->append_single_option_line("extruder_clearance_radius");
@@ -5926,6 +6003,7 @@ if (is_marlin_flavor)
         optgroup = page->new_optgroup(L("Wipe tower"), "param_tower");
         optgroup->append_single_option_line("purge_in_prime_tower", "semm");
         optgroup->append_single_option_line("enable_filament_ramming", "semm");
+        optgroup->append_single_option_line("tool_change_on_wipe_tower", "semm");
         optgroup->append_single_option_line("ramming_line_width_ratio");
         optgroup->append_single_option_line("enable_change_pressure_when_wiping");
         optgroup->append_single_option_line("ramming_pressure_advance_value");
@@ -6447,6 +6525,10 @@ void TabPrinter::toggle_options()
         for (auto el : {"use_firmware_retraction", "use_relative_e_distances", "support_multi_bed_types", "pellet_modded_printer", "bed_mesh_max", "bed_mesh_min", "bed_mesh_probe_distance", "adaptive_bed_mesh_margin", "thumbnails"})
           toggle_line(el, !is_BBL_printer);
 
+        // Orca #11582: power loss recovery G-code exists for Bambu Lab printers and Marlin 2 only.
+        const auto *flavor = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+        toggle_line("enable_power_loss_recovery", is_BBL_printer || (flavor && flavor->value == gcfMarlinFirmware));
+
         // "Unload filaments after print" is a Snapmaker tool-changer preference: the flag goes
         // to the printer with the print start, and only that firmware's PRINT_END acts on it.
         toggle_line("unload_filaments_at_end", is_snapmaker_toolchanger(*m_config));
@@ -6473,6 +6555,12 @@ void TabPrinter::toggle_options()
         toggle_option("extruders_count", !bSEMM);
         toggle_option("manual_filament_change", bSEMM);
         toggle_option("purge_in_prime_tower", bSEMM && !is_BBL_printer);
+
+        // Orca #13703: "Tool change on wipe tower" only makes sense for multi-extruder (multi-toolhead) printers
+        // using the Type 2 wipe tower (here: every non-BBL printer). SEMM already always travels to the tower
+        // as part of the purge, so the option is irrelevant there.
+        const size_t extruders_count = m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
+        toggle_option("tool_change_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
     }
     wxString extruder_number;
     long val = 1;
@@ -6858,10 +6946,27 @@ void Tab::update_btns_enabling()
     const Preset& preset = m_presets->get_edited_preset();
     m_btn_delete_preset->Show((m_type == Preset::TYPE_PRINTER && m_preset_bundle->physical_printers.has_selection())
                               || (!preset.is_default && !preset.is_system));
+    update_favorite_button();
 
     //if (m_btn_edit_ph_printer)
     //    m_btn_edit_ph_printer->SetToolTip( m_preset_bundle->physical_printers.has_selection() ?
     //                                       _L("Edit physical printer") : _L("Add physical printer"));
+}
+
+Tab::~Tab()
+{
+    if (m_favorite_subscription)
+        FavoriteFilamentsUI::unsubscribe(m_favorite_subscription);
+}
+
+void Tab::update_favorite_button()
+{
+    FavoritePresets::Kind kind;
+    if (!m_btn_favorite || !m_presets || !FavoriteFilamentsUI::kind_of(m_type, kind))
+        return;
+    const bool fav = FavoriteFilamentsUI::is_favorite(m_presets->get_selected_preset());
+    m_btn_favorite->SetBitmap_(into_u8(FavoriteFilamentsUI::star_icon_name(fav)));
+    m_btn_favorite->SetToolTip(FavoriteFilamentsUI::star_button_tooltip(fav, kind));
 }
 
 void Tab::update_preset_choice()
@@ -7228,9 +7333,19 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
         }
         load_current_preset();
 
+        // Orca #15916: wait for the settings dialog to close; its edits are still provisional.
+        if (printer_tab && is_selected) {
+            Plater *plater = wxGetApp().plater();
+            ParamsDialog *dialog = wxGetApp().params_dialog();
+            if (plater && !plater->is_loading_project() &&
+                (!dialog || !dialog->IsShown()))
+                plater->normalize_bed_types(false);
+        }
+
         // Ultra: switching to a printer re-pulls that printer's newest Bambu Studio user presets.
-        // Deferred so it runs after this switch settles; sync_bambu_user_presets only reloads the UI
-        // when new/updated files were actually copied (copied==0 -> no-op), so it's self-limiting.
+        // Deferred so it runs after this switch settles. sync_bambu_user_presets only lists the Bambu
+        // Studio folder here (no reads) and returns when nothing changed since the last clean sync;
+        // otherwise the mirror runs on a worker thread and the UI reloads only when files were copied.
         if (m_type == Preset::TYPE_PRINTER)
             wxGetApp().CallAfter([]() { wxGetApp().sync_bambu_user_presets(false); });
 
@@ -7723,13 +7838,15 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
     // focus currently.is there anything better than this ?
 //!	m_tabctrl->OnSetFocus();
     if (from_input) {
-        SavePresetDialog dlg(m_parent, m_type, detach ? _u8L("Detached") : "");
+        SavePresetDialog dlg(m_parent, m_type, m_mode, detach ? _u8L("Detached") : "");
         dlg.Show(false);
         dlg.input_name_from_other(input_name);
         wxCommandEvent evt(wxEVT_TEXT, GetId());
         dlg.GetEventHandler()->ProcessEvent(evt);
         dlg.confirm_from_other();
         name = input_name;
+        // Edge: the detach button asked for a detached copy already; the dialog only adds to that.
+        detach = detach || dlg.get_detach_value(m_type);
     }
 
     // Ultra: instead of prompting for a name when saving a modified system preset,
@@ -7740,7 +7857,7 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
     }
 
     if (name.empty()) {
-        SavePresetDialog dlg(m_parent, m_type, detach ? _u8L("Detached") : "");
+        SavePresetDialog dlg(m_parent, m_type, m_mode, detach ? _u8L("Detached") : "");
         if (!m_just_edit) {
             if (dlg.ShowModal() != wxID_OK)
                 return;
@@ -7749,6 +7866,8 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         //BBS: add project embedded preset relate logic
         save_to_project = dlg.get_save_to_project_selection(m_type);
         project_printers = dlg.get_project_printers_selection(m_type);
+        // Edge: the detach button asked for a detached copy already; the dialog only adds to that.
+        detach           = detach || dlg.get_detach_value(m_type);
     }
 
     //BBS record current preset name

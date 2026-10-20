@@ -4,6 +4,8 @@
 #include "GLGizmoPainterBase.hpp"
 #include "libslic3r/MixedFilament.hpp"
 
+#include <set>
+
 namespace Slic3r::GUI {
 
 class GLMmSegmentationGizmo3DScene
@@ -122,8 +124,10 @@ protected:
     bool                              m_detect_geometry_edge = true;
     
     // Filament remap feature
+    bool                              m_show_remap_panel = false;
     std::vector<size_t>               m_extruder_remap;      // index → target extruder index
-    bool                              m_show_filament_remap_ui = false;
+    // ORCA: Cache used filaments to filter UI. Edge: display slots (indices into m_display_filament_ids).
+    std::set<size_t>                  m_used_filaments;
 
     // Minimal context for gradient rendering; only physical_colors is used
     MixedFilamentDisplayContext       m_mixed_display_context;
@@ -153,6 +157,9 @@ private:
     // Filament remapping methods
     void remap_filament_assignments();
     void render_filament_remap_ui(float window_width, float max_tooltip_width);
+    // ORCA: Helper to update the cache of used filaments
+    void update_used_filaments();
+    void reset_filament_remap();
 
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.

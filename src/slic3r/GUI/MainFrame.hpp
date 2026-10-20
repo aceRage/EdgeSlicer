@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "GUI_Utils.hpp"
+#include "MainTabs.hpp"
 #include "Event.hpp"
 //BBS: GUI refactor
 #include "ParamsPanel.hpp"
@@ -112,6 +113,11 @@ class MainFrame : public DPIFrame
     std::string m_account_menubar_sig;             // what that menu currently shows
     //wxMenu* publishMenu{ nullptr };
     wxMenu *    m_calib_menu{nullptr};
+    // File > Export > Send plate / all plates to Bambu Connect: shown for Bambu printers only.
+    wxMenu *                  m_export_menu{ nullptr };
+    std::vector<wxMenuItem *> m_bambu_connect_items;
+    int                       m_bambu_connect_anchor_id{ wxID_NONE };
+    bool                      m_bambu_connect_items_shown{ true };
     bool        enable_multi_machine{ false };
 
 #if 0
@@ -136,6 +142,8 @@ class MainFrame : public DPIFrame
     bool can_export_supports() const;
     bool can_export_gcode() const;
     bool can_export_all_gcode() const;
+    // Bambu printer selected and the plate (all plates) sliced: File > Export > Send ... to Bambu Connect.
+    bool can_send_to_bambu_connect(bool all_plates) const;
     bool can_print_3mf() const;
     bool can_send_gcode() const;
     bool can_slice() const;
@@ -243,19 +251,23 @@ public:
     bool request_quit(bool discard = false);
 
     //BBS GUI refactor
+    // The values live in MainTabs.hpp (unit tested). Showcase (D1) sits after Preview, so Device
+    // and everything after it moved up by one on 2026-10-18; nothing compares or stores these by
+    // number (see MainTabs.hpp).
     enum TabPosition
     {
-        tpHome          = 0,
-        tp3DEditor      = 1,
-        tpPreview       = 2,
-        tpMonitor       = 3,
-        tpStream        = 4,
-        tpPrinters      = 5, // the Printers tab (PrintersPanel); always present
+        tpHome          = MainTabs::Home,
+        tp3DEditor      = MainTabs::Editor3D,
+        tpPreview       = MainTabs::Preview,
+        tpShowcase      = MainTabs::Showcase, // the third page hosting the plater
+        tpMonitor       = MainTabs::Monitor,
+        tpStream        = MainTabs::Stream,
+        tpPrinters      = MainTabs::Printers, // the Printers tab (PrintersPanel); always present
         tpMultiDevice   = tpPrinters, // its old name: the Multi-device tab had this slot
-        tpProject       = 6,
-        tpCalibration   = 7,
-        tpAuxiliary     = 8,
-        toDebugTool     = 9,
+        tpProject       = MainTabs::Project,
+        tpCalibration   = MainTabs::Calibration,
+        tpAuxiliary     = MainTabs::Auxiliary,
+        toDebugTool     = MainTabs::DebugTool,
     };
 
     //BBS: add slice&&print status update logic
@@ -279,7 +291,8 @@ public:
         eSendToPrinterAll    = 6,
         eUploadGcode         = 7,
         eExportAllSlicedFile = 8,
-        ePrintMultiMachine   = 9
+        ePrintMultiMachine   = 9,
+        eSendToBambuConnect  = 10 // Bambu printers: current plate, or all plates in the all-plates view
     };
 
     void update_layout();
@@ -433,6 +446,10 @@ public:
 
     //SoftFever
     void show_device(bool bBBLPrinter);
+    // The notebook index the Device page is inserted at (see the .cpp).
+    int  device_page_position() const;
+    // Attach / detach the File > Export "Send ... to Bambu Connect" items (Bambu printers only).
+    void show_bambu_connect_menu_items(bool show);
 
     PA_Calibration_Dlg* m_pa_calib_dlg{ nullptr };
     Temp_Calibration_Dlg* m_temp_calib_dlg{ nullptr };

@@ -281,7 +281,64 @@ bool MqttClient::Disconnect(std::string& msg)
     // any lost-session watcher stands down.
     wants_connection_.store(false, std::memory_order_release);
     is_reconnecting.store(false, std::memory_order_release);
+    // A route's own session goes with this one (a route never outlives the session it serves).
+    if (std::shared_ptr<MqttRoute> route = GetRoute())
+        route->owner_closing();
     return do_disconnect(msg);
+}
+
+// ---- routing ----
+
+void MqttClient::SetRoute(std::shared_ptr<MqttRoute> route)
+{
+    std::lock_guard<std::mutex> lock(route_mtx_);
+    route_ = std::move(route);
+}
+
+std::shared_ptr<MqttRoute> MqttClient::GetRoute() const
+{
+    std::lock_guard<std::mutex> lock(route_mtx_);
+    return route_;
+}
+
+bool MqttClient::Subscribe(const std::string& topic, int qos, std::string& msg)
+{
+    if (std::shared_ptr<MqttRoute> route = GetRoute()) {
+        const MqttRoute::Result r = route->subscribe(topic, qos, msg);
+        if (r != MqttRoute::Result::NotMine)
+            return r == MqttRoute::Result::Ok;
+    }
+    return SubscribeDirect(topic, qos, msg);
+}
+
+bool MqttClient::Unsubscribe(const std::string& topic, std::string& msg)
+{
+    if (std::shared_ptr<MqttRoute> route = GetRoute()) {
+        const MqttRoute::Result r = route->unsubscribe(topic, msg);
+        if (r != MqttRoute::Result::NotMine)
+            return r == MqttRoute::Result::Ok;
+    }
+    return UnsubscribeDirect(topic, msg);
+}
+
+bool MqttClient::Publish(const std::string& topic, const std::string& payload, int qos, std::string& msg)
+{
+    if (std::shared_ptr<MqttRoute> route = GetRoute()) {
+        const MqttRoute::Result r = route->publish(topic, payload, qos, msg);
+        if (r != MqttRoute::Result::NotMine)
+            return r == MqttRoute::Result::Ok;
+    }
+    return PublishDirect(topic, payload, qos, msg);
+}
+
+bool MqttClient::IsSubscribed(const std::string& topic) const
+{
+    if (std::shared_ptr<MqttRoute> route = GetRoute()) {
+        const MqttRoute::Result r = route->is_subscribed(topic);
+        if (r != MqttRoute::Result::NotMine)
+            return r == MqttRoute::Result::Ok;
+    }
+    return IsSubscribedDirect(topic);
 }
 
 bool MqttClient::do_disconnect(std::string& msg)
@@ -323,7 +380,7 @@ bool MqttClient::do_disconnect(std::string& msg)
 // @param topic: The topic to subscribe to
 // @param qos: Quality of Service level (0, 1, or 2)
 // @return: true if subscription successful, false otherwise
-bool MqttClient::Subscribe(const std::string& topic, int qos, std::string& msg)
+bool MqttClient::SubscribeDirect(const std::string& topic, int qos, std::string& msg)
 {
     if (!CheckConnected()) {
         BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Cannot subscribe: client not connected";
@@ -349,7 +406,7 @@ bool MqttClient::Subscribe(const std::string& topic, int qos, std::string& msg)
 // Unsubscribe from a specific MQTT topic
 // @param topic: The topic to unsubscribe from
 // @return: true if unsubscription successful, false otherwise
-bool MqttClient::Unsubscribe(const std::string& topic, std::string& msg)
+bool MqttClient::UnsubscribeDirect(const std::string& topic, std::string& msg)
 {
     if (!CheckConnected()) {
         BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Cannot unsubscribe: client not connected";
@@ -376,7 +433,7 @@ bool MqttClient::Unsubscribe(const std::string& topic, std::string& msg)
 // @param payload: The message content
 // @param qos: Quality of Service level (0, 1, or 2)
 // @return: true if publish successful, false otherwise
-bool MqttClient::Publish(const std::string& topic, const std::string& payload, int qos, std::string& msg)
+bool MqttClient::PublishDirect(const std::string& topic, const std::string& payload, int qos, std::string& msg)
 {
     if (!CheckConnected()) {
         msg = "client not connect";
@@ -715,6 +772,18 @@ void MqttClient::reconnect_now(const std::string& reason)
 // @param msg: Pointer to the received message
 void MqttClient::message_arrived(mqtt::const_message_ptr msg)
 {
+    const std::string topic   = msg->get_topic();
+    const std::string payload = msg->to_string();
+    if (std::shared_ptr<MqttRoute> route = GetRoute())
+        if (!route->accept_own_message(topic, payload))
+            return;
+    dispatch(topic, payload);
+}
+
+void MqttClient::Deliver(const std::string& topic, const std::string& payload) { dispatch(topic, payload); }
+
+void MqttClient::dispatch(const std::string& topic, const std::string& payload)
+{
     // Copy the callbacks under the lock and invoke the copies outside it:
     // the setters (and ~MqttClient) may run concurrently on another thread.
     std::function<void(const std::string&, const std::string&)> cb;
@@ -726,11 +795,11 @@ void MqttClient::message_arrived(mqtt::const_message_ptr msg)
     }
 
     if (cb) {
-        cb(msg->get_topic(), msg->to_string());
+        cb(topic, payload);
     }
 
     if (cb1) {
-        cb1(msg->get_topic(), msg->to_string(), this);
+        cb1(topic, payload, this);
     }
 }
 
@@ -838,7 +907,7 @@ void MqttClient::add_topic_to_resubscribe(const std::string& topic, int qos) {
     BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] Added topic to resubscribe list: " << topic;
 }
 
-bool MqttClient::IsSubscribed(const std::string& topic) const
+bool MqttClient::IsSubscribedDirect(const std::string& topic) const
 {
     std::lock_guard<std::mutex> lock(topics_mtx_);
     return topics_to_resubscribe_.count(topic) > 0;

@@ -16,7 +16,9 @@ add_executable(${_TEST_NAME}_tests
     hub_quit_tests.cpp
     web_load_retry_tests.cpp
     device_page_load_tests.cpp
+    flutter_web_bundle_tests.cpp
     home_tab_tests.cpp
+    main_tabs_tests.cpp
     theme_pack_tests.cpp
     account_providers_tests.cpp
     library_index_tests.cpp
@@ -30,6 +32,10 @@ add_executable(${_TEST_NAME}_tests
     preset_sync_policy_tests.cpp
     ff_diagnostics_tests.cpp
     elegoo_canvas_tests.cpp
+    elegoo_start_print_tests.cpp
+    elegoo_canvas_mapping_tests.cpp
+    elegoo_sdcp_tests.cpp
+    elegoo_camera_tests.cpp
     splash_animation_tests.cpp
     remote_events_tests.cpp
     remote_hub_tests.cpp
@@ -46,7 +52,9 @@ add_executable(${_TEST_NAME}_tests
     mqtt_reconnect_tests.cpp
     mqtt_log_redact_tests.cpp
     first_request_gate_tests.cpp
+    bind_list_refresh_tests.cpp
     ssdp_connect_type_tests.cpp
+    bambu_net_info_tests.cpp
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
     http_tls_policy_tests.cpp
@@ -60,13 +68,19 @@ add_executable(${_TEST_NAME}_tests
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
     gizmo_volume_refs_tests.cpp
+    camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
+    preset_mirror_skip_tests.cpp
+    plate_recentre_tests.cpp
+    bed_texture_pool_tests.cpp
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
     app_update_check_tests.cpp
     bambu_studio_launcher_tests.cpp
+    bambu_connect_tests.cpp
+    bambu_connect_status_tests.cpp
     blender_launcher_tests.cpp
     freecad_launcher_tests.cpp
     instance_routing_tests.cpp
@@ -79,6 +93,7 @@ add_executable(${_TEST_NAME}_tests
     stream_page_icon_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
+    nozzle_info_tests.cpp
     device_controls_tests.cpp
     bambu_fans_tests.cpp
     printer_timelapse_tests.cpp
@@ -102,11 +117,19 @@ add_executable(${_TEST_NAME}_tests
     emboss_font_search_tests.cpp
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
+    printer_storage_tests.cpp
+    u1_local_first_tests.cpp
+    u1_moonraker_probe_tests.cpp
+    u1_ws_route_tests.cpp
     # Hidden GLFW window + forward-compatible 3.3 core context; skips itself where none can be made.
     gl_core_profile_tests.cpp
     libvgcode_input_tests.cpp
     layer_height_check_tests.cpp
+    test_texture_island_view.cpp
     bind_detect_guard_tests.cpp
+    ams_filament_order_tests.cpp
+    favorite_filaments_tests.cpp
+    teardown_join_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
@@ -115,17 +138,25 @@ add_executable(${_TEST_NAME}_tests
 # The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the
 # handful of translation units next to it that call the crash-reporter and version wrappers. Those
 # wrappers are compiled straight into the app targets rather than into a library (src/CMakeLists.txt
-# does the same), so the test executable has to carry the same four files or it cannot link.
-if (WIN32)
+# does the same), so the test executable has to carry the same files or it cannot link. The
+# Sentry SDK itself comes with libslic3r_gui (SLIC3R_SENTRY and sentry::sentry are PUBLIC there).
+if (WIN32 OR APPLE)
     target_sources(${_TEST_NAME}_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
+        )
+    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+endif ()
+if (WIN32)
+    target_sources(${_TEST_NAME}_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/BaseException.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/StackWalker.cpp
         )
     target_compile_definitions(${_TEST_NAME}_tests PRIVATE BURY_EXPORTS)
-    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+elseif (APPLE)
+    # common_func.cpp reads the machine's network interfaces through IOKit, as the app does.
+    target_link_libraries(${_TEST_NAME}_tests "-framework IOKit" "-framework CoreFoundation")
 endif ()
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)

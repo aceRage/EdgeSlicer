@@ -9,9 +9,11 @@ It answers what SnapmakerLan asks a U1:
   GET /machine/system_info    model, serial number and device name (what identify() reads)
   GET /printer/info           hostname
   POST /server/files/upload   multipart (root=gcodes, file=...): kept in memory, name -> bytes
-  GET /server/files/metadata  ?filename= -> {size, modified} of an uploaded file, the slicer's numbers
-                              for fake_job.gcode (FAKE_JOB_META), 404 otherwise
+  GET /server/files/metadata  ?filename= -> {size, modified, slicer numbers, one 32x32 thumbnail} of an
+                              uploaded file, the slicer's numbers for fake_job.gcode (FAKE_JOB_META), 404 otherwise
   GET /server/files/list      ?root=gcodes -> every uploaded file
+  GET /server/files/gcodes/<dir>/.thumbs/<stem>-32x32.png -> a 1x1 PNG for each file (the Storage tab)
+  DELETE /server/files/gcodes/<path> -> deletes that file (404 when there is none)
   POST /printer/print/start   ?filename= -> starts that file (404 when it was never uploaded)
   POST /printer/gcode/script  ?script= -> accepted (the mapped start's macros)
 
@@ -22,7 +24,8 @@ and has a control port of its own, so a test can change how the "printer" behave
   GET /fake/mode?m=up               listen again and answer at once (same as normal)
   GET /fake/state?state=printing    what print_stats.state says (standby, printing, paused, ...)
   GET /fake/stats                   {"mode":..., "requests": {path: count}}
-  GET /fake/files                   {"files": {name: size}, "started": [names], "uploads": n}
+  GET /fake/files                   {"files": {name: size}, "started": [names], "uploads": n, "deleted": [names]}
+  GET /fake/add?name=a.gcode&size=n put a file there without an upload
   GET /fake/reset                   forget every file and start, state standby
 
 Nothing here ever talks to a real printer: both ports bind to 127.0.0.1 only.
@@ -36,17 +39,33 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 LOCK = threading.Lock()
 STATE = {"mode": "normal", "delay": 0.0, "state": "printing", "requests": {},
-         "files": {}, "started": [], "uploads": 0, "current": ""}
+         "files": {}, "started": [], "uploads": 0, "current": "", "deleted": []}
 ARGS = None
 # server.files.metadata for the job a fresh fake prints (fake_job.gcode): body 100000..900000 of a
 # 1 MB file and a 3600 s slicer estimate, so at file_position 300000 the hub should say 25 % and
 # 2700 s left (the old linear guess from display_status 0.30 and print_duration 600 was 1400 s).
 FAKE_JOB_META = {"filename": "fake_job.gcode", "size": 1000000, "modified": 1760000000.0, "slicer": "EdgeSlicer",
                  "gcode_start_byte": 100000, "gcode_end_byte": 900000, "estimated_time": 3600, "layer_count": 80}
+
+
+# The smallest valid PNG (1x1, transparent): the picture every fake thumbnail serves.
+TINY_PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                         "0000000d4944415478da636460f85f0f0002870180eb47ba920000000049454e44ae426082")
+
+
+def reply_bytes(handler, code, data, content_type):
+    try:
+        handler.send_response(code)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        pass
 
 
 def reply(handler, code, obj):
@@ -128,7 +147,27 @@ class Printer(BaseHTTPRequestHandler):
                 return reply(self, 200, {"result": FAKE_JOB_META})
             if size is None:
                 return reply(self, 404, {"error": {"code": 404, "message": "Metadata not available for " + q.get("filename", "")}})
-            return reply(self, 200, {"result": {"filename": q["filename"], "size": size, "modified": time.time()}})
+            name = q["filename"]
+            stem = name.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            # What a slicer writes, plus one thumbnail beside the file (the Storage tab's picture),
+            # relative to the file's own directory as Moonraker reports it.
+            return reply(self, 200, {"result": {"filename": name, "size": size, "modified": time.time(),
+                                                "slicer": "EdgeSlicer", "estimated_time": 4980,
+                                                "filament_total": 4560.0, "filament_weight_total": 13.6,
+                                                "filament_type": "PLA", "layer_height": 0.2,
+                                                "thumbnails": [{"width": 32, "height": 32, "size": len(TINY_PNG),
+                                                                "relative_path": ".thumbs/" + stem + "-32x32.png"}]}})
+        if u.path.startswith("/server/files/gcodes/"):
+            # Only the thumbnails are served: the fake keeps sizes, not the files' bytes.
+            path = unquote(u.path[len("/server/files/gcodes/"):])
+            with LOCK:
+                names = list(STATE["files"])
+            for n in names:
+                d, _, base = n.rpartition("/")
+                thumb = (d + "/" if d else "") + ".thumbs/" + base.rsplit(".", 1)[0] + "-32x32.png"
+                if path == thumb:
+                    return reply_bytes(self, 200, TINY_PNG, "image/png")
+            return reply(self, 404, {"error": {"code": 404, "message": "File not found: " + path}})
         if u.path == "/server/files/list":
             with LOCK:
                 files = [{"path": n, "size": sz, "modified": time.time(), "permissions": "rw"} for n, sz in STATE["files"].items()]
@@ -161,6 +200,20 @@ class Printer(BaseHTTPRequestHandler):
             return reply(self, 200, {"result": "ok"})
         if u.path == "/printer/gcode/script":
             return reply(self, 200, {"result": "ok"})
+        return reply(self, 404, {"error": {"code": 404, "message": "Not Found"}})
+
+    def do_DELETE(self):
+        u = urlparse(self.path)
+        with LOCK:
+            STATE["requests"]["DELETE " + u.path] = STATE["requests"].get("DELETE " + u.path, 0) + 1
+        if u.path.startswith("/server/files/gcodes/"):
+            path = unquote(u.path[len("/server/files/gcodes/"):])
+            with LOCK:
+                if path not in STATE["files"]:
+                    return reply(self, 404, {"error": {"code": 404, "message": "File does not exist: " + path}})
+                del STATE["files"][path]
+                STATE["deleted"].append(path)
+            return reply(self, 200, {"result": {"item": {"path": path, "root": "gcodes"}, "action": "delete_file"}})
         return reply(self, 404, {"error": {"code": 404, "message": "Not Found"}})
 
 
@@ -232,10 +285,15 @@ class Control(BaseHTTPRequestHandler):
         if u.path == "/fake/files":
             with LOCK:
                 return reply(self, 200, {"files": dict(STATE["files"]), "started": list(STATE["started"]),
-                                         "uploads": STATE["uploads"]})
+                                         "uploads": STATE["uploads"], "deleted": list(STATE["deleted"])})
+        if u.path == "/fake/add":
+            with LOCK:
+                STATE["files"][q.get("name", "added.gcode")] = int(q.get("size", "1000"))
+            return reply(self, 200, {"ok": True})
         if u.path == "/fake/reset":
             with LOCK:
-                STATE.update({"files": {}, "started": [], "uploads": 0, "current": "", "state": "standby"})
+                STATE.update({"files": {}, "started": [], "uploads": 0, "current": "", "state": "standby",
+                              "deleted": []})
             return reply(self, 200, {"ok": True})
         if u.path == "/fake/stats":
             with LOCK:

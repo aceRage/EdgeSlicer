@@ -11,6 +11,7 @@
 #include "Theme.hpp"
 #include "PresetMirror.hpp"
 #include "I18N.hpp"
+#include "GUI.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include <wx/language.h>
 #include <wx/notebook.h>
@@ -139,7 +140,9 @@ wxBoxSizer *PreferencesDialog::create_item_combobox(wxString title, wxWindow *pa
     if (!current_setting.empty()) {
         auto compare  = [current_setting](string possible_setting) { return current_setting == possible_setting; };
         auto iterator = find_if(config_name_index.begin(), config_name_index.end(), compare);
-        current_index = iterator - config_name_index.begin();
+        // Orca #13538: an unknown stored value keeps the first entry instead of indexing past the list.
+        if (iterator != config_name_index.end())
+            current_index = static_cast<unsigned int>(iterator - config_name_index.begin());
     }
 
     auto [sizer, combobox] = create_item_combobox_base(title, parent, tooltip, param, vlist, current_index);
@@ -687,6 +690,70 @@ wxBoxSizer *PreferencesDialog::create_item_backup_input(wxString title, wxWindow
 }
 
 // BBS: same layout as the backup interval row, but drives the project auto-save timer
+wxBoxSizer *PreferencesDialog::create_item_auto_reslice(wxString title, wxWindow *parent, wxString checkbox_tooltip, wxString delay_tooltip)
+{
+    wxBoxSizer *sizer_row = new wxBoxSizer(wxHORIZONTAL);
+    sizer_row->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+
+    auto checkbox = new ::CheckBox(parent);
+    checkbox->SetValue(app_config->get_bool("auto_slice_after_change"));
+    checkbox->SetToolTip(checkbox_tooltip);
+    sizer_row->Add(checkbox, 0, wxALIGN_CENTER, 0);
+    sizer_row->Add(0, 0, 0, wxEXPAND | wxLEFT, 8);
+
+    auto checkbox_title = new wxStaticText(parent, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, 0);
+    checkbox_title->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    checkbox_title->SetFont(::Label::Body_13);
+    checkbox_title->SetToolTip(checkbox_tooltip);
+    checkbox_title->Wrap(-1);
+    sizer_row->Add(checkbox_title, 0, wxALIGN_CENTER | wxALL, 3);
+
+    wxString delay_value = app_config->get("auto_slice_change_delay_seconds");
+    if (delay_value.empty())
+        delay_value = "0";
+
+    auto input = new ::TextInput(parent, wxEmptyString, _L("s"), wxEmptyString, wxDefaultPosition, DESIGN_INPUT_SIZE, wxTE_PROCESS_ENTER);
+    StateColor input_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled), std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
+    input->SetBackgroundColor(input_bg);
+    input->GetTextCtrl()->SetValue(delay_value);
+    wxTextValidator validator(wxFILTER_DIGITS);
+    input->GetTextCtrl()->SetValidator(validator);
+    input->SetToolTip(delay_tooltip);
+    sizer_row->Add(0, 0, 0, wxEXPAND | wxLEFT, 5);
+    sizer_row->Add(input, 0, wxALIGN_CENTER_VERTICAL, 0);
+
+    auto commit_delay = [this, input]() {
+        const int seconds   = AppConfig::auto_slice_delay_seconds(into_u8(input->GetTextCtrl()->GetValue()));
+        const wxString sanitized = wxString::Format("%d", seconds);
+        if (input->GetTextCtrl()->GetValue() != sanitized)
+            input->GetTextCtrl()->SetValue(sanitized);
+        app_config->set("auto_slice_change_delay_seconds", into_u8(sanitized));
+        app_config->save();
+    };
+    input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit_delay](wxCommandEvent &e) {
+        commit_delay();
+        e.Skip();
+    });
+    input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit_delay](wxFocusEvent &e) {
+        commit_delay();
+        e.Skip();
+    });
+
+    checkbox->Bind(wxEVT_TOGGLEBUTTON, [this, checkbox, input](wxCommandEvent &e) {
+        const bool enabled = checkbox->GetValue();
+        app_config->set_bool("auto_slice_after_change", enabled);
+        app_config->save();
+        input->Enable(enabled);
+        input->Refresh();
+        e.Skip();
+    });
+
+    input->Enable(checkbox->GetValue());
+    input->Refresh();
+
+    return sizer_row;
+}
+
 wxBoxSizer *PreferencesDialog::create_item_autosave_input(wxString title, wxWindow *parent, wxString tooltip, std::string param)
 {
     wxBoxSizer *m_sizer_input = new wxBoxSizer(wxHORIZONTAL);
@@ -1899,6 +1966,48 @@ wxWindow* PreferencesDialog::create_general_page()
             }
         });
 
+    // Orca #13538: Graphics (Orca's own Graphics tab; EdgeSlicer keeps it as a section of this page).
+    auto title_graphics = create_item_title(_L("Graphics"), page, _L("Graphics"));
+    auto item_antialiasing = create_item_combobox(_L("MSAA Multiplier"), page,
+        _L("Set the Multi-Sample Anti-Aliasing level.\n"
+           "Higher values result in smoother edges, but the impact on performance is exponential.\n"
+           "Lower values improve performance, at the cost of jagged edges.\n"
+           "If disabled, it is recommended to enable FXAA to reduce jagged edges with minimal performance impact.\n\n"
+           "Requires application restart."),
+        SETTING_OPENGL_AA_SAMPLES, { _L("Disabled"), "2x", "4x", "8x", "16x" }, { "0", "2", "4", "8", "16" });
+    auto item_fxaa = create_item_checkbox(_L("FXAA post-processing"), page,
+        _L("Applies Fast Approximate Anti-Aliasing as a screen-space pass.\n"
+           "Useful for disabling or reducing the MSAA setting to improve performance.\n\n"
+           "Takes effect immediately."),
+        50, SETTING_OPENGL_FXAA_ENABLED);
+    auto item_fps_cap = create_item_input(_L("FPS cap"), _L("FPS (0 = unlimited)"), page,
+        _L("Limits viewport frame rate to reduce GPU load and power usage.\n"
+           "Set to 0 for unlimited frame rate."),
+        SETTING_OPENGL_FPS_CAP, [this](wxString value) {
+            long fps_cap = 0;
+            if (!value.ToLong(&fps_cap))
+                fps_cap = 0;
+            fps_cap = std::clamp(fps_cap, 0L, 240L);
+            app_config->set(SETTING_OPENGL_FPS_CAP, std::to_string(fps_cap));
+        });
+    auto item_fps_overlay = create_item_checkbox(_L("Show FPS overlay"), page,
+        _L("Displays current viewport FPS in the top-right corner."), 50, SETTING_OPENGL_SHOW_FPS_OVERLAY);
+    // Orca #14080 / #14724: smooth normals, for the model whether or not the realistic view is on.
+    auto item_smooth_normals = create_item_checkbox(_L("Smooth normals"), page,
+        _L("Applies smooth normals to the model.\n\nRequires manual scene reload to take effect "
+           "(right-click on 3D view > \"Reload All\")."),
+        50, SETTING_OPENGL_PHONG_SMOOTH_NORMALS);
+    // Orca #13704: realistic view (also View > Realistic View).
+    auto item_realistic_mode = create_item_checkbox(_L("Realistic view"), page,
+        _L("Renders the objects of the 3D view more realistically, with the options below. Also in View > Realistic View."),
+        50, SETTING_OPENGL_REALISTIC_MODE);
+    auto item_realistic_phong = create_item_checkbox(_L("Phong shading"), page,
+        _L("Uses Phong shading inside realistic view."), 50, SETTING_OPENGL_REALISTIC_PHONG);
+    auto item_realistic_ssao = create_item_checkbox(_L("SSAO ambient occlusion"), page,
+        _L("Applies SSAO in realistic view."), 50, SETTING_OPENGL_PHONG_SSAO);
+    auto item_realistic_shadows = create_item_checkbox(_L("Shadows"), page,
+        _L("Renders cast shadows on the plate, other objects, and each object onto itself in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
+
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
     auto item_check_updates = create_item_checkbox(_L("Check for new versions on startup"), page,
@@ -1926,6 +2035,9 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_step_mesh_setting = create_item_checkbox(_L("Show the step mesh parameter setting dialog."), page, _L("If enabled,a parameter settings dialog will appear during STEP file import."), 50, "enable_step_mesh_setting");
     auto item_multi_machine = create_item_checkbox(_L("Multi-device Management (Take effect after restarting EdgeSlicer)."), page, _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), 50, "enable_multi_machine");
     auto item_auto_arrange  = create_item_checkbox(_L("Auto arrange plate after cloning"), page, _L("Auto arrange plate after object cloning"), 50, "auto_arrange");
+    auto item_auto_reslice  = create_item_auto_reslice(_L("Auto slice after changes"), page,
+        _L("If enabled, EdgeSlicer slices again by itself whenever a slicing-related setting changes."),
+        _L("Delay in seconds before auto slicing starts, allowing multiple edits to be grouped. Use 0 to slice immediately."));
     auto item_warn_low_memory = create_item_checkbox(_L("Warn when memory is low during slicing"), page,
         _L("When the PC is nearly out of free memory during slicing, pause and ask whether to continue. "
            "Turn this off to keep slicing without asking (a notice and a log line are still shown). "
@@ -2111,7 +2223,18 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_auto_reslice, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_warn_low_memory, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(title_graphics, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_antialiasing, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fxaa, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fps_cap, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fps_overlay, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_smooth_normals, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_mode, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_phong, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_ssao, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_shadows, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     if (item_user_sync)

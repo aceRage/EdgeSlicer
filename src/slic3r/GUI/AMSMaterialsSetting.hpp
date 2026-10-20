@@ -15,6 +15,8 @@
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/TextInput.hpp"
 #include "slic3r/Utils/CalibUtils.hpp"
+#include "FavoriteFilamentsUI.hpp"
+#include <memory>
 
 #define AMS_MATERIALS_SETTING_DEF_COLOUR wxColour(255, 255, 255)
 #define AMS_MATERIALS_SETTING_GREY900 wxColour(38, 46, 48)
@@ -192,6 +194,15 @@ protected:
         std::string setting_id;
     };
     std::map<std::string, FilamentInfos> map_filament_items;
+
+    // Favourite filaments (Orca #13946, extended): the list keeps the favourites on top, starred rows
+    // on the custom combo, a star prefix on the native macOS one; the star button toggles the shown
+    // filament on every platform (the macOS list cannot hold a clickable star).
+    std::unique_ptr<FavoriteFilamentsUI::FavoriteComboList> m_filament_list;
+    std::vector<FilamentInfos>                              m_filament_entries; // entry order of m_filament_list
+    ScalableButton                                         *m_button_favorite{nullptr};
+    const FilamentInfos *selected_filament_info() const;
+    void                 update_favorite_button();
 };
 
 wxDECLARE_EVENT(EVT_SELECTED_COLOR, wxCommandEvent);

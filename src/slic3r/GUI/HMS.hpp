@@ -98,6 +98,9 @@ public:
     // The eight-hex spelling of a print_error, the form the tables are keyed by.
     static std::string print_error_code(int print_error);
 
+    // The error picture URL the dialog may fetch: empty for a web URL in stealth mode (Orca #11225).
+    static wxString stealth_image_url(const wxString& url, bool stealth_mode);
+
     // ---- overrides: EdgeSlicer's own descriptions, ahead of Bambu's tables ----
     //
     // Bambu publishes an empty `intro` for some codes that their own slicer still shows a

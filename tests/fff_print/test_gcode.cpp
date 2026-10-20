@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include <cctype>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -391,4 +392,89 @@ TEST_CASE("Adaptive bed mesh probe points are no further apart than the probe di
     CHECK(size_y / (count_y - 1) <= 5. + EPSILON);
     CHECK(count_x == int(std::ceil(size_x / 5.)) + 1);
     CHECK(count_y == int(std::ceil(size_y / 5.)) + 1);
+}
+
+// Orca #13703: on a multi-toolhead printer (not SEMM, no multi-tool ramming) using the Type 2
+// wipe tower (WipeTower2, every non-BBL printer such as the U1), the tool change is emitted in
+// place unless "tool_change_on_wipe_tower" is on; then the head travels to the tower first.
+// Default off, so the default G-code is unchanged.
+static std::string slice_toolchanger_two_colour(bool tool_change_on_wipe_tower)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values    = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values     = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values      = {0.4, 0.4};
+    config.option<ConfigOptionBools>("filament_multitool_ramming")->values = {false, false};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = true;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values                = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values                = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value             = 35.;
+    config.option<ConfigOptionBool>("tool_change_on_wipe_tower")->value      = tool_change_on_wipe_tower;
+    config.set_deserialize_strict({
+        {"skirt_loops",                0},
+        {"brim_type",                  "no_brim"},
+        {"gcode_comments",             "1"},
+        {"machine_start_gcode",        ""},
+        {"change_filament_gcode",      ""},
+        {"layer_height",               "0.2"},
+        {"initial_layer_print_height", "0.2"},
+    });
+
+    Print print;
+    Model model;
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE_FALSE(print.is_BBL_printer());
+    REQUIRE(print.has_wipe_tower());
+    return Test::gcode(print);
+}
+
+static size_t count_substr(const std::string &s, const std::string &needle)
+{
+    size_t n = 0;
+    for (size_t pos = s.find(needle); pos != std::string::npos; pos = s.find(needle, pos + needle.size()))
+        ++n;
+    return n;
+}
+
+static size_t count_tool_lines(const std::string &gcode)
+{
+    size_t             n = 0;
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line))
+        if (line.size() >= 2 && line[0] == 'T' && std::isdigit(static_cast<unsigned char>(line[1])))
+            ++n;
+    return n;
+}
+
+TEST_CASE("Tool change on wipe tower forces the travel to the Type 2 tower before Tx", "[GCode][WipeTower][U1C]")
+{
+    const std::string off = slice_toolchanger_two_colour(false);
+    const std::string on  = slice_toolchanger_two_colour(true);
+    const size_t travels_off = count_substr(off, "Travel to a Wipe Tower");
+    const size_t travels_on  = count_substr(on, "Travel to a Wipe Tower");
+    const size_t tools_off   = count_tool_lines(off);
+    const size_t tools_on    = count_tool_lines(on);
+    CAPTURE(travels_off, travels_on, tools_off, tools_on);
+    REQUIRE(tools_off > 2);
+    // Same tool changes either way; the option only adds the travel.
+    CHECK(tools_on == tools_off);
+    CHECK(travels_on > travels_off);
+    // Every tool change after the first one now goes through the tower.
+    CHECK(travels_on + 1 >= tools_on);
 }

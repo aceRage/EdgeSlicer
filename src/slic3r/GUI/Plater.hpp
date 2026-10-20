@@ -71,6 +71,7 @@ namespace UndoRedo {
 namespace GUI {
 
 class MainFrame;
+struct FilamentData;
 class ConfigOptionsGroup;
 class ObjectSettings;
 class ObjectLayers;
@@ -183,7 +184,15 @@ public:
     void load_ams_list(std::string const & device, MachineObject* obj);
     std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list();
+    // No printer connected: offer the last AMS / nozzle snapshot seen for the selected printer (or
+    // the newest one of this printer model) and load it as the AMS list. 1 = loaded (`as_of` is
+    // the "<printer> as of <time>" text), 0 = the user declined, -1 = there is none.
+    int load_ams_snapshot(const std::string &preferred_dev_id, wxString &as_of);
     void show_sync_filament_dialog();
+    // Elegoo Centauri Carbon 1: the CANVAS trays into the same sync dialog (ElegooCanvasUI.hpp).
+    void show_canvas_sync_dialog();
+    // The colour-matching dialog and the project update both syncs share.
+    void apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList, bool canvas_generic = false);
     // Point the "Filaments" row's sync button at the sync that fits the current
     // printer preset (Bambu AMS / Snapmaker dialog), or hide it for other vendors.
     void update_filament_sync_button();
@@ -319,6 +328,8 @@ public:
     bool is_presets_dirty() const;
     void set_plater_dirty(bool is_dirty);
     void update_project_dirty_from_presets();
+    // Orca #15916: reset per-plate bed type overrides the selected printer cannot use.
+    void normalize_bed_types(bool multi_bed_changed);
     int  save_project_if_dirty(const wxString& reason);
     void reset_project_dirty_after_save();
     void reset_project_dirty_initial_presets();
@@ -334,7 +345,7 @@ public:
     const SLAPrint& sla_print() const;
     SLAPrint& sla_print();
 
-    int new_project(bool skip_confirm = false, bool silent = false, const wxString& project_name = wxString());
+    int new_project(bool skip_confirm = false, bool silent = false, const wxString& project_name = wxString(), bool reload_presets = true);
     // BBS: save & backup
     void load_project(wxString const & filename = "", wxString const & originfile = "-");
     int save_project(bool saveAs = false);
@@ -377,6 +388,9 @@ public:
     //BBS: add only gcode mode
     bool only_gcode_mode() { return m_only_gcode; }
     void set_only_gcode(bool only_gcode) { m_only_gcode = only_gcode; }
+    // The previewed G-code's own settings were loaded into the presets, as a .gcode.3mf's are: the bed already is the
+    // one it was sliced for, and the sidebar shows them.
+    bool gcode_settings_loaded() const { return m_only_gcode && m_gcode_settings_loaded; }
 
     //BBS: add only gcode mode
     bool using_exported_file() { return m_exported_file; }
@@ -452,6 +466,8 @@ public:
     bool is_preview_shown() const;
     bool is_preview_loaded() const;
     bool is_view3D_shown() const;
+    // The Showcase tab's view is the current panel.
+    bool is_showcase_shown() const;
 
     bool are_view3D_labels_shown() const;
     void show_view3D_labels(bool show);
@@ -479,7 +495,7 @@ public:
     void deselect_all();
     void exit_gizmo();
     void remove(size_t obj_idx);
-    void reset(bool apply_presets_change = false);
+    void reset(bool apply_presets_change = false, bool reload_presets = true);
     void reset_with_confirm();
     //BBS: return int for various result
     int close_with_confirm(std::function<bool(bool yes_or_no)> second_check = nullptr); // BBS close project
@@ -515,6 +531,10 @@ public:
     // File > Export > Export & Open in Bambu Studio: same export as export_bambu_3mf(), then
     // launch the installed Bambu Studio with the exported file (Utils/BambuStudioLauncher.hpp).
     void export_and_open_in_bambu_studio();
+    // Send to Bambu Connect (Bambu printers): export the current plate, or all plates, as .gcode.3mf
+    // into <temp>/EdgeSlicer/bambu-connect and open it in the user's own Bambu Connect app through
+    // its bambu-connect:// URL scheme (Utils/BambuConnect.hpp). Connect does the printing.
+    void send_to_bambu_connect(bool all_plates);
     static TriangleMesh combine_mesh_fff(const ModelObject& mo, int instance_id, std::function<void(const std::string&)> notify_func = {});
     void export_stl(bool extended = false, bool selection_only = false, bool multi_stls = false);
     // Export just the one selected part (ModelVolume) as a binary STL, in world coordinates.
@@ -557,6 +577,12 @@ public:
     void schedule_background_process(bool schedule = true);
     bool is_background_process_update_scheduled() const;
     void suppress_background_process(const bool stop_background_process) ;
+    // Called by MainFrame::shutdown (app close, and the old frame of a language / theme rebuild):
+    // from then on the background-process updates and the slice-button sync below are no-ops, so
+    // a timer that still fires while the window tree is torn down cannot touch a dead MainFrame
+    // (EDGESLICER-A).
+    void begin_shutdown();
+    bool is_shutting_down() const;
     /* -1: send current gcode if not specified
      * -2: send all gcode to target machine */
     int send_gcode(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);
@@ -1024,6 +1050,9 @@ public:
     void enable_wireframe(bool status);
     bool is_wireframe_enabled() const;
 
+    void toggle_show_xray();
+    bool is_show_xray() const;
+
 	// Wrapper around wxWindow::PopupMenu to suppress error messages popping out while tracking the popup menu.
 	bool PopupMenu(wxMenu *menu, const wxPoint& pos = wxDefaultPosition);
     bool PopupMenu(wxMenu *menu, int x, int y) { return this->PopupMenu(menu, wxPoint(x, y)); }
@@ -1075,6 +1104,8 @@ private:
     wxString m_last_loaded_gcode;
     //BBS: add only gcode mode
     bool m_only_gcode { false };
+    // Set by load_gcode() for the file it previews, so it means nothing once m_only_gcode is cleared.
+    bool m_gcode_settings_loaded { false };
     bool m_exported_file { false };
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };

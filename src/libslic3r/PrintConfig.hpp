@@ -122,6 +122,15 @@ enum class WallDirection
     Count,
 };
 
+// Orca #11582 / #11616: what the slicer does about the printer's power loss recovery.
+// PrinterConfiguration writes nothing and leaves the printer's own setting; Enable / Disable write
+// M1003 S1 / S0 (Bambu Lab) or M413 S1 / S0 (Marlin 2) at the start of the second layer.
+enum class PowerLossRecoveryMode {
+    PrinterConfiguration,
+    Enable,
+    Disable,
+};
+
 //BBS
 enum class PrintSequence {
     ByLayer,
@@ -621,6 +630,13 @@ std::vector<int> slice_info_extruder_types(const ConfigBase &config, size_t extr
 class DynamicPrintConfig;
 void resolve_printer_extruder_variants(DynamicPrintConfig &config);
 
+// Edge (Orca #11582 / #11616): a 3MF project (or its embedded printer preset) written before
+// enable_power_loss_recovery existed has no value for it, and the default ("printer configuration",
+// nothing written) would drop the M1003 S1 a Bambu Lab printer was always sliced with. Such a config
+// gets "enable" when its printer_model is a Bambu Lab one, which is what it was sliced with before.
+// Returns true when it set the value.
+bool upgrade_missing_power_loss_recovery(DynamicPrintConfig &config);
+
 // The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
 std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
 
@@ -899,6 +915,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 // Ultra: nozzle flow variant declared to Bambu printers (metadata only in this fork).
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
@@ -1346,6 +1363,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                bridge_no_support))
     ((ConfigOptionFloat,               elefant_foot_compensation))
     ((ConfigOptionInt,                 elefant_foot_compensation_layers))
+    ((ConfigOptionPercent,             elefant_foot_layers_density))
     ((ConfigOptionFloat,               max_bridge_length))
     ((ConfigOptionFloatOrPercent,      line_width))
     // Force the generation of solid shells between adjacent materials/volumes.
@@ -1526,6 +1544,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              initial_layer_acceleration))
     ((ConfigOptionFloatsOrPercents,     bridge_acceleration))
     ((ConfigOptionFloats,              travel_acceleration))
+    // Snapmaker #937 / #980: first-layer travel override; 0 keeps the initial layer acceleration.
+    ((ConfigOptionFloatOrPercent,      first_layer_travel_acceleration))
     ((ConfigOptionFloatsOrPercents,     sparse_infill_acceleration))
     ((ConfigOptionFloatsOrPercents,     internal_solid_infill_acceleration))
 
@@ -1536,6 +1556,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              top_surface_jerk))
     ((ConfigOptionFloats,              initial_layer_jerk))
     ((ConfigOptionFloats,              travel_jerk))
+    ((ConfigOptionFloatOrPercent,      first_layer_travel_jerk))
     ((ConfigOptionBool,               precise_z_height))
     ((ConfigOptionFloats,              default_junction_deviation))
         
@@ -1814,6 +1835,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               fan_kickstart))
     ((ConfigOptionBool,                fan_speedup_overhangs))
     ((ConfigOptionFloat,               fan_speedup_time))
+    // ORCA: minimum PWM (as a percent 0-100) emitted when the part-cooling fan is asked for a non-zero speed.
+    // Used to overcome the PWM start-up threshold on fans that cannot spool below a certain duty cycle.
+    // A value of 0 (the default) leaves behaviour unchanged. A fan command of 0 (off) is always honoured.
+    ((ConfigOptionInt,                 part_cooling_fan_min_pwm))
     ((ConfigOptionFloats,              filament_diameter))
     ((ConfigOptionFloats,              filament_density))
     ((ConfigOptionStrings,             filament_type))
@@ -1841,6 +1866,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                required_nozzle_HRC))
     // BBS
     ((ConfigOptionBool,                scan_first_layer))
+    ((ConfigOptionEnum<PowerLossRecoveryMode>, enable_power_loss_recovery)) // Orca #11582 / #11616
     ((ConfigOptionPoints,              thumbnail_size))
     // ((ConfigOptionBool,                spaghetti_detector))
     ((ConfigOptionBool,                gcode_add_line_number))
@@ -1951,6 +1977,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_stamping_distance))
     ((ConfigOptionBool,                purge_in_prime_tower))
     ((ConfigOptionBool,                enable_filament_ramming))
+    ((ConfigOptionBool,                tool_change_on_wipe_tower))
     ((ConfigOptionFloat,                ramming_line_width_ratio))
     ((ConfigOptionBool,                enable_change_pressure_when_wiping))
     ((ConfigOptionFloat,                ramming_pressure_advance_value))
@@ -2066,6 +2093,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionStrings,            filament_multi_colors))
     ((ConfigOptionInts,               filament_colour_mode))
     ((ConfigOptionBools,              activate_air_filtration))
+    ((ConfigOptionBools,              activate_air_filtration_during_print))
+    ((ConfigOptionBools,              activate_air_filtration_on_completion))
     ((ConfigOptionInts,               during_print_exhaust_fan_speed))
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
@@ -2076,6 +2105,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloats,              initial_layer_infill_speed))
     ((ConfigOptionInts,               nozzle_temperature_initial_layer))
     ((ConfigOptionInts,               full_fan_speed_layer))
+    // ORCA: explicit override for the part cooling fan speed on the first printed layer.
+    ((ConfigOptionInts,               initial_layer_fan_speed))
     ((ConfigOptionFloats,               fan_max_speed))
     ((ConfigOptionFloats,             max_layer_height))
     ((ConfigOptionFloats,               fan_min_speed))
@@ -2167,6 +2198,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_rib_width))
     ((ConfigOptionBool,               wipe_tower_fillet_wall))
     ((ConfigOptionBool,               wipe_tower_wall_gap))
+    ((ConfigOptionBool,               wipe_tower_stagger_toolchange_start))
     // Tower interface options (GCode/WipeTowerInterface.hpp), each off by default.
     ((ConfigOptionBool,               wipe_tower_interface_temp))
     ((ConfigOptionBool,               wipe_tower_interface_run_in))
@@ -2473,6 +2505,9 @@ bool has_nozzle_rack(const PrintConfig &config);
 // Ported from OrcaSlicer PR #13782 (LixNix, "Printing with different nozzle sizes"),
 // Flow.cpp::physical_extruder_for_filament.
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id);
+// The same mapping from the raw values, for callers that only hold a DynamicPrintConfig or the
+// preset bundle (the support overhang highlight in the 3D view).
+size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id);
 
 // Mixed nozzle sizes (Phase 3, UI): true when this machine may carry nozzles of different
 // diameters at the same time - more than one physical extruder and NOT a single-extruder

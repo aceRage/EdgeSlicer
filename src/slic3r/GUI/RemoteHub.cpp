@@ -4,6 +4,7 @@
 #include "RemoteHub.hpp"
 
 #include "BambuCamRelay.hpp"
+#include "ElegooCamRelay.hpp"
 #include "RemoteNotify.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
@@ -967,6 +968,9 @@ struct Request
     // can tell it apart from a genuine Serve connection. Always false today; the rule is already
     // written to honour it (Testing::trusted_proxy_headers).
     bool        via_relay { false };
+    // Serve's own marks on what it forwards (X-Forwarded-For / -Host / -Proto) and on a Funnel
+    // request (Tailscale-Funnel-Request). Only believed from loopback, like ts_login.
+    bool        forwarded { false }, funnel { false };
     size_t      content_length { 0 };
 };
 
@@ -1007,7 +1011,9 @@ static bool read_request(tcp::socket& client, Request& r)
             else if (key == "sec-fetch-site") r.sec_fetch_site = lower(val);
             else if (key == "content-type") r.content_type = lower(val);
             else if (key == "tailscale-user-login") r.ts_login = val;
-            else if (key == "x-forwarded-proto") r.fwd_proto = lower(val);
+            else if (key == "x-forwarded-proto") { r.fwd_proto = lower(val); r.forwarded = true; }
+            else if (key == "x-forwarded-for" || key == "x-forwarded-host") r.forwarded = true;
+            else if (key == "tailscale-funnel-request") r.funnel = true;
         }
         pos = nl + 2;
     }
@@ -1585,6 +1591,15 @@ bool Testing::trusted_proxy_headers(bool peer_is_loopback, bool via_relay)
     return peer_is_loopback && !via_relay;
 }
 
+Testing::ServeRequest Testing::classify_serve_request(bool headers_trusted, const std::string& ts_login, bool forwarded, bool funnel)
+{
+    if (!headers_trusted) return ServeRequest::Local;
+    // Serve never names a user on a Funnel request; one that claims both is not believed.
+    if (funnel) return ServeRequest::NoLogin;
+    if (!ts_login.empty()) return ServeRequest::Tailnet;
+    return forwarded ? ServeRequest::NoLogin : ServeRequest::Local;
+}
+
 // summary_json's "camera" field: the camera's own id first (a camera someone added *as* this
 // printer, id == id), then a LAN camera that sits on the same address - by the camera's recorded
 // `ip`, or, failing that, by the host inside its own stream URL. Pure and address-only: it never
@@ -1772,6 +1787,13 @@ Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_r
         const bool bambu = incoming.value("kind", std::string()) == "bambu";
         if (bambu && cached_fresh && cached_instance != incoming_instance && cached.value("connected", false) &&
             !incoming.value("connected", false)) {
+            out.keep_cached = true;
+            return out;
+        }
+        // An Elegoo SDCP printer has one connection per PC, held by one window (ElegooSdcpMonitor's
+        // lock); another window's row for it says it has nothing, and the holder's row is kept.
+        if (incoming.contains("sdcp_connected") && cached_fresh && cached_instance != incoming_instance &&
+            cached.value("sdcp_connected", false) && !incoming.value("sdcp_connected", false)) {
             out.keep_cached = true;
             return out;
         }
@@ -2890,6 +2912,7 @@ private:
     bool  set_remote(bool on, std::string& error);     // tailscale serve on/off for this hub
     void  remote_logins(const std::string& add, const std::string& remove);
     bool  login_allowed(const std::string& login);
+    void  note_refused_no_login(bool funnel);          // counts and logs (at most once a minute) a Serve request with no login
     json  remote_json_locked() const;                  // m_mutex held
     void  remember_old_token_locked(const std::string& token); // m_mutex held
     static Instance probe_instance(Instance inst);
@@ -2929,6 +2952,9 @@ private:
     TailscaleState                 m_ts;                         // last tailscale_query()
     std::string                    m_last_login;                 // most recent remote visitor
     long long                      m_last_login_at { 0 };
+    long long                      m_refused_no_login { 0 };      // Serve requests with no tailnet login refused this run
+    long long                      m_refused_no_login_at { 0 };   // ... the latest one (unix seconds)
+    long long                      m_refused_no_login_logged { 0 }; // when the log last said so
     int                            m_go2rtc_port { 0 };
     // What register_streams() has put into this go2rtc (name -> source). Only its single worker
     // touches it; go2rtc lives exactly as long as this server, so it never goes stale.
@@ -2938,6 +2964,10 @@ private:
     // or replaces one. Guarded by m_mutex. Idle streams cost nothing: go2rtc only connects to the
     // printer while somebody watches.
     std::map<std::string, std::string> m_own_streams;
+    // When somebody last looked at the printers (/summary, /state, a proxied /api/printers): the
+    // background poll tells the instances watching=0 otherwise, so an Elegoo printer's CANVAS is only
+    // read while a person can see it (ElegooSdcpMonitor).
+    std::atomic<long long>         m_watch_ms { 0 };
     std::atomic<bool>              m_streams_dirty { false };  // a Stream-tab save not synced yet
     std::atomic<bool>              m_streams_worker { false }; // the sync worker is running
     int                            m_webrtc_port { 0 };          // go2rtc's WebRTC media port (0 = WebRTC off)
@@ -3398,11 +3428,18 @@ static long long now_millis()
 void HubServer::poll_printers()
 {
     const std::vector<Instance> live = instances(false);
+    const long long             seen = m_watch_ms.load();
+    const bool                  watched = seen != 0 && now_millis() - seen < 45000;
+    // Whether a notification would go anywhere (a destination, a browser, the app): an Elegoo printer's
+    // print is then watched to its end even with nobody looking (ElegooSdcpMonitor).
+    bool notify = false;
+    try { notify = RemoteNotify::has_destinations(); } catch (...) {}
     for (const Instance& inst : live) {
         if (inst.port <= 0) continue;
         std::string body;
         int         status = 0;
-        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers")
+        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers?watching=" + (watched ? "1" : "0") +
+                  "&notify=" + (notify ? "1" : "0"))
             .timeout_connect(1).timeout_max(10)
             .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
             .on_error([&](std::string, std::string, unsigned) {})
@@ -3870,6 +3907,10 @@ json HubServer::summary_json()
         // fans), the U1's toolhead filaments and a Bambu printer's AMS units - as the instance's
         // row carried them. A stale row keeps them for display; the app offers no control on one.
         for (const char* k : { "controls", "toolheads", "ams", "ext_spools", "hms" })
+            if (row.contains(k)) p[k] = row[k];
+        // An Elegoo SDCP printer's chamber reading, where its camera is found, and what the printer
+        // itself says it is doing (ElegooSdcp::fill_row).
+        for (const char* k : { "chamber_temp", "chamber_target", "camera_hint", "sdcp" })
             if (row.contains(k)) p[k] = row[k];
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);
@@ -5004,6 +5045,8 @@ json HubServer::remote_json_locked() const
     r["allowed_logins"] = m_allowed_logins;
     r["last_login"]     = m_last_login;
     r["last_login_at"]  = m_last_login_at;
+    r["refused_no_login"]    = m_refused_no_login;
+    r["refused_no_login_at"] = m_refused_no_login_at;
     std::string err = m_ts.error;
     if (err.empty() && m_remote_on && m_ts.installed && !m_ts.serving) err = "Tailscale is no longer serving this hub; turn remote access off and on again";
     r["error"] = err;
@@ -5013,13 +5056,12 @@ json HubServer::remote_json_locked() const
                         { "message", st.message },
                         { "action", st.action },
                         { "action_url", st.action_url } };
-    // The `tailscale funnel` line the card's advanced note shows verbatim. Documented, never run:
-    // Funnel publishes the hub to the whole internet with only the path token in front of it, which
-    // is a deliberate choice nobody should make by clicking a button (design section 3).
+    // The `tailscale funnel ... off` line the card's advanced note shows verbatim, for somebody who
+    // switched Funnel on for an older version: Funnel requests carry no tailnet login and are
+    // refused now (classify_serve_request), so the hub no longer documents turning it on.
     // The CLI as it is typed in a terminal: the path that was found when that is not simply
     // "tailscale" on PATH (a Mac without the app's "Install CLI" shim has no `tailscale` command).
     const std::string ts_cli = HubPlatform::cli_for_terminal(TailscaleCli::current_platform(), tailscale_exe());
-    r["funnel_command"]     = ts_cli + " funnel --bg --https=443 http://127.0.0.1:" + std::to_string(m_port);
     r["funnel_off_command"] = ts_cli + " funnel --https=443 off";
     return r;
 }
@@ -5099,6 +5141,23 @@ bool HubServer::login_allowed(const std::string& login)
         BOOST_LOG_TRIVIAL(info) << "RemoteHub: remote visit by " << l;
     }
     return ok;
+}
+
+void HubServer::note_refused_no_login(bool funnel)
+{
+    const long long now = (long long) std::time(nullptr);
+    long long       count;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        count                 = ++m_refused_no_login;
+        m_refused_no_login_at = now;
+        // A Funnel URL scanned by the whole internet must not turn into a log line per request.
+        if (count > 1 && now - m_refused_no_login_logged < 60) return;
+        m_refused_no_login_logged = now;
+    }
+    BOOST_LOG_TRIVIAL(warning) << "RemoteHub: refused a Tailscale Serve request with no tailnet login ("
+                               << (funnel ? "Funnel" : "tagged device or other unsigned-in source") << "; " << count
+                               << " refused so far this run)";
 }
 
 long HubServer::spawn_slicer(const std::string& file, bool hidden)
@@ -5532,6 +5591,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
     // the requirement: the app's Devices screen used to be able to say nothing at all with the
     // slicer closed, because the printers were only reachable through /i/<pid>/api/printers.
     if (r.method == "GET" && (rest == "/summary" || rest == "/summary/")) {
+        m_watch_ms = now_millis();
         respond_json(client, 200, summary_json().dump());
         return;
     }
@@ -5815,6 +5875,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         }
         if (sub.compare(0, 4, "/api") == 0 && (sub.size() == 4 || sub[4] == '/')) {
             if (!instance_api_allowed(r.method, sub)) { respond_json(client, 404, json_error("route not proxied; see /api")); return; }
+            if (r.method == "GET" && sub == "/api/printers") m_watch_ms = now_millis();
             if (r.content_length > MAX_API_BODY) { respond_json(client, 413, json_error("body too large")); return; }
             // Replay the request against the instance with the prefix stripped; the instance
             // answers with Connection: close, so the splice ends by itself.
@@ -5911,8 +5972,22 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
                 BOOST_LOG_TRIVIAL(warning) << "RemoteHub: ignoring a Tailscale-User-Login header from a non-loopback peer";
             r.ts_login.clear();
             r.fwd_proto.clear();
+            r.forwarded = r.funnel = false;
         }
-        const bool via_serve = peer.is_loopback() && !r.ts_login.empty();
+        // Through Serve with no tailnet login at all - a tagged device, or a Funnel visitor from
+        // the public internet. The allow-list cannot check them, so they get nothing; before this
+        // they fell through to the token alone. Plain loopback (the PC's own pages and tools)
+        // carries none of Serve's marks and is unaffected.
+        const Testing::ServeRequest serve_kind =
+            Testing::classify_serve_request(Testing::trusted_proxy_headers(peer.is_loopback(), r.via_relay), r.ts_login, r.forwarded, r.funnel);
+        if (serve_kind == Testing::ServeRequest::NoLogin) {
+            note_refused_no_login(r.funnel);
+            respond(client, 403, "text/plain; charset=utf-8",
+                    "This printer hub only answers people signed in to its owner's tailnet. Requests through Tailscale Funnel "
+                    "or from tagged devices are refused.");
+            return;
+        }
+        const bool via_serve = serve_kind == Testing::ServeRequest::Tailnet;
         if (via_serve && !login_allowed(r.ts_login)) {
             BOOST_LOG_TRIVIAL(warning) << "RemoteHub: tailnet login not allowed: " << r.ts_login;
             respond(client, 403, "text/plain; charset=utf-8", "This printer hub is not shared with " + r.ts_login + ". Ask its owner to add you on the hub page.");
@@ -6002,6 +6077,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             respond(client, 200, "text/html; charset=utf-8", page,
                     "X-Frame-Options: DENY\r\nSet-Cookie: rt=" + token + "; Path=/; SameSite=Lax" + cookie_flags + "\r\n");
         } else if (rest == "/state") {
+            m_watch_ms = now_millis();
             // Through Tailscale Serve the phone learns who it is signed in as (shown in its top bar).
             std::string st = state_for_phone();
             if (via_serve) {
@@ -6029,6 +6105,22 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             int fps = std::atoi(query_param(r.query, "fps").c_str());
             if (fps < 0 || fps > 60) fps = 0;
             const std::string new_head = "GET /bambu?ip=" + percent_encode(ip) + "&code=" + percent_encode(code) +
+                                         (fps > 0 ? "&fps=" + std::to_string(fps) : "") + " HTTP/1.1\r\n" +
+                                         r.head.substr(r.head.find("\r\n") + 2);
+            tunnel(client, relay, force_close(new_head), "");
+        } else if (rest == "/elegoo" || rest == "/elegoo/status") {
+            // A Centauri Carbon camera: the same relay the PC's Stream tab uses, so a phone is one
+            // more viewer of the one connection the printer is given - never a connection of its own.
+            // The printer's address comes from the saved camera list, not from the phone.
+            std::string ip, unused_code;
+            if (!lookup_host(query_param(r.query, "id"), ip, unused_code)) { respond(client, 404, "text/plain", "unknown camera"); return; }
+            ip = ElegooCam::host_from_address(ip);
+            if (ip.empty()) { respond(client, 404, "text/plain", "unknown camera"); return; }
+            const int relay = BambuCamRelay::get().port();
+            if (relay == 0) { respond(client, 503, "text/plain", "camera relay is not running"); return; }
+            int fps = std::atoi(query_param(r.query, "fps").c_str());
+            if (fps < 0 || fps > 60) fps = 0;
+            const std::string new_head = std::string("GET ") + (rest == "/elegoo" ? "/elegoo" : "/elegoo/status") + "?ip=" + percent_encode(ip) +
                                          (fps > 0 ? "&fps=" + std::to_string(fps) : "") + " HTTP/1.1\r\n" +
                                          r.head.substr(r.head.find("\r\n") + 2);
             tunnel(client, relay, force_close(new_head), "");

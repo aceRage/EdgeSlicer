@@ -8,6 +8,8 @@
 #include "MsgDialog.hpp"
 #include "PluginGuard.hpp"
 #include "RemoteHub.hpp"
+#include "BambuNetInfo.hpp"
+#include "slic3r/Utils/TeardownJoin.hpp"
 
 #include <nlohmann/json.hpp>
 #include <wx/webview.h>
@@ -136,16 +138,52 @@ MediaPlayCtrl::MediaPlayCtrl(wxWindow *parent, wxMediaCtrl2 *media_ctrl, const w
     m_lan_passwd = "bblp";
 }
 
+// Serves what the camera worker may be blocked on while ~MediaPlayCtrl waits for it, and nothing
+// else (see Utils/TeardownJoin.hpp, EDGESLICER-A). Never a plain Yield(): that ran timers, wx
+// pending events and idle processing (a nested DeletePendingObjects) in the middle of the window
+// tree's teardown, and a Plater timer then repainted the half-destroyed MainFrame.
+static void pump_for_media_worker(TeardownPump stage)
+{
+#ifdef _WIN32
+    // The worker's WMP / DirectShow calls are marshalled to this (UI) apartment through COM's hidden
+    // window, and the BambuSource filter reports to the player window with WM_USER + 1000. Messages
+    // sent from another thread are delivered inside PeekMessage whatever its filter; posted ones are
+    // taken only from WM_USER up, so WM_TIMER, input, WM_PAINT and WM_QUIT stay queued untouched.
+    MSG msg;
+    while (::PeekMessage(&msg, nullptr, WM_USER, 0xFFFF, PM_REMOVE))
+        ::DispatchMessage(&msg);
+    if (stage == TeardownPump::Service)
+        return;
+#else
+    (void) stage;
+#endif
+    // Wide stage on Windows; every stage elsewhere (wxGTK / wxOSX cannot filter native events the
+    // same way). A category mask other than "all" skips wx pending events and idle processing, and
+    // on Windows also WM_TIMER and user input.
+    if (wxEventLoopBase *loop = wxEventLoopBase::GetActive())
+        loop->YieldFor(wxEVT_CATEGORY_UI | wxEVT_CATEGORY_UNKNOWN);
+}
+
 MediaPlayCtrl::~MediaPlayCtrl()
 {
     {
         boost::unique_lock lock(m_mutex);
-        m_tasks.push_back("<exit>");
+        // The worker finishes the task it is running and leaves; queued loads / plays are dropped.
+        m_exiting = true;
         m_cond.notify_all();
     }
-    while (!m_thread.try_join_for(boost::chrono::milliseconds(10))) {
-        wxEventLoopBase::GetActive()->Yield();
-    }
+    bool logged_wide = false;
+    const auto res = join_without_reentry(
+        [this] { return m_thread.try_join_for(boost::chrono::milliseconds(10)); },
+        [&logged_wide](TeardownPump stage) {
+            if (stage == TeardownPump::Wide && !logged_wide) {
+                logged_wide = true;
+                BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: camera worker still busy at teardown, widening the message pump";
+            }
+            pump_for_media_worker(stage);
+        },
+        std::chrono::seconds(3));
+    BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl: camera worker joined after " << res.rounds << " pump rounds";
 }
 
 void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
@@ -157,7 +195,10 @@ void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
         m_lan_mode       = obj->is_lan_mode_printer();
         m_lan_proto      = obj->liveview_local;
         m_remote_proto   = obj->get_liveview_remote();
-        m_lan_ip         = obj->dev_ip;
+        // A cloud-bound printer whose SSDP announcements never arrive (Windows Firewall on a Public
+        // network) still reports its address in push_status: the camera uses that until discovery
+        // finds it, instead of "[1:3]" on every Play for the whole session (BambuNetInfo.hpp).
+        m_lan_ip         = BambuNetInfo::camera_address(obj->dev_ip, obj->net_reported_ip);
         m_lan_passwd     = obj->get_access_code();
         m_device_busy    = obj->is_camera_busy_off();
         m_tutk_state     = obj->tutk_state;
@@ -368,7 +409,20 @@ void MediaPlayCtrl::Play()
                 if (m_last_state == MEDIASTATE_INITIALIZING) {
                     if (url.empty() || !boost::algorithm::starts_with(url, "bambu:///")) {
                         m_failed_code = 3;
-                        Stop(_L("Connection Failed. Please check the network and try again"), from_u8(url));
+                        if (m_lan_ip.empty() && m_lan_proto > MachineObject::LVL_Disable)
+                            // No cloud stream, and no LAN address to play the printer's own stream
+                            // from: say which of the two is missing rather than "check the network".
+#ifdef _WIN32
+                            Stop(_L("EdgeSlicer does not know this printer's LAN address yet, so the live view cannot start. "
+                                    "Printer discovery may be blocked: see Help > Check Windows Firewall."),
+                                 from_u8(url));
+#else
+                            Stop(_L("EdgeSlicer does not know this printer's LAN address yet, so the live view cannot start. "
+                                    "Printer discovery may be blocked by a firewall."),
+                                 from_u8(url));
+#endif
+                        else
+                            Stop(_L("Connection Failed. Please check the network and try again"), from_u8(url));
                     } else {
                         m_url = url;
                         load();
@@ -820,9 +874,11 @@ void MediaPlayCtrl::media_proc()
 {
     boost::unique_lock lock(m_mutex);
     while (true) {
-        while (m_tasks.empty()) {
+        while (m_tasks.empty() && !m_exiting) {
             m_cond.wait(lock);
         }
+        if (m_exiting)
+            break; // ~MediaPlayCtrl is waiting; queued tasks would only drive a player being destroyed
         wxString url = m_tasks.front();
         if (m_tasks.size() >= 2 && !url.IsEmpty() && url[0] != '<' && m_tasks[1] == "<stop>") {
             BOOST_LOG_TRIVIAL(trace) << "MediaPlayCtrl: busy skip url: " << url;

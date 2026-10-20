@@ -50,6 +50,7 @@
 #include "MsgDialog.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "MainFrame.hpp"
+#include "Plater.hpp"
 #include "WizardNetworking.hpp"
 
 #if defined(__linux__) && defined(__WXGTK3__)
@@ -2884,6 +2885,9 @@ bool ConfigWizard::run(RunReason reason, StartPage start_page)
 
         app.app_config->set_legacy_datadir(false);
         app.update_mode();
+        // Orca #16365: the printers chosen in the wizard may not take the plates' bed types.
+        if (Plater *plater = app.plater())
+            plater->normalize_bed_types(false);
         // BBS
         //app.obj_manipul()->update_ui_from_settings();
         BOOST_LOG_TRIVIAL(info) << "ConfigWizard applied";

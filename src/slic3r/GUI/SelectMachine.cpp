@@ -9,6 +9,7 @@
 #include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/BambuNozzleMappingRequest.hpp"
 #include "DualNozzleState.hpp"
+#include "NozzleInfo.hpp"
 #include "BambuSendMapping.hpp"
 #include "BambuSendDiagnosis.hpp"
 #include <chrono>
@@ -1408,7 +1409,7 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
     // and falls back to the preset's two nozzles when the printer has not reported any.
     BambuNozzleMapping::RequestInput in;
     in.calibration              = m_checkbox_list["flow_cali"] && m_checkbox_list["flow_cali"]->GetValue() ? 1 : 0;
-    in.extrude_cali_manual_mode = 1; // no PA-value switch in this fork: automatic, as the payload sends
+    in.extrude_cali_manual_mode = 0; // no PA-mode switch in this fork: Bambu Studio's default, as the payload sends
     if (gcode_result)
         for (auto f : gcode_result->filament_change_sequence)
             in.filament_change_sequence.push_back(int(f));
@@ -2005,7 +2006,7 @@ bool SelectMachineDialog::is_blocking_printing(MachineObject* obj_)
  * @param tag_nozzle_diameter -- return the target nozzle_diameter but mismatch
  * @return is same or not
 /*************************************************************/
-bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter) const
+bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter, float &printer_nozzle_diameter) const
 {
     DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev) return false;
@@ -2020,13 +2021,30 @@ bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter) c
         return false;
     }
 
+    const std::vector<Extder>& extders = obj_->m_extder_data.extders;
+    if (extders.empty())
+        return true; // nothing reported: unknown, assume it matches (Orca #12814)
+
     try
     {
         auto extruders = wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_extruders();
         for (auto i = 0; i < extruders.size(); i++) {
             auto extruder = extruders[i] - 1;
             tag_nozzle_diameter = float(opt_nozzle_diameters->get_at(extruder));
-            if (tag_nozzle_diameter != obj_->m_extder_data.extders[0].current_nozzle_diameter) {
+            // Orca #12814 (upstream compares the used nozzle, not always the first): on a
+            // two-extruder printer each used extruder is checked against its own nozzle.
+            const Extder* used = &extders.front();
+            if (extders.size() > 1 && opt_nozzle_diameters->size() > 1) {
+                const int physical = BambuExtruderMap::logical_to_physical(printer_physical_extruder_map(), extruder);
+                for (const Extder& e : extders)
+                    if (e.id == physical)
+                        used = &e;
+            }
+            printer_nozzle_diameter = used->current_nozzle_diameter;
+            // Orca #12814: assume matching if the printer has not reported its diameter.
+            if (!NozzleInfo::diameter_known(printer_nozzle_diameter))
+                continue;
+            if (tag_nozzle_diameter != printer_nozzle_diameter) {
                 return false;
             }
         }
@@ -2041,6 +2059,11 @@ bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter) c
 
 bool SelectMachineDialog::is_same_nozzle_type(const Extder& extruder, std::string& filament_type) const
 {
+    // Orca #12814: assume matching if the nozzle type is unknown (the caller already skips the
+    // check then; kept here so no other caller can compare against HRC 0).
+    if (extruder.current_nozzle_type == NozzleType::ntUndefine)
+        return true;
+
     auto printer_nozzle_hrc = Print::get_hrc_by_nozzle_type(extruder.current_nozzle_type);
 
     auto preset_bundle = wxGetApp().preset_bundle;
@@ -2259,13 +2282,14 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
     if (obj_->m_extder_data.extders[0].current_nozzle_type != ntUndefine && (m_print_type == PrintFromType::FROM_NORMAL))
     {
         float nozzle_diameter = 0;
-        if (!is_same_nozzle_diameters(nozzle_diameter))
+        float printer_nozzle_diameter = 0;
+        if (!is_same_nozzle_diameters(nozzle_diameter, printer_nozzle_diameter))
         {
             has_slice_warnings = true;
             // is_printing_block  = true;  # Removed to allow nozzle overrides (to support non-standard nozzles)
-            
+
             wxString nozzle_in_preset = wxString::Format(_L("nozzle in preset: %.1f %s"),nozzle_diameter, "");
-            wxString nozzle_in_printer = wxString::Format(_L("nozzle memorized: %.1f %s"), obj_->m_extder_data.extders[0].current_nozzle_diameter, "");
+            wxString nozzle_in_printer = wxString::Format(_L("nozzle memorized: %.1f %s"), printer_nozzle_diameter, "");
 
             confirm_text.push_back(ConfirmBeforeSendInfo(_L("Your nozzle diameter in sliced file is not consistent with memorized nozzle. If you changed your nozzle lately, please go to Device > Printer Parts to change settings.") 
                 + "\n    " + nozzle_in_preset 
@@ -2571,11 +2595,13 @@ void SelectMachineDialog::on_send_print()
     else
         BOOST_LOG_TRIVIAL(info) << "build_nozzle_mapping_request: none for this job";
 
-    // No PA-value switch in this fork: automatic extruder calibration (1), per the payload docs.
-    m_print_job->extruder_cali_manual_mode = 1;
+    // No PA-mode switch in this fork: send Bambu Studio's default. Its switch "Nozzles and
+    // filaments of the same type share the same PA profile" defaults to ON, which sends 0.
+    m_print_job->extruder_cali_manual_mode = 0;
 
     m_print_job->sdcard_state = (int) obj_->get_sdcard_state();
     m_print_job->has_sdcard   = bambu_storage_usable_for_lan(m_print_job->sdcard_state, wxGetApp().app_config->get_bool("allow_abnormal_storage"));
+    m_print_job->could_emmc_print = obj_->is_support_print_with_emmc;
 
 
     bool timelapse_option = select_timelapse->IsShown() ? m_checkbox_list["timelapse"]->GetValue() : true;
@@ -2672,6 +2698,10 @@ void SelectMachineDialog::update_user_machine_list()
 void SelectMachineDialog::on_refresh(wxCommandEvent &event)
 {
     BOOST_LOG_TRIVIAL(info) << "m_printer_last_select: on_refresh";
+    // Search the network again as well (rate-limited): the list below is rebuilt from the account's
+    // printers (fetched next) and from what discovery has heard.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        dev->restart_discovery("send dialog refresh", /* rate_limited */ true);
     show_status(PrintDialogStatus::PrintStatusRefreshingMachineList);
 
     update_user_machine_list();
@@ -3279,9 +3309,9 @@ void SelectMachineDialog::update_show_status()
         return;
     }
 
-    // check sdcard when if lan mode printer
+    // check sdcard when if lan mode printer (a printer that prints from internal storage needs none, as in Bambu Studio)
     if (obj_->is_lan_mode_printer()) {
-        if (obj_->get_sdcard_state() == MachineObject::SdcardState::NO_SDCARD) {
+        if (obj_->get_sdcard_state() == MachineObject::SdcardState::NO_SDCARD && !obj_->is_support_print_with_emmc) {
             show_status(PrintDialogStatus::PrintStatusLanModeNoSdcard);
             return;
         }

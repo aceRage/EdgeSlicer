@@ -5,6 +5,7 @@ add_executable(${_TEST_NAME}_tests
 	test_3mf.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
+	test_connect_filament_maps.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
@@ -14,6 +15,8 @@ add_executable(${_TEST_NAME}_tests
 	test_model_browser_rules.cpp
 	test_arrange_support_clearance.cpp
 	test_appconfig_trailing_newline.cpp
+	test_appconfig_auto_slice.cpp
+	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
 	test_arachne_walls.cpp
@@ -53,6 +56,7 @@ add_executable(${_TEST_NAME}_tests
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
 	test_default_bed_type.cpp
+	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp
 	test_ec_retraction.cpp
 	test_bed_exclude_area.cpp
@@ -104,6 +108,9 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_load_determinism.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
+	test_filament_remap.cpp
+	test_calib_settings.cpp
+	test_preset_printer_type.cpp
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
@@ -146,9 +153,12 @@ add_executable(${_TEST_NAME}_tests
     test_cost_estimate.cpp
     test_cost_overrides.cpp
     test_cost_pricing.cpp
+    test_showcase_scene.cpp
+    test_showcase_materials.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
+    test_connected_bodies.cpp
     test_texture_displacement.cpp
     test_texture_displacement_edge.cpp
     ../libnest2d/printer_parts.cpp

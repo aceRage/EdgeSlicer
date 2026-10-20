@@ -31,6 +31,9 @@ int get_hms_info_version(std::string& version)
     AppConfig* config = wxGetApp().app_config;
     if (!config)
         return -1;
+    // Orca #11225: stealth mode never asks Bambu's HMS server anything.
+    if (config->get_stealth_mode())
+        return -1;
     std::string hms_host = config->get_hms_host();
     if(hms_host.empty()) {
         BOOST_LOG_TRIVIAL(error) << "hms_host is empty";
@@ -71,6 +74,9 @@ int HMSQuery::download_hms_related(const std::string& hms_type, const std::strin
 
     AppConfig* config = wxGetApp().app_config;
     if (!config) return -1;
+    // Orca #11225: the local copy above is all stealth mode gets (init_hms_info already stops
+    // before calling this; kept here so no other caller can reach the network).
+    if (config->get_stealth_mode()) return -1;
 
     std::string hms_host = wxGetApp().app_config->get_hms_host();
     std::string url;
@@ -500,7 +506,18 @@ wxString HMSQuery::query_print_error_url_action(const std::string& dev_id, int p
 {
     char buf[32];
     ::sprintf(buf, "%08X", print_error);
-    return _query_error_url_action(get_dev_id_type(dev_id), std::string(buf), button_action);
+    const wxString url = _query_error_url_action(get_dev_id_type(dev_id), std::string(buf), button_action);
+    AppConfig* config = wxApp::GetInstance() ? wxGetApp().app_config : nullptr;
+    return stealth_image_url(url, config && config->get_stealth_mode());
+}
+
+wxString HMSQuery::stealth_image_url(const wxString& url, bool stealth_mode)
+{
+    // Orca #11225: the error dialog downloads this picture from Bambu's server. In stealth mode it
+    // goes without; the button actions read alongside it are local and stay.
+    if (stealth_mode && url.Contains("http"))
+        return wxEmptyString;
+    return url;
 }
 
 std::string HMSQuery::print_error_code(int print_error)
@@ -872,6 +889,8 @@ std::string get_hms_wiki_url(std::string error_code)
 {
     AppConfig* config = wxGetApp().app_config;
     if (!config) return "";
+    // Orca #11225: no link to Bambu's wiki in stealth mode (the HMS panel then shows no link).
+    if (config->get_stealth_mode()) return "";
 
     std::string hms_host = wxGetApp().app_config->get_hms_host();
     std::string lang_code = HMSQuery::hms_language_code();
@@ -897,6 +916,9 @@ std::string get_hms_wiki_url(std::string error_code)
 
 std::string get_error_message(int error_code)
 {
+    // Orca #11225: this asks Bambu's HMS server; stealth mode does not.
+    if (!wxGetApp().app_config || wxGetApp().app_config->get_stealth_mode()) return "";
+
 	char buf[64];
     std::string result_str = "";
     std::sprintf(buf,"%08X",error_code);

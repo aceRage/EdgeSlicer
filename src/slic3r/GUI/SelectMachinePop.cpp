@@ -506,11 +506,11 @@ void SelectMachinePopup::update_other_devices()
 
     for (auto &elem : m_free_machine_list) {
         MachineObject *     mobj = elem.second;
-        /* do not show printer bind state is empty */
-        if (!mobj->is_avaliable()) continue;
-
-        if (!wxGetApp().is_user_login() && !mobj->is_lan_mode_printer())
-            continue;
+        // Bind state empty or "occupied" hides a printer; signed out, a printer that is not in LAN
+        // mode is not hidden either - the access code is the way in (SsdpConnectType.hpp).
+        const SsdpConnectType::OtherEntry entry =
+            SsdpConnectType::other_devices_entry(wxGetApp().is_user_login(), mobj->is_lan_mode_printer(), mobj->is_avaliable());
+        if (entry == SsdpConnectType::OtherEntry::Hide) continue;
 
         /* do not show printer in my list */
         auto it = m_bind_machine_list.find(mobj->dev_id);
@@ -543,7 +543,9 @@ void SelectMachinePopup::update_other_devices()
 
         op->update_machine_info(mobj);
 
-        if (mobj->is_lan_mode_printer()) {
+        if (entry == SsdpConnectType::OtherEntry::Lan) {
+            op->show_edit_printer_name(false);
+            op->show_printer_bind(false, PrinterBindState::NONE);
             if (mobj->has_access_right()) {
                 op->set_printer_state(PrinterState::IN_LAN);
             } else {
@@ -572,6 +574,7 @@ void SelectMachinePopup::update_other_devices()
         m_placeholder_panel = nullptr;
         m_firewall_link     = nullptr; // was a child of the panel
         m_setup_link        = nullptr;
+        m_refresh_link      = nullptr;
     }
 
     const bool firewall_link = FirewallCheckDialog::supported();
@@ -593,6 +596,19 @@ void SelectMachinePopup::update_other_devices()
         m_firewall_link->SetCursor(wxCURSOR_HAND);
         placeholder_sizer->Add(m_firewall_link, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT | wxBOTTOM, 5);
     }
+
+    // A printer that switched between LAN-only and cloud mode (or was bound or unbound) while the
+    // app ran can be missing here until the next sign-in; this asks again without one.
+    m_refresh_link = new wxStaticText(m_placeholder_panel, wxID_ANY, _L("Refresh printers"));
+    {
+        wxFont f = m_refresh_link->GetFont();
+        f.SetUnderlined(true);
+        m_refresh_link->SetFont(f);
+    }
+    m_refresh_link->SetForegroundColour(StateColor::darkModeColorFor("#009789"));
+    m_refresh_link->SetCursor(wxCURSOR_HAND);
+    m_refresh_link->SetToolTip(_L("Search the network again and reload the printers of your account, without signing out."));
+    placeholder_sizer->Add(m_refresh_link, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
     // What a Bambu Lab printer needs to show up and connect (the first-time notice's checklist).
     m_setup_link = new wxStaticText(m_placeholder_panel, wxID_ANY, _L("Bambu printer setup"));
@@ -768,6 +784,21 @@ void SelectMachinePopup::update_machine_list(wxCommandEvent &event)
     BOOST_LOG_TRIVIAL(trace) << "SelectMachinePopup update_machine_list end";
 }
 
+void SelectMachinePopup::on_refresh_printers()
+{
+    DeviceManager* dev = wxGetApp().getDeviceManager();
+    if (!dev) return;
+    auto token = std::weak_ptr<int>(m_token);
+    const bool started = dev->refresh_printers("printer picker", [this, token]() {
+        if (token.expired()) return;
+        wxCommandEvent event(EVT_UPDATE_USER_MACHINE_LIST);
+        event.SetEventObject(this);
+        wxPostEvent(this, event);
+    });
+    if (started && m_refresh_link)
+        m_refresh_link->SetLabel(_L("Refreshing printers..."));
+}
+
 void SelectMachinePopup::start_ssdp(bool start)
 {
     return;
@@ -907,6 +938,16 @@ void SelectMachinePopup::OnLeftUp(wxMouseEvent &event)
                 mouse_pos.y < (f_rect.y + m_firewall_link->GetSize().y)) {
                 Dismiss();
                 wxGetApp().CallAfter([]() { FirewallCheckDialog::show_modal(wxGetApp().mainframe); });
+            }
+        }
+
+        //Refresh printers
+        if (m_refresh_link != nullptr) {
+            auto r_rect = m_refresh_link->ClientToScreen(wxPoint(0, 0));
+            if (mouse_pos.x > r_rect.x && mouse_pos.y > r_rect.y && mouse_pos.x < (r_rect.x + m_refresh_link->GetSize().x) &&
+                mouse_pos.y < (r_rect.y + m_refresh_link->GetSize().y)) {
+                on_refresh_printers();
+                return;
             }
         }
 

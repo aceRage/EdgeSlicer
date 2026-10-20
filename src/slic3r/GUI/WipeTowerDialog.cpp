@@ -510,7 +510,8 @@ WipingPanel::WipingPanel(wxWindow* parent, const std::vector<float>& matrix, con
         multi_desc_label->SetForegroundColour(g_text_color);
         m_sizer_advanced->Add(multi_desc_label, 0, wxEXPAND | wxLEFT, TEXT_BEG_PADDING);
 
-        wxString min_flush_str = wxString::Format(_L("Suggestion: Flushing Volume in range [%d, %d]"),*std::min_element(m_min_flush_volume.begin(), m_min_flush_volume.end()), m_max_flush_volume);
+        // Orca #11778: the "typical" guidance is unlinked from the (relaxed) upper clamp.
+        wxString min_flush_str = wxString::Format(_L("Suggestion: Flushing Volume in range [%d, %d]"),*std::min_element(m_min_flush_volume.begin(), m_min_flush_volume.end()), Slic3r::g_typical_max_flush_volume);
         m_min_flush_label = new wxStaticText(m_page_advanced, wxID_ANY, min_flush_str, wxDefaultPosition, wxDefaultSize, 0);
         m_min_flush_label->SetForegroundColour(g_text_color);
         m_sizer_advanced->Add(m_min_flush_label, 0, wxEXPAND | wxLEFT, TEXT_BEG_PADDING);

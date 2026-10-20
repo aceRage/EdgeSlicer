@@ -82,6 +82,7 @@
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
 #include "NetworkTestDialog.hpp"
+#include "U1LanRoute.hpp" // the read-only U1 Moonraker probe
 #include "FirewallCheckDialog.hpp"
 #include "BambuSetupNoticeDialog.hpp"
 #include "ConfigWizard.hpp"
@@ -971,10 +972,13 @@ void MainFrame::update_layout()
             }
         };
 
-        // On Linux m_plater needs to be removed from m_tabpanel before to reparent it
+        // On Linux m_plater needs to be removed from m_tabpanel before to reparent it. It is the
+        // page of Prepare, Preview and Showcase, so remove every one of them.
         int plater_page_id = m_tabpanel->FindPage(m_plater);
-        if (plater_page_id != wxNOT_FOUND)
+        while (plater_page_id != wxNOT_FOUND) {
             m_tabpanel->RemovePage(plater_page_id);
+            plater_page_id = m_tabpanel->FindPage(m_plater);
+        }
 
         if (m_plater->GetParent() != this)
             m_plater->Reparent(this);
@@ -1030,6 +1034,8 @@ void MainFrame::update_layout()
         m_plater->Reparent(m_tabpanel);
         m_tabpanel->InsertPage(tp3DEditor, m_plater, _L("Prepare"), std::string("tab_3d_active"), std::string("tab_3d_active"), false);
         m_tabpanel->InsertPage(tpPreview, m_plater, _L("Preview"), std::string("tab_preview_active"), std::string("tab_preview_active"), false);
+        // Showcase (D1): presentation renders, the plater's third page.
+        m_tabpanel->InsertPage(tpShowcase, m_plater, _L("Showcase"), std::string("tab_showcase_active"), std::string("tab_showcase_active"), false);
         m_main_sizer->Add(m_tabpanel, 1, wxEXPAND | wxTOP, 0);
 
         m_tabpanel->Bind(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, [this](wxCommandEvent& evt)
@@ -1119,6 +1125,10 @@ void MainFrame::shutdown(bool isRecreate)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "MainFrame::shutdown enter";
     m_shutting_down = true;
+    // EDGESLICER-A: this frame's Plater stops updating the background process and the slice/print
+    // buttons now; its timer could otherwise fire while the window tree is destroyed.
+    if (m_plater != nullptr)
+        m_plater->begin_shutdown();
     // First of all: no phone/agent request, send or control job may queue work for the GUI thread
     // any more, and what is already queued is dropped. The Plater is torn down below and freed
     // with this frame, and a request that ran after that crashed (c2a7d4de, 2026-09-22). A quit
@@ -1389,9 +1399,13 @@ void MainFrame::init_tabpanel() {
                 m_param_panel->OnActivate();
             }
             else if (sel == tpPreview) {
-                if (!m_plater || m_plater->is_view3D_shown())
+                if (!m_plater || m_plater->is_view3D_shown() || m_plater->is_showcase_shown())
                     wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_PREVIEW));
                 m_param_panel->OnActivate();
+            }
+            else if (sel == tpShowcase) {
+                if (m_plater && !m_plater->is_showcase_shown())
+                    wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_SHOWCASE));
             }
         }
         //else if (panel == m_param_panel)
@@ -1577,6 +1591,16 @@ void MainFrame::init_tabpanel() {
     }
 }
 
+// Where the Device page goes: tpMonitor once update_layout() has inserted the plater's three pages
+// (Prepare, Preview, Showcase), right after Home before that - the inserts then move it to tpMonitor.
+int MainFrame::device_page_position() const
+{
+    const int count = int(m_tabpanel->GetPageCount());
+    if (m_plater != nullptr && m_tabpanel->FindPage(m_plater) != wxNOT_FOUND)
+        return std::min<int>(tpMonitor, count);
+    return std::min(1, count);
+}
+
 // SoftFever
 void MainFrame::show_device(bool bBBLPrinter) {
     auto idx = -1;
@@ -1600,7 +1624,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
         if (!m_monitor_holder)
             m_monitor_holder = make_monitor_holder();
         m_monitor_holder->Show(false);
-        m_tabpanel->InsertPage(tpMonitor, m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
+        m_tabpanel->InsertPage(device_page_position(), m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
 
         if (!m_calibration_holder)
             m_calibration_holder = make_calibration_holder();
@@ -1635,7 +1659,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
             });
         }
         m_printer_view->Show(false);
-        m_tabpanel->InsertPage(tpMonitor, m_printer_view, _L("Device"), std::string("tab_monitor_active"),
+        m_tabpanel->InsertPage(device_page_position(), m_printer_view, _L("Device"), std::string("tab_monitor_active"),
                                std::string("tab_monitor_active"));
     }
 }
@@ -1661,7 +1685,7 @@ void MainFrame::show_flashforge_device()
     if (m_ff_device == nullptr)
         m_ff_device = new FFDeviceTab(m_tabpanel);
     m_ff_device->Show(false);
-    m_tabpanel->InsertPage(tpMonitor, m_ff_device, _L("Device"), std::string("tab_monitor_active"),
+    m_tabpanel->InsertPage(device_page_position(), m_ff_device, _L("Device"), std::string("tab_monitor_active"),
                            std::string("tab_monitor_active"));
     static_cast<FFDeviceTab*>(m_ff_device)->OnActivate();
 #ifdef _MSW_DARK_MODE
@@ -1927,6 +1951,14 @@ bool MainFrame::can_export_all_gcode() const
     return part_plate_list.is_all_slice_results_ready_for_print();
 }
 
+bool MainFrame::can_send_to_bambu_connect(bool all_plates) const
+{
+    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
+    if (preset_bundle == nullptr || !preset_bundle->is_bbl_vendor())
+        return false;
+    return all_plates ? can_export_all_gcode() : can_export_gcode();
+}
+
 bool MainFrame::can_print_3mf() const
 {
     if (m_plater && !m_plater->model().objects.empty()) {
@@ -2029,6 +2061,7 @@ static_assert(static_cast<int>(MainFrame::eSendToPrinterAll) == PrintSelectKeys:
 static_assert(static_cast<int>(MainFrame::eUploadGcode) == PrintSelectKeys::eUploadGcode);
 static_assert(static_cast<int>(MainFrame::eExportAllSlicedFile) == PrintSelectKeys::eExportAllSlicedFile);
 static_assert(static_cast<int>(MainFrame::ePrintMultiMachine) == PrintSelectKeys::ePrintMultiMachine);
+static_assert(static_cast<int>(MainFrame::eSendToBambuConnect) == PrintSelectKeys::eSendToBambuConnect);
 
 const char *print_select_type_key(MainFrame::PrintSelectType type)
 {
@@ -2049,6 +2082,7 @@ wxString print_select_type_label(MainFrame::PrintSelectType type)
     case MainFrame::eSendToPrinter:       return _L("Send");
     case MainFrame::eSendToPrinterAll:    return _L("Send all");
     case MainFrame::ePrintMultiMachine:   return _L("Send to Multi-device");
+    case MainFrame::eSendToBambuConnect:  return _L("Send to Bambu Connect");
     case MainFrame::eUploadGcode:         break; // no dropdown entry
     }
     return _L("Print plate");
@@ -2084,6 +2118,9 @@ std::vector<MainFrame::PrintSelectType> MainFrame::available_print_actions() con
     actions.push_back(eExportSlicedFile);
     actions.push_back(eExportAllSlicedFile);
     actions.push_back(eExportGcode);
+    // Hand the sliced file to the user's own Bambu Connect app (bambu-connect:// URL scheme), which
+    // prints via their Bambu account or LAN. Bambu printers only (Utils/BambuConnect.hpp).
+    actions.push_back(eSendToBambuConnect);
     return actions;
 }
 
@@ -2236,6 +2273,11 @@ wxBoxSizer* MainFrame::create_side_tools()
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_PRINTER));
             else if (m_print_select == eSendToPrinterAll)
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_PRINTER_ALL));
+            else if (m_print_select == eSendToBambuConnect) {
+                // In the all-plates view the whole project goes (Connect lets the user pick a plate).
+                const bool all_plates = wxGetApp().plater()->get_preview_canvas3D()->is_all_plates_selected();
+                wxPostEvent(m_plater, SimpleEvent(all_plates ? EVT_GLTOOLBAR_SEND_ALL_TO_BAMBU_CONNECT : EVT_GLTOOLBAR_SEND_TO_BAMBU_CONNECT));
+            }
             /* else if (m_print_select == ePrintMultiMachine)
                  wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_MULTI_MACHINE));*/
         });
@@ -2467,6 +2509,15 @@ bool MainFrame::get_enable_print_status()
         }
         enable = enable && !is_all_plates;
     }
+    else if (m_print_select == eSendToBambuConnect)
+    {
+        // Same readiness as the sliced-file exports it reuses: the current plate, or every plate
+        // in the all-plates view.
+        if (is_all_plates)
+            enable = part_plate_list.is_all_slice_result_ready_for_export();
+        else
+            enable = current_plate->is_slice_result_ready_for_export();
+    }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": m_print_select %1%, enable= %2% ")%m_print_select %enable;
 
@@ -2575,12 +2626,16 @@ void MainFrame::update_slice_print_status_impl(SlicePrintEventType event, bool c
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" m_slice_select %1%: can_slice= %2%, can_print %3%, enable_slice %4%, enable_print %5% ")%m_slice_select % can_slice %can_print %enable_slice %enable_print;
-    m_print_btn->Enable(enable_print);
-    m_slice_btn->Enable(enable_slice);
+    // Enable() re-renders the buttons' bitmaps (the EDGESLICER-A crash site); the buttons do not
+    // exist yet early in the constructor and are gone once the frame is being destroyed.
+    if (m_print_btn != nullptr && !m_print_btn->IsBeingDeleted())
+        m_print_btn->Enable(enable_print);
+    if (m_slice_btn != nullptr && !m_slice_btn->IsBeingDeleted())
+        m_slice_btn->Enable(enable_slice);
     m_slice_enable = enable_slice;
     m_print_enable = enable_print;
 
-    if (wxGetApp().mainframe)
+    if (wxGetApp().mainframe && wxGetApp().plater())
         wxGetApp().plater()->update_title_dirty_status();
 }
 
@@ -2621,6 +2676,8 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
         m_project->msw_rescale();
     if(m_monitor)
         m_monitor->msw_rescale();
+    if (m_printer_view)
+        m_printer_view->msw_rescale();
     if(m_multi_machine)
         m_multi_machine->msw_rescale();
     if(m_calibration)
@@ -2694,6 +2751,8 @@ void MainFrame::on_sys_color_changed()
     wxGetApp().plater()->sys_color_changed();
     if(m_monitor)
         m_monitor->on_sys_color_changed();
+    if (m_printer_view)
+        m_printer_view->sys_color_changed(); // its Storage tab
     if(m_calibration)
         m_calibration->on_sys_color_changed();
     // update Tabs
@@ -2785,6 +2844,13 @@ static wxMenu* generate_help_menu()
     append_menu_item(helpMenu, wxID_ANY, _L("Import Profile"), _L("Import Profile"), [](wxCommandEvent&) {
         wxGetApp().import_presets();
     });
+
+    // Owner diagnostic (tests/design_u1_local_first.md, Plan B): does a cloud-bound U1's Moonraker
+    // answer on the LAN? Read-only; only with EDGESLICER_U1_PROBE=1 in the environment.
+    if (u1_moonraker_probe_enabled())
+        append_menu_item(helpMenu, wxID_ANY, _L("Diagnostic: U1 local Moonraker probe (read-only)..."),
+                         _L("Ask a U1 on the LAN for its status over HTTP and its WebSocket, read-only"),
+                         [](wxCommandEvent&) { run_u1_moonraker_probe_dialog(wxGetApp().mainframe); });
 
     append_menu_item(helpMenu, wxID_ANY, _L("Open Network Test"), _L("Open Network Test"), [](wxCommandEvent&) {
         // Plain modal dialog: its test threads never touch the dialog itself (they keep only
@@ -3134,9 +3200,27 @@ void MainFrame::init_menubar_as_editor()
             [this](wxCommandEvent&) { if (m_plater) wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_ALL_SLICED_FILE)); }, "menu_export_sliced_file", nullptr,
             [this]() {return can_export_all_gcode(); }, this);
 
-        append_menu_item(export_menu, wxID_ANY, _L("Export G-code") + dots/* + "\t" + ctrl + "G"*/, _L("Export current plate as G-code"),
+        // Bambu printers: hand the sliced file to the user's own Bambu Connect app. Hidden for other
+        // vendors: show_bambu_connect_menu_items() detaches them on a printer switch (wx menu items
+        // cannot be hidden), like the print-button dropdown entry.
+        m_export_menu = export_menu;
+        m_bambu_connect_items.clear();
+        m_bambu_connect_items.push_back(append_menu_item(export_menu, wxID_ANY, _L("Send plate to Bambu Connect"),
+            _L("Export the current plate's sliced file and open it in Bambu Connect, which prints it with your Bambu account or over LAN"),
+            [this](wxCommandEvent&) { if (m_plater) wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_BAMBU_CONNECT)); }, "menu_export_sliced_file", nullptr,
+            [this]() { return can_send_to_bambu_connect(false); }, this));
+        m_bambu_connect_items.push_back(append_menu_item(export_menu, wxID_ANY, _L("Send all plates to Bambu Connect"),
+            _L("Export the sliced file of all plates and open it in Bambu Connect, where you pick the plate to print"),
+            [this](wxCommandEvent&) { if (m_plater) wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_ALL_TO_BAMBU_CONNECT)); }, "menu_export_sliced_file", nullptr,
+            [this]() { return can_send_to_bambu_connect(true); }, this));
+        m_bambu_connect_items_shown = true;
+
+        wxMenuItem *export_gcode_item = append_menu_item(export_menu, wxID_ANY, _L("Export G-code") + dots/* + "\t" + ctrl + "G"*/, _L("Export current plate as G-code"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_gcode(false); }, "menu_export_gcode", nullptr,
             [this]() {return can_export_gcode(); }, this);
+        m_bambu_connect_anchor_id = export_gcode_item ? export_gcode_item->GetId() : wxID_NONE;
+        // Sidebar::update_all_preset_comboboxes() re-applies this on every printer switch.
+        show_bambu_connect_menu_items(wxGetApp().preset_bundle != nullptr && wxGetApp().preset_bundle->is_bbl_vendor());
         append_menu_item(
             export_menu, wxID_ANY, _L("Export Preset Bundle") + dots /* + "\t" + ctrl + "E"*/, _L("Export current configuration to files"),
             [this](wxCommandEvent &) { export_config(); },
@@ -3443,6 +3527,37 @@ void MainFrame::init_menubar_as_editor()
                 m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
             },
             this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_view3D_overhang_shown(); }, this);
+
+        // Orca #15770: global X-Ray view of the Prepare scene. Orca puts the toggle in its canvas menu,
+        // which EdgeSlicer does not have; the per-object Ghost mode stays in the object list.
+        append_menu_check_item(viewMenu, wxID_ANY, _L("X-Ray"), _L("Show every object as a translucent, edge-weighted surface to see inside and behind parts."),
+            [this](wxCommandEvent &) {
+                m_plater->toggle_show_xray();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_show_xray(); }, this);
+
+        // Orca #13704: realistic view (Orca: its canvas menu). The details are in Preferences > Graphics.
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Realistic View"),
+            _L("Render objects with Phong shading, and optionally ambient occlusion and cast shadows (Preferences > Graphics)."),
+            [this](wxCommandEvent &) {
+                AppConfig* cfg = wxGetApp().app_config;
+                cfg->set_bool(SETTING_OPENGL_REALISTIC_MODE, !cfg->get_bool(SETTING_OPENGL_REALISTIC_MODE));
+                m_plater->set_current_canvas_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown() || m_plater->is_preview_shown(); },
+            []() { return wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_MODE); }, this);
+
+        // Orca #16291: center of mass markers, in Prepare and Preview (Orca: its canvas menu).
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Show Center of Mass"),
+            _L("Show the center of mass of each plate, object, separate part and support in Prepare and Preview. Click a marker for its weight, volume and moment of inertia."),
+            [this](wxCommandEvent &) {
+                wxGetApp().toggle_show_center_of_mass();
+                m_plater->set_current_canvas_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown() || m_plater->is_preview_shown(); }, []() { return wxGetApp().show_center_of_mass(); }, this);
 
         /*viewMenu->AppendSeparator();
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show &Wireframe") + "\t" + ctrl + shift + _L("Enter"), _L("Show wireframes in 3D scene."),
@@ -3906,6 +4021,25 @@ void MainFrame::init_menubar_as_gcodeviewer()
 #endif
 }
 
+void MainFrame::show_bambu_connect_menu_items(bool show)
+{
+    if (m_export_menu == nullptr || m_bambu_connect_items.empty() || show == m_bambu_connect_items_shown)
+        return;
+    if (show) {
+        // Back in front of "Export G-code", where init_menubar_as_editor() put them.
+        size_t pos = m_export_menu->GetMenuItemCount();
+        if (m_bambu_connect_anchor_id != wxID_NONE)
+            m_export_menu->FindChildItem(m_bambu_connect_anchor_id, &pos);
+        for (wxMenuItem *item : m_bambu_connect_items)
+            m_export_menu->Insert(pos++, item);
+    } else {
+        // Remove() detaches without deleting; the items are kept for a later switch back to a Bambu printer.
+        for (wxMenuItem *item : m_bambu_connect_items)
+            m_export_menu->Remove(item);
+    }
+    m_bambu_connect_items_shown = show;
+}
+
 void MainFrame::update_menubar()
 {
     if (wxGetApp().is_gcode_viewer())
@@ -4065,6 +4199,9 @@ bool MainFrame::load_config_file(const std::string &path)
         return false;
     }
     wxGetApp().load_current_presets();
+    // Orca #15916: the loaded printer may not take the plates' bed types.
+    if (Plater *plater = wxGetApp().plater())
+        plater->normalize_bed_types(false);
     return true;
 }
 
@@ -4184,7 +4321,8 @@ void MainFrame::select_tab(wxPanel* panel)
         return;
     }
     int page_idx = m_tabpanel->FindPage(panel);
-    if (page_idx == tp3DEditor && m_tabpanel->GetSelection() == tpPreview)
+    // FindPage() gives the plater's first page (Prepare); Preview and Showcase show it too.
+    if (page_idx == tp3DEditor && (m_tabpanel->GetSelection() == tpPreview || m_tabpanel->GetSelection() == tpShowcase))
         return;
     //BBS GUI refactor: remove unused layout new/dlg
     /*if (page_idx != wxNOT_FOUND && m_layout == ESettingsLayout::Dlg)
@@ -4417,6 +4555,7 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
     case eExportSlicedFile:
     case eExportAllSlicedFile:
     case ePrintMultiMachine:
+    case eSendToBambuConnect:
         apply_print_select_state(select_type);
         // Only the print-host flow (eSendGcode) needs a host. Export actions, eExportGcode
         // included, never depend on one: with "remember last print action" on, a restored

@@ -6,18 +6,25 @@
 #include "../wxExtensions.hpp"
 #include "StateHandler.hpp"
 #include "PopupWindow.hpp"
+#include <utility>
 
 #define DD_NO_CHECK_ICON    0x0001
 #define DD_NO_TEXT          0x0002
 #define DD_STYLE_MASK       0x0003
 
 wxDECLARE_EVENT(EVT_DISMISS, wxCommandEvent);
+// A click on an item's action icon (the column at the right of the rows, e.g. a favourite star).
+// GetInt() is the item's index. The list stays open and the item is not selected.
+wxDECLARE_EVENT(EVT_DROPDOWN_ITEM_ACTION, wxCommandEvent);
 
 class DropDown : public PopupWindow
 {
     std::vector<wxString> &       texts;
     std::vector<wxString> &       tips;
     std::vector<wxBitmap> &     icons;
+    // Optional, owned by the ComboBox: per-item action icons and disabled (header) flags.
+    const std::vector<wxBitmap> *action_icons = nullptr;
+    const std::vector<char> *     disabled     = nullptr;
     bool                          need_sync  = false;
     int                         selection = -1;
     int                         hover_item = -1;
@@ -30,6 +37,7 @@ class DropDown : public PopupWindow
 
     wxSize textSize;
     wxSize iconSize;
+    int    actionIconWidth = 0;
     wxSize rowSize{100, 30};  // Initialize with default values
 
     StateHandler state_handler;
@@ -82,6 +90,13 @@ public:
     void SetUseContentWidth(bool use, bool limit_max_content_width = false);
 
     void SetAlignIcon(bool align);
+
+    void SetItemExtras(const std::vector<wxBitmap> *action_icons, const std::vector<char> *disabled)
+    {
+        this->action_icons = action_icons;
+        this->disabled     = disabled;
+    }
+    bool IsItemDisabled(int n) const { return disabled && n >= 0 && n < int(disabled->size()) && (*disabled)[n]; }
     
 public:
     void Rescale();
@@ -97,6 +112,8 @@ private:
     void paintNow();
 
     void render(wxDC& dc);
+    const wxBitmap *actionIcon(int n) const;
+    std::pair<int, int> actionColumn() const;
 
     friend class ComboBox;
     void messureSize();
@@ -111,6 +128,7 @@ private:
     void mouseWheelMoved(wxMouseEvent &event);
 
     void sendDropDownEvent();
+    void sendDropDownActionEvent(int index);
 
 
     DECLARE_EVENT_TABLE()

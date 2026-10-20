@@ -992,7 +992,7 @@ bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_fi
             if (!XML_Parse(data->parser, (const char*)pBuf, (int)n, (file_ofs + n == data->stat.m_uncomp_size) ? 1 : 0) || data->ctx.error())
             {
                 char error_buf[1024];
-                ::sprintf(error_buf, "Parsing file %s error at line %d: {%s}", data->stat.m_filename, (int) XML_GetCurrentLineNumber(data->parser), data->ctx.error_message());
+                ::snprintf(error_buf, sizeof(error_buf), "Parsing file %s error at line %d: {%s}", data->stat.m_filename, (int) XML_GetCurrentLineNumber(data->parser), data->ctx.error_message());
                 throw Slic3r::FileIOError(error_buf);
             }
 

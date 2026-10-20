@@ -564,12 +564,21 @@ void CalibrationPanel::update_all() {
     }
 
     if (wxGetApp().is_user_login()) {
-        dev->check_pushing();
+        // Orca #13802: one throwing step must not skip the other, or the rest of the refresh.
         try {
-            m_agent->refresh_connection();
+            dev->check_pushing();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "CalibrationPanel::update_all check_pushing exception=" << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "CalibrationPanel::update_all check_pushing unknown exception";
         }
-        catch (...) {
-            ;
+        try {
+            if (m_agent)
+                m_agent->refresh_connection();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "CalibrationPanel::update_all refresh_connection exception=" << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "CalibrationPanel::update_all refresh_connection unknown exception";
         }
     }
 
