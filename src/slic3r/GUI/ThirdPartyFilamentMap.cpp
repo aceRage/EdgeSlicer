@@ -135,11 +135,25 @@ ThirdPartyMapMismatch mismatch_for(const ThirdPartySlicerFilament& filament, con
     return ThirdPartyMapMismatch::None;
 }
 
+int warning_slot_position(const ThirdPartyFilamentMapModel& model, size_t filament_row)
+{
+    if (filament_row >= model.filaments.size())
+        return -1;
+    if (model.read_only) {
+        const int t = model.filaments[filament_row].index;
+        for (size_t i = 0; i < model.slots.size(); ++i)
+            if (model.slots[i].index == t)
+                return (int) i;
+        return -1;
+    }
+    if (filament_row >= model.mapping.size())
+        return -1;
+    return model.mapping[filament_row];
+}
+
 ThirdPartyMapMismatch mismatch_at(const ThirdPartyFilamentMapModel& model, size_t filament_row)
 {
-    if (filament_row >= model.filaments.size() || filament_row >= model.mapping.size())
-        return ThirdPartyMapMismatch::None;
-    const int pos = model.mapping[filament_row];
+    const int pos = warning_slot_position(model, filament_row);
     if (pos < 0 || pos >= (int) model.slots.size())
         return ThirdPartyMapMismatch::None;
     return mismatch_for(model.filaments[filament_row], model.slots[pos]);

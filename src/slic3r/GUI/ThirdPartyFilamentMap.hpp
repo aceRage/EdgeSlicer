@@ -80,6 +80,10 @@ double map_colour_distance(const std::string& a, const std::string& b);
 bool colours_mismatch(const std::string& a, const std::string& b);
 
 ThirdPartyMapMismatch mismatch_for(const ThirdPartySlicerFilament& filament, const ThirdPartyDeviceSlot& slot);
+// Slot compared for a warning that describes what will actually print. Interactive: mapping[row].
+// Read-only: the slot whose protocol index equals the filament T-number (identity); mapping[] may
+// still hold a visual auto-match and is not sent.
+int                   warning_slot_position(const ThirdPartyFilamentMapModel& model, size_t filament_row);
 ThirdPartyMapMismatch mismatch_at(const ThirdPartyFilamentMapModel& model, size_t filament_row);
 
 // Distinct nozzle ids on filaments or slots; more than one means a multi-nozzle / multi-toolhead printer.

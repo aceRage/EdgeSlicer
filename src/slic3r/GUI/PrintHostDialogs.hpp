@@ -121,7 +121,10 @@ protected:
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
     virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
     // One or more lines under the mapping table, refreshed whenever a choice changes; "" = none.
-    // Named so vendor PRs (#622) can add their own mapping_warning() without colliding.
+    // Vendor PRs (#616/#619/#620/#622) override this; keep the name and signature.
+    virtual wxString mapping_warning() const;
+    // Panel type/colour mismatch (identity slots when read-only). Combined with mapping_warning()
+    // in update_mapping_note(); vendor overrides of mapping_warning() still compile after rebase.
     virtual wxString third_party_mismatch_warning() const;
     void on_dpi_changed(const wxRect &suggested_rect) override;
     void on_sys_color_changed() override;
@@ -281,7 +284,7 @@ public:
 protected:
     bool     use_third_party_map_panel() const override { return true; }
     int      preselect_slot(const SendPlateFilament& f) const override;
-    wxString third_party_mismatch_warning() const override;
+    wxString mapping_warning() const override;
 
 private:
     // The plate's used filaments in the shape the CANVAS mapping code takes.

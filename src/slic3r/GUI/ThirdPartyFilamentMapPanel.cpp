@@ -339,7 +339,7 @@ wxString ThirdPartyFilamentMapPanel::mismatch_warning() const
         const int n = m_model.filaments[i].index + 1;
         if (kind == ThirdPartyMapMismatch::Type || kind == ThirdPartyMapMismatch::TypeAndColour) {
             std::string slot_type;
-            const int pos = i < m_model.mapping.size() ? m_model.mapping[i] : -1;
+            const int pos = warning_slot_position(m_model, i);
             if (pos >= 0 && pos < (int) m_model.slots.size())
                 slot_type = m_model.slots[pos].type;
             add(format_wxstr(_L("Filament %1%: its type (%2%) does not match the mapped slot (%3%)."), n,
@@ -414,7 +414,7 @@ void ThirdPartyFilamentMapPanel::apply_slot_to_item(size_t row)
     const wxColour col = slot.empty ? unknown_slot_colour() : colour_of(slot.colour);
     item->set_ams_info(col, from_utf8(slot_display_label(slot)));
     item->on_normal();
-    if (mismatch_at(m_model, row) != ThirdPartyMapMismatch::None)
+    if (mismatch_for(m_model.filaments[row], slot) != ThirdPartyMapMismatch::None)
         item->on_warning();
 }
 

@@ -47,12 +47,15 @@ public:
     bool mapping_enabled() const { return m_mapping_enabled; }
 
     // Positions in model.slots, -1 = "As sliced". Same shape as PrintHostSendDialog::mapping_choice_positions().
-    // Still filled in read-only (the visual auto-match); filament_mapping() is empty then.
+    // In read-only this is the visual auto-match only. The map that is sent is filament_mapping()
+    // (empty); mismatch_warning() compares each filament with its T-number slot (identity).
     std::vector<int> choice_positions() const { return m_model.mapping; }
     // "0:1,1:2" — filament index to Slot::index. Empty when read_only or every row is "As sliced".
+    // Read-only consumers must take the sent map from here, not from choice_positions().
     std::string filament_mapping() const;
 
     // Type / colour mismatch sentences for the dialog's mapping note; "" = none. Translated.
+    // Read-only: identity (T-number slot), not the visual auto-match in choice_positions().
     wxString mismatch_warning() const;
 
     void msw_rescale();

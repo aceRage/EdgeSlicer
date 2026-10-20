@@ -402,6 +402,37 @@ TEST_CASE("Third-party filament map: encode matches the send dialog's filament:s
     CHECK(encode_filament_mapping(model) == "0:5,2:7");
 }
 
+TEST_CASE("Third-party filament map: read-only mismatch uses T-number identity, not auto-match", "[ThirdPartyFilamentMap]")
+{
+    using namespace Slic3r::GUI;
+    ThirdPartyFilamentMapModel model;
+    ThirdPartySlicerFilament f;
+    f.index  = 0;
+    f.type   = "PLA";
+    f.colour = "#FF0000";
+    model.filaments = { f };
+
+    ThirdPartyDeviceSlot t0;
+    t0.index  = 0;
+    t0.type   = "PETG";
+    t0.colour = "#0000FF";
+    ThirdPartyDeviceSlot t1;
+    t1.index  = 1;
+    t1.type   = "PLA";
+    t1.colour = "#FF0000";
+    model.slots   = { t0, t1 };
+    model.mapping = { 1 }; // visual auto-match to the matching holder
+
+    CHECK(mismatch_at(model, 0) == ThirdPartyMapMismatch::None);
+    CHECK(warning_slot_position(model, 0) == 1);
+
+    model.read_only = true;
+    CHECK(encode_filament_mapping(model).empty());
+    CHECK(warning_slot_position(model, 0) == 0);
+    CHECK(mismatch_at(model, 0) == ThirdPartyMapMismatch::TypeAndColour);
+    CHECK(model.mapping == std::vector<int>{ 1 });
+}
+
 TEST_CASE("Third-party filament map: type and colour mismatch, badges, colour parse", "[ThirdPartyFilamentMap]")
 {
     using namespace Slic3r::GUI;
