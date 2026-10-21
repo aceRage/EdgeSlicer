@@ -1819,13 +1819,13 @@ void GUI_App::shutdown(bool isRecreate)
 
     if (web_device_dialog != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": web device dialog");
-        web_device_dialog->Destroy();
+        delete web_device_dialog;
         web_device_dialog = nullptr;
     }
 
     if (web_preprint_dialog != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": web preprint dialog");
-        web_preprint_dialog->Destroy();
+        delete web_preprint_dialog;
         web_preprint_dialog = nullptr;
     }
 
