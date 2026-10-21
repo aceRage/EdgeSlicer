@@ -644,9 +644,12 @@ bool PrintObject::need_z_contouring() const
         return false;
     }
 
-    // Contouring needs a single instance to raycast against; see contour_z().
-    if (m_model_object == nullptr || m_model_object->instances.size() != 1) {
-        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, unexpected number of instances";
+    // A PrintObject groups the instances that share their whole transformation but the XY
+    // shift: an instance rotated, scaled or mirrored differently is a PrintObject of its own.
+    // The first instance therefore stands for all of them (Orca #16461). Skip only when there
+    // is no instance to raycast against.
+    if (m_instances.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, no instances";
         return false;
     }
 
@@ -668,7 +671,8 @@ void PrintObject::contour_z()
 
     TriangleMesh mesh = this->m_model_object->raw_mesh();
 
-    ModelInstance           *inst          = m_model_object->instances.front();
+    // The first instance stands for all copies that share this PrintObject's transformation.
+    const ModelInstance     *inst          = m_instances.front().model_instance;
     Point                    center_offset = this->center_offset();
     Geometry::Transformation trans         = inst->get_transformation();
 
