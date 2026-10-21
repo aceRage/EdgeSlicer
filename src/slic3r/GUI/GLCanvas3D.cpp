@@ -6172,6 +6172,12 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 
     Point pos(evt.GetX(), evt.GetY());
 
+    // Showcase (S3): dragging, editing or picking a filament callout takes the event before the camera.
+    if (m_canvas_type == ECanvasType::CanvasShowcase && m_showcase_renderer != nullptr && m_showcase_renderer->on_mouse(evt)) {
+        m_mouse.position = evt.Leaving() ? Vec2d(-1.0, -1.0) : pos.cast<double>();
+        return;
+    }
+
     ImGuiWrapper* imgui = wxGetApp().imgui();
     if (m_tooltip.is_in_imgui() && evt.LeftUp())
         // ignore left up events coming from imgui windows and not processed by them

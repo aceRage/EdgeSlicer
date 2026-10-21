@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstring>
 #include <sstream>
 
 namespace Slic3r {
@@ -49,6 +50,21 @@ static constexpr int SHOWCASE_REFLECTION_UNIT = 1;
 static constexpr int SHOWCASE_CONTACT_UNIT    = 2;
 // The contact shadow's footprint texture.
 static constexpr int SHOWCASE_CONTACT_SIZE    = 512;
+
+// A multi-material painted volume as one model per painted state (state s = filament s, 0 = the
+// volume's own), rebuilt when the painting changed.
+static void showcase_ensure_painted_parts(GLVolume &v, const ModelVolume &mv)
+{
+    if (mv.mmu_segmentation_facets.timestamp() == v.mmuseg_ts)
+        return;
+    v.mmuseg_models.clear();
+    std::vector<indexed_triangle_set> its_per_color;
+    mv.mmu_segmentation_facets.get_facets(mv, its_per_color);
+    v.mmuseg_models.resize(its_per_color.size());
+    for (size_t i = 0; i < its_per_color.size(); ++i)
+        v.mmuseg_models[i].init_from(its_per_color[i]);
+    v.mmuseg_ts = mv.mmu_segmentation_facets.timestamp();
+}
 
 static ColorRGBA showcase_color(const std::string &hex, const ColorRGBA &fallback)
 {
@@ -69,7 +85,8 @@ ShowcaseRenderer::~ShowcaseRenderer()
     // The GL objects go with the context when the canvas is destroyed during shutdown; release
     // them here only while the canvas can still be made current.
     const bool has_gl = m_bg_texture != 0 || m_wm_texture != 0 || (m_floor_model != nullptr && m_floor_model->is_initialized()) ||
-                        m_env_texture != 0 || m_floor_texture != 0 || m_contact_fbo != 0 || m_refl_fbo != 0 || !m_layers.empty();
+                        m_env_texture != 0 || m_floor_texture != 0 || m_contact_fbo != 0 || m_refl_fbo != 0 || !m_layers.empty() ||
+                        m_callout_texture != 0;
     if (has_gl && m_canvas.get_wxglcanvas() != nullptr && m_canvas._set_current())
         release_gl();
     delete m_floor_model;
@@ -85,6 +102,11 @@ void ShowcaseRenderer::release_gl()
         glsafe(::glDeleteTextures(1, &m_wm_texture));
         m_wm_texture = 0;
     }
+    if (m_callout_texture != 0) {
+        glsafe(::glDeleteTextures(1, &m_callout_texture));
+        m_callout_texture = 0;
+    }
+    m_callout_key = 0;
     if (m_floor_model != nullptr)
         m_floor_model->reset();
     m_bg_image_key.clear();
@@ -854,15 +876,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored)
         };
         if (mv != nullptr && v->printable && !mv->mmu_segmentation_facets.empty()) {
             // Multi-material painting: one part per filament, as GLVolume::simple_render keeps them.
-            if (mv->mmu_segmentation_facets.timestamp() != v->mmuseg_ts) {
-                v->mmuseg_models.clear();
-                std::vector<indexed_triangle_set> its_per_color;
-                mv->mmu_segmentation_facets.get_facets(*mv, its_per_color);
-                v->mmuseg_models.resize(its_per_color.size());
-                for (size_t i = 0; i < its_per_color.size(); ++i)
-                    v->mmuseg_models[i].init_from(its_per_color[i]);
-                v->mmuseg_ts = mv->mmu_segmentation_facets.timestamp();
-            }
+            showcase_ensure_painted_parts(*v, *mv);
             for (size_t i = 0; i < v->mmuseg_models.size(); ++i) {
                 if (!v->mmuseg_models[i].is_initialized())
                     continue;
@@ -1256,6 +1270,47 @@ void ShowcaseRenderer::ensure_watermark_texture(int frame_w, int frame_h)
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
 }
 
+// S3: the callouts' picture for this frame size and camera, uploaded when anything in it changed.
+void ShowcaseRenderer::ensure_callout_texture(int frame_w, int frame_h)
+{
+    if (!m_callout_provider || frame_w <= 0 || frame_h <= 0) {
+        m_callout_shown = false;
+        return;
+    }
+    // The camera moves the anchors: it is part of what the picture shows.
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    uint64_t      key    = 1469598103934665603ull;
+    auto mix = [&key](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+    mix(m_callout_version ? m_callout_version() : 0);
+    mix(uint64_t(frame_w));
+    mix(uint64_t(frame_h));
+    for (const Matrix4d *m : { &camera.get_view_matrix().matrix(), &camera.get_projection_matrix().matrix() })
+        for (int i = 0; i < 16; ++i) {
+            const double d = m->data()[i];
+            uint64_t     bits;
+            std::memcpy(&bits, &d, sizeof(bits));
+            mix(bits);
+        }
+    if (key == m_callout_key)
+        return;
+    m_callout_key = key;
+    ShowcaseImage image;
+    m_callout_shown = m_callout_provider(frame_w, frame_h, image) && !image.empty();
+    if (!m_callout_shown)
+        return;
+    if (m_callout_texture == 0)
+        glsafe(::glGenTextures(1, &m_callout_texture));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_callout_texture));
+    glsafe(::glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
+    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image.width, image.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data()));
+    // The picture is the frame's size, so it is drawn one to one.
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+}
+
 // The safe frame: everything outside the export's aspect is dimmed, with the export size in the
 // corner, and the watermark preview inside it. ImGui coordinates are the canvas' pixels.
 void ShowcaseRenderer::draw_overlay(int vp_w, int vp_h)
@@ -1279,6 +1334,11 @@ void ShowcaseRenderer::draw_overlay(int vp_w, int vp_h)
     dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(255, 255, 255, 140), 0.f, 0, 1.f);
 
     if (m_scene != nullptr) {
+        // S3: the callouts, under the watermark as in an export.
+        ensure_callout_texture(f.w, f.h);
+        if (m_callout_texture != 0 && m_callout_shown)
+            dl->AddImage((ImTextureID) (intptr_t) m_callout_texture, ImVec2(x0, y0), ImVec2(x1, y1), ImVec2(0.f, 0.f), ImVec2(1.f, 1.f),
+                         IM_COL32(255, 255, 255, 255));
         ensure_watermark_texture(f.w, f.h);
         if (m_wm_texture != 0 && !m_wm_rect.empty() && m_scene->export_settings.watermark.enabled) {
             const float op = std::clamp(m_scene->export_settings.watermark.opacity, 0.f, 1.f);
@@ -1318,6 +1378,9 @@ void ShowcaseRenderer::render_frame()
     update_visibility();
     camera.apply_projection(scene_box());
     camera.UpdateFrustum();
+    // S3: the callouts' GL work (ID passes) for this camera, before the frame itself.
+    if (m_before_frame)
+        m_before_frame();
     wxGetApp().imgui()->new_frame();
 
     DrawTarget t;
@@ -1589,6 +1652,199 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
 
     report = log.str();
     BOOST_LOG_TRIVIAL(info) << report;
+    return true;
+}
+
+// ------------------------------------------------------------------------------------------------
+// S3: the ID pass
+// ------------------------------------------------------------------------------------------------
+
+const ShowcaseIdPass::Entry *ShowcaseIdPass::entry_at(int x, int y) const
+{
+    if (!valid() || x < 0 || y < 0 || x >= width || y >= height)
+        return nullptr;
+    const int id = ids[size_t(y) * size_t(width) + size_t(x)];
+    return id >= 0 && size_t(id) < entries.size() ? &entries[size_t(id)] : nullptr;
+}
+
+bool ShowcaseIdPass::world_at(int x, int y, Vec3d &out) const
+{
+    if (entry_at(x, y) == nullptr)
+        return false;
+    const double d = double(depth[size_t(y) * size_t(width) + size_t(x)]);
+    const Vec4d  ndc(2. * (double(x) + 0.5) / double(width) - 1., 1. - 2. * (double(y) + 0.5) / double(height), 2. * d - 1., 1.);
+    const Vec4d  w = view_projection.inverse() * ndc;
+    if (std::abs(w.w()) < 1e-12)
+        return false;
+    out = Vec3d(w.x(), w.y(), w.z()) / w.w();
+    return true;
+}
+
+bool ShowcaseRenderer::frame_view_projection(Matrix4d &out) const
+{
+    if (m_live_frame.empty() || m_live_vp_w <= 0 || m_live_vp_h <= 0)
+        return false;
+    const Camera   &camera = wxGetApp().plater()->get_camera();
+    const Matrix4d &p      = camera.get_projection_matrix().matrix();
+    const bool      ortho  = camera.get_type() == Camera::EType::Ortho;
+    const double    n = camera.get_near_z(), f = camera.get_far_z();
+    if (p(0, 0) == 0. || p(1, 1) == 0. || f <= n)
+        return false;
+    // The same crop of the live frustum as render_export() makes.
+    const Showcase::RectI &fr = m_live_frame;
+    const double half_w = ortho ? 1.0 / p(0, 0) : n / p(0, 0);
+    const double half_h = ortho ? 1.0 / p(1, 1) : n / p(1, 1);
+    const double l = -half_w + 2. * half_w * double(fr.x) / double(m_live_vp_w);
+    const double r = -half_w + 2. * half_w * double(fr.x + fr.w) / double(m_live_vp_w);
+    const double t = half_h - 2. * half_h * double(fr.y) / double(m_live_vp_h);
+    const double b = half_h - 2. * half_h * double(fr.y + fr.h) / double(m_live_vp_h);
+    const double inv_dx = 1. / (r - l), inv_dy = 1. / (t - b), inv_dz = 1. / (f - n);
+    Matrix4d     crop;
+    if (ortho)
+        crop << 2. * inv_dx, 0., 0., -(l + r) * inv_dx,
+                0., 2. * inv_dy, 0., -(b + t) * inv_dy,
+                0., 0., -2. * inv_dz, -(n + f) * inv_dz,
+                0., 0., 0., 1.;
+    else
+        crop << 2. * n * inv_dx, 0., (l + r) * inv_dx, 0.,
+                0., 2. * n * inv_dy, (b + t) * inv_dy, 0.,
+                0., 0., -(n + f) * inv_dz, -2. * n * f * inv_dz,
+                0., 0., -1., 0.;
+    out = crop * camera.get_view_matrix().matrix();
+    return true;
+}
+
+bool ShowcaseRenderer::render_id_pass(int long_side, ShowcaseIdPass &out)
+{
+    out = ShowcaseIdPass();
+    if (!is_supported() || m_live_frame.empty() || long_side < 8)
+        return false;
+    GLShaderProgram *shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr || !frame_view_projection(out.view_projection))
+        return false;
+    const double aspect = double(m_live_frame.w) / double(std::max(1, m_live_frame.h));
+    const int    w = aspect >= 1. ? long_side : std::max(8, int(std::lround(long_side * aspect)));
+    const int    h = aspect >= 1. ? std::max(8, int(std::lround(long_side / aspect))) : long_side;
+
+    ShowcaseTargetState keep;
+    GLuint fbo = 0, color = 0, depth = 0;
+    glsafe(::glGenFramebuffers(1, &fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fbo));
+    glsafe(::glGenRenderbuffers(1, &color));
+    glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, color));
+    glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h));
+    glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, color));
+    glsafe(::glGenRenderbuffers(1, &depth));
+    glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, depth));
+    glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h));
+    glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth));
+    glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, 0));
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    glsafe(::glDrawBuffers(1, bufs));
+    glsafe(::glReadBuffer(GL_COLOR_ATTACHMENT0));
+    auto release = [&]() {
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+        glsafe(::glDeleteRenderbuffers(1, &color));
+        glsafe(::glDeleteRenderbuffers(1, &depth));
+        glsafe(::glDeleteFramebuffers(1, &fbo));
+    };
+    if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        release();
+        return false;
+    }
+
+    glsafe(::glViewport(0, 0, w, h));
+    glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
+    glsafe(::glClearDepth(1.0));
+    glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDisable(GL_DITHER));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_TRUE));
+
+    update_visibility();
+    const Camera      &camera = wxGetApp().plater()->get_camera();
+    const Transform3d &view   = camera.get_view_matrix();
+    // The cropped projection on its own: view_model_matrix carries the view.
+    const Matrix4d     proj   = out.view_projection * view.matrix().inverse();
+    const ModelObjectPtrs &objects = wxGetApp().model().objects;
+    // Colour = entry index + 1, one byte per channel: exact in RGBA8 with blending and dithering off.
+    auto id_color = [](size_t id) {
+        const uint32_t v = uint32_t(id + 1);
+        return ColorRGBA(float(v & 0xFF) / 255.f, float((v >> 8) & 0xFF) / 255.f, float((v >> 16) & 0xFF) / 255.f, 1.f);
+    };
+    shader->start_using();
+    shader->set_uniform("projection_matrix", proj);
+    for (GLVolume *v : m_canvas.m_volumes.volumes) {
+        if (v == nullptr || !v->is_active || v->is_modifier || v->is_wipe_tower)
+            continue;
+        const int obj = v->object_idx(), vol = v->volume_idx();
+        if (obj < 0 || size_t(obj) >= objects.size() || vol < 0 || size_t(vol) >= objects[size_t(obj)]->volumes.size())
+            continue;
+        const ModelObject *mo = objects[size_t(obj)];
+        const ModelVolume *mv = mo->volumes[size_t(vol)];
+        if (!mv->is_model_part())
+            continue;
+        const ConfigOption *own_opt = mv->config.option("extruder");
+        const int           own     = own_opt != nullptr ? own_opt->getInt() : 0;
+        int                 object_filament = mo->config.has("extruder") ? mo->config.opt_int("extruder") : 0;
+        if (object_filament <= 0)
+            object_filament = 1;
+        ShowcaseIdPass::Entry e;
+        e.object_idx          = obj;
+        e.volume_idx          = vol;
+        e.instance_idx        = v->instance_idx();
+        e.base.filament       = own > 0 ? own : object_filament;
+        e.base.object_default = own <= 0;
+        e.base.source         = own > 0 ? Showcase::CalloutSource::Part : Showcase::CalloutSource::Object;
+        shader->set_uniform("view_model_matrix", view * v->world_matrix());
+        if (v->printable && !mv->mmu_segmentation_facets.empty()) {
+            showcase_ensure_painted_parts(*v, *mv);
+            for (size_t i = 0; i < v->mmuseg_models.size(); ++i) {
+                if (!v->mmuseg_models[i].is_initialized())
+                    continue;
+                ShowcaseIdPass::Entry part = e;
+                if (i > 0)
+                    part.base = Showcase::BaseRegion{ int(i), false, Showcase::CalloutSource::Paint };
+                v->mmuseg_models[i].set_color(id_color(out.entries.size()));
+                out.entries.push_back(part);
+                v->mmuseg_models[i].render();
+            }
+        } else {
+            v->model.set_color(id_color(out.entries.size()));
+            out.entries.push_back(e);
+            v->model.render();
+        }
+    }
+    shader->stop_using();
+
+    std::vector<uint8_t> rgba(size_t(w) * size_t(h) * 4);
+    out.depth.assign(size_t(w) * size_t(h), 1.f);
+    glsafe(::glPixelStorei(GL_PACK_ALIGNMENT, 1));
+    glsafe(::glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data()));
+    glsafe(::glReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, out.depth.data()));
+    glsafe(::glPixelStorei(GL_PACK_ALIGNMENT, 4));
+    release();
+    glsafe(::glEnable(GL_DITHER));
+    glsafe(::glEnable(GL_CULL_FACE));
+    OpenGLManager::report_gl_errors("in a Showcase ID pass");
+
+    // Rows come bottom-up from GL.
+    out.width  = w;
+    out.height = h;
+    out.ids.assign(size_t(w) * size_t(h), -1);
+    std::vector<float> flipped(out.depth.size());
+    for (int y = 0; y < h; ++y) {
+        const int src = h - 1 - y;
+        for (int x = 0; x < w; ++x) {
+            const uint8_t *px = rgba.data() + (size_t(src) * size_t(w) + size_t(x)) * 4;
+            const int      id = int(px[0]) | (int(px[1]) << 8) | (int(px[2]) << 16);
+            out.ids[size_t(y) * size_t(w) + size_t(x)] = id > 0 && size_t(id) <= out.entries.size() ? id - 1 : -1;
+            flipped[size_t(y) * size_t(w) + size_t(x)] = out.depth[size_t(src) * size_t(w) + size_t(x)];
+        }
+    }
+    out.depth.swap(flipped);
     return true;
 }
 
