@@ -148,6 +148,7 @@
 #include "Selection.hpp"
 #include "GLToolbar.hpp"
 #include "GUI_Preview.hpp"
+#include "Showcase/ShowcaseView.hpp"
 #include "UVEditorCanvas.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
@@ -250,6 +251,7 @@
 
 #include "filamentsync/SyncConfirmDialog.hpp"
 #include "filamentsync/SyncFilamentColorDialog.hpp"
+#include "ElegooCanvasUI.hpp"
 
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include <chrono>
@@ -2190,9 +2192,11 @@ static wxString nozzle_type_key_to_label(const std::string& key)
 // Which filament sync the "Filaments" row's button performs for the printer
 // preset that is selected right now.  Snapmaker presets keep the fork's own
 // dialog (Sidebar::show_sync_filament_dialog, U1-only); Bambu presets get the
-// AMS sync, which works over the Bambu network and in LAN mode alike.  Every
-// other vendor has nothing to sync from, so the button is hidden.
-enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog };
+// AMS sync, which works over the Bambu network and in LAN mode alike.  An
+// Elegoo Centauri Carbon 1 on Elegoo Link reads its CANVAS into the same dialog
+// the Snapmaker path uses (Sidebar::show_canvas_sync_dialog).  Every other
+// vendor has nothing to sync from, so the button is hidden.
+enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog, ElegooCanvas };
 
 static FilamentSyncTarget filament_sync_target_for_current_preset()
 {
@@ -2205,6 +2209,8 @@ static FilamentSyncTarget filament_sync_target_for_current_preset()
         return FilamentSyncTarget::SnapmakerDialog;
     if (pb->is_bbl_vendor())
         return FilamentSyncTarget::BambuAms;
+    if (current_printer_reads_canvas())
+        return FilamentSyncTarget::ElegooCanvas;
     return FilamentSyncTarget::None;
 }
 
@@ -3328,8 +3334,11 @@ Sidebar::Sidebar(Plater *parent)
     ScalableButton* sync_filament_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "sync_filament");
     sync_filament_btn->SetToolTip(_L("Sync Filament Information"));
     sync_filament_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-        if (filament_sync_target_for_current_preset() == FilamentSyncTarget::BambuAms)
+        const FilamentSyncTarget target = filament_sync_target_for_current_preset();
+        if (target == FilamentSyncTarget::BambuAms)
             sync_ams_list();  // reports "select a printer in Device page" when none is connected
+        else if (target == FilamentSyncTarget::ElegooCanvas)
+            show_canvas_sync_dialog();
         else
             show_sync_filament_dialog();
     });
@@ -4077,6 +4086,12 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id);
                 else
                     p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host");
+                // The CANVAS card (a Centauri Carbon 1 on Elegoo Link) is for the same printer.
+                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
+                p_mainframe->m_printer_view->set_canvas_device((ph_picked && !ph_picked->address.empty()) ?
+                                                                   *ph_picked :
+                                                                   PrintHostDevices::from_config(cfg),
+                                                               preset_model);
             }
             is_sm_page = false;
 
@@ -4098,6 +4113,8 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     p_mainframe->m_printer_view->set_storage_source(PrinterStoragePanel::snapmaker_source());
                 else if (!takes_printhost_row)
                     p_mainframe->m_printer_view->set_storage_source(PrinterStoragePanel::Source());
+                if (!takes_printhost_row)
+                    p_mainframe->m_printer_view->set_canvas_device(PrintHostDevices::Device(), std::string());
             }
 
             if (is_snapmaker_u1) {
@@ -9580,16 +9597,21 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
 
     auto list = obj->amsList;
     for (auto ams : list) {
-        char n = ams.first.front() - '0' + 'A';
         for (auto tray : ams.second->trayList) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__
                 << boost::format(": ams %1% tray %2% id %3% color %4%") % ams.first % tray.first % tray.second->setting_id % tray.second->color;
-            char t = tray.first.front() - '0' + '1';
+            // Keyed by the whole ams id: keying by its first digit put an AMS HT (ams "128") on
+            // the key of AMS "1" slot 1, and an H2C with two AMS 2 Pro units lost its HT.
+            const BambuExtruderMap::AmsListEntry entry = BambuExtruderMap::ams_list_entry(ams.first, tray.first);
+            if (entry.key < 0) {
+                BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": invalid ams " << ams.first << " tray " << tray.first;
+                continue;
+            }
             DynamicPrintConfig tray_config;
             tray_config.set_key_value("filament_id", new ConfigOptionStrings{ tray.second->setting_id });
             tray_config.set_key_value("tag_uid", new ConfigOptionStrings{ tray.second->tag_uid });
             tray_config.set_key_value("filament_type", new ConfigOptionStrings{ tray.second->type });
-            tray_config.set_key_value("tray_name", new ConfigOptionStrings{ std::string(1, n) + std::string(1, t) });
+            tray_config.set_key_value("tray_name", new ConfigOptionStrings{ entry.tray_name });
             tray_config.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + tray.second->color).GetAsString(wxC2S_HTML_SYNTAX)) });
             tray_config.set_key_value("filament_exist", new ConfigOptionBools{ tray.second->is_exists });
 
@@ -9597,7 +9619,7 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
             for (int i = 0; i < tray.second->cols.size(); ++i) {
                 tray_config.opt<ConfigOptionStrings>("filament_multi_colors")->values.push_back(into_u8(wxColour("#" + tray.second->cols[i]).GetAsString(wxC2S_HTML_SYNTAX)));
             }
-            filament_ams_list.emplace(((n - 'A') * 4 + t - '1'), std::move(tray_config));
+            filament_ams_list.emplace(entry.key, std::move(tray_config));
         }
     }
     return filament_ams_list;
@@ -9824,6 +9846,10 @@ void Sidebar::update_filament_sync_button()
         p->m_bpButton_sync_filament->SetToolTip(_L("Sync Filament Information"));
         sizer->Show(p->m_bpButton_sync_filament);
         break;
+    case FilamentSyncTarget::ElegooCanvas:
+        p->m_bpButton_sync_filament->SetToolTip(_L("Sync filaments from CANVAS"));
+        sizer->Show(p->m_bpButton_sync_filament);
+        break;
     default:
         sizer->Hide(p->m_bpButton_sync_filament);
         break;
@@ -9920,6 +9946,52 @@ void Sidebar::show_sync_filament_dialog()
         return;
     }
 
+    apply_machine_filament_sync(machineFilamentList);
+}
+
+// The Elegoo Centauri Carbon 1's CANVAS into the same dialog the U1 uses (design D1): read the
+// trays over SDCP, then the shared tail below. No "Machine Filament" dropdown section and no
+// m_connect_machine_info_list - that state belongs to the Snapmaker connection.
+void Sidebar::show_canvas_sync_dialog()
+{
+    if (!wxGetApp().plater())
+        return;
+    const std::string address = canvas_address_for_current_printer();
+    if (address.empty()) {
+        SyncRichConfirmDialog dlg(this, _L("This printer has no address yet. Add one in its connection settings, then sync again."), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    const CanvasQueryResult result = query_canvas_with_progress(this, address);
+    if (!result.ok) {
+        SyncRichConfirmDialog dlg(this, canvas_failure_text(result), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    std::vector<FilamentData> machineFilamentList = canvas_machine_filaments(result.info);
+    if (result.info.loaded_count() == 0) {
+        SyncRichConfirmDialog dlg(this, _L("The CANVAS reports no loaded trays. Load the filaments, then sync again."), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    apply_machine_filament_sync(machineFilamentList, true);
+}
+
+// The part of the sync both sources share: the colour-matching dialog, then the project's
+// filaments, presets and colours from what it settled on. `canvas_generic`: a "Generic" filament
+// takes the Generic preset of its type (CANVAS).
+void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList, bool canvas_generic)
+{
+    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+    if (!preset_bundle || !wxGetApp().plater())
+        return;
+
     std::vector<FilamentData> designFilamentList;
     build_design_filament_list(preset_bundle, designFilamentList);
 
@@ -9984,8 +10056,20 @@ void Sidebar::show_sync_filament_dialog()
 
         for (size_t i = 0; i < effective_size; ++i) {
             const std::string synced_colour = into_u8(getMainColor(syncedData[i].m_color).GetAsString(wxC2S_HTML_SYNTAX));
-            Preset* matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
-                                                      syncedData[i].m_vendor, synced_colour);
+            Preset* matched = nullptr;
+            // CANVAS: an untagged or Generic spool takes the Generic preset of its type - the CC1's own
+            // ("Generic PLA @ECC") when the profiles have one - never a colour-picked look-alike such
+            // as "Generic PLA Silk" (owner decision 2026-10-18).
+            if (canvas_generic && boost::iequals(syncedData[i].m_vendor, "Generic") && !syncedData[i].m_type.empty()) {
+                if (Preset* own = preset_bundle->filaments.find_preset(canvas_generic_preset_name(syncedData[i].m_type));
+                    own != nullptr && own->is_compatible && own->name == canvas_generic_preset_name(syncedData[i].m_type))
+                    matched = own;
+                else
+                    matched = resolve_filament_preset(preset_bundle, "Generic " + syncedData[i].m_type, syncedData[i].m_type);
+            }
+            if (!matched)
+                matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
+                                                  syncedData[i].m_vendor, synced_colour);
             if (matched) {
                 preset_bundle->set_filament_preset(i, matched->name);
             }
@@ -10852,6 +10936,8 @@ struct Plater::priv
     GLToolbar collapse_toolbar;
     Preview *preview;
     AssembleView* assemble_view { nullptr };
+    // The Showcase tab (after Preview): presentation renders of the current plate.
+    ShowcaseView* showcase_view { nullptr };
     // Docked/resizable 2D pane showing GLGizmoTextureDisplacement's LSCM unwrap of a painted
     // patch; a sibling AUI pane alongside "sidebar"/"main", not part of the view3D/preview/
     // assemble_view sizer - see its registration below and Plater::get_uv_editor_canvas(). The
@@ -10899,6 +10985,8 @@ struct Plater::priv
     bool                        show_render_statistic_dialog{ false };
     bool                        show_wireframe{ false };
     bool                        wireframe_enabled{ true };
+    // Orca #15770: global X-Ray view of the Prepare scene (not persisted, like the wireframe).
+    bool                        show_xray{ false };
 
     std::chrono::steady_clock::time_point m_slice_start_time;
     bool                                  m_slice_timing_active = false;
@@ -10979,6 +11067,7 @@ struct Plater::priv
     bool is_preview_loaded() const { return preview->is_loaded(); }
     bool is_view3D_shown() const { return current_panel == view3D; }
     bool is_assemble_view_show() const { return current_panel == assemble_view; }
+    bool is_showcase_shown() const { return showcase_view != nullptr && current_panel == showcase_view; }
 
     bool are_view3D_labels_shown() const { return (current_panel == view3D) && view3D->get_canvas3d()->are_labels_shown(); }
     void show_view3D_labels(bool show) { if (current_panel == view3D) view3D->get_canvas3d()->show_labels(show); }
@@ -11503,6 +11592,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     preview = new Preview(panel_3d, bed, &model, config, &background_process, partplate_list.get_current_slice_result(), [this]() { schedule_background_process(); });
 
     assemble_view = new AssembleView(panel_3d, bed, &model, config, &background_process);
+    showcase_view = new ShowcaseView(panel_3d, bed, &model, config, &background_process);
 
 #ifdef __APPLE__
     // BBS
@@ -11513,6 +11603,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panels.push_back(view3D);
     panels.push_back(preview);
     panels.push_back(assemble_view);
+    panels.push_back(showcase_view);
 
     this->background_process_timer.SetOwner(this->q, 0);
     this->auto_reslice_timer.SetOwner(this->q, 0);
@@ -11575,6 +11666,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panel_sizer->Add(view3D, 1, wxEXPAND | wxALL, 0);
     panel_sizer->Add(preview, 1, wxEXPAND | wxALL, 0);
     panel_sizer->Add(assemble_view, 1, wxEXPAND | wxALL, 0);
+    panel_sizer->Add(showcase_view, 1, wxEXPAND | wxALL, 0);
     panel_3d->SetSizer(panel_sizer);
     m_aui_mgr.AddPane(panel_3d, wxAuiPaneInfo().Name("main").CenterPane().PaneBorder(false));
 
@@ -11798,8 +11890,10 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         q->Bind(EVT_EXPORT_FINISHED, &priv::on_export_finished, this);
         q->Bind(EVT_GLVIEWTOOLBAR_3D, [q](SimpleEvent&) { q->select_view_3D("3D"); });
         //BBS: set on_slice to false
+        q->Bind(EVT_GLVIEWTOOLBAR_SHOWCASE, [q](SimpleEvent&) { q->select_view_3D("Showcase"); });
         q->Bind(EVT_GLVIEWTOOLBAR_PREVIEW, [q](SimpleEvent&) {
-            if (q->is_view3D_shown()) {
+            // From Showcase as from Prepare: an unsliceable plate shows Preview without slicing.
+            if (q->is_view3D_shown() || q->is_showcase_shown()) {
                 PartPlate* curr = q->get_partplate_list().get_curr_plate();
                 if (curr && !q->is_plate_sliceable(q->get_partplate_list().get_curr_plate_index())) {
                     q->sync_filament_temp_mixing_notification();
@@ -12029,6 +12123,9 @@ void Plater::priv::update(unsigned int flags)
     if (is_preview_shown()) this->preview->reload_print();
     //BBS assemble view
     this->assemble_view->reload_scene(false, flags);
+    // Showcase: refreshed now when it is showing, else when it is next shown.
+    if (this->showcase_view != nullptr)
+        this->showcase_view->reload_scene(false, flags & (unsigned int)UpdateParams::FORCE_FULL_SCREEN_REFRESH);
 
     if (current_panel && is_preview_shown()) {
         q->force_update_all_plate_thumbnails();
@@ -12064,6 +12161,10 @@ void Plater::priv::select_view(const std::string& direction)
     else if (current_panel == assemble_view) {
         BOOST_LOG_TRIVIAL(info) << "select assemble view";
         assemble_view->select_view(direction);
+    }
+    else if (showcase_view != nullptr && current_panel == showcase_view) {
+        showcase_view->get_canvas3d()->select_view(direction);
+        showcase_view->set_as_dirty();
     }
 }
 
@@ -12149,6 +12250,11 @@ void Plater::priv::select_view_3D(const std::string& name, bool no_slice)
         set_current_panel(assemble_view, no_slice);
         wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
     }
+    else if (name == "Showcase" && showcase_view != nullptr) {
+        BOOST_LOG_TRIVIAL(info) << "select showcase view";
+        set_current_panel(showcase_view, no_slice);
+        wxGetApp().mainframe->select_tab(size_t(MainFrame::tpShowcase));
+    }
 
     //BBS update selection
     wxGetApp().obj_list()->update_selections();
@@ -12202,7 +12308,8 @@ void Plater::priv::update_sidebar(bool force_update) {
     }
     bool  needs_update = force_update;
 
-    if (!sidebar_layout.is_enabled) {
+    if (!sidebar_layout.is_enabled || is_showcase_shown()) {
+        // Showcase has its own panel on the right; the print settings are not for it.
         if (sidebar.IsShown()) {
             sidebar.Hide();
             needs_update = true;
@@ -12905,6 +13012,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         this->model.model_info = model.model_info;
                         // Costs > Project: the project's own fees and markup (display only).
                         this->model.pricing = model.pricing;
+                        // Showcase: the project's scenes and their pictures.
+                        this->model.showcase = model.showcase;
+                        if (showcase_view != nullptr)
+                            showcase_view->on_project_changed();
                     }
                 }
 
@@ -14184,6 +14295,10 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     model.plates_custom_gcodes.clear();
     // A new project starts on your default fees and markup.
     model.pricing.clear();
+    // ... and without Showcase scenes.
+    model.showcase.clear();
+    if (showcase_view != nullptr)
+        showcase_view->on_project_changed();
 
     // BBS
     m_saved_timestamp = m_backup_timestamp = size_t(-1);
@@ -16306,6 +16421,12 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
 
     update_sidebar(true);
 
+    // Leaving Showcase: its camera goes back into its scene, the editing camera comes back.
+    if (showcase_view != nullptr && old_panel == showcase_view) {
+        showcase_view->on_deactivate();
+        showcase_view->get_canvas3d()->unbind_event_handlers();
+    }
+
     if (wxGetApp().plater()) {
         Camera& cam = wxGetApp().plater()->get_camera();
         if (old_panel == preview || old_panel == view3D) {
@@ -16464,6 +16585,29 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
         assemble_view->set_as_dirty();
         // BBS
         //view_toolbar.select_item("Assemble");
+    }
+    else if (showcase_view != nullptr && current_panel == showcase_view) {
+        if (old_panel == view3D)
+            view3D->get_canvas3d()->unbind_event_handlers();
+        else if (old_panel == preview)
+            preview->get_canvas3d()->unbind_event_handlers();
+        else if (old_panel == assemble_view)
+            assemble_view->get_canvas3d()->unbind_event_handlers();
+
+        // A painting or editing gizmo left open on Prepare stays out of the picture.
+        GLGizmosManager& gizmos = view3D->get_canvas3d()->get_gizmos_manager();
+        if (gizmos.is_running()) {
+            gizmos.reset_all_states();
+            gizmos.update_data();
+        }
+
+        showcase_view->get_canvas3d()->bind_event_handlers();
+        showcase_view->reload_scene(true);
+        showcase_view->on_activate();
+        showcase_view->get_canvas3d()->reset_old_size();
+        showcase_view->set_as_dirty();
+        if (notification_manager != nullptr)
+            notification_manager->set_in_preview(false);
     }
 
     current_panel->SetFocusFromKbd();
@@ -17833,6 +17977,8 @@ void Plater::priv::on_apple_change_color_mode(wxSysColourChangedEvent& evt) {
         view3D->get_canvas3d()->on_change_color_mode(m_is_dark);
         preview->get_canvas3d()->on_change_color_mode(m_is_dark);
         assemble_view->get_canvas3d()->on_change_color_mode(m_is_dark);
+        if (showcase_view != nullptr)
+            showcase_view->on_change_color_mode(m_is_dark);
     }
 
     apply_color_mode();
@@ -17843,6 +17989,8 @@ void Plater::priv::on_change_color_mode(SimpleEvent& evt) {
     view3D->get_canvas3d()->on_change_color_mode(m_is_dark);
     preview->get_canvas3d()->on_change_color_mode(m_is_dark);
     assemble_view->get_canvas3d()->on_change_color_mode(m_is_dark);
+    if (showcase_view != nullptr)
+        showcase_view->on_change_color_mode(m_is_dark);
     if (m_send_to_sdcard_dlg) m_send_to_sdcard_dlg->on_change_color_mode();
 
     apply_color_mode();
@@ -18280,6 +18428,8 @@ void Plater::priv::set_current_canvas_as_dirty()
         preview->set_as_dirty();
     else if (current_panel == assemble_view)
         assemble_view->set_as_dirty();
+    else if (showcase_view != nullptr && current_panel == showcase_view)
+        showcase_view->set_as_dirty();
 }
 
 GLCanvas3D* Plater::priv::get_current_canvas3D(bool exclude_preview)
@@ -18316,6 +18466,9 @@ void Plater::priv::unbind_canvas_event_handlers()
 
     if (assemble_view != nullptr)
         assemble_view->get_canvas3d()->unbind_event_handlers();
+
+    if (showcase_view != nullptr && showcase_view->get_canvas3d() != nullptr)
+        showcase_view->get_canvas3d()->unbind_event_handlers();
 }
 
 void Plater::priv::reset_canvas_volumes()
@@ -18325,6 +18478,9 @@ void Plater::priv::reset_canvas_volumes()
 
     if (preview != nullptr)
         preview->get_canvas3d()->reset_volumes();
+
+    if (showcase_view != nullptr && showcase_view->get_canvas3d() != nullptr)
+        showcase_view->get_canvas3d()->reset_volumes();
 }
 
 bool Plater::priv::init_collapse_toolbar()
@@ -22123,6 +22279,7 @@ void Plater::reload_paint_after_background_process_apply() {
 bool Plater::is_preview_shown() const { return p->is_preview_shown(); }
 bool Plater::is_preview_loaded() const { return p->is_preview_loaded(); }
 bool Plater::is_view3D_shown() const { return p->is_view3D_shown(); }
+bool Plater::is_showcase_shown() const { return p->is_showcase_shown(); }
 
 bool Plater::are_view3D_labels_shown() const { return p->are_view3D_labels_shown(); }
 void Plater::show_view3D_labels(bool show) { p->show_view3D_labels(show); }
@@ -24306,15 +24463,36 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
     const DynamicPrintConfig   full    = bundle->full_config();
     const ConfigOptionStrings* colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
     const ConfigOptionStrings* types   = full.option<ConfigOptionStrings>("filament_type");
+    const ConfigOptionInts*    temps   = full.option<ConfigOptionInts>("nozzle_temperature");
+    const ConfigOptionInts*    fil_map = bundle->project_config.option<ConfigOptionInts>("filament_map");
     std::map<size_t, double>   volumes;
-    if (plate && plate->is_slice_result_valid() && plate->get_slice_result())
-        for (const auto& kv : plate->get_slice_result()->print_statistics.total_volumes_per_extruder)
-            volumes[kv.first] = kv.second;
+    auto add_volumes = [&volumes](PartPlate* p) {
+        if (p && p->is_slice_result_valid() && p->get_slice_result())
+            for (const auto& kv : p->get_slice_result()->print_statistics.total_volumes_per_extruder)
+                volumes[kv.first] += kv.second;
+    };
+    if (plate_idx == PLATE_ALL_IDX) {
+        // "Print all" sends every plate in one file: a filament any plate uses has to be mapped,
+        // or a QIDI Box feeds it from the slot its last print left behind.
+        for (int i = 0; i < plates.get_plate_count(); ++i)
+            add_volumes(plates.get_plate(i));
+    } else {
+        add_volumes(plate);
+    }
     for (size_t i = 0; i < bundle->filament_presets.size(); ++i) {
         SendPlateFilament f;
         f.index  = (int) i;
         f.colour = (colours && i < colours->values.size()) ? colours->values[i] : std::string();
         f.type   = (types && i < types->values.size()) ? types->values[i] : std::string();
+        f.nozzle_temp = (temps && i < temps->values.size()) ? temps->values[i] : 0;
+        // filament_map is 1-based (SelectMachine / Bambu dual-nozzle). -1 when the plate is single-nozzle.
+        if (fil_map && i < fil_map->values.size() && fil_map->values[i] > 0)
+            f.nozzle_id = fil_map->values[i] - 1;
+        // The remembered CANVAS mapping keys on the preset as people know it: its alias, else its name.
+        if (const Preset* fp = bundle->filaments.find_preset(bundle->filament_presets[i]))
+            f.alias = fp->alias.empty() ? fp->name : fp->alias;
+        else
+            f.alias = bundle->filament_presets[i];
         auto it  = volumes.find(i);
         f.used   = it != volumes.end() && it->second > 0;
         out.push_back(std::move(f));
@@ -24558,6 +24736,11 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         host_type == htFlashforge &&
         ff_serial_opt != nullptr && !ff_serial_opt->value.empty() &&
         ff_code_opt != nullptr && !ff_code_opt->value.empty();
+    // ElegooLink takes its own dialog: the time-lapse / heated-bed-leveling / plate options it shows
+    // are what ElegooLink::print() puts in the SDCP start command. Without them the command went out
+    // with empty values and the printer never answered. Not derived from host_type above, whose
+    // fallback for a missing option is htElegooLink.
+    const bool elegoolink_host = host_type_opt != nullptr && host_type_opt->value == htElegooLink;
 
     if (flashforge_local_api) {
         use_3mf          = true;
@@ -24610,8 +24793,9 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
 
     // The send dialog is polymorphic: a Flashforge printer reached over its HTTP local API gets the
     // IFS (material-station) mapping dialog, everything else - our device/slot flow included - gets
-    // the plain one. Legacy Flashforge printers (no serial number / check code, i.e. the TCP 8899
-    // M-code console) take the plain dialog too, exactly as before.
+    // the plain one, except ElegooLink, which gets the Elegoo dialog. Legacy Flashforge printers
+    // (no serial number / check code, i.e. the TCP 8899 M-code console) take the plain dialog too,
+    // exactly as before.
     std::unique_ptr<PrintHostSendDialog> pDlg;
     if (flashforge_local_api) {
         auto* flashforge_host = dynamic_cast<Flashforge*>(upload_job.printhost.get());
@@ -24685,9 +24869,27 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
                                                               std::move(slots),
                                                               project_filaments);
     } else {
-        pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
-                                                    storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
+        // An Elegoo printer gets the Elegoo dialog (an ElegooLink preset reaches here with the same
+        // device list, plate filaments and unload offer as the plain dialog below). Upstream Orca
+        // selects it by host_type too.
+        // An Elegoo Link preset with no device list still has its own address: the dialog needs one
+        // device to read the CANVAS from. It has no id, so nothing is rebuilt or remembered from it.
+        // The same for a QIDI that may carry a QIDI Box: without a device the dialog never reads the
+        // Box, sends no slot mapping, and the printer feeds whatever value_t<n> its last print left.
+        if ((elegoolink_host || PrintHostDevices::qidi_box_capable_model(printer_model)) && ph_devices.empty()) {
+            PrintHostDevices::Device own = PrintHostDevices::from_config(*physical_printer_config);
+            if (!own.address.empty())
+                ph_devices.push_back(own);
+        }
+        if (elegoolink_host)
+            pDlg = std::make_unique<ElegooPrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
+                                                              storage_paths, storage_names,
+                                                              config->get_bool("open_device_tab_post_upload"));
+        else
+            pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
+                                                        storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
         pDlg->set_devices(ph_model_key, ph_devices, ph_preselect);
+        pDlg->set_printer_model(printer_model);
         pDlg->set_plate_filaments(plate_filaments_for_send(plate_idx));
         if (offer_unload_at_end)
             pDlg->offer_unload_at_end(unload_at_end_default);
@@ -24727,6 +24929,9 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
             } catch (...) {}
         }
         upload_job.filament_mapping        = dlg.filament_mapping();
+        upload_job.qidi_start_script       = dlg.qidi_start_script();
+        upload_job.qidi_leveling_script    = dlg.qidi_leveling_script();
+        upload_job.qidi_timelapse          = dlg.qidi_timelapse();
         upload_job.unload_at_end           = dlg.unload_at_end();
         upload_job.switch_to_device_tab    = dlg.switch_to_device_tab();
         upload_job.upload_data.upload_path = dlg.filename();
@@ -26180,6 +26385,9 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
                  opt_key == "sparse_infill_filament" || opt_key == "solid_infill_filament") {
             update_scheduled = true;
         }
+        // Orca #16291: the center of mass markers weigh the parts by it.
+        else if (opt_key == "filament_density" && wxGetApp().show_center_of_mass())
+            p->view3D->get_canvas3d()->set_as_dirty();
     }
 
     if (bed_shape_changed)
@@ -27608,6 +27816,12 @@ int Plater::delete_plate(int plate_index)
     p->background_process.set_current_plate(nullptr);
 
     ret = p->partplate_list.delete_plate(index);
+    // Showcase: the plate's scene goes with it, later plates' scenes move down one.
+    if (ret == 0) {
+        p->model.showcase.on_plate_deleted(index);
+        if (p->showcase_view != nullptr)
+            p->showcase_view->on_project_changed();
+    }
 
     //BBS: update the current print to the current plate
     p->partplate_list.update_slice_context_to_current_plate(p->background_process);
@@ -28237,6 +28451,18 @@ void Plater::enable_wireframe(bool status)
 bool Plater::is_wireframe_enabled() const
 {
     return p->wireframe_enabled;
+}
+
+void Plater::toggle_show_xray()
+{
+    p->show_xray = !p->show_xray;
+    if (p->view3D != nullptr)
+        p->view3D->get_canvas3d()->set_as_dirty();
+}
+
+bool Plater::is_show_xray() const
+{
+    return p->show_xray;
 }
 
 

@@ -146,7 +146,8 @@ private:
     ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy);
     ApiResponse api_plate_preview_status(int plate);
     ApiResponse api_object_transform(const std::string& form_body);
-    ApiResponse api_printers(int plate = -1);
+    // watching=false: the hub's own background poll while nobody looks (ElegooSdcpMonitor::note_watching).
+    ApiResponse api_printers(int plate = -1, bool watching = true);
     ApiResponse api_snapmaker_devices();
     ApiResponse api_snapmaker_add(const std::string& ip, int port);
     ApiResponse api_snapmaker_remove(const std::string& id);

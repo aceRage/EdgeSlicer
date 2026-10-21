@@ -40,7 +40,8 @@ class OpenGLManager;
 static const float GCODE_VIEWER_SLIDER_SCALE = 0.6f;
 static const float SLIDER_DEFAULT_RIGHT_MARGIN  = 10.0f;
 static const float SLIDER_DEFAULT_BOTTOM_MARGIN = 10.0f;
-static const float SLIDER_RIGHT_MARGIN = 124.0f;
+// ORCA: match right margin to the vertical slider window width to prevent overlap.
+static inline const float SLIDER_RIGHT_MARGIN = IMSlider::vertical_slider_window_width();
 static const float SLIDER_BOTTOM_MARGIN = 64.0f;
 class GCodeViewer
 {
@@ -194,6 +195,35 @@ private:
     float m_max_print_height{ 0.0f };
     float m_z_offset{ 0.0f };
 
+    // Edge (support highlight, phase 2): each layer's supported overhangs (what the support
+    // generator holds up, red) and unsupported overhangs (yellow), drawn over the toolpaths and
+    // following the layer slider. Built from the slice (support_overhang_overlay()) the first time
+    // one of the two legend toggles is on after a G-code load.
+    struct SupportOverhangOverlay
+    {
+        struct Part
+        {
+            GLModel model;
+            // Per vgcode layer id present in the model, sorted: {layer id, first index}.
+            std::vector<std::pair<size_t, size_t>> layer_starts;
+            size_t indices_count{ 0 };
+            // Index range [first, second) of the triangles on layers [min_layer, max_layer].
+            std::pair<size_t, size_t> range(size_t min_layer, size_t max_layer) const;
+            void reset() { model.reset(); layer_starts.clear(); indices_count = 0; }
+        };
+        Part   supported;
+        Part   unsupported;
+        bool   show_supported{ false };
+        bool   show_unsupported{ false };
+        bool   dirty{ true };      // rebuild before the next render that shows it
+        bool   available{ false }; // the last build found a sliced print with layers
+        double build_ms{ 0. };     // CPU time of the last build (log)
+        void reset() { supported.reset(); unsupported.reset(); dirty = true; available = false; }
+    };
+    SupportOverhangOverlay m_support_overlay;
+    void load_support_overhang_overlay();
+    void render_support_overhang_overlay();
+
     ConfigOptionMode m_user_mode;
     bool m_fold = {false};
 
@@ -236,6 +266,11 @@ private:
     GCodeProcessorResult::SettingsIds m_settings_ids;
 
     std::vector<CustomGCode::Item> m_custom_gcode_per_print_z;
+    // Orca #16291: centers of mass of the loaded G-code.
+    GCodeProcessorResult::ObjectMass              m_plate_mass;
+    std::vector<GCodeProcessorResult::ObjectMass> m_object_masses;
+    std::vector<GCodeProcessorResult::ObjectMass> m_body_masses;
+    std::vector<GCodeProcessorResult::ObjectMass> m_support_masses;
 
     bool m_contained_in_bed{ true };
     // EDGE (#642 memory guard): set when the toolpaths were not loaded because memory ran low while
@@ -301,6 +336,10 @@ public:
     std::vector<float> get_layers_times() const { return m_viewer.get_layers_estimated_times(); }
 
     const libvgcode::Interval& get_layers_z_range() const { return m_viewer.get_layers_view_range(); }
+    const GCodeProcessorResult::ObjectMass&              get_plate_mass() const { return m_plate_mass; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_object_masses() const { return m_object_masses; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_body_masses() const { return m_body_masses; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_support_masses() const { return m_support_masses; }
 
     const SequentialView& get_sequential_view() const { return m_sequential_view; }
     void update_sequential_view_current(unsigned int first, unsigned int last);
