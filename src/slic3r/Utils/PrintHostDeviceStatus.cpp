@@ -4,11 +4,13 @@
 #include "PrusaLinkStatus.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 
 namespace Slic3r {
@@ -253,7 +255,22 @@ static void slots_from_extruders(const json& status, std::vector<Slot>& out)
 
 // The network-free half: a Moonraker `result.status` object -> what this dialog can say about the
 // printer. Shared by probe() and by parse_moonraker_status(), which is what the tests call.
-static Status fill_from_status(const json& status, const std::string& host_type_key)
+// save_variables' `variables`, when the answer carried them; null otherwise.
+static const json* qidi_variables_of(const json& status)
+{
+    if (!status.is_object() || !status.contains("save_variables") || !status["save_variables"].is_object())
+        return nullptr;
+    const json& sv = status["save_variables"];
+    return sv.contains("variables") && sv["variables"].is_object() ? &sv["variables"] : nullptr;
+}
+
+// The variables only a QIDI Box firmware keeps (QIDIStudio writes enable_box and value_t<n>).
+static bool qidi_variables_present(const json* vars)
+{
+    return vars != nullptr && (vars->contains("enable_box") || vars->contains("box_count") || vars->contains("filament_slot0"));
+}
+
+static Status fill_from_status(const json& status, const std::string& host_type_key, const QidiFilaList* filas = nullptr)
 {
     Status st;
     if (!status.is_object() || status.empty()) {
@@ -263,11 +280,28 @@ static Status fill_from_status(const json& status, const std::string& host_type_
     st.online = true;
     if (status.contains("print_stats") && status["print_stats"].is_object())
         st.state = str_at(status["print_stats"], "state");
-    st.qidi              = status.contains("multi_color_controller") && status["multi_color_controller"].is_object();
+    const json* vars     = qidi_variables_of(status);
+    st.qidi              = (status.contains("multi_color_controller") && status["multi_color_controller"].is_object()) ||
+                           qidi_variables_present(vars);
     st.qidi_polar_cooler = st.qidi && status.contains("output_pin polar_cooler") && status["output_pin polar_cooler"].is_object();
     slots_from_print_task_config(status, st.slots, st.slots_have_filaments);
     if (st.slots.empty())
         slots_from_qidi_box(status, st.slots, st.slots_have_filaments, st.qidi_box);
+    // The Box named no materials there (or is not described there at all): read it the way
+    // QIDIStudio does, from save_variables and the printer's filament list.
+    if (st.qidi && !st.slots_have_filaments && qidi_variables_present(vars) && filas != nullptr) {
+        bool              have = false;
+        std::vector<Slot> from_vars = slots_from_qidi_variables(vars->dump(), *filas, have);
+        if (!from_vars.empty()) {
+            st.slots                = std::move(from_vars);
+            st.slots_have_filaments = have;
+            st.qidi_box             = true;
+        }
+    }
+    // A Box the firmware counts but whose slots nobody could read is still a Box: the send must not
+    // treat it as absent and start on value_t<n> (qidi_send_policy needs a slot for every filament).
+    if (st.qidi && !st.qidi_box && vars != nullptr && int_at(*vars, "box_count", 0) > 0)
+        st.qidi_box = true;
     if (st.slots.empty())
         slots_from_extruders(status, st.slots);
     if (st.slots.empty() || !st.slots_have_filaments)
@@ -378,9 +412,13 @@ Status probe(const Device& d, int timeout_s)
     // for plus print_task_config (Snapmaker) and multi_color_controller (QIDI Box), which is where
     // the loaded filaments live when there are any, and the QIDI polar cooler's pin, which says
     // whether to offer its switch. Moonraker leaves out the ones a printer lacks.
+    // A model that may carry a QIDI Box also gets save_variables in the same call: that is where
+    // QIDIStudio reads the Box from, and where value_t<n> / enable_box live.
+    const bool  qidi_model = qidi_box_capable_model(d.printer_model);
     std::string body;
     if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&multi_color_controller"
-                              "&output_pin%20polar_cooler&extruder&extruder1&extruder2&extruder3",
+                              "&output_pin%20polar_cooler&extruder&extruder1&extruder2&extruder3" +
+                           std::string(qidi_model ? "&save_variables=variables" : ""),
                        body, st.error, timeout_s)) {
         st.note = "this printer did not answer" + (st.error.empty() ? std::string() : (": " + st.error));
         return st;
@@ -393,11 +431,209 @@ Status probe(const Device& d, int timeout_s)
         st.note  = "this printer answered something this slicer could not read.";
         return st;
     }
-    const json status = j.is_object() ? j.value("result", json::object()).value("status", json::object()) : json::object();
+    json   status = j.is_object() ? j.value("result", json::object()).value("status", json::object()) : json::object();
     Status parsed = fill_from_status(status, d.host_type);
+    if (parsed.qidi && !parsed.slots_have_filaments) {
+        // The Box named no materials in multi_color_controller: read it as QIDIStudio does.
+        if (qidi_variables_of(status) == nullptr) {
+            std::string vars, verr;
+            if (query_qidi_variables(base, vars, verr, timeout_s)) {
+                try {
+                    status["save_variables"] = json { { "variables", json::parse(vars) } };
+                } catch (...) {}
+            }
+        }
+        if (qidi_variables_present(qidi_variables_of(status))) {
+            std::string cfg, cerr;
+            QidiFilaList filas;
+            if (moonraker_get(base + "/server/files/config/officiall_filas_list.cfg", cfg, cerr, timeout_s))
+                filas = parse_qidi_filas_cfg(cfg);
+            else
+                BOOST_LOG_TRIVIAL(warning) << "PrintHostDevices::probe: could not read the QIDI filament list (" << cerr << ")";
+            parsed = fill_from_status(status, d.host_type, &filas);
+        }
+    }
     parsed.probed  = true;
     parsed.error   = st.error;
     return parsed;
+}
+
+QidiFilaList parse_qidi_filas_cfg(const std::string& text)
+{
+    QidiFilaList out;
+    std::string  section;
+    size_t       pos = 0;
+    while (pos <= text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos)
+            end = text.size();
+        std::string line = boost::algorithm::trim_copy(text.substr(pos, end - pos));
+        pos              = end + 1;
+        if (line.empty() || line[0] == '#' || line[0] == ';')
+            continue;
+        if (line.front() == '[') {
+            const size_t close = line.find(']');
+            section            = boost::algorithm::trim_copy(line.substr(1, close == std::string::npos ? std::string::npos : close - 1));
+            continue;
+        }
+        size_t eq = line.find_first_of("=:");
+        if (eq == std::string::npos)
+            continue;
+        const std::string key   = boost::algorithm::trim_copy(line.substr(0, eq));
+        const std::string value = boost::algorithm::trim_copy(line.substr(eq + 1));
+        try {
+            if (boost::istarts_with(section, "fila") && section.size() > 4) {
+                const int id = std::stoi(section.substr(4));
+                if (boost::iequals(key, "type"))
+                    out.type[id] = value;
+                else if (boost::iequals(key, "filament"))
+                    out.name[id] = value;
+            } else if (boost::iequals(section, "colordict")) {
+                const std::string c = colour_of(value);
+                if (!c.empty())
+                    out.colour[std::stoi(key)] = c;
+            }
+        } catch (...) {}
+    }
+    return out;
+}
+
+// A save_variables value as a number: Klipper keeps what SAVE_VARIABLE was given, an int or a
+// quoted string, so both are read.
+static int var_int(const json& vars, const std::string& key, int fallback)
+{
+    if (!vars.is_object() || !vars.contains(key))
+        return fallback;
+    const json& v = vars[key];
+    if (v.is_number())
+        return v.get<int>();
+    if (v.is_string()) {
+        try {
+            return std::stoi(v.get<std::string>());
+        } catch (...) {}
+    }
+    return fallback;
+}
+
+static std::string var_str(const json& vars, const std::string& key)
+{
+    if (!vars.is_object() || !vars.contains(key))
+        return {};
+    const json& v = vars[key];
+    if (v.is_string())
+        return v.get<std::string>();
+    if (v.is_number_integer())
+        return std::to_string(v.get<long long>());
+    return {};
+}
+
+std::vector<Slot> slots_from_qidi_variables(const std::string& variables_json, const QidiFilaList& list, bool& have_filaments)
+{
+    std::vector<Slot> out;
+    have_filaments = false;
+    json vars;
+    try {
+        vars = json::parse(variables_json);
+    } catch (...) {
+        return out;
+    }
+    const int boxes = std::min(4, var_int(vars, "box_count", 0));
+    for (int n = 0; n < boxes * 4; ++n) {
+        Slot s;
+        s.index         = n;
+        s.name          = "Box " + std::to_string(n / 4 + 1) + " slot " + std::to_string(n % 4 + 1);
+        const int fila  = var_int(vars, "filament_slot" + std::to_string(n), 0);
+        const int color = var_int(vars, "color_slot" + std::to_string(n), -1);
+        auto      t     = list.type.find(fila);
+        if (fila > 0 && t != list.type.end() && !t->second.empty()) {
+            s.loaded = true;
+            s.type   = t->second;
+            auto nm  = list.name.find(fila);
+            if (nm != list.name.end())
+                s.sub_type = nm->second;
+            auto c = list.colour.find(color);
+            if (c != list.colour.end())
+                s.color = c->second;
+            have_filaments = true;
+        }
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+bool qidi_mapping_confirmed(const std::string& variables_json, const std::string& mapping, int use_box, std::string& why)
+{
+    json vars;
+    try {
+        vars = json::parse(variables_json);
+    } catch (...) {
+        why = "the printer's saved variables could not be read";
+        return false;
+    }
+    if (!vars.is_object()) {
+        why = "the printer's saved variables could not be read";
+        return false;
+    }
+    if (use_box >= 0 || !mapping.empty()) {
+        const int want = use_box == 0 ? 0 : 1;
+        const int have = var_int(vars, "enable_box", -1);
+        if (have != want) {
+            why = "enable_box is " + (have < 0 ? std::string("not set") : std::to_string(have)) + ", not " + std::to_string(want);
+            return false;
+        }
+    }
+    if (use_box == 0)
+        return true;
+    std::string pair;
+    for (size_t i = 0; i <= mapping.size(); ++i) {
+        if (i < mapping.size() && mapping[i] != ',') {
+            pair += mapping[i];
+            continue;
+        }
+        const size_t colon = pair.find(':');
+        if (colon != std::string::npos) {
+            try {
+                const int         tool = std::stoi(pair.substr(0, colon));
+                const int         slot = std::stoi(pair.substr(colon + 1));
+                const std::string have = var_str(vars, "value_t" + std::to_string(tool));
+                const std::string want = "slot" + std::to_string(slot);
+                if (have != want) {
+                    why = "value_t" + std::to_string(tool) + " is '" + have + "', not '" + want + "'";
+                    return false;
+                }
+            } catch (...) {}
+        }
+        pair.clear();
+    }
+    return true;
+}
+
+bool query_qidi_variables(const std::string& base_url, std::string& variables_json, std::string& error, int timeout_s)
+{
+    variables_json.clear();
+    error.clear();
+    std::string body;
+    if (!moonraker_get(base_url + "/printer/objects/query?save_variables=variables", body, error, timeout_s))
+        return false;
+    try {
+        const json  j      = json::parse(body);
+        const json  status = j.is_object() ? j.value("result", json::object()).value("status", json::object()) : json::object();
+        const json* vars   = qidi_variables_of(status);
+        if (vars == nullptr) {
+            error = "the printer has no save_variables";
+            return false;
+        }
+        variables_json = vars->dump();
+        return true;
+    } catch (...) {
+        error = "the answer was not JSON";
+        return false;
+    }
+}
+
+int probe_timeout_for(const std::string& printer_model)
+{
+    return qidi_box_capable_model(printer_model) ? 10 : 3;
 }
 
 Status parse_moonraker_status(const std::string& status_json, const std::string& host_type_key)
@@ -560,6 +796,112 @@ int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, c
     return best;
 }
 
+bool qidi_box_capable_model(const std::string& printer_model)
+{
+    // Spaces, dashes and underscores dropped, so "Qidi X-Max 4", "QIDI XMax4" and "qidi x-plus 4"
+    // all read the same. The QIDI Box works with the Q2 (and Q2C), X-Max 4, X-Plus 4 and X-Plus 5.
+    std::string m;
+    for (char c : printer_model)
+        if (c != ' ' && c != '-' && c != '_')
+            m += (char) std::tolower((unsigned char) c);
+    if (m.find("qidi") == std::string::npos)
+        return false;
+    for (const char* family : { "q2", "max4", "plus4", "plus5" })
+        if (m.find(family) != std::string::npos)
+            return true;
+    return false;
+}
+
+bool qidi_polar_cooler_model(const std::string& printer_model)
+{
+    // QIDIStudio 2.07's machine profiles set is_support_polar_cooler for exactly the Box-capable
+    // models (Q2, Q2C, fdm_machine_x_common -> X-Max 4 / X-Plus 4, X-Plus 5).
+    return qidi_box_capable_model(printer_model);
+}
+
+bool filament_types_match(const std::string& plate_type, const std::string& slot_type)
+{
+    const std::string a = boost::algorithm::trim_copy(plate_type);
+    const std::string b = boost::algorithm::trim_copy(slot_type);
+    if (a.empty() || b.empty())
+        return false;
+    return boost::iequals(a, b);
+}
+
+QidiSendPolicy qidi_send_policy(const QidiSendFacts& f)
+{
+    if (!f.probe_ok)
+        // Nobody knows what is in the Box or what value_t<n> says. A model that may carry a Box is
+        // uploaded only unless the person explicitly chooses to print; anything else is not ours.
+        return f.model_may_have_box ? QidiSendPolicy::UploadOnlyNoProbe : QidiSendPolicy::NotApplicable;
+    if (!f.qidi)
+        // It answered, but without the multi_color_controller that names the Box: for a model that
+        // may carry one that is the same as not reading it at all.
+        return f.model_may_have_box ? QidiSendPolicy::UploadOnlyNoProbe : QidiSendPolicy::NotApplicable;
+    if (f.busy)
+        return QidiSendPolicy::UploadOnlyBusy;
+    // No Box plugged in, or switched off for this print (enable_box 0 goes out): the extruder's own
+    // spool feeds every tool, there is no saved slot to go stale.
+    if (!f.box_present || !f.use_box)
+        return QidiSendPolicy::Start;
+    // No used filament known at all is not "nothing to map": T0 still loads from value_t0.
+    if (f.used_filaments <= 0 || f.mapped_filaments < f.used_filaments)
+        return QidiSendPolicy::NeedsMapping;
+    if (f.type_mismatches > 0)
+        return QidiSendPolicy::ConfirmTypeMismatch;
+    return QidiSendPolicy::Start;
+}
+
+QidiAutoMapping qidi_auto_mapping(const Status& st, const std::vector<SendFilament>& filaments)
+{
+    QidiAutoMapping out;
+    QidiSendFacts&  f = out.facts;
+    f.probe_ok    = st.online;
+    f.qidi        = st.qidi;
+    f.box_present = st.qidi_box;
+    f.busy        = busy_printing(st.state);
+    // The send dialog's own starting value (qidi_option_defaults): the Box on whenever there is one.
+    f.use_box = st.qidi_box;
+    for (const SendFilament& fil : filaments) {
+        if (!fil.used)
+            continue;
+        ++f.used_filaments;
+        if (!st.qidi_box)
+            continue;
+        const int pos = auto_match_slot(st.slots, fil.colour, fil.type, true);
+        if (pos <= 0 || pos > (int) st.slots.size())
+            continue;
+        const Slot& s = st.slots[pos - 1];
+        ++f.mapped_filaments;
+        if (!filament_types_match(fil.type, s.type))
+            ++f.type_mismatches;
+        if (!out.mapping.empty())
+            out.mapping += ",";
+        out.mapping += std::to_string(fil.index) + ":" + std::to_string(s.index);
+    }
+    return out;
+}
+
+std::string qidi_send_refusal(QidiSendPolicy policy)
+{
+    switch (policy) {
+    case QidiSendPolicy::UploadOnlyBusy:
+        return "The QIDI printer is busy with another print, so this plate was not sent or started.";
+    case QidiSendPolicy::UploadOnlyNoProbe:
+        return "Couldn't read the QIDI Box, so the print was not started: the printer would feed whatever slots it used "
+               "last time. Send it as an upload only, or retry once the printer answers.";
+    case QidiSendPolicy::NeedsMapping:
+        return "A filament on this plate has no QIDI Box slot of the same material, so the print was not started: the "
+               "printer would feed whatever slot it used last time. Load that material in the Box, or send from the PC's "
+               "send dialog and pick the slots there.";
+    case QidiSendPolicy::ConfirmTypeMismatch:
+        return "A filament on this plate would be fed from a QIDI Box slot holding another material, so the print was "
+               "not started. Send it from the PC's send dialog to confirm the slots.";
+    default:
+        return {};
+    }
+}
+
 std::string qidi_start_script(const QidiPrintOptions& options, const std::string& mapping)
 {
     std::string out;
@@ -590,8 +932,10 @@ QidiOptionDefaults qidi_option_defaults(const Status& st, const std::string& rem
 {
     auto remembered = [](const std::string& v, bool fallback) { return v.empty() ? fallback : v == "1"; };
     QidiOptionDefaults d;
-    // A Box with nothing loaded in it has nothing to feed: start on the extruder's own spool.
-    d.use_box = st.qidi_box && std::any_of(st.slots.begin(), st.slots.end(), [](const Slot& s) { return s.loaded; });
+    // A Box starts on whenever there is one, loaded or not, readable or not: printing from the
+    // extruder's own spool (enable_box 0) feeds whatever is in the toolhead - possibly the last
+    // print's material - so it is a choice the person makes by unticking, never a default.
+    d.use_box = st.qidi_box;
     // Off unless the person turned it on last time: a mesh probe adds minutes to every print.
     d.bed_leveling = remembered(remembered_leveling, false);
     d.timelapse    = remembered(remembered_timelapse, false);

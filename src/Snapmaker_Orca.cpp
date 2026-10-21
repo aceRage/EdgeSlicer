@@ -113,6 +113,10 @@ using namespace nlohmann;
 
 #ifdef __WXGTK__
 #include <X11/Xlib.h>
+#include <unistd.h>
+#ifdef SLIC3R_GUI
+#include "slic3r/GUI/Widgets/WebView.hpp"
+#endif
 #endif
 
 #ifdef SLIC3R_GUI
@@ -1231,8 +1235,29 @@ int CLI::run(int argc, char **argv)
 #ifdef __WXGTK__
     // On Linux, wxGTK has no support for Wayland, and the app crashes on
     // startup if gtk3 is used. This env var has to be set explicitly to
-    // instruct the window manager to fall back to X server mode.
+    // instruct the window manager to fall back to X server mode. Keep the
+    // always-X11 force; Orca #16385's EGL/Wayland default path does not apply.
+#ifdef SLIC3R_GUI
+    // NVIDIA's proprietary driver cannot back WebKitGTK's DMABUF renderer.
+    // Force the shared-memory transport, which keeps compositing and threaded
+    // scrolling; the second variable clears Debian/Ubuntu/openSUSE's isNVIDIA().
+    if (::access("/proc/driver/nvidia/version", F_OK) == 0 && WebView::SupportsForceSharedMemory()) {
+        ::setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", /* replace */ false);
+        ::setenv("WEBKIT_FORCE_DMABUF_RENDERER", "1", /* replace */ false);
+    }
+#endif
+
     ::setenv("GDK_BACKEND", "x11", /* replace */ true);
+
+#ifdef SLIC3R_GUI
+    // Forced X11 in a Wayland session runs through XWayland. WebKit2GTK
+    // accelerated compositing could fail silently there before 2.42.
+    {
+        const char *wayland_env = ::getenv("WAYLAND_DISPLAY");
+        if (wayland_env && *wayland_env && WebView::NeedsCompositingWorkaround())
+            ::setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", /* replace */ false);
+    }
+#endif
 
     // Also on Linux, we need to tell Xlib that we will be using threads,
     // lest we crash when we fire up GStreamer.
