@@ -2931,7 +2931,7 @@ void SelectMachineDialog::update_user_printer()
     else {
         m_printer_last_select = "";
         update_select_layout(nullptr);
-        m_comboBox_printer->SetTextLabel("");
+        m_comboBox_printer->SetValue(_L("No available printers"));
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "for send task, current printer id =  " << m_printer_last_select << std::endl;

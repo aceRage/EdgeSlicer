@@ -28,6 +28,7 @@ add_executable(${_TEST_NAME}_tests
 	test_printobject.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp
+	test_support_overhang_highlight.cpp
 	test_support_groups.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
@@ -58,6 +59,7 @@ add_executable(${_TEST_NAME}_tests
 	test_wipe.cpp
 	test_adaptive_pa.cpp
 	test_extruder_variant_arrays.cpp
+	test_filament_map_roundtrip.cpp
 	test_core_guards.cpp
 	)
 # libslic3r_cgal links CGAL privately, so the GMP/MPFR libraries are needed at link time.

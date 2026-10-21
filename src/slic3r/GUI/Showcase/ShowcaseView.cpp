@@ -1,0 +1,1656 @@
+#include "ShowcaseView.hpp"
+
+#include "ShowcaseRenderer.hpp"
+#include "ShowcaseTextures.hpp"
+
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Showcase/ShowcaseWebP.hpp"
+#include "libslic3r/Utils.hpp"
+
+#include "../GLCanvas3D.hpp"
+#include "../GUI.hpp"
+#include "../GUI_App.hpp"
+#include "../GUI_Utils.hpp"   // _3MF_COVER_SIZE
+#include "../I18N.hpp"
+#include "../OpenGLManager.hpp"
+#include "../PartPlate.hpp"
+#include "../Plater.hpp"
+
+#include <wx/button.h>
+#include <wx/checkbox.h>
+#include <wx/choice.h>
+#include <wx/clipbrd.h>
+#include <wx/clrpicker.h>
+#include <wx/dataobj.h>
+#include <wx/dcclient.h>
+#include <wx/filedlg.h>
+#include <wx/filename.h>
+#include <wx/fontpicker.h>
+#include <wx/glcanvas.h>
+#include <wx/scrolwin.h>
+#include <wx/settings.h>
+#include <wx/sizer.h>
+#include <wx/slider.h>
+#include <wx/spinctrl.h>
+#include <wx/statline.h>
+#include <wx/stattext.h>
+#include <wx/textctrl.h>
+#include <wx/textdlg.h>
+#include <wx/utils.h>
+
+#include <boost/filesystem.hpp>
+#include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <initializer_list>
+
+namespace Slic3r {
+namespace GUI {
+
+namespace {
+
+struct ShowcaseSizePreset
+{
+    int         w, h;
+    const char *name;   // translated where it is shown
+};
+
+// Social and screen sizes; the last row of the choice is "Custom".
+const ShowcaseSizePreset SHOWCASE_SIZES[] = {
+    { 1280, 720, L("HD") },
+    { 1920, 1080, L("Full HD") },
+    { 2560, 1440, L("QHD") },
+    { 3840, 2160, L("4K UHD") },
+    { 1080, 1080, L("Square") },
+    { 1080, 1350, L("Portrait 4:5") },
+    { 1080, 1920, L("Story 9:16") },
+};
+constexpr int SHOWCASE_SIZE_COUNT = int(sizeof(SHOWCASE_SIZES) / sizeof(SHOWCASE_SIZES[0]));
+
+wxColour showcase_wx_colour(const std::string &hex)
+{
+    std::array<float, 4> c{ 1.f, 1.f, 1.f, 1.f };
+    Showcase::parse_hex_color(hex, c);
+    return wxColour((unsigned char) std::lround(c[0] * 255.f), (unsigned char) std::lround(c[1] * 255.f),
+                    (unsigned char) std::lround(c[2] * 255.f));
+}
+
+std::string showcase_hex(const wxColour &c)
+{
+    return Showcase::to_hex_color({ c.Red() / 255.f, c.Green() / 255.f, c.Blue() / 255.f, 1.f });
+}
+
+wxString showcase_preset_name(Showcase::PresetId id)
+{
+    switch (id) {
+    case Showcase::PresetId::DeskWood: return _L("Desk wood");
+    case Showcase::PresetId::DarkGradient: return _L("Dark gradient");
+    case Showcase::PresetId::Outdoor: return _L("Outdoor");
+    case Showcase::PresetId::BuildPlate: return _L("Build plate");
+    default: return _L("Studio white");
+    }
+}
+
+wxString showcase_light_rig_name(Showcase::LightRig rig)
+{
+    switch (rig) {
+    case Showcase::LightRig::ClassicThreePoint: return _L("Classic three-point");
+    case Showcase::LightRig::Dramatic: return _L("Dramatic (key and rim)");
+    case Showcase::LightRig::KeyOnly: return _L("Key light only");
+    case Showcase::LightRig::Sun: return _L("Hard sun");
+    default: return _L("Soft three-point");
+    }
+}
+
+} // namespace
+
+ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPrintConfig *config, BackgroundSlicingProcess *process)
+    : m_model(model)
+{
+    if (!Create(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0 /* disable wxTAB_TRAVERSAL */))
+        return;
+
+    m_canvas_widget = OpenGLManager::create_wxglcanvas(*this);
+    if (m_canvas_widget == nullptr)
+        return;
+    m_canvas = new GLCanvas3D(m_canvas_widget, bed);
+    m_canvas->set_context(wxGetApp().init_glcontext(*m_canvas_widget));
+    m_canvas->allow_multisample(OpenGLManager::can_multisample());
+    // A presentation, never an editor: no picking, moving, gizmos, selection or toolbars.
+    m_canvas->enable_picking(false);
+    m_canvas->enable_moving(false);
+    m_canvas->set_model(model);
+    m_canvas->set_process(process);
+    m_canvas->set_type(GLCanvas3D::ECanvasType::CanvasShowcase);
+    m_canvas->set_config(config);
+    m_canvas->enable_gizmos(false);
+    m_canvas->enable_selection(false);
+    m_canvas->enable_main_toolbar(false);
+    m_canvas->enable_labels(false);
+    m_canvas->enable_slope(false);
+    m_canvas->enable_assemble_view_toolbar(false);
+    m_canvas->enable_return_toolbar(false);
+    m_canvas->enable_separator_toolbar(false);
+    m_renderer = std::make_unique<ShowcaseRenderer>(*m_canvas);
+    m_renderer->set_watermark_provider([this](int w, int h, ShowcaseImage &mark, Showcase::RectI &where) {
+        return showcase_rasterize_watermark(scene().export_settings.watermark, project(), w, h, mark, where);
+    });
+
+    m_watermark_presets.load();
+
+    build_panel();
+
+    // The sash on the panel's left edge: drag it to widen the panel, double-click it to fit the panel
+    // to its contents again. The width is kept in tenths of an em, so it carries over between
+    // displays of different scaling.
+    const int em = wxGetApp().em_unit();
+    m_side_width = std::max(0, std::atoi(wxGetApp().app_config->get("showcase_panel_width").c_str()) * em / 10);
+    m_sash = new wxWindow(this, wxID_ANY, wxDefaultPosition, wxSize(std::max(4, em / 2), -1));
+    m_sash->SetCursor(wxCursor(wxCURSOR_SIZEWE));
+    m_sash->SetToolTip(_L("Drag to resize the panel. Double-click to fit it to its contents."));
+    m_sash->Bind(wxEVT_PAINT, [this](wxPaintEvent &) {
+        wxPaintDC dc(m_sash);
+        // The colours of the Plater's sidebar sash.
+        dc.SetBackground(wxBrush(wxGetApp().dark_mode() ? wxColour(38, 46, 48) : wxColour(206, 206, 206)));
+        dc.Clear();
+    });
+    m_sash->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent &e) {
+        m_sash_start_x     = m_sash->ClientToScreen(e.GetPosition()).x;
+        m_sash_start_width = m_side->GetSize().x;
+        if (!m_sash->HasCapture())
+            m_sash->CaptureMouse();
+    });
+    m_sash->Bind(wxEVT_MOTION, [this](wxMouseEvent &e) {
+        if (!m_sash->HasCapture())
+            return;
+        // The panel is on the right: dragging left widens it. It never gets narrower than its contents.
+        m_side_width = std::max(0, m_sash_start_width - (m_sash->ClientToScreen(e.GetPosition()).x - m_sash_start_x));
+        fit_side_width();
+        // Where the canvas' share stops it, remember the stop, so dragging back responds at once.
+        m_side_width = std::min(m_side_width, m_side->GetMinSize().x);
+    });
+    auto save_side_width = [this]() {
+        wxGetApp().app_config->set("showcase_panel_width", std::to_string(m_side_width * 10 / std::max(1, wxGetApp().em_unit())));
+    };
+    m_sash->Bind(wxEVT_LEFT_UP, [this, save_side_width](wxMouseEvent &) {
+        if (!m_sash->HasCapture())
+            return;
+        m_sash->ReleaseMouse();
+        save_side_width();
+    });
+    m_sash->Bind(wxEVT_MOUSE_CAPTURE_LOST, [](wxMouseCaptureLostEvent &) {});
+    m_sash->Bind(wxEVT_LEFT_DCLICK, [this, save_side_width](wxMouseEvent &) {
+        m_side_width = 0;
+        fit_side_width();
+        save_side_width();
+    });
+
+    auto *sizer = new wxBoxSizer(wxHORIZONTAL);
+    sizer->Add(m_canvas_widget, 1, wxEXPAND);
+    sizer->Add(m_sash, 0, wxEXPAND);
+    sizer->Add(m_side, 0, wxEXPAND);
+    SetSizer(sizer);
+    SetMinSize(GetSize());
+    GetSizer()->SetSizeHints(this);
+    // After the size hints: the view's own minimum stays the default panel width's.
+    fit_side_width();
+    Bind(wxEVT_SIZE, [this](wxSizeEvent &evt) {
+        fit_side_width();
+        evt.Skip();
+    });
+
+    Bind(wxEVT_IDLE, [this](wxIdleEvent &evt) {
+        evt.Skip();
+        on_idle_check();
+    });
+
+    wxGetApp().UpdateDarkUIWin(this);
+}
+
+ShowcaseView::~ShowcaseView()
+{
+    m_renderer.reset();
+    delete m_canvas;
+    delete m_canvas_widget;
+}
+
+// ------------------------------------------------------------------------------------------------
+// The scene of the current plate
+// ------------------------------------------------------------------------------------------------
+
+Showcase::Project &ShowcaseView::project() { return m_model->showcase; }
+
+int ShowcaseView::current_plate() const
+{
+    Plater *plater = wxGetApp().plater();
+    return plater != nullptr ? plater->get_partplate_list().get_curr_plate_index() : 0;
+}
+
+Showcase::Scene &ShowcaseView::scene()
+{
+    const int plate = current_plate();
+    if (Showcase::Scene *s = project().scene_for_plate(plate))
+        return *s;
+    if (m_draft_plate != plate) {
+        m_draft       = Showcase::make_scene(Showcase::PresetId::StudioWhite, plate);
+        m_draft_plate = plate;
+    }
+    return m_draft;
+}
+
+bool ShowcaseView::scene_in_project() { return project().scene_for_plate(current_plate()) != nullptr; }
+
+bool ShowcaseView::read_only() { return project().read_only(); }
+
+void ShowcaseView::commit()
+{
+    if (read_only() || scene_in_project())
+        return;
+    const int        plate = current_plate();
+    Showcase::Scene  draft = scene();
+    Showcase::Scene &s     = project().ensure_scene_for_plate(plate);
+    const std::string id   = s.id;
+    s                      = draft;
+    s.id                   = id;
+    s.plate_index          = plate;
+    project().active       = id;
+    m_draft_plate          = -1;
+    // ensure_scene_for_plate() may have moved the scenes: hand the renderer the new address.
+    m_renderer->set_scene(&scene(), &project());
+    mark_project_dirty();
+}
+
+template<class F> void ShowcaseView::edit(F &&change, bool resync)
+{
+    if (m_syncing || read_only())
+        return;
+    commit();
+    change(scene());
+    after_change(resync);
+}
+
+void ShowcaseView::after_change(bool resync)
+{
+    m_renderer->set_scene(&scene(), &project());
+    m_renderer->invalidate_watermark();
+    mark_project_dirty();
+    if (resync)
+        sync_controls();
+    else
+        update_enabled();
+    set_as_dirty();
+}
+
+void ShowcaseView::mark_project_dirty()
+{
+    if (Plater *plater = wxGetApp().plater()) {
+        plater->set_plater_dirty(true);
+        plater->update_title_dirty_status();
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Camera
+// ------------------------------------------------------------------------------------------------
+
+void ShowcaseView::apply_scene_camera()
+{
+    Camera                     &camera = wxGetApp().plater()->get_camera();
+    const Showcase::CameraView &c      = scene().camera;
+    if (c.valid) {
+        camera.set_type(c.projection == Showcase::Projection::Ortho ? Camera::EType::Ortho : Camera::EType::Perspective);
+        camera.look_at(Vec3d(c.eye[0], c.eye[1], c.eye[2]), Vec3d(c.target[0], c.target[1], c.target[2]), Vec3d(c.up[0], c.up[1], c.up[2]));
+        camera.set_zoom(c.zoom);
+    } else {
+        camera.set_type(Camera::EType::Perspective);
+        m_renderer->place_default_camera();
+    }
+    set_as_dirty();
+}
+
+void ShowcaseView::store_scene_camera(bool mark_dirty)
+{
+    if (read_only())
+        return;
+    Camera              &camera = wxGetApp().plater()->get_camera();
+    Showcase::CameraView v;
+    v.valid      = true;
+    v.projection = camera.get_type() == Camera::EType::Ortho ? Showcase::Projection::Ortho : Showcase::Projection::Perspective;
+    const Vec3d eye = camera.get_position(), target = camera.get_target(), up = camera.get_dir_up();
+    v.eye    = { eye.x(), eye.y(), eye.z() };
+    v.target = { target.x(), target.y(), target.z() };
+    v.up     = { up.x(), up.y(), up.z() };
+    v.zoom   = camera.get_zoom();
+    Showcase::Scene &s = scene();
+    if (s.camera == v)
+        return;
+    s.camera = v;
+    if (mark_dirty && scene_in_project())
+        mark_project_dirty();
+}
+
+void ShowcaseView::on_activate()
+{
+    if (m_canvas == nullptr)
+        return;
+    m_active = true;
+    Camera &camera = wxGetApp().plater()->get_camera();
+    m_saved_camera     = camera;
+    m_has_saved_camera = true;
+    // The Showcase camera is the scene's: switching it to orthographic here must not change the
+    // user's "use perspective camera" preference.
+    camera.enable_update_config_on_type_change(false);
+    m_plate = current_plate();
+    m_renderer->set_scene(&scene(), &project());
+    // The model or the print settings may have changed in Prepare: new layer heights.
+    m_renderer->invalidate_layers();
+    refresh_plates();
+    apply_scene_camera();
+    sync_controls();
+}
+
+void ShowcaseView::on_deactivate()
+{
+    if (!m_active)
+        return;
+    store_scene_camera(true);
+    m_active = false;
+    if (m_has_saved_camera) {
+        // The editing views get their camera (and the preference hook) back exactly as they left it.
+        wxGetApp().plater()->get_camera() = m_saved_camera;
+        m_has_saved_camera = false;
+    }
+}
+
+void ShowcaseView::on_project_changed()
+{
+    m_draft_plate = -1;
+    if (m_renderer == nullptr)
+        return;
+    m_renderer->set_scene(&scene(), &project());
+    m_renderer->invalidate_images();
+    if (m_active) {
+        m_plate = current_plate();
+        refresh_plates();
+        apply_scene_camera();
+        sync_controls();
+    }
+}
+
+void ShowcaseView::on_idle_check()
+{
+    if (!m_active || m_renderer == nullptr)
+        return;
+    if (current_plate() != m_plate)
+        on_plate_switched();
+    else if (m_plates != nullptr && int(m_plates->GetCount()) != wxGetApp().plater()->get_partplate_list().get_plate_count())
+        refresh_plates();
+    else
+        refresh_materials(false);   // the filament list may have changed in the sidebar
+}
+
+// Another plate became current: its own scene, with its own camera.
+void ShowcaseView::on_plate_switched()
+{
+    // Keep the camera of the plate being left (current_plate() already names the new one).
+    const int new_plate = current_plate();
+    if (!read_only()) {
+        Showcase::Scene *old = project().scene_for_plate(m_plate);
+        if (old == nullptr && m_draft_plate == m_plate)
+            old = &m_draft;
+        if (old != nullptr) {
+            Camera              &camera = wxGetApp().plater()->get_camera();
+            Showcase::CameraView v;
+            v.valid      = true;
+            v.projection = camera.get_type() == Camera::EType::Ortho ? Showcase::Projection::Ortho : Showcase::Projection::Perspective;
+            const Vec3d eye = camera.get_position(), target = camera.get_target(), up = camera.get_dir_up();
+            v.eye    = { eye.x(), eye.y(), eye.z() };
+            v.target = { target.x(), target.y(), target.z() };
+            v.up     = { up.x(), up.y(), up.z() };
+            v.zoom   = camera.get_zoom();
+            old->camera = v;
+        }
+    }
+    m_plate = new_plate;
+    m_renderer->set_scene(&scene(), &project());
+    refresh_plates();
+    apply_scene_camera();
+    sync_controls();
+}
+
+// ------------------------------------------------------------------------------------------------
+// Canvas
+// ------------------------------------------------------------------------------------------------
+
+void ShowcaseView::set_as_dirty()
+{
+    if (m_canvas != nullptr)
+        m_canvas->set_as_dirty();
+}
+
+bool ShowcaseView::is_reload_delayed() const { return m_canvas != nullptr && m_canvas->is_reload_delayed(); }
+
+void ShowcaseView::reload_scene(bool refresh_immediately, bool force_full_scene_refresh)
+{
+    if (m_canvas == nullptr)
+        return;
+    if (!m_canvas->is_initialized())
+        m_canvas->render(true);
+    if (m_renderer != nullptr)
+        m_renderer->invalidate_layers();
+    m_canvas->reload_scene(refresh_immediately, force_full_scene_refresh);
+}
+
+void ShowcaseView::on_change_color_mode(bool is_dark)
+{
+    if (m_canvas != nullptr)
+        m_canvas->on_change_color_mode(is_dark);
+    wxGetApp().UpdateDarkUIWin(this);
+    Refresh();
+    if (m_sash != nullptr)
+        m_sash->Refresh();
+}
+
+// ------------------------------------------------------------------------------------------------
+// The side panel
+// ------------------------------------------------------------------------------------------------
+
+void ShowcaseView::build_panel()
+{
+    const int em = wxGetApp().em_unit();
+    // 32 em is the default width; fit_side_width() widens the panel to its widest row and to what the
+    // user drags the sash to. Sideways scrolling only shows where the window is too narrow for that.
+    m_side = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxSize(32 * em, -1), wxVSCROLL | wxHSCROLL);
+    m_side->SetScrollRate(em, em);
+    auto *col = new wxBoxSizer(wxVERTICAL);
+
+    auto header = [this, col, em](const wxString &title) {
+        auto *t = new wxStaticText(m_side, wxID_ANY, title);
+        t->SetFont(wxGetApp().bold_font());
+        col->Add(t, 0, wxLEFT | wxRIGHT | wxTOP, em);
+        col->Add(new wxStaticLine(m_side), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em / 2);
+    };
+    wxFlexGridSizer *grid = nullptr;
+    auto begin_grid = [&grid, col, em]() {
+        grid = new wxFlexGridSizer(2, em / 2, em);
+        grid->AddGrowableCol(1, 1);
+        col->Add(grid, 0, wxEXPAND | wxALL, em);
+    };
+    auto row = [this, &grid](const wxString &label, wxWindow *ctrl) {
+        grid->Add(new wxStaticText(m_side, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(ctrl, 1, wxEXPAND);
+    };
+    auto choice = [this](const wxArrayString &items) {
+        auto *c = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, items);
+        return c;
+    };
+    // For names the user picks (plates, saved views, watermark presets): a set width, so a long name
+    // is cut short instead of widening the panel. Wider when the panel is.
+    auto named_choice = [this, em]() { return new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxSize(12 * em, -1)); };
+    auto slider = [this](int value, int lo, int hi) { return new wxSlider(m_side, wxID_ANY, value, lo, hi); };
+    auto picker = [this]() { return new wxColourPickerCtrl(m_side, wxID_ANY, *wxWHITE); };
+
+    m_notice = new wxStaticText(m_side, wxID_ANY, "");
+    m_notice->Hide();
+    col->Add(m_notice, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em);
+
+    // --- Scene ---------------------------------------------------------------------------------
+    header(_L("Scene"));
+    begin_grid();
+    m_plates = named_choice();
+    row(_L("Plate"), m_plates);
+    wxArrayString presets;
+    for (Showcase::PresetId id : Showcase::builtin_presets())
+        presets.Add(showcase_preset_name(id));
+    m_presets = choice(presets);
+    m_presets->SetToolTip(_L("Applies the preset's backdrop, floor, lights and environment. The camera, the materials and the export settings stay."));
+    row(_L("Look"), m_presets);
+    m_hide_plate = new wxCheckBox(m_side, wxID_ANY, _L("Hide the printer's plate"));
+    m_hide_wipe_tower = new wxCheckBox(m_side, wxID_ANY, _L("Hide the prime tower"));
+    grid->AddSpacer(0);
+    grid->Add(m_hide_plate);
+    grid->AddSpacer(0);
+    grid->Add(m_hide_wipe_tower);
+
+    // --- Background ----------------------------------------------------------------------------
+    header(_L("Background"));
+    begin_grid();
+    wxArrayString bg_types;
+    bg_types.Add(_L("Solid colour"));
+    bg_types.Add(_L("Vertical gradient"));
+    bg_types.Add(_L("Radial gradient"));
+    bg_types.Add(_L("Image"));
+    bg_types.Add(_L("Transparent"));
+    bg_types.Add(_L("Environment"));
+    m_bg_type = choice(bg_types);
+    m_bg_type->SetToolTip(_L("Environment: the scene's lighting environment behind the model, softened by Blur."));
+    row(_L("Type"), m_bg_type);
+    m_bg_color1 = picker();
+    row(_L("Colour"), m_bg_color1);
+    m_bg_color2 = picker();
+    row(_L("Second colour"), m_bg_color2);
+    m_bg_image = new wxButton(m_side, wxID_ANY, _L("Choose image..."));
+    row(_L("Image"), m_bg_image);
+    wxArrayString fits;
+    fits.Add(_L("Fill"));
+    fits.Add(_L("Fit"));
+    fits.Add(_L("Tile"));
+    m_bg_fit = choice(fits);
+    row(_L("Image fit"), m_bg_fit);
+    m_bg_blur = slider(0, 0, 100);
+    m_bg_blur->SetToolTip(_L("Softens the image or the environment behind the model, like a shallow depth of field."));
+    row(_L("Blur"), m_bg_blur);
+
+    // --- Floor ---------------------------------------------------------------------------------
+    header(_L("Floor"));
+    begin_grid();
+    wxArrayString floor_types;
+    floor_types.Add(_L("None"));
+    floor_types.Add(_L("Shadow only"));
+    floor_types.Add(_L("Solid colour"));
+    floor_types.Add(_L("Grid"));
+    floor_types.Add(_L("Photo"));
+    floor_types.Add(_L("My picture"));
+    m_floor_type = choice(floor_types);
+    m_floor_type->SetToolTip(_L("Shadow only: an invisible floor that shows just the shadow, over any background."));
+    row(_L("Type"), m_floor_type);
+    m_floor_color = picker();
+    row(_L("Colour"), m_floor_color);
+    m_floor_shadow = slider(45, 0, 100);
+    row(_L("Shadow"), m_floor_shadow);
+    m_floor_grid = new wxSpinCtrl(m_side, wxID_ANY, "10", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 100, 10);
+    row(_L("Grid spacing (mm)"), m_floor_grid);
+    wxArrayString floor_textures;
+    for (const Showcase::FloorTextureInfo &f : showcase_floors().floors)
+        floor_textures.Add(showcase_floor_name(f));
+    m_floor_texture = choice(floor_textures);
+    row(_L("Photo"), m_floor_texture);
+    m_floor_image = new wxButton(m_side, wxID_ANY, _L("Choose picture..."));
+    row(_L("Picture"), m_floor_image);
+    m_floor_tile = new wxSpinCtrl(m_side, wxID_ANY, "300", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 10, 5000, 300);
+    m_floor_tile->SetToolTip(_L("How large one copy of the photo or picture is on the floor."));
+    row(_L("Tile size (mm)"), m_floor_tile);
+    m_floor_reflection = slider(0, 0, 100);
+    m_floor_reflection->SetToolTip(_L("A glossy floor: how strongly the model is mirrored in it."));
+    row(_L("Reflection"), m_floor_reflection);
+    m_floor_contact = slider(60, 0, 100);
+    m_floor_contact->SetToolTip(_L("The soft shade right under the model where it touches the floor. Kept in transparent exports."));
+    row(_L("Contact shadow"), m_floor_contact);
+
+    // --- Light ---------------------------------------------------------------------------------
+    header(_L("Light"));
+    begin_grid();
+    m_light_fixed = new wxCheckBox(m_side, wxID_ANY, _L("Fixed in the scene"));
+    m_light_fixed->SetToolTip(_L("The light stays put when you orbit, so the shadows do too. Off: the light follows the camera."));
+    grid->AddSpacer(0);
+    grid->Add(m_light_fixed);
+    m_light_azimuth = slider(225, 0, 359);
+    row(_L("Direction"), m_light_azimuth);
+    m_light_elevation = slider(55, 5, 90);
+    row(_L("Height"), m_light_elevation);
+    m_shadows = new wxCheckBox(m_side, wxID_ANY, _L("Shadows"));
+    grid->AddSpacer(0);
+    grid->Add(m_shadows);
+    m_shadow_darkness = slider(35, 0, 100);
+    row(_L("Shadow darkness"), m_shadow_darkness);
+    m_ssao = new wxCheckBox(m_side, wxID_ANY, _L("Ambient occlusion"));
+    grid->AddSpacer(0);
+    grid->Add(m_ssao);
+    wxArrayString rigs;
+    for (Showcase::LightRig rig : Showcase::light_rigs())
+        rigs.Add(showcase_light_rig_name(rig));
+    m_light_rig = choice(rigs);
+    m_light_rig->SetToolTip(_L("Places the fill and rim lights around the key light and sets how soft the shadows are."));
+    row(_L("Setup"), m_light_rig);
+    m_key_intensity = slider(100, 0, 300);
+    row(_L("Key brightness"), m_key_intensity);
+    m_key_temperature = slider(56, 20, 100);
+    m_key_temperature->SetToolTip(_L("Colour of the key light: warm on the left, cool on the right (2000 to 10000 K)."));
+    row(_L("Key colour"), m_key_temperature);
+    m_fill = new wxCheckBox(m_side, wxID_ANY, _L("Fill light"));
+    m_fill->SetToolTip(_L("A soft light from the other side that lifts the shadows."));
+    m_fill_intensity = slider(35, 0, 300);
+    grid->Add(m_fill, 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(m_fill_intensity, 1, wxEXPAND);
+    m_rim = new wxCheckBox(m_side, wxID_ANY, _L("Rim light"));
+    m_rim->SetToolTip(_L("A light from behind that outlines the model."));
+    m_rim_intensity = slider(45, 0, 300);
+    grid->Add(m_rim, 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(m_rim_intensity, 1, wxEXPAND);
+    m_shadow_softness = slider(10, 5, 40);
+    row(_L("Shadow softness"), m_shadow_softness);
+    wxArrayString envs;
+    envs.Add(_L("None"));
+    for (const Showcase::EnvironmentInfo &e : showcase_environments().environments)
+        envs.Add(showcase_environment_name(e));
+    m_environment = choice(envs);
+    m_environment->SetToolTip(_L("Light and reflections from a photographed surrounding."));
+    row(_L("Environment"), m_environment);
+    m_env_intensity = slider(70, 0, 300);
+    row(_L("Environment brightness"), m_env_intensity);
+    m_env_rotation = slider(0, 0, 359);
+    row(_L("Environment rotation"), m_env_rotation);
+    m_exposure = slider(0, -30, 30);
+    m_exposure->SetToolTip(_L("Brightness of the model and the environment, in tenths of a stop."));
+    row(_L("Exposure"), m_exposure);
+
+    // --- Materials (D4) -----------------------------------------------------------------------
+    header(_L("Materials"));
+    begin_grid();
+    wxArrayString layer_lines;
+    layer_lines.Add(_L("Off"));
+    layer_lines.Add(_L("Subtle"));
+    layer_lines.Add(_L("Real"));
+    layer_lines.Add(_L("Exaggerated"));
+    m_layer_lines = choice(layer_lines);
+    m_layer_lines->SetToolTip(_L("Printed layer lines on the model at its real layer height. A layer is often thinner than a pixel "
+                                 "when the whole model is in view, so the lines show in close-ups and in large, high quality exports."));
+    row(_L("Layer lines"), m_layer_lines);
+    {
+        auto *hint = new wxStaticText(m_side, wxID_ANY, _L("The finish of each filament is guessed from its preset name and type. "
+                                                           "Pick another one where the guess is wrong."));
+        hint->Wrap(29 * em);
+        col->Add(hint, 0, wxLEFT | wxRIGHT, em);
+    }
+    begin_grid();
+    m_mat_grid = grid;
+
+    // --- Camera --------------------------------------------------------------------------------
+    header(_L("Camera"));
+    begin_grid();
+    wxArrayString projections;
+    projections.Add(_L("Perspective"));
+    projections.Add(_L("Orthographic"));
+    m_projection = choice(projections);
+    row(_L("Projection"), m_projection);
+    m_views = named_choice();
+    row(_L("Saved views"), m_views);
+    {
+        auto *buttons = new wxBoxSizer(wxHORIZONTAL);
+        auto *frame   = new wxButton(m_side, wxID_ANY, _L("Frame model"));
+        auto *save    = new wxButton(m_side, wxID_ANY, _L("Save view..."));
+        m_view_delete = new wxButton(m_side, wxID_ANY, _L("Delete view"));
+        buttons->Add(frame, 0, wxRIGHT, em / 2);
+        buttons->Add(save, 0, wxRIGHT, em / 2);
+        buttons->Add(m_view_delete, 0);
+        col->Add(buttons, 0, wxLEFT | wxRIGHT, em);
+        frame->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+            m_renderer->frame_model();
+            store_scene_camera(true);
+        });
+        save->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_save_view(); });
+        m_view_delete->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_delete_view(); });
+    }
+
+    // --- Export --------------------------------------------------------------------------------
+    header(_L("Export"));
+    begin_grid();
+    wxArrayString sizes;
+    for (const ShowcaseSizePreset &p : SHOWCASE_SIZES)
+        sizes.Add(wxString::Format("%s (%d x %d)", _(p.name), p.w, p.h));
+    sizes.Add(_L("Custom"));
+    m_size = choice(sizes);
+    row(_L("Size"), m_size);
+    m_width  = new wxSpinCtrl(m_side, wxID_ANY, "1920", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, Showcase::MIN_EXPORT_SIDE,
+                              Showcase::MAX_EXPORT_SIDE, 1920);
+    m_height = new wxSpinCtrl(m_side, wxID_ANY, "1080", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, Showcase::MIN_EXPORT_SIDE,
+                              Showcase::MAX_EXPORT_SIDE, 1080);
+    row(_L("Width (px)"), m_width);
+    row(_L("Height (px)"), m_height);
+    wxArrayString qualities;
+    qualities.Add(_L("Draft"));
+    qualities.Add(_L("High"));
+    qualities.Add(_L("Best"));
+    m_quality = choice(qualities);
+    m_quality->SetToolTip(_L("Draft renders at the image size, High at twice and Best at three times, then scales down. "
+                             "Very large images use less where the graphics card cannot."));
+    row(_L("Quality"), m_quality);
+    wxArrayString formats;
+    formats.Add("PNG");
+    formats.Add("JPEG");
+    formats.Add(_L("WebP (lossless)"));
+    m_format = choice(formats);
+    row(_L("Format"), m_format);
+    m_use_as_cover = new wxCheckBox(m_side, wxID_ANY, _L("Use as project cover"));
+    m_use_as_cover->SetToolTip(_L("Each export also becomes the cover picture of the project file. Off unless you turn it on."));
+    grid->AddSpacer(0);
+    grid->Add(m_use_as_cover);
+    {
+        auto *buttons = new wxBoxSizer(wxHORIZONTAL);
+        m_export = new wxButton(m_side, wxID_ANY, _L("Export image..."));
+        m_copy   = new wxButton(m_side, wxID_ANY, _L("Copy to clipboard"));
+        buttons->Add(m_export, 0, wxRIGHT, em / 2);
+        buttons->Add(m_copy, 0);
+        col->Add(buttons, 0, wxLEFT | wxRIGHT, em);
+        m_status = new wxStaticText(m_side, wxID_ANY, "");
+        col->Add(m_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em);
+        m_export->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_export(false); });
+        m_copy->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_export(true); });
+    }
+
+    // --- Watermark (D12) -----------------------------------------------------------------------
+    header(_L("Watermark"));
+    begin_grid();
+    m_wm_enabled = new wxCheckBox(m_side, wxID_ANY, _L("Add my watermark"));
+    m_wm_enabled->SetToolTip(_L("Your own logo and/or text on the exported images. Off unless you turn it on."));
+    grid->AddSpacer(0);
+    grid->Add(m_wm_enabled);
+    m_wm_presets = named_choice();
+    row(_L("Preset"), m_wm_presets);
+    m_wm_text = new wxTextCtrl(m_side, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+    row(_L("Text"), m_wm_text);
+    // A set width too: the button shows the font's name, which can be long.
+    m_wm_font = new wxFontPickerCtrl(m_side, wxID_ANY, wxFont(wxFontInfo(12)), wxDefaultPosition, wxSize(12 * em, -1),
+                                     wxFNTP_FONTDESC_AS_LABEL);
+    row(_L("Font"), m_wm_font);
+    m_wm_color = picker();
+    row(_L("Text colour"), m_wm_color);
+    {
+        auto *logo   = new wxBoxSizer(wxHORIZONTAL);
+        m_wm_logo        = new wxButton(m_side, wxID_ANY, _L("Choose logo..."));
+        m_wm_logo_remove = new wxButton(m_side, wxID_ANY, _L("Remove"));
+        logo->Add(m_wm_logo, 1, wxRIGHT, em / 2);
+        logo->Add(m_wm_logo_remove, 0);
+        grid->Add(new wxStaticText(m_side, wxID_ANY, _L("Logo")), 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(logo, 1, wxEXPAND);
+    }
+    wxArrayString anchors;
+    anchors.Add(_L("Top left"));
+    anchors.Add(_L("Top"));
+    anchors.Add(_L("Top right"));
+    anchors.Add(_L("Left"));
+    anchors.Add(_L("Centre"));
+    anchors.Add(_L("Right"));
+    anchors.Add(_L("Bottom left"));
+    anchors.Add(_L("Bottom"));
+    anchors.Add(_L("Bottom right"));
+    m_wm_anchor = choice(anchors);
+    row(_L("Position"), m_wm_anchor);
+    m_wm_size = slider(6, 1, 30);
+    row(_L("Size"), m_wm_size);
+    m_wm_opacity = slider(85, 0, 100);
+    row(_L("Opacity"), m_wm_opacity);
+    m_wm_margin = slider(3, 0, 20);
+    row(_L("Margin"), m_wm_margin);
+    {
+        auto *buttons = new wxBoxSizer(wxHORIZONTAL);
+        auto *save    = new wxButton(m_side, wxID_ANY, _L("Save as preset..."));
+        m_wm_preset_delete = new wxButton(m_side, wxID_ANY, _L("Delete preset"));
+        buttons->Add(save, 0, wxRIGHT, em / 2);
+        buttons->Add(m_wm_preset_delete, 0);
+        col->Add(buttons, 0, wxLEFT | wxRIGHT | wxBOTTOM, em);
+        save->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_save_watermark_preset(); });
+        m_wm_preset_delete->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_delete_watermark_preset(); });
+    }
+
+    m_side->SetSizer(col);
+    m_side->FitInside();
+
+    // --- Handlers ------------------------------------------------------------------------------
+    m_plates->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        if (m_syncing)
+            return;
+        const int sel = m_plates->GetSelection();
+        if (sel >= 0 && sel != current_plate())
+            wxGetApp().plater()->select_plate(sel);
+        // on_idle_check() picks the new plate up.
+    });
+    m_presets->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_presets->GetSelection();
+        if (sel < 0)
+            return;
+        edit([sel](Showcase::Scene &s) { Showcase::apply_preset(s, Showcase::builtin_presets()[size_t(sel)]); }, true);
+        m_renderer->invalidate_images();
+    });
+    m_hide_plate->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.floor.hide_plate = m_hide_plate->GetValue(); }); });
+    m_hide_wipe_tower->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.floor.hide_wipe_tower = m_hide_wipe_tower->GetValue(); });
+    });
+
+    m_bg_type->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_bg_type->GetSelection();
+        if (sel < 0)
+            return;
+        if (Showcase::BackgroundType(sel) == Showcase::BackgroundType::Image && scene().background.image.empty()) {
+            on_choose_background_image();
+            sync_controls();
+            return;
+        }
+        edit([sel](Showcase::Scene &s) { s.background.type = Showcase::BackgroundType(sel); });
+    });
+    m_bg_color1->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
+        edit([this](Showcase::Scene &s) { s.background.color1 = showcase_hex(m_bg_color1->GetColour()); });
+    });
+    m_bg_color2->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
+        edit([this](Showcase::Scene &s) { s.background.color2 = showcase_hex(m_bg_color2->GetColour()); });
+    });
+    m_bg_image->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_choose_background_image(); });
+    m_bg_fit->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_bg_fit->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.background.fit = Showcase::ImageFit(sel); });
+    });
+    m_bg_blur->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.background.blur = float(m_bg_blur->GetValue()) / 100.f; });
+    });
+
+    m_floor_type->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_floor_type->GetSelection();
+        if (sel < 0)
+            return;
+        if (Showcase::FloorType(sel) == Showcase::FloorType::Image && scene().floor.image.empty()) {
+            on_choose_floor_image();
+            sync_controls();
+            return;
+        }
+        edit([sel](Showcase::Scene &s) { s.floor.type = Showcase::FloorType(sel); }, true);
+    });
+    m_floor_texture->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_floor_texture->GetSelection();
+        const std::vector<Showcase::FloorTextureInfo> &floors = showcase_floors().floors;
+        if (sel < 0 || size_t(sel) >= floors.size())
+            return;
+        const std::string id = floors[size_t(sel)].id;
+        edit([&id](Showcase::Scene &s) {
+            s.floor.texture = id;
+            s.floor.type    = Showcase::FloorType::Texture;
+        }, true);
+    });
+    m_floor_image->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_choose_floor_image(); });
+    m_floor_tile->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent &) {
+        const float mm = float(m_floor_tile->GetValue());
+        edit([mm](Showcase::Scene &s) {
+            if (s.floor.type == Showcase::FloorType::Image)
+                s.floor.texture_size = mm;
+            else if (const Showcase::FloorTextureInfo *f = showcase_floors().find(s.floor.texture))
+                s.floor.texture_scale = std::clamp(mm / f->tile_mm, 0.1f, 10.f);
+        });
+    });
+    m_floor_reflection->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.floor.reflection = float(m_floor_reflection->GetValue()) / 100.f; });
+    });
+    m_floor_contact->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.floor.contact_shadow = float(m_floor_contact->GetValue()) / 100.f; });
+    });
+    m_floor_color->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
+        edit([this](Showcase::Scene &s) { s.floor.color = showcase_hex(m_floor_color->GetColour()); });
+    });
+    m_floor_shadow->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.floor.shadow_strength = float(m_floor_shadow->GetValue()) / 100.f; });
+    });
+    m_floor_grid->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent &) {
+        edit([this](Showcase::Scene &s) { s.floor.grid_spacing = float(m_floor_grid->GetValue()); });
+    });
+
+    m_light_fixed->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.world_fixed = m_light_fixed->GetValue(); }); });
+    m_light_azimuth->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.azimuth_deg = float(m_light_azimuth->GetValue()); });
+    });
+    m_light_elevation->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.elevation_deg = float(m_light_elevation->GetValue()); });
+    });
+    m_shadows->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.shadows = m_shadows->GetValue(); }); });
+    m_shadow_darkness->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.shadow_intensity = float(m_shadow_darkness->GetValue()) / 100.f; });
+    });
+    m_ssao->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.ssao = m_ssao->GetValue(); }); });
+    m_light_rig->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_light_rig->GetSelection();
+        const std::vector<Showcase::LightRig> rigs = Showcase::light_rigs();
+        if (sel >= 0 && size_t(sel) < rigs.size())
+            edit([&rigs, sel](Showcase::Scene &s) { Showcase::apply_light_rig(s.lighting, rigs[size_t(sel)]); }, true);
+    });
+    m_key_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.key_intensity = float(m_key_intensity->GetValue()) / 100.f; });
+    });
+    m_key_temperature->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.key_temperature = float(m_key_temperature->GetValue()) * 100.f; });
+    });
+    m_fill->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.fill = m_fill->GetValue(); }); });
+    m_fill_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.fill_intensity = float(m_fill_intensity->GetValue()) / 100.f; });
+    });
+    m_rim->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.rim = m_rim->GetValue(); }); });
+    m_rim_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.rim_intensity = float(m_rim_intensity->GetValue()) / 100.f; });
+    });
+    m_shadow_softness->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.shadow_softness = float(m_shadow_softness->GetValue()) / 10.f; });
+    });
+    m_environment->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_environment->GetSelection();
+        const std::vector<Showcase::EnvironmentInfo> &envs = showcase_environments().environments;
+        if (sel < 0)
+            return;
+        const std::string id = sel == 0 || size_t(sel) > envs.size() ? std::string() : envs[size_t(sel - 1)].id;
+        edit([&id](Showcase::Scene &s) { s.lighting.environment = id; });
+    });
+    m_env_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.env_intensity = float(m_env_intensity->GetValue()) / 100.f; });
+    });
+    m_env_rotation->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.env_rotation_deg = float(m_env_rotation->GetValue()); });
+    });
+    m_exposure->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.lighting.exposure = float(m_exposure->GetValue()) / 10.f; });
+    });
+    m_layer_lines->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_layer_lines->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.materials.layer_lines = Showcase::LayerLines(sel); });
+    });
+
+    m_projection->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        if (m_syncing || read_only())
+            return;
+        const bool ortho = m_projection->GetSelection() == 1;
+        wxGetApp().plater()->get_camera().set_type(ortho ? Camera::EType::Ortho : Camera::EType::Perspective);
+        commit();
+        store_scene_camera(true);
+        set_as_dirty();
+    });
+    m_views->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        if (m_syncing)
+            return;
+        const int sel = m_views->GetSelection();
+        const std::vector<Showcase::CameraView> &views = scene().views;
+        if (sel < 0 || size_t(sel) >= views.size())
+            return;
+        Showcase::CameraView keep = scene().camera;
+        scene().camera            = views[size_t(sel)];
+        apply_scene_camera();
+        if (scene_in_project() && !(keep == scene().camera))
+            mark_project_dirty();
+        update_enabled();
+    });
+
+    m_size->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_size->GetSelection();
+        if (sel < 0 || sel >= SHOWCASE_SIZE_COUNT) {
+            update_enabled();
+            return;
+        }
+        edit([sel](Showcase::Scene &s) {
+            s.export_settings.width  = SHOWCASE_SIZES[sel].w;
+            s.export_settings.height = SHOWCASE_SIZES[sel].h;
+        }, true);
+    });
+    m_width->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.width = Showcase::clamp_export_side(m_width->GetValue()); });
+    });
+    m_height->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.height = Showcase::clamp_export_side(m_height->GetValue()); });
+    });
+    m_quality->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_quality->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.export_settings.quality = Showcase::Quality(sel); });
+    });
+    m_format->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_format->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.export_settings.format = Showcase::ImageFormat(sel); });
+    });
+    m_use_as_cover->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.use_as_cover = m_use_as_cover->GetValue(); });
+    });
+
+    m_wm_enabled->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.watermark.enabled = m_wm_enabled->GetValue(); });
+    });
+    m_wm_presets->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) { on_apply_watermark_preset(); });
+    m_wm_text->Bind(wxEVT_TEXT, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.watermark.text = into_u8(m_wm_text->GetValue()); });
+    });
+    m_wm_font->Bind(wxEVT_FONTPICKER_CHANGED, [this](wxFontPickerEvent &) {
+        const wxFont f = m_wm_font->GetSelectedFont();
+        edit([&f](Showcase::Scene &s) {
+            s.export_settings.watermark.font_face = into_u8(f.GetFaceName());
+            s.export_settings.watermark.bold      = f.GetWeight() >= wxFONTWEIGHT_BOLD;
+        });
+    });
+    m_wm_color->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.watermark.text_color = showcase_hex(m_wm_color->GetColour()); });
+    });
+    m_wm_logo->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_choose_logo(); });
+    m_wm_logo_remove->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { edit([](Showcase::Scene &s) { s.export_settings.watermark.logo.clear(); }); });
+    m_wm_anchor->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_wm_anchor->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.export_settings.watermark.anchor = Showcase::Anchor(sel); });
+    });
+    m_wm_size->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.watermark.size_pct = float(m_wm_size->GetValue()); });
+    });
+    m_wm_opacity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.watermark.opacity = float(m_wm_opacity->GetValue()) / 100.f; });
+    });
+    m_wm_margin->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.export_settings.watermark.margin_pct = float(m_wm_margin->GetValue()); });
+    });
+}
+
+void ShowcaseView::refresh_plates()
+{
+    if (m_plates == nullptr)
+        return;
+    const bool syncing = m_syncing;
+    m_syncing          = true;
+    const int count    = wxGetApp().plater()->get_partplate_list().get_plate_count();
+    m_plates->Clear();
+    for (int i = 0; i < count; ++i)
+        m_plates->Append(wxString::Format(_L("Plate %d"), i + 1));
+    m_plates->SetSelection(std::min(current_plate(), count - 1));
+    m_syncing = syncing;
+}
+
+void ShowcaseView::refresh_views()
+{
+    const bool syncing = m_syncing;
+    m_syncing          = true;
+    m_views->Clear();
+    int selected = -1;
+    const Showcase::Scene &s = scene();
+    for (size_t i = 0; i < s.views.size(); ++i) {
+        m_views->Append(wxString::FromUTF8(s.views[i].name.empty() ? std::to_string(i + 1) : s.views[i].name));
+        if (s.camera == s.views[i] || (s.views[i].eye == s.camera.eye && s.views[i].target == s.camera.target && s.views[i].zoom == s.camera.zoom))
+            selected = int(i);
+    }
+    m_views->SetSelection(selected);
+    m_syncing = syncing;
+}
+
+void ShowcaseView::refresh_watermark_presets()
+{
+    const bool syncing = m_syncing;
+    m_syncing          = true;
+    m_wm_presets->Clear();
+    m_wm_presets->Append(_L("(none)"));
+    int selected = 0;
+    const std::string &current = scene().export_settings.watermark.name;
+    for (const WatermarkPresets::Preset &p : m_watermark_presets.presets()) {
+        m_wm_presets->Append(wxString::FromUTF8(p.name));
+        if (!current.empty() && p.name == current)
+            selected = int(m_wm_presets->GetCount()) - 1;
+    }
+    m_wm_presets->SetSelection(selected);
+    m_syncing = syncing;
+}
+
+void ShowcaseView::refresh_materials(bool sync_selection)
+{
+    if (m_mat_grid == nullptr)
+        return;
+    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    std::string signature;
+    for (const ShowcaseFilament &f : filaments)
+        signature += f.preset_name + "\n" + f.type + "\n" + f.color + "\n";
+    const bool rebuild = signature != m_mat_signature || m_mat_choices.size() != filaments.size();
+    if (!rebuild && !sync_selection)
+        return;
+    const bool syncing = m_syncing;
+    m_syncing          = true;
+    if (rebuild) {
+        m_mat_signature = signature;
+        m_mat_grid->Clear(true);
+        m_mat_choices.clear();
+        const int em = wxGetApp().em_unit();
+        for (const ShowcaseFilament &f : filaments) {
+            auto *label  = new wxBoxSizer(wxHORIZONTAL);
+            auto *swatch = new wxPanel(m_side, wxID_ANY, wxDefaultPosition, wxSize(int(1.4 * em), int(1.4 * em)), wxBORDER_SIMPLE);
+            swatch->SetBackgroundColour(showcase_wx_colour(f.color));
+            label->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+            wxString name = f.preset_name.empty() ? wxString::Format(_L("Filament %d"), f.slot)
+                                                  : wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.preset_name));
+            auto *text = new wxStaticText(m_side, wxID_ANY, name, wxDefaultPosition, wxSize(14 * em, -1), wxST_ELLIPSIZE_END);
+            text->SetToolTip(wxString::FromUTF8(f.preset_name + (f.type.empty() ? std::string() : " (" + f.type + ")")));
+            label->Add(text, 1, wxALIGN_CENTER_VERTICAL);
+            m_mat_grid->Add(label, 0, wxALIGN_CENTER_VERTICAL);
+
+            wxArrayString items;
+            items.Add(wxString::Format(_L("Auto: %s"), showcase_finish_name(f.inferred)));
+            for (Showcase::Finish finish : Showcase::all_finishes())
+                items.Add(showcase_finish_name(finish));
+            auto *c = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, items);
+            const int slot = f.slot;
+            c->Bind(wxEVT_CHOICE, [this, c, slot](wxCommandEvent &) {
+                const int sel = c->GetSelection();
+                const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
+                edit([&finishes, sel, slot](Showcase::Scene &s) {
+                    if (sel <= 0 || size_t(sel) > finishes.size())
+                        s.materials.set_override(slot, nullptr);
+                    else
+                        s.materials.set_override(slot, &finishes[size_t(sel - 1)]);
+                });
+            });
+            m_mat_grid->Add(c, 1, wxEXPAND);
+            m_mat_choices.push_back(c);
+        }
+        wxGetApp().UpdateDarkUIWin(m_side);
+        fit_side_width();
+        m_side->Layout();
+    }
+    const Showcase::Scene &s = scene();
+    const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
+    for (size_t i = 0; i < m_mat_choices.size(); ++i) {
+        const Showcase::Finish *o = s.materials.override_for(int(i) + 1);
+        int sel = 0;
+        if (o != nullptr)
+            sel = int(std::find(finishes.begin(), finishes.end(), *o) - finishes.begin()) + 1;
+        m_mat_choices[i]->SetSelection(sel);
+    }
+    m_syncing = syncing;
+}
+
+void ShowcaseView::sync_controls()
+{
+    if (m_side == nullptr)
+        return;
+    m_syncing = true;
+    const Showcase::Scene &s = scene();
+
+    m_notice->Show(read_only() || !ShowcaseRenderer::is_supported());
+    if (!ShowcaseRenderer::is_supported())
+        m_notice->SetLabel(_L("Showcase needs OpenGL 3.2 or newer to export images. This graphics driver only shows the preview."));
+    else if (read_only())
+        m_notice->SetLabel(_L("These scenes were saved by a newer version of EdgeSlicer. They are shown as saved and cannot be changed here."));
+    m_notice->Wrap(30 * wxGetApp().em_unit());
+
+    m_presets->SetSelection(-1);
+    Showcase::PresetId preset;
+    if (Showcase::from_string(s.preset_base, preset)) {
+        const std::vector<Showcase::PresetId> presets = Showcase::builtin_presets();
+        if (auto it = std::find(presets.begin(), presets.end(), preset); it != presets.end())
+            m_presets->SetSelection(int(it - presets.begin()));
+    }
+    m_hide_plate->SetValue(s.floor.hide_plate);
+    m_hide_wipe_tower->SetValue(s.floor.hide_wipe_tower);
+
+    m_bg_type->SetSelection(int(s.background.type));
+    m_bg_color1->SetColour(showcase_wx_colour(s.background.color1));
+    m_bg_color2->SetColour(showcase_wx_colour(s.background.color2));
+    m_bg_fit->SetSelection(int(s.background.fit));
+    m_bg_blur->SetValue(int(std::lround(s.background.blur * 100.f)));
+
+    m_floor_type->SetSelection(int(s.floor.type));
+    m_floor_color->SetColour(showcase_wx_colour(s.floor.color));
+    m_floor_shadow->SetValue(int(std::lround(s.floor.shadow_strength * 100.f)));
+    m_floor_grid->SetValue(int(std::lround(s.floor.grid_spacing)));
+    {
+        const std::vector<Showcase::FloorTextureInfo> &floors = showcase_floors().floors;
+        int sel = -1;
+        for (size_t i = 0; i < floors.size(); ++i)
+            if (floors[i].id == s.floor.texture)
+                sel = int(i);
+        m_floor_texture->SetSelection(sel);
+        const Showcase::FloorTextureInfo *f = showcase_floors().find(s.floor.texture);
+        const float tile = s.floor.type == Showcase::FloorType::Image ? s.floor.texture_size :
+                                                                         (f != nullptr ? f->tile_mm * s.floor.texture_scale : 300.f);
+        m_floor_tile->SetValue(std::clamp(int(std::lround(tile)), 10, 5000));
+    }
+    m_floor_reflection->SetValue(int(std::lround(s.floor.reflection * 100.f)));
+    m_floor_contact->SetValue(int(std::lround(s.floor.contact_shadow * 100.f)));
+
+    m_light_fixed->SetValue(s.lighting.world_fixed);
+    int az = int(std::lround(s.lighting.azimuth_deg)) % 360;
+    if (az < 0)
+        az += 360;
+    m_light_azimuth->SetValue(az);
+    m_light_elevation->SetValue(std::clamp(int(std::lround(s.lighting.elevation_deg)), 5, 90));
+    m_shadows->SetValue(s.lighting.shadows);
+    m_shadow_darkness->SetValue(int(std::lround(s.lighting.shadow_intensity * 100.f)));
+    m_ssao->SetValue(s.lighting.ssao);
+    m_light_rig->SetSelection(-1);   // an action, not a state
+    m_key_intensity->SetValue(int(std::lround(s.lighting.key_intensity * 100.f)));
+    m_key_temperature->SetValue(std::clamp(int(std::lround(s.lighting.key_temperature / 100.f)), 20, 100));
+    m_fill->SetValue(s.lighting.fill);
+    m_fill_intensity->SetValue(int(std::lround(s.lighting.fill_intensity * 100.f)));
+    m_rim->SetValue(s.lighting.rim);
+    m_rim_intensity->SetValue(int(std::lround(s.lighting.rim_intensity * 100.f)));
+    m_shadow_softness->SetValue(std::clamp(int(std::lround(s.lighting.shadow_softness * 10.f)), 5, 40));
+    {
+        const std::vector<Showcase::EnvironmentInfo> &envs = showcase_environments().environments;
+        int sel = 0;
+        for (size_t i = 0; i < envs.size(); ++i)
+            if (envs[i].id == s.lighting.environment)
+                sel = int(i) + 1;
+        m_environment->SetSelection(sel);
+    }
+    m_env_intensity->SetValue(int(std::lround(s.lighting.env_intensity * 100.f)));
+    int env_rot = int(std::lround(s.lighting.env_rotation_deg)) % 360;
+    if (env_rot < 0)
+        env_rot += 360;
+    m_env_rotation->SetValue(env_rot);
+    m_exposure->SetValue(std::clamp(int(std::lround(s.lighting.exposure * 10.f)), -30, 30));
+    m_layer_lines->SetSelection(int(s.materials.layer_lines));
+    refresh_materials(true);
+
+    m_projection->SetSelection(wxGetApp().plater()->get_camera().get_type() == Camera::EType::Ortho ? 1 : 0);
+    refresh_views();
+
+    int size_sel = SHOWCASE_SIZE_COUNT;
+    for (int i = 0; i < SHOWCASE_SIZE_COUNT; ++i)
+        if (SHOWCASE_SIZES[i].w == s.export_settings.width && SHOWCASE_SIZES[i].h == s.export_settings.height)
+            size_sel = i;
+    m_size->SetSelection(size_sel);
+    m_width->SetValue(s.export_settings.width);
+    m_height->SetValue(s.export_settings.height);
+    m_quality->SetSelection(int(s.export_settings.quality));
+    m_format->SetSelection(int(s.export_settings.format));
+    m_use_as_cover->SetValue(s.export_settings.use_as_cover);
+
+    const Showcase::Watermark &wm = s.export_settings.watermark;
+    m_wm_enabled->SetValue(wm.enabled);
+    refresh_watermark_presets();
+    m_wm_text->ChangeValue(wxString::FromUTF8(wm.text));
+    wxFontInfo font_info(12);
+    if (!wm.font_face.empty())
+        font_info.FaceName(wxString::FromUTF8(wm.font_face));
+    font_info.Bold(wm.bold);
+    m_wm_font->SetSelectedFont(wxFont(font_info));
+    m_wm_color->SetColour(showcase_wx_colour(wm.text_color));
+    m_wm_anchor->SetSelection(int(wm.anchor));
+    m_wm_size->SetValue(std::clamp(int(std::lround(wm.size_pct)), 1, 30));
+    m_wm_opacity->SetValue(int(std::lround(wm.opacity * 100.f)));
+    m_wm_margin->SetValue(std::clamp(int(std::lround(wm.margin_pct)), 0, 20));
+
+    m_syncing = false;
+    update_enabled();
+    fit_side_width();
+    m_side->Layout();
+}
+
+void ShowcaseView::fit_side_width()
+{
+    if (m_side == nullptr || m_side->GetSizer() == nullptr)
+        return;
+    const int em = wxGetApp().em_unit();
+    // Measured, not assumed: labels and controls come out wider in macOS's system font, and in longer
+    // languages, than an em count tuned on Windows allows for. The vertical scroll bar takes its
+    // share too where it is not an overlay.
+    const int content = m_side->GetSizer()->CalcMin().x + wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, m_side);
+    int       width   = std::max({ 32 * em, content, m_side_width });
+    // Leave the canvas some room; in a window too narrow for both the panel scrolls sideways.
+    if (const int client = GetClientSize().x; client > 0)
+        width = std::min(width, std::max(client - (m_sash != nullptr ? m_sash->GetSize().x : 0) - 24 * em, 20 * em));
+    if (width != m_side->GetMinSize().x) {
+        m_side->SetMinSize(wxSize(width, -1));
+        Layout();
+    }
+    m_side->FitInside();
+}
+
+void ShowcaseView::update_enabled()
+{
+    if (m_side == nullptr)
+        return;
+    const Showcase::Scene &s        = scene();
+    const bool             editable = !read_only();
+    const bool             gradient = s.background.type == Showcase::BackgroundType::VerticalGradient ||
+                          s.background.type == Showcase::BackgroundType::RadialGradient;
+    const bool image    = s.background.type == Showcase::BackgroundType::Image;
+    const bool floor_on = s.floor.hide_plate;
+
+    for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
+                                                          m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
+                                                          m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
+                                                          m_exposure, m_layer_lines, m_use_as_cover })
+        w->Enable(editable);
+    for (wxChoice *c : m_mat_choices)
+        c->Enable(editable);
+    m_fill_intensity->Enable(editable && s.lighting.fill);
+    m_rim_intensity->Enable(editable && s.lighting.rim);
+    m_env_intensity->Enable(editable && !s.lighting.environment.empty());
+    m_env_rotation->Enable(editable && !s.lighting.environment.empty());
+    m_bg_blur->Enable(editable && (image || s.background.type == Showcase::BackgroundType::Environment));
+    const bool photo   = s.floor.type == Showcase::FloorType::Texture;
+    const bool picture = s.floor.type == Showcase::FloorType::Image;
+    m_floor_texture->Enable(editable && floor_on && !showcase_floors().floors.empty());
+    m_floor_image->Enable(editable && floor_on);
+    m_floor_tile->Enable(editable && floor_on && (photo || picture));
+    m_floor_reflection->Enable(editable && floor_on && s.floor.type != Showcase::FloorType::None);
+    m_floor_contact->Enable(editable && floor_on && s.floor.type != Showcase::FloorType::None);
+    m_bg_color1->Enable(editable && s.background.type != Showcase::BackgroundType::Transparent);
+    m_bg_color2->Enable(editable && gradient);
+    m_bg_image->Enable(editable && image);
+    m_bg_fit->Enable(editable && image);
+    m_floor_type->Enable(editable && floor_on);
+    m_floor_color->Enable(editable && floor_on &&
+                          (s.floor.type == Showcase::FloorType::Solid || s.floor.type == Showcase::FloorType::Grid));
+    m_floor_shadow->Enable(editable && floor_on && s.floor.type != Showcase::FloorType::None);
+    m_floor_grid->Enable(editable && floor_on && s.floor.type == Showcase::FloorType::Grid);
+    m_light_azimuth->Enable(editable && s.lighting.world_fixed);
+    m_light_elevation->Enable(editable && s.lighting.world_fixed);
+    m_shadow_darkness->Enable(editable && s.lighting.shadows);
+    m_views->Enable(!s.views.empty());
+    m_view_delete->Enable(editable && m_views->GetSelection() >= 0);
+    const bool custom = m_size->GetSelection() == SHOWCASE_SIZE_COUNT;
+    m_width->Enable(editable && custom);
+    m_height->Enable(editable && custom);
+    const bool supported = ShowcaseRenderer::is_supported();
+    m_export->Enable(supported);
+    m_copy->Enable(supported);
+    const bool wm = editable && s.export_settings.watermark.enabled;
+    for (wxWindow *w : std::initializer_list<wxWindow *>{ m_wm_presets, m_wm_text, m_wm_font, m_wm_color, m_wm_logo, m_wm_anchor, m_wm_size,
+                                                          m_wm_opacity, m_wm_margin })
+        w->Enable(wm);
+    m_wm_logo_remove->Enable(wm && !s.export_settings.watermark.logo.empty());
+    m_wm_preset_delete->Enable(m_wm_presets->GetSelection() > 0);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Images, views, presets
+// ------------------------------------------------------------------------------------------------
+
+bool ShowcaseView::add_image_file(const std::string &path, int max_side, bool always_png, std::string &sha)
+{
+    std::vector<uint8_t> bytes;
+    std::string          ext, error;
+    if (!showcase_load_image_file(path, max_side, always_png, bytes, ext, error)) {
+        show_error(this, _L("The image could not be used.") + "\n" + wxString::FromUTF8(error));
+        return false;
+    }
+    sha = project().add_image(std::move(bytes), ext);
+    // Design section 5: warn when the project's pictures grow large.
+    size_t total = 0;
+    for (const auto &it : project().images)
+        total += it.second.bytes.size();
+    if (total > size_t(20) * 1024 * 1024)
+        show_info(this, _L("The pictures in this project's Showcase scenes are larger than 20 MB in total. "
+                           "They are saved in the project file."),
+                  _L("Showcase"));
+    return !sha.empty();
+}
+
+void ShowcaseView::on_choose_background_image()
+{
+    if (read_only())
+        return;
+    wxFileDialog dlg(this, _L("Choose a background image"), "", "", _L("Images") + " (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    commit();
+    std::string sha;
+    if (!add_image_file(into_u8(dlg.GetPath()), 4096, false, sha))
+        return;
+    edit([&sha](Showcase::Scene &s) {
+        s.background.image = sha;
+        s.background.type  = Showcase::BackgroundType::Image;
+    }, true);
+    m_renderer->invalidate_images();
+}
+
+void ShowcaseView::on_choose_floor_image()
+{
+    if (read_only())
+        return;
+    wxFileDialog dlg(this, _L("Choose a floor picture"), "", "", _L("Images") + " (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    commit();
+    std::string sha;
+    if (!add_image_file(into_u8(dlg.GetPath()), 4096, false, sha))
+        return;
+    edit([&sha](Showcase::Scene &s) {
+        s.floor.image = sha;
+        s.floor.type  = Showcase::FloorType::Image;
+    }, true);
+    m_renderer->invalidate_images();
+}
+
+void ShowcaseView::on_choose_logo()
+{
+    if (read_only())
+        return;
+    wxFileDialog dlg(this, _L("Choose a logo"), "", "", _L("Images") + " (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    commit();
+    std::string sha;
+    if (!add_image_file(into_u8(dlg.GetPath()), 1024, true, sha))
+        return;
+    edit([&sha](Showcase::Scene &s) { s.export_settings.watermark.logo = sha; }, true);
+}
+
+void ShowcaseView::on_save_view()
+{
+    if (read_only())
+        return;
+    const Showcase::Scene &s = scene();
+    wxTextEntryDialog dlg(this, _L("Name of the view:"), _L("Save view"), wxString::Format(_L("View %d"), int(s.views.size()) + 1));
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const std::string name = into_u8(dlg.GetValue());
+    commit();
+    store_scene_camera(false);
+    edit([&name](Showcase::Scene &sc) {
+        Showcase::CameraView v = sc.camera;
+        v.name                 = name;
+        for (Showcase::CameraView &existing : sc.views)
+            if (existing.name == name) {
+                existing = v;
+                return;
+            }
+        sc.views.push_back(v);
+    }, true);
+}
+
+void ShowcaseView::on_delete_view()
+{
+    const int sel = m_views->GetSelection();
+    if (sel < 0)
+        return;
+    edit([sel](Showcase::Scene &s) {
+        if (size_t(sel) < s.views.size())
+            s.views.erase(s.views.begin() + sel);
+    }, true);
+}
+
+void ShowcaseView::on_apply_watermark_preset()
+{
+    if (m_syncing || read_only())
+        return;
+    const int sel = m_wm_presets->GetSelection();
+    if (sel <= 0) {
+        update_enabled();
+        return;
+    }
+    const WatermarkPresets::Preset *p = m_watermark_presets.find(into_u8(m_wm_presets->GetString(sel)));
+    if (p == nullptr)
+        return;
+    commit();
+    std::string logo;
+    if (!p->logo.empty())
+        logo = project().add_image(p->logo, p->logo_ext);
+    edit([p, &logo](Showcase::Scene &s) {
+        Showcase::Watermark wm = p->watermark;
+        wm.name                = p->name;
+        wm.enabled             = true;
+        wm.logo                = logo;
+        s.export_settings.watermark = wm;
+    }, true);
+}
+
+void ShowcaseView::on_save_watermark_preset()
+{
+    const Showcase::Watermark &wm = scene().export_settings.watermark;
+    wxTextEntryDialog dlg(this, _L("Name of the watermark preset:"), _L("Save watermark preset"),
+                          wm.name.empty() ? _L("My watermark") : wxString::FromUTF8(wm.name));
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const std::string name = into_u8(dlg.GetValue());
+    if (name.empty())
+        return;
+    WatermarkPresets::Preset p;
+    p.name              = name;
+    p.watermark         = wm;
+    p.watermark.name    = name;
+    p.watermark.enabled = true;
+    if (const Showcase::ImageBlob *blob = project().find_image(wm.logo)) {
+        p.logo     = blob->bytes;
+        p.logo_ext = blob->ext;
+    } else
+        p.watermark.logo.clear();
+    m_watermark_presets.put(std::move(p));
+    std::string error;
+    if (!m_watermark_presets.save(&error)) {
+        show_error(this, _L("The watermark preset could not be saved.") + "\n" + wxString::FromUTF8(error));
+        return;
+    }
+    if (!read_only() && scene().export_settings.watermark.name != name)
+        edit([&name](Showcase::Scene &s) { s.export_settings.watermark.name = name; }, true);
+    else
+        refresh_watermark_presets();
+    update_enabled();
+}
+
+void ShowcaseView::on_delete_watermark_preset()
+{
+    const int sel = m_wm_presets->GetSelection();
+    if (sel <= 0)
+        return;
+    m_watermark_presets.remove(into_u8(m_wm_presets->GetString(sel)));
+    std::string error;
+    if (!m_watermark_presets.save(&error))
+        show_error(this, _L("The watermark presets could not be saved.") + "\n" + wxString::FromUTF8(error));
+    refresh_watermark_presets();
+    update_enabled();
+}
+
+// ------------------------------------------------------------------------------------------------
+// Export
+// ------------------------------------------------------------------------------------------------
+
+void ShowcaseView::write_project_cover(const wxImage &image)
+{
+    // The project's cover picture is the one the Project page's "set as cover" writes:
+    // <auxiliary folder>/.thumbnails/thumbnail_3mf.png, saved with the project (D10). The printer
+    // thumbnails next to it are left alone.
+    if (!image.IsOk() || image.GetWidth() <= 0 || image.GetHeight() <= 0)
+        return;
+    const int side = std::min(image.GetWidth(), image.GetHeight());
+    wxImage   cover = image.GetSubImage(wxRect((image.GetWidth() - side) / 2, (image.GetHeight() - side) / 2, side, side));
+    cover.Rescale(_3MF_COVER_SIZE.GetWidth(), _3MF_COVER_SIZE.GetHeight(), wxIMAGE_QUALITY_HIGH);
+    boost::system::error_code ec;
+    const boost::filesystem::path dir = boost::filesystem::path(m_model->get_auxiliary_file_temp_path()) / ".thumbnails";
+    boost::filesystem::create_directories(dir, ec);
+    const std::string file = (dir / "thumbnail_3mf.png").string();
+    if (ec || !cover.SaveFile(wxString::FromUTF8(file), wxBITMAP_TYPE_PNG)) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the project cover could not be written to " << file;
+        return;
+    }
+    mark_project_dirty();
+    BOOST_LOG_TRIVIAL(info) << "Showcase: the export is the project cover now (" << file << ")";
+}
+
+void ShowcaseView::on_export(bool to_clipboard)
+{
+    if (m_renderer == nullptr || !ShowcaseRenderer::is_supported())
+        return;
+    // Exporting a scene keeps it: its camera and settings are saved with the project.
+    commit();
+    store_scene_camera(true);
+    const Showcase::Scene &s    = scene();
+    const bool             jpeg = s.export_settings.format == Showcase::ImageFormat::JPEG;
+    const bool             webp = s.export_settings.format == Showcase::ImageFormat::WebP;
+
+    wxString path;
+    if (!to_clipboard) {
+        wxString name = wxGetApp().plater()->get_project_name();
+        if (name.empty())
+            name = "showcase";
+        name += wxString::Format("_plate%d", current_plate() + 1);
+        name += jpeg ? ".jpg" : webp ? ".webp" : ".png";
+        wxFileDialog dlg(this, _L("Export Showcase image"), wxString::FromUTF8(wxGetApp().app_config->get_last_dir()), name,
+                         jpeg ? "JPEG (*.jpg)|*.jpg;*.jpeg" : webp ? "WebP (*.webp)|*.webp" : "PNG (*.png)|*.png", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        path = dlg.GetPath();
+    }
+
+    ShowcaseImage image;
+    std::string   report;
+    {
+        wxBusyCursor busy;
+        m_status->SetLabel(_L("Rendering..."));
+        m_status->Update();
+        const bool ok = m_renderer->render_export(image, report);
+        if (!ok || image.empty()) {
+            m_status->SetLabel("");
+            show_error(this, _L("The image could not be rendered.") + "\n" + wxString::FromUTF8(report));
+            set_as_dirty();
+            return;
+        }
+        showcase_apply_watermark(image, s.export_settings.watermark, project());
+    }
+    set_as_dirty();
+
+    const bool transparent = !jpeg && !to_clipboard && s.background.type == Showcase::BackgroundType::Transparent;
+    // WebP: our own lossless encoder (no WebP library in the dependencies), alpha included.
+    std::vector<uint8_t> webp_bytes;
+    if (webp && !to_clipboard) {
+        if (!transparent)
+            Showcase::flatten_rgba(image.rgba, 255, 255, 255);
+        webp_bytes = Showcase::encode_webp_lossless(image.rgba, image.width, image.height);
+    }
+    if (jpeg || to_clipboard)
+        Showcase::flatten_rgba(image.rgba, 255, 255, 255);
+    wxImage    out(image.width, image.height, false);
+    if (transparent)
+        out.InitAlpha();
+    unsigned char *rgb   = out.GetData();
+    unsigned char *alpha = transparent ? out.GetAlpha() : nullptr;
+    for (size_t i = 0; i < size_t(image.width) * size_t(image.height); ++i) {
+        rgb[i * 3 + 0] = image.rgba[i * 4 + 0];
+        rgb[i * 3 + 1] = image.rgba[i * 4 + 1];
+        rgb[i * 3 + 2] = image.rgba[i * 4 + 2];
+        if (alpha)
+            alpha[i] = image.rgba[i * 4 + 3];
+    }
+
+    // D10: opt-in only.
+    if (s.export_settings.use_as_cover)
+        write_project_cover(out);
+
+    if (to_clipboard) {
+        if (wxTheClipboard->Open()) {
+            wxTheClipboard->SetData(new wxBitmapDataObject(wxBitmap(out)));
+            wxTheClipboard->Close();
+            m_status->SetLabel(wxString::Format(_L("Copied a %d x %d image."), image.width, image.height));
+        } else
+            show_error(this, _L("The clipboard is in use by another program."));
+        return;
+    }
+
+    bool saved = false;
+    if (webp) {
+        boost::nowide::ofstream f(into_u8(path), std::ios::binary | std::ios::trunc);
+        if (f && !webp_bytes.empty()) {
+            f.write(reinterpret_cast<const char *>(webp_bytes.data()), std::streamsize(webp_bytes.size()));
+            saved = f.good();
+        }
+    } else {
+        if (jpeg)
+            out.SetOption(wxIMAGE_OPTION_QUALITY, s.export_settings.jpeg_quality);
+        saved = out.SaveFile(path, jpeg ? wxBITMAP_TYPE_JPEG : wxBITMAP_TYPE_PNG);
+    }
+    if (!saved) {
+        m_status->SetLabel("");
+        show_error(this, _L("The image could not be saved."));
+        return;
+    }
+    wxGetApp().app_config->update_skein_dir(into_u8(wxFileName(path).GetPath()));
+    m_status->SetLabel(wxString::Format(_L("Saved %s (%d x %d)."), wxFileName(path).GetFullName(), image.width, image.height));
+    m_status->Wrap(30 * wxGetApp().em_unit());
+    fit_side_width();
+    BOOST_LOG_TRIVIAL(info) << "Showcase: exported " << image.width << "x" << image.height << " to " << into_u8(path);
+}
+
+} // namespace GUI
+} // namespace Slic3r

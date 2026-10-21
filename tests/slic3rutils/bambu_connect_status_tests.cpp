@@ -2,8 +2,11 @@
 
 #include <ctime>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 #include "slic3r/Utils/BambuConnectStatus.hpp"
 
 using namespace Slic3r;
@@ -114,6 +117,30 @@ TEST_CASE("snapshot JSON round-trips trays and nozzles", "[BambuConnectStatus]")
     CHECK(out.trays.at(254).opt<ConfigOptionStrings>("tray_name")->values == std::vector<std::string>{ "Ext" });
     CHECK(out.extruders == in.extruders);
     CHECK(same_content(in, out));
+}
+
+TEST_CASE("snapshot keeps an H2C's AMS HT next to its two AMS units", "[BambuConnectStatus]")
+{
+    // Trays keyed as Sidebar::build_filament_ams_list keys them (BambuExtruderMap::ams_list_entry):
+    // AMS 0 and 1 (four slots each) and an AMS HT (ams 128), the H2C that lost its HT on sync.
+    Snapshot s = sample_snapshot(1'800'000'000);
+    s.printer_model = "Bambu Lab H2C";
+    s.trays.clear();
+    const std::vector<std::pair<std::string, int>> units{ { "0", 4 }, { "1", 4 }, { "128", 1 } };
+    for (const auto &unit : units)
+        for (int slot = 0; slot < unit.second; ++slot) {
+            const BambuExtruderMap::AmsListEntry e = BambuExtruderMap::ams_list_entry(unit.first, std::to_string(slot));
+            REQUIRE(e.key >= 0);
+            s.trays.emplace(e.key, tray("GFA00", "#123456", e.tray_name));
+        }
+    REQUIRE(s.trays.size() == 9);
+
+    Snapshot out;
+    REQUIRE(snapshot_from_json(snapshot_to_json(s), out));
+    REQUIRE(out.trays.size() == 9);
+    CHECK(out.trays == s.trays);
+    CHECK(out.trays.at(128 * 4).opt<ConfigOptionStrings>("tray_name")->values == std::vector<std::string>{ "HT-A" });
+    CHECK(out.trays.at(4).opt<ConfigOptionStrings>("tray_name")->values == std::vector<std::string>{ "B1" });
 }
 
 TEST_CASE("snapshot keeps other option types and survives odd input", "[BambuConnectStatus]")
