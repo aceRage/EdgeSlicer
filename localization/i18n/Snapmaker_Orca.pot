@@ -5059,6 +5059,9 @@ msgstr ""
 msgid "No printers."
 msgstr ""
 
+msgid "No available printers"
+msgstr ""
+
 msgid "Loading file list..."
 msgstr ""
 
