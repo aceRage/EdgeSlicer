@@ -12,6 +12,7 @@
 #include "PlatePrintHistoryRecorder.hpp"
 #include "Plater.hpp"
 #include "RemoteAccess.hpp"
+#include "RemoteControl.hpp" // speaks_sdcp
 #include "SelectMachine.hpp" // CloudTaskNozzleId
 #include "SpoolmanDialog.hpp" // deduct_after_send_async
 #include "Jobs/PrintJob.hpp" // PrintPrepareData
@@ -25,6 +26,8 @@
 #include "slic3r/Utils/MoonRaker.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
+#include "slic3r/Utils/PrintHostDeviceStatus.hpp"
+#include "slic3r/Utils/PrinterStorage.hpp"
 #include "slic3r/Utils/Spoolman.hpp"
 
 #include <boost/filesystem.hpp>
@@ -495,6 +498,28 @@ static std::pair<int, std::string> prepare_bambu(const Request& req, PartPlate* 
     return { 200, "" };
 }
 
+// A print-host print that may land on a QIDI with a QIDI Box. The desktop's send dialog reads the
+// Box and sends value_t<n> before the start; nobody is at a dialog here, so run_host() does the
+// same read and the material-first auto-match, and refuses to start rather than let the printer
+// feed what its last print left in value_t<n> (an ASA slot for a PLA plate). Any Moonraker-speaking
+// target is asked - a QIDI saved under another model's preset is still a QIDI - and one whose
+// model can carry a Box is refused the start when it cannot be asked. Every other target is
+// untouched.
+static void arm_qidi_guard(Prepared& p, PrintHostDevices::Device target, const std::string& preset_model,
+                           std::vector<SnapmakerLan::FileFilament> filaments)
+{
+    if (target.printer_model.empty())
+        target.printer_model = preset_model;
+    const bool model_box = PrintHostDevices::qidi_box_capable_model(target.printer_model) ||
+                           PrintHostDevices::qidi_box_capable_model(preset_model);
+    if (!model_box && !PrintHostDevices::speaks_moonraker(target.host_type))
+        return;
+    p.qidi_guard     = true;
+    p.qidi_model_box = model_box;
+    p.qidi_device    = target;
+    p.file_filaments = std::move(filaments);
+}
+
 // The sliced file's filaments, the way the Device page's own sw_GetFileFilamentMapping reads them:
 // the project's colours and types, and which slots this plate's slice result actually used.
 static std::vector<SnapmakerLan::FileFilament> file_filaments_of(PartPlate* plate)
@@ -715,6 +740,16 @@ static std::pair<int, std::string> prepare_host(const Request& req, PartPlate* p
     p->upload.source_path  = source;
     p->upload.upload_path  = fs::path(name);
     p->upload.post_action  = (want_print && !p->two_step) ? PrintHostPostUploadAction::StartPrint : PrintHostPostUploadAction::None;
+    // A print on what may be a QIDI with a QIDI Box: run_host() reads the Box and maps it first.
+    if (want_print && p->kind == "printhost") {
+        PrintHostDevices::Device target;
+        if (!p->device_id.empty())
+            PrintHostDevices::find(p->model_key, p->device_id, target);
+        else
+            target = PrintHostDevices::from_config(cfg);
+        auto* model_opt = cfg.option<ConfigOptionString>("printer_model");
+        arm_qidi_guard(*p, target, model_opt ? model_opt->value : std::string(), file_filaments_of(plate));
+    }
     out                    = p;
     return { 200, "" };
 }
@@ -1259,9 +1294,10 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
     auto url   = std::make_shared<std::string>();
     auto hname = std::make_shared<std::string>();
     auto tmodel = std::make_shared<std::string>(); // the target's printer model, for a reprint to another printer
+    auto qdev   = std::make_shared<PrintHostDevices::Device>(); // the target as a device, for the QIDI Box guard
     auto rc    = std::make_shared<std::pair<int, std::string>>(200, "");
     const std::string device = printer.compare(0, 3, "ph:") == 0 ? printer.substr(3) : std::string();
-    const bool ran = on_main([host, url, hname, tmodel, rc, device]() {
+    const bool ran = on_main([host, url, hname, tmodel, qdev, rc, device]() {
         PresetBundle* bundle = wxGetApp().preset_bundle;
         if (!bundle) { *rc = { 503, "no preset bundle" }; return; }
         if (!device.empty()) {
@@ -1274,6 +1310,7 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
                     *url    = d.address;
                     *hname  = d.display_name();
                     *tmodel = d.printer_model.empty() ? kv.first : d.printer_model;
+                    *qdev   = d;
                 }
             if (!*host) { *rc = { 404, "no such print-host device: ph:" + device }; return; }
             return;
@@ -1290,6 +1327,7 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         host->reset(PrintHost::get_print_host(&cfg, false));
         if (!*host) { *rc = { 500, "unsupported host type" }; return; }
         *hname = std::string((*host)->get_name());
+        *qdev  = PrintHostDevices::from_config(cfg);
     }, 20000);
     if (!ran) return { 503, "the slicer is busy" };
     if (rc->first != 200) return *rc;
@@ -1316,6 +1354,10 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
     }
     p->upload.post_action = (mode == "print" && !p->two_step) ? PrintHostPostUploadAction::StartPrint
                                                               : PrintHostPostUploadAction::None;
+    // A reprint that starts a print on what may be a QIDI with a QIDI Box: mapped from the
+    // record's filaments, exactly as a fresh send (arm_qidi_guard).
+    if (mode == "print")
+        arm_qidi_guard(*p, *qdev, *tmodel, file_filaments_of_record(j));
     out = p;
     return { 200, "" };
 }
@@ -1578,6 +1620,97 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
     sink.done(true, "", result);
 }
 
+// "http://192.0.2.106:7125/" -> ip and port, as SnapmakerLan::run_script wants them (the same
+// reading PrintHostJobQueue's script_target makes).
+static SnapmakerLan::Device script_target_of(std::string h)
+{
+    SnapmakerLan::Device d;
+    const size_t scheme = h.find("://");
+    if (scheme != std::string::npos)
+        h = h.substr(scheme + 3);
+    if (const size_t slash = h.find('/'); slash != std::string::npos)
+        h = h.substr(0, slash);
+    const size_t close = h.rfind(']');
+    const size_t colon = h.rfind(':');
+    if (colon != std::string::npos && (close != std::string::npos ? colon > close : h.find(':') == colon)) {
+        try {
+            d.port = std::stoi(h.substr(colon + 1));
+        } catch (...) {}
+        h = h.substr(0, colon);
+    }
+    d.ip = h;
+    return d;
+}
+
+// Off the GUI thread. Reads the printer the way the desktop send dialog does, maps every used
+// filament to a Box slot of its own material (the dialog's automatic choice) and decides with
+// PrintHostDevices::qidi_send_policy. Start: the Box script goes out first, as the desktop's queue
+// sends it. Anything else: false with the reason, and nothing has been sent.
+static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
+{
+    const PrintHostDevices::Status st = PrintHostDevices::probe(p.qidi_device, p.qidi_model_box ? 10 : 3);
+    std::vector<PrintHostDevices::SendFilament> filaments;
+    for (const SnapmakerLan::FileFilament& f : p.file_filaments) {
+        PrintHostDevices::SendFilament s;
+        s.index  = f.index;
+        s.type   = f.type;
+        s.colour = f.color;
+        s.used   = f.used;
+        filaments.push_back(std::move(s));
+    }
+    PrintHostDevices::QidiAutoMapping am  = PrintHostDevices::qidi_auto_mapping(st, filaments);
+    am.facts.model_may_have_box           = p.qidi_model_box;
+    const PrintHostDevices::QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(am.facts);
+
+    json q;
+    q["probe_ok"]    = am.facts.probe_ok;
+    q["qidi"]        = am.facts.qidi;
+    q["box"]         = am.facts.box_present;
+    q["use_box"]     = am.facts.use_box;
+    q["used"]        = am.facts.used_filaments;
+    q["mapped"]      = am.facts.mapped_filaments;
+    q["mapping"]     = am.mapping;
+    q["policy"]      = (int) policy;
+    result["qidi"]   = q;
+
+    if (policy == PrintHostDevices::QidiSendPolicy::NotApplicable)
+        return true;
+    if (policy != PrintHostDevices::QidiSendPolicy::Start) {
+        why = PrintHostDevices::qidi_send_refusal(policy);
+        BOOST_LOG_TRIVIAL(warning) << "RemoteSend: QIDI Box print not started (policy " << (int) policy << ", probe "
+                                   << (st.online ? "ok" : st.error) << ", used " << am.facts.used_filaments << ", mapped "
+                                   << am.facts.mapped_filaments << ")";
+        return false;
+    }
+    PrintHostDevices::QidiPrintOptions o;
+    if (am.facts.box_present)
+        o.use_box = am.facts.use_box ? 1 : 0;
+    const std::string script = PrintHostDevices::qidi_start_script(o, am.mapping);
+    if (script.empty())
+        return true;
+    std::string err;
+    if (!SnapmakerLan::run_script(script_target_of(p.host->get_host()), script, err)) {
+        why = "The printer did not accept the QIDI Box slot mapping, so nothing was sent and the print was not started: " + err;
+        BOOST_LOG_TRIVIAL(error) << "RemoteSend: " << why;
+        return false;
+    }
+    // Read it back: a script Moonraker answered "ok" for is still not proof the Box took it.
+    {
+        std::string vars, verr, mismatch;
+        if (!PrintHostDevices::query_qidi_variables(PrinterStorage::base_url_of(p.host->get_host()), vars, verr) ||
+            !PrintHostDevices::qidi_mapping_confirmed(vars, am.mapping, o.use_box, mismatch)) {
+            why = "The QIDI Box mapping could not be confirmed on the printer (" + (verr.empty() ? mismatch : verr) +
+                  "), so nothing was sent and the print was not started.";
+            BOOST_LOG_TRIVIAL(error) << "RemoteSend: " << why;
+            return false;
+        }
+    }
+    q["sent"]      = true;
+    result["qidi"] = q;
+    BOOST_LOG_TRIVIAL(warning) << "RemoteSend: sent and confirmed the QIDI Box mapping '" << am.mapping << "' (use_box " << o.use_box << ")";
+    return true;
+}
+
 static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
 {
     json result;
@@ -1593,11 +1726,22 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
     result["post_action"] = p->upload.post_action == PrintHostPostUploadAction::StartPrint ? "start_print" : "none";
     result["two_step"]    = p->two_step;
     if (p->from_record) result["record"] = p->record_id;
+    const bool starts_print = p->upload.post_action == PrintHostPostUploadAction::StartPrint || p->two_step;
+    result["qidi_guard"]    = p->qidi_guard && starts_print;
     if (p->dry_run) {
         result["dry_run"] = true;
         sink.progress(99, "dry run: nothing was sent");
         sink.done(true, "", result);
         return;
+    }
+    // A QIDI Box printer: the Box mapping goes out first, or nothing is sent at all.
+    if (p->qidi_guard && starts_print) {
+        sink.progress(1, "reading the QIDI Box");
+        std::string why;
+        if (!qidi_guard_start(*p, result, why)) {
+            sink.done(false, why, result);
+            return;
+        }
     }
     std::string error;
     sink.progress(1, "uploading " + p->upload.upload_path.string());
@@ -1814,7 +1958,31 @@ void list_hosts(json& printers, int plate)
     const bool          use_3mf = bundle->is_bbl_vendor();
     const std::string   upload_name = export_name_for(plate, use_3mf ? ".gcode.3mf" : ".gcode");
     const std::string   url         = cfg.opt_string("print_host");
-    if (!url.empty() && !bundle->use_bbl_network()) {
+    const bool          bbl         = bundle->use_bbl_network();
+    // Every saved print-host device of every printer model (<datadir>/hub/print_host_devices.json),
+    // whatever printer preset is selected: like a Bambu printer or a LAN Snapmaker, a saved printer
+    // is on the list all the time. Only the selected model's devices offer a send (the plate was
+    // sliced for that model); the rest are there to be watched. Their live state is filled in off
+    // this thread by RemoteControl::describe_hosts (Moonraker / PrusaLink probes, and the hub's own
+    // on-demand SDCP connection for an Elegoo Centauri Carbon); the rest stay "unknown".
+    PrintHostDevices::HostListing listing;
+    std::string                   model_key;
+    try {
+        PrintHostDevices::migrate_from_presets(*bundle); // every visible preset's address becomes a device
+        model_key = bbl ? std::string() : PrintHostDevices::current_model_key(*bundle);
+        listing   = PrintHostDevices::host_listing(PrintHostDevices::all_devices(), model_key, bbl ? std::string() : url,
+                                                   PrintHostDevices::from_config(cfg).host_type);
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] listing devices failed: " << e.what();
+        listing          = {};
+        listing.host_row = !url.empty() && !bbl;
+    } catch (...) {
+        listing          = {};
+        listing.host_row = !url.empty() && !bbl;
+    }
+    // The preset's own print host - unless it is one of the devices below (an Elegoo printer the
+    // preset points at is listed once, under the device's stable id).
+    if (listing.host_row) {
         std::unique_ptr<PrintHost> host(PrintHost::get_print_host(&cfg, false));
         json p;
         p["id"]          = "host";
@@ -1829,60 +1997,58 @@ void list_hosts(json& printers, int plate)
         p["upload_name"] = upload_name;
         printers.push_back(p);
     }
-    // The printers of this model, by address (<datadir>/hub/print_host_devices.json). Read-only in
-    // phase 1: the phone's Devices tab can see the whole list, but a send still goes through the one
-    // address the preset holds (the "host" entry above, which is whichever device is current).
-    // Their live state is filled in off this thread by RemoteControl::describe_hosts, which probes
-    // only the Moonraker-shaped ones through its own probe cache; the rest stay "unknown".
-    // A Bambu printer is left out: it has its own device list, in the Device tab.
-    if (!bundle->use_bbl_network()) try {
-        PrintHostDevices::migrate_from_presets(*bundle); // the preset's own address becomes device 1
-        const std::string          model_key = PrintHostDevices::current_model_key(*bundle);
-        const std::string          selected  = PrintHostDevices::last_used_id(model_key);
-        const std::string          norm_url  = PrintHostDevices::normalize_address(url);
-        for (const PrintHostDevices::Device& d : PrintHostDevices::devices(model_key)) {
-            json p;
-            p["id"]           = "ph:" + d.id;
-            p["kind"]         = "printhost";
-            p["name"]         = d.display_name();
-            p["model"]        = d.printer_model.empty() ? cfg.opt_string("printer_model") : d.printer_model;
-            p["url"]          = d.address;
-            // Same address, reduced to a bare host: what the hub's camera join compares against
-            // (RemoteHub::summary_json), same as the "connect" card below. Never set for a device
-            // whose stored address is itself empty.
-            if (!d.address.empty()) p["ip"] = SnapmakerLan::host_of(d.address);
-            p["host_type"]    = d.host_type;
-            p["device_id"]    = d.id;
-            p["model_key"]    = model_key;
-            p["alias"]        = d.alias;
+    const std::string selected = model_key.empty() ? std::string() : PrintHostDevices::last_used_id(model_key);
+    const std::string norm_url = PrintHostDevices::normalize_address(url);
+    for (const PrintHostDevices::ListedDevice& l : listing.devices) try {
+        const PrintHostDevices::Device& d = l.device;
+        json p;
+        p["id"]           = "ph:" + d.id;
+        p["kind"]         = "printhost";
+        p["name"]         = d.display_name();
+        p["url"]          = d.address;
+        // Same address, reduced to a bare host: what the hub's camera join compares against
+        // (RemoteHub::summary_json), same as the "connect" card below.
+        p["ip"]           = SnapmakerLan::host_of(d.address);
+        p["host_type"]    = d.host_type;
+        p["device_id"]    = d.id;
+        p["model_key"]    = l.model_key;
+        p["alias"]        = d.alias;
+        p["online"]       = true; // no live status until describe_hosts answers for it
+        p["status"]       = "unknown";
+        p["can_pause"]    = false;
+        p["can_resume"]   = false;
+        p["can_stop"]     = false;
+        p["print_error"]  = nullptr;
+        if (l.selected_model) {
+            p["model"] = d.printer_model.empty() ? cfg.opt_string("printer_model") : d.printer_model;
             // Not "the main printer" - the one the last plate went to, which is what the desktop
             // send dialog and the Device tab preselect. Falls back to whichever device happens to
             // carry the preset's own address when nothing was ever sent.
             const bool is_last = (!selected.empty() && d.id == selected) ||
                                  (selected.empty() && !norm_url.empty() && PrintHostDevices::normalize_address(d.address) == norm_url);
-            p["last_used"]    = is_last;
-            p["is_current"]   = is_last; // phase 1's name for it, kept so the phone's list still reads
-            p["online"]       = true;   // no live status until describe_hosts answers for it
-            p["status"]       = "unknown";
-            // A device with an address can be sent to, whatever the preset's own print_host says:
+            p["last_used"]  = is_last;
+            p["is_current"] = is_last; // phase 1's name for it, kept so the phone's list still reads
+            // A device can be sent to, whatever the preset's own print_host says:
             // POST /api/plates/{i}/send?printer=ph:<id> builds the host from this device.
-            std::unique_ptr<PrintHost> dev_host;
-            if (!d.address.empty()) {
-                DynamicPrintConfig dev_cfg = PrintHostDevices::config_for(d, cfg);
-                dev_host.reset(PrintHost::get_print_host(&dev_cfg, false));
-            }
-            p["can_upload"]   = dev_host != nullptr;
-            p["can_print"]    = dev_host && dev_host->get_post_upload_actions().has(PrintHostPostUploadAction::StartPrint) &&
-                                (dynamic_cast<Moonraker*>(dev_host.get()) == nullptr || dynamic_cast<Moonraker_Mqtt*>(dev_host.get()) != nullptr);
-            p["can_pause"]    = false;
-            p["can_resume"]   = false;
-            p["can_stop"]     = false;
-            p["print_error"]  = nullptr;
-            p["upload_name"]  = upload_name;
-            printers.push_back(p);
+            DynamicPrintConfig         dev_cfg = PrintHostDevices::config_for(d, cfg);
+            std::unique_ptr<PrintHost> dev_host(PrintHost::get_print_host(&dev_cfg, false));
+            p["can_upload"]  = dev_host != nullptr;
+            p["can_print"]   = dev_host && dev_host->get_post_upload_actions().has(PrintHostPostUploadAction::StartPrint) &&
+                               (dynamic_cast<Moonraker*>(dev_host.get()) == nullptr || dynamic_cast<Moonraker_Mqtt*>(dev_host.get()) != nullptr);
+            p["upload_name"] = upload_name;
+        } else {
+            // Another printer model's device: monitoring (and, for an Elegoo Centauri Carbon,
+            // control) only - the current plate was sliced for another printer, so no send.
+            p["model"]         = d.printer_model.empty() ? l.model_key : d.printer_model;
+            p["last_used"]     = false;
+            p["is_current"]    = false;
+            p["model_matches"] = false;
+            p["can_upload"]    = false;
+            p["can_print"]     = false;
         }
+        printers.push_back(p);
     } catch (const std::exception& e) {
-        BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] listing devices failed: " << e.what();
+        BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] listing a device failed: " << e.what();
     } catch (...) {}
 
     std::shared_ptr<PrintHost> connected;

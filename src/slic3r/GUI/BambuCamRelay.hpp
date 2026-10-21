@@ -14,6 +14,9 @@ namespace GUI {
 //   GET /bambu?ip=<printer-ip>&code=<access-code>
 // on 127.0.0.1:<port()>, speaks the printer protocol upstream, and forwards the
 // frames as multipart/x-mixed-replace (MJPEG), which renders in a plain <img>.
+//
+// The same listener also answers GET /elegoo?ip=<printer-ip> for the Elegoo Centauri Carbon's
+// camera (ElegooCamRelay.hpp).
 class BambuCamRelay
 {
 public:

@@ -101,6 +101,8 @@ public:
     bool is_rendering_as_disabled() const { return m_render_as_disabled; }
 
     bool is_horizontal() const { return m_style == wxSL_HORIZONTAL; }
+    // Edge: left edge of the horizontal slider window on a canvas this wide (for overlays to keep clear of it).
+    float horizontal_slider_left(float canvas_width) const;
     bool is_one_layer() const { return m_is_one_layer; }
     bool is_lower_at_min() const { return m_lower_value == m_min_value; }
     bool is_higher_at_max() const { return m_higher_value == m_max_value; }
@@ -128,6 +130,8 @@ public:
 
     float m_scale = 1.0;
     void set_scale(float scale = 1.0);
+    // ORCA: expose vertical slider width for right-margin alignment in the preview UI.
+    static float vertical_slider_window_width();
     void on_change_color_mode(bool is_dark);
     void set_menu_enable(bool enable = true) { m_menu_enable = enable; }
 

@@ -421,6 +421,16 @@ public:
 
     // BBS
     void generate_support_preview();
+    // Edge (support highlight, phase 5): run the object steps the support generators' overhang
+    // detection reads (slicing, perimeters and the infill preparation, which bridge removal reads)
+    // and then only that detection - normal or tree, as the object's config says - so each layer's
+    // Layer::support_overhangs holds exactly what the generator would hold up. No support layers
+    // are made. For a private Print in a background job (the support painting highlight).
+    void detect_support_overhangs_only();
+    // Edge (support highlight, phase 6): after detect_support_overhangs_only(), generate the support
+    // itself (the support step's generator, without the side stabilizers), so a tree's real contact
+    // can be read from the support layers. For the same private Print.
+    void generate_support_for_preview();
     const std::vector<VolumeSlices>& firstLayerObjSlice() const { return firstLayerObjSliceByVolume; }
     std::vector<VolumeSlices>& firstLayerObjSliceMod() { return firstLayerObjSliceByVolume; }
     const std::vector<groupedVolumeSlices>& firstLayerObjGroups() const { return firstLayerObjSliceByGroups; }
