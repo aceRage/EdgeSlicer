@@ -1038,17 +1038,19 @@ bool Moonraker_Mqtt::set_engine(const std::shared_ptr<MqttClient>& engine, std::
     }
 
     BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] setting message callback";
-    std::weak_ptr<TimeSyncManager> weak_tsm = time_sync_manager_;
+    std::weak_ptr<TimeSyncManager> weak_tsm = tsm();
     engine->SetMessageCallback([this, weak_tsm](const std::string& topic, const std::string& payload) {
-        if (weak_tsm.expired()) {
+        // Hold the manager for the whole dispatch (an expired() check alone races disconnect()).
+        const std::shared_ptr<TimeSyncManager> alive = weak_tsm.lock();
+        if (!alive) {
             BOOST_LOG_TRIVIAL(warning) << "[Moonraker_Mqtt] object destroyed, ignoring MQTTS message";
             return;
         }
         this->on_mqtt_tls_message_arrived(topic, payload);
     });
     
-    if (time_sync_manager_) {
-        time_sync_manager_->reset();
+    if (auto tsm_now = tsm()) {
+        tsm_now->reset();
         BOOST_LOG_TRIVIAL(info) << "[Moonraker_Mqtt] time sync state reset";
     }
 
@@ -1132,9 +1134,11 @@ bool Moonraker_Mqtt::ask_for_tls_info(const nlohmann::json& cn_params)
     if (!response_subscribed) {
         return false;
     }
-    std::weak_ptr<TimeSyncManager> weak_tsm_mqtt = time_sync_manager_;
+    std::weak_ptr<TimeSyncManager> weak_tsm_mqtt = tsm();
     client->SetMessageCallback([this, weak_tsm_mqtt](const std::string& topic, const std::string& payload) {
-        if (weak_tsm_mqtt.expired()) {
+        // Hold the manager for the whole dispatch (an expired() check alone races disconnect()).
+        const std::shared_ptr<TimeSyncManager> alive = weak_tsm_mqtt.lock();
+        if (!alive) {
             BOOST_LOG_TRIVIAL(warning) << "[Moonraker_Mqtt] object destroyed, ignoring MQTT message";
             return;
         }
@@ -1195,8 +1199,8 @@ bool Moonraker_Mqtt::ask_for_tls_info(const nlohmann::json& cn_params)
     }
     body["id"] = seq_id;
     
-    if (time_sync_manager_) {
-        time_sync_manager_->addTimeFields(body);
+    if (auto tsm_now = tsm()) {
+        tsm_now->addTimeFields(body);
     }
 
     std::string pub_msg = "";
@@ -1378,8 +1382,8 @@ bool Moonraker_Mqtt::connect(wxString& msg, const nlohmann::json& params) {
     wcp_loger.add_log("MQTTS connected successfully", false, "", "Moonraker_Mqtt", "info");
 
     // Reset time sync state
-    if (time_sync_manager_) {
-        time_sync_manager_->reset();
+    if (auto tsm_now = tsm()) {
+        tsm_now->reset();
     }
 
     m_sn_mtx.lock();
@@ -1396,9 +1400,11 @@ bool Moonraker_Mqtt::connect(wxString& msg, const nlohmann::json& params) {
 
     // The callback first, then the subscriptions: a message delivered right after a SUBACK must
     // find somewhere to go.
-    std::weak_ptr<TimeSyncManager> weak_tsm = time_sync_manager_;
+    std::weak_ptr<TimeSyncManager> weak_tsm = tsm();
     new_client->SetMessageCallback([this, weak_tsm](const std::string& topic, const std::string& payload) {
-        if (weak_tsm.expired()) {
+        // Hold the manager for the whole dispatch (an expired() check alone races disconnect()).
+        const std::shared_ptr<TimeSyncManager> alive = weak_tsm.lock();
+        if (!alive) {
             BOOST_LOG_TRIVIAL(warning) << "[Moonraker_Mqtt] object destroyed, ignoring MQTTS message";
             return;
         }
@@ -1427,27 +1433,37 @@ bool Moonraker_Mqtt::disconnect(wxString& msg, const nlohmann::json& params) {
     BOOST_LOG_TRIVIAL(info) << "[Moonraker_Mqtt] starting MQTT disconnect";
     wcp_loger.add_log("starting MQTT disconnect", false, "", "Moonraker_Mqtt", "info");
 
-    // Take a snapshot of the client: the shared_ptr keeps it alive for the
-    // whole teardown even if another thread disconnects/connects concurrently.
-    // This function can be entered from several threads at once (UI thread via
-    // sm_disconnect_current_machine, SSWCP worker thread, ...); previously the
-    // unsynchronized m_mqtt_client_tls.reset() below raced between them and
-    // corrupted the heap.
-    std::shared_ptr<MqttClient> client = get_mqtt_client_tls();
+    // Claim the client: move it out of the global under the lock, so exactly one caller tears
+    // this client down. disconnect() is entered from several threads (UI thread through the
+    // connection-lost CallAfter in SSWCP and sm_disconnect_current_machine, the SSWCP worker
+    // thread, ...); a second caller now finds nothing and returns, instead of disconnecting and
+    // releasing the same client again (EDGESLICER-E).
+    std::shared_ptr<MqttClient> client;
+    {
+        std::lock_guard<std::mutex> lock(m_client_mtx);
+        client = std::move(m_mqtt_client_tls);
+        m_mqtt_client_tls.reset();
+    }
     if (!client) {
         BOOST_LOG_TRIVIAL(info) << "[Moonraker_Mqtt] MQTTS client does not exist, nothing to disconnect";
         wcp_loger.add_log("MQTTS client does not exist, nothing to disconnect", false, "", "Moonraker_Mqtt", "info");
         return false;
     }
 
+    // Stop delivering messages to this object first: from here a late message_arrived() on the
+    // Paho thread is a no-op, and nothing reads time_sync_manager_ through the callback.
+    client->SetMessageCallback(nullptr);
+
+    // Disconnect and wait (MqttClient::Disconnect waits up to 5 s for the broker's answer) before
+    // the client is destroyed below.
     std::string dc_msg = "success";
     bool flag = client->Disconnect(dc_msg);
     BOOST_LOG_TRIVIAL(info) << "[Moonraker_Mqtt] MQTTS disconnect result: " << (flag ? "success" : "failed");
     wcp_loger.add_log("MQTTS disconnect result: " + std::string((flag ? "success" : "failed")), false, "", "Moonraker_Mqtt", "info");
 
-    // Release time_sync_manager_ first so weak_ptr in callbacks expires immediately,
-    // ensuring no callback thread accesses a destroyed object
-    time_sync_manager_.reset();
+    // Release time_sync_manager_ so the weak_ptr in any callback still holding a copy expires.
+    // Atomic store: a dispatch already under way reads it through tsm() on the Paho thread.
+    clear_tsm();
 
     if (flag) {
         std::lock_guard<std::mutex> cbs_lock(m_cbs_mtx);
@@ -1461,25 +1477,12 @@ bool Moonraker_Mqtt::disconnect(wxString& msg, const nlohmann::json& params) {
     BOOST_LOG_TRIVIAL(info) << "[Moonraker_Mqtt] SN reset";
     wcp_loger.add_log("SN reset", false, "", "Moonraker_Mqtt", "info");
 
-    // Stop delivering messages to this object before teardown: late
-    // message_arrived() calls on the Paho thread become no-ops.
-    client->SetMessageCallback(nullptr);
-
-    // Detach the global pointer (only if we still own this client — another
-    // thread may already have reconnected), then drop our reference OUTSIDE
-    // the lock. ~MqttClient waits for the Paho send/receive threads to exit,
-    // and those threads must never wait on m_client_mtx: destroying the client
-    // while holding the lock could deadlock against a message dispatch that
-    // publishes a new request.
-    {
-        std::lock_guard<std::mutex> lock(m_client_mtx);
-        if (m_mqtt_client_tls == client) {
-            m_mqtt_client_tls.reset();
-        }
-    }
+    // Drop our reference outside every lock. ~MqttClient waits for the Paho threads, which must
+    // never wait on m_client_mtx. If this is the last reference and we are on a Paho callback
+    // thread, MqttClient's deleter moves the destruction to a thread of its own.
     client.reset();
     BOOST_LOG_TRIVIAL(info) << "[Moonraker_Mqtt] MQTTS client reset";
-    wcp_loger.add_log("MQTTS client reset", false, "", "Moonraker_Mqtt", "info");    
+    wcp_loger.add_log("MQTTS client reset", false, "", "Moonraker_Mqtt", "info");
     return flag;
 }
 
@@ -2848,8 +2851,8 @@ bool Moonraker_Mqtt::send_to_request(
         wcp_loger.add_log("publishing to topic: " + topic, false, "", "Moonraker_Mqtt", "info");
 
         // add time sync fields
-        if (time_sync_manager_) {
-            time_sync_manager_->addTimeFields(body);
+        if (auto tsm_now = tsm()) {
+            tsm_now->addTimeFields(body);
         }
 
         std::string pub_msg = "success";
@@ -2994,8 +2997,8 @@ void Moonraker_Mqtt::on_auth_arrived(const std::string& payload) {
         return;
     }
 
-    if (time_sync_manager_) {
-        time_sync_manager_->updateFromResponse(body);
+    if (auto tsm_now = tsm()) {
+        tsm_now->updateFromResponse(body);
     }
 
     if (!body.count("id")) {
@@ -3025,8 +3028,8 @@ void Moonraker_Mqtt::on_response_arrived(const std::string& payload)
         return;
     }
 
-    if (time_sync_manager_) {
-        time_sync_manager_->updateFromResponse(body);
+    if (auto tsm_now = tsm()) {
+        tsm_now->updateFromResponse(body);
     }
 
     if (!body.count("id")) {
