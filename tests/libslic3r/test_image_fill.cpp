@@ -2320,3 +2320,74 @@ TEST_CASE("Image Fill: the box face a normal belongs to", "[imagefill][box]")
     CHECK(u == Approx(0.2f));   // +Z: u = x, v = y
     CHECK(v == Approx(0.8f));
 }
+
+// =============================================================================================
+// Phase 5a: the part's own filament where the image does not reach, and the surfaces key
+// =============================================================================================
+
+TEST_CASE("Image Fill 5a: uncoloured samples print the fallback filament", "[imagefill][imagerow][dither][p5a]")
+{
+    const std::vector<std::array<float, 3>> colors = {{0.f, 0.f, 0.f}, {1.f, 1.f, 1.f}};
+    const std::vector<int>                  ids    = {1, 2};
+    // 10 white samples, 10 with no colour (a face the projection does not point at), 10 white.
+    std::vector<ImageRowSample> samples;
+    for (int i = 0; i < 30; ++i) {
+        ImageRowSample s;
+        s.s         = float(i) * 0.4f;
+        s.has_color = i < 10 || i >= 20;
+        s.color     = {1.f, 1.f, 1.f};
+        samples.push_back(s);
+    }
+
+    SECTION("without a fallback the gap carries the previous colour (phase 3 and 4)")
+    {
+        const auto runs = image_fill_dither_segment(samples, colors, ids, 0.4f);
+        REQUIRE(runs.size() == 1);
+        CHECK(runs[0].filament_id == 2);
+    }
+    SECTION("with a fallback the gap is its own run of the fallback filament")
+    {
+        const auto runs = image_fill_dither_segment(samples, colors, ids, 0.4f, 3, {0.f, 1.f, 0.f});
+        REQUIRE(runs.size() == 3);
+        CHECK(runs[0].filament_id == 2);
+        CHECK(runs[1].filament_id == 3);
+        CHECK(runs[2].filament_id == 2);
+        CHECK(runs[1].s0 == Approx(4.0f));
+        CHECK(runs[1].s1 == Approx(7.6f));
+    }
+    SECTION("nothing coloured at all is one fallback run")
+    {
+        for (ImageRowSample &s : samples)
+            s.has_color = false;
+        const auto runs = image_fill_dither_segment(samples, colors, ids, 0.4f, 3, {0.f, 1.f, 0.f});
+        REQUIRE(runs.size() == 1);
+        CHECK(runs[0].filament_id == 3);
+    }
+    SECTION("a fallback gap shorter than the nozzle folds into its neighbour")
+    {
+        for (ImageRowSample &s : samples)
+            s.has_color = true;
+        samples[15].has_color = false;
+        const auto runs = image_fill_dither_segment(samples, colors, ids, 1.0f, 3, {0.f, 1.f, 0.f});
+        REQUIRE(runs.size() == 1);
+        CHECK(runs[0].filament_id == 2);
+    }
+}
+
+TEST_CASE("Image Fill 5a: the surfaces key round-trips and old strings read as 0", "[imagefill][p5a]")
+{
+    ImageFillParams p;
+    p.asset    = "abc";
+    p.surfaces = IMAGE_FILL_SURFACE_TOP | IMAGE_FILL_SURFACE_WALLS;
+    ImageFillParams back;
+    REQUIRE(ImageFillParams::from_string(p.to_string(), back));
+    CHECK(back.surfaces == 3);
+    CHECK(back == p);
+
+    ImageFillParams legacy;
+    legacy.asset = "abc";
+    const std::string s = legacy.to_string();
+    CHECK(s.find("rs=") == std::string::npos);   // a default params string is unchanged
+    REQUIRE(ImageFillParams::from_string(s, back));
+    CHECK(back.surfaces == 0);
+}

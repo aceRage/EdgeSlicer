@@ -912,7 +912,10 @@ bool verify_update_print_object_regions(
                 return false;
             const PrintObjectRegions::VolumeRegion &parent_region   = layer_range.volume_regions[region.parent];
             PrintRegionConfig                       cfg             = parent_region.region->config();
-            cfg.wall_filament.value    = region.extruder_id;
+            // Image Row Phase 5a: mirrors generate_print_object_regions() - an ImageWeighted row
+            // bound to the parent's wall_filament keeps that virtual id here too.
+            if (! solid_infill_filament_is_image_row(mixed_mgr, cfg.wall_filament.value, num_physical_filaments))
+                cfg.wall_filament.value = region.extruder_id;
             // Image Row Phase 3: mirrors generate_print_object_regions() - an ImageWeighted row
             // bound to the parent's solid_infill_filament keeps that virtual id here.
             if (! solid_infill_filament_is_image_row(mixed_mgr, cfg.solid_infill_filament.value, num_physical_filaments))
@@ -1227,7 +1230,18 @@ static PrintObjectRegions* generate_print_object_regions(
                     (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
                     mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
                     PrintRegionConfig cfg = parent_region.region->config();
-                    cfg.wall_filament.value    = painted_extruder_id;
+                    // Image Row Phase 5a: the same rule for the WALLS. A row bound to this part's
+                    // wall_filament samples the image along the outer wall at nozzle resolution,
+                    // which is finer than the facet paint that made this painted region; keeping
+                    // the virtual id is what lets ImageRowWalls.cpp find the row on the painted
+                    // regions that own the walls near the painted faces. What the row does not
+                    // colour still prints the painted id: image_row_base_filament() looks this
+                    // painted region's extruder up, so inner walls keep the paint.
+                    const bool keep_image_row_wall =
+                        solid_infill_filament_is_image_row(mixed_mgr, cfg.wall_filament.value, num_physical_filaments);
+                    if (! keep_image_row_wall)
+                        cfg.wall_filament.value = painted_extruder_id;
+                    const int expected_wall_filament = cfg.wall_filament.value;
                     // Image Row Phase 3: an ImageWeighted row bound to this part's own
                     // solid_infill_filament outranks the paint for TOP SOLID INFILL - the row
                     // samples the same image at nozzle resolution, which is strictly finer
@@ -1255,7 +1269,7 @@ static PrintObjectRegions* generate_print_object_regions(
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
                     PrintRegion *painted_region = get_create_region(std::move(cfg));
-                    if (painted_region->config().wall_filament.value != painted_extruder_id ||
+                    if (painted_region->config().wall_filament.value != expected_wall_filament ||
                         painted_region->config().solid_infill_filament.value != expected_solid_infill_filament ||
                         painted_region->config().sparse_infill_filament.value != expected_sparse_infill_filament) {
                         BOOST_LOG_TRIVIAL(warning) << "Painted region filament mismatch"

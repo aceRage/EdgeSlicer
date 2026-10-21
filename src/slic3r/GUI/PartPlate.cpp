@@ -1643,7 +1643,26 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode, const Dynam
 	auto it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
 	plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
 
+	if (wxApp::GetInstance() != nullptr) {
 		expand_plate_extruders(plate_extruders);
+	} else {
+		// ImageMap Phase 5a: the CLI has no wxApp, so expand_plate_extruders() is a no-op there and
+		// a mixed (virtual) id - an image row, say - stayed ONE id. estimate_wipe_tower_footprint()
+		// then sized the CLI's tower for one filament instead of the row's three or four. Expand it
+		// from the project's own mixed_filament_definitions, as get_extruders_under_cli() does.
+		// Physical ids are unchanged by this, so a plate with no mixed rows comes out the same.
+		std::vector<std::string> physical_colors;
+		if (const auto *color_opt = project_config.option<ConfigOptionStrings>("filament_colour"))
+			physical_colors = color_opt->values;
+		if (!physical_colors.empty()) {
+			MixedFilamentManager mixed_mgr;
+			populate_cli_mixed_filament_manager(mixed_mgr, project_config, &glb_config, physical_colors, physical_colors.size());
+			mixed_mgr.expand_virtual_extruder_ids(plate_extruders, physical_colors.size());
+			std::sort(plate_extruders.begin(), plate_extruders.end());
+			it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
+			plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
+		}
+	}
 
 
 	return plate_extruders;
