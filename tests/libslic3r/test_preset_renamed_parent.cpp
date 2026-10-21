@@ -644,7 +644,10 @@ TEST_CASE("Detaching a user filament on a renamed parent drops the parent and ke
     CHECK(filaments.get_preset_parent(*preset) == nullptr);
     CHECK(nozzle_temperature(*preset) == 245);
     CHECK(flow_ratio(*preset) == Approx(0.95));
-    const nlohmann::json j = nlohmann::json::parse(read_file(file));
+    // The detached preset is a base preset now: its file moved into base/ and the old copy is gone.
+    CHECK_FALSE(fs::exists(file));
+    CHECK(fs::equivalent(fs::path(preset->file), temp_dir.path() / PRESET_FILAMENT_NAME / "base" / "My PETG.json"));
+    const nlohmann::json j = nlohmann::json::parse(read_file(fs::path(preset->file)));
     CHECK(j.value("inherits", std::string()).empty());
     CHECK(j.contains("filament_flow_ratio"));
     CHECK(filaments.legacy_user_filament_presets({ { k1_old_parent, { "Creality K1C 0.4 nozzle" } } }).empty());
