@@ -563,6 +563,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteSend.hpp
     GUI/BambuSendMapping.cpp
     GUI/BambuSendMapping.hpp
+    GUI/ArchiveImport.cpp
+    GUI/ArchiveImport.hpp
     GUI/BambuReprint.cpp
     GUI/BambuReprint.hpp
     GUI/GcodeArchive.cpp
@@ -598,6 +600,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
     GUI/HubEventDedupe.hpp
+    GUI/HubClients.hpp
     GUI/LoginTicketGate.hpp
     GUI/HubPushOwner.hpp
     GUI/RemoteNotify.cpp
