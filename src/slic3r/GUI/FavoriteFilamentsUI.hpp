@@ -3,6 +3,13 @@
 // The app side of favourite filaments: reads and writes the one per-user set in the app config
 // (local only), follows vendor renames once per session, and tells every open filament picker to
 // regroup when the set changes. The rules themselves are in FavoriteFilaments.hpp (GUI-free).
+//
+// The same machinery serves favourite process (print) presets: every function takes a Kind
+// (FavoritePresets.hpp) that defaults to Filament, so the filament callers are unchanged. Each kind has
+// its own stored set and its own subscribers (a star on a process preset does not rebuild the
+// filament lists).
+
+#include "FavoritePresets.hpp"
 
 #include <functional>
 #include <memory>
@@ -12,32 +19,44 @@
 
 #include <wx/string.h>
 
+#include "libslic3r/Preset.hpp"
+
 class wxWindow;
 class wxMenu;
 
 namespace Slic3r {
-class Preset;
 namespace GUI {
 namespace FavoriteFilamentsUI {
 
-// The key of a filament preset: a system preset's alias, a user preset's full name.
+using Kind = FavoritePresets::Kind;
+
+// The kind of favourites a preset type has: Filament for filament presets, Process for process (print)
+// presets, false for every other type (printers, SLA ...: nothing to star).
+bool kind_of(Preset::Type preset_type, Kind &kind);
+
+// The key of a preset: a system preset's alias, a user preset's full name (the same for every kind).
 std::string key_for(const Preset &preset);
 
-std::set<std::string> load();
-bool                  is_favorite(const std::string &key);
+std::set<std::string> load(Kind kind = Kind::Filament);
+bool                  is_favorite(const std::string &key, Kind kind = Kind::Filament);
+// The kind follows the preset's own type; a type with no favourites is never a favourite.
 bool                  is_favorite(const Preset &preset);
 // Stars or un-stars the key, saves the app config and notifies the pickers. Returns the new state.
-bool                  toggle(const std::string &key);
+bool                  toggle(const std::string &key, Kind kind = Kind::Filament);
 
-// Pickers that list filaments subscribe to hear about a change made anywhere (a star in the AMS
+// Pickers that list presets of a kind subscribe to hear about a change made anywhere (a star in the AMS
 // dialog regroups the sidebar too). The returned id unsubscribes.
-int  subscribe(std::function<void()> on_changed);
+int  subscribe(std::function<void()> on_changed, Kind kind = Kind::Filament);
 void unsubscribe(int id);
 
-// "Add to favorite filaments" / "Remove from favorite filaments" for the key: an item at the end of
-// the menu, the keyboard and screen-reader path where a star cannot be clicked (context
-// menu key / Shift+F10, macOS native combos). Returns the item id, or wxID_NONE for an empty key.
-int append_toggle_item(wxMenu &menu, const std::string &key);
+// "Add to favorite filaments" / "Remove from favorite filaments" (or "... process presets") for the
+// key: an item at the end of the menu, the keyboard and screen-reader path where a star cannot be
+// clicked (context menu key / Shift+F10, macOS native combos). Returns the item id, or wxID_NONE for
+// an empty key.
+int append_toggle_item(wxMenu &menu, const std::string &key, Kind kind = Kind::Filament);
+
+// The tooltip of a star button that toggles the selected preset of a kind.
+wxString star_button_tooltip(bool favorite, Kind kind);
 
 // The star bitmaps the pickers draw (filled = favourite), at 16 px for the window's DPI.
 wxString star_icon_name(bool favorite);

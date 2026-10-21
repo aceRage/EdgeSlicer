@@ -5,6 +5,7 @@ add_executable(${_TEST_NAME}_tests
 	test_3mf.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
+	test_connect_filament_maps.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
@@ -152,9 +153,12 @@ add_executable(${_TEST_NAME}_tests
     test_cost_estimate.cpp
     test_cost_overrides.cpp
     test_cost_pricing.cpp
+    test_showcase_scene.cpp
+    test_showcase_materials.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
+    test_connected_bodies.cpp
     test_texture_displacement.cpp
     test_texture_displacement_edge.cpp
     ../libnest2d/printer_parts.cpp

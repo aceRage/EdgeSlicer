@@ -5962,8 +5962,10 @@ void SSWCP_MachineManage_Instance::sw_AddDevice()
 {
     {
         wxGetApp().CallAfter([] {
-            if (wxGetApp().web_device_dialog)
-                delete wxGetApp().web_device_dialog;
+            if (wxGetApp().web_device_dialog) {
+                wxGetApp().web_device_dialog->Destroy();
+                wxGetApp().web_device_dialog = nullptr;
+            }
 
             wxGetApp().web_device_dialog = new WebDeviceDialog;
             wxGetApp().web_device_dialog->run();
@@ -7532,6 +7534,7 @@ std::unordered_map<std::string, int> SSWCP::m_tab_map = {
     {"Home", MainFrame::TabPosition::tpHome},
     {"3DEditor", MainFrame::TabPosition::tp3DEditor},
     {"Preview", MainFrame::TabPosition::tpPreview},
+    {"Showcase", MainFrame::TabPosition::tpShowcase},
     {"Monitor", MainFrame::TabPosition::tpMonitor},
     {"Stream", MainFrame::TabPosition::tpStream},
     {"MultiDevice", MainFrame::TabPosition::tpMultiDevice},

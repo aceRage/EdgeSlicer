@@ -3049,11 +3049,13 @@ void ObjectList::merge(bool to_multipart_object)
         std::vector<int> obj_idxs;
         wxDataViewItemArray sels;
         GetSelections(sels);
-        assert(!sels.IsEmpty());
+        get_object_idxs(obj_idxs, sels);
+        // Nothing usable selected (e.g. the Assembly gizmo's Merge parts when the list selection did not take):
+        // the merged object would get no instance and instances[0] below would read null (EDGESLICER-D).
+        if (obj_idxs.size() < 2)
+            return;
 
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Assemble");
-
-        get_object_idxs(obj_idxs, sels);
 
         // resulted objects merge to the one
         Model* model = (*m_objects)[0]->get_model();
