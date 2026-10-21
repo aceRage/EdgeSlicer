@@ -6158,3 +6158,89 @@ TEST_CASE("Mixed filament config remap follows mixed-deletion painting table", "
     CHECK(object_config.opt_int("wall_filament") == 5);
     CHECK_FALSE(object_config.has("sparse_infill_filament"));
 }
+
+TEST_CASE("Rebuild filament multi-color fields from plain colours when a 3MF omits them",
+          "[FilamentColor][3MF]")
+{
+    const int segment = FilamentColorModeToConfig(FilamentColorMode::Segment);
+    const int gradient = FilamentColorModeToConfig(FilamentColorMode::Gradient);
+    REQUIRE(segment == 0);
+    REQUIRE(gradient == 1);
+
+    SECTION("need rebuild only when an imported field is short")
+    {
+        CHECK_FALSE(ImportedFilamentMultiFieldsNeedRebuild(4, 4, 4));
+        CHECK_FALSE(ImportedFilamentMultiFieldsNeedRebuild(4, 4, 0));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(0, 0, 4));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(4, 0, 4));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(0, 4, 4));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(2, 4, 4));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(4, 2, 4));
+    }
+
+    SECTION("both fields missing: copy filament_colour as Segment")
+    {
+        const std::vector<std::string> colours = {"#FF0000", "#00FF00", "#0000FF", "#FFFF00"};
+        std::vector<std::string> leftover_multi = {"#111111|#222222", "#333333"};
+        std::vector<int> leftover_modes = {gradient, gradient};
+        REQUIRE(RebuildFilamentMultiFieldsFromPlainColors(colours, leftover_multi, leftover_modes, 4, 0, 0));
+        REQUIRE(leftover_multi.size() == 4);
+        REQUIRE(leftover_modes.size() == 4);
+        CHECK(leftover_multi[0] == "#FF0000");
+        CHECK(leftover_multi[1] == "#00FF00");
+        CHECK(leftover_multi[2] == "#0000FF");
+        CHECK(leftover_multi[3] == "#FFFF00");
+        CHECK(leftover_modes[0] == segment);
+        CHECK(leftover_modes[1] == segment);
+        CHECK(leftover_modes[2] == segment);
+        CHECK(leftover_modes[3] == segment);
+    }
+
+    SECTION("complete imported multi-colour is not overwritten when only modes are missing")
+    {
+        const std::vector<std::string> colours = {"#111111", "#222222", "#333333", "#444444"};
+        std::vector<std::string> multi = {"#FF0000|#00FF00|#0000FF|#FFFFFF", "#AAAAAA|#BBBBBB", "#00FF00", "#0000FF"};
+        std::vector<int> modes;
+        REQUIRE(ImportedFilamentMultiFieldsNeedRebuild(4, 0, 4));
+        REQUIRE(RebuildFilamentMultiFieldsFromPlainColors(colours, multi, modes, 4, 4, 0));
+        REQUIRE(multi.size() == 4);
+        CHECK(multi[0] == "#FF0000|#00FF00|#0000FF|#FFFFFF");
+        CHECK(multi[1] == "#AAAAAA|#BBBBBB");
+        CHECK(multi[2] == "#00FF00");
+        CHECK(multi[3] == "#0000FF");
+        REQUIRE(modes.size() == 4);
+        CHECK(modes[0] == segment);
+        CHECK(modes[3] == segment);
+    }
+
+    SECTION("short imported multi-colors keep the supplied slots and fill the rest")
+    {
+        const std::vector<std::string> colours = {"#111111", "#222222", "#333333", "#444444"};
+        std::vector<std::string> multi = {"#FF0000|#00FF00", "#00AABB"};
+        std::vector<int> modes = {gradient, gradient};
+        REQUIRE(RebuildFilamentMultiFieldsFromPlainColors(colours, multi, modes, 4, 2, 2));
+        REQUIRE(multi.size() == 4);
+        CHECK(multi[0] == "#FF0000|#00FF00");
+        CHECK(multi[1] == "#00AABB");
+        CHECK(multi[2] == "#333333");
+        CHECK(multi[3] == "#444444");
+        REQUIRE(modes.size() == 4);
+        CHECK(modes[0] == gradient);
+        CHECK(modes[1] == gradient);
+        CHECK(modes[2] == segment);
+        CHECK(modes[3] == segment);
+    }
+
+    SECTION("complete imported fields: helper writes nothing")
+    {
+        const std::vector<std::string> colours = {"#111111", "#222222"};
+        std::vector<std::string> multi = {"#FF0000|#00FF00", "#ABCDEF"};
+        std::vector<int> modes = {gradient, segment};
+        CHECK_FALSE(ImportedFilamentMultiFieldsNeedRebuild(2, 2, 2));
+        CHECK_FALSE(RebuildFilamentMultiFieldsFromPlainColors(colours, multi, modes, 2, 2, 2));
+        CHECK(multi[0] == "#FF0000|#00FF00");
+        CHECK(multi[1] == "#ABCDEF");
+        CHECK(modes[0] == gradient);
+        CHECK(modes[1] == segment);
+    }
+}
