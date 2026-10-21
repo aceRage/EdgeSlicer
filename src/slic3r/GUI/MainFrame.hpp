@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "GUI_Utils.hpp"
+#include "MainTabs.hpp"
 #include "Event.hpp"
 //BBS: GUI refactor
 #include "ParamsPanel.hpp"
@@ -250,19 +251,23 @@ public:
     bool request_quit(bool discard = false);
 
     //BBS GUI refactor
+    // The values live in MainTabs.hpp (unit tested). Showcase (D1) sits after Preview, so Device
+    // and everything after it moved up by one on 2026-10-18; nothing compares or stores these by
+    // number (see MainTabs.hpp).
     enum TabPosition
     {
-        tpHome          = 0,
-        tp3DEditor      = 1,
-        tpPreview       = 2,
-        tpMonitor       = 3,
-        tpStream        = 4,
-        tpPrinters      = 5, // the Printers tab (PrintersPanel); always present
+        tpHome          = MainTabs::Home,
+        tp3DEditor      = MainTabs::Editor3D,
+        tpPreview       = MainTabs::Preview,
+        tpShowcase      = MainTabs::Showcase, // the third page hosting the plater
+        tpMonitor       = MainTabs::Monitor,
+        tpStream        = MainTabs::Stream,
+        tpPrinters      = MainTabs::Printers, // the Printers tab (PrintersPanel); always present
         tpMultiDevice   = tpPrinters, // its old name: the Multi-device tab had this slot
-        tpProject       = 6,
-        tpCalibration   = 7,
-        tpAuxiliary     = 8,
-        toDebugTool     = 9,
+        tpProject       = MainTabs::Project,
+        tpCalibration   = MainTabs::Calibration,
+        tpAuxiliary     = MainTabs::Auxiliary,
+        toDebugTool     = MainTabs::DebugTool,
     };
 
     //BBS: add slice&&print status update logic
@@ -441,6 +446,8 @@ public:
 
     //SoftFever
     void show_device(bool bBBLPrinter);
+    // The notebook index the Device page is inserted at (see the .cpp).
+    int  device_page_position() const;
     // Attach / detach the File > Export "Send ... to Bambu Connect" items (Bambu printers only).
     void show_bambu_connect_menu_items(bool show);
 

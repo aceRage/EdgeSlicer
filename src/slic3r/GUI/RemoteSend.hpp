@@ -11,6 +11,7 @@
 #include "GcodeArchive.hpp"
 #include "SnapmakerLan.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
+#include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
 
 namespace Slic3r {
@@ -76,6 +77,14 @@ struct Prepared
     // One of this printer model's devices (<datadir>/hub/print_host_devices.json), when the target
     // was "ph:<id>" rather than the preset's own address. Empty for the plain "host" target.
     std::string      device_id, model_key;
+    // A print on a Moonraker print host that may be a QIDI with a QIDI Box: run() asks the printer
+    // (PrintHostDevices::probe) and starts the print only with a complete material-first Box
+    // mapping sent first (qidi_send_policy), never on the printer's stale value_t<n>. The filaments
+    // are file_filaments below; qidi_model_box: the target's printer_model can carry a Box, so an
+    // unreadable printer is refused the start rather than started blind.
+    bool                     qidi_guard { false };
+    bool                     qidi_model_box { false };
+    PrintHostDevices::Device qidi_device {};
     // Snapmaker over the LAN (Moonraker HTTP): no host object, just the printer and the mapping.
     SnapmakerLan::Device                    lan {};
     std::string                             lan_filename;

@@ -93,6 +93,8 @@ extern std::string  escape_string_cstyle(const std::string &str);
 extern std::string  escape_strings_cstyle(const std::vector<std::string> &strs);
 extern bool         unescape_string_cstyle(const std::string &str, std::string &out);
 extern bool         unescape_strings_cstyle(const std::string &str, std::vector<std::string> &out);
+// Reads the number a float option's text starts with, the same on every platform. See Config.cpp.
+extern bool         deserialize_float_value(const std::string &str, double &value);
 
 extern std::string  escape_ampersand(const std::string& str);
 
@@ -616,9 +618,7 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        return deserialize_float_value(str, this->value);
     }
 
     bool operator==(const ConfigOption &rhs) const override
@@ -712,10 +712,8 @@ public:
         		else
         			{ BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
         	} else {
-	            std::istringstream iss(item_str);
 	            double value;
-	            iss >> value;
-	            if (iss.fail())
+	            if (! deserialize_float_value(item_str, value))
 	            	return false;
 	            this->values.push_back(value);
 	        }
@@ -1015,9 +1013,7 @@ public:
     {
         UNUSED(append);
         // don't try to parse the trailing % since it's optional
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        return deserialize_float_value(str, this->value);
     }
 
 private:
@@ -1129,9 +1125,7 @@ public:
     {
         UNUSED(append);
         this->percent = str.find_first_of("%") != std::string::npos;
-        std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        return deserialize_float_value(str, this->value);
     }
 
 private:
@@ -1207,9 +1201,9 @@ public:
                     { BOOST_LOG_TRIVIAL(warning) << "deserialize: skipping nil item in non-nullable vector"; continue; }
             } else {
                 bool percent = item_str.find_first_of("%") != std::string::npos;
-                std::istringstream iss(item_str);
+                // Never fails: an item that is not a number reads as 0.
                 double value;
-                iss >> value;
+                deserialize_float_value(item_str, value);
                 this->values.push_back({ value, percent });
             }
         }

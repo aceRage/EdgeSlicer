@@ -161,8 +161,12 @@ protected:
     std::string m_cafile;
     bool        m_ssl_revoke_best_effort;
 
-    // Time synchronization manager
+    // Time synchronization manager. Read on the Paho callback threads (response handlers) while
+    // Moonraker_Mqtt::disconnect() clears it on the UI thread: go through tsm() / clear_tsm(),
+    // which use the atomic shared_ptr accessors, never the member directly.
     std::shared_ptr<TimeSyncManager> time_sync_manager_;
+    std::shared_ptr<TimeSyncManager> tsm() const { return std::atomic_load(&time_sync_manager_); }
+    void clear_tsm() { std::atomic_store(&time_sync_manager_, std::shared_ptr<TimeSyncManager>()); }
 
     // Helper methods
     virtual void set_auth(Http &http) const;

@@ -140,7 +140,9 @@ wxBoxSizer *PreferencesDialog::create_item_combobox(wxString title, wxWindow *pa
     if (!current_setting.empty()) {
         auto compare  = [current_setting](string possible_setting) { return current_setting == possible_setting; };
         auto iterator = find_if(config_name_index.begin(), config_name_index.end(), compare);
-        current_index = iterator - config_name_index.begin();
+        // Orca #13538: an unknown stored value keeps the first entry instead of indexing past the list.
+        if (iterator != config_name_index.end())
+            current_index = static_cast<unsigned int>(iterator - config_name_index.begin());
     }
 
     auto [sizer, combobox] = create_item_combobox_base(title, parent, tooltip, param, vlist, current_index);
@@ -1964,6 +1966,48 @@ wxWindow* PreferencesDialog::create_general_page()
             }
         });
 
+    // Orca #13538: Graphics (Orca's own Graphics tab; EdgeSlicer keeps it as a section of this page).
+    auto title_graphics = create_item_title(_L("Graphics"), page, _L("Graphics"));
+    auto item_antialiasing = create_item_combobox(_L("MSAA Multiplier"), page,
+        _L("Set the Multi-Sample Anti-Aliasing level.\n"
+           "Higher values result in smoother edges, but the impact on performance is exponential.\n"
+           "Lower values improve performance, at the cost of jagged edges.\n"
+           "If disabled, it is recommended to enable FXAA to reduce jagged edges with minimal performance impact.\n\n"
+           "Requires application restart."),
+        SETTING_OPENGL_AA_SAMPLES, { _L("Disabled"), "2x", "4x", "8x", "16x" }, { "0", "2", "4", "8", "16" });
+    auto item_fxaa = create_item_checkbox(_L("FXAA post-processing"), page,
+        _L("Applies Fast Approximate Anti-Aliasing as a screen-space pass.\n"
+           "Useful for disabling or reducing the MSAA setting to improve performance.\n\n"
+           "Takes effect immediately."),
+        50, SETTING_OPENGL_FXAA_ENABLED);
+    auto item_fps_cap = create_item_input(_L("FPS cap"), _L("FPS (0 = unlimited)"), page,
+        _L("Limits viewport frame rate to reduce GPU load and power usage.\n"
+           "Set to 0 for unlimited frame rate."),
+        SETTING_OPENGL_FPS_CAP, [this](wxString value) {
+            long fps_cap = 0;
+            if (!value.ToLong(&fps_cap))
+                fps_cap = 0;
+            fps_cap = std::clamp(fps_cap, 0L, 240L);
+            app_config->set(SETTING_OPENGL_FPS_CAP, std::to_string(fps_cap));
+        });
+    auto item_fps_overlay = create_item_checkbox(_L("Show FPS overlay"), page,
+        _L("Displays current viewport FPS in the top-right corner."), 50, SETTING_OPENGL_SHOW_FPS_OVERLAY);
+    // Orca #14080 / #14724: smooth normals, for the model whether or not the realistic view is on.
+    auto item_smooth_normals = create_item_checkbox(_L("Smooth normals"), page,
+        _L("Applies smooth normals to the model.\n\nRequires manual scene reload to take effect "
+           "(right-click on 3D view > \"Reload All\")."),
+        50, SETTING_OPENGL_PHONG_SMOOTH_NORMALS);
+    // Orca #13704: realistic view (also View > Realistic View).
+    auto item_realistic_mode = create_item_checkbox(_L("Realistic view"), page,
+        _L("Renders the objects of the 3D view more realistically, with the options below. Also in View > Realistic View."),
+        50, SETTING_OPENGL_REALISTIC_MODE);
+    auto item_realistic_phong = create_item_checkbox(_L("Phong shading"), page,
+        _L("Uses Phong shading inside realistic view."), 50, SETTING_OPENGL_REALISTIC_PHONG);
+    auto item_realistic_ssao = create_item_checkbox(_L("SSAO ambient occlusion"), page,
+        _L("Applies SSAO in realistic view."), 50, SETTING_OPENGL_PHONG_SSAO);
+    auto item_realistic_shadows = create_item_checkbox(_L("Shadows"), page,
+        _L("Renders cast shadows on the plate, other objects, and each object onto itself in realistic view."), 50, SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS);
+
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
     auto item_check_updates = create_item_checkbox(_L("Check for new versions on startup"), page,
@@ -2181,6 +2225,16 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_reslice, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_warn_low_memory, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(title_graphics, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_antialiasing, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fxaa, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fps_cap, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_fps_overlay, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_smooth_normals, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_mode, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_phong, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_ssao, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_realistic_shadows, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     if (item_user_sync)

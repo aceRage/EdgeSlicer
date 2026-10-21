@@ -2,6 +2,7 @@
 #include "Config.hpp"
 #include "GCode/WipePathHelpers.hpp"
 #include "Polygon.hpp"
+#include "ConnectedBodies.hpp"
 #include "PrintConfig.hpp"
 #include "libslic3r.h"
 #include "I18N.hpp"
@@ -533,6 +534,20 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
     return ok;
 }
 
+// Orca #15849 1fe5df7d4e / 733ef2b79f: a heater shared by several filaments stays
+// on until every one of them has finished. Edge has no is_imex, so this is the
+// bounds-checked half of imex_physical_heater_for. In-range physical_extruder_map
+// entries are heaters; out-of-range ids (the default single-entry {0}) pass
+// through as identity so U1 / classic multi-tool stay per-filament. get_at()
+// would clamp every filament onto heater 0 and keep all tools hot until the last
+// one finished. BBL never reaches this helper: pre_toolchange excludes it first.
+static int physical_heater_for(const ConfigOptionInts &pem, int filament_id)
+{
+    if (filament_id < 0 || filament_id >= int(pem.values.size()))
+        return filament_id;
+    return pem.values[size_t(filament_id)];
+}
+
 std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
 {
     std::string gcode;
@@ -544,9 +559,11 @@ std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
     //
     // This is restricted to "true" multi-tool setups where filament id == physical
     // extruder id (classic multi-extruder / IDEX / toolchanger machines with
-    // ooze_prevention enabled). SEMM/AMS/MMU never reach here: init_ooze_prevention()
-    // only sets m_ooze_prevention.enable when single_extruder_multi_material is off, so
-    // (like upstream bcbb8746) there is no separate SEMM check below.
+    // ooze_prevention enabled), plus the shared-heater case below when
+    // physical_extruder_map maps several filaments onto one heater. SEMM/AMS/MMU
+    // never reach here: init_ooze_prevention() only sets m_ooze_prevention.enable
+    // when single_extruder_multi_material is off, so (like upstream bcbb8746)
+    // there is no separate SEMM check below.
     //  - Bambu (H2/H2C/H2D) printers are excluded outright: they map filaments to
     //    physical nozzles through a separate grouping/virtual-filament layer
     //    (MultiNozzleUtils::LayeredNozzleGroupResult, MixedFilamentManager) where
@@ -566,7 +583,15 @@ std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
     if (gcodegen.m_curr_print != nullptr && !gcodegen.is_BBL_Printer() &&
         gcodegen.config().print_sequence == PrintSequence::ByLayer &&
         !gcodegen.m_curr_print->tool_ordering().empty()) {
-        is_last_use = gcodegen.m_curr_print->tool_ordering().is_last_extrusion_layer(print_z, extruder_id);
+        const auto &tool_ordering = gcodegen.m_curr_print->tool_ordering();
+        const auto &pem           = gcodegen.config().physical_extruder_map;
+        const int   heater        = physical_heater_for(pem, int(extruder_id));
+        // 733ef2b79f: start from this filament, then keep the heater on while any
+        // other used filament still maps to it.
+        is_last_use = tool_ordering.is_last_extrusion_layer(print_z, extruder_id);
+        for (unsigned int f : tool_ordering.all_extruders())
+            if (is_last_use && physical_heater_for(pem, int(f)) == heater)
+                is_last_use = tool_ordering.is_last_extrusion_layer(print_z, f);
     }
 
     // From upstream c93acbd2 (bcbb8746 went back to a bare pop_back()): never pop_back() on an
@@ -2326,6 +2351,152 @@ static std::vector<std::pair<std::string, std::string>> validate_custom_gcode(co
 }
 } // namespace DoExport
 
+// Orca #16291: numbers the object instances and the connected bodies of the instances of several, for the processor to
+// find those an extrusion lies in. Centers of mass only: the processor keeps the sums in memory and writes nothing.
+static void set_mass_locator(GCodeProcessor &processor, const Print &print)
+{
+    struct Object
+    {
+        const PrintObject    *object;
+        int                   first_instance;
+        // No bodies for an object of one.
+        size_t                bodies_count;
+        int                   first_body;
+        std::vector<coordf_t> print_zs;
+        // Per layer, the body of each island and a locator whose boxes are widened for walls reaching past them.
+        std::vector<std::vector<size_t>> bodies;
+        std::vector<IslandLocator>       islands;
+        // Per instance, whether its widened box reaches another's, so that the box of an island proves nothing.
+        std::vector<bool> crowded;
+    };
+    std::vector<Object>                           objects;
+    std::vector<GCodeProcessorResult::ObjectMass> object_masses;
+    int                                           bodies_total = 0;
+    for (const PrintObject *object : print.objects()) {
+        const auto layers = object->layers();
+        if (layers.empty())
+            continue;
+        // Bodies for assemblies only, as the Prepare tab counts them.
+        // Edge: always grouped from the layer slices here. Orca reuses the bodies its separated infills (#16274, not in
+        // EdgeSlicer) found when it needed them; connected_bodies() is the same grouping.
+        const ModelVolumePtrs &volumes  = object->model_object()->volumes;
+        const bool             assembly = std::count_if(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return v->is_model_part(); }) > 1 ||
+                              std::any_of(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return v->is_negative_volume(); });
+        size_t                           count = 0;
+        std::vector<std::vector<size_t>> bodies;
+        if (assembly) {
+            std::vector<const ExPolygons *> islands;
+            for (const Layer *layer : layers)
+                islands.emplace_back(&layer->lslices);
+            bodies = connected_bodies(islands, count);
+        }
+        if (count < 2) {
+            count = 0;
+            bodies.assign(layers.size(), {});
+        }
+        Object &o = objects.emplace_back(Object{ object, int(object_masses.size()), count, bodies_total, {}, std::move(bodies), {}, {} });
+        object_masses.resize(object_masses.size() + object->instances().size());
+        for (size_t instance = 0; instance < object->instances().size(); ++instance)
+            object_masses[o.first_instance + instance].assembly = assembly;
+        bodies_total += int(count * object->instances().size());
+        for (const Layer *layer : layers) {
+            o.print_zs.emplace_back(layer->print_z);
+            o.islands.emplace_back(layer->lslices, scaled<coord_t>(1.));
+        }
+    }
+    if (objects.empty())
+        return;
+    std::vector<BoundingBox> boxes;
+    for (const Object &o : objects) {
+        BoundingBox box;
+        for (const IslandLocator &islands : o.islands)
+            for (const BoundingBox &island : islands.boxes())
+                box.merge(island);
+        for (const PrintInstance &instance : o.object->instances()) {
+            BoundingBox &moved = boxes.emplace_back(box);
+            moved.translate(instance.shift);
+        }
+    }
+    for (Object &o : objects)
+        for (size_t instance = 0; instance < o.object->instances().size(); ++instance) {
+            const size_t i = o.first_instance + instance;
+            o.crowded.emplace_back(false);
+            for (size_t j = 0; j < boxes.size() && !o.crowded.back(); ++j)
+                o.crowded.back() = j != i && boxes[i].overlap(boxes[j]);
+        }
+
+    struct Hit
+    {
+        size_t object{ 0 }, instance{ 0 }, layer{ 0 }, island{ 0 };
+    };
+    auto locate = [objects = std::move(objects), footprints = std::move(boxes),
+                   last = std::optional<Hit>()](const Vec3d &point, bool support) mutable -> GCodeProcessor::MassLocation {
+        // Supports stand below and around their object: the instance whose footprint holds the point, the one whose center
+        // is nearest among several, else the nearest footprint.
+        if (support) {
+            const Point p(scaled(point.x()), scaled(point.y()));
+            int         found  = -1;
+            bool        inside = false;
+            double      best   = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < footprints.size(); ++i) {
+                const BoundingBox &box = footprints[i];
+                const double       gap = Point((box.min - p).cwiseMax(p - box.max).cwiseMax(0)).cast<double>().squaredNorm();
+                const bool         in  = gap == 0.;
+                const double       d   = in ? (box.center() - p).cast<double>().squaredNorm() : gap;
+                if ((in && !inside) || (in == inside && d < best)) {
+                    found  = int(i);
+                    inside = in;
+                    best   = d;
+                }
+            }
+            return { found, -1 };
+        }
+        constexpr double z_tolerance = 0.002;
+        const auto       local       = [&point, &objects](size_t object, size_t instance) {
+            return Point(Point(scaled(point.x()), scaled(point.y())) - objects[object].object->instances()[instance].shift);
+        };
+        const auto location = [&objects, &last](const Hit &hit) {
+            last            = hit;
+            const Object &o = objects[hit.object];
+            return GCodeProcessor::MassLocation{ o.first_instance + int(hit.instance),
+                                                 o.bodies_count == 0 ? -1 : o.first_body + int(hit.instance * o.bodies_count + o.bodies[hit.layer][hit.island]) };
+        };
+        // A point lies on the first layer at or above it, as spiral vase rises through each layer.
+        // Extrusions mostly follow each other on one island.
+        if (last) {
+            const Object &o = objects[last->object];
+            if (point.z() <= o.print_zs[last->layer] + z_tolerance &&
+                (last->layer == 0 || point.z() > o.print_zs[last->layer - 1] + z_tolerance) &&
+                o.islands[last->layer].holds(last->island, local(last->object, last->instance), o.crowded[last->instance]))
+                return location(*last);
+        }
+        // Outside the islands of instances crowding each other, the nearest outline.
+        std::optional<Hit> nearest;
+        double             distance = std::numeric_limits<double>::max();
+        for (size_t object = 0; object < objects.size(); ++object) {
+            const Object &o = objects[object];
+            const auto    z = std::lower_bound(o.print_zs.begin(), o.print_zs.end(), point.z() - z_tolerance);
+            if (z == o.print_zs.end())
+                continue;
+            const size_t layer = size_t(z - o.print_zs.begin());
+            for (size_t instance = 0; instance < o.object->instances().size(); ++instance) {
+                const auto [island, d] = o.islands[layer].find(local(object, instance), o.crowded[instance]);
+                if (island < 0)
+                    continue;
+                const Hit hit{ object, instance, layer, size_t(island) };
+                if (d == 0. || !o.crowded[instance])
+                    return location(hit);
+                if (d < distance) {
+                    distance = d;
+                    nearest  = hit;
+                }
+            }
+        }
+        return nearest ? location(*nearest) : GCodeProcessor::MassLocation{};
+    };
+    processor.set_mass_locator(std::move(locate), std::move(object_masses));
+}
+
 bool GCode::is_BBL_Printer()
 {
     if (m_curr_print)
@@ -2891,6 +3062,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     // modifies m_silent_time_estimator_enabled
     DoExport::init_gcode_processor(print.config(), m_processor, m_silent_time_estimator_enabled);
+    set_mass_locator(m_processor, print);
     const bool is_bbl_printers = print.is_BBL_printer();
     m_calib_config.clear();
     // Orca: Calibration overrides are reapplied after object/region settings in _extrude().
