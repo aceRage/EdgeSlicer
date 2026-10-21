@@ -5,6 +5,46 @@
 #include "nanosvg/nanosvg.h"
 #define NANOSVGRAST_IMPLEMENTATION
 #include "nanosvg/nanosvgrast.h"
+
+#include <boost/filesystem.hpp>
+
+#include <string>
+
+namespace {
+
+// Same isolation as fff_print_tests: load_bbs_3mf / Model backups otherwise land in
+// %TEMP%\snapmaker_orca_model (or /snapmaker_orca_model on a read-only macOS root).
+struct TemporaryDirListener : Catch::TestEventListenerBase
+{
+    using TestEventListenerBase::TestEventListenerBase;
+
+    void testRunStarting(Catch::TestRunInfo const &info) override
+    {
+        TestEventListenerBase::testRunStarting(info);
+        m_dir = boost::filesystem::temp_directory_path() /
+            ("edgeslicer_libslic3r_tests_" + std::to_string(Slic3r::get_current_pid()));
+        boost::filesystem::create_directories(m_dir);
+        Slic3r::set_temporary_dir(m_dir.string());
+    }
+
+    void testRunEnded(Catch::TestRunStats const &stats) override
+    {
+        try {
+            boost::system::error_code ec;
+            boost::filesystem::remove_all(m_dir, ec);
+        } catch (...) {
+            // Cleanup must never throw out of a Catch2 listener.
+        }
+        TestEventListenerBase::testRunEnded(stats);
+    }
+
+    boost::filesystem::path m_dir;
+};
+
+} // namespace
+
+CATCH_REGISTER_LISTENER(TemporaryDirListener)
+
 namespace {
 
 TEST_CASE("sort_remove_duplicates", "[utils]") {

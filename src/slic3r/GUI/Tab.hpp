@@ -157,8 +157,8 @@ protected:
 	ScalableButton*		m_btn_compare_preset;
 	ScalableButton*		m_btn_save_preset;
 	ScalableButton*		m_btn_delete_preset;
-	// Filament tab only: stars the selected filament (favourite filaments), next to the preset combo.
-	ScalableButton*		m_btn_favorite_filament {nullptr};
+	// Filament and Process tabs only: stars the selected preset (favourite filaments / process presets), next to the preset combo.
+	ScalableButton*		m_btn_favorite {nullptr};
 	int					m_favorite_subscription {0};
 	void				update_favorite_button();
 	//ScalableButton*		m_btn_edit_ph_printer {nullptr};

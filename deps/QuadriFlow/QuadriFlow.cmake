@@ -28,8 +28,9 @@
 # prepends the include upstream should have had. It is a cmake -P script rather than
 # `git apply` + a .patch on purpose: inside a work tree git treats a git-format patch
 # as repo-root-relative and silently skips every hunk (exit 0), and the --directory
-# guard the other patched deps carry depends on IN_GIT_REPO, which deps/CMakeLists.txt
-# defines only after this file is included. See the script for the full story.
+# guard the other patched deps carried then depended on IN_GIT_REPO, which
+# deps/CMakeLists.txt defined only after this file was included (deps/apply_patch.cmake
+# now works --directory out itself). See the script for the full story.
 #
 # EIGEN3_INCLUDE_DIR points at the tree's own bundled Eigen (deps_src/eigen), the same
 # copy libslic3r compiles against - QuadriFlow's types cross the ABI boundary in our
