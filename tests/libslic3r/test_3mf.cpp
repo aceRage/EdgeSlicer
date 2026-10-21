@@ -2335,3 +2335,61 @@ TEST_CASE("has_restore_data leaves a spent backup collectable", "[3mf]")
         CHECK(origin.empty());
     }
 }
+
+// Edgebuild job 306: with temporary_dir() unset the backup folder resolves to "/snapmaker_orca_model",
+// read-only on macOS. The project settings could not be extracted, the load still reported success with
+// an empty config, and the caller's first option read dereferenced null. A folder under a regular file
+// cannot be created on any platform, root or not, so it stands in for the read-only one here.
+TEST_CASE("A project loads without crashing when the temporary dir is not writable", "[3mf][Regression]")
+{
+    struct RestoreTemporaryDir
+    {
+        std::string saved = Slic3r::temporary_dir();
+        ~RestoreTemporaryDir() { Slic3r::set_temporary_dir(saved); }
+    } restore_temporary_dir;
+
+    TempBackupDir                 outer("orca_unwritable");
+    const boost::filesystem::path blocker = outer.path / "not_a_dir";
+    std::ofstream(blocker.string()) << "a file where the temporary dir would be";
+    const std::string unwritable = (blocker / "tmp").string();
+    Slic3r::set_temporary_dir(unwritable);
+
+    const std::string         path = std::string(TEST_DATA_DIR) + "/stabilizers/stabilizer_v1.3mf";
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl = false;
+    Semver                    file_version;
+    Model                     model;
+    auto load = [&]() {
+        return load_bbs_3mf(path.c_str(), &config, &ctxt, &model, &plate_data, &project_presets, &is_bbl, &file_version, nullptr,
+                            LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    };
+
+    SECTION("the backup folder falls back to the system temp folder")
+    {
+        bool ok = false;
+        REQUIRE_NOTHROW(ok = load());
+        release_PlateData_list(plate_data);
+        REQUIRE(ok);
+        REQUIRE_FALSE(model.objects.empty());
+        // The project settings came through, so reading one does not dereference null.
+        REQUIRE(config.option("stabilizer_supports") != nullptr);
+        CHECK(config.opt_enum<StabilizerMode>("stabilizer_supports") == smOff);
+        const std::string backup = model.get_backup_path();
+        CHECK_FALSE(boost::algorithm::starts_with(backup, unwritable));
+        CHECK(boost::filesystem::is_directory(backup));
+        model.remove_backup_path_if_exist();
+    }
+
+    SECTION("a backup folder the caller chose and cannot be written fails the load")
+    {
+        model.set_backup_path((blocker / "backup").string());
+        bool ok = true;
+        REQUIRE_NOTHROW(ok = load());
+        release_PlateData_list(plate_data);
+        CHECK_FALSE(ok);
+        model.set_backup_path("detach");
+    }
+}

@@ -17341,6 +17341,9 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
             sidebar->set_btn_label(ActionButtonType::abReslice, "Slice now");
         show_action_buttons(true);*/
         ready_to_slice = true;
+        // Intentionally left commented: get_enable_slice_status() reads
+        // is_background_process_slicing() (== m_is_slicing), which is still true
+        // here. Refresh after m_is_slicing is cleared below (Snap #1032).
         //this->main_frame->update_slice_print_status(MainFrame::eEventSliceUpdate, true, true);
 
         //BBS
@@ -17403,6 +17406,12 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":finished, reload print soon");
         m_is_slicing = false;
+        // Refresh the button after m_is_slicing clears: the cancelled branch
+        // above still sees m_is_slicing == true and would keep Slice disabled.
+        // update_slice_print_status() re-evaluates get_enable_slice_status()
+        // instead of force-enabling. RemoteAccess::note_slice_done already ran.
+        if (evt.cancelled() && this->main_frame != nullptr)
+            this->main_frame->update_slice_print_status(MainFrame::eEventSliceUpdate, true, true);
         this->preview->reload_print(false);
         /* BBS if in publishing progress */
         if (m_is_publishing) {
@@ -24500,16 +24509,30 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
     const ConfigOptionStrings* colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
     const ConfigOptionStrings* types   = full.option<ConfigOptionStrings>("filament_type");
     const ConfigOptionInts*    temps   = full.option<ConfigOptionInts>("nozzle_temperature");
+    const ConfigOptionInts*    fil_map = bundle->project_config.option<ConfigOptionInts>("filament_map");
     std::map<size_t, double>   volumes;
-    if (plate && plate->is_slice_result_valid() && plate->get_slice_result())
-        for (const auto& kv : plate->get_slice_result()->print_statistics.total_volumes_per_extruder)
-            volumes[kv.first] = kv.second;
+    auto add_volumes = [&volumes](PartPlate* p) {
+        if (p && p->is_slice_result_valid() && p->get_slice_result())
+            for (const auto& kv : p->get_slice_result()->print_statistics.total_volumes_per_extruder)
+                volumes[kv.first] += kv.second;
+    };
+    if (plate_idx == PLATE_ALL_IDX) {
+        // "Print all" sends every plate in one file: a filament any plate uses has to be mapped,
+        // or a QIDI Box feeds it from the slot its last print left behind.
+        for (int i = 0; i < plates.get_plate_count(); ++i)
+            add_volumes(plates.get_plate(i));
+    } else {
+        add_volumes(plate);
+    }
     for (size_t i = 0; i < bundle->filament_presets.size(); ++i) {
         SendPlateFilament f;
         f.index  = (int) i;
         f.colour = (colours && i < colours->values.size()) ? colours->values[i] : std::string();
         f.type   = (types && i < types->values.size()) ? types->values[i] : std::string();
         f.nozzle_temp = (temps && i < temps->values.size()) ? temps->values[i] : 0;
+        // filament_map is 1-based (SelectMachine / Bambu dual-nozzle). -1 when the plate is single-nozzle.
+        if (fil_map && i < fil_map->values.size() && fil_map->values[i] > 0)
+            f.nozzle_id = fil_map->values[i] - 1;
         // The remembered CANVAS mapping keys on the preset as people know it: its alias, else its name.
         if (const Preset* fp = bundle->filaments.find_preset(bundle->filament_presets[i]))
             f.alias = fp->alias.empty() ? fp->name : fp->alias;
@@ -24732,7 +24755,12 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
             wxGetApp().mainframe->select_tab(MainFrame::TabPosition::tpMonitor);
         }
 
-        delete dialog;
+        // Use wx deferred destruction instead of a direct delete: the dialog was
+        // just returning from its modal loop, and the destructor clears the
+        // global registration. Clear it now so nothing can touch the pending
+        // window before wx actually deletes it (Sentry SNAPMAKER_ORCA-21F).
+        dialog->Destroy();
+        wxGetApp().set_web_preprint_dialog(nullptr);
 
         return;
     }
@@ -24896,7 +24924,9 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         // selects it by host_type too.
         // An Elegoo Link preset with no device list still has its own address: the dialog needs one
         // device to read the CANVAS from. It has no id, so nothing is rebuilt or remembered from it.
-        if (elegoolink_host && ph_devices.empty()) {
+        // The same for a QIDI that may carry a QIDI Box: without a device the dialog never reads the
+        // Box, sends no slot mapping, and the printer feeds whatever value_t<n> its last print left.
+        if ((elegoolink_host || PrintHostDevices::qidi_box_capable_model(printer_model)) && ph_devices.empty()) {
             PrintHostDevices::Device own = PrintHostDevices::from_config(*physical_printer_config);
             if (!own.address.empty())
                 ph_devices.push_back(own);
@@ -24909,6 +24939,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
             pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
                                                         storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
         pDlg->set_devices(ph_model_key, ph_devices, ph_preselect);
+        pDlg->set_printer_model(printer_model);
         pDlg->set_plate_filaments(plate_filaments_for_send(plate_idx));
         if (offer_unload_at_end)
             pDlg->offer_unload_at_end(unload_at_end_default);
@@ -26753,7 +26784,12 @@ bool Plater::set_printer_technology(PrinterTechnology printer_technology)
     p->sidebar->get_searcher().set_printer_technology(printer_technology);
 
     p->notification_manager->set_fff(printer_technology == ptFFF);
-    p->notification_manager->set_slicing_progress_hidden();
+    if (ret) {
+        // Only hide when the technology actually changed (ret): hiding on a
+        // same-technology preset reload (device connect → load_current_presets
+        // → set_printer_technology(FFF)) kills the popup of a running slice.
+        p->notification_manager->set_slicing_progress_hidden();
+    }
 
     return ret;
 }
