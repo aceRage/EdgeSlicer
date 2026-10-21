@@ -1,6 +1,7 @@
 #ifndef slic3r_PrintHostDeviceStatus_hpp_
 #define slic3r_PrintHostDeviceStatus_hpp_
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -145,6 +146,106 @@ bool query_print_state(const std::string& base_url, std::string& state, std::str
 // closest colour (redmean) among the loaded slots that have a colour. A QIDI Box: only loaded
 // slots of the filament's own material, closest colour first, then one with no colour.
 int auto_match_slot(const std::vector<Slot>& slots, const std::string& colour, const std::string& type, bool qidi_box);
+
+// ---- Starting a print on a QIDI Box printer -----------------------------------------------------
+//
+// The Box firmware feeds T<n> from the slot its saved variable value_t<n> names, and only the
+// sending slicer sets it. A print started without a fresh mapping runs on whatever the printer was
+// told for its previous print: a PLA plate fed from the ASA slot, at PLA settings. So every path
+// that starts a print on such a printer - the desktop send dialog, the hub / phone / Stream tab
+// send, an archive reprint - asks qidi_send_policy() first, and only Start lets it go.
+
+// The profile's printer_model names a QIDI that can carry a QIDI Box (Q2 / Q2C, X-Max 4,
+// X-Plus 4, X-Plus 5). Used only when the printer itself could not be asked: such a printer is
+// then treated as having a Box, so nothing is started on a mapping nobody has seen.
+bool qidi_box_capable_model(const std::string& printer_model);
+// The model has QIDIStudio's "Polar cooler" (its profiles' is_support_polar_cooler: the Q2 / Q2C,
+// the X 4 series and the X-Plus 5). Used to offer the switch when the printer did not answer.
+bool qidi_polar_cooler_model(const std::string& printer_model);
+
+// A plate filament's material against a Box slot's ("PLA" vs "ASA"). Case and surrounding blanks
+// do not count; an unknown material on either side is not a match.
+bool filament_types_match(const std::string& plate_type, const std::string& slot_type);
+
+// One plate filament, as the policy and the automatic mapping need it.
+struct SendFilament
+{
+    int         index { 0 };    // 0-based, the slicer's filament/extruder number (T<index>)
+    std::string type;           // "PLA"
+    std::string colour;         // "#RRGGBB"
+    bool        used { false }; // this plate prints with it
+};
+
+// What is known when a print is about to start.
+struct QidiSendFacts
+{
+    bool model_may_have_box { false }; // qidi_box_capable_model(printer_model)
+    bool probe_ok { false };           // the printer answered the status query (Status::online)
+    bool qidi { false };               // it answered as QIDI firmware (Status::qidi)
+    bool box_present { false };        // with a QIDI Box plugged in (Status::qidi_box)
+    bool busy { false };               // printing or paused
+    bool use_box { true };             // the Box is used for this print (the dialog's switch)
+    int  used_filaments { 0 };         // filaments this plate prints with
+    int  mapped_filaments { 0 };       // ... that have a Box slot picked
+    int  type_mismatches { 0 };        // ... whose slot holds another material (or an unknown one)
+};
+
+enum class QidiSendPolicy
+{
+    NotApplicable,       // not a QIDI Box printer: the send goes on exactly as before
+    Start,               // mapping complete (or the Box is off / absent): start the print
+    UploadOnlyBusy,      // the printer is printing or paused: never re-point its Box under a print
+    UploadOnlyNoProbe,   // a Box printer that could not be read: upload only unless the person chooses to print
+    NeedsMapping,        // a used filament has no Box slot: the printer would use its stale value_t<n>
+    ConfirmTypeMismatch, // a filament goes to a slot holding another material: ask first
+};
+
+QidiSendPolicy qidi_send_policy(const QidiSendFacts& facts);
+
+// The automatic material-first mapping (auto_match_slot with qidi_box) for every used filament,
+// as the send dialog would preselect it. For sends with nobody at a dialog: the hub, the phone,
+// an archive reprint. `mapping` is "filament:slot,..." for qidi_start_script(); `facts` is filled
+// from `st` and the filaments (model_may_have_box is left to the caller).
+struct QidiAutoMapping
+{
+    std::string   mapping;
+    QidiSendFacts facts;
+};
+QidiAutoMapping qidi_auto_mapping(const Status& st, const std::vector<SendFilament>& filaments);
+
+// Plain English, for the hub / phone job result and the log: why the print was not started.
+// Empty for NotApplicable and Start.
+std::string qidi_send_refusal(QidiSendPolicy policy);
+
+// ---- QIDIStudio's own LAN read of the Box -------------------------------------------------------
+//
+// QIDIStudio 2.07 does not read a `multi_color_controller` object at all. Over the LAN it reads
+// Klipper's save_variables (`/printer/objects/query?save_variables=variables`): box_count, and per
+// Box slot n (box * 4 + slot, 0-based) filament_slot<n> / color_slot<n> / vendor_slot<n>, which
+// are indexes into the printer's own `config/officiall_filas_list.cfg` ([fila<id>] type = PLA ...,
+// [colordict] <id> = #RRGGBB). The same variables hold value_t<tool> and enable_box, which is what
+// the start-of-print script writes and what is read back to confirm it took.
+
+struct QidiFilaList
+{
+    std::map<int, std::string> type;   // fila id -> "PLA"
+    std::map<int, std::string> name;   // fila id -> "PLA Rapido"
+    std::map<int, std::string> colour; // colordict id -> "#RRGGBB"
+};
+// The INI text of officiall_filas_list.cfg.
+QidiFilaList parse_qidi_filas_cfg(const std::string& text);
+// save_variables' `variables` object (JSON text) -> the Box slots it describes; empty when it names
+// no Box. A slot counts as loaded when its filament_slot<n> names a material the list knows.
+std::vector<Slot> slots_from_qidi_variables(const std::string& variables_json, const QidiFilaList& list, bool& have_filaments);
+// After the start-of-print script: do the printer's variables now say what was sent? enable_box
+// as `use_box` (1 / 0, -1 = not sent) and value_t<tool> == 'slot<n>' for every pair of `mapping`.
+// False with `why` otherwise - the print must not start on a mapping that did not take.
+bool qidi_mapping_confirmed(const std::string& variables_json, const std::string& mapping, int use_box, std::string& why);
+// Blocking, off the GUI thread: the `variables` object of save_variables, as JSON text.
+bool query_qidi_variables(const std::string& base_url, std::string& variables_json, std::string& error, int timeout_s = 10);
+// The probe timeout for a model: a QIDI Box printer's Moonraker is slow to answer (3 s timed out
+// on a real one), every other printer keeps the short wait.
+int probe_timeout_for(const std::string& printer_model);
 
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
 Status probe(const Device& d, int timeout_s = 3);
