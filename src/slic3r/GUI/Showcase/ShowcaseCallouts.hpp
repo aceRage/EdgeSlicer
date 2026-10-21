@@ -39,6 +39,10 @@ struct ShowcaseCalloutDraw
     // label's own opacity. Empty: no fade, an occluded anchor gets a dashed leader (stills).
     std::vector<double>           fade;
     double                        alpha = 1.;
+    // S5: a path's timeline (Showcase::CalloutVisual): how much it shows the callout (0..1, on top of
+    // the fade) and how much it highlights it (an accent ring round the label and its dots).
+    double                        visual    = 1.;
+    double                        highlight = 0.;
 };
 
 struct ShowcaseCalloutOptions

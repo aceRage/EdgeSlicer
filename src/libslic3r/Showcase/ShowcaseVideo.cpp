@@ -18,6 +18,7 @@ constexpr double PI = 3.14159265358979323846;
 const char *const PATH_NAMES[]   = { "orbit", "turntable", "orbit_bob", "keyframes" };
 const char *const EASING_NAMES[] = { "linear", "ease_in_out", "ease_in", "ease_out" };
 const char *const FORMAT_NAMES[] = { "mp4", "webm", "webm_alpha", "gif", "webp", "png_sequence" };
+const char *const BUILD_SOURCE_NAMES[] = { "auto", "toolpaths", "clip" };
 
 template<class E, size_t N> const char *video_enum_name(E v, const char *const (&names)[N])
 {
@@ -72,6 +73,8 @@ const char *to_string(VideoFormat v) { return video_enum_name(v, FORMAT_NAMES); 
 bool from_string(const std::string &s, VideoPath &v) { return video_enum_parse(s, v, PATH_NAMES); }
 bool from_string(const std::string &s, Easing &v) { return video_enum_parse(s, v, EASING_NAMES); }
 bool from_string(const std::string &s, VideoFormat &v) { return video_enum_parse(s, v, FORMAT_NAMES); }
+const char *to_string(BuildSource v) { return video_enum_name(v, BUILD_SOURCE_NAMES); }
+bool from_string(const std::string &s, BuildSource &v) { return video_enum_parse(s, v, BUILD_SOURCE_NAMES); }
 
 const char *video_extension(VideoFormat f)
 {
@@ -87,7 +90,8 @@ const char *video_extension(VideoFormat f)
 
 bool Keyframe::operator==(const Keyframe &o) const
 {
-    return time == o.time && eye == o.eye && target == o.target && up == o.up && zoom == o.zoom && ease == o.ease;
+    return time == o.time && eye == o.eye && target == o.target && up == o.up && zoom == o.zoom && ease == o.ease && spin == o.spin &&
+           glide == o.glide;
 }
 
 bool VideoSettings::operator==(const VideoSettings &o) const
@@ -95,7 +99,7 @@ bool VideoSettings::operator==(const VideoSettings &o) const
     return path == o.path && duration == o.duration && fps == o.fps && resolution == o.resolution && quality == o.quality &&
            bitrate == o.bitrate && format == o.format && easing == o.easing && sweep_deg == o.sweep_deg && clockwise == o.clockwise &&
            bob_deg == o.bob_deg && bob_cycles == o.bob_cycles && hold_start == o.hold_start && hold_end == o.hold_end && loop == o.loop &&
-           callouts == o.callouts && keyframes == o.keyframes;
+           callouts == o.callouts && keyframes == o.keyframes && build == o.build && events == o.events && path_name == o.path_name;
 }
 
 void sanitize(VideoSettings &v)
@@ -111,6 +115,12 @@ void sanitize(VideoSettings &v)
     v.bob_cycles = std::clamp(v.bob_cycles, 1, 8);
     v.hold_start = clamp_finite(v.hold_start, 0., MAX_HOLD_SECONDS, 0.);
     v.hold_end   = clamp_finite(v.hold_end, 0., MAX_HOLD_SECONDS, 0.);
+    v.build.from = clamp_finite(v.build.from, 0., 1., 0.);
+    v.build.to   = clamp_finite(v.build.to, 0., 1., 1.);
+    if (int(v.build.easing) < int(Easing::Linear) || int(v.build.easing) > int(Easing::EaseOut))
+        v.build.easing = Easing::Linear;
+    if (int(v.build.source) < int(BuildSource::Auto) || int(v.build.source) > int(BuildSource::Clip))
+        v.build.source = BuildSource::Auto;
     std::vector<Keyframe> keys;
     for (Keyframe k : v.keyframes) {
         if (!std::isfinite(k.time) || !v_finite(k.eye) || !v_finite(k.target) || !v_finite(k.up))
@@ -120,6 +130,7 @@ void sanitize(VideoSettings &v)
         k.time = std::clamp(k.time, 0., MAX_VIDEO_SECONDS);
         k.zoom = std::isfinite(k.zoom) && k.zoom > 0. ? k.zoom : 1.;
         k.up   = v_norm(k.up);
+        k.spin = std::isfinite(k.spin) ? k.spin : 0.;
         insert_keyframe(keys, k);
     }
     v.keyframes = std::move(keys);
@@ -142,7 +153,7 @@ double ease(Easing e, double u)
 
 bool seamless_loop(const VideoSettings &v)
 {
-    if (!v.loop || v.path == VideoPath::Keyframes || v.hold_start > 0. || v.hold_end > 0.)
+    if (!v.loop || v.path == VideoPath::Keyframes || v.hold_start > 0. || v.hold_end > 0. || v.build.enabled)
         return false;
     // A whole number of turns comes back where it started.
     const double turns = v.sweep_deg / 360.;
@@ -167,6 +178,13 @@ double motion_fraction(const VideoSettings &v, double t)
     if (!(v.duration > 0.) || t <= v.hold_start)
         return 0.;
     return std::clamp((t - v.hold_start) / v.duration, 0., 1.);
+}
+
+double build_fraction(const VideoSettings &v, double t)
+{
+    if (!v.build.enabled)
+        return -1.;
+    return v.build.from + (v.build.to - v.build.from) * ease(v.build.easing, motion_fraction(v, t));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -248,31 +266,40 @@ CameraPose pose_of(const Keyframe &k) { return pose_of(k.eye, k.target, k.up, k.
 
 } // namespace
 
-CameraPose evaluate_keyframes(const std::vector<Keyframe> &keys, double t, const CameraView &fallback)
-{
-    if (keys.empty())
-        return pose_of(fallback.eye, fallback.target, fallback.up, fallback.zoom);
-    if (keys.size() == 1 || !(t > keys.front().time))
-        return pose_of(keys.front());
-    if (t >= keys.back().time)
-        return pose_of(keys.back());
-    size_t i = 0;
-    while (i + 2 < keys.size() && keys[i + 1].time <= t)
-        ++i;
-    const Keyframe &k1 = keys[i], &k2 = keys[i + 1];
-    const double    dt = k2.time - k1.time;
-    if (dt <= 1e-9)
-        return pose_of(k2);
-    const double s = ease(k2.ease, (t - k1.time) / dt);
+namespace {
 
-    // The neighbours; at the ends a mirrored phantom key keeps the curve's end straight.
-    auto neighbours = [&](const V3 Keyframe::*m, V3 &p0, V3 &p3) {
-        p0 = i > 0 ? keys[i - 1].*m : v_sub(v_mul(k1.*m, 2.), k2.*m);
-        p3 = i + 2 < keys.size() ? keys[i + 2].*m : v_sub(v_mul(k2.*m, 2.), k1.*m);
-    };
+// The neighbours of segment i (keys i and i + 1) of one channel; at the ends a mirrored phantom key
+// keeps the curve's end straight.
+void segment_neighbours(const std::vector<Keyframe> &keys, size_t i, const V3 Keyframe::*m, V3 &p0, V3 &p3)
+{
+    const Keyframe &k1 = keys[i], &k2 = keys[i + 1];
+    p0 = i > 0 ? keys[i - 1].*m : v_sub(v_mul(k1.*m, 2.), k2.*m);
+    p3 = i + 2 < keys.size() ? keys[i + 2].*m : v_sub(v_mul(k2.*m, 2.), k1.*m);
+}
+
+// The length of segment i of a channel (the polyline the arc length re-parameterisation measures).
+double segment_length(const std::vector<Keyframe> &keys, size_t i, const V3 Keyframe::*m)
+{
+    V3 p0, p3;
+    segment_neighbours(keys, i, m, p0, p3);
+    constexpr int N = 48;
+    double        len  = 0.;
+    V3            prev = keys[i].*m;
+    for (int k = 1; k <= N; ++k) {
+        const V3 p = catmull_rom(p0, keys[i].*m, keys[i + 1].*m, p3, double(k) / N);
+        len += v_len(v_sub(p, prev));
+        prev = p;
+    }
+    return len;
+}
+
+// The pose on segment i at `s` (0..1, already eased: the share of the segment's length covered).
+CameraPose pose_on_segment(const std::vector<Keyframe> &keys, size_t i, double s)
+{
+    const Keyframe &k1 = keys[i], &k2 = keys[i + 1];
     V3 e0, e3, t0, t3;
-    neighbours(&Keyframe::eye, e0, e3);
-    neighbours(&Keyframe::target, t0, t3);
+    segment_neighbours(keys, i, &Keyframe::eye, e0, e3);
+    segment_neighbours(keys, i, &Keyframe::target, t0, t3);
     // Even speed along the eye's path; along the target's when the eye stands still (a pan).
     double param = arc_length_param(e0, k1.eye, k2.eye, e3, s);
     if (param < 0.)
@@ -284,7 +311,108 @@ CameraPose evaluate_keyframes(const std::vector<Keyframe> &keys, double t, const
     const V3     up     = slerp_dir(k1.up, k2.up, param);
     const double z1 = std::max(1e-6, k1.zoom), z2 = std::max(1e-6, k2.zoom);
     const double zoom   = std::exp(std::log(z1) + (std::log(z2) - std::log(z1)) * param);
-    return pose_of(eye, target, up, zoom);
+    CameraPose   pose   = pose_of(eye, target, up, zoom);
+    pose.spin_deg       = k1.spin + (k2.spin - k1.spin) * param;
+    return pose;
+}
+
+} // namespace
+
+CameraPose evaluate_keyframes(const std::vector<Keyframe> &keys, double t, const CameraView &fallback)
+{
+    if (keys.empty())
+        return pose_of(fallback.eye, fallback.target, fallback.up, fallback.zoom);
+    auto with_spin = [](CameraPose p, const Keyframe &k) {
+        p.spin_deg = k.spin;
+        return p;
+    };
+    if (keys.size() == 1 || !(t > keys.front().time))
+        return with_spin(pose_of(keys.front()), keys.front());
+    if (t >= keys.back().time)
+        return with_spin(pose_of(keys.back()), keys.back());
+    size_t i = 0;
+    while (i + 2 < keys.size() && keys[i + 1].time <= t)
+        ++i;
+
+    // S5: the run of glide keys this segment belongs to, from the last key before it that stops to
+    // the first after it that does.
+    size_t a = i, b = i + 1;
+    while (a > 0 && keys[a].glide)
+        --a;
+    while (b + 1 < keys.size() && keys[b].glide)
+        ++b;
+    if (b == a + 1) {
+        const Keyframe &k1 = keys[a], &k2 = keys[b];
+        const double    dt = k2.time - k1.time;
+        if (dt <= 1e-9)
+            return with_spin(pose_of(k2), k2);
+        return pose_on_segment(keys, a, ease(k2.ease, (t - k1.time) / dt));
+    }
+    const double dt = keys[b].time - keys[a].time;
+    if (dt <= 1e-9)
+        return with_spin(pose_of(keys[b]), keys[b]);
+    const double s = ease(keys[b].ease, (t - keys[a].time) / dt);
+    // Even speed along the whole run: by the eye's path, else the target's, else by the keys' times.
+    std::vector<double> lengths;
+    double              total = 0.;
+    for (const V3 Keyframe::*m : { &Keyframe::eye, &Keyframe::target }) {
+        lengths.clear();
+        total = 0.;
+        for (size_t j = a; j < b; ++j) {
+            lengths.push_back(segment_length(keys, j, m));
+            total += lengths.back();
+        }
+        if (total > 1e-9)
+            break;
+    }
+    if (total <= 1e-9) {
+        lengths.clear();
+        total = 0.;
+        for (size_t j = a; j < b; ++j) {
+            lengths.push_back(std::max(0., keys[j + 1].time - keys[j].time));
+            total += lengths.back();
+        }
+        if (total <= 1e-9)
+            return with_spin(pose_of(keys[b]), keys[b]);
+    }
+    double want = s * total;
+    for (size_t j = a; j < b; ++j) {
+        const double len = lengths[j - a];
+        if (want <= len || j + 1 == b)
+            return pose_on_segment(keys, j, len > 1e-12 ? std::clamp(want / len, 0., 1.) : 1.);
+        want -= len;
+    }
+    return with_spin(pose_of(keys[b]), keys[b]);
+}
+
+double keyframe_run_time(const std::vector<Keyframe> &keys, size_t index)
+{
+    if (index >= keys.size())
+        return 0.;
+    if (!keys[index].glide || index == 0 || index + 1 >= keys.size())
+        return keys[index].time;
+    size_t a = index, b = index;
+    while (a > 0 && keys[a].glide)
+        --a;
+    while (b + 1 < keys.size() && keys[b].glide)
+        ++b;
+    double total = 0., upto = 0.;
+    for (size_t j = a; j < b; ++j) {
+        const double len = segment_length(keys, j, &Keyframe::eye);
+        total += len;
+        if (j < index)
+            upto += len;
+    }
+    if (total <= 1e-9)
+        return keys[index].time;
+    // The time the eased run covers that share of its length: invert the ease by bisection.
+    const double share = upto / total, t0 = keys[a].time, t1 = keys[b].time;
+    double lo = 0., hi = 1.;
+    for (int k = 0; k < 50; ++k) {
+        const double mid = 0.5 * (lo + hi);
+        (ease(keys[b].ease, mid) < share ? lo : hi) = mid;
+    }
+    return t0 + (t1 - t0) * 0.5 * (lo + hi);
 }
 
 CameraPose evaluate_path(const VideoSettings &v, const CameraView &base, double t)
@@ -535,9 +663,26 @@ std::string video_to_json(const VideoSettings &v)
     j["loop"]       = v.loop;
     j["callouts"]   = v.callouts;
     json keys       = json::array();
-    for (const Keyframe &k : v.keyframes)
-        keys.push_back({ { "time", k.time }, { "eye", k.eye }, { "target", k.target }, { "up", k.up }, { "zoom", k.zoom }, { "ease", to_string(k.ease) } });
+    for (const Keyframe &k : v.keyframes) {
+        json kj = { { "time", k.time }, { "eye", k.eye }, { "target", k.target }, { "up", k.up }, { "zoom", k.zoom }, { "ease", to_string(k.ease) } };
+        // S5 keys only where used, so an S4 scene writes back exactly as it was.
+        if (k.spin != 0.)
+            kj["spin"] = k.spin;
+        if (k.glide)
+            kj["glide"] = true;
+        keys.push_back(std::move(kj));
+    }
     j["keyframes"] = keys;
+    if (v.build != BuildUp())
+        j["build"] = { { "enabled", v.build.enabled }, { "from", v.build.from }, { "to", v.build.to },
+                       { "easing", to_string(v.build.easing) }, { "source", to_string(v.build.source) } };
+    if (!v.events.empty()) {
+        const json ev = json::parse(v.events, nullptr, false);
+        if (ev.is_array())
+            j["events"] = ev;
+    }
+    if (!v.path_name.empty())
+        j["path_name"] = v.path_name;
     return j.dump();
 }
 
@@ -574,8 +719,21 @@ bool video_from_json(const std::string &text, VideoSettings &out)
             k.up     = vvec(kj, "up", k.up);
             k.zoom   = vget<double>(kj, "zoom", 1.);
             k.ease   = venum(kj, "ease", k.ease);
+            k.spin   = vget<double>(kj, "spin", 0.);
+            k.glide  = vget<bool>(kj, "glide", false);
             v.keyframes.push_back(k);
         }
+    if (j.contains("build") && j["build"].is_object()) {
+        const json &b    = j["build"];
+        v.build.enabled  = vget<bool>(b, "enabled", false);
+        v.build.from     = vget<double>(b, "from", 0.);
+        v.build.to       = vget<double>(b, "to", 1.);
+        v.build.easing   = venum(b, "easing", v.build.easing);
+        v.build.source   = venum(b, "source", v.build.source);
+    }
+    if (j.contains("events") && j["events"].is_array() && !j["events"].empty())
+        v.events = j["events"].dump();
+    v.path_name = vget<std::string>(j, "path_name", std::string());
     sanitize(v);
     out = std::move(v);
     return true;

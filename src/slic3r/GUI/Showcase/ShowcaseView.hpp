@@ -11,6 +11,8 @@
 #include "ShowcaseCallouts.hpp"
 #include "ShowcaseWatermark.hpp"
 
+#include "libslic3r/Showcase/ShowcasePath.hpp"
+#include "libslic3r/Showcase/ShowcaseRenderCli.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
 
 #include "../Camera.hpp"
@@ -79,6 +81,10 @@ public:
     void on_project_changed();
     void on_change_color_mode(bool is_dark);
 
+    // S5, --showcase-render: renders the request's video or still of the current plate (the hidden
+    // instance has loaded the project and shown this view). Fills `report`; returns the exit code.
+    int run_render_job(const Showcase::RenderRequest &request, Showcase::RenderReport &report);
+
 private:
     Showcase::Project       &project();
     int                      current_plate() const;
@@ -142,9 +148,12 @@ private:
     void                     callouts_update_occlusion(const Showcase::Scene &scene);
     // The callouts as drawn now: label text and where the anchors land on the safe frame. S4: a video
     // frame passes its own occlusion and the fade state.
+    // S5: `frame_scene` and `visuals` - a moment of a path's timeline (callouts shown, hidden, highlighted).
     std::vector<ShowcaseCalloutDraw> callouts_draw_list(const ShowcaseLabelContext &labels,
                                                         const std::map<std::string, std::vector<bool>> *occluded = nullptr,
-                                                        const Showcase::CalloutFade *fade = nullptr);
+                                                        const Showcase::CalloutFade *fade = nullptr,
+                                                        const Showcase::Scene *frame_scene = nullptr,
+                                                        const std::map<std::string, Showcase::CalloutVisual> *visuals = nullptr);
     double                   callouts_model_center_x() const;
     bool                     callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &image);
     // Draws the callouts onto an exported image (before the watermark).
@@ -224,6 +233,24 @@ private:
     void                     video_cancel();
     bool                     video_busy() const { return m_video.job != nullptr; }
 
+    // --- S5: path files, the timeline, the build-up and the toolpath source (ShowcaseViewPath.cpp) ---
+    void                     on_import_path();
+    void                     on_export_path();
+    void                     refresh_path_info();
+    // What the paths' moves need: the camera to start from, the plate's objects and filaments, the
+    // saved views; zooms through `frame_height_px` (the live safe frame's height in the tab).
+    Showcase::PathContext    path_context(double frame_height_px);
+    // The video's events, parsed once per change of their text.
+    const std::vector<Showcase::PathEvent> &video_events(const Showcase::VideoSettings &v);
+    // The scene's view frame height, noted whenever its camera, views or keyframes are set.
+    void                     note_frame_height(Showcase::Scene &s);
+    // S5: shows the path at `t` seconds (the scrubber, the drawn timeline).
+    void                     video_scrub(double t);
+    void                     paint_timeline();
+    void                     on_timeline_mouse(wxMouseEvent &evt);
+    // A frame of the export at time `t` (callouts, watermark and the timeline included).
+    bool                     video_render_frame_at(double t, int index, Showcase::VideoFrame &out);
+
     struct VideoUi
     {
         // Preview and peek: the camera and the scene the renderer had before.
@@ -252,6 +279,13 @@ private:
         int                      height = 0;
         std::chrono::steady_clock::time_point started;
         ShowcaseVideoProgressDialog *progress = nullptr;
+
+        // S5: the timeline. The export's events; the preview's state of the moment it shows.
+        std::vector<Showcase::PathEvent> events;
+        std::string              events_text;          // what events_cache was parsed from
+        std::vector<Showcase::PathEvent> events_cache;
+        bool                     pose_timeline = false;
+        std::map<std::string, Showcase::CalloutVisual> pose_visuals;
     };
     VideoUi                  m_video;
     wxTimer                  m_video_timer;
@@ -395,6 +429,16 @@ private:
     std::vector<wxWindow *>  m_vid_orbit_rows;     // shown for orbit paths
     std::vector<wxWindow *>  m_vid_bob_rows;       // shown for the bob
     std::vector<wxWindow *>  m_vid_key_rows;       // shown for keyframes
+    // S5
+    wxCheckBox              *m_vid_build = nullptr;
+    wxButton                *m_vid_path_import = nullptr;
+    wxButton                *m_vid_path_export = nullptr;
+    wxButton                *m_vid_path_clear = nullptr;
+    wxStaticText            *m_vid_path_info = nullptr;
+    wxWindow                *m_vid_timeline = nullptr;   // the drawn timeline: keyframes, events, the moment shown
+    wxChoice                *m_source = nullptr;
+    wxCheckBox              *m_smooth_auto = nullptr;
+    wxSlider                *m_smooth = nullptr;
 };
 
 } // namespace GUI

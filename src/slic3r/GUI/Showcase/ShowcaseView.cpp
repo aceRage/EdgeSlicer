@@ -304,6 +304,7 @@ template<class F> void ShowcaseView::edit(F &&change, bool resync)
 
 void ShowcaseView::after_change(bool resync)
 {
+    note_frame_height(scene());
     m_renderer->set_scene(&scene(), &project());
     m_renderer->invalidate_watermark();
     ++m_callouts.version;
@@ -357,6 +358,7 @@ void ShowcaseView::store_scene_camera(bool mark_dirty)
     v.up     = { up.x(), up.y(), up.z() };
     v.zoom   = camera.get_zoom();
     Showcase::Scene &s = scene();
+    note_frame_height(s);
     if (s.camera == v)
         return;
     s.camera = v;
@@ -394,6 +396,10 @@ void ShowcaseView::on_deactivate()
     video_restore_view();
     store_scene_camera(true);
     m_active = false;
+    // S5: the toolpath source borrowed Preview's viewer.
+    if (m_renderer != nullptr)
+        m_renderer->set_build(-1., Showcase::BuildSource::Auto);
+    ShowcaseRenderer::release_toolpaths();
     m_callouts.drag = CalloutUi::Drag::None;
     if (m_canvas_widget != nullptr && m_canvas_widget->HasCapture())
         m_canvas_widget->ReleaseMouse();
@@ -703,6 +709,22 @@ void ShowcaseView::build_panel()
     m_layer_lines->SetToolTip(_L("Printed layer lines on the model at its real layer height. A layer is often thinner than a pixel "
                                  "when the whole model is in view, so the lines show in close-ups and in large, high quality exports."));
     row(_L("Layer lines"), m_layer_lines);
+    // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
+    // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
+    wxArrayString sources;
+    sources.Add(_L("Model"));
+    sources.Add(_L("Toolpaths (sliced plate)"));
+    m_source = choice(sources);
+    m_source->SetToolTip(_L("Toolpaths show the plate's slice as it will print: seams, the top pattern, supports and colour changes. "
+                            "Slice the plate first; until then the model is shown."));
+    row(_L("Show"), m_source);
+    m_smooth_auto = new wxCheckBox(m_side, wxID_ANY, _L("By finish"));
+    m_smooth_auto->SetToolTip(_L("Each filament's finish picks how smooth its toolpaths look (silk smoothest, matte least)."));
+    m_smooth = slider(60, 0, 100);
+    m_smooth->SetToolTip(_L("Toolpaths only. Left: crisp extrusions as in Preview. Right: rounded beads, and top and bottom "
+                            "skin widened and flattened into one surface."));
+    grid->Add(m_smooth_auto, 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(m_smooth, 1, wxEXPAND);
     {
         auto *hint = new wxStaticText(m_side, wxID_ANY, _L("The finish of each filament is guessed from its preset name and type. "
                                                            "Pick another one where the guess is wrong."));
@@ -1118,6 +1140,20 @@ void ShowcaseView::build_panel()
         if (sel >= 0)
             edit([sel](Showcase::Scene &s) { s.materials.layer_lines = Showcase::LayerLines(sel); });
     });
+    m_source->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_source->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.source = sel == 1 ? "toolpaths" : "model"; });
+    });
+    m_smooth_auto->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool by_finish = m_smooth_auto->GetValue();
+        const int  v         = m_smooth->GetValue();
+        edit([by_finish, v](Showcase::Scene &s) { s.materials.toolpath_smoothness = by_finish ? -1.f : float(v) / 100.f; });
+    });
+    m_smooth->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const int v = m_smooth->GetValue();
+        edit([v](Showcase::Scene &s) { s.materials.toolpath_smoothness = float(v) / 100.f; });
+    });
 
     m_projection->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         if (m_syncing || read_only())
@@ -1475,6 +1511,10 @@ void ShowcaseView::sync_controls()
     m_env_rotation->SetValue(env_rot);
     m_exposure->SetValue(std::clamp(int(std::lround(s.lighting.exposure * 10.f)), -30, 30));
     m_layer_lines->SetSelection(int(s.materials.layer_lines));
+    m_source->SetSelection(s.source == "toolpaths" ? 1 : 0);
+    m_smooth_auto->SetValue(s.materials.toolpath_smoothness < 0.f);
+    if (s.materials.toolpath_smoothness >= 0.f)
+        m_smooth->SetValue(int(std::lround(s.materials.toolpath_smoothness * 100.f)));
     refresh_materials(true);
 
     m_projection->SetSelection(wxGetApp().plater()->get_camera().get_type() == Camera::EType::Ortho ? 1 : 0);
@@ -1571,8 +1611,9 @@ void ShowcaseView::update_enabled()
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
                                                           m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
                                                           m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
-                                                          m_exposure, m_layer_lines, m_use_as_cover })
+                                                          m_exposure, m_layer_lines, m_use_as_cover, m_source, m_smooth_auto })
         w->Enable(editable);
+    m_smooth->Enable(editable && s.materials.toolpath_smoothness >= 0.f);
     for (wxChoice *c : m_mat_choices)
         c->Enable(editable);
     m_fill_intensity->Enable(editable && s.lighting.fill);
@@ -2282,11 +2323,17 @@ std::map<std::string, std::vector<bool>> ShowcaseView::callouts_compute_occlusio
 
 std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const ShowcaseLabelContext &labels,
                                                                   const std::map<std::string, std::vector<bool>> *occluded_in,
-                                                                  const Showcase::CalloutFade *fade)
+                                                                  const Showcase::CalloutFade *fade, const Showcase::Scene *frame_scene,
+                                                                  const std::map<std::string, Showcase::CalloutVisual> *visuals)
 {
     const std::map<std::string, std::vector<bool>> &occluded = occluded_in != nullptr ? *occluded_in : m_callouts.occluded;
     std::vector<ShowcaseCalloutDraw> out;
-    const Showcase::Scene &s = scene();
+    // S5: a preview of a path shows its timeline's callouts.
+    if (frame_scene == nullptr && m_video.borrowed && m_video.pose_timeline) {
+        frame_scene = &m_video.pose_scene;
+        visuals     = &m_video.pose_visuals;
+    }
+    const Showcase::Scene &s = frame_scene != nullptr ? *frame_scene : scene();
     Matrix4d               vp;
     if (m_model == nullptr || !m_renderer->frame_view_projection(vp))
         return out;
@@ -2320,6 +2367,13 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
         }
         if (fade != nullptr)
             d.alpha = fade->label_alpha(c.key, int(c.anchors.size()));
+        if (visuals != nullptr) {
+            auto v = visuals->find(c.key);
+            if (v != visuals->end()) {
+                d.visual    = v->second.alpha;
+                d.highlight = v->second.highlight;
+            }
+        }
         d.pinned     = c.pinned;
         d.pinned_pos = { c.label_pos[0], c.label_pos[1] };
         out.push_back(std::move(d));

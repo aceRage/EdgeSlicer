@@ -44,6 +44,9 @@ wxColour callout_colour(const std::string &hex, unsigned char alpha = 255)
                     (unsigned char) std::lround(c[2] * 255.f), alpha);
 }
 
+// S5: the accent a path's "highlight" draws round a callout.
+wxColour showcase_highlight_colour() { return wxColour(255, 138, 0); }
+
 wxColour callout_with_alpha(const wxColour &c, double a)
 {
     return wxColour(c.Red(), c.Green(), c.Blue(), (unsigned char) std::lround(std::clamp(a, 0., 1.) * 255.));
@@ -302,7 +305,8 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 dots.push_back({ d.anchors[a].x * W, d.anchors[a].y * H });
             // Video (S4): leaders fade instead of turning dashed.
             const bool video = !d.fade.empty();
-            auto fade_of = [&d, video](size_t a) { return video ? (a < d.fade.size() ? d.fade[a] : 1.) : 1.; };
+            // S5: a path's timeline dims or hides a callout (visual) on top of the occlusion fade.
+            auto fade_of = [&d, video](size_t a) { return (video ? (a < d.fade.size() ? d.fade[a] : 1.) : 1.) * std::clamp(d.visual, 0., 1.); };
             auto dashed  = [&d, video](size_t a) { return !video && a < d.occluded.size() && d.occluded[a]; };
             // Which anchors have no line to their label (S4: left out so nothing crosses).
             auto unlinked = [&pl, &layout](size_t a) {
@@ -337,9 +341,16 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 }
                 if (video && !layout.legend) {
                     with_layer(fade_of(a), [&]() {
+                        // S5: a highlighted callout's dots grow a little and get the accent ring.
+                        const double r = dot_r * (1. + 0.5 * std::clamp(d.highlight, 0., 1.));
+                        if (d.highlight > 0.004) {
+                            gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(callout_with_alpha(showcase_highlight_colour(), d.highlight), std::max(1., 0.9 * lw))));
+                            gc->SetBrush(*wxTRANSPARENT_BRUSH);
+                            gc->DrawEllipse(dots[a].x - 1.8 * r, dots[a].y - 1.8 * r, 3.6 * r, 3.6 * r);
+                        }
                         gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(halo, std::max(1., 0.45 * lw))));
                         gc->SetBrush(wxBrush(ink));
-                        gc->DrawEllipse(dots[a].x - dot_r, dots[a].y - dot_r, 2. * dot_r, 2. * dot_r);
+                        gc->DrawEllipse(dots[a].x - r, dots[a].y - r, 2. * r, 2. * r);
                     });
                     continue;
                 }
@@ -355,9 +366,17 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                     gc->DrawText(wxString::FromUTF8(num), dots[a].x - 0.5 * nw, dots[a].y - 0.5 * nh);
                     continue;
                 }
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(occluded ? ink : halo, std::max(1., 0.45 * lw))));
-                gc->SetBrush(occluded ? wxBrush(callout_with_alpha(halo, 0.6)) : wxBrush(ink));
-                gc->DrawEllipse(dots[a].x - dot_r, dots[a].y - dot_r, 2. * dot_r, 2. * dot_r);
+                with_layer(fade_of(a), [&]() {
+                    const double r = dot_r * (1. + 0.5 * std::clamp(d.highlight, 0., 1.));
+                    if (d.highlight > 0.004) {
+                        gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(callout_with_alpha(showcase_highlight_colour(), d.highlight), std::max(1., 0.9 * lw))));
+                        gc->SetBrush(*wxTRANSPARENT_BRUSH);
+                        gc->DrawEllipse(dots[a].x - 1.8 * r, dots[a].y - 1.8 * r, 3.6 * r, 3.6 * r);
+                    }
+                    gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(occluded ? ink : halo, std::max(1., 0.45 * lw))));
+                    gc->SetBrush(occluded ? wxBrush(callout_with_alpha(halo, 0.6)) : wxBrush(ink));
+                    gc->DrawEllipse(dots[a].x - r, dots[a].y - r, 2. * r, 2. * r);
+                });
             }
             if (hits != nullptr) {
                 ShowcaseCalloutHits::Item hit;
@@ -387,7 +406,7 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             const wxColour             second = callout_with_alpha(ink, 0.78);
             const bool                 halo   = !on_box;
             // S4, video: a label fades with the last of its anchors (never in the legend's key).
-            const double label_alpha = layout.legend ? 1. : std::clamp(d.alpha, 0., 1.);
+            const double label_alpha = layout.legend ? 1. : std::clamp(d.alpha * d.visual, 0., 1.);
             if (label_alpha <= 0.004)
                 continue;
             const bool label_layer = label_alpha < 0.996;
@@ -455,6 +474,15 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             if (!m.note.empty()) {
                 y += line_gap;
                 draw_text(font_small, m.note, second, b.x + pad_x, y, halo);
+            }
+            if (d.highlight > 0.004 && !layout.legend) {
+                // S5: a path's highlight - an accent ring round the label.
+                const double g = 0.25 * F;
+                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(callout_with_alpha(showcase_highlight_colour(), std::clamp(d.highlight, 0., 1.)),
+                                                           std::max(1.5, 0.16 * F))
+                                             .Join(wxJOIN_ROUND)));
+                gc->SetBrush(*wxTRANSPARENT_BRUSH);
+                gc->DrawRoundedRectangle(b.x - g, b.y - g, b.w + 2. * g, b.h + 2. * g, 0.4 * F);
             }
             if (opt.overlay && d.item == opt.selected) {
                 // The live view's selection; never in an export.

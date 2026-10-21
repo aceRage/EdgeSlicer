@@ -224,7 +224,8 @@ bool ExportSettings::operator==(const ExportSettings &o) const
 
 bool Scene::operator==(const Scene &o) const
 {
-    return id == o.id && name == o.name && plate_index == o.plate_index && source == o.source && preset_base == o.preset_base &&
+    return id == o.id && name == o.name && plate_index == o.plate_index && view_frame_height == o.view_frame_height && source == o.source &&
+           preset_base == o.preset_base &&
            background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && views == o.views &&
            export_settings == o.export_settings && materials == o.materials && callouts == o.callouts && video == o.video;
 }
@@ -694,6 +695,9 @@ json scene_to_json_object(const Scene &s)
     j["id"]          = s.id;
     j["name"]        = s.name;
     j["plate_index"] = s.plate_index;
+    // S5: only once known, so an S4 scene writes back as it was read.
+    if (s.view_frame_height > 0)
+        j["view_frame_height"] = s.view_frame_height;
     j["source"]      = s.source;
     j["preset_base"] = s.preset_base;
 
@@ -770,6 +774,9 @@ json scene_to_json_object(const Scene &s)
     for (const MaterialOverride &m : s.materials.overrides)
         filaments.push_back({ { "slot", m.filament }, { "finish", to_string(m.finish) } });
     ma["filaments"] = filaments;
+    // S5: only when set, so an S4 scene writes back as it was read.
+    if (s.materials.toolpath_smoothness >= 0.f)
+        ma["toolpath_smoothness"] = s.materials.toolpath_smoothness;
     j["materials"] = merged(raw, "materials", ma);
 
     j["callouts"] = callouts_to_json(s.callouts, raw.is_object() && raw.contains("callouts") ? raw["callouts"] : json());
@@ -787,6 +794,7 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.id          = get_or<std::string>(j, "id", "");
     s.name        = get_or<std::string>(j, "name", "");
     s.plate_index = std::max(0, get_or<int>(j, "plate_index", 0));
+    s.view_frame_height = std::clamp(get_or<int>(j, "view_frame_height", 0), 0, 100000);
     s.source      = get_or<std::string>(j, "source", "model");
     if (s.source != "model" && s.source != "toolpaths")
         s.source = "model";
@@ -854,6 +862,10 @@ bool scene_from_json_object(const json &j, Scene &s)
 
     const json ma              = j.contains("materials") ? j["materials"] : json();
     s.materials.layer_lines    = enum_or(ma, "layer_lines", s.materials.layer_lines);
+    {
+        const double sm               = get_or<double>(ma, "toolpath_smoothness", -1.);
+        s.materials.toolpath_smoothness = std::isfinite(sm) && sm >= 0. ? float(std::min(1., sm)) : -1.f;
+    }
     if (ma.is_object() && ma.contains("filaments") && ma["filaments"].is_array())
         for (const json &f : ma["filaments"]) {
             const int slot = get_or<int>(f, "slot", 0);

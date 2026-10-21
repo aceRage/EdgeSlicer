@@ -62,6 +62,9 @@ uniform int       layer_table_width;
 
 // Nothing under the floor (and the mirrored pass keeps to its side of it).
 uniform bool  clip_floor;
+// S5, the layer build-up's fallback without a slice: nothing above build_clip_z (very large = off),
+// and the inside seen through the cut is lit as a flat cap facing up, so the print reads solid.
+uniform float build_clip_z;
 
 in vec4 world_pos;
 in vec3 world_normal;
@@ -244,10 +247,12 @@ void main()
 {
     if (clip_floor && world_pos.z < -0.001)
         discard;
+    if (world_pos.z > build_clip_z)
+        discard;
 
     vec3 n = normalize(world_normal);
     if (!gl_FrontFacing)
-        n = -n;
+        n = build_clip_z < 1e9 ? vec3(0.0, 0.0, 1.0) : -n;
     vec3 v = normalize(camera_position - world_pos.xyz);
     vec3 albedo = srgb_to_linear(uniform_color.rgb);
 

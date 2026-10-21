@@ -10356,15 +10356,27 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
             glsafe(::glPolygonOffset(4.0f, 4.0f));
             glsafe(::glDisable(GL_CULL_FACE));
 
-            shader->start_using();
-            shader->set_uniform("projection_matrix", Transform3d(light_proj));
+            // Showcase S5: during a layer build-up only what is laid casts a shadow.
+            GLShaderProgram* caster = shader;
+            if (render_settings.has_clip_top()) {
+                if (GLShaderProgram* clip = wxGetApp().get_shader("showcase_shadow_clip"); clip != nullptr)
+                    caster = clip;
+            }
+            caster->start_using();
+            caster->set_uniform("projection_matrix", Transform3d(light_proj));
+            if (caster != shader)
+                caster->set_uniform("clip_z", float(render_settings.clip_top));
             for (GLVolume* volume : m_volumes.volumes) {
                 if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
                     continue;
-                shader->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
+                caster->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
+                if (caster != shader) {
+                    caster->set_uniform("volume_world_matrix", volume->world_matrix());
+                    caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+                }
                 volume->model.render();
             }
-            shader->stop_using();
+            caster->stop_using();
 
             // Restore state
             glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));

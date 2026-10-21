@@ -235,6 +235,9 @@ struct Materials
 {
     LayerLines                    layer_lines = LayerLines::Subtle;   // R11: subtle by default
     std::vector<MaterialOverride> overrides;                          // sorted by filament
+    // S5 (D13): the toolpath source's Smoothness, 0 = the crisp extrusions of Preview .. 1 = fully
+    // smoothed beads and blended skins; < 0 = by each filament's finish (toolpath_look()).
+    float                         toolpath_smoothness = -1.f;
 
     // The override for a filament, or null when its finish is inferred.
     const Finish *override_for(int filament) const;
@@ -243,7 +246,10 @@ struct Materials
     // The finish a filament renders with: the override, else the inference from its preset.
     Finish        finish_for(int filament, const std::string &preset_name, const std::string &filament_type) const;
 
-    bool operator==(const Materials &o) const { return layer_lines == o.layer_lines && overrides == o.overrides; }
+    bool operator==(const Materials &o) const
+    {
+        return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness;
+    }
     bool operator!=(const Materials &o) const { return !(*this == o); }
 };
 
@@ -252,7 +258,13 @@ struct Scene
     std::string             id;
     std::string             name;
     int                     plate_index = 0;      // 0-based, D17: one scene per plate
-    std::string             source      = "model"; // "model" | "toolpaths" (S5)
+    // S5: the height in pixels of the Showcase view's safe frame when the camera, the views and the
+    // keyframes were set. A camera's zoom is pixels per mm of that frame, so --showcase-render (which
+    // renders without a window) scales the zooms by its own frame's height over this one. 0 = unknown
+    // (a scene saved before S5).
+    int                     view_frame_height = 0;
+    // "model" | "toolpaths" (S5: the sliced plate's extrusions; the model when the plate is not sliced)
+    std::string             source      = "model";
     std::string             preset_base;           // the preset it started from (to_string(PresetId))
     Background              background;
     Floor                   floor;

@@ -26644,6 +26644,11 @@ GLCanvas3D* Plater::get_preview_canvas3D()
     return p->preview->get_canvas3d();
 }
 
+ShowcaseView* Plater::get_showcase_view()
+{
+    return p->showcase_view;
+}
+
 bool Plater::ensure_gl_ready()
 {
     // Preview first, View3D last: the 3D canvas' drawable is left current, and its volumes are

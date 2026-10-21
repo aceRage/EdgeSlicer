@@ -117,6 +117,10 @@ set(lisbslic3r_sources
     Showcase/ShowcaseVideo.hpp
     Showcase/ShowcaseEncoder.cpp
     Showcase/ShowcaseEncoder.hpp
+    Showcase/ShowcasePath.cpp
+    Showcase/ShowcasePath.hpp
+    Showcase/ShowcaseRenderCli.cpp
+    Showcase/ShowcaseRenderCli.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
@@ -754,6 +758,8 @@ slic3r_unity_build(libslic3r SKIP
     FlushVolCalc.cpp                # calls RGB2HSV() from libslic3r_gui; alone it is dropped by the linker in libslic3r_tests
     Showcase/ShowcaseVideo.cpp      # file-local vector helpers (V3, v_add, PI) with common names
     Showcase/ShowcaseEncoder.cpp    # boost::process pulls in <windows.h>; png.h setjmp
+    Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
+    Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
 )
 
 if (SLIC3R_STATIC)

@@ -1750,6 +1750,9 @@ void GCodeViewer::reset_shell()
 
 void GCodeViewer::reset()
 {
+    // EDGE (Showcase S5): the next load starts from the Preview's settings.
+    if (m_showcase.active)
+        restore_from_showcase(false);
     //BBS: should also reset the result id
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": current result id %1% ")%m_last_result_id;
     m_last_result_id = -1;
@@ -1788,6 +1791,9 @@ void GCodeViewer::reset()
 //BBS: GUI refactor: add canvas width and height
 void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
 {
+    // EDGE (Showcase S5): Preview always draws with its own settings.
+    if (m_showcase.active)
+        end_showcase();
     glsafe(::glEnable(GL_DEPTH_TEST));
     // EDGE: EDGESLICER_GL_SKIP leaves parts out, to bisect a driver message (OpenGLManager::gl_skip).
     if (!OpenGLManager::gl_skip("shells"))
@@ -1867,10 +1873,130 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
 // EDGE (phone / remote preview): the toolpaths alone, with the camera the caller put on the Plater.
 void GCodeViewer::render_toolpaths_for_capture()
 {
+    if (m_showcase.active)
+        end_showcase();
     if (!has_data() || m_no_render_path)
         return;
     glsafe(::glEnable(GL_DEPTH_TEST));
     render_toolpaths();
+}
+
+// ------------------------------------------------------------------------------------------------
+// EDGE (Showcase S5): the toolpaths in a presentation render
+// ------------------------------------------------------------------------------------------------
+
+static void showcase_set_option(libvgcode::Viewer &viewer, libvgcode::EOptionType type, bool visible)
+{
+    if (viewer.is_option_visible(type) != visible)
+        viewer.toggle_option_visibility(type);
+}
+
+static void showcase_set_role(libvgcode::Viewer &viewer, libvgcode::EGCodeExtrusionRole role, bool visible)
+{
+    if (viewer.is_extrusion_role_visible(role) != visible)
+        viewer.toggle_extrusion_role_visibility(role);
+}
+
+void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
+{
+    if (!has_data() || m_no_render_path)
+        return;
+    if (!m_showcase.active) {
+        ShowcaseSaved &sv  = m_showcase;
+        sv.view_type       = m_viewer.get_view_type();
+        for (size_t i = 0; i < libvgcode::OPTION_TYPES_COUNT; ++i)
+            sv.options[i] = m_viewer.is_option_visible(libvgcode::EOptionType(i));
+        sv.roles.clear();
+        for (size_t i = 0; i < size_t(libvgcode::EGCodeExtrusionRole::COUNT); ++i) {
+            const libvgcode::EGCodeExtrusionRole role = libvgcode::EGCodeExtrusionRole(i);
+            sv.roles.emplace_back(role, m_viewer.is_extrusion_role_visible(role));
+        }
+        sv.top_layer_only = m_viewer.is_top_layer_only_view_range();
+        sv.dim_previous   = m_viewer.is_dim_previous_layers();
+        sv.layers         = m_viewer.get_layers_view_range();
+        sv.visible        = m_viewer.get_view_visible_range();
+        sv.top_layer      = -2;
+        sv.top_progress   = -1.;
+        sv.active         = true;
+
+        // A presentation: the extrusions in their filaments' colours, nothing else, nothing dimmed.
+        m_viewer.set_view_type(libvgcode::EViewType::ColorPrint);
+        for (size_t i = 0; i < libvgcode::OPTION_TYPES_COUNT; ++i)
+            showcase_set_option(m_viewer, libvgcode::EOptionType(i), false);
+        for (size_t i = 0; i < size_t(libvgcode::EGCodeExtrusionRole::COUNT); ++i)
+            showcase_set_role(m_viewer, libvgcode::EGCodeExtrusionRole(i), true);
+        if (m_viewer.is_top_layer_only_view_range())
+            m_viewer.toggle_top_layer_only_view_range();
+        m_viewer.set_dim_previous_layers(false);
+        sv.hide_wipe_tower = false;
+    }
+    if (look.hide_wipe_tower != m_showcase.hide_wipe_tower) {
+        showcase_set_role(m_viewer, libvgcode::EGCodeExtrusionRole::WipeTower, !look.hide_wipe_tower);
+        m_showcase.hide_wipe_tower = look.hide_wipe_tower;
+        m_showcase.top_layer       = -2;   // the ranges are worked out again
+    }
+
+    const size_t layers = m_viewer.get_layers_count();
+    if (layers > 0 && (look.top_layer != m_showcase.top_layer || look.top_progress != m_showcase.top_progress)) {
+        const size_t last = layers - 1;
+        if (look.top_layer < 0 || size_t(look.top_layer) > last || (size_t(look.top_layer) == last && look.top_progress >= 1.)) {
+            m_viewer.set_layers_view_range(0, last);
+            const libvgcode::Interval &enabled = m_viewer.get_view_enabled_range();
+            m_viewer.set_view_visible_range(enabled[0], enabled[1]);
+        } else {
+            // The layer being laid: its own moves first, then everything up to the share of them.
+            const size_t top = size_t(look.top_layer);
+            m_viewer.set_layers_view_range(top, top);
+            const libvgcode::Interval layer = m_viewer.get_view_enabled_range();
+            m_viewer.set_layers_view_range(0, top);
+            const libvgcode::Interval &enabled = m_viewer.get_view_enabled_range();
+            const double p   = std::clamp(look.top_progress, 0., 1.);
+            const size_t end = layer[0] + size_t(std::llround(p * double(layer[1] - layer[0])));
+            m_viewer.set_view_visible_range(enabled[0], std::max(enabled[0], std::min(end, enabled[1])));
+        }
+        m_showcase.top_layer    = look.top_layer;
+        m_showcase.top_progress = look.top_progress;
+    }
+
+    m_viewer.set_smooth_look(look.smooth, look.looks);
+    m_viewer.set_light_top_dir(look.set_light ? libvgcode::Vec3{ look.light_dir_eye[0], look.light_dir_eye[1], look.light_dir_eye[2] } :
+                                                libvgcode::Vec3{ -0.4574957f, 0.4574957f, 0.7624929f });
+    m_viewer.set_tone(look.exposure, 1.f);
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    const Camera                 &camera = wxGetApp().plater()->get_camera();
+    const libvgcode::Mat4x4 view       = libvgcode::convert(static_cast<Matrix4f>(camera.get_view_matrix().matrix().cast<float>()));
+    const libvgcode::Mat4x4 projection = libvgcode::convert(static_cast<Matrix4f>(camera.get_projection_matrix().matrix().cast<float>()));
+    m_viewer.render(view, projection);
+}
+
+void GCodeViewer::end_showcase()
+{
+    if (m_showcase.active)
+        restore_from_showcase(true);
+}
+
+void GCodeViewer::restore_from_showcase(bool ranges)
+{
+    ShowcaseSaved &sv = m_showcase;
+    if (!sv.active)
+        return;
+    sv.active = false;
+    m_viewer.set_smooth_look(false, {});
+    m_viewer.set_light_top_dir({ -0.4574957f, 0.4574957f, 0.7624929f });
+    m_viewer.set_tone(1.f, 1.f);
+    m_viewer.set_view_type(sv.view_type);
+    for (size_t i = 0; i < libvgcode::OPTION_TYPES_COUNT; ++i)
+        showcase_set_option(m_viewer, libvgcode::EOptionType(i), sv.options[i]);
+    for (const auto &r : sv.roles)
+        showcase_set_role(m_viewer, r.first, r.second);
+    if (m_viewer.is_top_layer_only_view_range() != sv.top_layer_only)
+        m_viewer.toggle_top_layer_only_view_range();
+    m_viewer.set_dim_previous_layers(sv.dim_previous);
+    if (ranges && m_viewer.get_layers_count() > 0) {
+        m_viewer.set_layers_view_range(sv.layers);
+        m_viewer.set_view_visible_range(sv.visible[0], sv.visible[1]);
+    }
 }
 
 #define ENABLE_CALIBRATION_THUMBNAIL_OUTPUT 0

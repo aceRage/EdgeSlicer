@@ -7,6 +7,8 @@
 // Vertex shader: showcase_material.vs.
 
 uniform float contact_height;   // mm
+// S5: the layer build-up - nothing above the height laid so far (very large = off).
+uniform float clip_z;
 
 in vec4 world_pos;
 
@@ -14,6 +16,8 @@ out vec4 out_color;
 
 void main()
 {
+    if (world_pos.z > clip_z)
+        discard;
     float h = max(world_pos.z, 0.0) / max(contact_height, 1e-3);
     if (h >= 1.0)
         discard;
