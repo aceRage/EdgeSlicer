@@ -17305,6 +17305,9 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
             sidebar->set_btn_label(ActionButtonType::abReslice, "Slice now");
         show_action_buttons(true);*/
         ready_to_slice = true;
+        // Intentionally left commented: get_enable_slice_status() reads
+        // is_background_process_slicing() (== m_is_slicing), which is still true
+        // here. Refresh after m_is_slicing is cleared below (Snap #1032).
         //this->main_frame->update_slice_print_status(MainFrame::eEventSliceUpdate, true, true);
 
         //BBS
@@ -17367,6 +17370,12 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":finished, reload print soon");
         m_is_slicing = false;
+        // Refresh the button after m_is_slicing clears: the cancelled branch
+        // above still sees m_is_slicing == true and would keep Slice disabled.
+        // update_slice_print_status() re-evaluates get_enable_slice_status()
+        // instead of force-enabling. RemoteAccess::note_slice_done already ran.
+        if (evt.cancelled() && this->main_frame != nullptr)
+            this->main_frame->update_slice_print_status(MainFrame::eEventSliceUpdate, true, true);
         this->preview->reload_print(false);
         /* BBS if in publishing progress */
         if (m_is_publishing) {
@@ -26717,7 +26726,12 @@ bool Plater::set_printer_technology(PrinterTechnology printer_technology)
     p->sidebar->get_searcher().set_printer_technology(printer_technology);
 
     p->notification_manager->set_fff(printer_technology == ptFFF);
-    p->notification_manager->set_slicing_progress_hidden();
+    if (ret) {
+        // Only hide when the technology actually changed (ret): hiding on a
+        // same-technology preset reload (device connect → load_current_presets
+        // → set_printer_technology(FFF)) kills the popup of a running slice.
+        p->notification_manager->set_slicing_progress_hidden();
+    }
 
     return ret;
 }
