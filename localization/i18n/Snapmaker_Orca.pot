@@ -5873,6 +5873,11 @@ msgid ""
 msgstr ""
 
 msgid ""
+"The filament is too hard for the current nozzle. Please use a harder nozzle "
+"or a softer filament to avoid nozzle wear."
+msgstr ""
+
+msgid ""
 "Enabling traditional timelapse photography may cause surface imperfections. "
 "It is recommended to change to smooth mode."
 msgstr ""
