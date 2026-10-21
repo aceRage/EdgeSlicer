@@ -156,6 +156,7 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_scene.cpp
     test_showcase_materials.cpp
     test_showcase_callouts.cpp
+    test_showcase_video.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp

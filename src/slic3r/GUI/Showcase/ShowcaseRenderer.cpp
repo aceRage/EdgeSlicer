@@ -74,6 +74,77 @@ static ColorRGBA showcase_color(const std::string &hex, const ColorRGBA &fallbac
     return ColorRGBA(c[0], c[1], c[2], c[3]);
 }
 
+// Off-screen render targets of one export, freed on scope exit (S4: or kept for a video's frames).
+struct ShowcaseFramebuffers
+{
+    GLuint msaa_fbo = 0, msaa_color = 0, msaa_depth = 0;
+    GLuint fbo = 0, color = 0, depth = 0;
+    // S4: the plan the buffers were made for, when a video keeps them between frames.
+    int    ssaa = 1;
+    float  ssao_radius_scale = 1.f;
+
+    ~ShowcaseFramebuffers() { release(); }
+    void release()
+    {
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+        if (msaa_color) glsafe(::glDeleteRenderbuffers(1, &msaa_color));
+        if (msaa_depth) glsafe(::glDeleteRenderbuffers(1, &msaa_depth));
+        if (msaa_fbo) glsafe(::glDeleteFramebuffers(1, &msaa_fbo));
+        if (color) glsafe(::glDeleteTextures(1, &color));
+        if (depth) glsafe(::glDeleteRenderbuffers(1, &depth));
+        if (fbo) glsafe(::glDeleteFramebuffers(1, &fbo));
+        msaa_fbo = msaa_color = msaa_depth = fbo = color = depth = 0;
+    }
+
+    // Sized formats only: macOS core rejects the unsized ones (see the thumbnail path).
+    bool create(int w, int h, int samples)
+    {
+        release();
+        // Drain errors left by earlier code, so an out-of-memory below is this allocation's.
+        for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i) {}
+        glsafe(::glGenFramebuffers(1, &fbo));
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fbo));
+        glsafe(::glGenTextures(1, &color));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, color));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0));
+        glsafe(::glGenRenderbuffers(1, &depth));
+        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, depth));
+        glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h));
+        glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth));
+        const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+        glsafe(::glDrawBuffers(1, bufs));
+        glsafe(::glReadBuffer(GL_COLOR_ATTACHMENT0));
+        if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE || ::glGetError() == GL_OUT_OF_MEMORY) {
+            release();
+            return false;
+        }
+        if (samples > 1) {
+            glsafe(::glGenFramebuffers(1, &msaa_fbo));
+            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, msaa_fbo));
+            glsafe(::glGenRenderbuffers(1, &msaa_color));
+            glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, msaa_color));
+            glsafe(::glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, w, h));
+            glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msaa_color));
+            glsafe(::glGenRenderbuffers(1, &msaa_depth));
+            glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, msaa_depth));
+            glsafe(::glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH24_STENCIL8, w, h));
+            glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, msaa_depth));
+            glsafe(::glDrawBuffers(1, bufs));
+            glsafe(::glReadBuffer(GL_COLOR_ATTACHMENT0));
+            if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE || ::glGetError() == GL_OUT_OF_MEMORY) {
+                release();
+                return false;
+            }
+        }
+        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, 0));
+        return true;
+    }
+};
+
 ShowcaseRenderer::ShowcaseRenderer(GLCanvas3D &canvas) : m_canvas(canvas)
 {
     m_canvas.set_showcase_renderer(this);
@@ -89,6 +160,13 @@ ShowcaseRenderer::~ShowcaseRenderer()
                         m_callout_texture != 0;
     if (has_gl && m_canvas.get_wxglcanvas() != nullptr && m_canvas._set_current())
         release_gl();
+    if (m_batch_fb) {
+        // A video was cut short by the shutdown: without a context the buffers go with it.
+        if (m_canvas.get_wxglcanvas() != nullptr && m_canvas._set_current())
+            m_batch_fb.reset();
+        else
+            (void) m_batch_fb.release();
+    }
     delete m_floor_model;
 }
 
@@ -121,6 +199,7 @@ void ShowcaseRenderer::release_gl()
         m_floor_texture = 0;
     }
     m_floor_key.clear();
+    m_batch_fb.reset();
     release_offscreen();
     release_layers();
 }
@@ -1447,77 +1526,36 @@ void ShowcaseRenderer::place_default_camera()
 // Export
 // ------------------------------------------------------------------------------------------------
 
-namespace {
-
-// Off-screen render targets of one export, freed on scope exit.
-struct ShowcaseFramebuffers
+void ShowcaseRenderer::begin_batch()
 {
-    GLuint msaa_fbo = 0, msaa_color = 0, msaa_depth = 0;
-    GLuint fbo = 0, color = 0, depth = 0;
+    m_batch      = true;
+    m_batch_w    = 0;
+    m_batch_h    = 0;
+    m_batch_msaa = -1;
+}
 
-    ~ShowcaseFramebuffers() { release(); }
-    void release()
-    {
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-        if (msaa_color) glsafe(::glDeleteRenderbuffers(1, &msaa_color));
-        if (msaa_depth) glsafe(::glDeleteRenderbuffers(1, &msaa_depth));
-        if (msaa_fbo) glsafe(::glDeleteFramebuffers(1, &msaa_fbo));
-        if (color) glsafe(::glDeleteTextures(1, &color));
-        if (depth) glsafe(::glDeleteRenderbuffers(1, &depth));
-        if (fbo) glsafe(::glDeleteFramebuffers(1, &fbo));
-        msaa_fbo = msaa_color = msaa_depth = fbo = color = depth = 0;
-    }
+void ShowcaseRenderer::end_batch()
+{
+    m_batch = false;
+    if (m_batch_fb && m_canvas._set_current())
+        m_batch_fb->release();
+    m_batch_fb.reset();
+    m_batch_w = m_batch_h = 0;
+    m_batch_msaa = -1;
+    if (m_canvas._set_current())
+        release_offscreen();
+    m_canvas.set_as_dirty();
+}
 
-    // Sized formats only: macOS core rejects the unsized ones (see the thumbnail path).
-    bool create(int w, int h, int samples)
-    {
-        release();
-        // Drain errors left by earlier code, so an out-of-memory below is this allocation's.
-        for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i) {}
-        glsafe(::glGenFramebuffers(1, &fbo));
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fbo));
-        glsafe(::glGenTextures(1, &color));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, color));
-        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0));
-        glsafe(::glGenRenderbuffers(1, &depth));
-        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, depth));
-        glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h));
-        glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth));
-        const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
-        glsafe(::glDrawBuffers(1, bufs));
-        glsafe(::glReadBuffer(GL_COLOR_ATTACHMENT0));
-        if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE || ::glGetError() == GL_OUT_OF_MEMORY) {
-            release();
-            return false;
-        }
-        if (samples > 1) {
-            glsafe(::glGenFramebuffers(1, &msaa_fbo));
-            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, msaa_fbo));
-            glsafe(::glGenRenderbuffers(1, &msaa_color));
-            glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, msaa_color));
-            glsafe(::glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, w, h));
-            glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msaa_color));
-            glsafe(::glGenRenderbuffers(1, &msaa_depth));
-            glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, msaa_depth));
-            glsafe(::glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH24_STENCIL8, w, h));
-            glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, msaa_depth));
-            glsafe(::glDrawBuffers(1, bufs));
-            glsafe(::glReadBuffer(GL_COLOR_ATTACHMENT0));
-            if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE || ::glGetError() == GL_OUT_OF_MEMORY) {
-                release();
-                return false;
-            }
-        }
-        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, 0));
-        return true;
-    }
-};
-
-} // namespace
+void ShowcaseRenderer::prepare_live_camera()
+{
+    Camera &camera = wxGetApp().plater()->get_camera();
+    update_visibility();
+    if (m_live_vp_w > 0 && m_live_vp_h > 0)
+        camera.set_viewport(0, 0, unsigned(m_live_vp_w), unsigned(m_live_vp_h));
+    camera.apply_projection(scene_box());
+    camera.UpdateFrustum();
+}
 
 bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
 {
@@ -1551,9 +1589,19 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
         << plan.internal_width << "x" << plan.internal_height << "), " << (plan.msaa > 1 ? std::to_string(plan.msaa) + "x MSAA" : "no MSAA")
         << ", SSAO radius x" << plan.ssao_radius_scale << (plan.degraded ? " (reduced to fit the size cap / memory budget)" : "");
 
-    // Framebuffers, degrading on failure: MSAA first, then the supersampling.
-    ShowcaseFramebuffers fb;
-    for (;;) {
+    // Framebuffers, degrading on failure: MSAA first, then the supersampling. A video's frames (S4)
+    // keep the first frame's buffers and its plan.
+    ShowcaseFramebuffers  local_fb;
+    const bool            reuse = m_batch && m_batch_fb && m_batch_w == plan.width && m_batch_h == plan.height && m_batch_msaa >= 0;
+    if (reuse) {
+        plan.ssaa              = m_batch_fb->ssaa;
+        plan.msaa              = m_batch_msaa;
+        plan.internal_width    = plan.width * plan.ssaa;
+        plan.internal_height   = plan.height * plan.ssaa;
+        plan.ssao_radius_scale = m_batch_fb->ssao_radius_scale;
+    }
+    ShowcaseFramebuffers &fb = m_batch ? (m_batch_fb ? *m_batch_fb : *(m_batch_fb = std::make_unique<ShowcaseFramebuffers>())) : local_fb;
+    for (; !reuse;) {
         if (fb.create(plan.internal_width, plan.internal_height, plan.msaa))
             break;
         if (plan.msaa > 1) {
@@ -1630,9 +1678,19 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     glsafe(::glReadPixels(0, 0, plan.internal_width, plan.internal_height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data()));
     OpenGLManager::report_gl_errors("in a Showcase export's read back");
 
-    fb.release();
-    // Design 6: no export-size buffers stay behind (the mirror was sized for the export).
-    release_offscreen();
+    if (m_batch) {
+        // Kept for the next frame of the video (S4); end_batch() frees them.
+        fb.ssaa              = plan.ssaa;
+        fb.ssao_radius_scale = plan.ssao_radius_scale;
+        m_batch_w            = plan.width;
+        m_batch_h            = plan.height;
+        m_batch_msaa         = plan.msaa;
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    } else {
+        fb.release();
+        // Design 6: no export-size buffers stay behind (the mirror was sized for the export).
+        release_offscreen();
+    }
     camera = saved;
     camera.apply_viewport();
     // The SSAO copies were sized for the export; the next live frame sizes them back.

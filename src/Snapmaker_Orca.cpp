@@ -81,6 +81,7 @@ using namespace nlohmann;
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/Showcase/ShowcaseEncoder.hpp"
 
 #include "Snapmaker_Orca.hpp"
 //BBS: add exception handler for win32
@@ -1325,6 +1326,16 @@ int CLI::run(int argc, char **argv)
                             << "MIGRATE_CONF_PATHS=" << r.conf_paths_rewritten << std::endl
                             << "MIGRATE_ERROR=" << r.error << std::endl;
         return r.error.empty() ? 0 : CLI_ENVIRONMENT_ERROR;
+    }
+
+    // Showcase S4: prove the video encoder path headless (no window, no GL) and exit.
+    if (const ConfigOptionString* video_test = m_config.opt<ConfigOptionString>("showcase_video_test");
+        video_test && !video_test->value.empty()) {
+        if (!m_actions.empty()) {
+            boost::nowide::cerr << "--showcase-video-test cannot be combined with other actions" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        return Slic3r::Showcase::run_video_selftest(video_test->value, boost::nowide::cout) == 0 ? 0 : CLI_ENVIRONMENT_ERROR;
     }
 
 #ifdef SLIC3R_GUI

@@ -4,13 +4,15 @@
 // Showcase (tab after Preview): presentation renders of the model. This is the GL-free half - the
 // scene description, its JSON form in the 3MF (Metadata/showcase/scenes.json), the built-in presets
 // and the pure layout maths the renderer and the exporter share (export sizes, the safe frame, the
-// user's branding watermark) and, from S3, the scene's filament callouts (ShowcaseCallouts.hpp).
-// Design: tests/design_showcase_tab.md (phases S1, S2, S3).
+// user's branding watermark), from S3 the scene's filament callouts (ShowcaseCallouts.hpp) and from
+// S4 its video (ShowcaseVideo.hpp).
+// Design: tests/design_showcase_tab.md (phases S1 to S4).
 //
 // Kept wxWidgets- and GL-free so the 3MF code, the CLI and the unit tests can use it.
 
 #include "ShowcaseCallouts.hpp"
 #include "ShowcaseMaterial.hpp"
+#include "ShowcaseVideo.hpp"
 
 #include <array>
 #include <cstdint>
@@ -28,6 +30,7 @@ namespace Showcase {
 // writes back a floor or backdrop type it does not know.
 // S3 adds "callouts" to a scene without a new number: an S2 build keeps a scene's unknown keys and
 // writes them back untouched, so the callouts survive it; an S1 build opens the file read-only.
+// S4 adds "video" the same way: S2 and S3 builds keep it.
 constexpr int SCHEMA_VERSION = 2;
 
 // The archive folder. Nothing in the core model references it, so other readers ignore it.
@@ -259,6 +262,7 @@ struct Scene
     ExportSettings          export_settings;
     Materials               materials;
     Callouts                callouts;   // S3
+    VideoSettings           video;      // S4
 
     // Keys this build does not know, as a JSON object text, written back on save (forward compat).
     std::string             extra_json;
@@ -325,6 +329,9 @@ bool        scene_from_json(const std::string &text, Scene &out);
 // One watermark on its own (the user's reusable watermark presets, outside any project).
 std::string watermark_to_json(const Watermark &wm);
 bool        watermark_from_json(const std::string &text, Watermark &out);
+// One callout style on its own (S4: the user's saved styles, CalloutStyleLibrary).
+std::string callout_style_to_json(const CalloutStyle &style);
+bool        callout_style_from_json(const std::string &text, CalloutStyle &out);
 
 // "Metadata/showcase/<sha>.<ext>" and back. Returns false for any other name.
 std::string image_archive_path(const std::string &sha, const std::string &ext);

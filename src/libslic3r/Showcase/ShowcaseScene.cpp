@@ -226,7 +226,7 @@ bool Scene::operator==(const Scene &o) const
 {
     return id == o.id && name == o.name && plate_index == o.plate_index && source == o.source && preset_base == o.preset_base &&
            background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && views == o.views &&
-           export_settings == o.export_settings && materials == o.materials && callouts == o.callouts;
+           export_settings == o.export_settings && materials == o.materials && callouts == o.callouts && video == o.video;
 }
 
 double backdrop_luminance(const Background &bg, double nx, double ny)
@@ -519,6 +519,39 @@ Watermark watermark_from_json(const json &j)
     return w;
 }
 
+// A callout style; unknown keys of `raw` are kept (S4: also a saved style of the user's).
+json callout_style_to_json(const CalloutStyle &style, const json &raw)
+{
+    json st = raw.is_object() ? raw : json::object();
+    st["shape"]              = to_string(style.shape);
+    st["font"]               = style.font_face;
+    st["bold"]               = style.bold;
+    st["size_pct"]           = style.size_pct;
+    st["auto_colors"]        = style.auto_colors;
+    st["text_color"]         = style.text_color;
+    st["line_color"]         = style.line_color;
+    st["background"]         = style.background;
+    st["background_opacity"] = style.background_opacity;
+    st["leader"]             = to_string(style.leader);
+    return st;
+}
+
+CalloutStyle callout_style_from_json(const json &st)
+{
+    CalloutStyle s;
+    s.shape              = enum_or(st, "shape", s.shape);
+    s.font_face          = get_or<std::string>(st, "font", "");
+    s.bold               = get_or<bool>(st, "bold", false);
+    s.size_pct           = clamp_or(get_or<float>(st, "size_pct", s.size_pct), 0.5f, 10.f, 2.2f);
+    s.auto_colors        = get_or<bool>(st, "auto_colors", s.auto_colors);
+    s.text_color         = normalize_hex_color(get_or<std::string>(st, "text_color", s.text_color), s.text_color);
+    s.line_color         = normalize_hex_color(get_or<std::string>(st, "line_color", s.line_color), s.line_color);
+    s.background         = normalize_hex_color(get_or<std::string>(st, "background", s.background), s.background);
+    s.background_opacity = clamp_or(get_or<float>(st, "background_opacity", s.background_opacity), 0.f, 1.f, 0.92f);
+    s.leader             = enum_or(st, "leader", s.leader);
+    return s;
+}
+
 // S3: the scene's callouts. Unknown keys of the section, its fields and its style are kept.
 json callouts_to_json(const Callouts &c, const json &raw)
 {
@@ -545,18 +578,7 @@ json callouts_to_json(const Callouts &c, const json &raw)
     f["price"]      = c.fields.price;
     k["fields"]     = f;
 
-    json st = sub("style");
-    st["shape"]              = to_string(c.style.shape);
-    st["font"]               = c.style.font_face;
-    st["bold"]               = c.style.bold;
-    st["size_pct"]           = c.style.size_pct;
-    st["auto_colors"]        = c.style.auto_colors;
-    st["text_color"]         = c.style.text_color;
-    st["line_color"]         = c.style.line_color;
-    st["background"]         = c.style.background;
-    st["background_opacity"] = c.style.background_opacity;
-    st["leader"]             = to_string(c.style.leader);
-    k["style"]               = st;
+    k["style"] = callout_style_to_json(c.style, sub("style"));
 
     json items = json::array();
     for (const Callout &co : c.items) {
@@ -611,17 +633,7 @@ Callouts callouts_from_json(const json &j)
     c.fields.weight     = get_or<bool>(f, "weight", c.fields.weight);
     c.fields.price      = get_or<bool>(f, "price", c.fields.price);
 
-    const json st              = j.contains("style") ? j["style"] : json();
-    c.style.shape              = enum_or(st, "shape", c.style.shape);
-    c.style.font_face          = get_or<std::string>(st, "font", "");
-    c.style.bold               = get_or<bool>(st, "bold", false);
-    c.style.size_pct           = clamp_or(get_or<float>(st, "size_pct", c.style.size_pct), 0.5f, 10.f, 2.2f);
-    c.style.auto_colors        = get_or<bool>(st, "auto_colors", c.style.auto_colors);
-    c.style.text_color         = normalize_hex_color(get_or<std::string>(st, "text_color", c.style.text_color), c.style.text_color);
-    c.style.line_color         = normalize_hex_color(get_or<std::string>(st, "line_color", c.style.line_color), c.style.line_color);
-    c.style.background         = normalize_hex_color(get_or<std::string>(st, "background", c.style.background), c.style.background);
-    c.style.background_opacity = clamp_or(get_or<float>(st, "background_opacity", c.style.background_opacity), 0.f, 1.f, 0.92f);
-    c.style.leader             = enum_or(st, "leader", c.style.leader);
+    c.style = callout_style_from_json(j.contains("style") ? j["style"] : json());
 
     if (j.contains("items") && j["items"].is_array())
         for (const json &it : j["items"]) {
@@ -761,6 +773,8 @@ json scene_to_json_object(const Scene &s)
     j["materials"] = merged(raw, "materials", ma);
 
     j["callouts"] = callouts_to_json(s.callouts, raw.is_object() && raw.contains("callouts") ? raw["callouts"] : json());
+    // S4: the video's camera path and output, unknown keys of the section kept.
+    j["video"] = merged(raw, "video", json::parse(video_to_json(s.video), nullptr, false));
     return j;
 }
 
@@ -851,12 +865,52 @@ bool scene_from_json_object(const json &j, Scene &s)
     // S3. An S1 or S2 scene has none: callouts off, nothing generated yet.
     if (j.contains("callouts"))
         s.callouts = callouts_from_json(j["callouts"]);
+    // S4. An S1 to S3 scene has none: the default orbit.
+    if (j.contains("video") && j["video"].is_object())
+        video_from_json(j["video"].dump(), s.video);
     return true;
 }
 
 } // namespace
 
 std::string scene_to_json(const Scene &scene) { return scene_to_json_object(scene).dump(); }
+
+std::string callout_style_to_json(const CalloutStyle &style) { return callout_style_to_json(style, json()).dump(); }
+
+bool callout_style_from_json(const std::string &text, CalloutStyle &out)
+{
+    const json j = json::parse(text, nullptr, false);
+    if (!j.is_object())
+        return false;
+    out = callout_style_from_json(j);
+    return true;
+}
+
+// S4: the user's saved callout styles, {"styles": [{"name": ..., "style": {...}}]}.
+std::string CalloutStyleLibrary::to_json() const
+{
+    json list = json::array();
+    for (const UserCalloutStyle &s : m_styles)
+        list.push_back({ { "name", s.name }, { "style", callout_style_to_json(s.style, json()) } });
+    json j;
+    j["styles"] = list;
+    return j.dump(2);
+}
+
+bool CalloutStyleLibrary::from_json(const std::string &text)
+{
+    m_styles.clear();
+    const json j = json::parse(text, nullptr, false);
+    if (!j.is_object() || !j.contains("styles") || !j["styles"].is_array())
+        return false;
+    for (const json &e : j["styles"]) {
+        const std::string name = get_or<std::string>(e, "name", "");
+        if (name.empty() || !e.contains("style") || !e["style"].is_object() || find(name) != nullptr)
+            continue;
+        m_styles.push_back({ name, callout_style_from_json(e["style"]) });
+    }
+    return true;
+}
 
 std::string watermark_to_json(const Watermark &wm) { return watermark_to_json(wm, json()).dump(); }
 

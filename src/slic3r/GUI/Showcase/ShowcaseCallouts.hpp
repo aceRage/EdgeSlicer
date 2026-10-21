@@ -35,6 +35,10 @@ struct ShowcaseCalloutDraw
     std::vector<bool>             occluded;     // per anchor: something is in front of it
     bool                          pinned = false;
     Showcase::PointD              pinned_pos;   // 0..1 of the frame, the label's top-left
+    // S4, video: per anchor, how visible its leader and dot are (Showcase::CalloutFade), and the
+    // label's own opacity. Empty: no fade, an occluded anchor gets a dashed leader (stills).
+    std::vector<double>           fade;
+    double                        alpha = 1.;
 };
 
 struct ShowcaseCalloutOptions
@@ -43,6 +47,15 @@ struct ShowcaseCalloutOptions
     int             selected = -1;      // item index
     Showcase::RectI reserved;           // kept free of labels (the watermark), image pixels
     double          model_center_x = -1.;   // 0..1 of the frame; < 0 = the middle of the anchors
+    // S4: where the model is, 0..1 of the frame (empty = unknown): a wide, flat model gets its labels
+    // in bands above and below it.
+    Showcase::RectD model_box;
+    // S4, video: each callout's side in the previous frame by item index (in), and in this one (out),
+    // so a label only changes side once its anchor is clearly across (side_hysteresis, 0..1 of the
+    // frame width).
+    const std::map<int, int> *previous_sides = nullptr;
+    std::map<int, int>       *sides          = nullptr;
+    double                    side_hysteresis = 0.;
 };
 
 // Where things were drawn, image pixels (the live view's mouse uses them).
