@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
     device_model_code_tests.cpp
     login_useragent_tests.cpp
     hub_home_tests.cpp
+    hub_mosaic_tests.cpp
     hub_handover_tests.cpp
     hub_quit_tests.cpp
     web_load_retry_tests.cpp
