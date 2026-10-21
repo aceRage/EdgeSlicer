@@ -10,6 +10,9 @@
 #include "RemoteEvents.hpp"
 #include "SnapmakerLan.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "slic3r/Utils/ElegooCanvas.hpp"
+#include "slic3r/Utils/ElegooSdcp.hpp"
+#include "slic3r/Utils/ElegooSdcpMonitor.hpp"
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
@@ -389,6 +392,88 @@ static bool klipper_allows(const std::string& action, const std::string& state)
     return state == "printing" || state == "paused";
 }
 
+// ------------------------------------------------------------ Elegoo SDCP ----
+
+bool speaks_sdcp(const std::string& host_type_key, const std::string& printer_model)
+{
+    if (host_type_key != "elegoolink") return false;
+    std::string m = printer_model;
+    std::transform(m.begin(), m.end(), m.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+    // The Centauri Carbon 2 / Centauri 2 speak MQTT (a different adapter in elegoo-link).
+    return m.find("carbon 2") == std::string::npos && m.find("centauri 2") == std::string::npos;
+}
+
+// An Elegoo SDCP printer one of the control routes names: "host" (the printer preset's own print
+// host) or "ph:<device id>" (from any printer model's device list). GUI thread: the preset lives there.
+struct ElegooTarget
+{
+    std::string host; // bare
+    std::string name;
+};
+
+static bool elegoo_target(const std::string& printer, ElegooTarget& out)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    if (!bundle) return false;
+    if (printer == "host") {
+        if (bundle->use_bbl_network()) return false;
+        const DynamicPrintConfig&      cfg = bundle->printers.get_edited_preset().config;
+        const PrintHostDevices::Device d   = PrintHostDevices::from_config(cfg);
+        if (!speaks_sdcp(d.host_type, cfg.opt_string("printer_model"))) return false;
+        out.host = sdcp_host_of(d.address);
+        out.name = "Elegoo " + d.address;
+        return !out.host.empty();
+    }
+    if (printer.compare(0, 3, "ph:") != 0) return false;
+    const std::string id = printer.substr(3);
+    try {
+        for (const auto& kv : PrintHostDevices::all_devices())
+            for (const PrintHostDevices::Device& d : kv.second) {
+                if (d.id != id) continue;
+                if (!speaks_sdcp(d.host_type, d.printer_model.empty() ? kv.first : d.printer_model)) return false;
+                out.host = sdcp_host_of(d.address);
+                out.name = d.display_name();
+                return !out.host.empty();
+            }
+    } catch (...) {}
+    return false;
+}
+
+static std::string sdcp_state_words(const Sdcp::Snapshot& s)
+{
+    const std::string st = Sdcp::hub_state(s.status);
+    const std::string ph = Sdcp::phase_text(s.status);
+    return ph.empty() ? (st.empty() ? std::string("no print state") : st) : st + ", " + ph;
+}
+
+// Pause, resume or stop: SDCP Cmd 129 / 131 / 130 (specification; elegoo-link's command table),
+// sent over the hub's own connection. Gated by the printer's own state, as the desktop's buttons are.
+static std::pair<int, std::string> prepare_elegoo(const Request& req, const ElegooTarget& t, std::shared_ptr<Prepared> p,
+                                                  std::shared_ptr<Prepared>& out)
+{
+    const Sdcp::Snapshot s = SdcpMonitor::demand(t.host);
+    p->kind         = "elegoo";
+    p->printer_name = t.name;
+    p->sdcp_host    = t.host;
+    // A control is a request: the connection opens if it is not up (run() waits for it). The check
+    // goes by what the printer last said; it refuses anything that no longer fits with its own Ack.
+    if (s.other_window) return { 409, "another EdgeSlicer window is connected to " + t.name };
+    if (!s.connected && s.failures > 0)
+        return { 409, t.name + " is not answering" + (s.error.empty() ? std::string() : " (" + s.error + ")") };
+    if (!s.status.valid) return { 409, "connecting to " + t.name + "; try again in a moment" };
+    const bool allowed = req.action == "pause" ? Sdcp::can_pause(s.status) :
+                         req.action == "resume" ? Sdcp::can_resume(s.status) : Sdcp::can_stop(s.status);
+    if (!allowed) {
+        const std::string what = req.action == "pause" ? "paused" : req.action == "resume" ? "resumed" : "stopped";
+        return { 409, t.name + " cannot be " + what + " right now (it reports " + sdcp_state_words(s) + ")" };
+    }
+    p->sdcp_cmd      = req.action == "pause" ? Sdcp::CMD_PAUSE : req.action == "resume" ? Sdcp::CMD_RESUME : Sdcp::CMD_STOP;
+    p->sdcp_data     = json::object();
+    p->status_before = Sdcp::hub_state(s.status);
+    out              = p;
+    return { 200, "" };
+}
+
 // ---------------------------------------------------------------- prepare ----
 
 // The three actions, in every spelling this feature needs: what the phone asks for, the
@@ -669,6 +754,35 @@ static std::string moonraker_setting_script(const Prepared& p)
     return moonraker_fan_script(p.heater, p.int_value);
 }
 
+// The light and the fans of an Elegoo SDCP printer: Cmd 403 {"LightStatus":..} / {"TargetFanSpeed":..}
+// (OpenCentauri api.md, elegoo-homeassistant websocket/client.py). Its temperatures and speed are
+// shown, not set: elegoo-link keeps Cmd 403's temperature and speed entries commented out for the CC1.
+static std::pair<int, std::string> prepare_setting_elegoo(const Request& req, const ElegooTarget& t, std::shared_ptr<Prepared> p,
+                                                          std::shared_ptr<Prepared>& out)
+{
+    const Sdcp::Snapshot s = SdcpMonitor::demand(t.host);
+    p->kind         = "elegoo";
+    p->printer_name = t.name;
+    p->sdcp_host    = t.host;
+    // A control is a request: the connection opens if it is not up (run() waits for it). The check
+    // goes by what the printer last said; it refuses anything that no longer fits with its own Ack.
+    if (s.other_window) return { 409, "another EdgeSlicer window is connected to " + t.name };
+    if (!s.connected && s.failures > 0)
+        return { 409, t.name + " is not answering" + (s.error.empty() ? std::string() : " (" + s.error + ")") };
+    if (!s.status.valid) return { 409, "connecting to " + t.name + "; try again in a moment" };
+    if (req.action == "set_temp") return { 409, "temperatures can only be read on " + t.name + " from here" };
+    if (req.action == "set_speed") return { 409, "the print speed can only be read on " + t.name + " from here" };
+    const auto checked = check_setting(req, Sdcp::caps(s), Sdcp::is_printing(s.status), *p);
+    if (checked.first != 200) return checked;
+    p->sdcp_cmd  = Sdcp::CMD_CONTROL;
+    p->sdcp_data = req.action == "set_light" ? Sdcp::light_data(p->light_on) : Sdcp::fan_data(p->heater, p->int_value);
+    if (p->sdcp_data.is_null() || (req.action == "set_fan" && Sdcp::fan_key(p->heater).empty()))
+        return { 409, "this printer has no command for that" };
+    out = p;
+    BOOST_LOG_TRIVIAL(info) << "RemoteControl: SDCP " << p->sdcp_cmd << " (" << p->setting_text << ") prepared";
+    return { 200, "" };
+}
+
 static std::pair<int, std::string> prepare_setting_bambu(const Request& req, std::shared_ptr<Prepared> p,
                                                          std::shared_ptr<Prepared>& out)
 {
@@ -914,6 +1028,14 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
     }
     if (is_setting_verb(req.action)) {
         if (req.printer.empty()) return { 400, "printer is required" };
+        ElegooTarget et;
+        if ((req.printer == "host" || req.printer.compare(0, 3, "ph:") == 0) && elegoo_target(req.printer, et)) {
+            auto p        = std::make_shared<Prepared>();
+            p->action     = req.action;
+            p->dry_run    = req.dry_run || env_flag("SNORCA_SEND_DRYRUN");
+            p->printer_id = req.printer;
+            return prepare_setting_elegoo(req, et, p, out);
+        }
         if (req.printer.compare(0, 3, "ph:") == 0) return { 409, "this printer's settings cannot be changed from here" };
         auto p        = std::make_shared<Prepared>();
         p->action     = req.action;
@@ -927,7 +1049,8 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
         if (req.printer.empty()) return { 400, "printer is required" };
         // Only a Bambu printer has printer errors in this sense; "host", "connect" and sm:<id> are
         // Moonraker printers whose faults come through a different channel entirely.
-        if (req.printer == "host" || req.printer == "connect" || req.printer.compare(0, 3, "sm:") == 0)
+        if (req.printer == "host" || req.printer == "connect" || req.printer.compare(0, 3, "sm:") == 0 ||
+            req.printer.compare(0, 3, "ph:") == 0)
             return { 409, "printer-error actions are for Bambu printers; this one reports faults another way" };
         auto p        = std::make_shared<Prepared>();
         p->action     = req.action;
@@ -948,6 +1071,11 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
     p->action  = req.action;
     p->dry_run = req.dry_run || env_flag("SNORCA_SEND_DRYRUN");
     p->printer_id = req.printer;
+    {
+        ElegooTarget et;
+        if ((req.printer == "host" || req.printer.compare(0, 3, "ph:") == 0) && elegoo_target(req.printer, et))
+            return prepare_elegoo(req, et, p, out);
+    }
     if (req.printer == "host" || req.printer == "connect") return prepare_host(req, *a, p, out);
     if (req.printer.compare(0, 3, "sm:") == 0) return prepare_snapmaker_lan(req, *a, p, out);
     return prepare_bambu(req, *a, p, out);
@@ -1213,11 +1341,59 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
     sink.done(true, "", result);
 }
 
+// An Elegoo SDCP printer: one command over the hub's connection, then - for pause / resume / stop -
+// a few seconds watching its pushed status for the change, as watch_bambu does.
+static void run_elegoo(std::shared_ptr<Prepared> p, Sink& sink)
+{
+    json result;
+    result["kind"]      = p->kind;
+    result["action"]    = p->action;
+    result["printer"]   = { { "id", p->printer_id }, { "name", p->printer_name } };
+    result["transport"] = "sdcp";
+    result["cmd"]       = p->sdcp_cmd;
+    if (!p->sdcp_data.empty()) result["data"] = p->sdcp_data;
+    if (p->is_setting) result["setting"] = p->setting_text;
+    if (p->dry_run) {
+        result["dry_run"] = true;
+        sink.progress(99, "dry run: nothing was sent");
+        sink.done(true, "", result);
+        return;
+    }
+    sink.progress(40, "sending " + (p->is_setting ? p->setting_text : p->action) + " to the printer");
+    const SdcpMonitor::CommandResult r = SdcpMonitor::command(p->sdcp_host, p->sdcp_cmd, p->sdcp_data, 12000);
+    result["ack"] = r.ack;
+    if (!r.answered) {
+        sink.done(false, p->printer_name + (r.sent ? " did not answer: " : " could not be reached: ") + r.error, result);
+        return;
+    }
+    if (r.ack > 0) {
+        sink.done(false, p->printer_name + ": " + Sdcp::ack_text(p->sdcp_cmd, r.ack), result);
+        return;
+    }
+    if (p->is_setting) {
+        sink.done(true, "", result);
+        return;
+    }
+    sink.progress(70, error_wait_text(p));
+    std::string state = "unknown";
+    for (int i = 0; i < 10 && state == "unknown"; ++i) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const Sdcp::Snapshot s  = SdcpMonitor::demand(p->sdcp_host);
+        const std::string    st = Sdcp::hub_state(s.status);
+        if (p->action == "pause" && st == "paused") state = "paused";
+        else if (p->action == "resume" && st == "printing" && s.status.print_status == Sdcp::PRINT_PRINTING) state = "printing";
+        else if (p->action == "stop" && !Sdcp::is_printing(s.status)) state = "stopped";
+    }
+    result["state"] = state;
+    sink.done(true, "", result);
+}
+
 void run(std::shared_ptr<Prepared> p, Sink sink)
 {
     try {
-        if (p->kind == "bambu") run_bambu(p, sink);
-        else                    run_host(p, sink);
+        if (p->kind == "bambu")       run_bambu(p, sink);
+        else if (p->kind == "elegoo") run_elegoo(p, sink);
+        else                          run_host(p, sink);
     } catch (const std::exception& e) {
         sink.done(false, std::string("the command failed: ") + e.what(), json::object());
     } catch (...) {
@@ -1275,20 +1451,40 @@ void list_host_targets(std::vector<HostTarget>& out)
     // string for Moonraker (only the Device tab's MQTT connect sets that enum), so what a printer
     // speaks is decided by what it answers, not by the preset.
     PresetBundle* bundle = wxGetApp().preset_bundle;
-    if (bundle && !bundle->use_bbl_network()) {
+    const bool    bbl    = !bundle || bundle->use_bbl_network();
+    // The saved devices (<datadir>/hub/print_host_devices.json) of every printer model, whatever
+    // preset is selected, under the ids /api/printers gives them (RemoteSend::list_hosts makes the
+    // same listing). api_printers calls this before list_hosts (its HostsAtEnd runs last), so the
+    // import has to happen here too or the very first poll would list the devices without ever
+    // having probed them.
+    PrintHostDevices::HostListing listing;
+    std::string                   url;
+    if (bundle) {
         const DynamicPrintConfig& cfg = bundle->printers.get_edited_preset().config;
-        const std::string         url = cfg.opt_string("print_host");
-        if (!url.empty()) {
-            // The preset says what it is: a PrusaLink or PrusaConnect preset is asked over its own
-            // REST API with the credentials it holds, everything else as a Moonraker printer (the
-            // fork has no host_type key for Moonraker, so that stays decided by what it answers).
-            const PrintHostDevices::Device d = PrintHostDevices::from_config(cfg);
-            if (PrusaLinkStatus::speaks_prusalink(d.host_type))
-                out.push_back({ "host", PrusaLinkStatus::base_url(url), d.host_type, d.auth_type,
-                                d.apikey, d.user, d.password });
-            else
-                out.push_back({ "host", moonraker_base(url), "", "", "", "", "" });
+        url = bbl ? std::string() : cfg.opt_string("print_host");
+        try {
+            PrintHostDevices::migrate_from_presets(*bundle);
+            listing = PrintHostDevices::host_listing(PrintHostDevices::all_devices(),
+                                                     bbl ? std::string() : PrintHostDevices::current_model_key(*bundle), url,
+                                                     PrintHostDevices::from_config(cfg).host_type);
+        } catch (...) {
+            listing          = {};
+            listing.host_row = !url.empty();
         }
+    }
+    if (bundle && listing.host_row && !url.empty()) {
+        const DynamicPrintConfig& cfg = bundle->printers.get_edited_preset().config;
+        // The preset says what it is: a PrusaLink or PrusaConnect preset is asked over its own
+        // REST API with the credentials it holds, everything else as a Moonraker printer (the
+        // fork has no host_type key for Moonraker, so that stays decided by what it answers).
+        const PrintHostDevices::Device d = PrintHostDevices::from_config(cfg);
+        if (PrusaLinkStatus::speaks_prusalink(d.host_type))
+            out.push_back({ "host", PrusaLinkStatus::base_url(url), d.host_type, d.auth_type,
+                            d.apikey, d.user, d.password });
+        else if (speaks_sdcp(d.host_type, cfg.opt_string("printer_model")))
+            out.push_back({ "host", sdcp_host_of(url), d.host_type, "", "", "", "", "Elegoo " + url });
+        else
+            out.push_back({ "host", moonraker_base(url), "", "", "", "", "" });
     }
     std::shared_ptr<PrintHost> connected;
     wxGetApp().get_connect_host(connected);
@@ -1297,26 +1493,24 @@ void list_host_targets(std::vector<HostTarget>& out)
     // poll and could only ever say "offline". The connect card keeps the MQTT link's own state.
     if (connected && !SnapmakerLan::is_cloud_host(connected->get_host()))
         out.push_back({ "connect", moonraker_base(connected->get_host()), "", "", "", "", "" });
-    // The model's own devices (<datadir>/hub/print_host_devices.json), under the ids /api/printers
-    // gives them. Only the Moonraker-shaped ones are worth asking - an Elegoo Link box answers SDCP
-    // over its own websocket and would just spend this call's timeout - so the rest are left with
-    // the "unknown" status list_hosts gave them.
-    if (bundle && !bundle->use_bbl_network()) try {
-        // api_printers calls this before RemoteSend::list_hosts (its HostsAtEnd runs last), so the
-        // import has to happen here too or the very first poll would list the devices without ever
-        // having probed them.
-        PrintHostDevices::migrate_from_presets(*bundle);
-        const std::string model_key = PrintHostDevices::current_model_key(*bundle);
-        for (const PrintHostDevices::Device& d : PrintHostDevices::devices(model_key)) {
-            if (d.address.empty()) continue;
-            if (PrintHostDevices::speaks_moonraker(d.host_type)) {
-                out.push_back({ "ph:" + d.id, moonraker_base(d.address), "", "", "", "", "" });
-            } else if (PrusaLinkStatus::speaks_prusalink(d.host_type)) {
-                // Its own base (no MQTT-port stripping: a PrusaLink box is addressed exactly as
-                // the preset holds it) and its own credentials, which the probe needs.
-                out.push_back({ "ph:" + d.id, PrusaLinkStatus::base_url(d.address), d.host_type,
-                                d.auth_type, d.apikey, d.user, d.password });
-            }
+    // Only the devices that speak something the hub asks are targets; the rest keep the "unknown"
+    // status list_hosts gave them. A Moonraker / PrusaLink box is probed over HTTP (with its own
+    // backoff); an Elegoo SDCP printer (a Centauri Carbon 1) is watched over the hub's own on-demand
+    // connection - being a target opens nothing by itself (describe_hosts: touch vs demand).
+    for (const PrintHostDevices::ListedDevice& l : listing.devices) try {
+        const PrintHostDevices::Device& d = l.device;
+        if (d.address.empty()) continue;
+        if (d.host_type == "elegoolink") {
+            if (!speaks_sdcp(d.host_type, d.printer_model.empty() ? l.model_key : d.printer_model)) continue;
+            const std::string host = sdcp_host_of(d.address);
+            if (!host.empty()) out.push_back({ "ph:" + d.id, host, d.host_type, "", "", "", "", d.display_name() });
+        } else if (PrintHostDevices::speaks_moonraker(d.host_type)) {
+            out.push_back({ "ph:" + d.id, moonraker_base(d.address), "", "", "", "", "" });
+        } else if (PrusaLinkStatus::speaks_prusalink(d.host_type)) {
+            // Its own base (no MQTT-port stripping: a PrusaLink box is addressed exactly as
+            // the preset holds it) and its own credentials, which the probe needs.
+            out.push_back({ "ph:" + d.id, PrusaLinkStatus::base_url(d.address), d.host_type,
+                            d.auth_type, d.apikey, d.user, d.password });
         }
     } catch (...) {}
 }
@@ -1414,7 +1608,34 @@ struct HostAnswer
     PrusaLinkStatus::Status  pl;
 };
 
-void describe_hosts(const std::vector<HostTarget>& targets, json& printers)
+static void describe_moonraker_hosts(const std::vector<HostTarget>& targets, json& printers);
+
+void describe_hosts(const std::vector<HostTarget>& targets, json& printers, bool demand)
+{
+    if (targets.empty() || !printers.is_array()) return;
+    // The Elegoo SDCP printers first: their state is whatever the hub's connection last heard (a
+    // pushed status, or the last check-in), read without waiting. Somebody looking (`demand`) is a
+    // request and opens the connection; the event watcher and the hub's background poll only look.
+    std::vector<HostTarget> others;
+    others.reserve(targets.size());
+    for (const HostTarget& t : targets) {
+        if (t.host_type != "elegoolink") {
+            others.push_back(t);
+            continue;
+        }
+        const Sdcp::Snapshot s = demand ? SdcpMonitor::demand(t.base) : SdcpMonitor::touch(t.base);
+        for (json& p : printers)
+            if (p.is_object() && p.value("id", std::string()) == t.id) {
+                Sdcp::fill_row(s, t.base, p);
+                break;
+            }
+    }
+    if (others.empty()) return;
+    describe_moonraker_hosts(others, printers);
+}
+
+// Moonraker and PrusaLink printers: asked over HTTP, side by side, each bounded by its own timeout.
+static void describe_moonraker_hosts(const std::vector<HostTarget>& targets, json& printers)
 {
     if (targets.empty() || !printers.is_array()) return;
     // Side by side, not one after the other: an address that is off must cost this call its own
@@ -1493,6 +1714,11 @@ void describe_hosts(const std::vector<HostTarget>& targets, json& printers)
             if (is_device) {
                 (*entry)["status"] = state;
                 (*entry)["online"] = true;
+                // Read-only: prepare() routes pause / resume / stop for a ph: id only to an Elegoo
+                // SDCP printer, so a Moonraker / PrusaLink device must not offer the buttons.
+                (*entry)["can_pause"]  = false;
+                (*entry)["can_resume"] = false;
+                (*entry)["can_stop"]   = false;
             }
         } else {
             if (is_device && a.asked) (*entry)["online"] = false;

@@ -156,10 +156,12 @@
         var groups = [];
         (Array.isArray(p.ams) ? p.ams : []).forEach(function(u, ui) {
             if (!u) return;
-            var name = 'AMS ' + (isNum(+u.id) && +u.id < 128 ? String.fromCharCode(65 + (+u.id)) : (ui + 1)) + (u.side ? ' (' + u.side + ')' : '');
+            // A unit that names itself (an Elegoo CANVAS: "CANVAS 1") keeps its name.
+            var name = str(u.name) || ('AMS ' + (isNum(+u.id) && +u.id < 128 ? String.fromCharCode(65 + (+u.id)) : (ui + 1)) + (u.side ? ' (' + u.side + ')' : ''));
             var slots = (Array.isArray(u.trays) ? u.trays : []).map(function(t, i) {
                 return { label: name + ' slot ' + (i + 1), present: t && t.exists !== false && !!(t.type || colour(t.color)),
-                         type: str(t && t.type), color: colour(t && t.color), remain: t && isNum(t.remain) && t.remain >= 0 ? t.remain : null };
+                         type: str(t && t.type), color: colour(t && t.color), remain: t && isNum(t.remain) && t.remain >= 0 ? t.remain : null,
+                         active: !!(t && t.active === true) };
             });
             var hum = isNum(u.humidity_pct) ? u.humidity_pct + '%' : '';
             if (slots.length) groups.push({ name: name, note: hum ? 'humidity ' + hum : '', slots: slots });
@@ -300,9 +302,10 @@
                     sws.setAttribute('aria-label', g.name);
                     g.slots.forEach(function(s) {
                         var li = el('li', 'psw' + (s.present ? '' : ' vacant'));
-                        var text = s.label + ': ' + (s.present ? (s.type || 'filament') + (s.color ? ' ' + s.color : '') + (s.remain !== null ? ', ' + s.remain + '% left' : '') : 'empty');
+                        var text = s.label + ': ' + (s.present ? (s.type || 'filament') + (s.color ? ' ' + s.color : '') + (s.remain !== null ? ', ' + s.remain + '% left' : '') : 'empty') + (s.active ? ', in the toolhead' : '');
                         li.title = text;
                         li.setAttribute('aria-label', text);
+                        if (s.active) li.classList.add('active');
                         if (s.present && s.color) li.style.background = s.color;
                         if (s.present && s.type) li.appendChild(el('span', 'pswt', s.type.split(' ')[0].slice(0, 6)));
                         if (s.remain !== null && s.remain <= 10 && s.present) li.classList.add('low');
