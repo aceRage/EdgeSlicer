@@ -1112,6 +1112,10 @@ set(SLIC3R_GUI_SOURCES
     # Last on purpose: a new source in the middle of the list reshuffles the unity batches (HomeVaults.cpp
     # and HomeVendors.cpp share file-local names and must not land in one batch).
     GUI/FavoriteFilamentsUI.cpp
+    GUI/ThirdPartyFilamentMap.cpp
+    GUI/ThirdPartyFilamentMap.hpp
+    GUI/ThirdPartyFilamentMapPanel.cpp
+    GUI/ThirdPartyFilamentMapPanel.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
@@ -1282,6 +1286,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Tab.cpp                                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/AMSMaterialsSetting.cpp                   # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/AmsMappingPopup.cpp                       # ::CheckBox members vs GUI::CheckBox (Field.hpp)
+    GUI/ThirdPartyFilamentMapPanel.cpp            # includes AmsMappingPopup.hpp (::CheckBox vs GUI::CheckBox)
     GUI/CalibrationWizardPage.cpp                 # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/ExtrusionCalibration.cpp                  # ::CheckBox members vs GUI::CheckBox (Field.hpp)
 )

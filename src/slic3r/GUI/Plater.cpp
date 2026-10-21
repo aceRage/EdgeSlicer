@@ -24464,6 +24464,7 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
     const ConfigOptionStrings* colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
     const ConfigOptionStrings* types   = full.option<ConfigOptionStrings>("filament_type");
     const ConfigOptionInts*    temps   = full.option<ConfigOptionInts>("nozzle_temperature");
+    const ConfigOptionInts*    fil_map = bundle->project_config.option<ConfigOptionInts>("filament_map");
     std::map<size_t, double>   volumes;
     auto add_volumes = [&volumes](PartPlate* p) {
         if (p && p->is_slice_result_valid() && p->get_slice_result())
@@ -24484,6 +24485,9 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
         f.colour = (colours && i < colours->values.size()) ? colours->values[i] : std::string();
         f.type   = (types && i < types->values.size()) ? types->values[i] : std::string();
         f.nozzle_temp = (temps && i < temps->values.size()) ? temps->values[i] : 0;
+        // filament_map is 1-based (SelectMachine / Bambu dual-nozzle). -1 when the plate is single-nozzle.
+        if (fil_map && i < fil_map->values.size() && fil_map->values[i] > 0)
+            f.nozzle_id = fil_map->values[i] - 1;
         // The remembered CANVAS mapping keys on the preset as people know it: its alias, else its name.
         if (const Preset* fp = bundle->filaments.find_preset(bundle->filament_presets[i]))
             f.alias = fp->alias.empty() ? fp->name : fp->alias;
