@@ -1398,7 +1398,14 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "small_area_infill_flow_compensation"
             || opt_key == "lateral_lattice_angle_1"
             || opt_key == "lateral_lattice_angle_2"
-            || opt_key == "infill_overhang_angle") {
+            || opt_key == "infill_overhang_angle"
+            || opt_key == "sandwich_lite_enable"
+            || opt_key == "sandwich_lite_include_bottom"
+            || opt_key == "sandwich_lite_pass_count"
+            || opt_key == "sandwich_lite_height_ratios"
+            || opt_key == "sandwich_lite_angles"
+            || opt_key == "sandwich_lite_speed_percents"
+            || opt_key == "sandwich_lite_fan_speeds") {
             steps.emplace_back(posInfill);
         } else if (opt_key == "sparse_infill_pattern"
                    || opt_key == "symmetric_infill_y_axis"

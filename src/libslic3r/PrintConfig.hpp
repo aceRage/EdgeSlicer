@@ -1670,6 +1670,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, ironing_direction))
     ((ConfigOptionFloats, ironing_speed))
     ((ConfigOptionFloat, ironing_angle))
+    // Sandwich-lite (spike, default off): up to 3 thin top-surface (optionally bottom)
+    // sub-passes inside one nominal layer. Single-tool only. Do not enable in profiles.
+    ((ConfigOptionBool,                 sandwich_lite_enable))
+    ((ConfigOptionBool,                 sandwich_lite_include_bottom))
+    ((ConfigOptionInt,                  sandwich_lite_pass_count))
+    ((ConfigOptionFloats,               sandwich_lite_height_ratios))
+    ((ConfigOptionFloats,               sandwich_lite_angles))
+    ((ConfigOptionFloats,               sandwich_lite_speed_percents))
+    ((ConfigOptionInts,                 sandwich_lite_fan_speeds))
     // Detect bridging perimeters
     ((ConfigOptionBool, detect_overhang_wall))
     ((ConfigOptionBool, unsupported_wall_last))

@@ -275,6 +275,8 @@ void ExtrusionLoop::split_at(const Point &point, bool prefer_non_overhang, const
     // Ultra: offset-layers attributes must survive the seam split
     p1.z_offset = path.z_offset;   p1.extrusion_multiplier = path.extrusion_multiplier;
     p2.z_offset = path.z_offset;   p2.extrusion_multiplier = path.extrusion_multiplier;
+    p1.sandwich_speed_factor = path.sandwich_speed_factor; p1.sandwich_fan_percent = path.sandwich_fan_percent;
+    p2.sandwich_speed_factor = path.sandwich_speed_factor; p2.sandwich_fan_percent = path.sandwich_fan_percent;
     // ZAA: so must the contour samples. They are keyed on coordinates, so both halves - and the
     // one interpolated point the split introduces - resolve against the same shared sample set.
     p1.z_contour = path.z_contour;

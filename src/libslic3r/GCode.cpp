@@ -9459,6 +9459,8 @@ std::string GCode::change_layer(coordf_t print_z)
     }
 
     m_need_change_layer_lift_z = true;
+    // Sandwich-lite: re-emit M106 on the next pass of the new layer.
+    m_last_sandwich_fan_percent = -2;
 
     m_nominal_z = z;
     // Snapmaker #993 (Edge adaptation): the writer takes the new layer's Z as before, but remembers the Z the
@@ -9938,15 +9940,38 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
                         // A reversed copy is owned here and can be moved from.
                         ExtrusionEntityCollection chained = own_copy ? std::move(static_cast<ExtrusionEntityCollection&>(*own_copy)) :
                                                                        ExtrusionEntityCollection(*eec);
-                        if (!chained.no_sort)
-                            chain_and_reorder_extrusion_entities(chained.entities, &m_last_pos);
-                        for (ExtrusionEntity* ee : chained.entities)
-                            gcode += this->extrude_entity(*ee, extrusion_name);
+                        gcode += this->extrude_infill_collection(chained, extrusion_name);
                     } else
                         gcode += this->extrude_entity(*fill, extrusion_name);
                 }
             }
         }
+    return gcode;
+}
+
+std::string GCode::extrude_infill_collection(ExtrusionEntityCollection &collection, const char *extrusion_name)
+{
+    std::string gcode;
+    ConstExtrusionEntitiesPtr children;
+    children.reserve(collection.entities.size());
+    for (ExtrusionEntity *ee : collection.entities)
+        children.emplace_back(ee);
+    std::vector<std::unique_ptr<ExtrusionEntity>> reversed;
+    if (!collection.no_sort)
+        chain_and_reorder_extrusion_entities(children, m_last_pos, reversed);
+    auto next_reversed = reversed.begin();
+    for (const ExtrusionEntity *child : children) {
+        ExtrusionEntity *own_copy = next_reversed != reversed.end() && next_reversed->get() == child ?
+                                        (next_reversed++)->get() :
+                                        nullptr;
+        if (auto *child_eec = dynamic_cast<const ExtrusionEntityCollection *>(child)) {
+            ExtrusionEntityCollection nested = own_copy ? std::move(static_cast<ExtrusionEntityCollection &>(*own_copy)) :
+                                                          ExtrusionEntityCollection(*child_eec);
+            gcode += this->extrude_infill_collection(nested, extrusion_name);
+        } else {
+            gcode += this->extrude_entity(*child, extrusion_name);
+        }
+    }
     return gcode;
 }
 
@@ -10472,6 +10497,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             }
         }
     }
+    // Sandwich-lite (spike): per-pass speed share of the role speed already resolved above.
+    if (path.sandwich_speed_factor > 0.f && std::abs(double(path.sandwich_speed_factor) - 1.) > EPSILON)
+        speed *= double(path.sandwich_speed_factor);
+
     // Override skirt speed if set
     if (path.role() == erSkirt) {
         const double skirt_speed = m_config.skirt_speed.value; // a plain float option: same value get_abs_value("skirt_speed") returned
@@ -10780,6 +10809,15 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         m_last_height = path.height;
         sprintf(buf, ";%s%g\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height).c_str(), m_last_height);
         gcode += buf;
+    }
+
+    // Sandwich-lite (spike): optional per-pass fan. CoolingBuffer may still rewrite M106
+    // from layer-time slowdown; the comment is the stable marker for tests and Stream.
+    if (path.sandwich_fan_percent >= 0 && path.sandwich_fan_percent != m_last_sandwich_fan_percent) {
+        m_last_sandwich_fan_percent = path.sandwich_fan_percent;
+        sprintf(buf, "; sandwich-lite fan %d\n", path.sandwich_fan_percent);
+        gcode += buf;
+        gcode += m_writer.set_fan(unsigned(std::clamp(path.sandwich_fan_percent, 0, 100)));
     }
 
     // Orca: Dynamic PA

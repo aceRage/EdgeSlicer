@@ -545,6 +545,8 @@ private:
 
     std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first, bool unsupported_loops_only = false);
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
+    // Recurse one collection: honor no_sort, chain children that allow it, then emit.
+    std::string     extrude_infill_collection(ExtrusionEntityCollection &collection, const char *extrusion_name);
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
 
     // BBS
@@ -656,6 +658,8 @@ private:
     // Filament mass (g) printed up to the previous layer change, for curr_layer_mass.
     double                              m_last_layer_accumulated_mass{ 0.0 };
     float                               m_last_width{ 0.0f };
+    // Sandwich-lite (spike): last emitted per-pass fan so we do not spam M106 on every path.
+    int                                 m_last_sandwich_fan_percent{ -2 };
 
     // SM_Orca
     float                               m_next_wipe_x {0.0f};
