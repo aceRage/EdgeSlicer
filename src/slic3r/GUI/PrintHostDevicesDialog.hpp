@@ -41,6 +41,8 @@ private:
     void on_edit();
     void on_remove();
     void on_test();
+    // Elegoo Centauri Carbon 1: the redacted CANVAS diagnostic (ElegooCanvasUI.hpp).
+    void on_capture_canvas();
     // The old single-address editor (PhysicalPrinterDialog), behind an explicit click. Nothing
     // else opens it any more: the sidebar's connection icon lands on this list instead.
     void on_edit_connection();
@@ -58,6 +60,7 @@ private:
     Button*             m_btn_edit { nullptr };
     Button*             m_btn_remove { nullptr };
     Button*             m_btn_test { nullptr };
+    Button*             m_btn_canvas { nullptr };
     Button*             m_btn_connection { nullptr };
     Button*             m_btn_close { nullptr };
 };

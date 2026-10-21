@@ -1055,6 +1055,7 @@ void PrintObject::clear_support_layers()
             l->sharp_tails.clear();
             l->sharp_tails_height.clear();
             l->cantilevers.clear();
+            l->support_overhangs.clear();
         }
     }
 }
@@ -4251,6 +4252,41 @@ void PrintObject::generate_support_preview()
     this->generate_support_material();
     boost::posix_time::ptime ts3 = boost::posix_time::microsec_clock::local_time();
     profiler.duration2 = (ts3 - ts2).total_milliseconds();
+}
+
+// Edge (support highlight, phase 5): see Print.hpp.
+void PrintObject::detect_support_overhangs_only()
+{
+    // The steps a slice runs before the support step that the detection reads: the slices, and for
+    // bridge removal the perimeters and the bottom bridge surfaces of the infill preparation. Always
+    // both, so the layers are exactly as the slice has them when its support step starts.
+    this->make_perimeters();
+    this->prepare_infill();
+    this->throw_if_canceled();
+    this->clear_support_layers();
+    if (m_layers.size() < 2 || ! m_config.enable_support.value)
+        return;
+    if (is_tree(m_config.support_type.value)) {
+        // Every tree style, organic too, detects with TreeSupport::detect_overhangs().
+        TreeSupport tree_support(*this, m_slicing_params);
+        tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
+        tree_support.detect_overhangs();
+        this->clear_tree_support_preview_cache();
+    } else {
+        PrintObjectSupportMaterial support_material(this, m_slicing_params);
+        support_material.detect_overhangs_only(*this);
+    }
+    this->throw_if_canceled();
+}
+
+// Edge (support highlight, phase 6): see Print.hpp.
+void PrintObject::generate_support_for_preview()
+{
+    this->clear_support_layers();
+    if ((m_config.enable_support.value && m_layers.size() > 1) || (this->has_raft() && ! m_layers.empty()))
+        this->_generate_support_material();
+    this->clear_tree_support_preview_cache();
+    this->throw_if_canceled();
 }
 
 void PrintObject::update_slicing_parameters()

@@ -41,6 +41,8 @@ class Button;
 namespace Slic3r {
 namespace GUI {
 
+class ElegooCanvasPanel;
+
 
 class PrinterWebView : public wxPanel{
 public:
@@ -82,6 +84,11 @@ public:
     void set_storage_device(const PrintHostDevices::Device& device, const std::string& key);
     void set_storage_source(PrinterStoragePanel::Source source);
 
+    // The read-only CANVAS card above the page (ElegooCanvasUI.hpp): shown for a Centauri Carbon 1
+    // on Elegoo Link, hidden for everything else. `preset_model` is the printer preset's
+    // printer_model, for a device saved without one.
+    void set_canvas_device(const PrintHostDevices::Device& device, const std::string& preset_model);
+
     void sys_color_changed();
     void msw_rescale();
 
@@ -108,6 +115,8 @@ private:
     ::Button*     m_tab_page { nullptr };
     ::Button*     m_tab_storage { nullptr };
     PrinterStoragePanel* m_storage { nullptr };
+    ElegooCanvasPanel*   m_canvas { nullptr };
+    std::string          m_canvas_model; // the preset's printer_model the card was last set for
     bool          m_storage_shown { false };
     bool          m_storage_has_source { false };
     int           m_bar_state { 0 }; // what update_bar() last laid out (all hidden at first)

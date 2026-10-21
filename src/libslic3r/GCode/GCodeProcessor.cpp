@@ -50,7 +50,6 @@ static const float DEFAULT_TRAVEL_ACCELERATION = 1250.0f;
 static const size_t MIN_EXTRUDERS_COUNT = 5;
 static const float DEFAULT_FILAMENT_DIAMETER = 1.75f;
 static const int   DEFAULT_FILAMENT_HRC = 0;
-static const float DEFAULT_FILAMENT_DENSITY = 1.245f;
 static const float DEFAULT_FILAMENT_COST = 29.99f;
 static const int   DEFAULT_FILAMENT_VITRIFICATION_TEMPERATURE = 0;
 static const Slic3r::Vec3f DEFAULT_EXTRUDER_OFFSET = Slic3r::Vec3f::Zero();
@@ -693,6 +692,10 @@ void GCodeProcessorResult::reset() {
     lock();
 
     moves = std::vector<GCodeProcessorResult::MoveVertex>();
+    plate_mass = {};
+    object_masses.clear();
+    body_masses.clear();
+    support_masses.clear();
     printable_area = Pointfs();
     //BBS: add bed exclude area
     bed_exclude_area = Pointfs();
@@ -721,6 +724,10 @@ void GCodeProcessorResult::reset() {
     // moves and lines_ends grow with the print: free them, as no reset result reuses the capacity.
     clear_and_shrink(moves);
     clear_and_shrink(lines_ends);
+    plate_mass = {};
+    object_masses.clear();
+    body_masses.clear();
+    support_masses.clear();
     printable_area = Pointfs();
     //BBS: add bed exclude area
     bed_exclude_area = Pointfs();
@@ -1313,6 +1320,7 @@ void GCodeProcessor::enable_stealth_time_estimator(bool enabled)
 
 void GCodeProcessor::reset()
 {
+    m_mass_locator = nullptr;
     m_booked_times.clear();
     m_booking_tool_change = false;
     m_skip_end_gcode_delays = false;
@@ -1502,6 +1510,7 @@ void GCodeProcessor::process_buffer(const std::string &buffer)
 void GCodeProcessor::finalize(bool post_process)
 {
     m_result.z_offset = m_z_offset;
+    finalize_object_masses();
 
     // update width/height of wipe moves
     for (GCodeProcessorResult::MoveVertex& move : m_result.moves) {
@@ -3259,6 +3268,10 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
     for (TimeMachine& machine : m_time_processor.machines)
         if (machine.enabled && !machine.blocks.empty())
             machine.blocks.back().move_id = static_cast<unsigned int>(m_result.moves.size());
+
+    // Orca #16291: centers of mass (in memory only).
+    if (type == EMoveType::Extrude)
+        add_object_mass(m_extruder_id, area_filament_cross_section * delta_pos[E]);
 
     // store move
     store_move_vertex(type, origin == G1DiscretizationOrigin::G2G3);
@@ -5264,6 +5277,74 @@ void GCodeProcessor::store_move_vertex(EMoveType type, bool internal_only)
             machine.stop_times.push_back({ m_g1_line_id, 0.0f });
         }
     }
+}
+
+void GCodeProcessorResult::ObjectMass::add(const Sum &sum, const BoundingBoxf3 &extent, size_t layer)
+{
+    box.merge(extent);
+    if (printed_up_to_layer.size() <= layer)
+        printed_up_to_layer.resize(layer + 1);
+    printed_up_to_layer[layer].add(sum);
+}
+
+void GCodeProcessor::add_object_mass(int filament_id, float volume)
+{
+    // Skirt, prime tower and custom G-code belong to no object.
+    const ExtrusionRole role = m_extrusion_role;
+    if (volume <= 0.f || role == erNone || role == erSkirt || role == erWipeTower || role == erCustom || role == erMixed)
+        return;
+
+    const bool   has_density = size_t(filament_id) < m_result.filament_densities.size() && m_result.filament_densities[filament_id] > 0.f;
+    const double mass        = double(volume) * (has_density ? m_result.filament_densities[filament_id] : DEFAULT_FILAMENT_DENSITY);
+    // In the frame of the stored moves, the bead's center half its height below the nozzle, from the move's start to its end.
+    const Vec3d half_height = 0.5 * double(m_height) * Vec3d::UnitZ();
+    const Vec3f extruder_offset = size_t(filament_id) < m_extruder_offsets.size() ? m_extruder_offsets[filament_id] : Vec3f::Zero();
+    const Vec3d offset      = Vec3d(m_x_offset, m_y_offset, -m_z_offset) - half_height + extruder_offset.cast<double>();
+    const Vec3d start       = Vec3d(m_start_position[X], m_start_position[Y], m_start_position[Z]) + offset;
+    const Vec3d end         = Vec3d(m_end_position[X], m_end_position[Y], m_end_position[Z]) + offset;
+    // The second moments of a uniform segment.
+    const GCodeProcessorResult::ObjectMass::Sum sum{ mass, double(volume), 0.5 * mass * (start + end),
+                                                     mass / 3. * (start.cwiseProduct(start) + start.cwiseProduct(end) + end.cwiseProduct(end)) };
+    // Of the bead's center line and its height, as its width is only estimated. Merged, as a wall along an axis is flat.
+    BoundingBoxf3 extent;
+    extent.merge(start.cwiseMin(end) - half_height);
+    extent.merge(start.cwiseMax(end) + half_height);
+    const bool   part  = role != erBrim && !is_support(role);
+    const size_t layer = std::max<unsigned int>(1, m_layer_id) - 1;
+
+    m_result.plate_mass.add(sum, extent, layer);
+    // The brim belongs to the plate alone.
+    if (role == erBrim || !m_mass_locator)
+        return;
+    const auto add = [&sum, &extent, layer](std::vector<GCodeProcessorResult::ObjectMass> &masses, int index) {
+        if (index < 0)
+            return;
+        if (masses.size() <= size_t(index))
+            masses.resize(index + 1);
+        masses[index].add(sum, extent, layer);
+    };
+    // At the nozzle's height, which the layers print at.
+    const MassLocation location = m_mass_locator(0.5 * (start + end) + half_height, !part);
+    if (part) {
+        add(m_result.object_masses, location.object);
+        add(m_result.body_masses, location.body);
+    } else
+        add(m_result.support_masses, location.object);
+}
+
+void GCodeProcessor::finalize_object_masses()
+{
+    const auto accumulate = [](GCodeProcessorResult::ObjectMass &object) {
+        for (size_t i = 1; i < object.printed_up_to_layer.size(); ++i)
+            object.printed_up_to_layer[i].add(object.printed_up_to_layer[i - 1]);
+    };
+    accumulate(m_result.plate_mass);
+    for (GCodeProcessorResult::ObjectMass &object : m_result.object_masses)
+        accumulate(object);
+    for (GCodeProcessorResult::ObjectMass &body : m_result.body_masses)
+        accumulate(body);
+    for (GCodeProcessorResult::ObjectMass &support : m_result.support_masses)
+        accumulate(support);
 }
 
 void GCodeProcessor::set_extrusion_role(ExtrusionRole role)
