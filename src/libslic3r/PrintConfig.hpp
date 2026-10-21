@@ -2505,6 +2505,9 @@ bool has_nozzle_rack(const PrintConfig &config);
 // Ported from OrcaSlicer PR #13782 (LixNix, "Printing with different nozzle sizes"),
 // Flow.cpp::physical_extruder_for_filament.
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id);
+// The same mapping from the raw values, for callers that only hold a DynamicPrintConfig or the
+// preset bundle (the support overhang highlight in the 3D view).
+size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id);
 
 // Mixed nozzle sizes (Phase 3, UI): true when this machine may carry nozzles of different
 // diameters at the same time - more than one physical extruder and NOT a single-extruder

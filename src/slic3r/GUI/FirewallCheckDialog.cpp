@@ -119,7 +119,9 @@ FirewallCheckDialog::FirewallCheckDialog(wxWindow* parent)
 
     top->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(14));
 
-    // "Also allow on Public networks", off by default, with the trade-off spelled out.
+    // "Also allow on Public networks", with the trade-off spelled out. Off, except when the PC is on
+    // a Public network that the rules do not cover (WinFirewall::default_allow_public, set by the
+    // first check below).
     auto* public_row = new wxBoxSizer(wxHORIZONTAL);
     m_cb_public      = new ::CheckBox(this);
     m_cb_public->SetValue(false);
@@ -141,8 +143,9 @@ FirewallCheckDialog::FirewallCheckDialog(wxWindow* parent)
 
     m_public_explain = new wxStaticText(this, wxID_ANY,
         _L("Public networks are the ones Windows treats as untrusted, such as cafe or hotel Wi-Fi. Allowing EdgeSlicer there "
-           "lets other devices on such a network reach it too (printer discovery, the phone hub and its video). Leave this off "
-           "and set your home network to Private instead, unless you cannot change it."));
+           "lets other devices on such a network reach it too (printer discovery, the phone hub and its video). EdgeSlicer ticks "
+           "this when this PC is on a Public network now; untick it if that network is not your own, or set your home network "
+           "to Private instead."));
     m_public_explain->SetFont(Label::Body_12);
     m_public_explain->SetForegroundColour(wxColour(107, 107, 107));
     m_public_explain->Wrap(wrap);
@@ -230,6 +233,13 @@ void FirewallCheckDialog::run_check()
 {
     wxBusyCursor busy;
     m_diag = WinFirewall::diagnose_this_copy();
+    if (!m_public_defaulted && m_diag.ok) {
+        // Once per dialog: a later "Check again" never overrides what the user ticked or unticked.
+        m_public_defaulted = true;
+        const bool tick = WinFirewall::default_allow_public(m_diag);
+        m_cb_public->SetValue(tick);
+        if (tick) BOOST_LOG_TRIVIAL(warning) << "[Firewall] this PC is on a Public network the rules do not cover: \"Also allow on Public networks\" starts ticked";
+    }
     rebuild_lines();
     update_public_hint();
     relayout();
