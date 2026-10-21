@@ -87,7 +87,10 @@ const EVENTS = [
 const controlPosts = [];
 const hubPosts = [];
 const HUB_INFO = { phone: true, url: 'http://192.168.1.5:13640/r/' + TOKEN + '/', video: null, remote: {
-    on: true, access: { state: 'serving', message: '' }, url: 'https://pc.example.ts.net/r/' + TOKEN + '/', allowed_logins: ['a@example.com'], funnel_command: '' } };
+    on: true, access: { state: 'serving', message: '' }, url: 'https://pc.example.ts.net/r/' + TOKEN + '/', allowed_logins: ['a@example.com'], funnel_off_command: '' },
+    clients: { scopes: ['status', 'camera', 'control', 'print'], list: [
+        { id: 'phone-link', name: 'Phone link (QR code above)', scopes: ['status', 'camera', 'control', 'print'], legacy: true, created_at: 0, last_used_at: 0 },
+        { id: 'c0123456789ab', name: 'Workshop PC', scopes: ['status', 'print'], legacy: false, tagged_ok: false, created_at: 1760000000, last_used_at: 0 } ] } };
 
 const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -357,6 +360,7 @@ async function main() {
             await evalJs(`Array.prototype.filter.call(document.querySelectorAll('span.btn'), function(e){ return e.getAttribute('role') !== 'button'; }).map(function(e){ return e.textContent; }).join(',')`));
         check('hub.html: the notification tabs are keyboard buttons with a pressed state', await evalJs(`(function(t){ return t.length === 4 && Array.prototype.every.call(t, function(e){ return e.getAttribute('role') === 'button' && e.hasAttribute('aria-pressed'); }); })(document.querySelectorAll('#notifytabs .tab'))`));
         check('hub.html: the remove-x has a name', await evalJs(`Array.prototype.some.call(document.querySelectorAll('.login .btn'), function(e){ return /^Remove a@example.com$/.test(e.getAttribute('aria-label')); })`));
+        check('hub.html: the Apps and PCs card lists the clients, and Revoke names its client', await evalJs(`Array.prototype.some.call(document.querySelectorAll('#clientsbody .btn'), function(e){ return e.getAttribute('aria-label') === 'Revoke Workshop PC' && e.getAttribute('role') === 'button'; })`));
         check('hub.html: Enter on a button presses it (Disable -> POST /hub/phone?on=0)', await focus('#phonebody .btn.warn') && (await ENTER(), await sleep(500), hubPosts.indexOf('/hub/phone?on=0') >= 0), hubPosts.join(','));
         const hubRatios = JSON.parse(await evalJs(`(function(){
             var mk = function(html){ var d = document.createElement('div'); d.innerHTML = html; document.querySelector('.card').appendChild(d); var e = d.firstChild, s = getComputedStyle(e); var r = { fg: s.color, bg: s.backgroundColor }; d.remove(); return r; };
