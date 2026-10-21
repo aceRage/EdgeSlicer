@@ -28,7 +28,7 @@ from urllib.parse import parse_qsl, urlparse
 
 from . import safety
 
-VERSION = "E1"
+VERSION = "E2"
 PAGE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page", "index.html")
 
 

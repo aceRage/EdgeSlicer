@@ -64,16 +64,31 @@ class EmulatedPrinter:
                     errors.append("cannot listen on %s:%d (%s)%s%s" % (key[0], key[1], e.strerror or e,
                                                                        "; held by " + holder if holder else "",
                                                                        safety.mac_alias_hint(key[0])))
+            extra = getattr(self.personality, "reconcile_extra", None)
+            if extra is not None:
+                errors += extra(host)  # listeners that are no HTTP (the U1's MQTT brokers)
             self.error = "; ".join(errors)
             if not want:
                 self.release.set()  # anything held by the timeout fault lets go
+                self._personality_stopped()
             return not errors
+
+    def _personality_stopped(self):
+        """The listeners are closed: open websockets and camera streams go too, as when a printer
+        is switched off."""
+        fn = getattr(self.personality, "on_stop", None)
+        if fn is not None:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - stopping must not fail
+                pass
 
     def stop(self):
         with self.lock:
             for key in list(self.listeners):
                 self.listeners.pop(key).down()
             self.release.set()
+            self._personality_stopped()
 
     @property
     def running(self):
@@ -97,6 +112,32 @@ class EmulatedPrinter:
                                    payload={"fault": "http_error", "code": code})
         with self.lock:
             return self.personality.route(req)
+
+    def handle_upgrade(self, handler, req):
+        """A websocket handshake. The personality runs the session itself (outside the printer
+        lock, taking it per message); a personality without websockets answers 404."""
+        if self.faults.get("timeout"):
+            self.release.clear()
+            self.record(req, Response(0, None, kind="fault", payload={"fault": "timeout", "held": True}), 0, status=None)
+            self.hold_until_released()
+            return
+        fn = getattr(self.personality, "ws_session", None)
+        if fn is None:
+            resp = moonraker_error(404, "Not Found", kind="http")
+            data = resp.encoded()
+            handler.send_response(404)
+            handler.send_header("Content-Type", resp.ctype)
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            self.record(req, resp, 0, status=404)
+            return
+        fn(handler, req)
+
+    def event(self, kind, payload, transport="ws", path=None, port=None, status=None, method=None):
+        """A log entry that is no HTTP request: a websocket command, a push, an MQTT message."""
+        self.log.add(self.id, self.personality.name, kind, transport=transport, method=method, path=path, port=port,
+                     status=status, payload=payload, state_after=self.snapshot())
 
     def hold_until_released(self, max_s=600):
         """The timeout fault: keep the connection, answer nothing, until the fault is switched off,

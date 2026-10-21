@@ -5,6 +5,7 @@ Lifted from tests/slic3rutils/fake_moonraker.py (reply helpers, the listener tha
 closes) and generalised so one printer can own several listeners (the QIDI 8080 retry port).
 """
 import json
+import socketserver
 import sys
 import threading
 import time
@@ -33,10 +34,11 @@ class Request:
 
 class Response:
     """What a personality answers. `kind` and `payload` are what the command log records; `hold`
-    means accept and never answer (the timeout fault); `extra` log entries were already written."""
+    means accept and never answer (the timeout fault); `log=False`: the entries were already
+    written (sub-commands)."""
 
     def __init__(self, status=200, body=None, ctype="application/json", kind="http", payload=None, headers=None,
-                 hold=False, log=True):
+                 hold=False, log=True, stream=None, drop=False):
         self.status = status
         self.body = body
         self.ctype = ctype
@@ -45,6 +47,11 @@ class Response:
         self.headers = headers or {}
         self.hold = hold
         self.log = log
+        # stream(wfile): an endless body (the MJPEG camera), written after the headers with the
+        # printer's lock released; it returns when the client goes or the printer stops.
+        self.stream = stream
+        # drop: close the connection without a byte of answer (a camera turning a viewer away).
+        self.drop = drop
 
     def encoded(self):
         if self.body is None:
@@ -70,6 +77,12 @@ class _Server(ThreadingHTTPServer):
     def __init__(self, addr, handler, printer):
         self.printer = printer
         super().__init__(addr, handler)
+
+    def server_bind(self):
+        # HTTPServer.server_bind asks socket.getfqdn() for the address, a reverse DNS lookup that
+        # takes about 5 s per 127.0.0.x listener on Windows. The name is never used here.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class PrinterHandler(BaseHTTPRequestHandler):
@@ -101,6 +114,15 @@ class PrinterHandler(BaseHTTPRequestHandler):
     def _handle(self, method):
         t0 = time.time()
         u = urlparse(self.path)
+        if (self.headers.get("Upgrade") or "").lower() == "websocket":
+            # A websocket (Elegoo SDCP): the printer takes the connection over until it closes.
+            req = Request(method, u.path, u.query, self.headers, b"", self.server.server_address[1], self.client_address[0])
+            self.close_connection = True
+            try:
+                self.server.printer.handle_upgrade(self, req)
+            except (OSError, EOFError, ValueError):
+                pass
+            return
         try:
             body = self._read_body()
         except (OSError, ValueError):
@@ -116,6 +138,25 @@ class PrinterHandler(BaseHTTPRequestHandler):
         if resp.hold:
             printer.record(req, resp, int((time.time() - t0) * 1000), status=None)
             printer.hold_until_released()
+            self.close_connection = True
+            return
+        if resp.drop:
+            printer.record(req, resp, int((time.time() - t0) * 1000), status=None)
+            self.close_connection = True
+            return
+        if resp.stream is not None:
+            try:
+                self.send_response(resp.status)
+                self.send_header("Content-Type", resp.ctype)
+                self.send_header("Cache-Control", "no-cache, no-store")
+                self.send_header("Connection", "close")
+                for k, v in resp.headers.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                printer.record(req, resp, int((time.time() - t0) * 1000), status=resp.status)
+                resp.stream(self.wfile)
+            except (OSError, ValueError):
+                pass
             self.close_connection = True
             return
         data = resp.encoded()

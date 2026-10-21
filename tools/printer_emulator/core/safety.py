@@ -54,6 +54,14 @@ def check_bind(host, lan=False):
     return host
 
 
+def mac_alias_command(host):
+    """The one command a Mac needs before a printer can listen on `host` (only 127.0.0.1 exists
+    there until an alias is added; it lasts until the Mac restarts). "" when none is needed."""
+    if is_loopback(host) and host != "127.0.0.1":
+        return "sudo ifconfig lo0 alias %s up" % host
+    return ""
+
+
 def mac_alias_hint(host):
     if sys.platform == "darwin" and is_loopback(host) and host != "127.0.0.1":
         return " On a Mac only 127.0.0.1 exists until you add the alias: sudo ifconfig lo0 alias %s up" % host

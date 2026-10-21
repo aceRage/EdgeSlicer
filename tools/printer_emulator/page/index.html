@@ -107,7 +107,7 @@ const el = (tag, attrs = {}, ...kids) => {
 };
 const STATES = ["standby", "printing", "paused", "complete", "cancelled", "error"];
 const TYPES = ["PLA", "PETG", "ABS", "ASA", "TPU", "PA", "PC", "PET", "PLA-CF", "PETG-CF", "PA-CF", "HIPS", "PVA"];
-const POLL_KINDS = new Set(["query", "info", "files"]);
+const POLL_KINDS = new Set(["query", "info", "files", "status_query", "attributes", "upload_chunk"]);
 let printers = {}, paused = false, logEntries = [], lastSeq = 0;
 
 function toast(msg, bad) {
@@ -135,6 +135,9 @@ function renderCard(p) {
   card.append(el("div", { class: "hint" },
     el("div", {}, el("b", {}, "Add in EdgeSlicer: "), "printer preset ", el("code", {}, p.hint.printer_preset),
       ", host type ", el("code", {}, p.hint.host_type), ", hostname ", el("code", {}, p.hint.address), "."),
+    p.hint.camera ? el("div", {}, el("b", {}, "Camera: "), el("a", { href: p.hint.camera, target: "_blank" }, p.hint.camera),
+      " (the Stream tab finds it through Cmd 386)") : null,
+    p.hint.mac_alias ? el("div", { class: "muted" }, "Mac: ", el("code", {}, p.hint.mac_alias)) : null,
     el("div", { class: "muted", "data-k": "addr" }, "Listening on " + (p.addresses.join(", ") || "nothing (stopped)"))));
 
   // state + lifecycle
@@ -157,6 +160,8 @@ function renderCard(p) {
       el("button", { onclick: async () => renderCard(await api(`/emu/printers/${p.id}/set`, { name: name.value, bind: bind.value, port: +port.value })) }, "Apply"))));
 
   if (isQidi) card.append(qidiSection(p));
+  if (p.personality === "elegoo_cc1") card.append(canvasSection(p));
+  if (p.personality === "u1") card.append(u1Section(p));
   card.append(faultSection(p));
   const old = $("#card-" + p.id);
   if (old) old.replaceWith(card); else $("#printers").append(card);
@@ -209,6 +214,77 @@ function qidiSection(p) {
   return sec;
 }
 
+// Elegoo CC1: the CANVAS trays (type, colour, brand, untagged, loaded, active), attach / detach.
+function canvasSection(p) {
+  const c = p.config, cv = c.canvas || {};
+  const sec = el("section", {});
+  const attached = el("input", { type: "checkbox", checked: cv.attached !== false });
+  sec.append(el("h3", {}, "CANVAS"),
+    el("div", { class: "row" }, el("label", { class: "row" }, attached, "CANVAS attached (untick: \"CANVAS detached\", Cmd 324 answers Ack 1)")));
+  const slots = (c.slots || []).slice(0, 4);
+  while (slots.length < 4) slots.push({ loaded: false });
+  const rows = slots.map((s, i) => {
+    const r = {
+      loaded: el("input", { type: "checkbox", checked: !!s.loaded, "aria-label": "loaded" }),
+      active: el("input", { type: "radio", name: "active-" + p.id, checked: cv.active_tray === i, "aria-label": "active" }),
+      type: el("input", { type: "text", list: "types", value: s.type || "", "aria-label": "type" }),
+      name: el("input", { type: "text", value: s.name || "", placeholder: "ELEGOO PLA", "aria-label": "filament name" }),
+      brand: el("input", { type: "text", value: s.brand || "", placeholder: "ELEGOO", "aria-label": "brand" }),
+      untagged: el("input", { type: "checkbox", checked: !!s.untagged, "aria-label": "untagged" }),
+      color: el("input", { type: "color", value: /^#[0-9a-f]{6}$/i.test(s.color || "") ? s.color : "#ffffff", "aria-label": "colour" }),
+    };
+    r.tr = el("tr", {}, el("td", { class: "mono" }, "tray " + i), el("td", {}, r.loaded), el("td", {}, r.active), el("td", {}, r.type),
+      el("td", {}, r.name), el("td", {}, r.brand), el("td", {}, r.untagged), el("td", {}, r.color));
+    return r;
+  });
+  sec.append(el("table", { class: "slots" }, el("tr", {}, ["Tray", "Loaded", "Active", "Type", "Name", "Brand", "Untagged (— — — —)", "Colour"].map(h => el("th", {}, h))), rows.map(r => r.tr)));
+  const apply = async () => {
+    const newSlots = rows.map(r => r.loaded.checked ? { type: r.type.value.trim(), name: r.name.value.trim(), brand: r.brand.value.trim(),
+      untagged: r.untagged.checked, color: r.color.value.toUpperCase(), loaded: true } : { loaded: false });
+    const active = rows.findIndex(r => r.active.checked);
+    renderCard(await api(`/emu/printers/${p.id}/set`, { canvas: { attached: attached.checked, active_tray: active }, slots: newSlots }));
+    toast("CANVAS applied. EdgeSlicer reads it on its next Cmd 324.");
+  };
+  sec.append(el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "primary", onclick: apply }, "Apply CANVAS and trays")));
+  const ls = p.state.last_start;
+  sec.append(el("h3", {}, "Last start (Cmd 128)"), el("div", { class: "mono", "data-k": "laststart" }, ls ? JSON.stringify(ls) : "none yet"));
+  return sec;
+}
+
+// Snapmaker U1: the four toolheads and what the mapping macros set.
+function u1Section(p) {
+  const c = p.config;
+  const sec = el("section", {});
+  const slots = (c.slots || []).slice(0, 4);
+  while (slots.length < 4) slots.push({ loaded: false });
+  const rows = slots.map((s, i) => {
+    const r = {
+      loaded: el("input", { type: "checkbox", checked: !!s.loaded, "aria-label": "loaded" }),
+      type: el("input", { type: "text", list: "types", value: s.type || "", "aria-label": "type" }),
+      sub: el("input", { type: "text", value: s.sub || "", "aria-label": "sub-type" }),
+      vendor: el("input", { type: "text", value: s.vendor || "", "aria-label": "vendor" }),
+      color: el("input", { type: "color", value: /^#[0-9a-f]{6}$/i.test(s.color || "") ? s.color : "#ffffff", "aria-label": "colour" }),
+    };
+    r.tr = el("tr", {}, el("td", { class: "mono" }, "toolhead " + (i + 1) + " (T" + i + ")"), el("td", {}, r.loaded), el("td", {}, r.type),
+      el("td", {}, r.sub), el("td", {}, r.vendor), el("td", {}, r.color));
+    return r;
+  });
+  sec.append(el("h3", {}, "Toolheads (print_task_config)"),
+    el("table", { class: "slots" }, el("tr", {}, ["Toolhead", "Loaded", "Type", "Sub-type", "Vendor", "Colour"].map(h => el("th", {}, h))), rows.map(r => r.tr)));
+  const apply = async () => {
+    const newSlots = rows.map(r => ({ type: r.type.value.trim(), sub: r.sub.value.trim(), vendor: r.vendor.value.trim(), color: r.color.value.toUpperCase(), loaded: r.loaded.checked }));
+    renderCard(await api(`/emu/printers/${p.id}/set`, { slots: newSlots }));
+    toast("Toolheads applied.");
+  };
+  sec.append(el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "primary", onclick: apply }, "Apply toolheads")));
+  sec.append(el("h3", {}, "Mapping now (what SET_PRINT_* set)"), el("div", { class: "mono", "data-k": "u1map" }, u1Map(p.state)));
+  return sec;
+}
+function u1Map(st) {
+  return "extruder_map " + JSON.stringify(st.extruder_map || []) + "  used " + JSON.stringify(st.extruders_used || []) +
+    "  preferences " + JSON.stringify(st.preferences || {});
+}
+
 function varsTable(st) {
   const v = st.save_variables || {};
   const keys = Object.keys(v);
@@ -252,6 +328,10 @@ async function poll() {
       if (sel && document.activeElement !== sel) sel.value = p.state.print_state;
       const vars = $('[data-k="vars"]', card);
       if (vars) vars.replaceChildren(varsTable(p.state));
+      const ls = $('[data-k="laststart"]', card);
+      if (ls) ls.textContent = p.state.last_start ? JSON.stringify(p.state.last_start) : "none yet";
+      const um = $('[data-k="u1map"]', card);
+      if (um) um.textContent = u1Map(p.state);
       $('[data-k="file"]', card).textContent = p.state.current_file ? "file " + p.state.current_file : "";
       const st = $('[data-k="status"]', card);
       st.className = "pill " + (p.error ? "bad" : p.running ? "ok" : "warn");
@@ -272,7 +352,8 @@ function refreshFilter() {
 function summary(e) {
   const p = e.payload || {};
   const bits = [];
-  for (const k of ["var", "value", "cmd", "name", "file", "size", "sha256", "objects", "action", "state", "fault", "error", "why"]) {
+  for (const k of ["var", "value", "cmd", "name", "file", "size", "sha256", "md5", "objects", "action", "state", "slot_map_form", "slot_map",
+                   "ack", "config", "map", "extruders", "end_unload_filament", "url", "open", "streams", "warnings", "fault", "error", "why"]) {
     if (k in p) bits.push(k + "=" + (typeof p[k] === "string" ? (k === "sha256" ? p[k].slice(0, 12) + "…" : p[k]) : JSON.stringify(p[k])));
   }
   if (p.refused) bits.push("REFUSED");
