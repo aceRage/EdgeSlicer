@@ -5,6 +5,9 @@
 
 #include <admesh/stl.h>            // ImportstlProgressFn
 
+#include "libslic3r/Point.hpp"
+
+#include <array>
 #include <string>
 #include <vector>
 
@@ -61,6 +64,24 @@ struct GltfInfo
 // "Loading of a model file failed." instead of something the user can act on.
 extern bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &message,
                       const char *object_name = nullptr, ImportstlProgressFn progressFn = nullptr);
+
+// ImageMap phase 5d: a textured OBJ (an mtl `map_Kd` image) sampled the way a glTF base colour
+// texture is - once per triangle at its centroid UV, and per sub-facet at depth `depth` - so the
+// OBJ importer can hand the same arrays to Model::import_multi_volume_face_color_deal().
+//
+// `face_texture[i]` is the image file face i is textured with (empty: none - the face takes
+// `fallback_colors[i]`, its material colour); `uvs[i]` are its three corners' UVs, OBJ convention
+// (v up, origin at the image's bottom-left). PNG and JPEG, as for glTF; the path must be relative
+// to `base_dir` and stay inside it. Returns false, leaving the outputs empty, when no texture
+// could be read at all.
+bool sample_obj_textures(const std::string                       &base_dir,
+                         const std::vector<std::string>          &face_texture,
+                         const std::vector<std::array<Vec2f, 3>> &uvs,
+                         const std::vector<RGBA>                 &fallback_colors,
+                         int                                      depth,
+                         std::vector<RGBA>                       &face_colors,
+                         std::vector<RGBA>                       &sub_face_colors,
+                         std::string                             &warning);
 
 } // namespace Slic3r
 
