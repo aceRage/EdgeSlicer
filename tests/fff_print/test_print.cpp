@@ -1757,6 +1757,47 @@ TEST_CASE("Bridge expansion extra 0: G-code is identical to the default", "[Prin
     CHECK(unset == zero);
 }
 
+TEST_CASE("Bridge expansion extra above 0 grows the bridged area", "[Print][BridgeExpansion]")
+{
+    // Two pillars joined by a slab that overlaps them by 0.5 mm, so the slab underside is a
+    // bridge over a 18 mm gap with solid material on both sides.
+    auto bridge_area = [](const char *extra, const char *walls) {
+        TriangleMesh mesh = make_cube(6., 10., 5.);
+        TriangleMesh pillar = make_cube(6., 10., 5.);
+        pillar.translate(24.f, 0.f, 0.f);
+        mesh.merge(pillar);
+        TriangleMesh slab = make_cube(30., 10., 3.5);
+        slab.translate(0.f, 0.f, 4.5f);
+        mesh.merge(slab);
+        Print print;
+        Model model;
+        init_print({ mesh }, print, model, {
+            { "bridge_expansion_extra", extra },
+            { "wall_loops", walls },
+            { "layer_height", "0.2" },
+            { "initial_layer_print_height", "0.2" },
+            { "bottom_shell_layers", "3" },
+            { "sparse_infill_density", "15%" },
+        }, false);
+        print.process();
+        double area = 0.;
+        for (const Layer *layer : print.objects().front()->layers())
+            for (const LayerRegion *region : layer->regions())
+                for (const Surface *surface : region->fill_surfaces.filter_by_type(stBottomBridge))
+                    area += unscale<double>(unscale<double>(surface->expolygon.area()));
+        return area;
+    };
+    for (const char *walls : { "2", "4" }) {
+        CAPTURE(walls);
+        const double base  = bridge_area("0", walls);
+        const double extra = bridge_area("3", walls);
+        REQUIRE(base > 0.);
+        CHECK(extra > base);
+        // The extra zone must not eat the bridge: a second run at 0 matches the first.
+        CHECK(bridge_area("0", walls) == Approx(base));
+    }
+}
+
 // Orca #16312: shrinkage used to be derived from Print::extruders(), which is empty on the first
 // apply() before PrintObjects exist, so the first slice never compensated. Cache it from the model.
 TEST_CASE("Filament shrinkage compensation scales the sliced object", "[Print][Regression]")
