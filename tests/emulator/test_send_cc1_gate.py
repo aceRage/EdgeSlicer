@@ -7,21 +7,25 @@ Elegoo Centauri Carbon (host type Elegoo Link) at a 127.0.0.x address of its own
 two-filament PLA plate (red on filament 1, white on filament 2, made with the CLI) is sliced
 through the hub API and sent once per row; each row asserts on the emulator's command log.
 
-  C1  CANVAS attached, PLA trays, sent "as sliced"   chunked upload (MD5 good), Cmd 128 Ack 0 on the
-                                                      uploaded file; slot_map [] (or absent - noted)
+  C1  CANVAS attached, PLA trays, no mapping asked   chunked upload (MD5 good), Cmd 128 Ack 0 on the
+                                                      uploaded file; slot_map = the desktop dialog's
+                                                      automatic choice (closest colour): T0 -> tray 0,
+                                                      T1 -> tray 1
   C2  the same, with a mapping (T0 -> tray 1,         Cmd 128 carries slot_map [{t,canvas_id,tray_id}...]
       T1 -> tray 0)
   C3  CANVAS detached                                 Cmd 128 without slot_map
-  C4  PLA plate, every tray ASA                       the send asks first (409) or refuses; nothing
-                                                      uploaded, no Cmd 128
+  C4  PLA plate, every tray ASA                       refused, naming the filament and the tray ("Filament 1
+                                                      is PLA but tray 1A holds ASA"); nothing uploaded,
+                                                      no Cmd 128
+  C4u the same, upload only                           the file is uploaded, no Cmd 128 (upload stays possible)
   C5  upload MD5 mismatch                             job error naming the MD5 check; no Cmd 128
-  C6  start refused (the printer is printing)         job error "busy"; no print started
-  C7  viewer limit reached (busy)                     the upload lands, the start websocket is refused;
-                                                      job error, no Cmd 128
+  C6  the printer is printing                         refused as "busy" BEFORE anything is uploaded; no
+                                                      print started
+  C7  viewer limit reached (busy)                     the start websocket is refused; job error, no Cmd 128
 
-Rows C2 and C4 carry KNOWN PRODUCT GAPS (see the report): the hub's CC1 send never reads the CANVAS
-and has no mapping parameter for it. They print XFAIL until the product closes the gap, then XPASS
-(which fails the gate so the marker is taken out).
+C1, C2, C4 and C6 need the product fix of PR #660 (fix/remote-send-slot-policy: the hub's
+CC1 send reads the printer and the CANVAS, maps the trays the desktop dialog's way and refuses a
+material mismatch or a busy printer before the upload). Against an older build they FAIL.
 
 usage: python tests/emulator/test_send_cc1_gate.py [--exe=C:/Dev/EdgeSlicerBuilds/current/EdgeSlicer.exe]
            [--work=<scratch dir>] [--template=<a data dir with the first-run wizard done>]
@@ -94,7 +98,7 @@ def no_start(emu, mark, label):
 def run_matrix(inst, emu):
     printer = "ph:" + DEVICE
 
-    L.row("C1", "CANVAS attached, PLA trays, as sliced")
+    L.row("C1", "CANVAS attached, PLA trays, no mapping asked (the dialog's automatic choice)")
     mark = setup(emu)
     j = inst.send(printer)
     L.check(j.get("state") == "done", "the send job is done (%s %s)" % (j.get("state"), j.get("error", "")))
@@ -111,14 +115,13 @@ def run_matrix(inst, emu):
     if st and up:
         L.check(st["payload"]["file"] == up["payload"]["name"] and st["payload"]["filename"] == "/local/" + up["payload"]["name"],
                 "Cmd 128 names the uploaded file (/local/%s)" % up["payload"]["name"])
-        form = st["payload"]["slot_map_form"]
-        L.check(form in ("empty", "absent"), "as sliced: slot_map %s" % form)
-        print("  note the hub sends slot_map %s; the desktop dialog sends [] when it read a CANVAS" % form)
+        L.check(st["payload"]["slot_map"] == [{"t": 0, "canvas_id": 0, "tray_id": 0}, {"t": 1, "canvas_id": 0, "tray_id": 1}],
+                "slot_map is the closest-colour match, red -> tray 0, white -> tray 1 (got %s: %s)"
+                % (st["payload"]["slot_map_form"], st["payload"]["slot_map"]))
     g.expect_order(L, emu, PRINTER_ID, "order: upload, start", ["upload", "start"], mark)
     L.check(emu.state(PRINTER_ID)["print_state"] == "printing", "the printer is printing")
 
-    L.row("C2", "CANVAS mapping T0->tray 1, T1->tray 0",
-          gap="the hub's CC1 send never reads the CANVAS and has no mapping for it: slot_map is never sent")
+    L.row("C2", "CANVAS mapping T0->tray 1, T1->tray 0")
     mark = setup(emu)
     j = inst.send(printer, mapping="0:1,1:0")
     L.check(j.get("state") == "done", "the send job is done (%s %s)" % (j.get("state"), j.get("error", "")))
@@ -135,14 +138,23 @@ def run_matrix(inst, emu):
     if st:
         L.check(st["payload"]["slot_map_form"] == "absent", "no slot_map key without a CANVAS (%s)" % st["payload"]["slot_map_form"])
 
-    L.row("C4", "PLA plate, every CANVAS tray ASA",
-          gap="the hub's CC1 send never compares the plate's materials with the CANVAS trays: it uploads and starts")
+    L.row("C4", "PLA plate, every CANVAS tray ASA")
     mark = setup(emu, slots=SLOTS_ASA)
     j = inst.send(printer)
     asked = j.get("state") == "refused" and j.get("http") in (400, 409)
     L.check(asked or j.get("state") == "error", "the send asks first or refuses (%s %s %s)" % (j.get("state"), j.get("http"), j.get("error", "")))
+    err = j.get("error") or ""
+    L.check("Filament 1 is PLA but tray 1A holds ASA" in err and "upload only" in err,
+            "the refusal names the filament, the tray and the way out: %s" % err.replace("\n", " | "))
     g.expect_none(L, emu, PRINTER_ID, "nothing uploaded", "upload", mark)
     no_start(emu, mark, "ASA trays")
+
+    L.row("C4u", "PLA plate, every CANVAS tray ASA, upload only")
+    mark = setup(emu, slots=SLOTS_ASA)
+    j = inst.send(printer, mode="upload")
+    L.check(j.get("state") == "done", "the upload-only send is done (%s %s)" % (j.get("state"), j.get("error", "")))
+    g.expect(L, emu, PRINTER_ID, "the file is uploaded", "upload", mark)
+    g.expect_none(L, emu, PRINTER_ID, "no Cmd 128", "start", mark)
 
     L.row("C5", "upload MD5 mismatch")
     mark = setup(emu, faults={"upload_md5_mismatch": True})
@@ -159,9 +171,7 @@ def run_matrix(inst, emu):
             "refused as busy: %s" % (j.get("error") or "").replace("\n", " | "))
     for e in emu.find(PRINTER_ID, kind="start", since=mark):
         L.check(e["payload"]["ack"] == 1, "Cmd 128 answered Ack 1 (busy)")
-    ups = emu.find(PRINTER_ID, kind="upload", since=mark)
-    print("  note %s" % ("the hub uploaded to the busy printer before Cmd 128 was refused (%d upload)" % len(ups) if ups
-                         else "nothing was uploaded to the busy printer"))
+    g.expect_none(L, emu, PRINTER_ID, "nothing was uploaded to the busy printer", "upload", mark)
     L.check(emu.state(PRINTER_ID)["current_file"] == "emu_job.gcode", "the printer's own job was not replaced")
 
     L.row("C7", "viewer limit reached (busy)")

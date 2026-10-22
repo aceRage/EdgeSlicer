@@ -14,6 +14,8 @@ row; each row asserts on the emulator's command log.
   U4  the printer is printing                         refused before anything is sent (no upload, no script)
   U5  a filament mapped onto the empty toolhead       refused (409) before anything is sent
   U6  the printer refuses SET_PRINT_EXTRUDER_MAP      job error; the file is on the printer, no start
+  U7  a print ended a moment ago (the hub's 4 s       the send goes through: the cached "printing" is
+      cached reading still says printing)             asked again (needs PR #660)
 
 The firmware's own refusal of SET_PRINT_PREFERENCES while printing (the end-of-print unload) is
 covered by test_emulator_e2_selftest.py and the Catch2 [.EmulatorE2E] run: the hub never gets that
@@ -135,6 +137,19 @@ def run_matrix(inst, emu):
     g.expect(L, emu, PRINTER_ID, "the map was refused", "extruder_map", mark, refused=True)
     g.expect_none(L, emu, PRINTER_ID, "no start", "start", mark)
     L.check(emu.state(PRINTER_ID)["print_state"] == "standby", "the printer is still idle")
+
+    # Needs PR #660: a "printing" the hub cached (SnapmakerLan's 4 s probe) is asked again before the
+    # send is refused. Before it, this send was refused as "printing" for up to 4 s after a print ended.
+    L.row("U7", "a print that ended a moment ago (the hub's cached reading says printing)")
+    setup(emu, state="printing")
+    st, pl = inst.call("/printers?plate=0")  # the hub reads the U1 now: printing, kept for 4 s
+    seen = next((p for p in pl.get("printers", []) if p.get("id") == printer), {})
+    print("  note the hub's row says %s" % seen.get("state"))
+    mark = emu.reset(PRINTER_ID, json.loads(json.dumps(BASE)))  # the print is over; no wait for the cache
+    mark = emu.mark() if mark is None else mark
+    j = inst.send(printer)
+    L.check(j.get("state") == "done", "the send job is done, not refused as printing (%s %s)" % (j.get("state"), j.get("error", "")))
+    g.expect(L, emu, PRINTER_ID, "the print was started", "start", mark)
 
 
 def main():
