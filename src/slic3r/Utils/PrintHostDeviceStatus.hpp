@@ -94,7 +94,15 @@ struct Status
     bool              qidi_polar_cooler { false };
     // The slots are CANVAS trays read over SDCP (Cmd 324), so the start command can carry a slot_map.
     bool              canvas { false };
+    // A CANVAS: the position in `slots` of the tray in the extruder now (active_canvas_id /
+    // active_tray_id), -1 when there is none or the printer did not say.
+    int               active_slot { -1 };
 };
+
+// A slot's tile label as the send dialog's map shows it ("1A", "1B"... for a CANVAS or QIDI Box:
+// unit by order of appearance, then the slot's place in it; the bare number otherwise). `pos` is a
+// position in `slots`.
+std::string slot_tile_label(const std::vector<Slot>& slots, int pos);
 
 // QIDIStudio's print options, as the send dialog's checkboxes answered them. -1 = not offered, so
 // the printer keeps its own setting; 0 = off; 1 = on.
@@ -198,17 +206,49 @@ struct QidiSendFacts
     bool box_inconsistent { false };   // the Box answer contradicts itself (Status::qidi_box_inconsistent)
 };
 
-enum class QidiSendPolicy
+// ---- The slot send policy: one rule for every printer whose slots feed the tools -----------------
+//
+// A QIDI Box, an Elegoo CANVAS: the printer feeds each tool from a slot, and a print started on the
+// wrong slots runs another material at the plate's settings. Every path that starts such a print
+// with nobody at a dialog (the hub, the phone, an archive reprint) and the desktop send dialog ask
+// slot_send_policy(); qidi_send_policy() and ElegooCanvasMapping::plan_unattended_send() are its two
+// readings of what the printer said.
+
+struct SlotSendFacts
 {
-    NotApplicable,       // not a QIDI Box printer: the send goes on exactly as before
-    Start,               // mapping complete (or the Box is off / absent): start the print
-    UploadOnlyBusy,      // the printer is printing or paused: never re-point its Box under a print
-    UploadOnlyNoProbe,   // a Box printer that could not be read: upload only unless the person chooses to print
-    NeedsMapping,        // a used filament has no Box slot: the printer would use its stale value_t<n>
-    ConfirmTypeMismatch, // a filament goes to a slot holding another material: ask first
-    MappedToEmpty,       // a filament goes to a slot the printer says is empty: never started
-    UploadOnlyInconsistent, // the Box answer contradicts itself: upload only, nothing mapped
+    bool slots_required { false }; // a print is never started without reading the slots (a QIDI Box model)
+    bool probe_ok { false };       // the printer answered
+    bool slot_unit { false };      // ... as one whose slots can be read (QIDI firmware; an SDCP status)
+    bool unit_in_use { false };    // the slots feed this print (a Box present and switched on; a CANVAS with trays)
+    bool busy { false };           // printing or paused
+    bool slots_inconsistent { false }; // the slot answer contradicts itself (Status::qidi_box_inconsistent)
+    int  used_filaments { 0 };     // filaments this plate prints with
+    int  mapped_filaments { 0 };   // ... that have a loaded slot picked
+    int  mapped_to_empty { 0 };    // ... whose picked slot the printer says is empty
+    int  type_mismatches { 0 };    // ... whose slot holds another material
+    // Nothing is mapped, and the printer's own choice is known to be the right one: the CANVAS
+    // "as sliced" start (design D4, an empty slot_map) of a one-filament plate whose material is
+    // in the tray already in the extruder.
+    bool as_sliced_ok { false };
 };
+
+enum class SlotSendPolicy
+{
+    NotApplicable,       // no slots to map (or not this kind of printer): the send goes on exactly as before
+    Start,               // mapping complete (or the slots are not in use): start the print
+    UploadOnlyBusy,      // the printer is printing or paused: never touch its slots under a print
+    UploadOnlyNoProbe,   // a slot printer that could not be read: upload only unless the person chooses to print
+    NeedsMapping,        // a used filament has no loaded slot: the printer would feed whatever it used last
+    ConfirmTypeMismatch, // a filament goes to a slot holding another material: ask first (an unattended send refuses)
+    StartAsSliced,       // nothing mapped, but as_sliced_ok: start with no mapping and let the printer feed
+    MappedToEmpty,       // a filament goes to a slot the printer says is empty: never started
+    UploadOnlyInconsistent, // the slot answer contradicts itself: upload only, nothing mapped
+};
+
+SlotSendPolicy slot_send_policy(const SlotSendFacts& facts);
+
+// The QIDI Box reading of the slot send policy (StartAsSliced never comes out of it).
+using QidiSendPolicy = SlotSendPolicy;
 
 QidiSendPolicy qidi_send_policy(const QidiSendFacts& facts);
 
