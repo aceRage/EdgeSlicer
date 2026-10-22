@@ -4670,6 +4670,12 @@ void Sidebar::on_filaments_change(size_t num_filaments)
         const bool sync_manager = !p->m_skip_mixed_filament_sync_once;
         p->m_skip_mixed_filament_sync_once = false;
         update_ui_from_settings();
+        // Colors may be replaced in place without a count change (e.g. 3MF
+        // import, U1 4-slot sync): repaint the physical-slot combos. Mixed
+        // panel sync still honors m_skip_mixed_filament_sync_once above.
+        for (PlaterPresetComboBox* choice : choices)
+            if (choice)
+                choice->update();
         update_dynamic_filament_list();
         update_mixed_filament_panel(sync_manager);
 
@@ -4694,6 +4700,11 @@ void Sidebar::on_filaments_change(size_t num_filaments)
         choices[0]->GetDropDown().Invalidate();
 
     wxWindowUpdateLocker noUpdates_scrolled_panel(this);
+
+    // The import may also recolor existing slots: repaint them before appending new combos.
+    for (PlaterPresetComboBox* choice : choices)
+        if (choice)
+            choice->update();
 
     size_t i = choices.size();
     while (i < num_filaments)
@@ -12777,10 +12788,35 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                     preset_bundle->set_num_filaments(unsigned(desired_physical_filaments));
                                 } else
                                     preset_bundle->update_multi_material_filament_presets();
-                                BOOST_LOG_TRIVIAL(info) << "3MF geometry import applied imported project config"
-                                                        << " current_num_filaments=" << current_num_filaments
-                                                        << " desired_physical_filaments=" << desired_physical_filaments
-                                                        << " mixed_enabled=" << preset_bundle->mixed_filaments.enabled_count();
+                                // Swatches render multi_colors/mode first: rebuild only the
+                                // slots the 3MF omitted. Real multi-colour / Full Spectrum
+                                // / U1 4-slot data already in the file is left alone.
+                                const auto *imported_multi_colors =
+                                    config_loaded.option<ConfigOptionStrings>("filament_multi_colors");
+                                const auto *imported_color_modes =
+                                    config_loaded.option<ConfigOptionInts>("filament_colour_mode");
+                                const size_t imported_multi_count =
+                                    imported_multi_colors != nullptr ? imported_multi_colors->values.size() : 0;
+                                const size_t imported_mode_count =
+                                    imported_color_modes != nullptr ? imported_color_modes->values.size() : 0;
+                                bool multi_fields_rebuilt = false;
+                                if (ImportedFilamentMultiFieldsNeedRebuild(imported_multi_count, imported_mode_count,
+                                                                           desired_physical_filaments)) {
+                                    ConfigOptionStrings *colors =
+                                        preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+                                    ConfigOptionStrings *multi_colors =
+                                        preset_bundle->project_config.option<ConfigOptionStrings>("filament_multi_colors", true);
+                                    ConfigOptionInts *color_modes =
+                                        preset_bundle->project_config.option<ConfigOptionInts>("filament_colour_mode", true);
+                                    if (colors != nullptr && multi_colors != nullptr && color_modes != nullptr)
+                                        multi_fields_rebuilt = RebuildFilamentMultiFieldsFromPlainColors(
+                                            colors->values, multi_colors->values, color_modes->values,
+                                            desired_physical_filaments, imported_multi_count, imported_mode_count);
+                                }
+                                BOOST_LOG_TRIVIAL(info) << "3MF geometry import adopted filament colors"
+                                                        << " current=" << current_num_filaments
+                                                        << " desired=" << desired_physical_filaments
+                                                        << " multi_rebuilt=" << (multi_fields_rebuilt ? 1 : 0);
                                 wxGetApp().plater()->on_filaments_change(desired_physical_filaments);
                             } else if (current_num_filaments < desired_physical_filaments) {
                                 std::vector<std::string> new_colors;
