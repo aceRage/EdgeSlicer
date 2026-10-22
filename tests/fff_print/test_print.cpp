@@ -1737,3 +1737,20 @@ TEST_CASE("The build height check counts the raft", "[Print][validate][Regressio
         }
     }
 }
+
+TEST_CASE("Bridge expansion extra 0: G-code is identical to the default", "[Print][BridgeExpansion]")
+{
+    const std::string unset = strip_gcode_timestamps(slice({ TestMesh::overhang }, {
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops", "3" },
+    }));
+    const std::string zero = strip_gcode_timestamps(slice({ TestMesh::overhang }, {
+        { "bridge_expansion_extra", "0" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops", "3" },
+    }));
+    REQUIRE_FALSE(unset.empty());
+    CHECK(unset == zero);
+}

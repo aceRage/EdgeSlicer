@@ -1379,6 +1379,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "ensure_vertical_shell_thickness"
             || opt_key == "bridge_angle"
             || opt_key == "internal_bridge_angle" // ORCA: Internal bridge angle override
+            || opt_key == "bridge_expansion_extra"
             //BBS
             || opt_key == "bridge_density"
             || opt_key == "internal_bridge_density") {

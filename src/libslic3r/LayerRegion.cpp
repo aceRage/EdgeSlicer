@@ -628,7 +628,10 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
     // Scaled expansions of the respective external surfaces.
     float                           expansion_top           = shell_width * sqrt(2.);
     float                           expansion_bottom        = expansion_top;
-    float                           expansion_bottom_bridge = expansion_top;
+    // Extra millimetres of bridge anchoring, independent of wall_loops. Default 0 is
+    // identical to the previous expansion_top-only expression.
+    float                           expansion_bottom_bridge = expansion_top
+        + scaled<float>(std::max(0., this->region().config().bridge_expansion_extra.value));
     // Expand by waves of expansion_step size (expansion_step is scaled), but with no more steps than max_nr_expansion_steps.
     const float                     expansion_step          = scaled<float>(0.1);
     // Don't take more than max_nr_steps for small expansion_step.
@@ -650,6 +653,15 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
         ExpansionZone{std::move(top_expolygons), expansion_params_into_solid_infill},
     };
 
+    // When extra expansion is on, also grow bridges into neighbouring stBottom
+    // (supported area of the same part). Default 0 keeps the original three-zone list.
+    const bool bridge_extra_on = this->region().config().bridge_expansion_extra.value > 0.;
+    if (bridge_extra_on) {
+        ExPolygons bottom_expolygons = union_ex(
+            fill_surfaces_extract_expolygons(this->fill_surfaces.surfaces, { stBottom }, layer_thickness));
+        expansion_zones.push_back(ExpansionZone{ std::move(bottom_expolygons), expansion_params_into_solid_infill });
+    }
+
     SurfaceCollection bridges;
     {
         BOOST_LOG_TRIVIAL(trace) << "Processing external surface, detecting bridges. layer" << this->layer()->print_z;
@@ -664,6 +676,16 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
             bridges.export_to_svg(debug_out_path("bridges-after-grouping-%d.svg", iRun++).c_str(), true);
         }
 #endif
+    }
+
+    // Put back the leftover stBottom after the bridge has taken its share, then
+    // restore the three-zone stack the rest of this function already expects.
+    if (bridge_extra_on) {
+        this->fill_surfaces.remove_types({ stBottom });
+        Surface bottom_templ(stBottom, {});
+        bottom_templ.thickness = layer_thickness;
+        this->fill_surfaces.append(std::move(expansion_zones.back().expolygons), bottom_templ);
+        expansion_zones.pop_back();
     }
 
     this->fill_surfaces.remove_types({stTop});
