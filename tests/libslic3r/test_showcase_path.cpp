@@ -952,3 +952,66 @@ TEST_CASE("The shipped example paths parse and compile", "[Showcase][Path]")
     }
     CHECK(count >= 2);
 }
+
+TEST_CASE("S5b: the build-up may leave out infill and supports", "[Showcase][Path][Build]")
+{
+    SECTION("both on by default, as S5 laid every extrusion; an S5 scene writes no new keys")
+    {
+        const BuildUp b;
+        CHECK(b.infill);
+        CHECK(b.supports);
+        Project p;
+        p.ensure_scene_for_plate(0).video.build.enabled = true;
+        const json j = json::parse(scenes_to_json(p));
+        REQUIRE(j["scenes"][0]["video"].contains("build"));
+        CHECK_FALSE(j["scenes"][0]["video"]["build"].contains("infill"));
+        CHECK_FALSE(j["scenes"][0]["video"]["build"].contains("supports"));
+    }
+    SECTION("the scene keeps them")
+    {
+        Project p;
+        Scene  &s             = p.ensure_scene_for_plate(0);
+        s.video.build.enabled  = true;
+        s.video.build.infill   = false;
+        s.video.build.supports = false;
+        Project back;
+        REQUIRE(scenes_from_json(scenes_to_json(p), back));
+        CHECK(back.scenes[0].video.build == s.video.build);
+        // ... and the timeline follows the scene.
+        const TimelineState st = evaluate_timeline({}, back.scenes[0], 1., 0.5);
+        CHECK_FALSE(st.build_infill);
+        CHECK_FALSE(st.build_supports);
+        // A path exported from it says so.
+        s.video.duration = 4.;
+        const PathDocument doc = export_path(s.video, sample_context(), "B");
+        REQUIRE(doc.events.size() == 1);
+        REQUIRE(doc.events[0].build_infill.has_value());
+        CHECK_FALSE(*doc.events[0].build_infill);
+        CHECK_FALSE(*doc.events[0].build_supports);
+    }
+    SECTION("a path's build event sets them; unset keeps the scene's")
+    {
+        std::vector<PathEvent> ev;
+        PathIssues             issues;
+        REQUIRE(parse_path_events("[{\"type\": \"build\", \"from\": 0, \"to\": 2, \"infill\": false}]", ev, issues));
+        REQUIRE(ev.size() == 1);
+        REQUIRE(ev[0].build_infill.has_value());
+        CHECK_FALSE(*ev[0].build_infill);
+        CHECK_FALSE(ev[0].build_supports.has_value());
+        const Scene         base = sample_scene();
+        const TimelineState st   = evaluate_timeline(ev, base, 1.);
+        CHECK_FALSE(st.build_infill);
+        CHECK(st.build_supports);
+        // Written back as read.
+        std::vector<PathEvent> again;
+        REQUIRE(parse_path_events(path_events_to_json(ev), again, issues));
+        REQUIRE(again.size() == 1);
+        CHECK(again[0].build_infill == ev[0].build_infill);
+        CHECK_FALSE(again[0].build_supports.has_value());
+        // Not a flag: an error.
+        std::vector<PathEvent> bad;
+        PathIssues             bad_issues;
+        parse_path_events("[{\"type\": \"build\", \"from\": 0, \"to\": 2, \"supports\": \"some\"}]", bad, bad_issues);
+        CHECK(bad_issues.has_errors());
+    }
+}

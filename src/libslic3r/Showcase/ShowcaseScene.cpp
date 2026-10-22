@@ -568,12 +568,16 @@ json callouts_to_json(const Callouts &c, const json &raw)
     k["enabled"]        = c.enabled;
     k["layout"]         = to_string(c.layout);
     k["max_per_column"] = c.max_per_column;
+    k["once_per_color"] = c.once_per_color;
 
     json f = sub("fields");
     f["brand"]      = c.fields.brand;
     f["product"]    = c.fields.product;
+    f["family"]     = c.fields.family;
     f["color_name"] = c.fields.color_name;
     f["hex"]        = c.fields.hex;
+    f["swatch"]     = c.fields.swatch;
+    f["separator"]  = c.fields.separator;
     f["type"]       = c.fields.type;
     f["weight"]     = c.fields.weight;
     f["price"]      = c.fields.price;
@@ -624,12 +628,17 @@ Callouts callouts_from_json(const json &j)
     c.enabled        = get_or<bool>(j, "enabled", false);
     c.layout         = enum_or(j, "layout", c.layout);
     c.max_per_column = std::clamp(get_or<int>(j, "max_per_column", c.max_per_column), 1, 50);
+    c.once_per_color = get_or<bool>(j, "once_per_color", false);
 
     const json f        = j.contains("fields") ? j["fields"] : json();
     c.fields.brand      = get_or<bool>(f, "brand", c.fields.brand);
     c.fields.product    = get_or<bool>(f, "product", c.fields.product);
     c.fields.color_name = get_or<bool>(f, "color_name", c.fields.color_name);
     c.fields.hex        = get_or<bool>(f, "hex", c.fields.hex);
+    // S5b: before the swatch was a field of its own, "hex" meant the hex code and the swatch.
+    c.fields.swatch     = get_or<bool>(f, "swatch", c.fields.hex);
+    c.fields.family     = get_or<bool>(f, "family", c.fields.family);
+    c.fields.separator  = get_or<std::string>(f, "separator", c.fields.separator);
     c.fields.type       = get_or<bool>(f, "type", c.fields.type);
     c.fields.weight     = get_or<bool>(f, "weight", c.fields.weight);
     c.fields.price      = get_or<bool>(f, "price", c.fields.price);

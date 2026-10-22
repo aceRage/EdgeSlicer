@@ -24,6 +24,7 @@
 #include <wx/choice.h>
 #include <wx/clipbrd.h>
 #include <wx/clrpicker.h>
+#include <wx/cursor.h>
 #include <wx/dataobj.h>
 #include <wx/dcclient.h>
 #include <wx/filedlg.h>
@@ -525,16 +526,15 @@ void ShowcaseView::build_panel()
     // user drags the sash to. Sideways scrolling only shows where the window is too narrow for that.
     m_side = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxSize(32 * em, -1), wxVSCROLL | wxHSCROLL);
     m_side->SetScrollRate(em, em);
-    auto *col = new wxBoxSizer(wxVERTICAL);
+    auto *root  = new wxBoxSizer(wxVERTICAL);
+    m_side_root = root;
+    m_sections.clear();
+    // Rows go into the current section's sizer (S5b: each section folds).
+    wxBoxSizer *col = root;
 
-    auto header = [this, col, em](const wxString &title) {
-        auto *t = new wxStaticText(m_side, wxID_ANY, title);
-        t->SetFont(wxGetApp().bold_font());
-        col->Add(t, 0, wxLEFT | wxRIGHT | wxTOP, em);
-        col->Add(new wxStaticLine(m_side), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em / 2);
-    };
+    auto header = [this, root, &col](const wxString &title, const char *key) { col = add_panel_section(root, title, key); };
     wxFlexGridSizer *grid = nullptr;
-    auto begin_grid = [&grid, col, em]() {
+    auto begin_grid = [&grid, &col, em]() {
         grid = new wxFlexGridSizer(2, em / 2, em);
         grid->AddGrowableCol(1, 1);
         col->Add(grid, 0, wxEXPAND | wxALL, em);
@@ -558,7 +558,7 @@ void ShowcaseView::build_panel()
     col->Add(m_notice, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em);
 
     // --- Scene ---------------------------------------------------------------------------------
-    header(_L("Scene"));
+    header(_L("Scene"), "scene");
     begin_grid();
     m_plates = named_choice();
     row(_L("Plate"), m_plates);
@@ -576,7 +576,7 @@ void ShowcaseView::build_panel()
     grid->Add(m_hide_wipe_tower);
 
     // --- Background ----------------------------------------------------------------------------
-    header(_L("Background"));
+    header(_L("Background"), "background");
     begin_grid();
     wxArrayString bg_types;
     bg_types.Add(_L("Solid colour"));
@@ -605,7 +605,7 @@ void ShowcaseView::build_panel()
     row(_L("Blur"), m_bg_blur);
 
     // --- Floor ---------------------------------------------------------------------------------
-    header(_L("Floor"));
+    header(_L("Floor"), "floor");
     begin_grid();
     wxArrayString floor_types;
     floor_types.Add(_L("None"));
@@ -641,7 +641,7 @@ void ShowcaseView::build_panel()
     row(_L("Contact shadow"), m_floor_contact);
 
     // --- Light ---------------------------------------------------------------------------------
-    header(_L("Light"));
+    header(_L("Light"), "light");
     begin_grid();
     m_light_fixed = new wxCheckBox(m_side, wxID_ANY, _L("Fixed in the scene"));
     m_light_fixed->SetToolTip(_L("The light stays put when you orbit, so the shadows do too. Off: the light follows the camera."));
@@ -698,7 +698,7 @@ void ShowcaseView::build_panel()
     row(_L("Exposure"), m_exposure);
 
     // --- Materials (D4) -----------------------------------------------------------------------
-    header(_L("Materials"));
+    header(_L("Materials"), "materials");
     begin_grid();
     wxArrayString layer_lines;
     layer_lines.Add(_L("Off"));
@@ -735,7 +735,7 @@ void ShowcaseView::build_panel()
     m_mat_grid = grid;
 
     // --- Camera --------------------------------------------------------------------------------
-    header(_L("Camera"));
+    header(_L("Camera"), "camera");
     begin_grid();
     wxArrayString projections;
     projections.Add(_L("Perspective"));
@@ -762,7 +762,7 @@ void ShowcaseView::build_panel()
     }
 
     // --- Callouts (S3) ------------------------------------------------------------------------
-    header(_L("Callouts"));
+    header(_L("Callouts"), "callouts");
     begin_grid();
     m_co_enabled = new wxCheckBox(m_side, wxID_ANY, _L("Show filament callouts"));
     m_co_enabled->SetToolTip(_L("Labels that name each filament on the model: made from the filaments of objects, parts, "
@@ -778,6 +778,11 @@ void ShowcaseView::build_panel()
     m_co_layout->SetToolTip(_L("Automatic: labels in columns left and right of the model, in rows above and below a wide, flat "
                                "model, a numbered legend when there are too many."));
     row(_L("Layout"), m_co_layout);
+    m_co_once = new wxCheckBox(m_side, wxID_ANY, _L("Each colour once"));
+    m_co_once->SetToolTip(_L("One callout per colour on the plate, with one leader to where that colour shows most, instead of a "
+                             "callout per filament with a leader to each place it shows."));
+    grid->AddSpacer(0);
+    grid->Add(m_co_once);
     wxArrayString co_styles;
     for (Showcase::CalloutStylePreset preset : Showcase::callout_style_presets()) {
         switch (preset) {
@@ -827,20 +832,25 @@ void ShowcaseView::build_panel()
     m_co_bg_opacity = slider(92, 0, 100);
     row(_L("Background opacity"), m_co_bg_opacity);
     {
-        // D7: brand, product, colour name, hex and swatch, type and finish on; weight and price off.
+        // D7: brand, product, colour name, hex, swatch, type and finish on; family, weight and price off.
         auto *fields = new wxFlexGridSizer(2, em / 4, em);
-        const wxString names[] = { _L("Brand"), _L("Product"), _L("Colour name"), _L("Hex code and swatch"), _L("Type and finish"),
-                                   _L("Weight"), _L("Price") };
+        const wxString names[] = { _L("Brand"), _L("Product"), _L("Material family"), _L("Colour name"), _L("Hex code"), _L("Swatch"),
+                                   _L("Type and finish"), _L("Weight"), _L("Price") };
         for (const wxString &name : names) {
             auto *cb = new wxCheckBox(m_side, wxID_ANY, name);
             fields->Add(cb);
             m_co_fields.push_back(cb);
         }
-        m_co_fields[5]->SetToolTip(_L("Filament used, from the plate's slice. Shown once the plate is sliced."));
-        m_co_fields[6]->SetToolTip(_L("Filament cost, from the plate's slice and your filament prices. Shown once the plate is sliced."));
+        m_co_fields[2]->SetToolTip(_L("Just the material, such as PLA, PETG or ABS. With Product on, the product name is shown instead "
+                                      "(it names the material too)."));
+        m_co_fields[7]->SetToolTip(_L("Filament used, from the plate's slice. Shown once the plate is sliced."));
+        m_co_fields[8]->SetToolTip(_L("Filament cost, from the plate's slice and your filament prices. Shown once the plate is sliced."));
         grid->Add(new wxStaticText(m_side, wxID_ANY, _L("Show")), 0, wxALIGN_TOP | wxTOP, em / 4);
         grid->Add(fields, 1, wxEXPAND);
     }
+    m_co_separator = new wxTextCtrl(m_side, wxID_ANY, "", wxDefaultPosition, wxSize(6 * em, -1));
+    m_co_separator->SetToolTip(_L("What goes between the name and the colour name on the first line. Spaces count."));
+    row(_L("Separator"), m_co_separator);
     m_co_list = named_choice();
     row(_L("Callout"), m_co_list);
     {
@@ -881,10 +891,10 @@ void ShowcaseView::build_panel()
     }
 
     // --- Video (S4) --------------------------------------------------------------------------------
-    build_video_section(col);
+    build_video_section(root);
 
     // --- Export --------------------------------------------------------------------------------
-    header(_L("Export"));
+    header(_L("Export"), "export");
     begin_grid();
     wxArrayString sizes;
     for (const ShowcaseSizePreset &p : SHOWCASE_SIZES)
@@ -930,7 +940,7 @@ void ShowcaseView::build_panel()
     }
 
     // --- Watermark (D12) -----------------------------------------------------------------------
-    header(_L("Watermark"));
+    header(_L("Watermark"), "watermark");
     begin_grid();
     m_wm_enabled = new wxCheckBox(m_side, wxID_ANY, _L("Add my watermark"));
     m_wm_enabled->SetToolTip(_L("Your own logo and/or text on the exported images. Off unless you turn it on."));
@@ -984,7 +994,8 @@ void ShowcaseView::build_panel()
         m_wm_preset_delete->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_delete_watermark_preset(); });
     }
 
-    m_side->SetSizer(col);
+    m_side->SetSizer(root);
+    apply_panel_sections();
     m_side->FitInside();
 
     // --- Handlers ------------------------------------------------------------------------------
@@ -1302,11 +1313,18 @@ void ShowcaseView::build_panel()
             const bool on = m_co_fields[i]->GetValue();
             edit([i, on](Showcase::Scene &s) {
                 Showcase::CalloutFields &f = s.callouts.fields;
-                bool *fields[] = { &f.brand, &f.product, &f.color_name, &f.hex, &f.type, &f.weight, &f.price };
+                bool *fields[] = { &f.brand, &f.product, &f.family, &f.color_name, &f.hex, &f.swatch, &f.type, &f.weight, &f.price };
                 *fields[i] = on;
             });
             refresh_callout_list();
         });
+    m_co_separator->Bind(wxEVT_TEXT, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.fields.separator = into_u8(m_co_separator->GetValue()); });
+        refresh_callout_list();
+    });
+    m_co_once->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.once_per_color = m_co_once->GetValue(); });
+    });
     m_co_list->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         if (m_syncing)
             return;
@@ -1564,10 +1582,14 @@ void ShowcaseView::sync_controls()
     m_co_bg->SetColour(showcase_wx_colour(co.style.background));
     m_co_bg_opacity->SetValue(int(std::lround(co.style.background_opacity * 100.f)));
     {
-        const bool fields[] = { co.fields.brand, co.fields.product, co.fields.color_name, co.fields.hex, co.fields.type, co.fields.weight, co.fields.price };
+        const bool fields[] = { co.fields.brand, co.fields.product, co.fields.family, co.fields.color_name, co.fields.hex,
+                                co.fields.swatch, co.fields.type, co.fields.weight, co.fields.price };
         for (size_t i = 0; i < m_co_fields.size() && i < sizeof(fields) / sizeof(fields[0]); ++i)
             m_co_fields[i]->SetValue(fields[i]);
     }
+    if (into_u8(m_co_separator->GetValue()) != co.fields.separator)
+        m_co_separator->ChangeValue(wxString::FromUTF8(co.fields.separator));
+    m_co_once->SetValue(co.once_per_color);
     refresh_callout_list();
     sync_video_controls();
 
@@ -1581,6 +1603,8 @@ void ShowcaseView::fit_side_width()
 {
     if (m_side == nullptr || m_side->GetSizer() == nullptr)
         return;
+    // Rows shown or rebuilt since (a path's rows, the materials) stay hidden in a folded section.
+    apply_panel_sections();
     const int em = wxGetApp().em_unit();
     // Measured, not assumed: labels and controls come out wider in macOS's system font, and in longer
     // languages, than an em count tuned on Windows allows for. The vertical scroll bar takes its
@@ -1595,6 +1619,76 @@ void ShowcaseView::fit_side_width()
         Layout();
     }
     m_side->FitInside();
+}
+
+// ------------------------------------------------------------------------------------------------
+// S5b: collapsible sections
+// ------------------------------------------------------------------------------------------------
+
+namespace {
+wxString panel_section_arrow(bool collapsed)
+{
+    // U+25B8 / U+25BE, small right- and down-pointing triangles.
+    return wxString::FromUTF8(collapsed ? "\xE2\x96\xB8" : "\xE2\x96\xBE");
+}
+} // namespace
+
+wxBoxSizer *ShowcaseView::add_panel_section(wxBoxSizer *root, const wxString &title, const std::string &key)
+{
+    const int    em = wxGetApp().em_unit();
+    PanelSection sec;
+    sec.key       = key;
+    sec.collapsed = wxGetApp().app_config->get("showcase_collapsed_" + key) == "1";
+    auto *head    = new wxBoxSizer(wxHORIZONTAL);
+    sec.arrow     = new wxStaticText(m_side, wxID_ANY, panel_section_arrow(sec.collapsed));
+    sec.arrow->SetMinSize(wxSize(int(1.2 * em), -1));
+    auto *t = new wxStaticText(m_side, wxID_ANY, title);
+    t->SetFont(wxGetApp().bold_font());
+    sec.arrow->SetFont(wxGetApp().bold_font());
+    head->Add(sec.arrow, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 3);
+    head->Add(t, 1, wxALIGN_CENTER_VERTICAL);
+    root->Add(head, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em);
+    root->Add(new wxStaticLine(m_side), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em / 2);
+    sec.body = new wxBoxSizer(wxVERTICAL);
+    root->Add(sec.body, 0, wxEXPAND);
+    const size_t index = m_sections.size();
+    for (wxWindow *w : { static_cast<wxWindow *>(sec.arrow), static_cast<wxWindow *>(t) }) {
+        w->SetCursor(wxCursor(wxCURSOR_HAND));
+        w->SetToolTip(_L("Click to show or hide this section."));
+        w->Bind(wxEVT_LEFT_DOWN, [this, index](wxMouseEvent &) { toggle_panel_section(index); });
+    }
+    m_sections.push_back(sec);
+    return sec.body;
+}
+
+void ShowcaseView::apply_panel_sections()
+{
+    if (m_side_root == nullptr)
+        return;
+    for (const PanelSection &sec : m_sections)
+        if (sec.collapsed && sec.body != nullptr)
+            m_side_root->Hide(sec.body);
+}
+
+void ShowcaseView::toggle_panel_section(size_t index)
+{
+    if (index >= m_sections.size() || m_side_root == nullptr)
+        return;
+    PanelSection &sec = m_sections[index];
+    sec.collapsed     = !sec.collapsed;
+    wxGetApp().app_config->set("showcase_collapsed_" + sec.key, sec.collapsed ? "1" : "0");
+    sec.arrow->SetLabel(panel_section_arrow(sec.collapsed));
+    if (sec.collapsed) {
+        m_side_root->Hide(sec.body);
+        m_side->Layout();
+        fit_side_width();
+    } else {
+        // Showing the section shows every row in it: the controls' own state hides the rows that
+        // should stay hidden again (a camera path's rows, the read-only notice).
+        m_side_root->Show(sec.body);
+        sync_controls();
+    }
+    m_side->Refresh();
 }
 
 void ShowcaseView::update_enabled()
@@ -1661,10 +1755,11 @@ void ShowcaseView::update_enabled()
     const bool boxed  = co.style.shape == Showcase::CalloutShape::Card || co.style.shape == Showcase::CalloutShape::Pill;
     m_co_enabled->Enable(editable);
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_co_layout, m_co_style, m_co_font, m_co_size, m_co_leader, m_co_auto_colors,
-                                                          m_co_regenerate })
+                                                          m_co_regenerate, m_co_once })
         w->Enable(co_on);
     for (wxCheckBox *cb : m_co_fields)
         cb->Enable(co_on);
+    m_co_separator->Enable(co_on && co.fields.color_name);
     m_co_text->Enable(co_on && !co.style.auto_colors);
     m_co_line->Enable(co_on && !co.style.auto_colors);
     m_co_bg->Enable(co_on && boxed);
@@ -2188,6 +2283,10 @@ void ShowcaseView::callouts_find_anchors(Showcase::Scene &s, bool regenerate)
             }
         found = Showcase::find_anchor_pixels(classes, pass.width, pass.height, int(targets.size()), Showcase::MAX_CALLOUT_LEADERS,
                                              std::max(6, pass.width * pass.height / 1500));
+        // S5b: how much of each shows, for "each colour once" (the regions come largest first).
+        m_callouts.areas.clear();
+        for (size_t i = 0; i < targets.size() && i < found.size(); ++i)
+            m_callouts.areas[targets[i].key] = found[i].empty() ? 0 : found[i].front().area;
     }
 
     std::vector<Showcase::Callout> items;
@@ -2338,15 +2437,38 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
     if (m_model == nullptr || !m_renderer->frame_view_projection(vp))
         return out;
     const Showcase::RectI frame = m_renderer->live_frame();
+    // S5b, each colour once: per colour the callout that shows most (its largest region in the last
+    // ID pass), with one leader, to that region.
+    const bool        once = s.callouts.once_per_color;
+    std::vector<bool> keep(s.callouts.items.size(), true);
+    if (once) {
+        std::vector<std::string> colors;
+        std::vector<double>      scores;
+        for (const Showcase::Callout &c : s.callouts.items) {
+            bool shown = !c.hidden;
+            if (visuals != nullptr)
+                if (auto v = visuals->find(c.key); v != visuals->end() && v->second.alpha <= 1e-3)
+                    shown = false;
+            std::string key;
+            if (shown)
+                for (const std::string &col : labels.colors_of(c))
+                    key += (key.empty() ? "" : ",") + col;
+            colors.push_back(key);
+            auto a = m_callouts.areas.find(c.key);
+            scores.push_back(a == m_callouts.areas.end() ? 0. : double(a->second));
+        }
+        keep = Showcase::once_per_color_keep(colors, scores);
+    }
     for (size_t i = 0; i < s.callouts.items.size(); ++i) {
         const Showcase::Callout &c = s.callouts.items[i];
-        if (c.hidden)
+        if (c.hidden || !keep[i])
             continue;
         ShowcaseCalloutDraw d;
         d.item  = int(i);
         d.label = Showcase::build_callout_label(c, labels.filament(s, c), s.callouts.fields, labels.words());
-        auto occ = occluded.find(c.key);
-        for (size_t a = 0; a < c.anchors.size(); ++a) {
+        auto         occ     = occluded.find(c.key);
+        const size_t anchors = once ? std::min<size_t>(1, c.anchors.size()) : c.anchors.size();
+        for (size_t a = 0; a < anchors; ++a) {
             if (m_callouts.drag == CalloutUi::Drag::Dot && m_callouts.moved && m_callouts.drag_item == int(i) &&
                 m_callouts.drag_anchor == int(a) && !frame.empty()) {
                 // The dot being dragged follows the pointer.
@@ -2366,7 +2488,7 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
                 d.fade.push_back(fade->alpha(c.key, int(a)));
         }
         if (fade != nullptr)
-            d.alpha = fade->label_alpha(c.key, int(c.anchors.size()));
+            d.alpha = fade->label_alpha(c.key, int(anchors));
         if (visuals != nullptr) {
             auto v = visuals->find(c.key);
             if (v != visuals->end()) {

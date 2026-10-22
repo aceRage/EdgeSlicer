@@ -164,7 +164,7 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             m.draw    = int(i);
             m.line1   = callout_first_line(l);
             m.swatch  = !l.swatches.empty();
-            m.hex     = m.swatch ? l.hex : std::string();
+            m.hex     = l.hex;   // S5b: the hex code and the swatch are separate fields
             m.details = l.details;
             m.note    = l.note;
             double h  = 0.;

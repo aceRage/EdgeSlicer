@@ -1750,10 +1750,12 @@ void ShowcaseRenderer::set_offscreen_view(int width, int height)
     m_live_frame = Showcase::RectI{ 0, 0, m_live_vp_w, m_live_vp_h };
 }
 
-void ShowcaseRenderer::set_build(double fraction, Showcase::BuildSource source)
+void ShowcaseRenderer::set_build(double fraction, Showcase::BuildSource source, bool infill, bool supports)
 {
     m_build_fraction = std::isfinite(fraction) ? std::min(fraction, 1.) : -1.;
     m_build_source   = source;
+    m_build_infill   = infill;
+    m_build_supports = supports;
 }
 
 bool ShowcaseRenderer::toolpaths_available()
@@ -1832,6 +1834,9 @@ bool ShowcaseRenderer::draw_toolpaths()
 
     GCodeViewer::ShowcaseLook look;
     look.hide_wipe_tower = m_scene->floor.hide_wipe_tower;
+    // S5b: only a build-up leaves out infill or supports; the toolpath source shows the whole slice.
+    look.show_infill   = m_build_fraction < 0. || m_build_infill;
+    look.show_supports = m_build_fraction < 0. || m_build_supports;
     if (m_build_fraction >= 0. && m_build_fraction < 1.) {
         // Every layer takes the same time, the top one laid move by move.
         const std::vector<double>     zs = gv.get_layers_zs();

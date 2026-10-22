@@ -178,6 +178,8 @@ private:
         };
         std::vector<Pick> picks;           // dots the user dropped, picked on the next frame
         uint64_t version = 1;              // bumped whenever the labels may look different
+        // S5b: each callout's largest visible region in the last ID pass (pixels), for "each colour once".
+        std::map<std::string, int> areas;
         uint64_t occlusion_camera = 0;     // the camera the occlusion was worked out for
         std::map<std::string, std::vector<bool>> occluded;
         ShowcaseCalloutHits hits;          // the last live drawing, frame pixels
@@ -208,7 +210,13 @@ private:
     void                     on_delete_callout_style();
 
     // --- S4: the videographer (ShowcaseViewVideo.cpp) -----------------------------------------------
-    void                     build_video_section(wxBoxSizer *col);
+    void                     build_video_section(wxBoxSizer *root);
+    // S5b: the side panel's collapsible sections. Adds a section's clickable header to `root` and
+    // returns the sizer its rows go in; whether it is folded is kept in the app config.
+    wxBoxSizer              *add_panel_section(wxBoxSizer *root, const wxString &title, const std::string &key);
+    void                     toggle_panel_section(size_t index);
+    // Hides the rows of the folded sections again (after rows were shown or rebuilt).
+    void                     apply_panel_sections();
     void                     sync_video_controls();
     void                     update_video_enabled();
     void                     refresh_keyframes();
@@ -388,7 +396,18 @@ private:
     wxColourPickerCtrl      *m_co_line = nullptr;
     wxColourPickerCtrl      *m_co_bg = nullptr;
     wxSlider                *m_co_bg_opacity = nullptr;
-    std::vector<wxCheckBox *> m_co_fields;   // brand, product, colour name, hex, type, weight, price
+    std::vector<wxCheckBox *> m_co_fields;   // brand, product, family, colour name, hex, swatch, type, weight, price
+    wxTextCtrl              *m_co_separator = nullptr;   // S5b
+    wxCheckBox              *m_co_once = nullptr;        // S5b: each colour once
+    struct PanelSection
+    {
+        std::string   key;
+        wxBoxSizer   *body      = nullptr;
+        wxStaticText *arrow     = nullptr;
+        bool          collapsed = false;
+    };
+    std::vector<PanelSection> m_sections;               // S5b
+    wxBoxSizer              *m_side_root = nullptr;     // S5b: the panel's sizer
     wxChoice                *m_co_list = nullptr;
     wxButton                *m_co_edit = nullptr;
     wxButton                *m_co_hide = nullptr;
@@ -431,6 +450,8 @@ private:
     std::vector<wxWindow *>  m_vid_key_rows;       // shown for keyframes
     // S5
     wxCheckBox              *m_vid_build = nullptr;
+    wxCheckBox              *m_vid_build_infill = nullptr;     // S5b
+    wxCheckBox              *m_vid_build_supports = nullptr;   // S5b
     wxButton                *m_vid_path_import = nullptr;
     wxButton                *m_vid_path_export = nullptr;
     wxButton                *m_vid_path_clear = nullptr;

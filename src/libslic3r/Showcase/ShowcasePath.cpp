@@ -695,7 +695,7 @@ void read_event(const json &ej, const std::string &where, PathEvent &e, PathIssu
             e.enabled = true;   // a range shows the mark within it
         break;
     case PathEventType::Build:
-        r.allow({ "start", "end", "ease", "source" });
+        r.allow({ "start", "end", "ease", "source", "infill", "supports" });
         if (!e.range)
             r.error("at", "a build-up needs \"from\" and \"to\"");
         r.number("start", e.build_start, false, 0., 1.);
@@ -706,6 +706,8 @@ void read_event(const json &ej, const std::string &where, PathEvent &e, PathIssu
             if (r.string("source", s) && !from_string(s, e.build_source))
                 r.error("source", "unknown value \"" + s + "\" (one of: auto, toolpaths, clip)");
         }
+        r.boolean("infill", e.build_infill);
+        r.boolean("supports", e.build_supports);
         break;
     }
     r.check_unknown();
@@ -921,6 +923,8 @@ json event_json(const PathEvent &e)
         j["ease"]  = to_string(e.build_easing);
         if (e.build_source != BuildSource::Auto)
             j["source"] = to_string(e.build_source);
+        opt("infill", e.build_infill);
+        opt("supports", e.build_supports);
         break;
     }
     return j;
@@ -1599,6 +1603,10 @@ PathDocument export_path(const VideoSettings &v_in, const PathContext &ctx, cons
         b.build_end    = v.build.to;
         b.build_easing = v.build.easing;
         b.build_source = v.build.source;
+        if (!v.build.infill)
+            b.build_infill = false;
+        if (!v.build.supports)
+            b.build_supports = false;
         doc.events.push_back(b);
     }
     return doc;
@@ -1788,6 +1796,8 @@ TimelineState evaluate_timeline(const std::vector<PathEvent> &events, const Scen
     st.scene = base;
     st.build = video_build;
     st.build_source = base.video.build.source;
+    st.build_infill   = base.video.build.infill;
+    st.build_supports = base.video.build.supports;
     for (const Callout &c : base.callouts.items)
         st.callouts[c.key] = CalloutVisual{ base.callouts.enabled && !c.hidden ? 1. : 0., 0. };
     if (events.empty())
@@ -1912,6 +1922,10 @@ TimelineState evaluate_timeline(const std::vector<PathEvent> &events, const Scen
             f = e.build_start + (e.build_end - e.build_start) * ease(e.build_easing, (t - e.from) / (e.to - e.from));
         st.build        = std::clamp(f, 0., 1.);
         st.build_source = e.build_source;
+        if (e.build_infill)
+            st.build_infill = *e.build_infill;
+        if (e.build_supports)
+            st.build_supports = *e.build_supports;
     }
 
     bool any = false;

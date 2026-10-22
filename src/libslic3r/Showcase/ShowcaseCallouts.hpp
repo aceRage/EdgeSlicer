@@ -89,17 +89,28 @@ struct Callout
     bool operator!=(const Callout &o) const { return !(*this == o); }
 };
 
+// " – ", the first line's separator before S5b made it the user's.
+extern const char *const DEFAULT_CALLOUT_SEPARATOR;
+
 // D7: what a label shows. Weight and price are off by default (resellers may not want prices in
 // shared images); both need a sliced plate.
 struct CalloutFields
 {
     bool brand      = true;
     bool product    = true;
+    // S5b: the material family (filament_type: PLA, PETG, ABS...) in the first line instead of the
+    // product. The product wins when both are on (it names the family too, "PLA Basic"); the family
+    // then leaves the details line, which would only repeat it.
+    bool family     = false;
     bool color_name = true;
-    bool hex        = true;   // the hex code and the swatch
+    bool hex        = true;   // the hex code (S5b: the swatch is its own field; old scenes: both follow "hex")
+    bool swatch     = true;   // S5b: the colour swatch
     bool type       = true;   // the filament type and the finish
     bool weight     = false;
     bool price      = false;
+    // S5b: between the first line's title and the colour name. The "≈" of an approximate colour
+    // name belongs to the name, not to this.
+    std::string separator = DEFAULT_CALLOUT_SEPARATOR;
 
     bool operator==(const CalloutFields &o) const;
     bool operator!=(const CalloutFields &o) const { return !(*this == o); }
@@ -158,6 +169,9 @@ struct Callouts
     bool                 enabled = false;
     CalloutLayout        layout  = CalloutLayout::Auto;
     int                  max_per_column = 8;   // Auto: more than this in a column gives the legend
+    // S5b: each colour once: one callout per colour (the most visible), with one leader to its
+    // largest region, instead of a callout per filament with a leader to each region.
+    bool                 once_per_color = false;
     CalloutFields        fields;
     CalloutStyle         style;
     std::vector<Callout> items;
@@ -308,12 +322,13 @@ struct CalloutLabel
 {
     std::string              title;        // brand + product (or the user's first line)
     std::string              color_name;   // shown after the title
-    std::vector<std::string> swatches;     // empty without the hex field
+    std::vector<std::string> swatches;     // empty without the swatch field
     std::string              hex;
     std::string              details;      // type · finish · weight · price · from height
     std::string              note;
+    std::string              separator = DEFAULT_CALLOUT_SEPARATOR;   // S5b: between title and colour name
 
-    bool empty() const { return title.empty() && color_name.empty() && hex.empty() && details.empty() && note.empty(); }
+    bool empty() const { return title.empty() && color_name.empty() && swatches.empty() && hex.empty() && details.empty() && note.empty(); }
 };
 
 // "Polymaker PolyTerra PLA @BBL X1C 0.4 nozzle" with vendor "Polymaker" -> "PolyTerra PLA".
@@ -321,8 +336,13 @@ std::string product_name(const std::string &preset_name, const std::string &vend
 std::string format_weight(double grams, const std::string &unit = "g");
 std::string format_price(double amount, const std::string &currency);
 CalloutLabel build_callout_label(const Callout &callout, const LabelFilament &filament, const CalloutFields &fields, const LabelWords &words);
-// The first line as drawn: title, then " – " and the colour name.
+// The first line as drawn: title, then the label's separator (" – " unless the user set another)
+// and the colour name.
 std::string callout_first_line(const CalloutLabel &label);
+
+// S5b, "each colour once": which callouts stay. `colors` is each callout's colour (callouts with an
+// empty one always stay), `scores` how visible it is (larger wins; ties go to the first).
+std::vector<bool> once_per_color_keep(const std::vector<std::string> &colors, const std::vector<double> &scores);
 
 // Ink that reads on a backdrop of that luminance (0 black .. 1 white): near-black or near-white.
 std::string auto_ink(double luminance);

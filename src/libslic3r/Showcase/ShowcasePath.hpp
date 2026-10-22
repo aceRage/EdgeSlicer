@@ -173,6 +173,8 @@ struct PathEvent
     double                        build_end    = 1.;
     Easing                        build_easing = Easing::Linear;
     BuildSource                   build_source = BuildSource::Auto;
+    // S5b: lay the infill / the supports (toolpaths only); unset = the scene's choice.
+    std::optional<bool>           build_infill, build_supports;
 };
 
 enum class PathStart : int { Scene = 0, Default, View, Pose };
@@ -297,6 +299,9 @@ struct TimelineState
     // The layer build-up: < 0 = none (the whole print), else 0..1 of it.
     double                               build = -1.;
     BuildSource                          build_source = BuildSource::Auto;
+    // S5b: what of the slice the build-up lays.
+    bool                                 build_infill   = true;
+    bool                                 build_supports = true;
 };
 
 // The scene at `t` seconds: the base scene with every event up to then applied in order (sorted by

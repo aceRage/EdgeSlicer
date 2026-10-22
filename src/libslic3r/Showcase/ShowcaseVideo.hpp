@@ -84,10 +84,15 @@ struct BuildUp
     double      to      = 1.;
     Easing      easing  = Easing::Linear;
     BuildSource source  = BuildSource::Auto;
+    // S5b: what of the slice the build-up lays (toolpaths only; the clip of the model has neither).
+    // Both on, as S5 showed every extrusion.
+    bool        infill   = true;   // sparse and internal solid infill, internal bridges
+    bool        supports = true;   // supports, their interfaces and transitions
 
     bool operator==(const BuildUp &o) const
     {
-        return enabled == o.enabled && from == o.from && to == o.to && easing == o.easing && source == o.source;
+        return enabled == o.enabled && from == o.from && to == o.to && easing == o.easing && source == o.source && infill == o.infill &&
+               supports == o.supports;
     }
     bool operator!=(const BuildUp &o) const { return !(*this == o); }
 };

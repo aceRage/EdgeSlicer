@@ -296,6 +296,8 @@ private:
         int                                                    top_layer = -2;
         double                                                 top_progress = -1.;
         bool                                                   hide_wipe_tower = false;
+        bool                                                   show_infill     = true;   // S5b
+        bool                                                   show_supports   = true;   // S5b
     };
     ShowcaseSaved m_showcase;
     // Puts the Preview's settings back; `ranges` = also its layer and move ranges (not after a load).
@@ -344,6 +346,8 @@ public:
         int    top_layer       = -1;    // the last layer shown, 0-based; -1 = all of them
         double top_progress    = 1.;    // how much of that layer, by moves (0..1)
         bool   hide_wipe_tower = false;
+        bool   show_infill     = true;  // S5b: sparse and internal solid infill, internal bridges
+        bool   show_supports   = true;  // S5b: supports, their interfaces and transitions
         bool   smooth          = false; // the smooth bead look (D13)
         std::array<float, 128> looks{}; // per extruder: see libvgcode::Viewer::set_smooth_look()
         bool   set_light       = false;

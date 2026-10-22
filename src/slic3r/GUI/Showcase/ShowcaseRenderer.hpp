@@ -149,7 +149,8 @@ public:
     // S5: the layer build-up. `fraction` < 0 = none (the whole print), else 0..1 of it. With
     // toolpaths (Auto, when the plate is sliced) the slice's layers grow; otherwise the model is cut
     // by a plane (the clip fallback).
-    void set_build(double fraction, Showcase::BuildSource source);
+    // S5b: `infill` / `supports`: whether a toolpath build-up lays them.
+    void set_build(double fraction, Showcase::BuildSource source, bool infill = true, bool supports = true);
     // What the last frame used for the build-up: "" none, "toolpaths" or "clip".
     std::string build_used() const { return m_build_used; }
     // S5: the plate's slice can be drawn (Preview has its toolpaths loaded).
@@ -276,6 +277,8 @@ private:
     // S5
     double                     m_build_fraction = -1.;
     Showcase::BuildSource      m_build_source   = Showcase::BuildSource::Auto;
+    bool                       m_build_infill   = true;   // S5b
+    bool                       m_build_supports = true;   // S5b
     double                     m_build_clip_z   = 1e30;   // the clip fallback's plane, this frame
     std::string                m_build_used;
     std::vector<double>        m_model_tops;

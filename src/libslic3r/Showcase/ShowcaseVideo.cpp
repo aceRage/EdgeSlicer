@@ -673,9 +673,15 @@ std::string video_to_json(const VideoSettings &v)
         keys.push_back(std::move(kj));
     }
     j["keyframes"] = keys;
-    if (v.build != BuildUp())
+    if (v.build != BuildUp()) {
         j["build"] = { { "enabled", v.build.enabled }, { "from", v.build.from }, { "to", v.build.to },
                        { "easing", to_string(v.build.easing) }, { "source", to_string(v.build.source) } };
+        // S5b keys only where used, so an S5 scene writes back exactly as it was.
+        if (!v.build.infill)
+            j["build"]["infill"] = false;
+        if (!v.build.supports)
+            j["build"]["supports"] = false;
+    }
     if (!v.events.empty()) {
         const json ev = json::parse(v.events, nullptr, false);
         if (ev.is_array())
@@ -730,6 +736,8 @@ bool video_from_json(const std::string &text, VideoSettings &out)
         v.build.to       = vget<double>(b, "to", 1.);
         v.build.easing   = venum(b, "easing", v.build.easing);
         v.build.source   = venum(b, "source", v.build.source);
+        v.build.infill   = vget<bool>(b, "infill", true);
+        v.build.supports = vget<bool>(b, "supports", true);
     }
     if (j.contains("events") && j["events"].is_array() && !j["events"].empty())
         v.events = j["events"].dump();

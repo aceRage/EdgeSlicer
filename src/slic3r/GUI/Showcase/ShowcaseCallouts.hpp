@@ -98,6 +98,8 @@ public:
     const Showcase::LabelWords &words() const { return m_words; }
     // Changes whenever a label could read differently.
     std::string               signature() const;
+    // The callout's colour(s), "#RRGGBB" (several for a multi-colour filament).
+    std::vector<std::string>  colors_of(const Showcase::Callout &callout) const;
 
 private:
     struct Slot
@@ -108,8 +110,6 @@ private:
         std::vector<std::string> colors;
         int                      family = -1;   // index into m_library, -1 = not a library filament
     };
-    std::vector<std::string> colors_of(const Showcase::Callout &callout) const;
-
     std::vector<Slot>              m_slots;      // physical filaments, slot - 1
     std::map<int, double>          m_weight_g;   // slot -> grams, from the slice
     std::map<int, double>          m_price;      // slot -> money, from the slice and your prices

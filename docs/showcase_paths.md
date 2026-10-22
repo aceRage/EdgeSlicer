@@ -131,7 +131,7 @@ short way round, and other values switch half way.
 | `look` | `preset`: a whole built-in look (`studio_white`, `dark_gradient`, `build_plate`, `desk_wood`, `outdoor`) for the backdrop, floor and lights |
 | `callouts` | `action` (`show`, `hide`, `highlight`), and which callouts: `filaments` (slots) and/or `labels` (callout keys such as `"f2"` or `"f2@12.40"`, or a callout's title). Naming neither means all of them. A highlight draws an accent ring round the label and its dots, and dims the others. |
 | `watermark` | `enabled`, `text`, `anchor` (`top_left` ... `bottom_right`), `opacity` (0-1), `size` (% of the height). A range shows the mark inside it. |
-| `build` | Needs `from` and `to`. `start` and `end` give how much of the print is shown, 0 to 1 (default 0 to 1). Also `ease`, and `source`: `auto`, `toolpaths` or `clip`. Before the range the print shows `start`; after it, `end`. |
+| `build` | Needs `from` and `to`. `start` and `end` give how much of the print is shown, 0 to 1 (default 0 to 1). Also `ease`, `source`: `auto`, `toolpaths` or `clip`, and `infill` and `supports` (`true` or `false`; unset = the scene's choice, which is both on). Before the range the print shows `start`; after it, `end`. |
 
 **The layer build-up.**
 
@@ -140,6 +140,10 @@ short way round, and other values switch half way.
 - **Without a slice, or with `clip`.** The model is cut by a horizontal plane at the height reached.
   The cut is drawn as a solid cap, and only what is built casts a shadow.
 - **Timing.** Every layer takes the same time, as on the printer.
+- **Infill and supports.** With toolpaths the build-up lays every extrusion. `"infill": false`
+  leaves out sparse and internal solid infill and internal bridges; `"supports": false` leaves out
+  supports, their interfaces and transitions. The clip of an unsliced model has neither. With
+  `--showcase-render`, add `--slice` so a project without a slice gets toolpaths.
 
 ## `--showcase-render`
 
@@ -152,7 +156,9 @@ EdgeSlicer --showcase-render <project.3mf> --out <file> [--path <path.json>] [--
 
 - **What it renders.** Without `--path`, it renders the scene's own video, as set in the Showcase
   tab. With `--path`, the path replaces the camera path and timeline. The scene's look (lights,
-  backdrop, floor, materials, callouts, watermark) is the project's.
+  backdrop, floor, materials, callouts, watermark) is the project's. That includes the callouts'
+  fields (material family, hex code and swatch apart), their separator, "each colour once" and the
+  leader style, which the Showcase tab sets.
 - **Format.**
   - From `--format`, else from the `--out` extension (`.mp4`, `.webm`, `.gif`, `.webp`).
   - `--format png`, or an `--out` without an extension, gives a folder of numbered PNG frames.

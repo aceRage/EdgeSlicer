@@ -1929,11 +1929,29 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
             m_viewer.toggle_top_layer_only_view_range();
         m_viewer.set_dim_previous_layers(false);
         sv.hide_wipe_tower = false;
+        sv.show_infill     = true;
+        sv.show_supports   = true;
     }
     if (look.hide_wipe_tower != m_showcase.hide_wipe_tower) {
         showcase_set_role(m_viewer, libvgcode::EGCodeExtrusionRole::WipeTower, !look.hide_wipe_tower);
         m_showcase.hide_wipe_tower = look.hide_wipe_tower;
         m_showcase.top_layer       = -2;   // the ranges are worked out again
+    }
+    // S5b: the build-up may leave out the inside of the print and its supports.
+    if (look.show_infill != m_showcase.show_infill) {
+        for (libvgcode::EGCodeExtrusionRole role : { libvgcode::EGCodeExtrusionRole::InternalInfill, libvgcode::EGCodeExtrusionRole::SolidInfill,
+                                                     libvgcode::EGCodeExtrusionRole::InternalBridgeInfill })
+            showcase_set_role(m_viewer, role, look.show_infill);
+        m_showcase.show_infill = look.show_infill;
+        m_showcase.top_layer   = -2;
+    }
+    if (look.show_supports != m_showcase.show_supports) {
+        for (libvgcode::EGCodeExtrusionRole role : { libvgcode::EGCodeExtrusionRole::SupportMaterial,
+                                                     libvgcode::EGCodeExtrusionRole::SupportMaterialInterface,
+                                                     libvgcode::EGCodeExtrusionRole::SupportTransition })
+            showcase_set_role(m_viewer, role, look.show_supports);
+        m_showcase.show_supports = look.show_supports;
+        m_showcase.top_layer     = -2;
     }
 
     const size_t layers = m_viewer.get_layers_count();

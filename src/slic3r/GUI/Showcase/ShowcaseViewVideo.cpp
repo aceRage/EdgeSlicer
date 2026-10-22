@@ -186,15 +186,10 @@ std::unique_ptr<Showcase::FrameSink> showcase_make_native_mp4_sink(const std::st
 // The Video panel
 // ------------------------------------------------------------------------------------------------
 
-void ShowcaseView::build_video_section(wxBoxSizer *col)
+void ShowcaseView::build_video_section(wxBoxSizer *root)
 {
-    const int em = wxGetApp().em_unit();
-    {
-        auto *t = new wxStaticText(m_side, wxID_ANY, _L("Video"));
-        t->SetFont(wxGetApp().bold_font());
-        col->Add(t, 0, wxLEFT | wxRIGHT | wxTOP, em);
-        col->Add(new wxStaticLine(m_side), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em / 2);
-    }
+    const int   em  = wxGetApp().em_unit();
+    wxBoxSizer *col = add_panel_section(root, _L("Video"), "video");
     auto *grid = new wxFlexGridSizer(2, em / 2, em);
     grid->AddGrowableCol(1, 1);
     col->Add(grid, 0, wxEXPAND | wxALL, em);
@@ -297,6 +292,16 @@ void ShowcaseView::build_video_section(wxBoxSizer *col)
     m_vid_build->SetToolTip(_L("The print grows from the plate, layer by layer, over the motion. With a sliced plate its toolpaths are "
                                "laid; without a slice the model is cut by a plane at the height reached."));
     check_row(m_vid_build);
+    {
+        // S5b: what of the slice the build-up lays.
+        auto *parts          = new wxBoxSizer(wxHORIZONTAL);
+        m_vid_build_infill   = new wxCheckBox(m_side, wxID_ANY, _L("Infill"));
+        m_vid_build_supports = new wxCheckBox(m_side, wxID_ANY, _L("Supports"));
+        parts->Add(m_vid_build_infill, 0, wxRIGHT, em);
+        parts->Add(m_vid_build_supports, 0);
+        grid->Add(new wxStaticText(m_side, wxID_ANY, ""));
+        grid->Add(parts, 0, wxLEFT, em);
+    }
 
     // Keyframes.
     m_vid_keys = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxSize(12 * em, -1));
@@ -472,6 +477,14 @@ void ShowcaseView::build_video_section(wxBoxSizer *col)
         const bool on = m_vid_build->GetValue();
         video_edit([on](Showcase::VideoSettings &v) { v.build.enabled = on; }, false);
     });
+    m_vid_build_infill->Bind(wxEVT_CHECKBOX, [this, video_edit](wxCommandEvent &) {
+        const bool on = m_vid_build_infill->GetValue();
+        video_edit([on](Showcase::VideoSettings &v) { v.build.infill = on; }, false);
+    });
+    m_vid_build_supports->Bind(wxEVT_CHECKBOX, [this, video_edit](wxCommandEvent &) {
+        const bool on = m_vid_build_supports->GetValue();
+        video_edit([on](Showcase::VideoSettings &v) { v.build.supports = on; }, false);
+    });
     m_vid_path_import->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_import_path(); });
     m_vid_path_export->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_export_path(); });
     m_vid_path_clear->Bind(wxEVT_BUTTON, [this, video_edit](wxCommandEvent &) {
@@ -602,6 +615,8 @@ void ShowcaseView::sync_video_controls()
     m_vid_loop->SetValue(v.loop);
     m_vid_callouts->SetValue(v.callouts);
     m_vid_build->SetValue(v.build.enabled);
+    m_vid_build_infill->SetValue(v.build.infill);
+    m_vid_build_supports->SetValue(v.build.supports);
     refresh_path_info();
     if (m_video.selected_key >= int(v.keyframes.size()))
         m_video.selected_key = int(v.keyframes.size()) - 1;
@@ -667,6 +682,19 @@ void ShowcaseView::update_video_enabled()
     m_vid_loop->Enable(editable && v.path != Showcase::VideoPath::Keyframes);
     m_vid_callouts->Enable(editable && scene().callouts.enabled);
     m_vid_build->Enable(editable);
+    {
+        // S5b: infill and supports come from the slice; the model's clip has neither.
+        const bool sliced = ShowcaseRenderer::toolpaths_available();
+        const bool parts  = editable && v.build.enabled && v.build.source != Showcase::BuildSource::Clip && sliced;
+        const wxString tip = sliced ? _L("Lay the infill and the supports with the walls while the print grows. Untick to show only the "
+                                         "shell growing.")
+                                    : _L("Slice the plate first: infill and supports come from the plate's toolpaths.");
+        for (wxCheckBox *cb : { m_vid_build_infill, m_vid_build_supports }) {
+            cb->Enable(parts);
+            if (cb->GetToolTipText() != tip)
+                cb->SetToolTip(tip);
+        }
+    }
     m_vid_path_import->Enable(editable);
     m_vid_path_export->Enable(!video_busy());
     m_vid_path_clear->Enable(editable && (!v.events.empty() || !v.path_name.empty()));
@@ -930,7 +958,7 @@ void ShowcaseView::video_show_pose(double t)
         m_video.pose_timeline = timeline;
         spin_lights(m_video.pose_scene, pose.spin_deg);
         m_renderer->set_scene(&m_video.pose_scene, &project());
-        m_renderer->set_build(st.build, st.build_source);
+        m_renderer->set_build(st.build, st.build_source, st.build_infill, st.build_supports);
         if (timeline) {
             m_renderer->invalidate_watermark();
             ++m_callouts.version;
@@ -1223,7 +1251,7 @@ bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFra
     spin_lights(m_video.frame_scene, pose.spin_deg);
     const Showcase::Scene &fs = m_video.frame_scene;
     m_renderer->set_scene(&m_video.frame_scene, &project());
-    m_renderer->set_build(st.build, st.build_source);
+    m_renderer->set_build(st.build, st.build_source, st.build_infill, st.build_supports);
     m_renderer->prepare_live_camera();
 
     ShowcaseImage image;
