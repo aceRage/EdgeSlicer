@@ -26,6 +26,16 @@ static std::string hms_ver_string(const json& j)
     return std::string();
 }
 
+// The app's config, or null when there is no GUI_App. wxApp::GetInstance() alone is not enough:
+// slic3rutils_tests starts a plain wxApp for its window tests (dark_mode_background_tests.cpp),
+// and wxGetApp() static-casts that to GUI_App, so app_config was read from past the end of a
+// wxApp - which crashed the HMS cases whenever --order rand ran one of those tests first.
+static AppConfig* gui_app_config_or_null()
+{
+    GUI_App* app = dynamic_cast<GUI_App*>(wxApp::GetInstance());
+    return app ? app->app_config : nullptr;
+}
+
 int get_hms_info_version(std::string& version)
 {
     AppConfig* config = wxGetApp().app_config;
@@ -244,7 +254,7 @@ int HMSQuery::save_to_local(const std::string& lang, const std::string& hms_type
 
 std::string HMSQuery::hms_language_code()
 {
-    AppConfig* config = wxApp::GetInstance() ? wxGetApp().app_config : nullptr;
+    AppConfig* config = gui_app_config_or_null();
     if (!config)
         // set language code to en by default
         return "en";
@@ -507,7 +517,7 @@ wxString HMSQuery::query_print_error_url_action(const std::string& dev_id, int p
     char buf[32];
     ::sprintf(buf, "%08X", print_error);
     const wxString url = _query_error_url_action(get_dev_id_type(dev_id), std::string(buf), button_action);
-    AppConfig* config = wxApp::GetInstance() ? wxGetApp().app_config : nullptr;
+    AppConfig* config = gui_app_config_or_null();
     return stealth_image_url(url, config && config->get_stealth_mode());
 }
 
@@ -834,7 +844,7 @@ void HMSQuery::init_hms_info(const std::string& dev_id_type, const std::string& 
     // Stealth mode stops the cloud fetch and nothing else: the shipped and cached tables below
     // are read exactly as they would be otherwise. This is the whole of "offline still answers" -
     // the object now always exists (GUI_App.cpp), and only the network half is withheld.
-    AppConfig* config = wxApp::GetInstance() ? wxGetApp().app_config : nullptr;
+    AppConfig* config = gui_app_config_or_null();
     const bool offline_only = !config || config->get_stealth_mode();
 
     bool want_refresh = false;
