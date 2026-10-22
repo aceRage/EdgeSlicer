@@ -1,0 +1,281 @@
+#include "ThirdPartyFilamentMap.hpp"
+
+#include "../Utils/PrintHostDeviceStatus.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <set>
+
+namespace Slic3r {
+namespace GUI {
+
+namespace {
+
+char hex_digit(unsigned v)
+{
+    return v < 10 ? static_cast<char>('0' + v) : static_cast<char>('A' + (v - 10));
+}
+
+bool hex_nibble(char c, int& out)
+{
+    if (c >= '0' && c <= '9') {
+        out = c - '0';
+        return true;
+    }
+    if (c >= 'a' && c <= 'f') {
+        out = c - 'a' + 10;
+        return true;
+    }
+    if (c >= 'A' && c <= 'F') {
+        out = c - 'A' + 10;
+        return true;
+    }
+    return false;
+}
+
+bool rgb_of(const std::string& colour, int& r, int& g, int& b)
+{
+    const std::string hex = normalize_map_colour(colour);
+    if (hex.size() != 7)
+        return false;
+    int v[6];
+    for (int i = 0; i < 6; ++i) {
+        if (!hex_nibble(hex[i + 1], v[i]))
+            return false;
+    }
+    r = v[0] * 16 + v[1];
+    g = v[2] * 16 + v[3];
+    b = v[4] * 16 + v[5];
+    return true;
+}
+
+std::string lower_copy(std::string s)
+{
+    for (char& c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+} // namespace
+
+std::string normalize_map_colour(const std::string& colour)
+{
+    std::string s = colour;
+    if (!s.empty() && s[0] == '#')
+        s = s.substr(1);
+    if (s.size() < 6)
+        return {};
+    int dummy;
+    for (int i = 0; i < 6; ++i) {
+        if (!hex_nibble(s[i], dummy))
+            return {};
+    }
+    std::string out = "#";
+    out.resize(7);
+    out[0] = '#';
+    for (int i = 0; i < 6; ++i) {
+        int n = 0;
+        hex_nibble(s[i], n);
+        out[i + 1] = hex_digit(static_cast<unsigned>(n));
+    }
+    return out;
+}
+
+std::string bambu_style_slot_label(int unit_id, int slot_id)
+{
+    const int slot = slot_id < 0 ? 0 : slot_id;
+    if (unit_id < 0)
+        return std::to_string(slot + 1);
+    if (slot >= 26)
+        return std::to_string(unit_id + 1) + "-" + std::to_string(slot + 1);
+    const char letter = static_cast<char>('A' + slot);
+    return std::to_string(unit_id + 1) + letter;
+}
+
+std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<PrintHostDevices::Slot>& slots, bool qidi_box)
+{
+    std::vector<ThirdPartyDeviceSlot> out;
+    out.reserve(slots.size());
+    std::vector<int> raw_units;   // raw Slot::unit in order of appearance; position = unit number
+    std::vector<int> unit_counts; // trays seen so far per unit
+    for (const PrintHostDevices::Slot& s : slots) {
+        ThirdPartyDeviceSlot ds;
+        ds.colour = s.color;
+        ds.type   = s.type;
+        ds.name   = s.name;
+        ds.empty  = !s.loaded;
+        ds.index  = s.index;
+        if (s.unit >= 0) {
+            auto it = std::find(raw_units.begin(), raw_units.end(), s.unit);
+            int  u  = (int) (it - raw_units.begin());
+            if (it == raw_units.end()) {
+                raw_units.push_back(s.unit);
+                unit_counts.push_back(0);
+            }
+            ds.unit_id = u;
+            ds.slot_id = unit_counts[u]++;
+        } else if (qidi_box && s.index >= 0) {
+            ds.unit_id = s.index / 4;
+            ds.slot_id = s.index % 4;
+        } else {
+            ds.unit_id = -1;
+            ds.slot_id = s.index;
+            ds.label   = "T" + std::to_string(s.index + 1);
+        }
+        out.push_back(std::move(ds));
+    }
+    return out;
+}
+
+int initial_slot_position(const std::vector<PrintHostDevices::Slot>& slots, int remembered_pos, const std::string& colour,
+                          const std::string& type, bool qidi_box)
+{
+    if (remembered_pos >= 0 && remembered_pos < (int) slots.size())
+        return remembered_pos;
+    return PrintHostDevices::auto_match_slot(slots, colour, type, qidi_box) - 1; // 0 = "As sliced"
+}
+
+std::string slot_display_label(const ThirdPartyDeviceSlot& slot)
+{
+    if (!slot.label.empty())
+        return slot.label;
+    return bambu_style_slot_label(slot.unit_id, slot.slot_id >= 0 ? slot.slot_id : slot.index);
+}
+
+bool types_match(const std::string& a, const std::string& b)
+{
+    if (a.empty() || b.empty())
+        return true;
+    return lower_copy(a) == lower_copy(b);
+}
+
+double map_colour_distance(const std::string& a, const std::string& b)
+{
+    int ar, ag, ab, br, bg, bb;
+    if (!rgb_of(a, ar, ag, ab) || !rgb_of(b, br, bg, bb))
+        return 0;
+    const double rm = (ar + br) / 2.0;
+    const double dr = ar - br, dg = ag - bg, db = ab - bb;
+    return (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db;
+}
+
+bool colours_mismatch(const std::string& a, const std::string& b)
+{
+    if (normalize_map_colour(a).empty() || normalize_map_colour(b).empty())
+        return false;
+    // Red vs a nearby red is a few thousand; red vs blue is tens of thousands. 8000 is
+    // "noticeably different" without flagging two spools of the same shade.
+    return map_colour_distance(a, b) > 8000.0;
+}
+
+ThirdPartyMapMismatch mismatch_for(const ThirdPartySlicerFilament& filament, const ThirdPartyDeviceSlot& slot)
+{
+    const bool type_bad   = !slot.empty && !types_match(filament.type, slot.type);
+    const bool colour_bad = !slot.empty && colours_mismatch(filament.colour, slot.colour);
+    if (type_bad && colour_bad)
+        return ThirdPartyMapMismatch::TypeAndColour;
+    if (type_bad)
+        return ThirdPartyMapMismatch::Type;
+    if (colour_bad)
+        return ThirdPartyMapMismatch::Colour;
+    return ThirdPartyMapMismatch::None;
+}
+
+int warning_slot_position(const ThirdPartyFilamentMapModel& model, size_t filament_row)
+{
+    if (filament_row >= model.filaments.size())
+        return -1;
+    if (model.read_only) {
+        const int t = model.filaments[filament_row].index;
+        for (size_t i = 0; i < model.slots.size(); ++i)
+            if (model.slots[i].index == t)
+                return (int) i;
+        return -1;
+    }
+    if (filament_row >= model.mapping.size())
+        return -1;
+    return model.mapping[filament_row];
+}
+
+ThirdPartyMapMismatch mismatch_at(const ThirdPartyFilamentMapModel& model, size_t filament_row)
+{
+    const int pos = warning_slot_position(model, filament_row);
+    if (pos < 0 || pos >= (int) model.slots.size())
+        return ThirdPartyMapMismatch::None;
+    return mismatch_for(model.filaments[filament_row], model.slots[pos]);
+}
+
+std::vector<int> distinct_nozzle_ids(const ThirdPartyFilamentMapModel& model)
+{
+    std::set<int> ids;
+    for (const ThirdPartySlicerFilament& f : model.filaments)
+        if (f.nozzle_id >= 0)
+            ids.insert(f.nozzle_id);
+    for (const ThirdPartyDeviceSlot& s : model.slots)
+        if (s.nozzle_id >= 0)
+            ids.insert(s.nozzle_id);
+    return std::vector<int>(ids.begin(), ids.end());
+}
+
+bool has_multiple_nozzles(const ThirdPartyFilamentMapModel& model)
+{
+    return distinct_nozzle_ids(model).size() > 1;
+}
+
+std::string filament_badge_text(const ThirdPartySlicerFilament& filament, const ThirdPartyFilamentMapModel& model)
+{
+    const std::vector<int> nozzles = distinct_nozzle_ids(model);
+    const bool slots_name_nozzles = std::any_of(model.slots.begin(), model.slots.end(),
+                                                [](const ThirdPartyDeviceSlot& s) { return s.nozzle_id >= 0; });
+    if (filament.nozzle_id >= 0 && nozzles.size() > 1 && slots_name_nozzles) {
+        if (nozzles.size() == 2 && nozzles[0] == 0 && nozzles[1] == 1) {
+            // Bambu H2D: physical 0 is the right nozzle, 1 is the left.
+            if (filament.nozzle_id == 0)
+                return "R";
+            if (filament.nozzle_id == 1)
+                return "L";
+        }
+        return std::to_string(filament.nozzle_id + 1);
+    }
+    return std::to_string(filament.index + 1);
+}
+
+std::vector<ThirdPartySlotGroup> group_slots(const std::vector<ThirdPartyDeviceSlot>& slots)
+{
+    std::vector<ThirdPartySlotGroup> groups;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const ThirdPartyDeviceSlot& s = slots[i];
+        auto it = std::find_if(groups.begin(), groups.end(), [&](const ThirdPartySlotGroup& g) {
+            return g.unit_id == s.unit_id && g.nozzle_id == s.nozzle_id;
+        });
+        if (it == groups.end()) {
+            ThirdPartySlotGroup g;
+            g.unit_id   = s.unit_id;
+            g.nozzle_id = s.nozzle_id;
+            g.slot_positions.push_back((int) i);
+            groups.push_back(std::move(g));
+        } else {
+            it->slot_positions.push_back((int) i);
+        }
+    }
+    return groups;
+}
+
+std::string encode_filament_mapping(const ThirdPartyFilamentMapModel& model)
+{
+    if (model.read_only)
+        return {};
+    std::string out;
+    for (size_t i = 0; i < model.filaments.size() && i < model.mapping.size(); ++i) {
+        const int pos = model.mapping[i];
+        if (pos < 0 || pos >= (int) model.slots.size())
+            continue;
+        if (!out.empty())
+            out += ",";
+        out += std::to_string(model.filaments[i].index) + ":" + std::to_string(model.slots[pos].index);
+    }
+    return out;
+}
+
+} // namespace GUI
+} // namespace Slic3r
