@@ -81,6 +81,12 @@ struct Status
     // The slots are a QIDI Box's: a filament left "As sliced" is fed from whichever slot the
     // printer last used for that tool, so the dialog matches by material, never by colour alone.
     bool              qidi_box { false };
+    // The printer's answer about its Box contradicts itself (box counts that differ, slot motors
+    // for other slots than box_count names, filament reported past the counted Boxes, a slot the
+    // controller calls loaded that its own sensor calls empty): nothing is mapped automatically
+    // and qidi_send_policy keeps the send to an upload. `qidi_box_problem` says what, in words.
+    bool              qidi_box_inconsistent { false };
+    std::string       qidi_box_problem;
     // QIDI firmware (X-Max 4, X-Plus 4, Q2, X-Plus 5 - the ones with a multi_color_controller,
     // Box or not): the send dialog offers QIDIStudio's print options. qidi_polar_cooler: the
     // printer has the extruder cooler that QIDIStudio's "Polar cooler" switch drives.
@@ -187,7 +193,9 @@ struct QidiSendFacts
     bool use_box { true };             // the Box is used for this print (the dialog's switch)
     int  used_filaments { 0 };         // filaments this plate prints with
     int  mapped_filaments { 0 };       // ... that have a Box slot picked
+    int  mapped_to_empty { 0 };        // ... whose picked slot the printer says is empty
     int  type_mismatches { 0 };        // ... whose slot holds another material (or an unknown one)
+    bool box_inconsistent { false };   // the Box answer contradicts itself (Status::qidi_box_inconsistent)
 };
 
 enum class QidiSendPolicy
@@ -198,6 +206,8 @@ enum class QidiSendPolicy
     UploadOnlyNoProbe,   // a Box printer that could not be read: upload only unless the person chooses to print
     NeedsMapping,        // a used filament has no Box slot: the printer would use its stale value_t<n>
     ConfirmTypeMismatch, // a filament goes to a slot holding another material: ask first
+    MappedToEmpty,       // a filament goes to a slot the printer says is empty: never started
+    UploadOnlyInconsistent, // the Box answer contradicts itself: upload only, nothing mapped
 };
 
 QidiSendPolicy qidi_send_policy(const QidiSendFacts& facts);
@@ -217,14 +227,23 @@ QidiAutoMapping qidi_auto_mapping(const Status& st, const std::vector<SendFilame
 // Empty for NotApplicable and Start.
 std::string qidi_send_refusal(QidiSendPolicy policy);
 
+// One line for the log at each QIDI send: every Box slot as the send saw it - "1A loaded PLA
+// (PLA Rapido) #FFFFFF; 1B empty; ..." - and, when the answer did not add up, why. No address,
+// no serial.
+std::string describe_qidi_box(const Status& st);
+
 // ---- QIDIStudio's own LAN read of the Box -------------------------------------------------------
 //
-// QIDIStudio 2.07 does not read a `multi_color_controller` object at all. Over the LAN it reads
-// Klipper's save_variables (`/printer/objects/query?save_variables=variables`): box_count, and per
-// Box slot n (box * 4 + slot, 0-based) filament_slot<n> / color_slot<n> / vendor_slot<n>, which
-// are indexes into the printer's own `config/officiall_filas_list.cfg` ([fila<id>] type = PLA ...,
-// [colordict] <id> = #RRGGBB). The same variables hold value_t<tool> and enable_box, which is what
-// the start-of-print script writes and what is read back to confirm it took.
+// QIDIStudio 2.07.02.60 (the release) does not read a `multi_color_controller` object at all. Over
+// the LAN it reads Klipper's save_variables (`/printer/objects/query?save_variables=variables`):
+// box_count, and per Box slot n (box * 4 + slot, 0-based: Box 1 is slots 0-3, the firmware's
+// `box_config box0` / `box_stepper slot0..3`) filament_slot<n> / color_slot<n> / vendor_slot<n>,
+// which are indexes into the printer's own `config/officiall_filas_list.cfg` ([fila<id>] type =
+// PLA ..., [colordict] <id> = #RRGGBB). Whether slot n has filament it takes from the
+// `box_stepper slot<n>` object (runout_button 0), not from those ids: the firmware's saved
+// variables default filament_slot<n> to 1 (a PLA) on every slot. The same variables hold
+// value_t<tool> and enable_box, which is what the start-of-print script writes and what is read
+// back to confirm it took.
 
 struct QidiFilaList
 {
@@ -234,13 +253,21 @@ struct QidiFilaList
 };
 // The INI text of officiall_filas_list.cfg.
 QidiFilaList parse_qidi_filas_cfg(const std::string& text);
-// save_variables' `variables` object (JSON text) -> the Box slots it describes; empty when it names
-// no Box. A slot counts as loaded when its filament_slot<n> names a material the list knows.
+// save_variables' `variables` object (JSON text) -> the Box slots it describes (box_count * 4,
+// Box 1 slot A first); empty when it names no Box. A slot counts as loaded only when its own state
+// word `slot<n>` says so (0 empty, 1 / 2 / 3 filament there, negative blocked) - never from
+// filament_slot<n>, which the firmware defaults to 1 (a PLA) on every slot and keeps after the
+// spool is gone. A loaded slot's material is filament_slot<n> in the list; unknown when 0.
+// (The probe also reads each slot's `box_stepper slot<n>` sensor, as QIDIStudio 2.07.02.60 does.)
 std::vector<Slot> slots_from_qidi_variables(const std::string& variables_json, const QidiFilaList& list, bool& have_filaments);
 // After the start-of-print script: do the printer's variables now say what was sent? enable_box
 // as `use_box` (1 / 0, -1 = not sent) and value_t<tool> == 'slot<n>' for every pair of `mapping`.
 // False with `why` otherwise - the print must not start on a mapping that did not take.
 bool qidi_mapping_confirmed(const std::string& variables_json, const std::string& mapping, int use_box, std::string& why);
+// The network-free half of probe() for a QIDI: a Moonraker `result.status` object (with
+// save_variables and the box_stepper objects when the printer has them) and the printer's
+// filament list -> the Box as the send dialog sees it. For the tests.
+Status parse_qidi_status(const std::string& status_json, const QidiFilaList& filas, const std::string& host_type_key = "octoprint");
 // Blocking, off the GUI thread: the `variables` object of save_variables, as JSON text.
 bool query_qidi_variables(const std::string& base_url, std::string& variables_json, std::string& error, int timeout_s = 10);
 // The probe timeout for a model: a QIDI Box printer's Moonraker is slow to answer (3 s timed out
