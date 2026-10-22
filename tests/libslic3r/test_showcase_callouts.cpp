@@ -285,7 +285,8 @@ TEST_CASE("Callout layout: the column split", "[Showcase][Callouts]")
         CHECK_THAT(r.labels[0].box.y, WithinAbs(60., 1e-9));
         CHECK_THAT(r.labels[1].box.right(), WithinAbs(1000., 1e-9));
         CHECK_THAT(r.labels[1].box.bottom(), WithinAbs(600., 1e-9));
-        REQUIRE(r.labels[0].leader.size() == 2);
+        // S5b: Elbow (the default) turns a right angle into that side.
+        REQUIRE(r.labels[0].leader.size() == 3);
         CHECK_THAT(r.labels[0].leader.back().x, WithinAbs(150., 1e-9));   // the side facing the anchor
     }
 }
@@ -492,7 +493,7 @@ TEST_CASE("Callout label text", "[Showcase][Callouts]")
         CHECK(build_callout_label(c, f, fields, words).details == "PLA \xC2\xB7 Silk");
     }
     SECTION("fields off") {
-        fields.brand = fields.hex = fields.type = false;
+        fields.brand = fields.hex = fields.swatch = fields.type = false;
         const CalloutLabel l = build_callout_label(c, f, fields, words);
         CHECK(l.title == "PLA Pro");
         CHECK(l.hex.empty());
