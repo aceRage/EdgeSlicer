@@ -1,4 +1,4 @@
-"""QIDI send gate (design section 5, Q1-Q9): EdgeSlicer's hub send path against the printer emulator.
+"""QIDI send gate (design section 5, Q1-Q13): EdgeSlicer's hub send path against the printer emulator.
 
 An installed EdgeSlicer is started hidden on its own scratch data dir with ONE print-host device, a
 QIDI X-Max 4 at a 127.0.0.x address served by the emulator. A two-filament PLA plate (made here
@@ -16,6 +16,19 @@ per row, and each row asserts on the emulator's command log:
   Q8  probe delayed 12 s (QIDI timeout is 10)   print refused, nothing sent; then mode=upload uploads
                                                 only (no script, no start)
   Q9  PLA plate, only an ASA slot  (#611)       refused, nothing sent (never fed from the ASA slot)
+
+The Box as the firmware lays it out (fix/qidi-box-index, the 2.4.6.3 report: all filament in Box 1,
+1C ASA, shown as "Unit 2" PLA and T1 sent to slot7). save_variables keep filament_slot<n> = 1 (a PLA)
+on every slot, empty or not; presence is the slot's state word slot<n> and its box_stepper sensor:
+
+  Q10 save_variables only, 1A PLA red, 1B EMPTY    value_t0=slot0, value_t1=slot0 (the only PLA);
+      (filament_slot1 still 1), 1C ASA, 1D PETG    never value_t -> slot1 (the empty slot)
+  Q11 Q10's Box, flat multi_color_controller       the same mapping, read from box0_... keys
+      (QIDIStudio's 2026-10-19 shape)
+  Q12 the reported picture: save_variables say     refused as "did not add up", nothing sent
+      box_count 2, the printer has one Box; Box 1
+      spools untagged, Box 2 the PLA defaults
+  Q13 two Boxes, filament only in Box 1            value_t0=slot0, value_t1=slot1; nothing to slot4-7
 
 Every printer address is asserted to be loopback before anything starts. Nothing here writes to
 %APPDATA%\\EdgeSlicer or the owner's emulator home; only processes this script started are stopped,
@@ -431,6 +444,71 @@ def run_matrix(inst, emu):
     nothing_sent(emu, mark, "ASA slot only")
     check(emu.state(PRINTER_ID)["print_state"] == "standby", "the printer is still idle")
 
+    # Q10-Q13: the Box as the firmware lays it out -----------------------------------------------
+    box1 = [{"type": "PLA", "sub": "PLA", "vendor": "Generic", "color": RED, "loaded": True},
+            {"loaded": False},  # filament_slot1 keeps the shipped 1 (a white PLA)
+            {"type": "ASA", "sub": "ASA", "vendor": "Generic", "color": "#202020", "loaded": True},
+            {"type": "PETG", "sub": "PETG", "vendor": "Generic", "color": "#FFFFFF", "loaded": True}]
+
+    def never_to(mark, slots, label):
+        bad = [e for e in emu.find(PRINTER_ID, kind="save_variable", since=mark)
+               if str(e["payload"].get("var", "")).startswith("value_t") and e["payload"].get("value") in slots]
+        check(not bad, "%s (%s)" % (label, [(e["payload"]["var"], e["payload"]["value"]) for e in bad]))
+
+    row("Q10", "save_variables only, the firmware's layout: 1B empty but filament_slot1 still the shipped PLA")
+    mark = setup(emu, qidi={"box_report": "vars_only", "mcc_shape": "array", "stale_value_t": {"0": "slot1", "1": "slot1"}},
+                 slots=box1)
+    j = send(inst)
+    q = (j.get("result") or {}).get("qidi") or {}
+    check(j.get("state") == "done", "the send job is done (%s %s)" % (j.get("state"), j.get("error", "")))
+    check(q.get("mapping") == "0:0,1:0", "both PLA filaments go to 1A, the only loaded PLA (%s)" % q.get("mapping"))
+    expect(emu, "value_t0='slot0'", "save_variable", mark, var="value_t0", value="slot0")
+    expect(emu, "value_t1='slot0'", "save_variable", mark, var="value_t1", value="slot0")
+    never_to(mark, ["slot1"], "nothing pointed at the empty 1B (slot1)")
+
+    row("Q11", "Q10's Box through a flat multi_color_controller (box0_... keys) and save_variables")
+    mark = setup(emu, qidi={"box_report": "mcc+vars", "mcc_shape": "flat", "stale_value_t": {"0": "slot1", "1": "slot1"}},
+                 slots=box1)
+    j = send(inst)
+    q = (j.get("result") or {}).get("qidi") or {}
+    check(j.get("state") == "done", "the send job is done (%s %s)" % (j.get("state"), j.get("error", "")))
+    check(q.get("mapping") == "0:0,1:0", "mapping 0:0,1:0 from the flat keys (%s)" % q.get("mapping"))
+    never_to(mark, ["slot1"], "nothing pointed at the empty 1B (slot1)")
+    check("filas_cfg" not in [e["kind"] for e in emu.find(PRINTER_ID, since=mark)],
+          "the controller named the materials: no filament list needed")
+
+    row("Q12", "the 2.4.6.3 picture: save_variables say 2 Boxes, the printer has 1; Box 1 untagged, 1C ASA")
+    untagged = [{"type": "PLA", "color": RED, "loaded": True, "untagged": True},
+                {"type": "PLA", "color": WHITE, "loaded": True, "untagged": True},
+                {"type": "ASA", "color": "#202020", "loaded": True, "untagged": True},
+                {"loaded": False}]
+    mark = setup(emu, qidi={"box_report": "vars_only", "mcc_shape": "array", "boxes": 1, "vars_box_count": 2,
+                            "stale_value_t": {"0": "slot7", "1": "slot7"}}, slots=untagged)
+    j = send(inst)
+    q = (j.get("result") or {}).get("qidi") or {}
+    check(j.get("state") == "error" and "did not add up" in (j.get("error") or ""),
+          "refused, the Box answer does not add up: %s" % j.get("error"))
+    check(bool(q.get("box_problem")), "the hub result says why (%s)" % q.get("box_problem"))
+    nothing_sent(emu, mark, "inconsistent Box")
+    check(emu.state(PRINTER_ID)["print_state"] == "standby", "the printer is still idle")
+    mark = emu.mark()
+    j = send(inst, mode="upload")
+    check(j.get("state") == "done", "mode=upload still works (%s %s)" % (j.get("state"), j.get("error", "")))
+    expect(emu, "upload only: print=false", "upload", mark, print=False)
+
+    row("Q13", "two Boxes, filament only in Box 1: Box 2's PLA defaults are not filament")
+    two = [{"type": "PLA", "sub": "PLA", "vendor": "Generic", "color": RED, "loaded": True},
+           {"type": "PLA", "sub": "PLA", "vendor": "Generic", "color": WHITE, "loaded": True},
+           {"type": "ASA", "sub": "ASA", "vendor": "Generic", "color": "#202020", "loaded": True},
+           {"loaded": False}, {"loaded": False}, {"loaded": False}, {"loaded": False}, {"loaded": False}]
+    mark = setup(emu, qidi={"box_report": "vars_only", "mcc_shape": "array", "boxes": 2,
+                            "stale_value_t": {"0": "slot4", "1": "slot5"}}, slots=two)
+    j = send(inst)
+    q = (j.get("result") or {}).get("qidi") or {}
+    check(j.get("state") == "done", "the send job is done (%s %s)" % (j.get("state"), j.get("error", "")))
+    check(q.get("mapping") == "0:0,1:1", "red to 1A, white to 1B (%s)" % q.get("mapping"))
+    never_to(mark, ["slot%d" % n for n in range(3, 8)], "nothing pointed at an empty slot (1D, 2A-2D)")
+
 
 def main():
     global current_row
@@ -477,7 +555,7 @@ def main():
         emu_p.stop()
         print("(work dir with the instance, emulator and CLI logs: %s)" % WORK)
     print("\n== QIDI send gate: %d checks, %d failed ==" % (checks, len(fails)))
-    for name in ["setup"] + ["Q%d" % i for i in range(1, 10)]:
+    for name in ["setup"] + ["Q%d" % i for i in range(1, 14)]:
         if name in rows:
             print("  %-6s %s" % (name, "PASS" if rows[name] else "FAIL"))
     for r, f in fails:
