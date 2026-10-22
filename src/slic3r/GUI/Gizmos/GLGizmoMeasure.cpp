@@ -3181,6 +3181,10 @@ void GLGizmoMeasure::ultra_merge_parts()
     ol->select_items(std::vector<ObjectVolumeID>{ ObjectVolumeID{ tmo, nullptr }, ObjectVolumeID{ amo, nullptr } });
     ol->merge(true);
     reset_all_feature(); // merge() deleted the two source objects -> picked GLVolume* would dangle
+    if (model.objects.size() == before) {
+        notify(_u8L("Merge parts did not run: select both objects in the object list and use Assemble instead."));
+        return;
+    }
     notify((boost::format(_u8L("Merged into one object (objects %d -> %d). Check the Prepare view.")) % (int) before % (int) model.objects.size()).str());
 }
 

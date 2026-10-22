@@ -1451,22 +1451,40 @@ void list_host_targets(std::vector<HostTarget>& out)
     // string for Moonraker (only the Device tab's MQTT connect sets that enum), so what a printer
     // speaks is decided by what it answers, not by the preset.
     PresetBundle* bundle = wxGetApp().preset_bundle;
-    if (bundle && !bundle->use_bbl_network()) {
+    const bool    bbl    = !bundle || bundle->use_bbl_network();
+    // The saved devices (<datadir>/hub/print_host_devices.json) of every printer model, whatever
+    // preset is selected, under the ids /api/printers gives them (RemoteSend::list_hosts makes the
+    // same listing). api_printers calls this before list_hosts (its HostsAtEnd runs last), so the
+    // import has to happen here too or the very first poll would list the devices without ever
+    // having probed them.
+    PrintHostDevices::HostListing listing;
+    std::string                   url;
+    if (bundle) {
         const DynamicPrintConfig& cfg = bundle->printers.get_edited_preset().config;
-        const std::string         url = cfg.opt_string("print_host");
-        if (!url.empty()) {
-            // The preset says what it is: a PrusaLink or PrusaConnect preset is asked over its own
-            // REST API with the credentials it holds, everything else as a Moonraker printer (the
-            // fork has no host_type key for Moonraker, so that stays decided by what it answers).
-            const PrintHostDevices::Device d = PrintHostDevices::from_config(cfg);
-            if (PrusaLinkStatus::speaks_prusalink(d.host_type))
-                out.push_back({ "host", PrusaLinkStatus::base_url(url), d.host_type, d.auth_type,
-                                d.apikey, d.user, d.password });
-            else if (speaks_sdcp(d.host_type, cfg.opt_string("printer_model")))
-                out.push_back({ "host", sdcp_host_of(url), d.host_type, "", "", "", "", "Elegoo " + url });
-            else
-                out.push_back({ "host", moonraker_base(url), "", "", "", "", "" });
+        url = bbl ? std::string() : cfg.opt_string("print_host");
+        try {
+            PrintHostDevices::migrate_from_presets(*bundle);
+            listing = PrintHostDevices::host_listing(PrintHostDevices::all_devices(),
+                                                     bbl ? std::string() : PrintHostDevices::current_model_key(*bundle), url,
+                                                     PrintHostDevices::from_config(cfg).host_type);
+        } catch (...) {
+            listing          = {};
+            listing.host_row = !url.empty();
         }
+    }
+    if (bundle && listing.host_row && !url.empty()) {
+        const DynamicPrintConfig& cfg = bundle->printers.get_edited_preset().config;
+        // The preset says what it is: a PrusaLink or PrusaConnect preset is asked over its own
+        // REST API with the credentials it holds, everything else as a Moonraker printer (the
+        // fork has no host_type key for Moonraker, so that stays decided by what it answers).
+        const PrintHostDevices::Device d = PrintHostDevices::from_config(cfg);
+        if (PrusaLinkStatus::speaks_prusalink(d.host_type))
+            out.push_back({ "host", PrusaLinkStatus::base_url(url), d.host_type, d.auth_type,
+                            d.apikey, d.user, d.password });
+        else if (speaks_sdcp(d.host_type, cfg.opt_string("printer_model")))
+            out.push_back({ "host", sdcp_host_of(url), d.host_type, "", "", "", "", "Elegoo " + url });
+        else
+            out.push_back({ "host", moonraker_base(url), "", "", "", "", "" });
     }
     std::shared_ptr<PrintHost> connected;
     wxGetApp().get_connect_host(connected);
@@ -1475,39 +1493,25 @@ void list_host_targets(std::vector<HostTarget>& out)
     // poll and could only ever say "offline". The connect card keeps the MQTT link's own state.
     if (connected && !SnapmakerLan::is_cloud_host(connected->get_host()))
         out.push_back({ "connect", moonraker_base(connected->get_host()), "", "", "", "", "" });
-    // The model's own devices (<datadir>/hub/print_host_devices.json), under the ids /api/printers
-    // gives them. Only the Moonraker-shaped ones are worth asking - an Elegoo Link box answers SDCP
-    // over its own websocket and would just spend this call's timeout - so the rest are left with
-    // the "unknown" status list_hosts gave them.
-    if (bundle && !bundle->use_bbl_network()) try {
-        // api_printers calls this before RemoteSend::list_hosts (its HostsAtEnd runs last), so the
-        // import has to happen here too or the very first poll would list the devices without ever
-        // having probed them.
-        PrintHostDevices::migrate_from_presets(*bundle);
-        const std::string model_key = PrintHostDevices::current_model_key(*bundle);
-        for (const PrintHostDevices::Device& d : PrintHostDevices::devices(model_key)) {
-            if (d.address.empty()) continue;
-            if (d.host_type == "elegoolink") continue; // every model's Elegoo printers are added below
-            if (PrintHostDevices::speaks_moonraker(d.host_type)) {
-                out.push_back({ "ph:" + d.id, moonraker_base(d.address), "", "", "", "", "" });
-            } else if (PrusaLinkStatus::speaks_prusalink(d.host_type)) {
-                // Its own base (no MQTT-port stripping: a PrusaLink box is addressed exactly as
-                // the preset holds it) and its own credentials, which the probe needs.
-                out.push_back({ "ph:" + d.id, PrusaLinkStatus::base_url(d.address), d.host_type,
-                                d.auth_type, d.apikey, d.user, d.password });
-            }
+    // Only the devices that speak something the hub asks are targets; the rest keep the "unknown"
+    // status list_hosts gave them. A Moonraker / PrusaLink box is probed over HTTP (with its own
+    // backoff); an Elegoo SDCP printer (a Centauri Carbon 1) is watched over the hub's own on-demand
+    // connection - being a target opens nothing by itself (describe_hosts: touch vs demand).
+    for (const PrintHostDevices::ListedDevice& l : listing.devices) try {
+        const PrintHostDevices::Device& d = l.device;
+        if (d.address.empty()) continue;
+        if (d.host_type == "elegoolink") {
+            if (!speaks_sdcp(d.host_type, d.printer_model.empty() ? l.model_key : d.printer_model)) continue;
+            const std::string host = sdcp_host_of(d.address);
+            if (!host.empty()) out.push_back({ "ph:" + d.id, host, d.host_type, "", "", "", "", d.display_name() });
+        } else if (PrintHostDevices::speaks_moonraker(d.host_type)) {
+            out.push_back({ "ph:" + d.id, moonraker_base(d.address), "", "", "", "", "" });
+        } else if (PrusaLinkStatus::speaks_prusalink(d.host_type)) {
+            // Its own base (no MQTT-port stripping: a PrusaLink box is addressed exactly as
+            // the preset holds it) and its own credentials, which the probe needs.
+            out.push_back({ "ph:" + d.id, PrusaLinkStatus::base_url(d.address), d.host_type,
+                            d.auth_type, d.apikey, d.user, d.password });
         }
-    } catch (...) {}
-    // Elegoo SDCP printers (a Centauri Carbon 1), whatever printer preset is selected: like a Bambu
-    // printer or a U1 on the LAN, the hub watches it over its own connection, so it is listed for
-    // every model and not only while its own preset is the current one.
-    if (bundle) try {
-        for (const auto& kv : PrintHostDevices::all_devices())
-            for (const PrintHostDevices::Device& d : kv.second) {
-                if (d.address.empty() || !speaks_sdcp(d.host_type, d.printer_model.empty() ? kv.first : d.printer_model)) continue;
-                const std::string host = sdcp_host_of(d.address);
-                if (!host.empty()) out.push_back({ "ph:" + d.id, host, d.host_type, "", "", "", "", d.display_name() });
-            }
     } catch (...) {}
 }
 
@@ -1710,6 +1714,11 @@ static void describe_moonraker_hosts(const std::vector<HostTarget>& targets, jso
             if (is_device) {
                 (*entry)["status"] = state;
                 (*entry)["online"] = true;
+                // Read-only: prepare() routes pause / resume / stop for a ph: id only to an Elegoo
+                // SDCP printer, so a Moonraker / PrusaLink device must not offer the buttons.
+                (*entry)["can_pause"]  = false;
+                (*entry)["can_resume"] = false;
+                (*entry)["can_stop"]   = false;
             }
         } else {
             if (is_device && a.asked) (*entry)["online"] = false;
