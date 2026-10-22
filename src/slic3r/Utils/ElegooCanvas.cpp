@@ -4,6 +4,7 @@
 // itself sits in ElegooCanvasQuery.cpp.
 
 #include "ElegooCanvas.hpp"
+#include "ElegooSdcp.hpp" // read_frame / hub_state: what the Cmd 0 status says the printer is doing
 
 #include <nlohmann/json.hpp>
 #include <boost/algorithm/string.hpp>
@@ -609,18 +610,22 @@ CanvasQueryResult canvas_query_over(SdcpTransport& transport, const CanvasQueryO
         return result;
     }
     {
+        Sdcp::Status     status;
+        Sdcp::Attributes attrs;
         const auto deadline = CvClock::now() + std::chrono::milliseconds(opts.step_timeout_ms);
         for (int i = 0; i < opts.max_frames; ++i) {
             const int left = std::min(opts.frame_timeout_ms, cv_remaining_ms(deadline));
             std::string frame;
             if (left <= 0 || !transport.receive(frame, left, err))
                 break;
+            Sdcp::read_frame(frame, status, attrs); // the print state rides in the same status frame
             const int st = sdcp_ams_connect_status(frame);
             if (st >= 0) {
                 result.ams_connect_status = st;
                 break;
             }
         }
+        result.print_state = Sdcp::hub_state(status);
     }
     transport.close();
     if (result.ams_connect_status == 0) {

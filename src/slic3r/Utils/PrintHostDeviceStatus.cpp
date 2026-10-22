@@ -42,6 +42,31 @@ std::string Slot::label() const
     return out;
 }
 
+std::string slot_tile_label(const std::vector<Slot>& slots, int pos)
+{
+    if (pos < 0 || pos >= (int) slots.size())
+        return std::to_string(pos + 1);
+    const Slot& s = slots[pos];
+    if (s.unit < 0)
+        return s.name.empty() ? "T" + std::to_string(s.index + 1) : s.name;
+    // The send dialog's tiles (third_party_slots_from + bambu_style_slot_label): units numbered by
+    // order of appearance, the slot by its place in its unit, as letters.
+    std::vector<int> units;
+    int              place = 0;
+    for (int i = 0; i <= pos; ++i) {
+        if (slots[i].unit < 0)
+            continue;
+        if (std::find(units.begin(), units.end(), slots[i].unit) == units.end())
+            units.push_back(slots[i].unit);
+        if (i < pos && slots[i].unit == s.unit)
+            ++place;
+    }
+    const int unit = (int) (std::find(units.begin(), units.end(), s.unit) - units.begin());
+    if (place >= 26)
+        return std::to_string(unit + 1) + "-" + std::to_string(place + 1);
+    return std::to_string(unit + 1) + std::string(1, (char) ('A' + place));
+}
+
 // Moonraker::make_url's own rule, as RemoteControl.cpp:79 copies it: an address without a scheme
 // becomes http://, and the MQTT ports the Device tab stores are dropped so the printer's HTTP API
 // on port 80 is addressed instead.
@@ -340,6 +365,7 @@ Status status_from_canvas(const CanvasQueryResult& r)
     st.probed = true;
     st.online = r.reached;
     st.error  = r.error;
+    st.state  = r.print_state; // what Cmd 0 said, CANVAS or not
     if (!r.ok) {
         if (r.no_canvas)
             st.note = "The printer reports no CANVAS attached, so there is nothing to map. The plate is sent exactly as it was sliced.";
@@ -366,6 +392,8 @@ Status status_from_canvas(const CanvasQueryResult& r)
             s.name     = canvas_tray_name(t);
             st.slots_have_filaments = true;
         }
+        if (t.canvas_id == r.info.active_canvas_id && t.tray_id == r.info.active_tray_id)
+            st.active_slot = (int) st.slots.size();
         st.slots.push_back(std::move(s));
     }
     if (!st.slots_have_filaments)
@@ -828,28 +856,44 @@ bool filament_types_match(const std::string& plate_type, const std::string& slot
     return boost::iequals(a, b);
 }
 
+SlotSendPolicy slot_send_policy(const SlotSendFacts& f)
+{
+    if (!f.probe_ok || !f.slot_unit)
+        // Nobody knows what is in the slots (it did not answer, or answered without them). Where a
+        // print must never start blind, upload only unless the person explicitly chooses to print;
+        // anything else is not ours.
+        return f.slots_required ? SlotSendPolicy::UploadOnlyNoProbe : SlotSendPolicy::NotApplicable;
+    if (f.busy)
+        return SlotSendPolicy::UploadOnlyBusy;
+    // No slot unit feeding this print: nothing to map, nothing to go stale.
+    if (!f.unit_in_use)
+        return SlotSendPolicy::Start;
+    // No used filament known at all is not "nothing to map": T0 still loads from somewhere.
+    if (f.used_filaments <= 0 || f.mapped_filaments < f.used_filaments)
+        return (f.mapped_filaments == 0 && f.as_sliced_ok) ? SlotSendPolicy::StartAsSliced : SlotSendPolicy::NeedsMapping;
+    if (f.type_mismatches > 0)
+        return SlotSendPolicy::ConfirmTypeMismatch;
+    return SlotSendPolicy::Start;
+}
+
 QidiSendPolicy qidi_send_policy(const QidiSendFacts& f)
 {
-    if (!f.probe_ok)
-        // Nobody knows what is in the Box or what value_t<n> says. A model that may carry a Box is
-        // uploaded only unless the person explicitly chooses to print; anything else is not ours.
-        return f.model_may_have_box ? QidiSendPolicy::UploadOnlyNoProbe : QidiSendPolicy::NotApplicable;
-    if (!f.qidi)
-        // It answered, but without the multi_color_controller that names the Box: for a model that
-        // may carry one that is the same as not reading it at all.
-        return f.model_may_have_box ? QidiSendPolicy::UploadOnlyNoProbe : QidiSendPolicy::NotApplicable;
-    if (f.busy)
-        return QidiSendPolicy::UploadOnlyBusy;
+    SlotSendFacts s;
+    // A model that may carry a Box is never started on a Box nobody read.
+    s.slots_required = f.model_may_have_box;
+    s.probe_ok       = f.probe_ok;
+    // It answered, but without the multi_color_controller that names the Box: for a model that may
+    // carry one that is the same as not reading it at all.
+    s.slot_unit = f.qidi;
+    s.busy      = f.busy;
     // No Box plugged in, or switched off for this print (enable_box 0 goes out): the extruder's own
-    // spool feeds every tool, there is no saved slot to go stale.
-    if (!f.box_present || !f.use_box)
-        return QidiSendPolicy::Start;
-    // No used filament known at all is not "nothing to map": T0 still loads from value_t0.
-    if (f.used_filaments <= 0 || f.mapped_filaments < f.used_filaments)
-        return QidiSendPolicy::NeedsMapping;
-    if (f.type_mismatches > 0)
-        return QidiSendPolicy::ConfirmTypeMismatch;
-    return QidiSendPolicy::Start;
+    // spool feeds every tool, there is no saved value_t<n> to go stale.
+    s.unit_in_use      = f.box_present && f.use_box;
+    s.used_filaments   = f.used_filaments;
+    s.mapped_filaments = f.mapped_filaments;
+    s.type_mismatches  = f.type_mismatches;
+    s.as_sliced_ok     = false; // a Box always feeds T<n> from value_t<n>: there is no safe "as sliced"
+    return slot_send_policy(s);
 }
 
 QidiAutoMapping qidi_auto_mapping(const Status& st, const std::vector<SendFilament>& filaments)
