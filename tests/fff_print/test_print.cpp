@@ -840,6 +840,15 @@ std::string strip_gcode_timestamps(const std::string &gcode)
     return out;
 }
 
+// Non-BBL export appends the full config after this marker (GCode.cpp), so two
+// slices that only differ in unused keys will still mismatch if the block is kept.
+std::string gcode_before_config_block(const std::string &gcode)
+{
+    const std::string stripped = strip_gcode_timestamps(gcode);
+    const size_t      pos      = stripped.find("; CONFIG_BLOCK_START");
+    return pos == std::string::npos ? stripped : stripped.substr(0, pos);
+}
+
 size_t count_toolchange(const std::string &gcode, unsigned int extruder_id)
 {
     const std::string needle = "T" + std::to_string(extruder_id);
@@ -1736,4 +1745,28 @@ TEST_CASE("The build height check counts the raft", "[Print][validate][Regressio
                 CHECK(error.find("maximum build volume height") != std::string::npos);
         }
     }
+}
+
+TEST_CASE("Overhang shadow off: G-code is identical to ratio 0", "[Print][OverhangShadow]")
+{
+    const std::string off = gcode_before_config_block(slice({ TestMesh::overhang }, {
+        { "overhang_shadow_inner_wall", "0" },
+        { "overhang_shadow_speed_ratio", "30%" },
+        { "overhang_shadow_distance", "200%" },
+        { "enable_overhang_speed", "1" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops", "3" },
+    }));
+    const std::string zero = gcode_before_config_block(slice({ TestMesh::overhang }, {
+        { "overhang_shadow_inner_wall", "1" },
+        { "overhang_shadow_speed_ratio", "0%" },
+        { "overhang_shadow_distance", "200%" },
+        { "enable_overhang_speed", "1" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops", "3" },
+    }));
+    REQUIRE_FALSE(off.empty());
+    CHECK(off == zero);
 }
