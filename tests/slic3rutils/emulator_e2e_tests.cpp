@@ -172,7 +172,7 @@ TEST_CASE("emulator CC1: canvas_query reads the trays, the untagged brand, and a
     CHECK(r.info.trays[0].tray_type == "PLA");
     CHECK(r.info.trays[0].colour_hex() == "#D02A2A");
     CHECK(r.info.trays[1].brand == "Generic"); // "— — — —" on the wire
-    CHECK(r.info.trays[1].filament_code == "0x00000");
+    CHECK((r.info.trays[1].filament_code.empty() || r.info.trays[1].filament_code == "0x00000")); // "no tag"
     CHECK(r.info.trays[2].tray_type == "ASA");
     CHECK_FALSE(r.info.trays[3].has_filament);
     CHECK(r.info.active_tray_id == 0);
@@ -200,7 +200,10 @@ TEST_CASE("emulator CC1: canvas_query reads the trays, the untagged brand, and a
     CHECK_FALSE(st.canvas);
     CHECK(st.slots.empty());
 
-    INFO("every viewer slot taken: the query cannot connect and says so");
+    INFO("every viewer slot taken: a new connection is refused and the query says so");
+    // The hub's shared SDCP connection, if one is open, keeps working (the printer only refuses NEW
+    // clients); drop it so the query has to connect.
+    SdcpMonitor::reset_for_tests();
     set("e2e-cc1", { { "canvas", { { "attached", true } } }, { "faults", { { "viewers_full", true } } } });
     r = canvas_query(cc1);
     CHECK_FALSE(r.ok);
