@@ -23,6 +23,7 @@
 #include "FlexiJoint.hpp"
 #include "CutRecipe.hpp"
 #include "CostPricing.hpp"
+#include "Showcase/ShowcaseScene.hpp"
 #include "BRep/CadBody.hpp"
 #include "TextureDisplacement.hpp"
 
@@ -1794,6 +1795,10 @@ public:
     // picture share one entry because the key is the content's SHA-256; the 3MF writes each
     // entry once as Metadata/image_fill/<sha256>.png.
     ImageAssetStore image_assets;
+
+    // Showcase tab: the per-plate presentation scenes and their images (Metadata/showcase/ in the
+    // 3MF). A plain value member like image_assets: no object id, not part of undo/redo.
+    Showcase::Project showcase;
 
     //makerlab information
     std::string mk_name;

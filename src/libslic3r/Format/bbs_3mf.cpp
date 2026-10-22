@@ -1378,10 +1378,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         // Image Fill (Phase 2): one Metadata/image_fill/<sha256>.png into Model::image_assets.
         void _extract_image_fill_asset_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
+        // Showcase tab: Metadata/showcase/scenes.json and the images it names, into Model::showcase.
+        void _extract_showcase_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
 
         void _extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, const std::string& archive_filename);
         //BBS: add project config file logic
-        void _extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, Model& model);
+        // False when the settings could not be extracted at all; a load must not go on without them.
+        bool _extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, Model& model);
         //BBS: extract project embedded presets
         void _extract_project_embedded_presets_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, std::vector<Preset*>&project_presets, Model& model, Preset::Type type, bool use_json = true);
 
@@ -1760,7 +1763,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (boost::algorithm::iequals(name, BBS_PROJECT_CONFIG_FILE)) {
                     // extract slic3r print config file
                     ConfigSubstitutionContext config_substitutions(ForwardCompatibilitySubstitutionRule::Disable);
-                    _extract_project_config_from_archive(archive, stat, config, config_substitutions, model);
+                    if (!_extract_project_config_from_archive(archive, stat, config, config_substitutions, model))
+                        return false;
                 }
                 else if (boost::algorithm::iequals(name, BBS_MODEL_CONFIG_FILE)) {
                     // extract slic3r model config file
@@ -2119,7 +2123,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //} else
                 if (boost::algorithm::iequals(name, BBS_PROJECT_CONFIG_FILE)) {
                     // extract slic3r print config file
-                    _extract_project_config_from_archive(archive, stat, config, config_substitutions, model);
+                    if (!_extract_project_config_from_archive(archive, stat, config, config_substitutions, model) && !dont_load_config)
+                        return false;
                 }
                 else if (boost::algorithm::iequals(name, CUT_INFORMATION_FILE)) {
                     // extract object cut info
@@ -2192,6 +2197,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // dropped rather than trusted - the annotation then simply finds no image.
                     if (!boost::algorithm::iequals(name, IMAGE_FILL_MANIFEST_FILE))
                         _extract_image_fill_asset_from_archive(archive, stat, model);
+                }
+                else if (boost::algorithm::istarts_with(name, Showcase::ARCHIVE_DIR)) {
+                    // Showcase scenes and their images. Before the generic Metadata/*.png branch
+                    // below, which would otherwise take a backdrop picture for a plate thumbnail.
+                    _extract_showcase_from_archive(archive, stat, model);
                 }
                 else if (boost::algorithm::istarts_with(name, AUXILIARY_DIR)) {
                     // extract auxiliary directory to temp directory, do nothing for restore
@@ -3363,7 +3373,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     }
 
     //BBS: extract project config from json files
-    void _BBS_3MF_Importer::_extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model& model)
+    bool _BBS_3MF_Importer::_extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model& model)
     {
         if (stat.m_uncomp_size > 0) {
             const std::string& temp_path = model.get_backup_path();
@@ -3373,21 +3383,25 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             mz_bool res = mz_zip_reader_extract_to_file(&archive, stat.m_file_index, dest_zip_file.c_str(), 0);
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", extract  %1% from 3mf %2%, ret %3%\n") % dest_file % stat.m_filename % res;
             if (res == 0) {
-                add_error("Error while extract project config file to file");
-                return;
+                // The backup folder cannot be written. Going on would hand the caller an empty config
+                // for a project that has one, and callers read its options without checking for them.
+                add_error("Error while extract project config file to file " + dest_file);
+                return false;
             }
             std::map<std::string, std::string> key_values;
             std::string reason;
             int ret = config.load_from_json(dest_file, config_substitutions, true, key_values, reason);
             if (ret) {
+                // A damaged settings file stays a warning, as it always was.
                 add_error("Error load config from json:"+reason);
-                return;
+                return true;
             }
             // Edge (Orca #11582): a Bambu Lab project from before the option keeps its M1003.
             if (upgrade_missing_power_loss_recovery(config))
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": project has no enable_power_loss_recovery; Bambu Lab printer, set to enable";
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", load project config file successfully from %1%\n") %dest_file;
         }
+        return true;
     }
 
     //BBS: extract project embedded presets
@@ -4039,6 +4053,47 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         if (!expect.empty() && !boost::iequals(expect, stored))
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": image fill asset " << stat.m_filename
                                        << " does not match its own hash (" << stored << ")";
+    }
+
+    void _BBS_3MF_Importer::_extract_showcase_from_archive(::mz_zip_archive &archive, const mz_zip_archive_file_stat &stat, Model &model)
+    {
+        // Never fatal: a damaged or unknown file just means the project opens without its scenes.
+        if (stat.m_uncomp_size == 0 || stat.m_uncomp_size > 64ull * 1024ull * 1024ull) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase entry " << stat.m_filename << " has an implausible size, skipped";
+            return;
+        }
+        std::vector<uint8_t> bytes(size_t(stat.m_uncomp_size));
+        if (!mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, bytes.data(), bytes.size(), 0)) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not read showcase entry " << stat.m_filename;
+            return;
+        }
+        const std::string name = stat.m_filename;
+        if (boost::algorithm::iequals(name, Showcase::ARCHIVE_SCENES)) {
+            Showcase::Project loaded;
+            std::string       error;
+            if (!Showcase::scenes_from_json(std::string(bytes.begin(), bytes.end()), loaded, &error)) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << error << "; the project opens without showcase scenes";
+                return;
+            }
+            if (loaded.read_only())
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase scenes use schema " << loaded.schema
+                                           << ", newer than this build's " << Showcase::SCHEMA_VERSION << "; kept read-only";
+            // Images read before the scenes file (archive order) stay.
+            loaded.images  = std::move(model.showcase.images);
+            model.showcase = std::move(loaded);
+            return;
+        }
+        std::string sha, ext;
+        if (!Showcase::parse_image_archive_path(name, sha, ext)) {
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": unknown showcase entry " << name << " ignored";
+            return;
+        }
+        // The file name is the content hash; a file whose bytes do not match it is dropped.
+        if (image_fill_sha256_hex(bytes) != sha) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase image " << name << " does not match its own hash, dropped";
+            return;
+        }
+        model.showcase.add_image(std::move(bytes), ext);
     }
 
     void _BBS_3MF_Importer::_extract_custom_gcode_per_print_z_from_archive(::mz_zip_archive &archive, const mz_zip_archive_file_stat &stat)
@@ -6864,6 +6919,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // per distinct pre-cut mesh. The mesh is written ONCE however many objects refer to it,
         // which is what keeps the two halves of one cut to a single copy.
         bool _add_cut_recipe_file_to_archive(mz_zip_archive &archive, Model &model);
+        // Showcase tab: "Metadata/showcase/scenes.json" plus the images the scenes use.
+        bool _add_showcase_to_archive(mz_zip_archive &archive, const Model &model);
         bool _add_slice_info_config_file_to_archive(mz_zip_archive &archive, const Model &model, PlateDataPtrs &plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config);
         // Ultra (H2C 3MF schema): "Metadata/filament_sequence.json" (filament / nozzle entry order).
         bool _add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list);
@@ -7424,6 +7481,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // that carry one, so a project with no editable cut gains nothing at all.
         if (!_add_cut_recipe_file_to_archive(archive, model)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_cut_recipe_file_to_archive failed\n");
+            return false;
+        }
+
+        // Showcase scenes (D9): project saves and backups only. Not in "Export Bambu 3MF" (a file
+        // for another slicer) and not in a sliced-plate file (sent to a printer).
+        if (!m_bambu_compat && !m_skip_model && (!m_save_gcode || m_from_backup_save) && !_add_showcase_to_archive(archive, model)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << ", _add_showcase_to_archive failed";
             return false;
         }
 
@@ -9401,6 +9465,40 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
     // COMPATIBILITY. Neither the recipe nor the blobs are referenced from the main
     // <resources> model, so a slicer that knows nothing about them loads the two halves and
     // ignores these entries - the same contract Metadata/cut_information.xml keeps.
+    bool _BBS_3MF_Exporter::_add_showcase_to_archive(mz_zip_archive &archive, const Model &model)
+    {
+        const Showcase::Project &project = model.showcase;
+        if (project.empty() && !project.read_only())
+            return true;
+        const std::string text = Showcase::scenes_to_json(project);
+        if (!mz_zip_writer_add_mem(&archive, Showcase::ARCHIVE_SCENES, (const void *) text.data(), text.size(), MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add the showcase scenes to archive");
+            return false;
+        }
+        // A read-only (newer schema) project keeps every image it came with: this build cannot tell
+        // which ones its scenes use.
+        std::vector<std::string> images = project.used_images();
+        if (project.read_only()) {
+            images.clear();
+            for (const auto &it : project.images)
+                images.push_back(it.first);
+        }
+        for (const std::string &sha : images) {
+            const Showcase::ImageBlob *blob = project.find_image(sha);
+            if (blob == nullptr) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase image " << sha << " is referenced but not present; not written";
+                continue;
+            }
+            const std::string path = Showcase::image_archive_path(sha, blob->ext);
+            // Stored, not deflated: the payload is already compressed (PNG / JPEG).
+            if (!mz_zip_writer_add_mem(&archive, path.c_str(), (const void *) blob->bytes.data(), blob->bytes.size(), MZ_NO_COMPRESSION)) {
+                add_error("Unable to add a showcase image to archive");
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool _BBS_3MF_Exporter::_add_cut_recipe_file_to_archive(mz_zip_archive &archive, Model &model)
     {
         pt::ptree tree;

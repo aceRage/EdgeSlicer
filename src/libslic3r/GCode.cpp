@@ -534,6 +534,20 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
     return ok;
 }
 
+// Orca #15849 1fe5df7d4e / 733ef2b79f: a heater shared by several filaments stays
+// on until every one of them has finished. Edge has no is_imex, so this is the
+// bounds-checked half of imex_physical_heater_for. In-range physical_extruder_map
+// entries are heaters; out-of-range ids (the default single-entry {0}) pass
+// through as identity so U1 / classic multi-tool stay per-filament. get_at()
+// would clamp every filament onto heater 0 and keep all tools hot until the last
+// one finished. BBL never reaches this helper: pre_toolchange excludes it first.
+static int physical_heater_for(const ConfigOptionInts &pem, int filament_id)
+{
+    if (filament_id < 0 || filament_id >= int(pem.values.size()))
+        return filament_id;
+    return pem.values[size_t(filament_id)];
+}
+
 std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
 {
     std::string gcode;
@@ -545,9 +559,11 @@ std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
     //
     // This is restricted to "true" multi-tool setups where filament id == physical
     // extruder id (classic multi-extruder / IDEX / toolchanger machines with
-    // ooze_prevention enabled). SEMM/AMS/MMU never reach here: init_ooze_prevention()
-    // only sets m_ooze_prevention.enable when single_extruder_multi_material is off, so
-    // (like upstream bcbb8746) there is no separate SEMM check below.
+    // ooze_prevention enabled), plus the shared-heater case below when
+    // physical_extruder_map maps several filaments onto one heater. SEMM/AMS/MMU
+    // never reach here: init_ooze_prevention() only sets m_ooze_prevention.enable
+    // when single_extruder_multi_material is off, so (like upstream bcbb8746)
+    // there is no separate SEMM check below.
     //  - Bambu (H2/H2C/H2D) printers are excluded outright: they map filaments to
     //    physical nozzles through a separate grouping/virtual-filament layer
     //    (MultiNozzleUtils::LayeredNozzleGroupResult, MixedFilamentManager) where
@@ -567,7 +583,15 @@ std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
     if (gcodegen.m_curr_print != nullptr && !gcodegen.is_BBL_Printer() &&
         gcodegen.config().print_sequence == PrintSequence::ByLayer &&
         !gcodegen.m_curr_print->tool_ordering().empty()) {
-        is_last_use = gcodegen.m_curr_print->tool_ordering().is_last_extrusion_layer(print_z, extruder_id);
+        const auto &tool_ordering = gcodegen.m_curr_print->tool_ordering();
+        const auto &pem           = gcodegen.config().physical_extruder_map;
+        const int   heater        = physical_heater_for(pem, int(extruder_id));
+        // 733ef2b79f: start from this filament, then keep the heater on while any
+        // other used filament still maps to it.
+        is_last_use = tool_ordering.is_last_extrusion_layer(print_z, extruder_id);
+        for (unsigned int f : tool_ordering.all_extruders())
+            if (is_last_use && physical_heater_for(pem, int(f)) == heater)
+                is_last_use = tool_ordering.is_last_extrusion_layer(print_z, f);
     }
 
     // From upstream c93acbd2 (bcbb8746 went back to a bare pop_back()): never pop_back() on an
@@ -3288,12 +3312,23 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             if (!full_config.empty())
                 file.write(full_config);
 
-            // SoftFever: write compatiple image
+            // SoftFever: write compatible image. Bed stays the max of used filaments
+            // (Edge always heats to the highest bed temp). Nozzle is the first printing
+            // filament when tool ordering already exists. On a single-filament plate
+            // (no wipe tower; by-object skips ToolOrdering) first_extruder() is empty
+            // / unsigned(-1), so fall back to the first used filament. The U1 trailer
+            // (non-BBL) uses the captured initial_extruder_id below.
             int first_layer_bed_temperature = get_bed_temperature_max(print, true);
+            unsigned int bbl_first_filament = 0;
+            if (const unsigned int fe = print.tool_ordering().first_extruder();
+                !print.tool_ordering().empty() && fe != (unsigned int) -1)
+                bbl_first_filament = fe;
+            else if (const std::vector<unsigned int> used = print.extruders(true); !used.empty())
+                bbl_first_filament = used.front();
             file.write_format("; first_layer_bed_temperature = %d\n", first_layer_bed_temperature);
             file.write_format("; first_layer_temperature = %d\n",
                               get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
-                                           ConfigFlowDomain::Filament, 0));
+                                           ConfigFlowDomain::Filament, bbl_first_filament));
             file.write("; CONFIG_BLOCK_END\n\n");
         } else if (thumbnail_cb != nullptr) {
             // generate the thumbnails
@@ -3484,6 +3519,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         assert(final_extruder_id != (unsigned int) -1);
     }
     print.throw_if_canceled();
+
+    // Taken before the object loop, which reassigns initial_extruder_id when printing by object.
+    // Bed stays the max of used filaments (Edge always heats to the highest bed temp).
+    // U1 / non-BBL writes these at the end of the file; BBL already wrote its CONFIG_BLOCK.
+    int compat_first_layer_bed_temp    = 0;
+    int compat_first_layer_nozzle_temp = 0;
+    if (!is_bbl_printers) {
+        compat_first_layer_bed_temp = get_bed_temperature_max(print, true);
+        compat_first_layer_nozzle_temp =
+            get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
+                         ConfigFlowDomain::Filament, initial_extruder_id);
+    }
 
     // Ultra: fold the first printing filament's Z offset into the job's Z offset
     // (per-filament squish / plate-surface compensation, OrcaSlicer #4660).
@@ -4464,13 +4511,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         if (!full_config.empty())
             file.write(full_config);
 
-        // SoftFever: write compatiple info
-        int first_layer_bed_temperature = get_bed_temperature_max(print, true);
-        file.write_format("; first_layer_bed_temperature = %d\n", first_layer_bed_temperature);
+        // SoftFever: write compatible info. Nozzle temp of the filament the plate starts with,
+        // captured before the by-object loop reassigns initial_extruder_id (Orca #16422).
+        file.write_format("; first_layer_bed_temperature = %d\n", compat_first_layer_bed_temp);
         file.write_format("; bed_shape = %s\n", print.full_print_config().opt_serialize("printable_area").c_str());
-        file.write_format("; first_layer_temperature = %d\n",
-                          get_value_at(print.config(), print.config().nozzle_temperature_initial_layer,
-                                       ConfigFlowDomain::Filament, 0));
+        file.write_format("; first_layer_temperature = %d\n", compat_first_layer_nozzle_temp);
         file.write_format("; first_layer_height = %.3f\n", print.config().initial_layer_print_height.value);
 
         // SF TODO
