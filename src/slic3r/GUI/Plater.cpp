@@ -316,16 +316,69 @@ static std::string filament_display_label(int slot_1based)
 
 // Compose a single comma-separated line of "[n] Preset" labels from a list
 // of 1-based slot numbers. Used inside High/Low temperature group lines.
-static std::string format_filament_slot_list(const std::vector<int>& slots_1based)
+// The separator defaults to the plain English comma; callers that need a
+// locale-aware comma pass a translated separator (e.g. tr_u8(", "), which
+// resolves to the full-width comma in zh_CN).
+static std::string format_filament_slot_list(const std::vector<int>& slots_1based, const std::string& separator = ", ")
 {
     std::string out;
     for (size_t i = 0; i < slots_1based.size(); ++i)
     {
         if (i != 0)
-            out += ", ";
+            out += separator;
         out += filament_display_label(slots_1based[i]);
     }
     return out;
+}
+
+// Post-slice toast for the nozzle-HRC (hardness) mismatch. Filament prompt
+// follows the filament_temp_mixing / cold_plate / flow_ratio_zero banners:
+// translated issue sentence, then a "Filament(s): [n] Preset" line naming the
+// offending slots. warning.params holds 0-based print extruder ids; converted
+// to 1-based slot numbers for filament_display_label.
+// Sync semantics: this toast is pushed at WarningNotificationLevel (duration 0)
+// and its type is not swept by close_slicing_errors_and_warnings(), so only
+// this function can retire it. Always close the previous toast first, then
+// re-push only if the plate's latest slice result still reports an HRC
+// mismatch; otherwise a fixed config or a clean re-slice would leave the
+// stale warning on screen with nothing to clear it.
+static void sync_nozzle_hrc_warning_notification(NotificationManager* nm, PartPlate* plate)
+{
+    if (nm == nullptr)
+        return;
+
+    std::string text;
+    if (plate != nullptr) {
+        GCodeProcessorResult* result = plate->get_slice_result();
+        if (result != nullptr) {
+            for (GCodeProcessorResult::SliceWarning& warning : result->warnings) {
+                if (warning.msg != NOZZLE_HRC_CHECKER)
+                    continue;
+                // Separate from get_slice_warning_string(): SelectMachine still
+                // shows the original translated HRC sentence.
+                const wxString base = _L("The filament is too hard for the current nozzle. Please use a harder nozzle or a softer filament to avoid nozzle wear.");
+
+                std::vector<int> offender_slots_1based;
+                for (const std::string& param : warning.params)
+                    offender_slots_1based.push_back(atoi(param.c_str()) + 1);
+
+                std::string line = into_u8(base);
+                if (!offender_slots_1based.empty()) {
+                    line += "\n";
+                    line += tr_u8("Filament(s):");
+                    line += " ";
+                    line += format_filament_slot_list(offender_slots_1based, tr_u8(", "));
+                }
+                text += line + "\n";
+            }
+        }
+    }
+
+    nm->close_notification_of_type(NotificationType::NozzleHrcWarning);
+    if (!text.empty())
+        nm->push_notification(NotificationType::NozzleHrcWarning,
+            NotificationManager::NotificationLevel::WarningNotificationLevel,
+            text);
 }
 
 // Append the High/Low temperature grouping block (two lines, only groups that
@@ -14223,6 +14276,9 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     this->background_process.stop();
 
     clear_warnings();
+    // The nozzle-HRC toast manages its own lifecycle (its type is not part of
+    // the slicing warning sweep) and must not outlive the project it described.
+    notification_manager->close_notification_of_type(NotificationType::NozzleHrcWarning);
 
     set_project_filename("");
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " call set_project_filename: empty";
@@ -17336,6 +17392,9 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         if (exporting_status == ExportingStatus::EXPORTING_TO_LOCAL && !has_error)
             notification_manager->push_exporting_finished_notification(last_output_path, last_output_dir_path, false);
 
+        if (!has_error && exporting_status == ExportingStatus::NOT_EXPORTING)
+            sync_nozzle_hrc_warning_notification(notification_manager.get(), background_process.get_current_plate());
+
         // BBS, Generate calibration thumbnail for current plate
         if (!has_error && preview) {
             // generate calibration data
@@ -17777,6 +17836,9 @@ void Plater::priv::on_plate_selected(SimpleEvent&)
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received plate selected event\n" ;
     sidebar->obj_list()->on_plate_selected(partplate_list.get_curr_plate_index());
     q->sync_print_seq_warning_notification();
+    // Re-evaluate the nozzle-HRC toast against the newly selected plate's
+    // slice result, so it always describes the current plate (or is gone).
+    sync_nozzle_hrc_warning_notification(notification_manager.get(), partplate_list.get_curr_plate());
 }
 
 void Plater::priv::on_action_request_model_id(wxCommandEvent& evt)
