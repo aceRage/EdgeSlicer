@@ -117,6 +117,11 @@ nlohmann::json result_json(const GCodeProcessorResult& result, const ResultInput
     if (silent > 0.f)
         j["time_silent_s"] = (long long) std::llround(silent);
     j["prepare_time_s"] = (long long) std::llround(ps.modes[size_t(ETimeMode::Normal)].prepare_time);
+    // The layer count from the per-layer times the processor already keeps (GCodeProcessor::finalize):
+    // no G-code reload and nothing shown on the PC. Left out when the result has none.
+    const size_t layers = ps.modes[size_t(ETimeMode::Normal)].layers_times.size();
+    if (layers > 0)
+        j["layers"] = layers;
     if (in.gcode_bytes >= 0)
         j["gcode_bytes"] = in.gcode_bytes;
 
