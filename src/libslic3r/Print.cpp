@@ -715,8 +715,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "preheat_time",
         "delta_temperature",
         "preheat_steps",
-        // Edge: the file header only affects G-code export (upstream falls through to invalidate_all_steps).
+        // Edge: the file header and the config-block switch only affect G-code export
+        // (upstream falls through to invalidate_all_steps).
         "file_start_gcode",
+        "gcode_skip_config_block",
         "machine_start_gcode",
         "filament_start_gcode",
         "change_filament_gcode",

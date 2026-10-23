@@ -3064,6 +3064,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     DoExport::init_gcode_processor(print.config(), m_processor, m_silent_time_estimator_enabled);
     set_mass_locator(m_processor, print);
     const bool is_bbl_printers = print.is_BBL_printer();
+    const bool skip_config_block = print.config().gcode_skip_config_block;
     m_calib_config.clear();
     // Orca: Calibration overrides are reapplied after object/region settings in _extrude().
     // Keep inward wiping from masking retraction and pressure advance artifacts.
@@ -3321,7 +3322,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // as configuration key / value pairs to be parsable by older versions of
     // PrusaSlicer G-code viewer.
     {
-        if (is_bbl_printers) {
+        if (is_bbl_printers && !skip_config_block) {
             file.write("; CONFIG_BLOCK_START\n");
             std::string full_config;
             append_full_config(print, full_config);
@@ -4524,23 +4525,25 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // CONFIG_BLOCK first, time estimate after: some firmwares only scan the last N lines for
         // "estimated printing time", and a large config could push an estimate written before it
         // out of that window.
-        file.write("; CONFIG_BLOCK_START\n");
-        std::string full_config;
-        append_full_config(print, full_config);
-        if (!full_config.empty())
-            file.write(full_config);
+        if (!skip_config_block) {
+            file.write("; CONFIG_BLOCK_START\n");
+            std::string full_config;
+            append_full_config(print, full_config);
+            if (!full_config.empty())
+                file.write(full_config);
 
-        // SoftFever: write compatible info. Nozzle temp of the filament the plate starts with,
-        // captured before the by-object loop reassigns initial_extruder_id (Orca #16422).
-        file.write_format("; first_layer_bed_temperature = %d\n", compat_first_layer_bed_temp);
-        file.write_format("; bed_shape = %s\n", print.full_print_config().opt_serialize("printable_area").c_str());
-        file.write_format("; first_layer_temperature = %d\n", compat_first_layer_nozzle_temp);
-        file.write_format("; first_layer_height = %.3f\n", print.config().initial_layer_print_height.value);
+            // SoftFever: write compatible info. Nozzle temp of the filament the plate starts with,
+            // captured before the by-object loop reassigns initial_extruder_id (Orca #16422).
+            file.write_format("; first_layer_bed_temperature = %d\n", compat_first_layer_bed_temp);
+            file.write_format("; bed_shape = %s\n", print.full_print_config().opt_serialize("printable_area").c_str());
+            file.write_format("; first_layer_temperature = %d\n", compat_first_layer_nozzle_temp);
+            file.write_format("; first_layer_height = %.3f\n", print.config().initial_layer_print_height.value);
 
-        // SF TODO
-        //      file.write_format("; variable_layer_height = %d\n", print.ad.adaptive_layer_height ? 1 : 0);
+            // SF TODO
+            //      file.write_format("; variable_layer_height = %d\n", print.ad.adaptive_layer_height ? 1 : 0);
 
-        file.write("; CONFIG_BLOCK_END\n\n");
+            file.write("; CONFIG_BLOCK_END\n\n");
+        } // !skip_config_block
 
         file.write_format("; total filament used [g] = %.2lf\n", print.m_print_statistics.total_weight);
         if (print.gcode_filament_prices())
