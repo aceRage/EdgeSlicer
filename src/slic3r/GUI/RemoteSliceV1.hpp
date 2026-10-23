@@ -96,17 +96,18 @@ struct SheetFilament
 
 struct SheetTarget
 {
-    std::string id;           // what the wire form names: "<ams>-<slot>" (AMS), else the position ("0", "1", ...)
-    std::string label;        // what the printer calls it: "A1", "T1", "1A"
-    std::string type;
-    std::string color;        // #RRGGBB, "" when unknown or empty
+    std::string id;           // what a filament's `target` names: the label ("A1", "T1", "1A"); the wire form if labels repeat
+    std::string label;        // what the printer calls it
+    std::string type;         // "" = unknown (sent as null)
+    std::string color;        // #RRGGBB, "" when unknown or empty (sent as null)
     bool        ready { false }; // something usable is loaded
     std::string side;         // "L" / "R" on a two-extruder Bambu printer, else ""
+    std::string wire;         // the target in the mapping's wire form: "<ams>-<slot>" (AMS); "" = its position ("0", "1"...)
 };
 
 struct Sheet
 {
-    std::string                mapping_kind { "none" }; // ams | toolheads | canvas | qidi_box | none
+    std::string                mapping_kind { "none" }; // ams | toolheads | canvas | none (a QIDI Box: none, read-only)
     bool                       editable { false };      // the send takes this sheet's mapping back
     std::vector<SheetFilament> filaments;               // the ones the plate prints with
     std::vector<SheetTarget>   targets;
@@ -119,9 +120,10 @@ struct Sheet
     bool                       can_send { true };       // a print would go ahead with this mapping
 };
 
-// The sheet's part of the answer: mapping_kind, editable, filaments [{index, type, color, grams,
-// target (a target id or null), auto, problems []}], targets [{id, label, type, color, ready, side}],
-// mapping, policy, warnings [], can_send.
+// The sheet's part of the answer (EdgeSlicerApp tools/slice_v1/schemas/send_preview.schema.json):
+// mapping_kind, editable, filaments [{index, type, color, grams, target (a target id or null), auto,
+// problems []}], targets [{id, label, type|null, color|null, ready, side, wire}], mapping, policy,
+// problems [], warnings [], can_send.
 nlohmann::json sheet_json(const Sheet& sheet);
 
 // "<filament>:<position>,..." of a choice map (only the filaments with a target): what
@@ -135,7 +137,8 @@ std::string positions_wire(const std::map<int, int>& choice);
 void check_toolheads(Sheet& sheet, bool force);
 
 // The Bambu reprint preview (BambuReprint::evaluate) as a plate sheet: adds mapping_kind "ams",
-// editable, targets (from trays) and per filament color and target. The reprint's own fields
+// editable, targets (from trays: id = the tray's name, wire = "<ams>-<slot>") and per filament color
+// and target (that id). The reprint's own fields
 // (colour, tray, trays, problems, job, options...) stay, so the app's reprint mapping model reads it.
 void decorate_ams_preview(nlohmann::json& preview);
 

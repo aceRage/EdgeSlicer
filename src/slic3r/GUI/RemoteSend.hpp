@@ -169,8 +169,8 @@ std::pair<int, std::string> preview_record(const Request& req, nlohmann::json& o
 // slice_v1 (feature slice_send_preview): a plate send's mapping sheet, before anything is sent -
 // for a Bambu printer the reprint preview's checks and AMS mapping over the plate's own exported
 // .gcode.3mf (the same file a send uploads), for a Snapmaker U1 its toolheads, for an Elegoo CANVAS
-// and a QIDI Box the slot send policy's reading of the printer (read, never written), and "none"
-// for the rest. `out` is the JSON (RemoteSliceV1::sheet_json + printer, plate, mode, options...).
+// and a QIDI Box the slot send policy's reading of the printer (read, never written; a Box is
+// "none" with its slots shown read-only), and "none" for the rest. `out` is the JSON (RemoteSliceV1::sheet_json + printer, plate, mode, options...).
 // Any thread but the GUI one. Refusals as prepare(): 4xx with the reason; mapping problems are in
 // the sheet with can_send false.
 std::pair<int, std::string> preview_plate(const Request& req, nlohmann::json& out);

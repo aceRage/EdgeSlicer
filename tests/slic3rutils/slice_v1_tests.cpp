@@ -291,10 +291,10 @@ SliceV1::Sheet u1_sheet()
     s.mapping_kind = "toolheads";
     s.editable     = true;
     s.filaments    = { { 0, "PLA", "#FFFFFF", 20.5 }, { 1, "PLA", "#101010", 3.25 }, { 3, "PLA", "#FF0000", 1.0 } };
-    s.targets      = { { "0", "T1", "PLA", "#FFFFFF", true, "" },
-                       { "1", "T2", "PETG", "#000000", true, "" },
-                       { "2", "T3", "", "", false, "" },
-                       { "3", "T4", "PLA", "#FF0000", true, "" } };
+    s.targets      = { { "T1", "T1", "PLA", "#FFFFFF", true, "" },
+                       { "T2", "T2", "PETG", "#000000", true, "" },
+                       { "T3", "T3", "", "", false, "" },
+                       { "T4", "T4", "PLA", "#FF0000", true, "" } };
     s.choice       = { { 0, 0 }, { 1, 1 }, { 3, 2 } };
     s.automatic    = { { 0, 0 }, { 1, 3 }, { 3, 3 } };
     return s;
@@ -342,7 +342,7 @@ TEST_CASE("slice_v1 send preview: a plate-level problem (slot policy) is listed 
     SliceV1::Sheet s;
     s.mapping_kind = "canvas";
     s.filaments    = { { 0, "PLA", "#FFFFFF", 5. } };
-    s.targets      = { { "0", "1A", "PETG", "#000000", true, "" } };
+    s.targets      = { { "1A", "1A", "PETG", "#000000", true, "" } };
     s.choice       = { { 0, 0 } };
     s.problems[-1] = { "Filament 1 (PLA) is on tray 1A, which holds PETG." };
     s.policy       = "type_mismatch";
@@ -372,9 +372,9 @@ TEST_CASE("slice_v1 send preview: the Bambu reprint sheet gains the plate sheet'
     CHECK(p["mapping_kind"] == "ams");
     CHECK(p["editable"] == true);
     REQUIRE(p["targets"].size() == 1);
-    CHECK(p["targets"][0] == json::parse(R"({"id": "0-0", "label": "A1", "type": "PLA", "color": "#E6EBE3", "ready": true, "side": ""})"));
+    CHECK(p["targets"][0] == json::parse(R"({"id": "A1", "label": "A1", "type": "PLA", "color": "#E6EBE3", "ready": true, "side": "", "wire": "0-0"})"));
     CHECK(p["filaments"][0]["color"] == "#E6EBE3");
-    CHECK(p["filaments"][0]["target"] == "0-0");
+    CHECK(p["filaments"][0]["target"] == "A1");
     CHECK(p["filaments"][1]["target"].is_null());
     // the reprint's own fields are still there for the app's BambuMapping model
     CHECK(p["filaments"][0]["colour"] == "#E6EBE3");
@@ -392,4 +392,16 @@ TEST_CASE("slice_v1 send preview: the hub proxies the preview route and /pair sa
     CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/send/preview/x"));
     const auto f = RemoteHub::Testing::pair_features();
     CHECK(std::find(f.begin(), f.end(), "slice_send_preview") != f.end());
+}
+
+TEST_CASE("slice_v1 send preview: target ids are unique; a repeated label goes by its wire form", "[SliceV1]")
+{
+    SliceV1::Sheet s;
+    s.filaments = { { 0, "PLA", "#FFFFFF", 1. } };
+    s.targets   = { { "Ext", "Ext", "PLA", "#FFFFFF", true, "L", "254-0" }, { "Ext", "Ext", "PLA", "#FFFFFF", true, "R", "255-0" } };
+    s.choice    = { { 0, 1 } };
+    const json j = SliceV1::sheet_json(s);
+    CHECK(j["targets"][0]["id"] == "254-0");
+    CHECK(j["targets"][1]["id"] == "255-0");
+    CHECK(j["filaments"][0]["target"] == "255-0");
 }

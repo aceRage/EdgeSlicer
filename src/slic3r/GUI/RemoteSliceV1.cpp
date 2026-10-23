@@ -260,9 +260,22 @@ nlohmann::json sheet_json(const Sheet& s)
     nlohmann::json j;
     j["mapping_kind"] = s.mapping_kind;
     j["editable"]     = s.editable;
+    // ids must be unique: a target whose id is empty or repeats goes by its wire form instead.
+    std::vector<std::string> ids, wires;
+    for (size_t i = 0; i < s.targets.size(); ++i) {
+        const SheetTarget& t = s.targets[i];
+        wires.push_back(t.wire.empty() ? std::to_string(i) : t.wire);
+        size_t same = 0;
+        for (const SheetTarget& u : s.targets) same += (u.id == t.id) ? 1 : 0;
+        ids.push_back(t.id.empty() || same > 1 ? wires.back() : t.id);
+    }
+    auto or_null = [](const std::string& v) { return v.empty() ? nlohmann::json(nullptr) : nlohmann::json(v); };
     nlohmann::json tj = nlohmann::json::array();
-    for (const SheetTarget& t : s.targets)
-        tj.push_back({ { "id", t.id }, { "label", t.label }, { "type", t.type }, { "color", t.color }, { "ready", t.ready }, { "side", t.side } });
+    for (size_t i = 0; i < s.targets.size(); ++i) {
+        const SheetTarget& t = s.targets[i];
+        tj.push_back({ { "id", ids[i] }, { "label", t.label }, { "type", or_null(t.type) }, { "color", or_null(t.color) },
+                       { "ready", t.ready }, { "side", t.side }, { "wire", wires[i] } });
+    }
     j["targets"] = tj;
     nlohmann::json fj = nlohmann::json::array();
     for (const SheetFilament& f : s.filaments) {
@@ -273,7 +286,7 @@ nlohmann::json sheet_json(const Sheet& s)
         o["grams"]    = round2(f.grams);
         const auto c   = s.choice.find(f.index);
         const int  pos = c == s.choice.end() ? -1 : c->second;
-        o["target"]   = pos >= 0 && pos < (int) s.targets.size() ? nlohmann::json(s.targets[size_t(pos)].id) : nlohmann::json(nullptr);
+        o["target"]   = pos >= 0 && pos < (int) s.targets.size() ? nlohmann::json(ids[size_t(pos)]) : nlohmann::json(nullptr);
         const auto a   = s.automatic.find(f.index);
         o["auto"]     = pos >= 0 && a != s.automatic.end() && a->second == pos;
         nlohmann::json pj = nlohmann::json::array();
@@ -329,20 +342,34 @@ void decorate_ams_preview(nlohmann::json& p)
 {
     p["mapping_kind"] = "ams";
     p["editable"]     = true;
-    nlohmann::json targets = nlohmann::json::array();
+    // The trays as plate-sheet targets: id = the tray's name ("A1", "HT-A"), wire = its "<ams>-<slot>".
+    std::vector<SheetTarget> trays;
     if (p.contains("trays") && p["trays"].is_array())
-        for (const auto& t : p["trays"])
-            targets.push_back({ { "id", t.value("id", std::string()) },
-                                { "label", t.value("name", std::string()) },
-                                { "type", t.value("type", std::string()) },
-                                { "color", t.value("colour", std::string()) },
-                                { "ready", t.value("ready", false) },
-                                { "side", t.value("side", std::string()) } });
-    p["targets"] = targets;
+        for (const auto& t : p["trays"]) {
+            SheetTarget st;
+            st.id    = t.value("name", std::string());
+            st.label = st.id;
+            st.type  = t.value("type", std::string());
+            st.color = t.value("colour", std::string());
+            st.ready = t.value("ready", false);
+            st.side  = t.value("side", std::string());
+            st.wire  = t.value("id", std::string());
+            trays.push_back(st);
+        }
+    Sheet only_targets;
+    only_targets.targets = trays;
+    p["targets"]         = sheet_json(only_targets)["targets"];
+    std::map<std::string, std::string> id_of_wire;
+    for (const auto& t : p["targets"]) id_of_wire[t.value("wire", std::string())] = t.value("id", std::string());
     if (p.contains("filaments") && p["filaments"].is_array())
         for (auto& f : p["filaments"]) {
-            f["color"]  = f.value("colour", std::string());
-            f["target"] = f.contains("tray") ? f["tray"] : nlohmann::json(nullptr);
+            f["color"] = f.value("colour", std::string());
+            const auto tray = f.find("tray");
+            if (tray != f.end() && tray->is_string()) {
+                const auto it = id_of_wire.find(tray->get<std::string>());
+                f["target"]   = it != id_of_wire.end() ? nlohmann::json(it->second) : nlohmann::json(tray->get<std::string>());
+            } else
+                f["target"] = nullptr;
         }
     if (!p.contains("policy")) p["policy"] = "";
 }

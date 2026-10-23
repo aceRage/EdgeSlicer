@@ -1331,8 +1331,9 @@ static std::vector<SliceV1::SheetTarget> sheet_slots(const std::vector<PrintHost
     std::vector<SliceV1::SheetTarget> out;
     for (size_t i = 0; i < slots.size(); ++i) {
         SliceV1::SheetTarget t;
-        t.id    = std::to_string(i);
         t.label = PrintHostDevices::slot_tile_label(slots, (int) i);
+        t.id    = t.label;
+        t.wire  = std::to_string(i); // the position, what /send's mapping names
         t.type  = slots[i].type;
         t.color = slots[i].loaded ? slots[i].color : std::string();
         t.ready = slots[i].loaded;
@@ -1457,8 +1458,9 @@ std::pair<int, std::string> preview_plate(const Request& req_in, json& out)
         sheet.editable     = true;
         for (size_t i = 0; i < p->toolheads.size(); ++i) {
             SliceV1::SheetTarget t;
-            t.id    = std::to_string(i);
             t.label = "T" + std::to_string(i + 1);
+            t.id    = t.label;
+            t.wire  = std::to_string(i);
             t.type  = p->toolheads[i].type;
             t.color = p->toolheads[i].loaded ? p->toolheads[i].color : std::string();
             t.ready = p->toolheads[i].loaded;
@@ -1521,7 +1523,9 @@ std::pair<int, std::string> preview_plate(const Request& req_in, json& out)
         am.facts.model_may_have_box          = p->qidi_model_box;
         const PrintHostDevices::QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(am.facts);
         if (policy != PrintHostDevices::QidiSendPolicy::NotApplicable) {
-            sheet.mapping_kind = "qidi_box";
+            // The app's contract has no Box kind: "none" (nothing to pick), with the Box's slots and
+            // the automatic mapping shown read-only, and the policy's verdict in can_send.
+            sheet.mapping_kind = "none";
             sheet.editable     = false;
             sheet.targets      = sheet_slots(st.slots);
             // am.mapping is "<filament>:<slot index>,..." (Slot::index, box * 4 + slot).
@@ -1551,7 +1555,7 @@ std::pair<int, std::string> preview_plate(const Request& req_in, json& out)
     out                  = SliceV1::sheet_json(sheet);
     out["plate"]         = req_in.plate;
     out["mode"]          = mode;
-    out["printer"]       = { { "id", req_in.printer }, { "name", p->printer_name }, { "kind", p->kind } };
+    out["printer"]       = { { "id", req_in.printer }, { "name", p->printer_name }, { "kind", p->kind }, { "has_ams", false } };
     out["options"]       = json::object();
     out["unload_at_end"] = unload;
     if (p->kind == "snapmaker")
