@@ -9424,7 +9424,9 @@ void GCode::append_full_config(const Print& print, std::string& str)
     std::vector<int> grouped_nozzle_map, grouped_volume_map;
     const bool       use_grouped_maps = grouping_header_maps(print, grouped_nozzle_map, grouped_volume_map);
     // Sorted list of config keys, which shall not be stored into the G-code. Initializer list.
-    static const std::set<std::string_view> banned_keys({"compatible_printers"sv, "compatible_prints"sv, "print_host"sv,
+    // OrcaSlicer #13507: filament_colour_type crashes the Anycubic Kobra 3 config parser. This fork
+    // has no such option yet; the ban keeps the block safe once a profile sync or port brings it in.
+    static const std::set<std::string_view> banned_keys({"compatible_printers"sv, "compatible_prints"sv, "filament_colour_type"sv, "print_host"sv,
                                                          "print_host_webui"sv, "printhost_apikey"sv, "printhost_cafile"sv,
                                                          "printhost_user"sv, "printhost_password"sv, "printhost_port"sv});
     auto                                    is_banned = [](const std::string& key) { return banned_keys.find(key) != banned_keys.end(); };
