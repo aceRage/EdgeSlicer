@@ -404,6 +404,8 @@ inline bool is_bbl_special_tool_command(int tool_number)
             Wipe_Tower_Start,
             Wipe_Tower_End,
             PA_Change,
+            Print_Time_Sec_Placeholder,
+            Used_Filament_Length_Placeholder,
         };
 
         static const std::string& reserved_tag(ETags tag) { return s_IsBBLPrinter ? Reserved_Tags[static_cast<unsigned char>(tag)] : Reserved_Tags_compatible[static_cast<unsigned char>(tag)]; }
