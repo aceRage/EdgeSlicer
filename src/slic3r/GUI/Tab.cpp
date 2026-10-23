@@ -2822,6 +2822,7 @@ void TabPrint::build()
 	    optgroup->append_single_option_line("internal_bridge_flow", "quality_settings_bridging#flow-ratio");
         optgroup->append_single_option_line("bridge_density", "quality_settings_bridging#bridge-density");
         optgroup->append_single_option_line("internal_bridge_density", "quality_settings_bridging#bridge-density");
+        optgroup->append_single_option_line("bridge_expansion_extra");
         optgroup->append_single_option_line("thick_bridges", "quality_settings_bridging#thick-bridges");
         optgroup->append_single_option_line("thick_internal_bridges", "quality_settings_bridging#thick-bridges");
         optgroup->append_single_option_line("enable_extra_bridge_layer", "quality_settings_bridging#extra-bridge-layers");
@@ -2935,6 +2936,9 @@ void TabPrint::build()
         optgroup = page->new_optgroup(L("Overhang speed"), L"param_overhang_speed", 15);
         optgroup->append_single_option_line("enable_overhang_speed", "speed_settings_overhang_speed#slow-down-for-overhang");
         optgroup->append_single_option_line("slowdown_for_curled_perimeters", "speed_settings_overhang_speed#slow-down-for-curled-perimeters");
+        optgroup->append_single_option_line("overhang_shadow_inner_wall");
+        optgroup->append_single_option_line("overhang_shadow_speed_ratio");
+        optgroup->append_single_option_line("overhang_shadow_distance");
         Line line = { L("Overhang speed"), L("This is the speed for various overhang degrees. Overhang degrees are expressed as a percentage of line width. 0 speed means no slowing down for the overhang degree range and wall speed is used") };
         line.label_path = "slow-down-for-overhang";
         line.append_option(optgroup->get_option("overhang_1_4_speed"));
@@ -8006,7 +8010,7 @@ void Tab::delete_preset()
         for (auto &preset2 : *m_presets)
             if (preset2.inherits() == current_preset.name) {
                 ++count;
-                presets += "\n - " + preset2.name;
+                presets += "\n - " + from_u8(preset2.name); // preset names are UTF-8 (OrcaSlicer #15419)
             }
         if (count > 0) {
             msg = _L("Presets inherited by other presets cannot be deleted!");

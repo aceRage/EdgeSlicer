@@ -1200,7 +1200,7 @@ static std::vector<std::string> s_Preset_print_options {
     "ooze_prevention", "standby_temperature_delta", "preheat_time","delta_temperature","preheat_steps", "interface_shells", "line_width", "initial_layer_line_width", "inner_wall_line_width",
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
     "skin_infill_line_width","skeleton_infill_line_width", "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces",
-    "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "internal_bridge_flow",
+    "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "bridge_expansion_extra", "internal_bridge_flow",
     "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "resolution", "enable_prime_tower", "preload_all_filaments",
     "prime_tower_width", "prime_tower_brim_width", "prime_volume", "prime_tower_brim_chamfer", "prime_tower_brim_chamfer_max_width",
     "wipe_tower_no_sparse_layers", "compatible_printers", "compatible_printers_condition", "inherits",
@@ -1211,7 +1211,7 @@ static std::vector<std::string> s_Preset_print_options {
      "tree_support_branch_diameter", "tree_support_branch_diameter_angle",
      "detect_narrow_internal_solid_infill",
      "gcode_add_line_number", "enable_arc_fitting", "precise_z_height", "infill_combination","infill_combination_max_layer_height", /*"adaptive_layer_height",*/
-     "support_bottom_interface_spacing", "enable_overhang_speed", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
+     "support_bottom_interface_spacing", "enable_overhang_speed", "overhang_shadow_inner_wall", "overhang_shadow_speed_ratio", "overhang_shadow_distance", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
      "layer_time_speed_smoothing", "layer_time_speed_max_variation", "layer_time_speed_max_speedup",
      "layer_time_speed_max_slowdown", "layer_time_speed_max_time_increase", "layer_time_speed_slowdown_scope",
      "initial_layer_infill_speed", "only_one_wall_top", 
@@ -1545,10 +1545,23 @@ void PresetCollection::load_presets(
     // Store the loaded presets into a new vector, otherwise the binary search for already existing presets would be broken.
     // (see the "Preset already present, not loading" message).
     std::deque<Preset> presets_loaded;
-    //BBS: change to json format
+    // A user preset may inherit another user preset of this same folder (a "detached" parent that
+    // lives beside its children). Those parents are only in presets_loaded until the loop is done,
+    // and the directory order is arbitrary, so a child whose parent is not there yet is deferred and
+    // retried for as long as a round loads something. What is still unresolved after that has a
+    // parent that does not exist, and is reported as before.
+    std::vector<boost::filesystem::path> pending_files;
     for (auto &dir_entry : boost::filesystem::directory_iterator(dir))
+        pending_files.push_back(dir_entry.path());
+    std::vector<boost::filesystem::path> deferred_files;
+    bool final_round = false;
+    for (;;) {
+    deferred_files.clear();
+    const size_t loaded_before_round = presets_loaded.size();
+    //BBS: change to json format
+    for (const boost::filesystem::path &entry_path : pending_files)
     {
-        std::string file_name = dir_entry.path().filename().string();
+        std::string file_name = entry_path.filename().string();
         //if (Slic3r::is_ini_file(dir_entry)) {
         if (Slic3r::is_json_file(file_name)) {
             // One tick per user preset file, so a splash animation keeps moving here too.
@@ -1557,7 +1570,8 @@ void PresetCollection::load_presets(
             std::string name = file_name.erase(file_name.size() - 5);
             try {
                 Preset preset(m_type, name, false);
-                preset.file = dir_entry.path().string();
+                preset.file = entry_path.string();
+                const size_t substitutions_before = substitutions.size();
                 // Load the preset file, apply preset values on top of defaults.
                 try {
                     fs::path idx_path(preset.file);
@@ -1630,6 +1644,14 @@ void PresetCollection::load_presets(
                         std::string inherits_value = option_str->value;
                         // Orca: try to find if the parent preset has been renamed
                         inherit_preset = this->find_preset2(inherits_value);
+                        if (inherit_preset == nullptr && !inherits_value.empty()) {
+                            // The parent may be another user preset of this folder, loaded earlier in this pass.
+                            for (Preset &loaded : presets_loaded)
+                                if (loaded.name == inherits_value) {
+                                    inherit_preset = &loaded;
+                                    break;
+                                }
+                        }
 
                     } else {
                         ;
@@ -1643,6 +1665,12 @@ void PresetCollection::load_presets(
                         // We support custom root preset now
                         auto inherits_config2 = dynamic_cast<ConfigOptionString *>(inherits_config);
                         if ((inherits_config2 && !inherits_config2->value.empty()) && !preset.is_custom_defined()) {
+                            if (!final_round) {
+                                // Maybe its parent is a user preset of this folder that is not loaded yet.
+                                substitutions.erase(substitutions.begin() + substitutions_before, substitutions.end());
+                                deferred_files.push_back(entry_path);
+                                continue;
+                            }
                             BOOST_LOG_TRIVIAL(error) << boost::format("can not find parent for config %1%!")%preset.file;
                             ++m_errors;
                             continue;
@@ -1691,6 +1719,12 @@ void PresetCollection::load_presets(
                 errors_cummulative += "\n";
             }
         }
+    }
+    if (deferred_files.empty() || final_round)
+        break;
+    if (presets_loaded.size() == loaded_before_round)
+        final_round = true;
+    pending_files = deferred_files;
     }
     if (presets_loaded.size() > 0)
         m_presets.insert(m_presets.end(), std::make_move_iterator(presets_loaded.begin()), std::make_move_iterator(presets_loaded.end()));
@@ -2893,6 +2927,9 @@ void PresetCollection::save_current_preset(const std::string &new_name, bool det
     Preset curr_preset = _curr_preset ? *_curr_preset : m_edited_preset;
     //BBS: add lock logic for sync preset in background
     std::string final_inherits;
+    // Detaching an existing preset moves its file from the user folder into base/; the old copy is
+    // removed once the new one is written.
+    std::string old_file_after_detach;
     lock();
     // 1) Find the preset with a new_name or create a new one,
     // initialize it with the edited config.
@@ -2921,6 +2958,15 @@ void PresetCollection::save_current_preset(const std::string &new_name, bool det
 			preset.renamed_from.clear();
             preset.m_excluded_from.clear();
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": save preset %1% , with detach")%new_name;
+            // A base preset is kept in base/ (path_for_preset): a preset that was attached to a parent
+            // sits one folder up, where a reload would still find it, but beside its own children.
+            if (!preset.is_project_embedded && !preset.file.empty()) {
+                const std::string new_file = this->path_for_preset(preset);
+                if (new_file != preset.file) {
+                    old_file_after_detach = preset.file;
+                    preset.file           = new_file;
+                }
+            }
         }
         //BBS: add lock logic for sync preset in background
 
@@ -3010,10 +3056,20 @@ void PresetCollection::save_current_preset(const std::string &new_name, bool det
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " base_id: " << parent_preset->setting_id;
         }
     }
+    bool saved = false;
     if (parent_preset)
-        this->get_selected_preset().save(&(parent_preset->config));
+        saved = this->get_selected_preset().save(&(parent_preset->config));
     else
-        this->get_selected_preset().save(nullptr);
+        saved = this->get_selected_preset().save(nullptr);
+    if (saved && !old_file_after_detach.empty() && old_file_after_detach != this->get_selected_preset().file) {
+        // The detached preset now lives in base/: drop the copy it left behind, with its .info.
+        InstanceLock instance_lock(user_presets_lock_path());
+        boost::system::error_code ec;
+        fs::remove(fs::path(old_file_after_detach), ec);
+        fs::path old_info(old_file_after_detach);
+        old_info.replace_extension(".info");
+        fs::remove(old_info, ec);
+    }
 }
 
 // Ultra: see ProjectPresetPrinters. Kept apart from save_current_preset() so a later "carry the
