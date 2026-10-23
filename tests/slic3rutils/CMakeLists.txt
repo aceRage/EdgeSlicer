@@ -121,6 +121,7 @@ add_executable(${_TEST_NAME}_tests
     ff_device_pid_tests.cpp
     emboss_font_search_tests.cpp
     imgui_font_ranges_tests.cpp
+    imgui_tooltip_utf8_tests.cpp
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
     printer_storage_tests.cpp
