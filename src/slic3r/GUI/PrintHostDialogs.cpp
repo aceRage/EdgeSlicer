@@ -667,7 +667,14 @@ void PrintHostSendDialog::refresh_device_status()
             text = format_wxstr(_L("Status: %1%"), from_u8(m_device_status.state));
         else if (m_device_status.probed && !m_device_status.online)
             text = _L("Status: unknown");
-        if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
+        if (m_device_status.qidi_box_inconsistent) {
+            if (!text.IsEmpty())
+                text += "  ";
+            // The Box answer does not add up: say what, and that only an upload goes out.
+            text += _L("The QIDI Box's answer does not add up, so no slot is picked and the print is not started; the "
+                       "file can still be uploaded.") +
+                    " (" + from_u8(m_device_status.qidi_box_problem) + ")";
+        } else if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
             if (!text.IsEmpty())
                 text += "  ";
             // The honest sentence: this protocol has no filament data, so there is nothing to map.
@@ -733,6 +740,7 @@ PrintHostDevices::QidiSendFacts PrintHostSendDialog::qidi_send_facts() const
     f.box_present = m_device_status.qidi_box;
     f.busy        = PrintHostDevices::busy_printing(m_device_status.state);
     f.use_box     = m_qidi_use_box ? m_qidi_use_box->GetValue() : m_device_status.qidi_box;
+    f.box_inconsistent = m_device_status.qidi_box_inconsistent;
     for (const SendPlateFilament& p : m_plate_filaments)
         if (p.used)
             ++f.used_filaments;
@@ -744,6 +752,8 @@ PrintHostDevices::QidiSendFacts PrintHostSendDialog::qidi_send_facts() const
         if (pos < 0 || pos >= (int) m_device_status.slots.size())
             continue;
         ++f.mapped_filaments;
+        if (!m_device_status.slots[pos].loaded)
+            ++f.mapped_to_empty;
         const SendPlateFilament* p = plate_filament(m_mapping_filament[i]);
         if (!PrintHostDevices::filament_types_match(p ? p->type : std::string(), m_device_status.slots[pos].type))
             ++f.type_mismatches;
@@ -780,6 +790,11 @@ wxString PrintHostSendDialog::qidi_mapping_problems(bool& unmapped, bool& mismat
             continue;
         }
         const PrintHostDevices::Slot& s = m_device_status.slots[pos];
+        if (!s.loaded) {
+            mismatched = true;
+            add(format_wxstr(_L("%1% goes to %2%, which the printer reports as empty."), filament_name(p), from_u8(s.label())));
+            continue;
+        }
         if (!PrintHostDevices::filament_types_match(p.type, s.type)) {
             mismatched = true;
             add(format_wxstr(_L("%1% goes to %2%, which holds %3%."), filament_name(p), from_u8(s.label()),
@@ -837,6 +852,10 @@ bool PrintHostSendDialog::confirm_qidi_start()
 {
     using PrintHostDevices::QidiSendPolicy;
     const QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(qidi_send_facts());
+    // What this send saw in the Box, slot by slot, for the log a report comes with.
+    if (m_device_status.qidi)
+        BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: " << PrintHostDevices::describe_qidi_box(m_device_status) << " (policy "
+                                   << (int) policy << ", mapping '" << filament_mapping() << "')";
     switch (policy) {
     case QidiSendPolicy::NotApplicable: {
         // Any other printer that names what is in its slots (a CANVAS, a U1's toolheads): a
@@ -883,6 +902,32 @@ bool PrintHostSendDialog::confirm_qidi_start()
         BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: QIDI Box material mismatch, " << (anyway ? "printed anyway" : "not started");
         return anyway;
     }
+    case QidiSendPolicy::MappedToEmpty: {
+        bool           unmapped = false, mismatched = false;
+        const wxString lines    = qidi_mapping_problems(unmapped, mismatched);
+        wxString       msg      = _L("The print was not started: a filament would be fed from a QIDI Box slot the printer reports "
+                                     "as empty.");
+        if (!lines.IsEmpty())
+            msg += "\n\n" + lines;
+        msg += "\n\n" + _L("Pick a loaded slot for every filament, or press Upload to send the file without starting it.");
+        MessageDialog(this, msg, _L("QIDI Box"), wxOK | wxICON_WARNING).ShowModal();
+        BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: QIDI Box print not started, a filament is mapped to an empty slot";
+        return false;
+    }
+    case QidiSendPolicy::UploadOnlyInconsistent: {
+        const wxString msg = _L("The QIDI Box's answer does not add up, so no slot can be trusted and the print is not "
+                                "started:") +
+                             "\n\n" + from_u8(m_device_status.qidi_box_problem) + "\n\n" +
+                             _L("Upload the file only, and check the Box on the printer's screen before starting it there.");
+        QidiStartQuestion q(this, msg, _L("Upload only"), _L("Cancel"), false);
+        if (q.ShowModal() == wxID_YES) {
+            post_upload_action = PrintHostPostUploadAction::None;
+            BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: QIDI Box answer inconsistent, uploaded only";
+            return true;
+        }
+        BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: QIDI Box answer inconsistent, not sent";
+        return false;
+    }
     case QidiSendPolicy::UploadOnlyNoProbe: {
         const wxString msg = _L("Couldn't read the QIDI Box. Without it this slicer cannot tell the printer which slot feeds "
                                 "each filament, and the printer would use whatever slots it was told for its last print - "
@@ -920,7 +965,10 @@ void PrintHostSendDialog::rebuild_mapping_rows()
     m_mapping_filament.clear();
     m_mapping_sizer->Clear(true);
 
-    const bool can_map = m_device_status.slots_have_filaments && !m_device_status.slots.empty() && !m_plate_filaments.empty();
+    // A QIDI Box answer that does not add up is never offered for mapping: no slot number in it is
+    // trusted (the device note says why, and the start is refused as upload only).
+    const bool can_map = m_device_status.slots_have_filaments && !m_device_status.slots.empty() && !m_plate_filaments.empty() &&
+                         !m_device_status.qidi_box_inconsistent;
     if (!can_map) {
         m_mapping_panel->Show(false);
         m_mapping_panel->Layout();
