@@ -38,6 +38,7 @@ struct StringObjectException
     ObjectBase const *object = nullptr;
     std::string opt_key;
     StringExceptionType         type = STRING_EXCEPT_NOT_DEFINED;   // warning type for tips
+    bool is_warning = false;
     std::vector<std::string>    params; // warning params for tips
 };
 
