@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -10,6 +11,7 @@
 #include "BambuSendDiagnosis.hpp"
 #include "GcodeArchive.hpp"
 #include "SnapmakerLan.hpp"
+#include "slic3r/Utils/ElegooCanvasMapping.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
@@ -85,6 +87,15 @@ struct Prepared
     bool                     qidi_guard { false };
     bool                     qidi_model_box { false };
     PrintHostDevices::Device qidi_device {};
+    // A print on an Elegoo Centauri Carbon 1 (Elegoo Link): run() reads the printer first (its
+    // status and CANVAS, over the hub's on-demand SDCP connection), refuses a busy printer before
+    // anything is uploaded, and maps the filaments to CANVAS trays the way the desktop dialog does
+    // (the remembered tray, else the closest colour; ElegooCanvasMapping::plan_unattended_send).
+    // canvas_mapping: filament -> tray position the request named (-1 = as sliced); empty = auto.
+    bool                                           canvas_guard { false };
+    PrintHostDevices::Device                       canvas_device {};
+    std::vector<ElegooCanvasMapping::UsedFilament> canvas_used;
+    std::map<int, int>                             canvas_mapping;
     // Snapmaker over the LAN (Moonraker HTTP): no host object, just the printer and the mapping.
     SnapmakerLan::Device                    lan {};
     std::string                             lan_filename;

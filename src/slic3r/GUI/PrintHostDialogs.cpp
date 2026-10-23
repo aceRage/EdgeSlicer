@@ -871,7 +871,8 @@ bool PrintHostSendDialog::confirm_qidi_start()
         BOOST_LOG_TRIVIAL(warning) << "PrintHostSendDialog: slot material mismatch, " << (anyway ? "printed anyway" : "not started");
         return anyway;
     }
-    case QidiSendPolicy::Start: return true;
+    case QidiSendPolicy::Start:
+    case QidiSendPolicy::StartAsSliced: return true; // never from qidi_send_policy
     case QidiSendPolicy::UploadOnlyBusy: {
         MessageDialog(this, _L("This printer is busy with a print, so this plate can be uploaded but not started."), _L("QIDI Box"),
                       wxOK | wxICON_WARNING)
