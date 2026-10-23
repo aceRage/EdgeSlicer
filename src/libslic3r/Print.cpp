@@ -721,6 +721,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "gcode_skip_config_block",
         "machine_start_gcode",
         "filament_start_gcode",
+        // Edge: OrcaSlicer #11784's process / filament role-change templates only affect G-code export.
+        "process_change_extrusion_role_gcode",
+        "filament_change_extrusion_role_gcode",
         "change_filament_gcode",
         "wipe",
         // BBS
