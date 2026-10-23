@@ -155,6 +155,10 @@ struct CanvasQueryResult
     bool        reached   = false;   // the printer accepted a connection at all
     std::string error;               // why not ok, for the log and the dialogs (English)
     CanvasInfo  info;
+    // What the status (Cmd 0) said the machine is doing, in Sdcp::hub_state's words ("standby",
+    // "printing", "paused", ...); "" when no status frame said. The unattended send checks it before
+    // anything is uploaded (RemoteSend), as the QIDI path checks print_stats.
+    std::string print_state;
 };
 
 struct CanvasQueryOptions

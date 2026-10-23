@@ -3,6 +3,7 @@ add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     printhost_devices_tests.cpp
     qidi_send_policy_tests.cpp
+    slot_send_policy_tests.cpp
     printhost_error_tests.cpp
     snapmaker_unload_tests.cpp
     snapmaker_probe_tests.cpp
@@ -13,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
     device_model_code_tests.cpp
     login_useragent_tests.cpp
     hub_home_tests.cpp
+    hub_mosaic_tests.cpp
     hub_handover_tests.cpp
     hub_quit_tests.cpp
     web_load_retry_tests.cpp
