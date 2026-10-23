@@ -3,7 +3,10 @@
 #include "ShowcaseRenderer.hpp"
 #include "ShowcaseTextures.hpp"
 
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Showcase/ShowcaseEncoder.hpp"
 #include "libslic3r/Showcase/ShowcaseWebP.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -15,18 +18,21 @@
 #include "../OpenGLManager.hpp"
 #include "../PartPlate.hpp"
 #include "../Plater.hpp"
+#include "../Widgets/StateColor.hpp"
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
 #include <wx/choice.h>
 #include <wx/clipbrd.h>
 #include <wx/clrpicker.h>
+#include <wx/cursor.h>
 #include <wx/dataobj.h>
 #include <wx/dcclient.h>
 #include <wx/filedlg.h>
 #include <wx/filename.h>
 #include <wx/fontpicker.h>
 #include <wx/glcanvas.h>
+#include <wx/menu.h>
 #include <wx/scrolwin.h>
 #include <wx/settings.h>
 #include <wx/sizer.h>
@@ -38,6 +44,8 @@
 #include <wx/textdlg.h>
 #include <wx/utils.h>
 
+#include <limits>
+
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -45,7 +53,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
+#include <unordered_map>
 
 namespace Slic3r {
 namespace GUI {
@@ -138,8 +148,28 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
     m_renderer->set_watermark_provider([this](int w, int h, ShowcaseImage &mark, Showcase::RectI &where) {
         return showcase_rasterize_watermark(scene().export_settings.watermark, project(), w, h, mark, where);
     });
+    // S3: the filament callouts over the live view, their GL work and their mouse handling.
+    m_renderer->set_callout_provider([this](int w, int h, ShowcaseImage &image) { return callouts_rasterize(w, h, image); },
+                                     [this]() { return m_callouts.version * 1000003ull + m_co_video_rev; });
+    m_renderer->set_before_frame([this]() { callouts_before_frame(); });
+    m_renderer->set_mouse_handler([this](wxMouseEvent &evt) {
+        // S4: a video being written owns the view; a preview or a peek ends at the first click or wheel.
+        if (video_busy())
+            return true;
+        if (m_video.borrowed && (evt.ButtonDown() || evt.GetWheelRotation() != 0))
+            video_restore_view();
+        return callouts_on_mouse(evt);
+    });
+    // A callout drag holds the mouse; losing it ends the drag where it is.
+    m_canvas_widget->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent &evt) {
+        m_callouts.drag = CalloutUi::Drag::None;
+        evt.Skip();
+    });
 
     m_watermark_presets.load();
+    load_callout_styles();
+    m_video_timer.SetOwner(this);
+    Bind(wxEVT_TIMER, &ShowcaseView::on_video_timer, this, m_video_timer.GetId());
 
     build_panel();
 
@@ -212,6 +242,10 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
 
 ShowcaseView::~ShowcaseView()
 {
+    // S4: a video still being written stops (its partial file goes).
+    m_video_timer.Stop();
+    if (m_video.worker)
+        m_video.worker->cancel();
     m_renderer.reset();
     delete m_canvas;
     delete m_canvas_widget;
@@ -274,8 +308,10 @@ template<class F> void ShowcaseView::edit(F &&change, bool resync)
 
 void ShowcaseView::after_change(bool resync)
 {
+    note_frame_height(scene());
     m_renderer->set_scene(&scene(), &project());
     m_renderer->invalidate_watermark();
+    ++m_callouts.version;
     mark_project_dirty();
     if (resync)
         sync_controls();
@@ -313,7 +349,8 @@ void ShowcaseView::apply_scene_camera()
 
 void ShowcaseView::store_scene_camera(bool mark_dirty)
 {
-    if (read_only())
+    // S4: a preview's camera is borrowed, never the scene's.
+    if (read_only() || m_video.borrowed)
         return;
     Camera              &camera = wxGetApp().plater()->get_camera();
     Showcase::CameraView v;
@@ -325,6 +362,7 @@ void ShowcaseView::store_scene_camera(bool mark_dirty)
     v.up     = { up.x(), up.y(), up.z() };
     v.zoom   = camera.get_zoom();
     Showcase::Scene &s = scene();
+    note_frame_height(s);
     if (s.camera == v)
         return;
     s.camera = v;
@@ -349,6 +387,8 @@ void ShowcaseView::on_activate()
     m_renderer->invalidate_layers();
     refresh_plates();
     apply_scene_camera();
+    // S3: the filament assignments may have changed too, and so may the slice's weights.
+    callouts_sync(false);
     sync_controls();
 }
 
@@ -356,8 +396,17 @@ void ShowcaseView::on_deactivate()
 {
     if (!m_active)
         return;
+    video_cancel();
+    video_restore_view();
     store_scene_camera(true);
     m_active = false;
+    // S5: the toolpath source borrowed Preview's viewer.
+    if (m_renderer != nullptr)
+        m_renderer->set_build(-1., Showcase::BuildSource::Auto);
+    ShowcaseRenderer::release_toolpaths();
+    m_callouts.drag = CalloutUi::Drag::None;
+    if (m_canvas_widget != nullptr && m_canvas_widget->HasCapture())
+        m_canvas_widget->ReleaseMouse();
     if (m_has_saved_camera) {
         // The editing views get their camera (and the preference hook) back exactly as they left it.
         wxGetApp().plater()->get_camera() = m_saved_camera;
@@ -367,15 +416,20 @@ void ShowcaseView::on_deactivate()
 
 void ShowcaseView::on_project_changed()
 {
+    video_cancel();
+    m_video.borrowed = false;   // the scene it belonged to is gone
+    m_video.previewing = false;
     m_draft_plate = -1;
     if (m_renderer == nullptr)
         return;
     m_renderer->set_scene(&scene(), &project());
     m_renderer->invalidate_images();
+    m_callouts.selected = -1;
     if (m_active) {
         m_plate = current_plate();
         refresh_plates();
         apply_scene_camera();
+        callouts_sync(false);
         sync_controls();
     }
 }
@@ -395,6 +449,13 @@ void ShowcaseView::on_idle_check()
 // Another plate became current: its own scene, with its own camera.
 void ShowcaseView::on_plate_switched()
 {
+    video_cancel();
+    if (m_video.borrowed) {
+        // The plate being left gets its own camera back, not the preview's.
+        wxGetApp().plater()->get_camera() = m_video.saved_camera;
+        m_video.borrowed   = false;
+        m_video.previewing = false;
+    }
     // Keep the camera of the plate being left (current_plate() already names the new one).
     const int new_plate = current_plate();
     if (!read_only()) {
@@ -416,8 +477,11 @@ void ShowcaseView::on_plate_switched()
     }
     m_plate = new_plate;
     m_renderer->set_scene(&scene(), &project());
+    m_callouts.selected = -1;
+    m_callouts.drag     = CalloutUi::Drag::None;
     refresh_plates();
     apply_scene_camera();
+    callouts_sync(false);
     sync_controls();
 }
 
@@ -449,6 +513,7 @@ void ShowcaseView::on_change_color_mode(bool is_dark)
     if (m_canvas != nullptr)
         m_canvas->on_change_color_mode(is_dark);
     wxGetApp().UpdateDarkUIWin(this);
+    apply_section_header_colours();
     Refresh();
     if (m_sash != nullptr)
         m_sash->Refresh();
@@ -465,16 +530,15 @@ void ShowcaseView::build_panel()
     // user drags the sash to. Sideways scrolling only shows where the window is too narrow for that.
     m_side = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxSize(32 * em, -1), wxVSCROLL | wxHSCROLL);
     m_side->SetScrollRate(em, em);
-    auto *col = new wxBoxSizer(wxVERTICAL);
+    auto *root  = new wxBoxSizer(wxVERTICAL);
+    m_side_root = root;
+    m_sections.clear();
+    // Rows go into the current section's sizer (S5b: each section folds).
+    wxBoxSizer *col = root;
 
-    auto header = [this, col, em](const wxString &title) {
-        auto *t = new wxStaticText(m_side, wxID_ANY, title);
-        t->SetFont(wxGetApp().bold_font());
-        col->Add(t, 0, wxLEFT | wxRIGHT | wxTOP, em);
-        col->Add(new wxStaticLine(m_side), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em / 2);
-    };
+    auto header = [this, root, &col](const wxString &title, const char *key) { col = add_panel_section(root, title, key); };
     wxFlexGridSizer *grid = nullptr;
-    auto begin_grid = [&grid, col, em]() {
+    auto begin_grid = [&grid, &col, em]() {
         grid = new wxFlexGridSizer(2, em / 2, em);
         grid->AddGrowableCol(1, 1);
         col->Add(grid, 0, wxEXPAND | wxALL, em);
@@ -498,7 +562,7 @@ void ShowcaseView::build_panel()
     col->Add(m_notice, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em);
 
     // --- Scene ---------------------------------------------------------------------------------
-    header(_L("Scene"));
+    header(_L("Scene"), "scene");
     begin_grid();
     m_plates = named_choice();
     row(_L("Plate"), m_plates);
@@ -516,7 +580,7 @@ void ShowcaseView::build_panel()
     grid->Add(m_hide_wipe_tower);
 
     // --- Background ----------------------------------------------------------------------------
-    header(_L("Background"));
+    header(_L("Background"), "background");
     begin_grid();
     wxArrayString bg_types;
     bg_types.Add(_L("Solid colour"));
@@ -545,7 +609,7 @@ void ShowcaseView::build_panel()
     row(_L("Blur"), m_bg_blur);
 
     // --- Floor ---------------------------------------------------------------------------------
-    header(_L("Floor"));
+    header(_L("Floor"), "floor");
     begin_grid();
     wxArrayString floor_types;
     floor_types.Add(_L("None"));
@@ -581,7 +645,7 @@ void ShowcaseView::build_panel()
     row(_L("Contact shadow"), m_floor_contact);
 
     // --- Light ---------------------------------------------------------------------------------
-    header(_L("Light"));
+    header(_L("Light"), "light");
     begin_grid();
     m_light_fixed = new wxCheckBox(m_side, wxID_ANY, _L("Fixed in the scene"));
     m_light_fixed->SetToolTip(_L("The light stays put when you orbit, so the shadows do too. Off: the light follows the camera."));
@@ -638,7 +702,7 @@ void ShowcaseView::build_panel()
     row(_L("Exposure"), m_exposure);
 
     // --- Materials (D4) -----------------------------------------------------------------------
-    header(_L("Materials"));
+    header(_L("Materials"), "materials");
     begin_grid();
     wxArrayString layer_lines;
     layer_lines.Add(_L("Off"));
@@ -649,6 +713,22 @@ void ShowcaseView::build_panel()
     m_layer_lines->SetToolTip(_L("Printed layer lines on the model at its real layer height. A layer is often thinner than a pixel "
                                  "when the whole model is in view, so the lines show in close-ups and in large, high quality exports."));
     row(_L("Layer lines"), m_layer_lines);
+    // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
+    // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
+    wxArrayString sources;
+    sources.Add(_L("Model"));
+    sources.Add(_L("Toolpaths (sliced plate)"));
+    m_source = choice(sources);
+    m_source->SetToolTip(_L("Toolpaths show the plate's slice as it will print: seams, the top pattern, supports and colour changes. "
+                            "Slice the plate first; until then the model is shown."));
+    row(_L("Show"), m_source);
+    m_smooth_auto = new wxCheckBox(m_side, wxID_ANY, _L("By finish"));
+    m_smooth_auto->SetToolTip(_L("Each filament's finish picks how smooth its toolpaths look (silk smoothest, matte least)."));
+    m_smooth = slider(60, 0, 100);
+    m_smooth->SetToolTip(_L("Toolpaths only. Left: crisp extrusions as in Preview. Right: rounded beads, and top and bottom "
+                            "skin widened and flattened into one surface."));
+    grid->Add(m_smooth_auto, 0, wxALIGN_CENTER_VERTICAL);
+    grid->Add(m_smooth, 1, wxEXPAND);
     {
         auto *hint = new wxStaticText(m_side, wxID_ANY, _L("The finish of each filament is guessed from its preset name and type. "
                                                            "Pick another one where the guess is wrong."));
@@ -659,7 +739,7 @@ void ShowcaseView::build_panel()
     m_mat_grid = grid;
 
     // --- Camera --------------------------------------------------------------------------------
-    header(_L("Camera"));
+    header(_L("Camera"), "camera");
     begin_grid();
     wxArrayString projections;
     projections.Add(_L("Perspective"));
@@ -685,8 +765,140 @@ void ShowcaseView::build_panel()
         m_view_delete->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_delete_view(); });
     }
 
+    // --- Callouts (S3) ------------------------------------------------------------------------
+    header(_L("Callouts"), "callouts");
+    begin_grid();
+    m_co_enabled = new wxCheckBox(m_side, wxID_ANY, _L("Show filament callouts"));
+    m_co_enabled->SetToolTip(_L("Labels that name each filament on the model: made from the filaments of objects, parts, "
+                                "painted areas, height ranges and layer changes."));
+    grid->AddSpacer(0);
+    grid->Add(m_co_enabled);
+    wxArrayString co_layouts;
+    co_layouts.Add(_L("Automatic"));
+    co_layouts.Add(_L("Columns"));
+    co_layouts.Add(_L("Numbered legend"));
+    co_layouts.Add(_L("Rows above and below"));
+    m_co_layout = choice(co_layouts);
+    m_co_layout->SetToolTip(_L("Automatic: labels in columns left and right of the model, in rows above and below a wide, flat "
+                               "model, a numbered legend when there are too many."));
+    row(_L("Layout"), m_co_layout);
+    m_co_once = new wxCheckBox(m_side, wxID_ANY, _L("Each colour once"));
+    m_co_once->SetToolTip(_L("One callout per colour on the plate, with one leader to where that colour shows most, instead of a "
+                             "callout per filament with a leader to each place it shows."));
+    grid->AddSpacer(0);
+    grid->Add(m_co_once);
+    wxArrayString co_styles;
+    for (Showcase::CalloutStylePreset preset : Showcase::callout_style_presets()) {
+        switch (preset) {
+        case Showcase::CalloutStylePreset::CardLight: co_styles.Add(_L("Card, light")); break;
+        case Showcase::CalloutStylePreset::CardDark: co_styles.Add(_L("Card, dark")); break;
+        case Showcase::CalloutStylePreset::Minimal: co_styles.Add(_L("Minimal")); break;
+        case Showcase::CalloutStylePreset::Pill: co_styles.Add(_L("Pill")); break;
+        case Showcase::CalloutStylePreset::Technical: co_styles.Add(_L("Technical")); break;
+        }
+    }
+    m_co_style = choice(co_styles);
+    m_co_style->SetToolTip(_L("Sets the label shape, colours, leaders and size. A built-in style keeps your font; a style you saved "
+                              "brings its own."));
+    row(_L("Style"), m_co_style);
+    {
+        // S4: the user's own styles, kept across projects.
+        auto *buttons    = new wxBoxSizer(wxHORIZONTAL);
+        m_co_style_save   = new wxButton(m_side, wxID_ANY, _L("Save style..."));
+        m_co_style_delete = new wxButton(m_side, wxID_ANY, _L("Delete style"));
+        buttons->Add(m_co_style_save, 0, wxRIGHT, em / 2);
+        buttons->Add(m_co_style_delete, 0);
+        grid->AddSpacer(0);
+        grid->Add(buttons);
+        m_co_style_save->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_save_callout_style(); });
+        m_co_style_delete->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_delete_callout_style(); });
+    }
+    m_co_font = new wxFontPickerCtrl(m_side, wxID_ANY, wxFont(wxFontInfo(12)), wxDefaultPosition, wxSize(12 * em, -1),
+                                     wxFNTP_FONTDESC_AS_LABEL);
+    row(_L("Font"), m_co_font);
+    m_co_size = slider(22, 10, 60);
+    m_co_size->SetToolTip(_L("Text height, as a share of the image height: the labels look the same at every export size."));
+    row(_L("Text size"), m_co_size);
+    wxArrayString co_leaders;
+    co_leaders.Add(_L("Straight"));
+    co_leaders.Add(_L("Elbow"));
+    m_co_leader = choice(co_leaders);
+    row(_L("Leader lines"), m_co_leader);
+    m_co_auto_colors = new wxCheckBox(m_side, wxID_ANY, _L("Colours that stand out from the background"));
+    grid->AddSpacer(0);
+    grid->Add(m_co_auto_colors);
+    m_co_text = picker();
+    row(_L("Text colour"), m_co_text);
+    m_co_line = picker();
+    row(_L("Line colour"), m_co_line);
+    m_co_bg = picker();
+    row(_L("Label background"), m_co_bg);
+    m_co_bg_opacity = slider(92, 0, 100);
+    row(_L("Background opacity"), m_co_bg_opacity);
+    {
+        // D7: brand, product, colour name, hex, swatch, type and finish on; family, weight and price off.
+        auto *fields = new wxFlexGridSizer(2, em / 4, em);
+        const wxString names[] = { _L("Brand"), _L("Product"), _L("Material family"), _L("Colour name"), _L("Hex code"), _L("Swatch"),
+                                   _L("Type and finish"), _L("Weight"), _L("Price") };
+        for (const wxString &name : names) {
+            auto *cb = new wxCheckBox(m_side, wxID_ANY, name);
+            fields->Add(cb);
+            m_co_fields.push_back(cb);
+        }
+        m_co_fields[2]->SetToolTip(_L("Just the material, such as PLA, PETG or ABS. With Product on, the product name is shown instead "
+                                      "(it names the material too)."));
+        m_co_fields[7]->SetToolTip(_L("Filament used, from the plate's slice. Shown once the plate is sliced."));
+        m_co_fields[8]->SetToolTip(_L("Filament cost, from the plate's slice and your filament prices. Shown once the plate is sliced."));
+        grid->Add(new wxStaticText(m_side, wxID_ANY, _L("Show")), 0, wxALIGN_TOP | wxTOP, em / 4);
+        grid->Add(fields, 1, wxEXPAND);
+    }
+    m_co_separator = new wxTextCtrl(m_side, wxID_ANY, "", wxDefaultPosition, wxSize(6 * em, -1));
+    m_co_separator->SetToolTip(_L("What goes between the name and the colour name on the first line. Spaces count."));
+    row(_L("Separator"), m_co_separator);
+    m_co_list = named_choice();
+    row(_L("Callout"), m_co_list);
+    {
+        auto *buttons = new wxBoxSizer(wxHORIZONTAL);
+        m_co_edit = new wxButton(m_side, wxID_ANY, _L("Edit..."));
+        m_co_hide = new wxButton(m_side, wxID_ANY, _L("Hide"));
+        buttons->Add(m_co_edit, 0, wxRIGHT, em / 2);
+        buttons->Add(m_co_hide, 0);
+        col->Add(buttons, 0, wxLEFT | wxRIGHT, em);
+        auto *more = new wxBoxSizer(wxHORIZONTAL);
+        m_co_regenerate = new wxButton(m_side, wxID_ANY, _L("Regenerate"));
+        m_co_regenerate->SetToolTip(_L("Finds the filaments again and places every callout you did not place by hand on what the view shows now."));
+        m_co_unpin = new wxButton(m_side, wxID_ANY, _L("Unpin all"));
+        m_co_unpin->SetToolTip(_L("Returns every label you dragged to the automatic layout."));
+        more->Add(m_co_regenerate, 0, wxRIGHT, em / 2);
+        more->Add(m_co_unpin, 0);
+        col->Add(more, 0, wxLEFT | wxRIGHT | wxTOP, em / 2);
+        m_co_hint = new wxStaticText(m_side, wxID_ANY, _L("On the view: drag a label to move it, drag its dot to another spot on the model, "
+                                                          "double-click a label to edit it, right-click it for more."));
+        m_co_hint->Wrap(29 * em);
+        col->Add(m_co_hint, 0, wxLEFT | wxRIGHT | wxTOP, em);
+        m_co_edit->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { callouts_edit(m_callouts.selected); });
+        m_co_hide->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+            const int item = m_callouts.selected;
+            edit([item](Showcase::Scene &s) {
+                if (item >= 0 && size_t(item) < s.callouts.items.size())
+                    s.callouts.items[size_t(item)].hidden = !s.callouts.items[size_t(item)].hidden;
+            });
+            refresh_callout_list();
+        });
+        m_co_regenerate->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { callouts_sync(true); });
+        m_co_unpin->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+            edit([](Showcase::Scene &s) {
+                for (Showcase::Callout &c : s.callouts.items)
+                    c.pinned = false;
+            });
+        });
+    }
+
+    // --- Video (S4) --------------------------------------------------------------------------------
+    build_video_section(root);
+
     // --- Export --------------------------------------------------------------------------------
-    header(_L("Export"));
+    header(_L("Export"), "export");
     begin_grid();
     wxArrayString sizes;
     for (const ShowcaseSizePreset &p : SHOWCASE_SIZES)
@@ -732,7 +944,7 @@ void ShowcaseView::build_panel()
     }
 
     // --- Watermark (D12) -----------------------------------------------------------------------
-    header(_L("Watermark"));
+    header(_L("Watermark"), "watermark");
     begin_grid();
     m_wm_enabled = new wxCheckBox(m_side, wxID_ANY, _L("Add my watermark"));
     m_wm_enabled->SetToolTip(_L("Your own logo and/or text on the exported images. Off unless you turn it on."));
@@ -786,7 +998,10 @@ void ShowcaseView::build_panel()
         m_wm_preset_delete->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_delete_watermark_preset(); });
     }
 
-    m_side->SetSizer(col);
+    m_side->SetSizer(root);
+    // S5c: the panel's width is that of its widest row, folded or not, so it never jumps.
+    m_side_content_w = root->CalcMin().x;
+    apply_panel_sections();
     m_side->FitInside();
 
     // --- Handlers ------------------------------------------------------------------------------
@@ -942,6 +1157,20 @@ void ShowcaseView::build_panel()
         if (sel >= 0)
             edit([sel](Showcase::Scene &s) { s.materials.layer_lines = Showcase::LayerLines(sel); });
     });
+    m_source->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_source->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.source = sel == 1 ? "toolpaths" : "model"; });
+    });
+    m_smooth_auto->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool by_finish = m_smooth_auto->GetValue();
+        const int  v         = m_smooth->GetValue();
+        edit([by_finish, v](Showcase::Scene &s) { s.materials.toolpath_smoothness = by_finish ? -1.f : float(v) / 100.f; });
+    });
+    m_smooth->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const int v = m_smooth->GetValue();
+        edit([v](Showcase::Scene &s) { s.materials.toolpath_smoothness = float(v) / 100.f; });
+    });
 
     m_projection->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         if (m_syncing || read_only())
@@ -1030,6 +1259,83 @@ void ShowcaseView::build_panel()
     });
     m_wm_margin->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
         edit([this](Showcase::Scene &s) { s.export_settings.watermark.margin_pct = float(m_wm_margin->GetValue()); });
+    });
+
+    // S3: callouts.
+    m_co_enabled->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.enabled = m_co_enabled->GetValue(); });
+        // Turned on: the callouts are worked out from the model and placed on the next frame.
+        callouts_sync(false);
+        refresh_callout_list();
+    });
+    m_co_layout->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_co_layout->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.callouts.layout = Showcase::CalloutLayout(sel); });
+    });
+    m_co_style->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_co_style->GetSelection();
+        const std::vector<Showcase::CalloutStylePreset> presets = Showcase::callout_style_presets();
+        if (sel >= 0 && size_t(sel) < presets.size())
+            edit([&presets, sel](Showcase::Scene &s) { Showcase::apply_callout_style_preset(s.callouts.style, presets[size_t(sel)]); }, true);
+        else if (sel >= 0 && size_t(sel) - presets.size() < m_callout_styles.styles().size()) {
+            // S4: one of the user's styles, font included.
+            const Showcase::CalloutStyle style = m_callout_styles.styles()[size_t(sel) - presets.size()].style;
+            edit([&style](Showcase::Scene &s) { s.callouts.style = style; }, true);
+        }
+    });
+    m_co_font->Bind(wxEVT_FONTPICKER_CHANGED, [this](wxFontPickerEvent &) {
+        const wxFont f = m_co_font->GetSelectedFont();
+        edit([&f](Showcase::Scene &s) {
+            s.callouts.style.font_face = into_u8(f.GetFaceName());
+            s.callouts.style.bold      = f.GetWeight() >= wxFONTWEIGHT_BOLD;
+        });
+    });
+    m_co_size->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.style.size_pct = float(m_co_size->GetValue()) / 10.f; });
+    });
+    m_co_leader->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_co_leader->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.callouts.style.leader = Showcase::LeaderStyle(sel); });
+    });
+    m_co_auto_colors->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.style.auto_colors = m_co_auto_colors->GetValue(); });
+    });
+    m_co_text->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.style.text_color = showcase_hex(m_co_text->GetColour()); });
+    });
+    m_co_line->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.style.line_color = showcase_hex(m_co_line->GetColour()); });
+    });
+    m_co_bg->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.style.background = showcase_hex(m_co_bg->GetColour()); });
+    });
+    m_co_bg_opacity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.style.background_opacity = float(m_co_bg_opacity->GetValue()) / 100.f; });
+    });
+    for (size_t i = 0; i < m_co_fields.size(); ++i)
+        m_co_fields[i]->Bind(wxEVT_CHECKBOX, [this, i](wxCommandEvent &) {
+            const bool on = m_co_fields[i]->GetValue();
+            edit([i, on](Showcase::Scene &s) {
+                Showcase::CalloutFields &f = s.callouts.fields;
+                bool *fields[] = { &f.brand, &f.product, &f.family, &f.color_name, &f.hex, &f.swatch, &f.type, &f.weight, &f.price };
+                *fields[i] = on;
+            });
+            refresh_callout_list();
+        });
+    m_co_separator->Bind(wxEVT_TEXT, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.fields.separator = into_u8(m_co_separator->GetValue()); });
+        refresh_callout_list();
+    });
+    m_co_once->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        edit([this](Showcase::Scene &s) { s.callouts.once_per_color = m_co_once->GetValue(); });
+    });
+    m_co_list->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        if (m_syncing)
+            return;
+        const int sel = m_co_list->GetSelection();
+        callouts_select(sel >= 0 ? int(reinterpret_cast<intptr_t>(m_co_list->GetClientData(unsigned(sel)))) : -1);
     });
 }
 
@@ -1132,6 +1438,9 @@ void ShowcaseView::refresh_materials(bool sync_selection)
         wxGetApp().UpdateDarkUIWin(m_side);
         fit_side_width();
         m_side->Layout();
+        // S3: the labels name these filaments.
+        callouts_changed();
+        refresh_callout_list();
     }
     const Showcase::Scene &s = scene();
     const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
@@ -1226,6 +1535,10 @@ void ShowcaseView::sync_controls()
     m_env_rotation->SetValue(env_rot);
     m_exposure->SetValue(std::clamp(int(std::lround(s.lighting.exposure * 10.f)), -30, 30));
     m_layer_lines->SetSelection(int(s.materials.layer_lines));
+    m_source->SetSelection(s.source == "toolpaths" ? 1 : 0);
+    m_smooth_auto->SetValue(s.materials.toolpath_smoothness < 0.f);
+    if (s.materials.toolpath_smoothness >= 0.f)
+        m_smooth->SetValue(int(std::lround(s.materials.toolpath_smoothness * 100.f)));
     refresh_materials(true);
 
     m_projection->SetSelection(wxGetApp().plater()->get_camera().get_type() == Camera::EType::Ortho ? 1 : 0);
@@ -1257,6 +1570,35 @@ void ShowcaseView::sync_controls()
     m_wm_opacity->SetValue(int(std::lround(wm.opacity * 100.f)));
     m_wm_margin->SetValue(std::clamp(int(std::lround(wm.margin_pct)), 0, 20));
 
+    // S3
+    const Showcase::Callouts &co = s.callouts;
+    m_co_enabled->SetValue(co.enabled);
+    m_co_layout->SetSelection(int(co.layout));
+    refresh_callout_styles();
+    wxFontInfo co_font(12);
+    if (!co.style.font_face.empty())
+        co_font.FaceName(wxString::FromUTF8(co.style.font_face));
+    co_font.Bold(co.style.bold);
+    m_co_font->SetSelectedFont(wxFont(co_font));
+    m_co_size->SetValue(std::clamp(int(std::lround(co.style.size_pct * 10.f)), 10, 60));
+    m_co_leader->SetSelection(int(co.style.leader));
+    m_co_auto_colors->SetValue(co.style.auto_colors);
+    m_co_text->SetColour(showcase_wx_colour(co.style.text_color));
+    m_co_line->SetColour(showcase_wx_colour(co.style.line_color));
+    m_co_bg->SetColour(showcase_wx_colour(co.style.background));
+    m_co_bg_opacity->SetValue(int(std::lround(co.style.background_opacity * 100.f)));
+    {
+        const bool fields[] = { co.fields.brand, co.fields.product, co.fields.family, co.fields.color_name, co.fields.hex,
+                                co.fields.swatch, co.fields.type, co.fields.weight, co.fields.price };
+        for (size_t i = 0; i < m_co_fields.size() && i < sizeof(fields) / sizeof(fields[0]); ++i)
+            m_co_fields[i]->SetValue(fields[i]);
+    }
+    if (into_u8(m_co_separator->GetValue()) != co.fields.separator)
+        m_co_separator->ChangeValue(wxString::FromUTF8(co.fields.separator));
+    m_co_once->SetValue(co.once_per_color);
+    refresh_callout_list();
+    sync_video_controls();
+
     m_syncing = false;
     update_enabled();
     fit_side_width();
@@ -1267,11 +1609,15 @@ void ShowcaseView::fit_side_width()
 {
     if (m_side == nullptr || m_side->GetSizer() == nullptr)
         return;
+    // Rows shown or rebuilt since (a path's rows, the materials) stay hidden in a folded section.
+    apply_panel_sections();
     const int em = wxGetApp().em_unit();
     // Measured, not assumed: labels and controls come out wider in macOS's system font, and in longer
     // languages, than an em count tuned on Windows allows for. The vertical scroll bar takes its
     // share too where it is not an overlay.
-    const int content = m_side->GetSizer()->CalcMin().x + wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, m_side);
+    // S5c: never narrower than the widest the rows have been, so folding a section keeps the width.
+    m_side_content_w  = std::max(m_side_content_w, m_side->GetSizer()->CalcMin().x);
+    const int content = m_side_content_w + wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, m_side);
     int       width   = std::max({ 32 * em, content, m_side_width });
     // Leave the canvas some room; in a window too narrow for both the panel scrolls sideways.
     if (const int client = GetClientSize().x; client > 0)
@@ -1281,6 +1627,103 @@ void ShowcaseView::fit_side_width()
         Layout();
     }
     m_side->FitInside();
+}
+
+// ------------------------------------------------------------------------------------------------
+// S5b: collapsible sections
+// ------------------------------------------------------------------------------------------------
+
+namespace {
+wxString panel_section_arrow(bool collapsed)
+{
+    // U+25B8 / U+25BE, small right- and down-pointing triangles.
+    return wxString::FromUTF8(collapsed ? "\xE2\x96\xB8" : "\xE2\x96\xBE");
+}
+} // namespace
+
+wxBoxSizer *ShowcaseView::add_panel_section(wxBoxSizer *root, const wxString &title, const std::string &key)
+{
+    const int    em = wxGetApp().em_unit();
+    PanelSection sec;
+    sec.key = key;
+    // S5c: folded until the user opens a section (then remembered either way).
+    sec.collapsed = wxGetApp().app_config->get("showcase_collapsed_" + key) != "0";
+    // A full-width row on the theme's button colour.
+    sec.head   = new wxPanel(m_side, wxID_ANY);
+    auto *head = new wxBoxSizer(wxHORIZONTAL);
+    sec.arrow  = new wxStaticText(sec.head, wxID_ANY, panel_section_arrow(sec.collapsed));
+    sec.arrow->SetMinSize(wxSize(int(1.2 * em), -1));
+    sec.title = new wxStaticText(sec.head, wxID_ANY, title);
+    sec.title->SetFont(wxGetApp().bold_font());
+    sec.arrow->SetFont(wxGetApp().bold_font());
+    head->Add(sec.arrow, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, em / 2);
+    head->Add(sec.title, 1, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, em / 2);
+    sec.head->SetSizer(head);
+    root->Add(sec.head, 0, wxEXPAND | wxTOP, em / 2);
+    sec.body = new wxBoxSizer(wxVERTICAL);
+    root->Add(sec.body, 0, wxEXPAND);
+    const size_t index = m_sections.size();
+    for (wxWindow *w : { static_cast<wxWindow *>(sec.head), static_cast<wxWindow *>(sec.arrow), static_cast<wxWindow *>(sec.title) }) {
+        w->SetCursor(wxCursor(wxCURSOR_HAND));
+        w->SetToolTip(_L("Click to show or hide this section."));
+        w->Bind(wxEVT_LEFT_DOWN, [this, index](wxMouseEvent &) { toggle_panel_section(index); });
+    }
+    m_sections.push_back(sec);
+    apply_section_header_colours();
+    return sec.body;
+}
+
+void ShowcaseView::apply_section_header_colours()
+{
+    // The regular button's background (Widgets/Button.cpp), themed like it.
+    const bool     dark = wxGetApp().dark_mode();
+    const wxColour bg   = dark ? StateColor::darkModeColorFor(wxColour("#DFDFDF")) : wxColour("#DFDFDF");
+    const wxColour fg   = dark ? StateColor::darkModeColorFor(wxColour("#262E30")) : wxColour("#262E30");
+    for (PanelSection &sec : m_sections) {
+        if (sec.head == nullptr)
+            continue;
+        if (sec.head->GetBackgroundColour() != bg) {
+            sec.head->SetBackgroundColour(bg);
+            sec.head->Refresh();
+        }
+        for (wxStaticText *t : { sec.arrow, sec.title })
+            if (t != nullptr) {
+                t->SetBackgroundColour(bg);
+                t->SetForegroundColour(fg);
+            }
+    }
+}
+
+void ShowcaseView::apply_panel_sections()
+{
+    if (m_side_root == nullptr)
+        return;
+    // A rebuilt row may have had the dark theme applied over the headers' colours.
+    apply_section_header_colours();
+    for (const PanelSection &sec : m_sections)
+        if (sec.collapsed && sec.body != nullptr)
+            m_side_root->Hide(sec.body);
+}
+
+void ShowcaseView::toggle_panel_section(size_t index)
+{
+    if (index >= m_sections.size() || m_side_root == nullptr)
+        return;
+    PanelSection &sec = m_sections[index];
+    sec.collapsed     = !sec.collapsed;
+    wxGetApp().app_config->set("showcase_collapsed_" + sec.key, sec.collapsed ? "1" : "0");
+    sec.arrow->SetLabel(panel_section_arrow(sec.collapsed));
+    if (sec.collapsed) {
+        m_side_root->Hide(sec.body);
+        m_side->Layout();
+        fit_side_width();
+    } else {
+        // Showing the section shows every row in it: the controls' own state hides the rows that
+        // should stay hidden again (a camera path's rows, the read-only notice).
+        m_side_root->Show(sec.body);
+        sync_controls();
+    }
+    m_side->Refresh();
 }
 
 void ShowcaseView::update_enabled()
@@ -1297,8 +1740,9 @@ void ShowcaseView::update_enabled()
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
                                                           m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
                                                           m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
-                                                          m_exposure, m_layer_lines, m_use_as_cover })
+                                                          m_exposure, m_layer_lines, m_use_as_cover, m_source, m_smooth_auto })
         w->Enable(editable);
+    m_smooth->Enable(editable && s.materials.toolpath_smoothness >= 0.f);
     for (wxChoice *c : m_mat_choices)
         c->Enable(editable);
     m_fill_intensity->Enable(editable && s.lighting.fill);
@@ -1339,6 +1783,34 @@ void ShowcaseView::update_enabled()
         w->Enable(wm);
     m_wm_logo_remove->Enable(wm && !s.export_settings.watermark.logo.empty());
     m_wm_preset_delete->Enable(m_wm_presets->GetSelection() > 0);
+
+    // S3
+    const Showcase::Callouts &co = s.callouts;
+    const bool co_on  = editable && co.enabled;
+    const bool boxed  = co.style.shape == Showcase::CalloutShape::Card || co.style.shape == Showcase::CalloutShape::Pill;
+    m_co_enabled->Enable(editable);
+    for (wxWindow *w : std::initializer_list<wxWindow *>{ m_co_layout, m_co_style, m_co_font, m_co_size, m_co_leader, m_co_auto_colors,
+                                                          m_co_regenerate, m_co_once })
+        w->Enable(co_on);
+    for (wxCheckBox *cb : m_co_fields)
+        cb->Enable(co_on);
+    m_co_separator->Enable(co_on && co.fields.color_name);
+    m_co_text->Enable(co_on && !co.style.auto_colors);
+    m_co_line->Enable(co_on && !co.style.auto_colors);
+    m_co_bg->Enable(co_on && boxed);
+    m_co_bg_opacity->Enable(co_on && boxed);
+    const bool has_items = co.enabled && !co.items.empty();
+    m_co_list->Enable(has_items);
+    const bool selected = has_items && m_callouts.selected >= 0 && size_t(m_callouts.selected) < co.items.size();
+    m_co_edit->Enable(editable && selected);
+    m_co_hide->Enable(editable && selected);
+    m_co_hide->SetLabel(selected && co.items[size_t(m_callouts.selected)].hidden ? _L("Show") : _L("Hide"));
+    m_co_unpin->Enable(editable && has_items &&
+                       std::any_of(co.items.begin(), co.items.end(), [](const Showcase::Callout &c) { return c.pinned; }));
+    m_co_style_save->Enable(co_on);
+    m_co_style_delete->Enable(co_on && m_callout_styles.match(co.style) != nullptr);
+
+    update_video_enabled();
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1587,6 +2059,9 @@ void ShowcaseView::on_export(bool to_clipboard)
             set_as_dirty();
             return;
         }
+        // S3: the callouts at the export's own size (after the supersampled render was scaled
+        // down, so the text is sharp), then the watermark over everything.
+        callouts_apply_to_export(image, s.background.type == Showcase::BackgroundType::Transparent);
         showcase_apply_watermark(image, s.export_settings.watermark, project());
     }
     set_as_dirty();
@@ -1650,6 +2125,827 @@ void ShowcaseView::on_export(bool to_clipboard)
     m_status->Wrap(30 * wxGetApp().em_unit());
     fit_side_width();
     BOOST_LOG_TRIVIAL(info) << "Showcase: exported " << image.width << "x" << image.height << " to " << into_u8(path);
+}
+
+
+// ------------------------------------------------------------------------------------------------
+// S3: filament callouts
+// ------------------------------------------------------------------------------------------------
+
+namespace {
+
+const ModelInstance *showcase_instance(const Model &model, int object_idx, int instance_idx)
+{
+    if (object_idx < 0 || size_t(object_idx) >= model.objects.size())
+        return nullptr;
+    const ModelObject *mo = model.objects[size_t(object_idx)];
+    if (instance_idx < 0 || size_t(instance_idx) >= mo->instances.size())
+        return nullptr;
+    return mo->instances[size_t(instance_idx)];
+}
+
+bool showcase_anchor_world(const Model &model, const Showcase::CalloutAnchor &a, Vec3d &world)
+{
+    const ModelInstance *inst = showcase_instance(model, a.object_idx, a.instance_idx);
+    if (inst == nullptr)
+        return false;
+    world = inst->get_matrix() * Vec3d(a.local[0], a.local[1], a.local[2]);
+    return true;
+}
+
+Showcase::CalloutAnchor showcase_make_anchor(const ModelInstance &inst, int object_idx, int instance_idx, const Vec3d &world)
+{
+    Showcase::CalloutAnchor a;
+    a.object_idx   = object_idx;
+    a.instance_idx = instance_idx;
+    const Vec3d local = inst.get_matrix().inverse() * world;
+    a.local = { local.x(), local.y(), local.z() };
+    return a;
+}
+
+uint64_t showcase_matrix_key(const Matrix4d &m)
+{
+    uint64_t key = 1469598103934665603ull;
+    for (int i = 0; i < 16; ++i) {
+        const double d = m.data()[i];
+        uint64_t     bits;
+        std::memcpy(&bits, &d, sizeof(bits));
+        key = (key ^ bits) * 1099511628211ull;
+    }
+    return key;
+}
+
+} // namespace
+
+std::vector<int> ShowcaseView::plate_objects() const
+{
+    std::vector<int> out;
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr || m_model == nullptr)
+        return out;
+    PartPlate *plate = plater->get_partplate_list().get_curr_plate();
+    if (plate == nullptr)
+        return out;
+    for (size_t o = 0; o < m_model->objects.size(); ++o)
+        for (size_t i = 0; i < m_model->objects[o]->instances.size(); ++i)
+            if (plate->contain_instance(int(o), int(i))) {
+                out.push_back(int(o));
+                break;
+            }
+    return out;
+}
+
+const CustomGCode::Info *ShowcaseView::plate_changes() const
+{
+    if (m_model == nullptr)
+        return nullptr;
+    auto it = m_model->plates_custom_gcodes.find(current_plate());
+    return it == m_model->plates_custom_gcodes.end() ? nullptr : &it->second;
+}
+
+const ShowcaseLabelContext &ShowcaseView::callouts_labels()
+{
+    const Showcase::Scene &s     = scene();
+    const bool             usage = s.callouts.fields.weight || s.callouts.fields.price;
+    if (!m_callouts.labels || m_callouts.labels_version != m_callouts.version || m_callouts.labels_usage != usage) {
+        m_callouts.labels         = std::make_shared<ShowcaseLabelContext>(ShowcaseLabelContext::current(current_plate(), usage));
+        m_callouts.labels_version = m_callouts.version;
+        m_callouts.labels_usage   = usage;
+    }
+    return *m_callouts.labels;
+}
+
+void ShowcaseView::callouts_sync(bool regenerate)
+{
+    if (m_renderer == nullptr || m_model == nullptr || read_only())
+        return;
+    Showcase::Scene &s = scene();
+    if (!s.callouts.enabled)
+        return;
+    int filament_count = 0;
+    if (PresetBundle *bundle = wxGetApp().preset_bundle)
+        filament_count = int(bundle->mixed_filaments.total_filaments(bundle->filament_presets.size()));
+    if (Showcase::prune_callouts(s.callouts, m_model->objects.size(), filament_count) > 0 && scene_in_project())
+        mark_project_dirty();
+    // The ID pass needs the canvas' context and the live camera: the next frame does the rest.
+    m_callouts.pending          = true;
+    m_callouts.regenerate       = m_callouts.regenerate || regenerate;
+    m_callouts.occlusion_camera = 0;
+    callouts_changed();
+}
+
+void ShowcaseView::callouts_before_frame()
+{
+    if (!m_active || m_renderer == nullptr || m_model == nullptr || read_only())
+        return;
+    Showcase::Scene &s = scene();
+    if (!s.callouts.enabled)
+        return;
+    if (m_callouts.pending) {
+        const bool regenerate = m_callouts.regenerate;
+        m_callouts.pending    = false;
+        m_callouts.regenerate = false;
+        callouts_find_anchors(s, regenerate);
+    }
+    if (!m_callouts.picks.empty()) {
+        // Dots the user dropped: on the model where they landed, else back where they were.
+        ShowcaseIdPass pass;
+        const bool     ok      = m_renderer->render_id_pass(1024, pass);
+        bool           changed = false;
+        for (const CalloutUi::Pick &pick : m_callouts.picks) {
+            Showcase::Callout *c = s.callouts.find(pick.key);
+            if (!ok || c == nullptr)
+                continue;
+            const int x = std::clamp(int(pick.nx * pass.width), 0, pass.width - 1);
+            const int y = std::clamp(int(pick.ny * pass.height), 0, pass.height - 1);
+            const ShowcaseIdPass::Entry *e = pass.entry_at(x, y);
+            Vec3d world;
+            if (e == nullptr || !pass.world_at(x, y, world))
+                continue;
+            const ModelInstance *inst = showcase_instance(*m_model, e->object_idx, e->instance_idx);
+            if (inst == nullptr)
+                continue;
+            const Showcase::CalloutAnchor a = showcase_make_anchor(*inst, e->object_idx, e->instance_idx, world);
+            if (pick.anchor >= 0 && size_t(pick.anchor) < c->anchors.size())
+                c->anchors[size_t(pick.anchor)] = a;
+            else
+                c->anchors.push_back(a);
+            c->user_anchor = true;
+            changed        = true;
+        }
+        m_callouts.picks.clear();
+        if (changed) {
+            ++m_callouts.version;
+            m_callouts.occlusion_camera = 0;
+            CallAfter([this]() { mark_project_dirty(); });
+        }
+    }
+    callouts_update_occlusion(s);
+}
+
+void ShowcaseView::callouts_find_anchors(Showcase::Scene &s, bool regenerate)
+{
+    const Showcase::CalloutRegions             regions(*m_model, plate_objects(), plate_changes());
+    const std::vector<Showcase::CalloutTarget> targets = regions.targets();
+
+    // Design 3.3: a low-resolution ID pass, each visible pixel sorted into its callout, and per
+    // callout the point deepest inside each separate region it covers.
+    ShowcaseIdPass pass;
+    const bool     have_pass = !targets.empty() && m_renderer->render_id_pass(512, pass);
+    std::vector<std::vector<Showcase::AnchorPixel>> found;
+    if (have_pass) {
+        std::map<std::string, int> index;
+        for (size_t i = 0; i < targets.size(); ++i)
+            index[targets[i].key] = int(i);
+        // The callout of a pixel depends only on its entry and its height: remember each answer.
+        std::unordered_map<uint64_t, int> memo;
+        std::vector<int> classes(pass.ids.size(), -1);
+        for (int y = 0; y < pass.height; ++y)
+            for (int x = 0; x < pass.width; ++x) {
+                const int id = pass.ids[size_t(y) * size_t(pass.width) + size_t(x)];
+                Vec3d     world;
+                if (id < 0 || !pass.world_at(x, y, world))
+                    continue;
+                const uint64_t key = (uint64_t(uint32_t(id)) << 32) | uint64_t(uint32_t(std::max(0LL, std::llround(world.z() * 100.))));
+                auto           it  = memo.find(key);
+                if (it == memo.end()) {
+                    const ShowcaseIdPass::Entry &e = pass.entries[size_t(id)];
+                    const Showcase::CalloutTarget t = regions.classify(e.object_idx, e.base, world.z());
+                    auto                           ix = index.find(t.key);
+                    it = memo.emplace(key, ix == index.end() ? -1 : ix->second).first;
+                }
+                classes[size_t(y) * size_t(pass.width) + size_t(x)] = it->second;
+            }
+        found = Showcase::find_anchor_pixels(classes, pass.width, pass.height, int(targets.size()), Showcase::MAX_CALLOUT_LEADERS,
+                                             std::max(6, pass.width * pass.height / 1500));
+        // S5b: how much of each shows, for "each colour once" (the regions come largest first).
+        m_callouts.areas.clear();
+        for (size_t i = 0; i < targets.size() && i < found.size(); ++i)
+            m_callouts.areas[targets[i].key] = found[i].empty() ? 0 : found[i].front().area;
+    }
+
+    std::vector<Showcase::Callout> items;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const Showcase::CalloutTarget &t = targets[i];
+        Showcase::Callout              c;
+        // The user's edits stay with their callout.
+        if (const Showcase::Callout *old = s.callouts.find(t.key))
+            c = *old;
+        else
+            c.key = t.key;
+        c.filament = t.filament;
+        c.source   = t.source;
+        c.z_from   = t.z_from;
+        c.color    = t.color;
+        // An anchor must still be on (or right next to) its object: after objects were deleted an index
+        // can name another one.
+        const bool valid = !c.anchors.empty() && std::all_of(c.anchors.begin(), c.anchors.end(), [this](const Showcase::CalloutAnchor &a) {
+                               Vec3d world;
+                               if (!showcase_anchor_world(*m_model, a, world))
+                                   return false;
+                               const BoundingBoxf3 box = m_model->objects[size_t(a.object_idx)]->instance_bounding_box(size_t(a.instance_idx));
+                               const double        m   = 1.;
+                               return box.defined && world.x() >= box.min.x() - m && world.y() >= box.min.y() - m && world.z() >= box.min.z() - m &&
+                                      world.x() <= box.max.x() + m && world.y() <= box.max.y() + m && world.z() <= box.max.z() + m;
+                           });
+        if (!(valid && (c.user_anchor || !regenerate))) {
+            c.anchors.clear();
+            c.user_anchor = false;
+            if (have_pass && i < found.size())
+                for (const Showcase::AnchorPixel &ap : found[i]) {
+                    const ShowcaseIdPass::Entry *e = pass.entry_at(ap.x, ap.y);
+                    Vec3d world;
+                    if (e == nullptr || !pass.world_at(ap.x, ap.y, world))
+                        continue;
+                    if (const ModelInstance *inst = showcase_instance(*m_model, e->object_idx, e->instance_idx))
+                        c.anchors.push_back(showcase_make_anchor(*inst, e->object_idx, e->instance_idx, world));
+                }
+            if (c.anchors.empty() && !t.objects.empty()) {
+                // Not in view from here: the middle of the first object showing it (of the part above
+                // a layer change).
+                const int    o     = t.objects.front();
+                const ModelObject *mo = m_model->objects[size_t(o)];
+                PartPlate   *plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+                for (size_t k = 0; k < mo->instances.size(); ++k) {
+                    if (plate != nullptr && !plate->contain_instance(o, int(k)))
+                        continue;
+                    const BoundingBoxf3 box = mo->instance_bounding_box(k);
+                    Vec3d centre = box.center();
+                    if (t.z_from >= 0.)
+                        centre.z() = 0.5 * (std::clamp(t.z_from, box.min.z(), box.max.z()) + box.max.z());
+                    c.anchors.push_back(showcase_make_anchor(*mo->instances[k], o, int(k), centre));
+                    break;
+                }
+            }
+        }
+        items.push_back(std::move(c));
+    }
+    if (items != s.callouts.items) {
+        s.callouts.items = std::move(items);
+        if (m_callouts.selected >= int(s.callouts.items.size()))
+            m_callouts.selected = -1;
+        ++m_callouts.version;
+        m_callouts.occlusion_camera = 0;
+        // Not from inside the frame: the title bar and the panel are windows of their own.
+        CallAfter([this]() {
+            if (scene_in_project())
+                mark_project_dirty();
+            refresh_callout_list();
+            update_enabled();
+            fit_side_width();
+        });
+    }
+}
+
+void ShowcaseView::callouts_update_occlusion(const Showcase::Scene &s)
+{
+    if (s.callouts.items.empty() || m_callouts.drag != CalloutUi::Drag::None)
+        return;
+    Matrix4d vp;
+    if (!m_renderer->frame_view_projection(vp))
+        return;
+    const uint64_t key = showcase_matrix_key(vp);
+    if (key == m_callouts.occlusion_camera)
+        return;
+    m_callouts.occlusion_camera = key;
+    std::map<std::string, std::vector<bool>> occluded = callouts_compute_occlusion(s);
+    if (occluded != m_callouts.occluded) {
+        m_callouts.occluded = std::move(occluded);
+        ++m_callouts.version;
+    }
+}
+
+std::map<std::string, std::vector<bool>> ShowcaseView::callouts_compute_occlusion(const Showcase::Scene &s)
+{
+    std::map<std::string, std::vector<bool>> occluded;
+    ShowcaseIdPass pass;
+    if (s.callouts.items.empty() || !m_renderer->render_id_pass(384, pass))
+        return occluded;
+    // Design 3.3, 6.: an anchor something stands in front of gets a dashed leader. Compared as
+    // distances along the view (ortho or perspective alike), with a tolerance for the coarse pass.
+    const Transform3d  &view = wxGetApp().plater()->get_camera().get_view_matrix();
+    const BoundingBoxf3 box  = m_renderer->objects_box();
+    const double        tol  = box.defined ? std::max(0.3, 0.015 * box.radius()) : 0.5;
+    for (const Showcase::Callout &c : s.callouts.items) {
+        std::vector<bool> flags;
+        for (const Showcase::CalloutAnchor &a : c.anchors) {
+            Vec3d world;
+            bool  hidden = false;
+            if (showcase_anchor_world(*m_model, a, world)) {
+                const Vec4d clip = pass.view_projection * Vec4d(world.x(), world.y(), world.z(), 1.);
+                if (clip.w() > 1e-9) {
+                    const int    px    = int(std::floor((clip.x() / clip.w() + 1.) * 0.5 * pass.width));
+                    const int    py    = int(std::floor((1. - clip.y() / clip.w()) * 0.5 * pass.height));
+                    const double depth = -(view * world).z();
+                    hidden = px >= 0 && py >= 0 && px < pass.width && py < pass.height;
+                    // Hidden only when everything around it is clearly in front of it.
+                    for (int dy = -1; dy <= 1 && hidden; ++dy)
+                        for (int dx = -1; dx <= 1 && hidden; ++dx) {
+                            Vec3d seen;
+                            if (!pass.world_at(std::clamp(px + dx, 0, pass.width - 1), std::clamp(py + dy, 0, pass.height - 1), seen) ||
+                                -(view * seen).z() >= depth - tol)
+                                hidden = false;
+                        }
+                }
+            }
+            flags.push_back(hidden);
+        }
+        occluded[c.key] = std::move(flags);
+    }
+    return occluded;
+}
+
+std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const ShowcaseLabelContext &labels,
+                                                                  const std::map<std::string, std::vector<bool>> *occluded_in,
+                                                                  const Showcase::CalloutFade *fade, const Showcase::Scene *frame_scene,
+                                                                  const std::map<std::string, Showcase::CalloutVisual> *visuals)
+{
+    const std::map<std::string, std::vector<bool>> &occluded = occluded_in != nullptr ? *occluded_in : m_callouts.occluded;
+    std::vector<ShowcaseCalloutDraw> out;
+    // S5: a preview of a path shows its timeline's callouts.
+    if (frame_scene == nullptr && m_video.borrowed && m_video.pose_timeline) {
+        frame_scene = &m_video.pose_scene;
+        visuals     = &m_video.pose_visuals;
+    }
+    const Showcase::Scene &s = frame_scene != nullptr ? *frame_scene : scene();
+    Matrix4d               vp;
+    if (m_model == nullptr || !m_renderer->frame_view_projection(vp))
+        return out;
+    const Showcase::RectI frame = m_renderer->live_frame();
+    // S5b, each colour once: per colour the callout that shows most (its largest region in the last
+    // ID pass), with one leader, to that region.
+    const bool        once = s.callouts.once_per_color;
+    std::vector<bool> keep(s.callouts.items.size(), true);
+    if (once) {
+        std::vector<std::string> colors;
+        std::vector<double>      scores;
+        for (const Showcase::Callout &c : s.callouts.items) {
+            bool shown = !c.hidden;
+            if (visuals != nullptr)
+                if (auto v = visuals->find(c.key); v != visuals->end() && v->second.alpha <= 1e-3)
+                    shown = false;
+            std::string key;
+            if (shown)
+                for (const std::string &col : labels.colors_of(c))
+                    key += (key.empty() ? "" : ",") + col;
+            colors.push_back(key);
+            auto a = m_callouts.areas.find(c.key);
+            scores.push_back(a == m_callouts.areas.end() ? 0. : double(a->second));
+        }
+        keep = Showcase::once_per_color_keep(colors, scores);
+    }
+    for (size_t i = 0; i < s.callouts.items.size(); ++i) {
+        const Showcase::Callout &c = s.callouts.items[i];
+        if (c.hidden || !keep[i])
+            continue;
+        // S5c, as used: not before the build-up has printed its filament, then fading in.
+        double appear = 1.;
+        if (m_co_video.as_used && m_co_video.built_z < 1e29) {
+            auto         fz    = m_video.first_z.find(c.key);
+            const double first = fz != m_video.first_z.end() ? fz->second : 0.;
+            appear             = std::clamp((m_co_video.built_z - first) / std::max(1e-3, m_co_video.fade_mm), 0., 1.);
+            if (appear <= 1e-3)
+                continue;
+        }
+        // S5d, static: the label stays where the clip's layout put it; its leaders still follow the model.
+        const Showcase::PointD *fixed_label = nullptr;
+        if (m_co_video.fixed && m_video.static_valid)
+            if (auto it = m_video.static_labels.find(c.key); it != m_video.static_labels.end())
+                fixed_label = &it->second;
+        ShowcaseCalloutDraw d;
+        d.item  = int(i);
+        d.label = Showcase::build_callout_label(c, labels.filament(s, c), s.callouts.fields, labels.words());
+        auto         occ     = occluded.find(c.key);
+        const size_t anchors = once ? std::min<size_t>(1, c.anchors.size()) : c.anchors.size();
+        for (size_t a = 0; a < anchors; ++a) {
+            if (m_callouts.drag == CalloutUi::Drag::Dot && m_callouts.moved && m_callouts.drag_item == int(i) &&
+                m_callouts.drag_anchor == int(a) && !frame.empty()) {
+                // The dot being dragged follows the pointer.
+                d.anchors.push_back({ m_callouts.drag_x / frame.w, m_callouts.drag_y / frame.h });
+                d.occluded.push_back(false);
+                continue;
+            }
+            Vec3d world;
+            if (!showcase_anchor_world(*m_model, c.anchors[a], world))
+                continue;
+            // S5c: a spot the build-up has not printed yet gets no leader (it would point at air): the
+            // label stays, without a line, until it is built.
+            if (world.z() > m_co_video.built_z + 0.5)
+                continue;
+            const Vec4d clip = vp * Vec4d(world.x(), world.y(), world.z(), 1.);
+            if (clip.w() <= 1e-9)
+                continue;   // behind the camera
+            d.anchors.push_back({ (clip.x() / clip.w() + 1.) * 0.5, (1. - clip.y() / clip.w()) * 0.5 });
+            // Design 3.3: an anchor the model hides from this view gets a dashed leader and a hollow dot
+            // (stills and the live view; a video fades it instead).
+            d.occluded.push_back(occ != occluded.end() && a < occ->second.size() && occ->second[a]);
+            if (fade != nullptr)
+                d.fade.push_back(fade->alpha(c.key, int(a)));
+        }
+        if (fade != nullptr)
+            d.alpha = fixed_label != nullptr ? 1. : fade->label_alpha(c.key, int(anchors));
+        if (visuals != nullptr) {
+            auto v = visuals->find(c.key);
+            if (v != visuals->end()) {
+                d.visual    = v->second.alpha;
+                d.highlight = v->second.highlight;
+            }
+        }
+        d.visual *= appear;
+        d.pinned     = c.pinned;
+        d.pinned_pos = { c.label_pos[0], c.label_pos[1] };
+        if (fixed_label != nullptr && !c.pinned) {
+            // Laid out like a label the user pinned there: a leader to its nearest free side, every frame.
+            d.pinned     = true;
+            d.pinned_pos = *fixed_label;
+        }
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
+// S5c (the video panel's, here for showcase_anchor_world())
+void ShowcaseView::video_prepare_callouts(const Showcase::VideoSettings &v, const Showcase::CameraView &base,
+                                          const std::vector<Showcase::PathEvent> &events)
+{
+    m_video.first_z.clear();
+    m_video.static_valid = false;
+    m_video.static_labels.clear();
+    if (m_model == nullptr || m_renderer == nullptr)
+        return;
+    for (const Showcase::CalloutTarget &t : Showcase::CalloutRegions(*m_model, plate_objects(), plate_changes()).targets())
+        m_video.first_z[t.key] = t.first_z;
+    if (v.callout_motion != Showcase::CalloutMotion::Static)
+        return;
+    // S5d: static callouts keep the labels where the layout of one frame puts them - the frame that
+    // shows the whole model: the end of the motion when the print builds up (a static zoom-out ends
+    // framed on all of it), else the first. Their leaders follow the model every frame.
+    const double t     = v.build.enabled ? v.hold_start + v.duration : 0.;
+    Camera      &camera = wxGetApp().plater()->get_camera();
+    const Camera saved  = camera;
+    const Showcase::CameraPose pose = video_pose(v, base, t, events);
+    camera.look_at(Vec3d(pose.eye[0], pose.eye[1], pose.eye[2]), Vec3d(pose.target[0], pose.target[1], pose.target[2]),
+                   Vec3d(pose.up[0], pose.up[1], pose.up[2]));
+    camera.set_zoom(pose.zoom);
+    m_renderer->prepare_live_camera();
+    const CalloutVideoPass pass = m_co_video;
+    m_co_video                  = CalloutVideoPass();   // every label, as on the finished model
+    const Showcase::RectI frame = m_renderer->live_frame();
+    const int             w     = frame.empty() ? 1920 : frame.w;
+    const int             h     = frame.empty() ? 1080 : frame.h;
+    const std::vector<ShowcaseCalloutDraw> draws = callouts_draw_list(callouts_labels());
+    if (!draws.empty()) {
+        ShowcaseImage layout;
+        layout.width  = w;
+        layout.height = h;
+        layout.rgba.assign(size_t(w) * size_t(h) * 4, 0);
+        ShowcaseCalloutOptions opt;
+        opt.reserved       = showcase_watermark_rect(scene().export_settings.watermark, project(), w, h);
+        opt.model_center_x = callouts_model_center_x();
+        opt.model_box      = callouts_model_box();
+        ShowcaseCalloutHits hits;
+        showcase_draw_callouts(layout, true, scene(), draws, opt, &hits);
+        if (!hits.legend) {   // a numbered legend stays put anyway
+            for (const ShowcaseCalloutHits::Item &it : hits.items)
+                if (it.item >= 0 && size_t(it.item) < scene().callouts.items.size())
+                    m_video.static_labels[scene().callouts.items[size_t(it.item)].key] = { it.box.x / double(w), it.box.y / double(h) };
+            m_video.static_valid = !m_video.static_labels.empty();
+        }
+    }
+    m_co_video = pass;
+    camera     = saved;
+    m_renderer->prepare_live_camera();
+}
+
+Showcase::RectD ShowcaseView::callouts_model_box() const
+{
+    Matrix4d vp;
+    if (m_renderer == nullptr || !m_renderer->frame_view_projection(vp))
+        return {};
+    const BoundingBoxf3 box = m_renderer->objects_box();
+    if (!box.defined)
+        return {};
+    double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (int i = 0; i < 8; ++i) {
+        const Vec3d c((i & 1) ? box.max.x() : box.min.x(), (i & 2) ? box.max.y() : box.min.y(), (i & 4) ? box.max.z() : box.min.z());
+        const Vec4d clip = vp * Vec4d(c.x(), c.y(), c.z(), 1.);
+        if (clip.w() <= 1e-9)
+            return {};   // partly behind the camera: no useful box
+        const double x = (clip.x() / clip.w() + 1.) * 0.5, y = (1. - clip.y() / clip.w()) * 0.5;
+        x0 = std::min(x0, x);
+        y0 = std::min(y0, y);
+        x1 = std::max(x1, x);
+        y1 = std::max(y1, y);
+    }
+    x0 = std::clamp(x0, 0., 1.);
+    y0 = std::clamp(y0, 0., 1.);
+    x1 = std::clamp(x1, 0., 1.);
+    y1 = std::clamp(y1, 0., 1.);
+    return { x0, y0, x1 - x0, y1 - y0 };
+}
+
+double ShowcaseView::callouts_model_center_x() const
+{
+    Matrix4d vp;
+    if (m_renderer == nullptr || !m_renderer->frame_view_projection(vp))
+        return -1.;
+    const BoundingBoxf3 box = m_renderer->objects_box();
+    if (!box.defined)
+        return -1.;
+    const Vec3d c    = box.center();
+    const Vec4d clip = vp * Vec4d(c.x(), c.y(), c.z(), 1.);
+    if (clip.w() <= 1e-9)
+        return -1.;
+    return std::clamp((clip.x() / clip.w() + 1.) * 0.5, 0., 1.);
+}
+
+bool ShowcaseView::callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &image)
+{
+    const Showcase::Scene &s = scene();
+    // S5c: a video's preview follows its "Show Callouts" (S4 drew them in the preview regardless), and
+    // the path's timeline may switch them on or off.
+    const Showcase::Scene &shown   = m_video.borrowed && m_video.pose_timeline ? m_video.pose_scene : s;
+    const bool             in_clip = m_video.borrowed && s.video.callouts;
+    if (!m_active || (m_video.borrowed && !in_clip) || !shown.callouts.enabled || shown.callouts.items.empty() || frame_w <= 0 ||
+        frame_h <= 0) {
+        m_callouts.hits = ShowcaseCalloutHits();
+        return false;
+    }
+    const std::vector<ShowcaseCalloutDraw> draws = callouts_draw_list(callouts_labels());
+    image.width  = frame_w;
+    image.height = frame_h;
+    image.rgba.assign(size_t(frame_w) * size_t(frame_h) * 4, 0);
+    ShowcaseCalloutOptions opt;
+    opt.overlay        = true;
+    opt.selected       = m_callouts.selected;
+    opt.reserved       = showcase_watermark_rect(s.export_settings.watermark, project(), frame_w, frame_h);
+    opt.model_center_x = callouts_model_center_x();
+    opt.model_box      = callouts_model_box();
+    showcase_draw_callouts(image, true, s, draws, opt, &m_callouts.hits);
+    return true;
+}
+
+void ShowcaseView::callouts_apply_to_export(ShowcaseImage &image, bool has_alpha)
+{
+    const Showcase::Scene &s = scene();
+    if (!s.callouts.enabled || s.callouts.items.empty() || image.empty())
+        return;
+    // The same anchors, layout and text as the screen, drawn at the export's size.
+    const ShowcaseLabelContext labels = ShowcaseLabelContext::current(current_plate(), s.callouts.fields.weight || s.callouts.fields.price);
+    ShowcaseCalloutOptions opt;
+    opt.reserved       = showcase_watermark_rect(s.export_settings.watermark, project(), image.width, image.height);
+    opt.model_center_x = callouts_model_center_x();
+    opt.model_box      = callouts_model_box();
+    showcase_draw_callouts(image, has_alpha, s, callouts_draw_list(labels), opt);
+}
+
+bool ShowcaseView::callouts_on_mouse(wxMouseEvent &evt)
+{
+    if (!m_active || m_renderer == nullptr || m_canvas_widget == nullptr)
+        return false;
+    CalloutUi &ui = m_callouts;
+    auto set_cursor = [this, &ui](int kind) {
+        if (kind == ui.cursor)
+            return;
+        ui.cursor = kind;
+        m_canvas_widget->SetCursor(wxCursor(kind == 2 ? wxCURSOR_HAND : kind == 1 ? wxCURSOR_SIZING : wxCURSOR_ARROW));
+    };
+    const Showcase::Scene &s = scene();
+    const Showcase::RectI  f = m_renderer->live_frame();
+    if (!s.callouts.enabled || s.callouts.items.empty() || read_only() || f.empty()) {
+        set_cursor(0);
+        ui.drag = CalloutUi::Drag::None;
+        return false;
+    }
+    const double x = double(evt.GetX() - f.x), y = double(evt.GetY() - f.y);
+
+    // A drag under way.
+    if (ui.drag != CalloutUi::Drag::None) {
+        if (evt.Dragging() && evt.LeftIsDown()) {
+            if (std::hypot(x - ui.press_x, y - ui.press_y) > 3.)
+                ui.moved = true;
+            if (ui.moved) {
+                if (ui.drag == CalloutUi::Drag::Label) {
+                    Showcase::Scene &sc = scene();
+                    if (ui.drag_item >= 0 && size_t(ui.drag_item) < sc.callouts.items.size()) {
+                        Showcase::Callout &c = sc.callouts.items[size_t(ui.drag_item)];
+                        c.pinned    = true;
+                        c.label_pos = { std::clamp((x - ui.grab_dx) / double(f.w), 0., 1.), std::clamp((y - ui.grab_dy) / double(f.h), 0., 1.) };
+                    }
+                } else {
+                    ui.drag_x = std::clamp(x, 0., double(f.w));
+                    ui.drag_y = std::clamp(y, 0., double(f.h));
+                }
+                callouts_changed();
+            }
+            return true;
+        }
+        if (evt.LeftUp() || !evt.LeftIsDown()) {
+            const CalloutUi::Drag drag = ui.drag;
+            const int             item = ui.drag_item;
+            ui.drag                    = CalloutUi::Drag::None;
+            if (m_canvas_widget->HasCapture())
+                m_canvas_widget->ReleaseMouse();
+            if (ui.moved && item >= 0 && size_t(item) < s.callouts.items.size()) {
+                if (drag == CalloutUi::Drag::Label) {
+                    mark_project_dirty();
+                    update_enabled();
+                } else
+                    // Dropped: picked on the model in the next frame (it needs the GL context).
+                    ui.picks.push_back({ s.callouts.items[size_t(item)].key, ui.drag_anchor, ui.drag_x / double(f.w), ui.drag_y / double(f.h) });
+                ui.occlusion_camera = 0;
+                callouts_changed();
+            } else
+                callouts_select(item);
+            return true;
+        }
+        return true;
+    }
+
+    // What is under the pointer: dots first (they are small), then labels, topmost first.
+    int  hit_item = -1, dot_index = 0;
+    bool on_dot   = false;
+    Showcase::RectD hit_box;
+    const double reach = std::max(6., 0.012 * double(f.h));
+    for (auto it = ui.hits.items.rbegin(); it != ui.hits.items.rend() && hit_item < 0; ++it)
+        for (size_t d = 0; d < it->dots.size(); ++d)
+            if (std::hypot(it->dots[d].x - x, it->dots[d].y - y) <= reach) {
+                hit_item  = it->item;
+                dot_index = int(d);
+                on_dot    = true;
+                hit_box   = it->box;
+                break;
+            }
+    for (auto it = ui.hits.items.rbegin(); it != ui.hits.items.rend() && hit_item < 0; ++it)
+        if (it->box.contains({ x, y })) {
+            hit_item = it->item;
+            hit_box  = it->box;
+        }
+    set_cursor(hit_item < 0 ? 0 : on_dot ? 2 : 1);
+    if (evt.Leaving())
+        set_cursor(0);
+    if (hit_item < 0) {
+        if (evt.LeftDown() && ui.selected >= 0)
+            callouts_select(-1);   // and the camera orbits as usual
+        return false;
+    }
+    if (evt.LeftDClick()) {
+        CallAfter([this, hit_item]() { callouts_edit(hit_item); });
+        return true;
+    }
+    if (evt.LeftDown() && !on_dot && ui.hits.legend) {
+        // The legend's rows stay in the key: a click only selects.
+        callouts_select(hit_item);
+        return true;
+    }
+    if (evt.LeftDown()) {
+        commit();
+        ui.drag        = on_dot ? CalloutUi::Drag::Dot : CalloutUi::Drag::Label;
+        ui.drag_item   = hit_item;
+        ui.drag_anchor = dot_index;
+        ui.moved       = false;
+        ui.press_x     = x;
+        ui.press_y     = y;
+        ui.grab_dx     = x - hit_box.x;
+        ui.grab_dy     = y - hit_box.y;
+        ui.drag_x      = x;
+        ui.drag_y      = y;
+        if (!m_canvas_widget->HasCapture())
+            m_canvas_widget->CaptureMouse();
+        return true;
+    }
+    if (evt.RightDown())
+        return true;
+    if (evt.RightUp()) {
+        callouts_select(hit_item);
+        CallAfter([this, hit_item]() { callouts_context_menu(hit_item); });
+        return true;
+    }
+    return false;
+}
+
+void ShowcaseView::callouts_select(int item)
+{
+    if (item != m_callouts.selected) {
+        m_callouts.selected = item;
+        callouts_changed();
+    }
+    if (m_co_list != nullptr) {
+        const bool syncing = m_syncing;
+        m_syncing          = true;
+        int sel = -1;
+        for (unsigned i = 0; i < m_co_list->GetCount(); ++i)
+            if (int(reinterpret_cast<intptr_t>(m_co_list->GetClientData(i))) == item)
+                sel = int(i);
+        m_co_list->SetSelection(sel);
+        m_syncing = syncing;
+    }
+    update_enabled();
+}
+
+void ShowcaseView::callouts_edit(int item)
+{
+    if (read_only())
+        return;
+    const Showcase::Scene &s = scene();
+    if (item < 0 || size_t(item) >= s.callouts.items.size())
+        return;
+    callouts_select(item);
+    const Showcase::Callout    c      = s.callouts.items[size_t(item)];
+    const ShowcaseLabelContext labels = ShowcaseLabelContext::current(current_plate(), false);
+    // What the label says without the user's text.
+    Showcase::Callout plain = c;
+    plain.title.clear();
+    plain.color_name.clear();
+    plain.note.clear();
+    const Showcase::CalloutLabel auto_label = Showcase::build_callout_label(plain, labels.filament(s, plain), Showcase::CalloutFields(), labels.words());
+    const std::string            current    = Showcase::callout_first_line(Showcase::build_callout_label(c, labels.filament(s, c),
+                                                                                                         Showcase::CalloutFields(), labels.words()));
+    const wxString heading = current.empty() ? wxString::Format(_L("Filament %d"), c.filament) : wxString::FromUTF8(current);
+    ShowcaseCalloutDialog dlg(this, c, heading, auto_label.title, auto_label.color_name, labels.library_name(c));
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const Showcase::Callout r = dlg.result();
+    edit([item, &r](Showcase::Scene &sc) {
+        if (size_t(item) < sc.callouts.items.size())
+            sc.callouts.items[size_t(item)] = r;
+    });
+    refresh_callout_list();
+    update_enabled();
+}
+
+void ShowcaseView::callouts_context_menu(int item)
+{
+    const Showcase::Scene &s = scene();
+    if (read_only() || item < 0 || size_t(item) >= s.callouts.items.size() || m_canvas_widget == nullptr)
+        return;
+    const Showcase::Callout &c = s.callouts.items[size_t(item)];
+    enum { ID_EDIT = 1, ID_HIDE, ID_UNPIN, ID_REANCHOR };
+    wxMenu menu;
+    menu.Append(ID_EDIT, _L("Edit..."));
+    menu.Append(ID_HIDE, _L("Hide"));
+    if (c.pinned)
+        menu.Append(ID_UNPIN, _L("Back to the automatic layout"));
+    if (c.user_anchor)
+        menu.Append(ID_REANCHOR, _L("Place the dot automatically"));
+    const int chosen = m_canvas_widget->GetPopupMenuSelectionFromUser(menu);
+    switch (chosen) {
+    case ID_EDIT: callouts_edit(item); break;
+    case ID_HIDE:
+        edit([item](Showcase::Scene &sc) {
+            if (size_t(item) < sc.callouts.items.size())
+                sc.callouts.items[size_t(item)].hidden = true;
+        });
+        refresh_callout_list();
+        break;
+    case ID_UNPIN:
+        edit([item](Showcase::Scene &sc) {
+            if (size_t(item) < sc.callouts.items.size())
+                sc.callouts.items[size_t(item)].pinned = false;
+        });
+        break;
+    case ID_REANCHOR:
+        edit([item](Showcase::Scene &sc) {
+            if (size_t(item) < sc.callouts.items.size()) {
+                sc.callouts.items[size_t(item)].anchors.clear();
+                sc.callouts.items[size_t(item)].user_anchor = false;
+            }
+        });
+        callouts_sync(false);
+        break;
+    default: break;
+    }
+}
+
+void ShowcaseView::refresh_callout_list()
+{
+    if (m_co_list == nullptr)
+        return;
+    const bool syncing = m_syncing;
+    m_syncing          = true;
+    m_co_list->Clear();
+    int                    sel = -1;
+    const Showcase::Scene &s   = scene();
+    if (s.callouts.enabled && !s.callouts.items.empty()) {
+        const ShowcaseLabelContext &labels = callouts_labels();
+        for (size_t i = 0; i < s.callouts.items.size(); ++i) {
+            const Showcase::Callout &c    = s.callouts.items[i];
+            const std::string        text = Showcase::callout_first_line(
+                Showcase::build_callout_label(c, labels.filament(s, c), Showcase::CalloutFields(), labels.words()));
+            wxString label = wxString::Format("%d  ", c.filament) + (text.empty() ? wxString::Format(_L("Filament %d"), c.filament) : wxString::FromUTF8(text));
+            if (c.z_from >= 0.)
+                label += wxString::Format(" (%s)", wxString::FromUTF8(Showcase::build_callout_label(c, Showcase::LabelFilament(),
+                                                                                                    Showcase::CalloutFields{ false, false, false, false, false, false, false },
+                                                                                                    labels.words()).details));
+            if (c.hidden)
+                label += " " + _L("(hidden)");
+            m_co_list->Append(label, reinterpret_cast<void *>(intptr_t(i)));
+            if (int(i) == m_callouts.selected)
+                sel = int(m_co_list->GetCount()) - 1;
+        }
+    }
+    m_co_list->SetSelection(sel);
+    m_syncing = syncing;
 }
 
 } // namespace GUI

@@ -8,6 +8,7 @@
 #include "I18N.hpp"
 #include "Layer.hpp"
 #include "MutablePolygon.hpp"
+#include "PerimeterGenerator.hpp"
 #include "PrintConfig.hpp"
 #include "Support/SupportMaterial.hpp"
 #include "Support/SupportSpotsGenerator.hpp"
@@ -1119,12 +1120,13 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "top_surface_speed") {
             // Brim is printed below supports, support invalidates brim and skirt.
             steps.emplace_back(posSupportMaterial);
-            if (opt_key == "brim_type") {
-                const auto* old_brim_type = old_config.option<ConfigOptionEnum<BrimType>>(opt_key);
-                const auto* new_brim_type = new_config.option<ConfigOptionEnum<BrimType>>(opt_key);
-                //BBS: When switch to manual brim, the object must have brim, then re-generate perimeter
-                //to make the wall order of first layer to be outer-first
-                if (old_brim_type->value == btOuterOnly || new_brim_type->value == btOuterOnly)
+            if (opt_key == "brim_type" || opt_key == "brim_width") {
+                // Regenerate the walls when the brim starts or stops putting the first layer's outer walls first.
+                auto outer_walls_first = [](const ConfigOptionResolver &config) {
+                    return brim_puts_outer_walls_first(config.option<ConfigOptionEnum<BrimType>>("brim_type")->value,
+                                                       config.option<ConfigOptionFloat>("brim_width")->value);
+                };
+                if (outer_walls_first(old_config) != outer_walls_first(new_config))
                     steps.emplace_back(posPerimeters);
             }
         } else if (
@@ -1383,6 +1385,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "ensure_vertical_shell_thickness"
             || opt_key == "bridge_angle"
             || opt_key == "internal_bridge_angle" // ORCA: Internal bridge angle override
+            || opt_key == "bridge_expansion_extra"
             //BBS
             || opt_key == "bridge_density"
             || opt_key == "internal_bridge_density") {
@@ -1455,6 +1458,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "overhang_reverse_threshold"
             || opt_key == "wall_direction"
             || opt_key == "enable_overhang_speed"
+            || opt_key == "overhang_shadow_inner_wall"
+            || opt_key == "overhang_shadow_speed_ratio"
+            || opt_key == "overhang_shadow_distance"
             || opt_key == "detect_thin_wall"
             || opt_key == "precise_outer_wall") {
             steps.emplace_back(posPerimeters);
@@ -3665,6 +3671,11 @@ void PrintObject::bridge_over_infill()
                 ExPolygons additional_ensuring = intersection_ex(additional_ensuring_areas, near_perimeters);
 
                 SurfacesPtr internal_infills = region->fill_surfaces.filter_by_type(stInternal);
+                // Orca #16570: Sloping walls shift adjacent infill contours, so their boundary bands
+                // may intersect in a strip too narrow to print. Widen these contacts into
+                // sparse infill to retain support after the fill's half-spacing inset.
+                additional_ensuring = intersection_ex(internal_infills,
+                    expand_ex(to_polygons(additional_ensuring), region->flow(frSolidInfill).scaled_spacing()));
                 ExPolygons new_internal_infills = diff_ex(internal_infills, cut_from_infill);
                 new_internal_infills            = diff_ex(new_internal_infills, additional_ensuring);
                 for (const ExPolygon &ep : new_internal_infills) {

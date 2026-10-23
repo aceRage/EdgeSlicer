@@ -67,6 +67,7 @@ struct Record
 };
 Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
+void disable_spawn(); // from now on ensure_running() never spawns a hub and returns a dead Info (CLI render jobs)
 Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it, or for one
                                                                  // already starting (up to HubHandover::START_DEADLINE_MS)
 Info set_phone(bool on, const std::string& token = ""); // off and on keeps the same link; a valid

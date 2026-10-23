@@ -276,6 +276,10 @@ unsigned int init_shader(const std::string& shader_name, const char* vertex_shad
     return shader_id;
 }
 
+// EDGE (Showcase S5): the texture unit of the per-vertex roles (clear of 0-3, the shadow map's 4 and
+// the host's realistic-view units).
+static constexpr int SMOOTH_ROLES_UNIT = 10;
+
 static void delete_textures(unsigned int& id)
 {
     if (id != 0) {
@@ -795,12 +799,18 @@ void ViewerImpl::init(const std::string& opengl_context_version)
     m_uni_segments_exposure_id               = glGetUniformLocation(m_segments_shader_id, "exposure");
     m_uni_segments_saturation_id             = glGetUniformLocation(m_segments_shader_id, "saturation");
     m_uni_segments_light_top_dir_id          = glGetUniformLocation(m_segments_shader_id, "light_top_dir");
+    // EDGE (Showcase S5): -1 in the ES shaders, which have no smooth look (glUniform ignores -1).
+    m_uni_segments_smooth_mode_id            = glGetUniformLocation(m_segments_shader_id, "smooth_mode");
+    m_uni_segments_role_tex_id               = glGetUniformLocation(m_segments_shader_id, "role_tex");
+    m_uni_segments_look_a_id                 = glGetUniformLocation(m_segments_shader_id, "look_a");
+    m_uni_segments_look_b_id                 = glGetUniformLocation(m_segments_shader_id, "look_b");
     m_uni_segments_layer_colors.init(m_segments_shader_id);
     // EDGE (core profile): every sampler on its own unit from the start (see set_sampler_units()).
     // render_segments() sets the same units again on every draw; shadow_map takes the unit the host
     // will name in set_shadow_map(), 4 until then.
     set_sampler_units(m_segments_shader_id, { { "position_tex", 0 }, { "height_width_angle_tex", 1 }, { "color_tex", 2 },
-                                              { "segment_index_tex", 3 }, { "shadow_map", m_shadow_map_texture_unit } });
+                                              { "segment_index_tex", 3 }, { "shadow_map", m_shadow_map_texture_unit },
+                                              { "role_tex", SMOOTH_ROLES_UNIT } });
     // A complete 1x1 texture for shadow_map while the host has not set a shadow map. White: depth 1,
     // the far plane, so nothing would be in shadow even if intensity were not 0.
     {
@@ -988,6 +998,8 @@ void ViewerImpl::reset()
 
     delete_textures(m_enabled_options_tex_id);
     delete_buffers(m_enabled_options_buf_id);
+    delete_textures(m_roles_tex_id);
+    delete_buffers(m_roles_buf_id);
     delete_textures(m_enabled_segments_tex_id);
     delete_buffers(m_enabled_segments_buf_id);
     delete_textures(m_colors_tex_id);
@@ -1245,6 +1257,20 @@ void ViewerImpl::load(GCodeInputData&& gcode_data)
         glsafe(glBindBuffer(GL_TEXTURE_BUFFER, m_enabled_options_buf_id));
         glsafe(glGenTextures(1, &m_enabled_options_tex_id));
         glsafe(glBindTexture(GL_TEXTURE_BUFFER, m_enabled_options_tex_id));
+
+        // EDGE (Showcase S5): create and fill the roles buffer, 2 bytes per vertex, read only by the
+        // smooth bead look (role | extruder << 8).
+        {
+            std::vector<uint16_t> roles(m_vertices.size());
+            for (size_t i = 0; i < m_vertices.size(); ++i)
+                roles[i] = static_cast<uint16_t>(static_cast<uint16_t>(m_vertices[i].role) |
+                                                 (static_cast<uint16_t>(std::min<uint8_t>(m_vertices[i].extruder_id, 15)) << 8));
+            glsafe(glGenBuffers(1, &m_roles_buf_id));
+            glsafe(glBindBuffer(GL_TEXTURE_BUFFER, m_roles_buf_id));
+            glsafe(glBufferData(GL_TEXTURE_BUFFER, roles.size() * sizeof(uint16_t), roles.data(), GL_STATIC_DRAW));
+            glsafe(glGenTextures(1, &m_roles_tex_id));
+            glsafe(glBindTexture(GL_TEXTURE_BUFFER, m_roles_tex_id));
+        }
 
         glsafe(glBindBuffer(GL_TEXTURE_BUFFER, 0));
         glsafe(glBindTexture(GL_TEXTURE_BUFFER, old_bound_texture));
@@ -2177,6 +2203,19 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
         glsafe(glUniform1f(m_uni_segments_saturation_id, m_saturation));
         glsafe(glUniform3fv(m_uni_segments_light_top_dir_id, 1, m_light_top_dir.data()));
         set_layer_colors(m_uni_segments_layer_colors);
+        // EDGE (Showcase S5): the smooth bead look, off unless Showcase asked for it.
+        const bool smooth = m_smooth_look && m_roles_tex_id != 0;
+        glsafe(glUniform1i(m_uni_segments_smooth_mode_id, smooth ? 1 : 0));
+        if (smooth) {
+            std::array<float, 64> a{}, b{};
+            for (size_t e = 0; e < 16; ++e)
+                for (size_t k = 0; k < 4; ++k) {
+                    a[e * 4 + k] = m_looks[e * 8 + k];
+                    b[e * 4 + k] = m_looks[e * 8 + 4 + k];
+                }
+            glsafe(glUniform4fv(m_uni_segments_look_a_id, 16, a.data()));
+            glsafe(glUniform4fv(m_uni_segments_look_b_id, 16, b.data()));
+        }
     }
 
     glsafe(glDisable(GL_CULL_FACE));
@@ -2247,8 +2286,26 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
     glsafe(glActiveTexture(GL_TEXTURE3));
     glsafe(glBindTexture(GL_TEXTURE_BUFFER, m_enabled_segments_tex_id));
     glsafe(glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, m_enabled_segments_buf_id));
+    // EDGE (Showcase S5): the roles on their own unit (always bound, so the usamplerBuffer never sits
+    // on a unit without a buffer texture of its type).
+    int curr_roles_texture = 0;
+    const bool bind_roles = !m_rendering_shadow_casters && m_roles_tex_id != 0;
+    if (bind_roles) {
+        glsafe(glActiveTexture(GL_TEXTURE0 + SMOOTH_ROLES_UNIT));
+        glsafe(glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &curr_roles_texture));
+        glsafe(glBindTexture(GL_TEXTURE_BUFFER, m_roles_tex_id));
+        glsafe(glTexBuffer(GL_TEXTURE_BUFFER, GL_R16UI, m_roles_buf_id));
+        glsafe(glUniform1i(m_uni_segments_role_tex_id, SMOOTH_ROLES_UNIT));
+        glsafe(glActiveTexture(GL_TEXTURE0));
+    }
 
     draw(m_enabled_segments_count);
+
+    if (bind_roles) {
+        glsafe(glActiveTexture(GL_TEXTURE0 + SMOOTH_ROLES_UNIT));
+        glsafe(glBindTexture(GL_TEXTURE_BUFFER, static_cast<GLuint>(curr_roles_texture)));
+        glsafe(glActiveTexture(GL_TEXTURE0));
+    }
 #endif // ENABLE_OPENGL_ES
 
     if (bind_shadow_fallback) {
