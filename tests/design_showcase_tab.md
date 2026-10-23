@@ -449,6 +449,26 @@ Each phase is a separate PR with owner hand-test steps. All of them depend on th
 | **S4: videographer** | orbit/turntable/bob/spline keyframes; timeline UI; easing; offline frame loop + PBO + encoder thread; ffmpeg pipe (Windows), AVFoundation (Mac), PNG sequence; GIF/WebP/VP9-alpha; progress/cancel/ETA; callouts per frame with occlusion fade | **L (6–8 d)** | S1; S3 for callouts in video |
 | **S5: toolpath realism** | Toolpath source in Showcase; libvgcode role buffer; per-fragment cross-section normals (A), skin flatten/overlap (B), Smoothness slider (F), finish defaults, SSAO skin weight, anisotropic silk along `line_dir`; optional same look in Preview realistic view; layer build-up animation (stretch) | **L (6–9 d)** | S2 (materials), libvgcode host; owner look sign-off |
 
+- **S5 as built (2026-10-21, owner priority order):**
+  - **Programmatic sequencing first.** A versioned JSON path format (`docs/showcase_paths.md`). It has:
+    - keyframes with fov or ortho scale, per-key ease, holds, spin and glide;
+    - chained high-level moves (orbit, turntable, dolly, zoom, pan, focus on an object or filament, fly to a view, move to, wait), compiled to keyframes deterministically;
+    - a timed event timeline (lighting, backdrop, floor, look, callouts show/hide/highlight, watermark, build-up).
+
+    It also has:
+    - import and export in the Video panel;
+    - `--showcase-render` (a hidden, network-free instance; exit codes; `--report`; `--still`; `--dry-run`);
+    - three example paths in `resources/showcase/paths/`.
+
+    The hub endpoint (1d) was left out.
+  - **Layer build-up.** With toolpaths when Preview has the plate's slice loaded; otherwise a clip plane on the mesh, with a cap and clipped shadow casters.
+  - **D13.** The libvgcode role buffer (R16UI: role | extruder) and per-fragment superellipse bead normals. Also:
+    - skin widening and flattening;
+    - the groove;
+    - silk's anisotropic streak;
+    - a Smoothness slider, or "By finish".
+
+    It is used only when Showcase draws the toolpath source; Preview's `smooth_mode` is always 0 and draws exactly as before.
 - **Smallest useful slice:** S1 alone already gives "nice product shot of my model on white with a soft shadow, 4K PNG".
 - **Order:** S3 can run in parallel with S2 once S1 merges; they touch different files (overlay vs shaders).
 - **Gates and tests:**
