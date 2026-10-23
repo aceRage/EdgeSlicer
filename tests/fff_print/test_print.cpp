@@ -1759,6 +1759,8 @@ TEST_CASE("Bridge expansion extra 0: G-code is identical to the default", "[Prin
 
 TEST_CASE("Bridge expansion extra above 0 grows the bridged area", "[Print][BridgeExpansion]")
 {
+    // The slab is thin enough that the whole bridge layer sits inside the top shells, so the
+    // area around the bridge is solid infill, which is what the extra expansion grows into.
     // Two pillars joined by a slab that overlaps them by 0.5 mm, so the slab underside is a
     // bridge over a 18 mm gap with solid material on both sides.
     auto bridge_area = [](const char *extra, const char *walls) {
@@ -1766,7 +1768,7 @@ TEST_CASE("Bridge expansion extra above 0 grows the bridged area", "[Print][Brid
         TriangleMesh pillar = make_cube(6., 10., 5.);
         pillar.translate(24.f, 0.f, 0.f);
         mesh.merge(pillar);
-        TriangleMesh slab = make_cube(30., 10., 3.5);
+        TriangleMesh slab = make_cube(30., 10., 1.5);
         slab.translate(0.f, 0.f, 4.5f);
         mesh.merge(slab);
         Print print;
@@ -1776,7 +1778,7 @@ TEST_CASE("Bridge expansion extra above 0 grows the bridged area", "[Print][Brid
             { "wall_loops", walls },
             { "layer_height", "0.2" },
             { "initial_layer_print_height", "0.2" },
-            { "bottom_shell_layers", "3" },
+            { "bottom_shell_layers", "3" }, { "top_shell_layers", "8" }, { "top_shell_thickness", "0" },
             { "sparse_infill_density", "15%" },
         }, false);
         print.process();
