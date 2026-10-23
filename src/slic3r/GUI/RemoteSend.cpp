@@ -1661,6 +1661,10 @@ static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
     PrintHostDevices::QidiAutoMapping am  = PrintHostDevices::qidi_auto_mapping(st, filaments);
     am.facts.model_may_have_box           = p.qidi_model_box;
     const PrintHostDevices::QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(am.facts);
+    // What this send saw in the Box, slot by slot, for the log a report comes with.
+    if (st.qidi || p.qidi_model_box)
+        BOOST_LOG_TRIVIAL(warning) << "RemoteSend: " << PrintHostDevices::describe_qidi_box(st) << " (policy " << (int) policy
+                                   << ", mapping '" << am.mapping << "')";
 
     json q;
     q["probe_ok"]    = am.facts.probe_ok;
@@ -1671,6 +1675,8 @@ static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
     q["mapped"]      = am.facts.mapped_filaments;
     q["mapping"]     = am.mapping;
     q["policy"]      = (int) policy;
+    if (st.qidi_box_inconsistent)
+        q["box_problem"] = st.qidi_box_problem;
     result["qidi"]   = q;
 
     if (policy == PrintHostDevices::QidiSendPolicy::NotApplicable)

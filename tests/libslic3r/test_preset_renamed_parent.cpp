@@ -757,6 +757,34 @@ void check_detach_from_parent(PresetCollection &presets, const DetachCase &c)
 }
 } // namespace
 
+TEST_CASE("The selected preset is its own base when its parent is not loaded", "[Preset]")
+{
+    const auto               &defaults = static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults());
+    PrinterPresetCollection   printers(Preset::TYPE_PRINTER, Preset::printer_options(), defaults, "Default Printer");
+
+    auto add = [&](const std::string &name, const std::string &parent = {}) -> Preset & {
+        DynamicPrintConfig cfg = printers.default_preset().config;
+        if (!parent.empty())
+            Preset::inherits(cfg) = parent;
+        Preset &preset     = printers.load_preset("", name, std::move(cfg), false);
+        preset.is_visible  = true;
+        return preset;
+    };
+
+    add("Printer").is_system = true;
+    add("User Printer", "Printer");
+    add("Orphan Printer", "Uninstalled Vendor Printer");
+
+    printers.select_preset_by_name("User Printer", true);
+    REQUIRE(printers.get_selected_preset_name() == "User Printer");
+    CHECK(printers.get_selected_preset_base().name == "Printer");
+
+    printers.select_preset_by_name("Orphan Printer", true);
+    REQUIRE(printers.get_selected_preset_name() == "Orphan Printer");
+    REQUIRE(printers.get_preset_base(printers.get_selected_preset()) == nullptr);
+    CHECK(printers.get_selected_preset_base().name == "Orphan Printer");
+}
+
 TEST_CASE("Detach from parent works for process, filament and printer presets", "[Preset][Detach]")
 {
     const auto &defaults = static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults());

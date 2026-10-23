@@ -102,7 +102,8 @@ public:
      * Get the order constraints of the insets when printing walls per region / hole.
      * Each returned pair consists of adjacent wall lines where the left has an inset_idx one lower than the right.
      *
-     * Odd walls should always go after their enclosing wall polygons.
+     * Odd walls follow the same order as even ones, so that the centre line of a narrow wall is an inner wall
+     * like any other when printing inner to outer.
      *
      * \param outer_to_inner Whether the wall polygons with a lower inset_idx should go before those with a higher one.
      */
