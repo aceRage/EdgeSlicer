@@ -4,6 +4,7 @@
   "time_s": 9000,
   "time_silent_s": 12000,
   "prepare_time_s": 120,
+  "layers": 230,
   "gcode_bytes": 7130112,
   "filaments": [
     {"index": 0, "preset": "Bambu PLA Basic @BBL X1C", "type": "PLA", "color": "#E6EBE3",

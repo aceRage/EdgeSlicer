@@ -92,6 +92,7 @@ void fill_two_filaments(GCodeProcessorResult& r)
     ps.wipe_tower_volumes_per_extruder = { { 0, 500. } };
     ps.total_volumes_per_extruder      = { { 0, 40000. }, { 1, 10000. } };
     ps.total_filamentchanges           = 24;
+    ps.modes[size_t(Mode::Normal)].layers_times.assign(230, 39.f); // 230 layers
     GCodeProcessorResult::SliceWarning w;
     w.level = 1;
     w.msg   = BED_TEMP_TOO_HIGH_THAN_FILAMENT;
@@ -157,6 +158,7 @@ TEST_CASE("slice_v1 result: unknown prices, fees and markup", "[SliceV1]")
     r.print_statistics.modes[size_t(Mode::Normal)].prepare_time = 0.f;
     r.print_statistics.modes[size_t(Mode::Stealth)].time        = 0.f;
     r.print_statistics.total_filamentchanges                    = 0;
+    r.print_statistics.modes[size_t(Mode::Normal)].layers_times.clear(); // no per-layer times: no "layers"
     r.print_statistics.model_volumes_per_extruder = { { 0, 10000. } };
     r.print_statistics.total_volumes_per_extruder = { { 0, 10000. } };
     r.toolpath_outside = true;
