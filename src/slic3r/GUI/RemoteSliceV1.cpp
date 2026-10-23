@@ -22,8 +22,9 @@ const std::vector<std::string>& pair_features()
 {
     // slice_v1: the contract (result + cancel + presets type + instances progress + cache headers);
     // slice_result / slice_cancel: the two sub-features the app checks one by one;
-    // slice_send_preview: POST /plates/{i}/send/preview and ams_mapping on a plate send.
-    static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview" };
+    // slice_send_preview: POST /plates/{i}/send/preview and ams_mapping on a plate send;
+    // slice_preview_live: that preview never selects / connects a Bambu printer without live=1.
+    static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live" };
     return f;
 }
 

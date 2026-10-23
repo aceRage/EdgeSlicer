@@ -160,6 +160,7 @@ struct CachedPrinter
     bool   online { false };    // MachineObject::is_online
     bool   connected { false }; // MachineObject::is_connected: its pushes are arriving now
     double age_s { -1. };       // seconds since its last push (MachineObject::last_update_time), < 0 unknown
+    std::string name;           // its display name (dev_name), "" when unknown
 };
 
 // The longest a printer's last push may be old for its AMS to count as current.

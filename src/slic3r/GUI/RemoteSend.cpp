@@ -935,7 +935,9 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
     if (!plate->is_slice_result_valid() || plate->get_slice_result() == nullptr || !plate->is_slice_result_ready_for_print())
         return { 409, "this plate is not sliced, or its result is not printable" };
     // The export helpers and the file name work on the current plate, exactly as the dialogs do.
-    if (plates.get_curr_plate_index() != req.plate) plater->select_plate(req.plate, false);
+    // A preview leaves the PC's shown plate alone: it reads the plate's own slice result and
+    // G-code, and names the file with export_name_for(); nothing is uploaded from it.
+    if (!req.preview && plates.get_curr_plate_index() != req.plate) plater->select_plate(req.plate, false);
 
     auto p        = std::make_shared<Prepared>();
     p->mode       = req.mode;
@@ -1350,6 +1352,7 @@ static SliceV1::CachedPrinter cached_printer(const std::string& printer)
     MachineObject* obj = dm ? find_machine(dm, printer) : nullptr;
     if (!obj) return c;
     c.known     = true;
+    c.name      = obj->dev_name;
     c.online    = obj->is_online();
     c.connected = obj->is_connected();
     if (obj->last_update_time.time_since_epoch().count() > 0)
@@ -1385,6 +1388,7 @@ static std::pair<int, std::string> preview_plate_bambu(const Request& req, const
         if (!why.empty()) {
             out            = SliceV1::no_state_sheet(sheet_filaments(*used), why, cached->age_s);
             out["printer"] = { { "id", req.printer }, { "kind", "bambu" }, { "has_ams", false } };
+            if (!cached->name.empty()) out["printer"]["name"] = cached->name;
             return { 200, "" };
         }
     }
@@ -1395,22 +1399,43 @@ static std::pair<int, std::string> preview_plate_bambu(const Request& req, const
             on_main([ready, req]() { *ready = printer_ready(req.printer); }, 3000);
         }
     }
-    // The file a send would upload (Plater::send_gcode), which is also what a reprint reads.
-    auto path = std::make_shared<std::string>();
-    if (!on_main([rc, path, req]() {
+    // The plate's .gcode.3mf, which is what a send uploads and what a reprint reads. A live preview
+    // makes it the way a send does (the plate becomes the current one, Plater::send_gcode). A
+    // cached preview must not change what the PC shows: it writes the same export (export_3mf with
+    // send_gcode's strategy, for that plate index) to a temp file of its own, without selecting the
+    // plate and without touching the send path's own temp file, and removes it once read. Only the
+    // job data (slice_info, project settings, filament sequence) is read from it.
+    auto path      = std::make_shared<std::string>();
+    auto temporary = std::make_shared<bool>(false);
+    if (!on_main([rc, path, temporary, req]() {
             *rc = plate_sendable(req);
             if (rc->first != 200) return;
             Plater*        plater = wxGetApp().plater();
             PartPlateList& plates = plater->get_partplate_list();
-            if (plates.get_curr_plate_index() != req.plate) plater->select_plate(req.plate, false);
-            if (plater->send_gcode(req.plate, nullptr) < 0) { *rc = { 500, "Abnormal print file data. Please slice again" }; return; }
-            PrintPrepareData jd;
-            plater->get_print_job_data(&jd);
-            *path = jd._3mf_path.string();
+            if (req.live) {
+                if (plates.get_curr_plate_index() != req.plate) plater->select_plate(req.plate, false);
+                if (plater->send_gcode(req.plate, nullptr) < 0) { *rc = { 500, "Abnormal print file data. Please slice again" }; return; }
+                PrintPrepareData jd;
+                plater->get_print_job_data(&jd);
+                *path = jd._3mf_path.string();
+                return;
+            }
+            boost::system::error_code ec;
+            const fs::path tmp = fs::temp_directory_path(ec) /
+                                 ("edgeslicer_preview_" + std::to_string((long) wxGetProcessId()) + "_" + std::to_string(req.plate) + ".gcode.3mf");
+            if (ec) { *rc = { 500, "no temp folder for the preview" }; return; }
+            const SaveStrategy strategy = SaveStrategy::Silence | SaveStrategy::SkipModel | SaveStrategy::WithGcode | SaveStrategy::SkipAuxiliary;
+            if (plater->export_3mf(tmp, strategy, req.plate) < 0) { *rc = { 500, "Abnormal print file data. Please slice again" }; return; }
+            *path      = tmp.string();
+            *temporary = true;
         }, 5 * 60 * 1000))
         return { 503, "the slicer is busy" };
     if (rc->first != 200) return *rc;
     auto job = std::make_shared<BambuReprint::Job>(BambuReprint::load_job(*path));
+    if (*temporary) {
+        boost::system::error_code ec;
+        fs::remove(fs::path(*path), ec);
+    }
     if (!job->error.empty()) return { 409, job->error };
 
     BambuReprint::Request br;
@@ -1599,7 +1624,15 @@ std::pair<int, std::string> preview_plate(const Request& req_in, json& out)
     out["source"]        = "live"; // read from the printer (or its own status cache) for this preview
     out["needs_live"]    = false;
     out["ams_age_s"]     = nullptr;
-    if (p->kind == "snapmaker")
+    // prepare() named the file after the current plate (a preview does not switch to the requested
+    // one); the sheet names the requested plate's own file, as a send of it would.
+    if (req_in.name.empty()) {
+        const std::string ext  = p->kind == "snapmaker" || !p->upload.use_3mf ? ".gcode" : ".gcode.3mf";
+        auto              name = std::make_shared<std::string>();
+        const int         idx  = req_in.plate;
+        on_main([name, idx, ext]() { *name = export_name_for(idx, ext); }, 5000);
+        if (!name->empty()) out["upload_name"] = *name;
+    } else if (p->kind == "snapmaker")
         out["upload_name"] = p->lan_filename;
     else if (!p->upload.upload_path.empty())
         out["upload_name"] = p->upload.upload_path.filename().string();

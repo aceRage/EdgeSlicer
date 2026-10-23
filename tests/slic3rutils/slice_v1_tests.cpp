@@ -395,6 +395,8 @@ TEST_CASE("slice_v1 send preview: the hub proxies the preview route and /pair sa
     CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/send/preview/x"));
     const auto f = RemoteHub::Testing::pair_features();
     CHECK(std::find(f.begin(), f.end(), "slice_send_preview") != f.end());
+    // the hub understands live=1 and never connects a Bambu printer for a preview without it
+    CHECK(std::find(f.begin(), f.end(), "slice_preview_live") != f.end());
 }
 
 TEST_CASE("slice_v1 send preview: target ids are unique; a repeated label goes by its wire form", "[SliceV1]")

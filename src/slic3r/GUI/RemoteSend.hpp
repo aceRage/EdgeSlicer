@@ -56,7 +56,8 @@ struct Request
     // Bambu two-nozzle printers: nozzle offset calibration (-1 = the desktop's remembered choice).
     int         nozzle_offset_cali { -1 };
     // slice_v1: a plate send's preview (POST /api/plates/{i}/send/preview). prepare() then only
-    // works out what a send would do: it records nothing (no "last used" device).
+    // works out what a send would do: it records nothing (no "last used" device) and does not
+    // switch the plate the PC shows.
     bool        preview { false };
     // A Bambu preview: select and connect the printer to read its AMS live (live=1). Without it the
     // preview uses only what the PC already holds for that printer (SliceV1::CachedPrinter).
