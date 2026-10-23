@@ -2221,3 +2221,47 @@ TEST_CASE("Print::validate tolerates a null warnings pointer", "[Print][validate
     StringObjectException err = print.validate();  // warnings == nullptr
     CHECK(err.string.empty());
 }
+
+TEST_CASE("Print::validate concatenates layered-clearance collisions into one warning", "[Print][validate]")
+{
+    // Orca #12122: in by-layer mode, layered_print_cleareance_valid folds every too-close instance
+    // into a single warning entry (newline-joined), unlike the per-check stacking above. Isolate
+    // that entry by type so unrelated default-config warnings don't affect the assertion.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+    std::vector<StringObjectException> warnings;
+    StringObjectException err = validate_cubes(config, warnings, /*n=*/3, /*overlap=*/true);
+
+    CHECK(err.string.empty());
+    auto is_layered = [](const StringObjectException& w) {
+        return w.type == STRING_EXCEPT_OBJECT_COLLISION_IN_LAYER_PRINT; };
+    REQUIRE(std::count_if(warnings.begin(), warnings.end(), is_layered) == 1);  // 3 objects, 2 collisions, 1 entry
+    auto it = std::find_if(warnings.begin(), warnings.end(), is_layered);
+    CHECK(it->string.find('\n') != std::string::npos);  // the collisions were concatenated
+    // The jump target is one ModelInstance, not the whole object.
+    CHECK(dynamic_cast<const ModelInstance*>(it->object) != nullptr);
+}
+
+TEST_CASE("Print::validate flags each of several overlapping instances of one object", "[Print][validate]")
+{
+    // Orca #12122: instances of ONE object that overlap are reported too, and name an instance.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n"));
+
+    Slic3r::Model model;
+    ModelObject* object = model.add_object();
+    object->add_volume(Slic3r::Test::mesh(TestMesh::cube_20x20x20));
+    for (int i = 0; i < 2; ++i)
+        object->add_instance()->set_offset(Vec3d(i * 5.0, 0.0, 0.0));
+    object->ensure_on_bed();
+    Slic3r::Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+
+    std::vector<StringObjectException> warnings;
+    CHECK(print.validate(&warnings).string.empty());
+    auto it = std::find_if(warnings.begin(), warnings.end(), [](const StringObjectException& w) {
+        return w.type == STRING_EXCEPT_OBJECT_COLLISION_IN_LAYER_PRINT; });
+    REQUIRE(it != warnings.end());
+    CHECK(dynamic_cast<const ModelInstance*>(it->object) != nullptr);
+}

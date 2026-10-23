@@ -14638,12 +14638,20 @@ void Plater::priv::process_validation_warning(StringObjectException const &warni
         std::string text = warning.string;
         auto po = dynamic_cast<PrintObjectBase const *>(warning.object);
         auto mo = po ? po->model_object() : dynamic_cast<ModelObject const *>(warning.object);
-        auto action_fn = (mo || !warning.opt_key.empty()) ? [id = mo ? mo->id() : 0, opt = warning.opt_key](wxEvtHandler *) {
+        // ORCA #12122: a warning may name one ModelInstance, so the jump selects that instance.
+        auto mi = dynamic_cast<ModelInstance const *>(warning.object);
+        auto action_fn = (mo || mi || !warning.opt_key.empty()) ? [id = mo ? mo->id() : 0,
+             obj_id = mi ? mi->get_object()->id() : ObjectID(0),
+             inst_id = mi ? mi->id() : ObjectID(0),
+             opt = warning.opt_key](wxEvtHandler *) {
 		    auto & objects = wxGetApp().model().objects;
-		    auto iter = id.id ? std::find_if(objects.begin(), objects.end(), [id](auto o) { return o->id() == id; }) : objects.end();
+            const ObjectID target_id = inst_id.id ? obj_id : id;
+		    auto iter = target_id.id ? std::find_if(objects.begin(), objects.end(), [target_id](auto o) { return o->id() == target_id; }) : objects.end();
             if (iter != objects.end()) {
                 wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
-			    wxGetApp().obj_list()->select_items({{*iter, nullptr}});
+                if (!inst_id.id || !select_model_instances({{obj_id, inst_id}}))
+			        wxGetApp().obj_list()->select_items({{*iter, nullptr}});
+                wxGetApp().obj_list()->update_selections_on_canvas();
             }
             if (!opt.empty()) {
                 if (iter != objects.end())
@@ -14652,8 +14660,9 @@ void Plater::priv::process_validation_warning(StringObjectException const &warni
 		    }
 		    return false;
 	    } : std::function<bool(wxEvtHandler *)>();
-        auto hypertext = (mo || !warning.opt_key.empty()) ? _u8L("Jump to") : "";
+        auto hypertext = (mo || mi || !warning.opt_key.empty()) ? _u8L("Jump to") : "";
         if (mo) hypertext += std::string(" [") + mo->name + "]";
+        if (mi) hypertext += std::string(" [") + mi->get_object()->name + "]";
         if (!warning.opt_key.empty()) hypertext += std::string(" (") + warning.opt_key + ")";
 
         // BBS disable support enforcer
