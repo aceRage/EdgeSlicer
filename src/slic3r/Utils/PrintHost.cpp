@@ -579,7 +579,24 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
                      wxString::FromUTF8(err.c_str()));
             return;
         }
-        BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent the QIDI print options (Box mapping " << archive_mapping << ")";
+        // Read it back. Moonraker answering the script is not proof the Box took it, and a print
+        // started on value_t<n> left from the last print is the bug this exists to stop.
+        const int use_box = the_job.qidi_start_script.find("enable_box VALUE=0") != std::string::npos ? 0 :
+                            the_job.qidi_start_script.find("enable_box VALUE=1") != std::string::npos ? 1 : -1;
+        if (use_box >= 0) {
+            std::string vars, verr, mismatch;
+            if (!PrintHostDevices::query_qidi_variables(PrinterStorage::base_url_of(host_url), vars, verr) ||
+                !PrintHostDevices::qidi_mapping_confirmed(vars, archive_mapping, use_box, mismatch)) {
+                const std::string why = verr.empty() ? mismatch : verr;
+                BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the QIDI Box mapping '" << archive_mapping
+                                         << "' could not be confirmed (" << why << "), nothing uploaded";
+                error_fn(_L("The QIDI Box slot mapping could not be confirmed on the printer, so the file was not sent and "
+                            "the print was not started:") + " " + wxString::FromUTF8(why.c_str()));
+                return;
+            }
+        }
+        BOOST_LOG_TRIVIAL(warning) << "PrintHostJobQueue: sent and confirmed the QIDI print options (Box mapping '"
+                                   << archive_mapping << "', enable_box " << use_box << ")";
     }
     // The bed leveling (G31 / G32) is a call of its own, after the Box: a firmware that refuses it
     // is logged and the print goes ahead on the saved mesh. It never blocks the mapping or the print.
