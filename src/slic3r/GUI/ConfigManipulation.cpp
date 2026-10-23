@@ -1007,6 +1007,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     (config->opt_int("skirt_height") > 1 || config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
     toggle_line("support_speed", have_support_material || have_skirt_height || stab_on);
     toggle_line("support_interface_speed", have_support_material && have_support_interface);
+    // Orca #13459
+    for (auto el : {"small_support_perimeter_speed", "small_support_perimeter_threshold"})
+        toggle_line(el, have_support_material);
 
     // BBS
     //toggle_field("support_material_synchronize_layers", have_support_soluble);

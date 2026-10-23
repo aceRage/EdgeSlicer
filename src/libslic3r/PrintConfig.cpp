@@ -7435,6 +7435,30 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 80 });
 
+    // OrcaSlicer #13459. Edge: per flow variant like support_speed / small_perimeter_speed (not nullable),
+    // min 0 because 0 = auto, and the percentage is taken over the support (interface) speed.
+    def = this->add("small_support_perimeter_speed", coFloatsOrPercents);
+    def->label = L("Small support perimeters");
+    def->category = L("Speed");
+    def->tooltip = L("Same as \"Small perimeters\", but for supports. "
+                    "This separate setting will affect the speed of support for areas <= `small_support_perimeter_threshold`. "
+                    "If expressed as a percentage (for example: 80%), it will be calculated on the support or support interface speed setting above. "
+                    "Set to zero for auto.");
+    def->sidetext = L("mm/s or %");
+    def->ratio_over = "support_speed";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatsOrPercents { FloatOrPercent{50, true} });
+
+    def = this->add("small_support_perimeter_threshold", coFloats);
+    def->label = L("Small support perimeters threshold");
+    def->category = L("Speed");
+    def->tooltip = L("This sets the threshold for small support perimeter length. The default threshold is 0mm.");
+    def->sidetext = L("mm");	// millimeters, CIS languages need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0 });
+
     def = this->add("support_style", coEnum);
     def->label = L("Style");
     def->category = L("Support");
@@ -9734,6 +9758,8 @@ const std::vector<std::string>& process_flow_variant_options()
         "small_perimeter_speed",
         "small_perimeter_threshold",
         "support_speed",
+        "small_support_perimeter_speed",
+        "small_support_perimeter_threshold",
         "support_interface_speed",
         "initial_layer_speed",
         "initial_layer_infill_speed",

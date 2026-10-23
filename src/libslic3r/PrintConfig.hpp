@@ -1456,6 +1456,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               support_base_pattern_spacing))
     ((ConfigOptionFloat,               support_expansion))
     ((ConfigOptionFloats,               support_speed))
+    // OrcaSlicer #13459
+    ((ConfigOptionFloatsOrPercents,     small_support_perimeter_speed))
+    ((ConfigOptionFloats,               small_support_perimeter_threshold))
     ((ConfigOptionEnum<SupportMaterialStyle>, support_style))
     // BBS
     //((ConfigOptionBool,                independent_support_layer_height))

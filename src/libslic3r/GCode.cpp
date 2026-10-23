@@ -10031,6 +10031,23 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
     static constexpr const char* support_transition_label = "support transition";
     static constexpr const char* support_ironing_label    = "support ironing";
 
+    // OrcaSlicer #13459: small support perimeters. Upstream keeps this lambda static with a [&] capture,
+    // which pins the first GCode instance; here it is a plain local. A threshold of 0 (the default)
+    // switches it off outright, so even a zero-length support path keeps the role speed.
+    const auto speed_for_path = [this](double length, ExtrusionRole role) {
+        const double default_speed = -1.0;
+        const double threshold     = this->process_flow_value(m_config.small_support_perimeter_threshold);
+        if (!is_support(role) || threshold <= 0. || length > SMALL_PERIMETER_LENGTH(threshold))
+            return default_speed;
+
+        const double base_speed = (role == erSupportMaterialInterface) ? this->process_flow_value(m_config.support_interface_speed) :
+                                                                         this->process_flow_value(m_config.support_speed);
+        const FloatOrPercent small_speed_opt = this->process_flow_value(m_config.small_support_perimeter_speed);
+        const double small_perimeter_speed = small_speed_opt.value == 0 ? base_speed * 0.5 : 
+                                             (small_speed_opt.percent ? small_speed_opt.value * 0.01 * base_speed : small_speed_opt.value);
+        return small_perimeter_speed > 0 ? small_perimeter_speed : default_speed;
+    };
+
     std::string gcode;
     if (!support_fills.entities.empty()) {
         ConstExtrusionEntitiesPtr extrusions;
@@ -10060,19 +10077,16 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
                                     ((role == erSupportMaterialInterface) ?
                                          support_interface_label :
                                          ((role == erIroning) ? support_ironing_label : support_transition_label));
-            // BBS
-            // const double speed = (role == erSupportMaterial) ? support_speed : support_interface_speed;
-            const double                     speed      = -1.0;
             const ExtrusionPath*             path       = dynamic_cast<const ExtrusionPath*>(ee);
             const ExtrusionMultiPath*        multipath  = dynamic_cast<const ExtrusionMultiPath*>(ee);
             const ExtrusionLoop*             loop       = dynamic_cast<const ExtrusionLoop*>(ee);
             const ExtrusionEntityCollection* collection = dynamic_cast<const ExtrusionEntityCollection*>(ee);
             if (path)
-                gcode += this->extrude_path(*path, label, speed);
+                gcode += this->extrude_path(*path, label, speed_for_path(path->length(), role));
             else if (multipath) {
-                gcode += this->extrude_multi_path(*multipath, label, speed);
+                gcode += this->extrude_multi_path(*multipath, label, speed_for_path(multipath->length(), role));
             } else if (loop) {
-                gcode += this->extrude_loop(*loop, label, speed);
+                gcode += this->extrude_loop(*loop, label, speed_for_path(loop->length(), role));
             } else if (collection) {
                 gcode += extrude_support(*collection, support_extrusion_role);
             } else {

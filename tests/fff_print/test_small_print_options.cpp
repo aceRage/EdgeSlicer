@@ -157,3 +157,51 @@ TEST_CASE("Lightning infill angles change the lightning infill", "[SmallPrintOpt
     REQUIRE_FALSE(at_default.empty());
     CHECK(lightning("80").size() != at_default.size());
 }
+
+// ---------------------------------------------------------------------------
+// OrcaSlicer #13459 (+ #15232): small support perimeter speed
+// ---------------------------------------------------------------------------
+TEST_CASE("Small support perimeter options default to off", "[SmallPrintOptions][SmallSupportPerimeters]")
+{
+    const PrintObjectConfig &defaults = PrintObjectConfig::defaults();
+    CHECK(defaults.small_support_perimeter_threshold.get_at(0) == Approx(0.));
+    CHECK(defaults.small_support_perimeter_speed.get_at(0).percent);
+    CHECK(defaults.small_support_perimeter_speed.get_at(0).value == Approx(50.));
+}
+
+TEST_CASE("Small support perimeters print at the small support speed", "[SmallPrintOptions][SmallSupportPerimeters]")
+{
+    // 31 mm/s support, 50% for small support perimeters = 15.5 mm/s = F930. Layer-time
+    // slowdown is off so the cooling buffer leaves the feed rates alone.
+    auto support_gcode = [](const char *threshold) {
+        return slice({ TestMesh::overhang }, {
+            { "enable_support", "1" },
+            { "support_speed", "31" },
+            { "support_interface_speed", "31" },
+            { "slow_down_for_layer_cooling", "0" },
+            { "small_support_perimeter_speed", "50%" },
+            { "small_support_perimeter_threshold", threshold },
+        });
+    };
+    const std::string off = support_gcode("0");
+    const std::string on  = support_gcode("1000");
+    REQUIRE(off.find(";TYPE:Support") != std::string::npos);
+    CHECK(count_occurrences(off, "F930\n") == 0);
+    CHECK(count_occurrences(on, "F930\n") > 0);
+}
+
+TEST_CASE("An object-level small support perimeter speed is read as a percentage", "[SmallPrintOptions][SmallSupportPerimeters]")
+{
+    // OrcaSlicer #15232: Model::findMaxSpeed used to read the FloatOrPercent option as a plain float
+    // and crash on object-level overrides.
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance();
+    object->config.set_key_value("support_speed", new ConfigOptionFloats{ 100. });
+    object->config.set_key_value("small_support_perimeter_speed", new ConfigOptionFloatsOrPercents{ FloatOrPercent{300., true} });
+    double max_speed = 0.;
+    REQUIRE_NOTHROW(max_speed = Model::findMaxSpeed(object));
+    // 300% of the object's 100 mm/s support speed (the global speed map may only add to it).
+    CHECK(max_speed >= 300. - EPSILON);
+}
