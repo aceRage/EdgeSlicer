@@ -11,10 +11,10 @@
     {"index": 0, "type": "PLA", "color": "#FFFFFF", "grams": 20.5, "target": "T1", "auto": true, "problems": []},
     {"index": 1, "type": "PLA", "color": "#101010", "grams": 3.25, "target": "T2", "auto": false, "problems": []},
     {"index": 3, "type": "PLA", "color": "#FF0000", "grams": 1.0, "target": "T3", "auto": false,
-     "problems": ["toolhead 3 is empty; load it, pick another, or send force=1"]}
+     "problems": ["toolhead 3 is empty; load it, pick another, or send anyway"]}
   ],
   "problems": [
-    {"filament": 3, "code": "mapping", "text": "toolhead 3 is empty; load it, pick another, or send force=1"}
+    {"filament": 3, "code": "mapping", "text": "toolhead 3 is empty; load it, pick another, or send anyway"}
   ],
   "mapping": "0:0,1:1,3:2",
   "policy": "",

@@ -1538,7 +1538,7 @@ std::pair<int, std::string> preview_plate(const Request& req_in, json& out)
         if (!plan.problems.empty())
             sheet.problems[-1] = plan.problems;
         else if (!sheet.can_send && !plan.refusal.empty())
-            sheet.problems[-1] = { plan.refusal };
+            sheet.problems[-1] = { SliceV1::preview_tense(plan.refusal) };
         sheet.mapping = SliceV1::positions_wire(sheet.choice);
         if (!st.online)
             sheet.warnings.push_back(p->printer_name + " did not answer");
@@ -1585,7 +1585,7 @@ std::pair<int, std::string> preview_plate(const Request& req_in, json& out)
             }
             sheet.policy   = slot_policy_name(policy);
             sheet.can_send = policy == PrintHostDevices::QidiSendPolicy::Start;
-            if (!sheet.can_send) sheet.problems[-1] = { PrintHostDevices::qidi_send_refusal(policy) };
+            if (!sheet.can_send) sheet.problems[-1] = { SliceV1::preview_tense(PrintHostDevices::qidi_send_refusal(policy)) };
             if (st.qidi_box_inconsistent && !st.qidi_box_problem.empty()) sheet.warnings.push_back(st.qidi_box_problem);
         }
     }

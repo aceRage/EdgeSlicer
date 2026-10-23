@@ -352,6 +352,7 @@ TEST_CASE("slice_v1 send preview: a plate-level problem (slot policy) is listed 
     const json j   = SliceV1::sheet_json(s);
     REQUIRE(j["problems"].size() == 1);
     CHECK(j["problems"][0]["filament"] == -1);
+    CHECK(j["problems"][0]["code"] == "policy");
     CHECK(j["filaments"][0]["problems"].empty());
     CHECK(j["policy"] == "type_mismatch");
     CHECK(j["can_send"] == false);
@@ -435,4 +436,15 @@ TEST_CASE("slice_v1 send preview: with no usable state the sheet says so instead
     CHECK(unknown["problems"][0]["code"] == "printer_unknown");
     CHECK(unknown["needs_live"] == true);
     CHECK(unknown["can_send"] == false);
+}
+
+TEST_CASE("slice_v1 send preview: send refusals read as what would happen", "[SliceV1]")
+{
+    CHECK(SliceV1::preview_tense("The QIDI printer is busy with another print, so this plate was not sent or started.") ==
+          "The QIDI printer is busy with another print, so this plate would not be sent or started.");
+    CHECK(SliceV1::preview_tense("Filament 1 is PLA but tray 1A holds PETG - remap in EdgeSlicer or upload only. Nothing was sent and the print was not started.") ==
+          "Filament 1 is PLA but tray 1A holds PETG - remap in EdgeSlicer or upload only. Nothing would be sent and the print would not be started.");
+    CHECK(SliceV1::preview_tense("The QIDI Box's answer did not add up, so no slot was picked and the print was not started.") ==
+          "The QIDI Box's answer did not add up, so no slot would be picked and the print would not be started.");
+    CHECK(SliceV1::preview_tense("unchanged text") == "unchanged text");
 }

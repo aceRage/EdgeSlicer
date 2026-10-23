@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace Slic3r {
 namespace GUI {
@@ -305,7 +306,9 @@ nlohmann::json sheet_json(const Sheet& s)
     // The reprint sheet's top-level list as well: {filament, code, text}.
     nlohmann::json all = nlohmann::json::array();
     for (const auto& [filament, texts] : s.problems)
-        for (const std::string& t : texts) all.push_back({ { "filament", filament }, { "code", "mapping" }, { "text", t } });
+        for (const std::string& t : texts)
+            // filament -1 is the plate as a whole: the slot send policy's verdict (CANVAS, QIDI Box).
+            all.push_back({ { "filament", filament }, { "code", filament < 0 ? "policy" : "mapping" }, { "text", t } });
     j["problems"]  = all;
     j["mapping"]   = s.mapping;
     j["policy"]    = s.policy;
@@ -333,7 +336,7 @@ void check_toolheads(Sheet& s, bool force)
         else if (heads > 0 && pos >= heads)
             probs.push_back("the printer has " + std::to_string(heads) + " toolheads, so there is no toolhead " + std::to_string(pos + 1));
         else if (heads > 0 && !s.targets[size_t(pos)].ready && !force)
-            probs.push_back("toolhead " + std::to_string(pos + 1) + " is empty; load it, pick another, or send force=1");
+            probs.push_back("toolhead " + std::to_string(pos + 1) + " is empty; load it, pick another, or send anyway");
         else if (heads > 0 && !f.type.empty() && !s.targets[size_t(pos)].type.empty() && upper(f.type) != upper(s.targets[size_t(pos)].type))
             s.warnings.push_back("Filament " + std::to_string(f.index + 1) + " (" + f.type + ") prints from toolhead " + std::to_string(pos + 1) +
                                  ", which holds " + s.targets[size_t(pos)].type + ".");
@@ -377,6 +380,24 @@ void decorate_ams_preview(nlohmann::json& p)
                 f["target"] = nullptr;
         }
     if (!p.contains("policy")) p["policy"] = "";
+}
+
+std::string preview_tense(std::string text)
+{
+    // The send refusals (qidi_send_refusal, ElegooCanvasMapping's plan.refusal) report what happened;
+    // a preview says what would happen. Longest phrases first.
+    static const std::pair<const char*, const char*> swaps[] = {
+        { "so this plate was not sent or started", "so this plate would not be sent or started" },
+        { "Nothing was sent and the print was not started", "Nothing would be sent and the print would not be started" },
+        { "nothing was sent and the print was not started", "nothing would be sent and the print would not be started" },
+        { "the print was not started", "the print would not be started" },
+        { "no slot was picked", "no slot would be picked" },
+        { "was not sent", "would not be sent" },
+    };
+    for (const auto& [from, to] : swaps)
+        for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + std::strlen(to)))
+            text.replace(at, std::strlen(from), to);
+    return text;
 }
 
 std::string cached_state_problem(const CachedPrinter& c, double max_age_s)

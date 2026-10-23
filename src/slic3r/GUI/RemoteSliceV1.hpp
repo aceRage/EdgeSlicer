@@ -123,7 +123,8 @@ struct Sheet
 // The sheet's part of the answer (EdgeSlicerApp tools/slice_v1/schemas/send_preview.schema.json):
 // mapping_kind, editable, filaments [{index, type, color, grams, target (a target id or null), auto,
 // problems []}], targets [{id, label, type|null, color|null, ready, side, wire}], mapping, policy,
-// problems [], warnings [], can_send.
+// problems [], warnings [], can_send. problems[] codes: "mapping" (one filament) or "policy"
+// (filament -1, the plate as a whole).
 nlohmann::json sheet_json(const Sheet& sheet);
 
 // "<filament>:<position>,..." of a choice map (only the filaments with a target): what
@@ -141,6 +142,10 @@ void check_toolheads(Sheet& sheet, bool force);
 // and target (that id). The reprint's own fields
 // (colour, tray, trays, problems, job, options...) stay, so the app's reprint mapping model reads it.
 void decorate_ams_preview(nlohmann::json& preview);
+
+// A send refusal ("... so the print was not started") as a preview says it ("... would not be
+// started"). Text it does not know is returned unchanged.
+std::string preview_tense(std::string text);
 
 // ---- a Bambu preview without connecting (owner, 2026-10-23) ----
 // Browsing printers on the phone's send sheet must not select / connect each Bambu printer it
