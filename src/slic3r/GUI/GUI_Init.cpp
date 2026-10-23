@@ -5,6 +5,7 @@
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/RemoteAccess.hpp"
+#include "slic3r/GUI/RemoteHub.hpp"
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/InstanceCheck.hpp"
 #include "slic3r/Utils/InstanceRouting.hpp"
@@ -52,6 +53,9 @@ int GUI_Run(GUI_InitParams &params)
         GUI::RemoteAccess::install_dialog_policy();
         // Showcase S5: set before the app exists (its constructor starts the page server).
         GUI::GUI_App::set_showcase_render_mode(params.showcase_render != nullptr);
+        // ...and starts no hub / go2rtc from any panel (they would outlive the job).
+        if (params.showcase_render)
+            GUI::RemoteHub::disable_spawn();
         GUI::GUI_App* gui = new GUI::GUI_App();
         //if (gui->get_app_mode() != GUI::GUI_App::EAppMode::GCodeViewer) {
             // G-code viewer is currently not performing instance check, a new G-code viewer is started every time.
