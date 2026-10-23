@@ -128,3 +128,32 @@ TEST_CASE("slowdown_for_curled_perimeters is off by default", "[SmallPrintOption
         CHECK_FALSE(bool(v));
     CHECK_FALSE(PrintRegionConfig::defaults().slowdown_for_curled_perimeters.get_at(0));
 }
+
+// ---------------------------------------------------------------------------
+// OrcaSlicer #13848: Lightning infill angles
+// ---------------------------------------------------------------------------
+TEST_CASE("Lightning infill angles default to 45 degrees", "[SmallPrintOptions][Lightning]")
+{
+    const PrintRegionConfig &defaults = PrintRegionConfig::defaults();
+    CHECK(defaults.lightning_overhang_angle.value == Approx(45.));
+    CHECK(defaults.lightning_prune_angle.value == Approx(45.));
+    CHECK(defaults.lightning_straightening_angle.value == Approx(45.));
+    // The generator converts with value * PI / 180; at the default that is exactly the former PI / 4.
+    CHECK(defaults.lightning_overhang_angle.value * M_PI / 180.0 == M_PI / 4);
+}
+
+TEST_CASE("Lightning infill angles change the lightning infill", "[SmallPrintOptions][Lightning]")
+{
+    auto lightning = [](const char *angle) {
+        return slice({ TestMesh::cube_20x20x20 }, {
+            { "sparse_infill_pattern", "lightning" },
+            { "sparse_infill_density", "15%" },
+            { "lightning_overhang_angle", angle },
+            { "lightning_prune_angle", angle },
+            { "lightning_straightening_angle", angle },
+        });
+    };
+    const std::string at_default = lightning("45");
+    REQUIRE_FALSE(at_default.empty());
+    CHECK(lightning("80").size() != at_default.size());
+}
