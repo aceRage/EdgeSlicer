@@ -142,6 +142,33 @@ void check_toolheads(Sheet& sheet, bool force);
 // (colour, tray, trays, problems, job, options...) stay, so the app's reprint mapping model reads it.
 void decorate_ams_preview(nlohmann::json& preview);
 
+// ---- a Bambu preview without connecting (owner, 2026-10-23) ----
+// Browsing printers on the phone's send sheet must not select / connect each Bambu printer it
+// looks at. A preview is built from what the PC's DeviceManager already holds for that printer when
+// that is current; otherwise the sheet says so (source "none") and the app asks again with live=1,
+// which selects and connects the printer as a send does. A plate send itself is unchanged.
+
+// What the PC knows about a Bambu printer right now, read off the MachineObject without touching it.
+struct CachedPrinter
+{
+    bool   known { false };     // DeviceManager lists it
+    bool   online { false };    // MachineObject::is_online
+    bool   connected { false }; // MachineObject::is_connected: its pushes are arriving now
+    double age_s { -1. };       // seconds since its last push (MachineObject::last_update_time), < 0 unknown
+};
+
+// The longest a printer's last push may be old for its AMS to count as current.
+constexpr double CACHED_AMS_MAX_AGE_S = 120.;
+
+// "" when the cached state can be used for a preview; otherwise why not:
+// printer_unknown | printer_offline | printer_not_connected | printer_state_stale.
+std::string cached_state_problem(const CachedPrinter& c, double max_age_s = CACHED_AMS_MAX_AGE_S);
+
+// The sheet for a Bambu printer with no usable cached state: mapping_kind "ams", editable false, the
+// plate's filaments with no target, no targets, the reason as a plate-level problem (code = the
+// reason) and a hint, can_send false, source "none", needs_live true, ams_age_s (null unknown).
+nlohmann::json no_state_sheet(const std::vector<SheetFilament>& filaments, const std::string& reason, double age_s);
+
 } // namespace SliceV1
 } // namespace GUI
 } // namespace Slic3r

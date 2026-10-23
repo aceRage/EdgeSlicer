@@ -1342,18 +1342,52 @@ static std::vector<SliceV1::SheetTarget> sheet_slots(const std::vector<PrintHost
     return out;
 }
 
+// What the DeviceManager holds for a Bambu printer, read without selecting or connecting it (GUI thread).
+static SliceV1::CachedPrinter cached_printer(const std::string& printer)
+{
+    SliceV1::CachedPrinter c;
+    DeviceManager* dm  = wxGetApp().getDeviceManager();
+    MachineObject* obj = dm ? find_machine(dm, printer) : nullptr;
+    if (!obj) return c;
+    c.known     = true;
+    c.online    = obj->is_online();
+    c.connected = obj->is_connected();
+    if (obj->last_update_time.time_since_epoch().count() > 0)
+        c.age_s = std::chrono::duration<double>(std::chrono::system_clock::now() - obj->last_update_time).count();
+    return c;
+}
+
 // A Bambu printer: the plate's file exported the way a send exports it, read back as a job and put
 // through the reprint preview (BambuReprint::evaluate) - the send dialog's checks and AMS mapping.
+// Without req.live the printer is never selected or connected: the preview is built from the
+// DeviceManager's current state of it (source "cached"), or, with none usable, says so (source
+// "none", needs_live) so the app can ask again with live=1.
 static std::pair<int, std::string> preview_plate_bambu(const Request& req, const std::string& mode, json& out)
 {
-    auto rc   = std::make_shared<std::pair<int, std::string>>(500, "not run");
-    auto wait = std::make_shared<bool>(false);
-    if (!on_main([rc, wait, req]() {
+    auto rc     = std::make_shared<std::pair<int, std::string>>(500, "not run");
+    auto wait   = std::make_shared<bool>(false);
+    auto cached = std::make_shared<SliceV1::CachedPrinter>();
+    auto used   = std::make_shared<std::vector<SnapmakerLan::FileFilament>>();
+    if (!on_main([rc, wait, cached, used, req]() {
             *rc = plate_sendable(req);
-            if (rc->first == 200) *rc = preselect(req, *wait);
+            if (rc->first != 200) return;
+            if (req.live) {
+                *rc = preselect(req, *wait);
+                return;
+            }
+            *cached = cached_printer(req.printer);
+            *used   = file_filaments_of(wxGetApp().plater()->get_partplate_list().get_plate(req.plate));
         }, 30000))
         return { 503, "the slicer is busy" };
     if (rc->first != 200) return *rc;
+    if (!req.live) {
+        const std::string why = SliceV1::cached_state_problem(*cached);
+        if (!why.empty()) {
+            out            = SliceV1::no_state_sheet(sheet_filaments(*used), why, cached->age_s);
+            out["printer"] = { { "id", req.printer }, { "kind", "bambu" }, { "has_ams", false } };
+            return { 200, "" };
+        }
+    }
     if (*wait) {
         auto ready = std::make_shared<bool>(false);
         for (int i = 0; i < 30 && !*ready; ++i) { // up to 15 s, as a send waits
@@ -1401,12 +1435,16 @@ static std::pair<int, std::string> preview_plate_bambu(const Request& req, const
         return { 503, "the slicer is busy" };
     if (ev->status != 200) return { ev->status, ev->error };
     out = ev->preview;
-    if (!ev->nozzle_mapping_request.empty() && ev->can_send)
+    // The H2C nozzle-mapping handshake asks the printer, so only a live preview makes it.
+    if (req.live && !ev->nozzle_mapping_request.empty() && ev->can_send)
         out["nozzle_mapping"] = nozzle_mapping_probe(printer, ev->nozzle_mapping_request);
     SliceV1::decorate_ams_preview(out);
     out["editable"]      = *editable && ev->use_ams;
     out["unload_at_end"] = nullptr;
     if (out.contains("printer") && out["printer"].is_object()) out["printer"]["kind"] = "bambu";
+    out["source"]     = req.live ? "live" : "cached";
+    out["needs_live"] = false;
+    out["ams_age_s"]  = !req.live && cached->age_s >= 0. ? json(std::round(cached->age_s)) : json(nullptr);
     return { 200, "" };
 }
 
@@ -1558,6 +1596,9 @@ std::pair<int, std::string> preview_plate(const Request& req_in, json& out)
     out["printer"]       = { { "id", req_in.printer }, { "name", p->printer_name }, { "kind", p->kind }, { "has_ams", false } };
     out["options"]       = json::object();
     out["unload_at_end"] = unload;
+    out["source"]        = "live"; // read from the printer (or its own status cache) for this preview
+    out["needs_live"]    = false;
+    out["ams_age_s"]     = nullptr;
     if (p->kind == "snapmaker")
         out["upload_name"] = p->lan_filename;
     else if (!p->upload.upload_path.empty())

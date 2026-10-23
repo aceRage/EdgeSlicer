@@ -58,6 +58,9 @@ struct Request
     // slice_v1: a plate send's preview (POST /api/plates/{i}/send/preview). prepare() then only
     // works out what a send would do: it records nothing (no "last used" device).
     bool        preview { false };
+    // A Bambu preview: select and connect the printer to read its AMS live (live=1). Without it the
+    // preview uses only what the PC already holds for that printer (SliceV1::CachedPrinter).
+    bool        live { false };
 };
 
 // Everything prepare() worked out on the GUI thread; run() only performs the transfer.

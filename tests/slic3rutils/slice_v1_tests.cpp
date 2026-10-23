@@ -405,3 +405,32 @@ TEST_CASE("slice_v1 send preview: target ids are unique; a repeated label goes b
     CHECK(j["targets"][1]["id"] == "255-0");
     CHECK(j["filaments"][0]["target"] == "255-0");
 }
+
+// ---- a Bambu preview without connecting --------------------------------------------------------
+
+TEST_CASE("slice_v1 send preview: the PC's current state of a Bambu printer is used only when it is current", "[SliceV1]")
+{
+    SliceV1::CachedPrinter c;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_unknown");
+    c.known = true;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_offline");
+    c.online = true;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_not_connected");
+    c.connected = true;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_state_stale"); // no push time known
+    c.age_s = 3.;
+    CHECK(SliceV1::cached_state_problem(c) == ""); // the cached path: no selection, no connection
+    c.age_s = SliceV1::CACHED_AMS_MAX_AGE_S + 1.;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_state_stale");
+}
+
+TEST_CASE("slice_v1 send preview: with no usable state the sheet says so instead of connecting", "[SliceV1]")
+{
+    const std::vector<SliceV1::SheetFilament> fils = { { 0, "PLA", "#E6EBE3", 58.3 }, { 1, "PETG", "#F5822F", 12.1 } };
+    require_same(SliceV1::no_state_sheet(fils, "printer_not_connected", 3600.2), read_fixture("send_preview_no_state.json"));
+    const json unknown = SliceV1::no_state_sheet(fils, "printer_unknown", -1.);
+    CHECK(unknown["ams_age_s"].is_null());
+    CHECK(unknown["problems"][0]["code"] == "printer_unknown");
+    CHECK(unknown["needs_live"] == true);
+    CHECK(unknown["can_send"] == false);
+}

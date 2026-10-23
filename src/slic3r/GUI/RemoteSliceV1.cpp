@@ -374,6 +374,41 @@ void decorate_ams_preview(nlohmann::json& p)
     if (!p.contains("policy")) p["policy"] = "";
 }
 
+std::string cached_state_problem(const CachedPrinter& c, double max_age_s)
+{
+    if (!c.known) return "printer_unknown";
+    if (!c.online) return "printer_offline";
+    if (!c.connected) return "printer_not_connected";
+    if (c.age_s < 0. || c.age_s > max_age_s) return "printer_state_stale";
+    return "";
+}
+
+static std::string no_state_text(const std::string& reason)
+{
+    if (reason == "printer_unknown") return "The PC does not know this printer.";
+    if (reason == "printer_offline") return "The printer is offline.";
+    if (reason == "printer_state_stale") return "The PC has not heard from this printer recently, so its AMS may have changed.";
+    return "The PC is not connected to this printer, so its AMS is not known.";
+}
+
+nlohmann::json no_state_sheet(const std::vector<SheetFilament>& filaments, const std::string& reason, double age_s)
+{
+    Sheet s;
+    s.mapping_kind = "ams";
+    s.editable     = false;
+    s.filaments    = filaments;
+    s.can_send     = false;
+    s.warnings.push_back("Check the printer to read its AMS (the PC connects to it), or send with the automatic mapping.");
+    nlohmann::json j = sheet_json(s);
+    j["problems"]    = nlohmann::json::array({ { { "filament", -1 }, { "code", reason }, { "text", no_state_text(reason) } } });
+    j["source"]      = "none";
+    j["needs_live"]  = true;
+    j["ams_age_s"]   = age_s >= 0. ? nlohmann::json(std::round(age_s)) : nlohmann::json(nullptr);
+    j["options"]     = nlohmann::json::object();
+    j["unload_at_end"] = nullptr;
+    return j;
+}
+
 } // namespace SliceV1
 } // namespace GUI
 } // namespace Slic3r
