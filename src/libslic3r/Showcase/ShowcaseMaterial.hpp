@@ -44,6 +44,36 @@ struct MaterialParams
 };
 MaterialParams material_params(Finish finish);
 
+// --- toolpath realism (S5, D13; design 2.6.3) --------------------------------------------------
+
+// The finish's default Smoothness (design 2.6.3's table): matte 0.5, standard 0.6, silk 0.8, gloss
+// 0.75, transparent 0.7, metallic 0.7, carbon fibre 0.45.
+float default_toolpath_smoothness(Finish finish);
+
+// What the toolpath shader does at a Smoothness (0 = Preview's crisp extrusions .. 1), the uniforms of
+// libvgcode's smooth path (A + B + F of D13). At 0 everything is off: the shader takes its old path.
+struct ToolpathLook
+{
+    float smoothness   = 0.f;   // 0..1
+    // A: the bead's cross-section, a superellipse |x|^p + |y|^p = 1 (p 2 = round .. 6 = boxy, a bulge
+    // that sits flatter on the bead below).
+    float bulge        = 2.f;
+    // B: top and bottom skin (solid infill, ironing): the line widened by this factor so neighbours
+    // overlap (1 = as sliced), and its normal bent towards straight up/down (0..1).
+    float skin_overlap = 1.f;
+    float skin_flatten = 0.f;
+    // The groove between two wall layers: how dark it stays (0 = none .. 1 = as crisp toolpaths).
+    float groove       = 1.f;
+    // The SSAO weight on skin (the creases there were the main artefact): 1 = full, 0 = none.
+    float ssao_skin    = 1.f;
+    // Silk: the highlight streaks along the extrusion (0..1).
+    float anisotropy   = 0.f;
+};
+
+// `smoothness` < 0 = the finish's default. The finish shapes the defaults (silk overlaps more and
+// streaks its highlight, matte keeps its grooves).
+ToolpathLook toolpath_look(Finish finish, float smoothness);
+
 // --- light rig ---------------------------------------------------------------------------------
 
 // Linear RGB of a black body at `kelvin` (clamped to 1000..40000), largest channel 1. 6500 K is

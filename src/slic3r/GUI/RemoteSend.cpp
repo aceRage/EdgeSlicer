@@ -26,6 +26,8 @@
 #include "slic3r/Utils/MoonRaker.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
+#include "slic3r/Utils/PrintHostDeviceStatus.hpp"
+#include "slic3r/Utils/PrinterStorage.hpp"
 #include "slic3r/Utils/Spoolman.hpp"
 
 #include <boost/filesystem.hpp>
@@ -496,6 +498,28 @@ static std::pair<int, std::string> prepare_bambu(const Request& req, PartPlate* 
     return { 200, "" };
 }
 
+// A print-host print that may land on a QIDI with a QIDI Box. The desktop's send dialog reads the
+// Box and sends value_t<n> before the start; nobody is at a dialog here, so run_host() does the
+// same read and the material-first auto-match, and refuses to start rather than let the printer
+// feed what its last print left in value_t<n> (an ASA slot for a PLA plate). Any Moonraker-speaking
+// target is asked - a QIDI saved under another model's preset is still a QIDI - and one whose
+// model can carry a Box is refused the start when it cannot be asked. Every other target is
+// untouched.
+static void arm_qidi_guard(Prepared& p, PrintHostDevices::Device target, const std::string& preset_model,
+                           std::vector<SnapmakerLan::FileFilament> filaments)
+{
+    if (target.printer_model.empty())
+        target.printer_model = preset_model;
+    const bool model_box = PrintHostDevices::qidi_box_capable_model(target.printer_model) ||
+                           PrintHostDevices::qidi_box_capable_model(preset_model);
+    if (!model_box && !PrintHostDevices::speaks_moonraker(target.host_type))
+        return;
+    p.qidi_guard     = true;
+    p.qidi_model_box = model_box;
+    p.qidi_device    = target;
+    p.file_filaments = std::move(filaments);
+}
+
 // The sliced file's filaments, the way the Device page's own sw_GetFileFilamentMapping reads them:
 // the project's colours and types, and which slots this plate's slice result actually used.
 static std::vector<SnapmakerLan::FileFilament> file_filaments_of(PartPlate* plate)
@@ -526,6 +550,96 @@ static std::vector<SnapmakerLan::FileFilament> file_filaments_of(PartPlate* plat
         out.push_back(f);
     }
     return out;
+}
+
+static bool parse_mapping(const std::string& text, size_t filaments, std::vector<int>& out, std::string& error);
+
+// The plate's filaments the way the Elegoo send dialog keys them (Plater's plate_filaments_for_send):
+// type, colour, the preset's alias for the remembered CANVAS mapping, and the nozzle temperature.
+// Only the ones this plate's slice result used.
+static std::vector<ElegooCanvasMapping::UsedFilament> canvas_used_of(PartPlate* plate)
+{
+    std::vector<ElegooCanvasMapping::UsedFilament> out;
+    PresetBundle*                                  bundle = wxGetApp().preset_bundle;
+    if (!bundle)
+        return out;
+    const DynamicPrintConfig   full    = bundle->full_config();
+    const ConfigOptionStrings* colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+    const ConfigOptionStrings* types   = full.option<ConfigOptionStrings>("filament_type");
+    const ConfigOptionInts*    temps   = full.option<ConfigOptionInts>("nozzle_temperature");
+    std::map<size_t, double>   volumes;
+    if (plate && plate->is_slice_result_valid() && plate->get_slice_result())
+        for (const auto& kv : plate->get_slice_result()->print_statistics.total_volumes_per_extruder)
+            volumes[kv.first] = kv.second;
+    for (size_t i = 0; i < bundle->filament_presets.size(); ++i) {
+        auto it = volumes.find(i);
+        if (it == volumes.end() || it->second <= 0)
+            continue;
+        ElegooCanvasMapping::UsedFilament u;
+        u.index       = (int) i;
+        u.colour      = (colours && i < colours->values.size()) ? colours->values[i] : std::string();
+        u.type        = (types && i < types->values.size()) ? types->values[i] : std::string();
+        u.nozzle_temp = (temps && i < temps->values.size()) ? temps->values[i] : 0;
+        if (const Preset* fp = bundle->filaments.find_preset(bundle->filament_presets[i]))
+            u.alias = fp->alias.empty() ? fp->name : fp->alias;
+        else
+            u.alias = bundle->filament_presets[i];
+        out.push_back(std::move(u));
+    }
+    return out;
+}
+
+// The same from an archived record's filaments (no alias there: the remembered mapping then simply
+// does not match, and the colour match picks).
+static std::vector<ElegooCanvasMapping::UsedFilament> canvas_used_of(const std::vector<SnapmakerLan::FileFilament>& filaments)
+{
+    std::vector<ElegooCanvasMapping::UsedFilament> out;
+    for (const SnapmakerLan::FileFilament& f : filaments) {
+        if (!f.used)
+            continue;
+        ElegooCanvasMapping::UsedFilament u;
+        u.index  = f.index;
+        u.type   = f.type;
+        u.colour = f.color;
+        out.push_back(std::move(u));
+    }
+    return out;
+}
+
+// A print on what is an Elegoo Centauri Carbon 1: run_host() reads it and maps the CANVAS before
+// anything is uploaded (canvas_guard_start). `mapping` is the request's "<filament>:<tray>,..."
+// (0-based, the tray's position in the CANVAS list), "as_sliced" for no mapping at all (design D4),
+// or "" for the dialog's automatic choice. False with `error` for a mapping that cannot be read.
+static bool arm_canvas_guard(Prepared& p, PrintHostDevices::Device target, const std::string& preset_model,
+                             std::vector<ElegooCanvasMapping::UsedFilament> used, size_t filament_count, const std::string& mapping,
+                             std::string& error)
+{
+    if (target.printer_model.empty())
+        target.printer_model = preset_model;
+    if (target.host_type != "elegoolink" || !canvas_capable_model(target.printer_model))
+        return true;
+    p.canvas_guard  = true;
+    p.canvas_device = target;
+    p.canvas_mapping.clear();
+    if (mapping == "as_sliced") {
+        for (const ElegooCanvasMapping::UsedFilament& u : used)
+            p.canvas_mapping[u.index] = -1;
+    } else if (!mapping.empty()) {
+        for (const ElegooCanvasMapping::UsedFilament& u : used)
+            filament_count = std::max(filament_count, (size_t) u.index + 1);
+        std::vector<int> v;
+        if (!parse_mapping(mapping, filament_count, v, error))
+            return false;
+        for (size_t i = 0; i < v.size(); ++i)
+            if (v[i] >= 0)
+                p.canvas_mapping[(int) i] = v[i];
+        // A mapping that names none of the used filaments would read as "the automatic choice".
+        if (p.canvas_mapping.empty())
+            for (const ElegooCanvasMapping::UsedFilament& u : used)
+                p.canvas_mapping[u.index] = -1;
+    }
+    p.canvas_used = std::move(used);
+    return true;
 }
 
 // "0:1,1:2" - the file's filament 0 prints on toolhead 1, filament 1 on toolhead 2.
@@ -565,6 +679,17 @@ static bool parse_mapping(const std::string& text, size_t filaments, std::vector
     return true;
 }
 
+// A Snapmaker's status for a send decision. The cached answer (up to PROBE_TTL_MS old) is fine for
+// "it is idle" - run_snapmaker asks again before the start - but a "printing" from the cache may be
+// a print that ended a moment ago, so that one is asked again before the send is refused.
+static SnapmakerLan::Status status_for_send(const SnapmakerLan::Device& d)
+{
+    SnapmakerLan::Status st = SnapmakerLan::status(d);
+    if (st.online && st.printing())
+        st = SnapmakerLan::status_now(d);
+    return st;
+}
+
 // A Snapmaker on the LAN: no connect, no host object, just its address (SnapmakerLan).
 static std::pair<int, std::string> prepare_snapmaker(const Request& req, PartPlate* plate, std::shared_ptr<Prepared> p,
                                                      std::shared_ptr<Prepared>& out)
@@ -573,7 +698,7 @@ static std::pair<int, std::string> prepare_snapmaker(const Request& req, PartPla
     SnapmakerLan::Device d;
     if (!SnapmakerLan::find(req.printer.substr(3), d))
         return { 404, "no such printer: " + req.printer };
-    const SnapmakerLan::Status st = SnapmakerLan::status(d);
+    const SnapmakerLan::Status st = status_for_send(d);
     if (!st.online)
         return { 409, d.name + " is not answering on the network" };
     if (st.login_required)
@@ -716,6 +841,21 @@ static std::pair<int, std::string> prepare_host(const Request& req, PartPlate* p
     p->upload.source_path  = source;
     p->upload.upload_path  = fs::path(name);
     p->upload.post_action  = (want_print && !p->two_step) ? PrintHostPostUploadAction::StartPrint : PrintHostPostUploadAction::None;
+    // A print on what may be a QIDI with a QIDI Box: run_host() reads the Box and maps it first.
+    if (want_print && p->kind == "printhost") {
+        PrintHostDevices::Device target;
+        if (!p->device_id.empty())
+            PrintHostDevices::find(p->model_key, p->device_id, target);
+        else
+            target = PrintHostDevices::from_config(cfg);
+        auto* model_opt = cfg.option<ConfigOptionString>("printer_model");
+        arm_qidi_guard(*p, target, model_opt ? model_opt->value : std::string(), file_filaments_of(plate));
+        // ... or on an Elegoo Centauri Carbon 1: run() checks it is idle and maps the CANVAS first.
+        std::string error;
+        if (!arm_canvas_guard(*p, target, model_opt ? model_opt->value : std::string(), canvas_used_of(plate),
+                              bundle->filament_presets.size(), req.mapping, error))
+            return { 400, error };
+    }
     out                    = p;
     return { 200, "" };
 }
@@ -1186,7 +1326,7 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
                                                                          d.model, GcodeArchive::model_names());
             if (!why.empty()) return { 409, why };
         }
-        const SnapmakerLan::Status st = SnapmakerLan::status(d);
+        const SnapmakerLan::Status st = status_for_send(d);
         if (!st.online)
             return { 409, d.name + " is not answering on the network" };
         if (st.login_required)
@@ -1260,9 +1400,10 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
     auto url   = std::make_shared<std::string>();
     auto hname = std::make_shared<std::string>();
     auto tmodel = std::make_shared<std::string>(); // the target's printer model, for a reprint to another printer
+    auto qdev   = std::make_shared<PrintHostDevices::Device>(); // the target as a device, for the QIDI Box guard
     auto rc    = std::make_shared<std::pair<int, std::string>>(200, "");
     const std::string device = printer.compare(0, 3, "ph:") == 0 ? printer.substr(3) : std::string();
-    const bool ran = on_main([host, url, hname, tmodel, rc, device]() {
+    const bool ran = on_main([host, url, hname, tmodel, qdev, rc, device]() {
         PresetBundle* bundle = wxGetApp().preset_bundle;
         if (!bundle) { *rc = { 503, "no preset bundle" }; return; }
         if (!device.empty()) {
@@ -1275,6 +1416,7 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
                     *url    = d.address;
                     *hname  = d.display_name();
                     *tmodel = d.printer_model.empty() ? kv.first : d.printer_model;
+                    *qdev   = d;
                 }
             if (!*host) { *rc = { 404, "no such print-host device: ph:" + device }; return; }
             return;
@@ -1291,6 +1433,7 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         host->reset(PrintHost::get_print_host(&cfg, false));
         if (!*host) { *rc = { 500, "unsupported host type" }; return; }
         *hname = std::string((*host)->get_name());
+        *qdev  = PrintHostDevices::from_config(cfg);
     }, 20000);
     if (!ran) return { 503, "the slicer is busy" };
     if (rc->first != 200) return *rc;
@@ -1317,6 +1460,15 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
     }
     p->upload.post_action = (mode == "print" && !p->two_step) ? PrintHostPostUploadAction::StartPrint
                                                               : PrintHostPostUploadAction::None;
+    // A reprint that starts a print on what may be a QIDI with a QIDI Box: mapped from the
+    // record's filaments, exactly as a fresh send (arm_qidi_guard).
+    if (mode == "print") {
+        const std::vector<SnapmakerLan::FileFilament> filaments = file_filaments_of_record(j);
+        arm_qidi_guard(*p, *qdev, *tmodel, filaments);
+        std::string error;
+        if (!arm_canvas_guard(*p, *qdev, *tmodel, canvas_used_of(filaments), filaments.size(), req.mapping, error))
+            return { 400, error };
+    }
     out = p;
     return { 200, "" };
 }
@@ -1579,6 +1731,154 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
     sink.done(true, "", result);
 }
 
+// "http://192.0.2.106:7125/" -> ip and port, as SnapmakerLan::run_script wants them (the same
+// reading PrintHostJobQueue's script_target makes).
+static SnapmakerLan::Device script_target_of(std::string h)
+{
+    SnapmakerLan::Device d;
+    const size_t scheme = h.find("://");
+    if (scheme != std::string::npos)
+        h = h.substr(scheme + 3);
+    if (const size_t slash = h.find('/'); slash != std::string::npos)
+        h = h.substr(0, slash);
+    const size_t close = h.rfind(']');
+    const size_t colon = h.rfind(':');
+    if (colon != std::string::npos && (close != std::string::npos ? colon > close : h.find(':') == colon)) {
+        try {
+            d.port = std::stoi(h.substr(colon + 1));
+        } catch (...) {}
+        h = h.substr(0, colon);
+    }
+    d.ip = h;
+    return d;
+}
+
+// Off the GUI thread. Reads the printer the way the desktop send dialog does, maps every used
+// filament to a Box slot of its own material (the dialog's automatic choice) and decides with
+// PrintHostDevices::qidi_send_policy. Start: the Box script goes out first, as the desktop's queue
+// sends it. Anything else: false with the reason, and nothing has been sent.
+static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
+{
+    const PrintHostDevices::Status st = PrintHostDevices::probe(p.qidi_device, p.qidi_model_box ? 10 : 3);
+    std::vector<PrintHostDevices::SendFilament> filaments;
+    for (const SnapmakerLan::FileFilament& f : p.file_filaments) {
+        PrintHostDevices::SendFilament s;
+        s.index  = f.index;
+        s.type   = f.type;
+        s.colour = f.color;
+        s.used   = f.used;
+        filaments.push_back(std::move(s));
+    }
+    PrintHostDevices::QidiAutoMapping am  = PrintHostDevices::qidi_auto_mapping(st, filaments);
+    am.facts.model_may_have_box           = p.qidi_model_box;
+    const PrintHostDevices::QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(am.facts);
+    // What this send saw in the Box, slot by slot, for the log a report comes with.
+    if (st.qidi || p.qidi_model_box)
+        BOOST_LOG_TRIVIAL(warning) << "RemoteSend: " << PrintHostDevices::describe_qidi_box(st) << " (policy " << (int) policy
+                                   << ", mapping '" << am.mapping << "')";
+
+    json q;
+    q["probe_ok"]    = am.facts.probe_ok;
+    q["qidi"]        = am.facts.qidi;
+    q["box"]         = am.facts.box_present;
+    q["use_box"]     = am.facts.use_box;
+    q["used"]        = am.facts.used_filaments;
+    q["mapped"]      = am.facts.mapped_filaments;
+    q["mapping"]     = am.mapping;
+    q["policy"]      = (int) policy;
+    if (st.qidi_box_inconsistent)
+        q["box_problem"] = st.qidi_box_problem;
+    result["qidi"]   = q;
+
+    if (policy == PrintHostDevices::QidiSendPolicy::NotApplicable)
+        return true;
+    if (policy != PrintHostDevices::QidiSendPolicy::Start) {
+        why = PrintHostDevices::qidi_send_refusal(policy);
+        BOOST_LOG_TRIVIAL(warning) << "RemoteSend: QIDI Box print not started (policy " << (int) policy << ", probe "
+                                   << (st.online ? "ok" : st.error) << ", used " << am.facts.used_filaments << ", mapped "
+                                   << am.facts.mapped_filaments << ")";
+        return false;
+    }
+    PrintHostDevices::QidiPrintOptions o;
+    if (am.facts.box_present)
+        o.use_box = am.facts.use_box ? 1 : 0;
+    const std::string script = PrintHostDevices::qidi_start_script(o, am.mapping);
+    if (script.empty())
+        return true;
+    std::string err;
+    if (!SnapmakerLan::run_script(script_target_of(p.host->get_host()), script, err)) {
+        why = "The printer did not accept the QIDI Box slot mapping, so nothing was sent and the print was not started: " + err;
+        BOOST_LOG_TRIVIAL(error) << "RemoteSend: " << why;
+        return false;
+    }
+    // Read it back: a script Moonraker answered "ok" for is still not proof the Box took it.
+    {
+        std::string vars, verr, mismatch;
+        if (!PrintHostDevices::query_qidi_variables(PrinterStorage::base_url_of(p.host->get_host()), vars, verr) ||
+            !PrintHostDevices::qidi_mapping_confirmed(vars, am.mapping, o.use_box, mismatch)) {
+            why = "The QIDI Box mapping could not be confirmed on the printer (" + (verr.empty() ? mismatch : verr) +
+                  "), so nothing was sent and the print was not started.";
+            BOOST_LOG_TRIVIAL(error) << "RemoteSend: " << why;
+            return false;
+        }
+    }
+    q["sent"]      = true;
+    result["qidi"] = q;
+    BOOST_LOG_TRIVIAL(warning) << "RemoteSend: sent and confirmed the QIDI Box mapping '" << am.mapping << "' (use_box " << o.use_box << ")";
+    return true;
+}
+
+// Off the GUI thread. An Elegoo Centauri Carbon 1: read it the way the desktop send dialog does
+// (PrintHostDevices::probe: its status and CANVAS, through the hub's on-demand SDCP connection),
+// map the filaments the dialog's way and decide with the slot send policy. True: the start command
+// carries the CANVAS fields (ElegooLink reads them from extended_info). False with the reason:
+// nothing has been uploaded or started.
+static bool canvas_guard_start(Prepared& p, json& result, std::string& why)
+{
+    const PrintHostDevices::Status st     = PrintHostDevices::probe(p.canvas_device, PrintHostDevices::probe_timeout_for(p.canvas_device.printer_model));
+    std::map<std::string, ElegooCanvasMapping::Remembered> memory;
+    try {
+        if (p.canvas_mapping.empty())
+            memory = ElegooCanvasMapping::load();
+    } catch (...) {}
+    const ElegooCanvasMapping::UnattendedPlan plan =
+        ElegooCanvasMapping::plan_unattended_send(st, p.canvas_used, memory, p.canvas_mapping, p.printer_name);
+
+    json c;
+    c["reached"]  = st.online;
+    c["state"]    = st.state;
+    c["canvas"]   = st.canvas;
+    c["policy"]   = (int) plan.policy;
+    c["explicit"] = plan.explicit_mapping;
+    c["used"]     = plan.facts.used_filaments;
+    c["mapped"]   = plan.facts.mapped_filaments;
+    c["mismatches"] = plan.facts.type_mismatches;
+    c["slot_map"] = ElegooStartPrint::format_slot_map(plan.entries);
+    if (!plan.problems.empty())
+        c["problems"] = plan.problems;
+    result["canvas"] = c;
+
+    if (!plan.may_start()) {
+        why = plan.refusal;
+        BOOST_LOG_TRIVIAL(warning) << "RemoteSend: Elegoo print not started (policy " << (int) plan.policy << ", state '" << st.state
+                                   << "', canvas " << st.canvas << ", used " << plan.facts.used_filaments << ", mapped "
+                                   << plan.facts.mapped_filaments << ", mismatches " << plan.facts.type_mismatches << ")";
+        return false;
+    }
+    ElegooCanvasMapping::add_to_extended_info(plan, p.upload.extended_info);
+    BOOST_LOG_TRIVIAL(info) << "RemoteSend: CANVAS slot_map for this print: [" << ElegooStartPrint::format_slot_map(plan.entries) << "]"
+                            << (plan.canvas ? "" : " (no CANVAS: the start command keeps its old shape)");
+    // A mapping somebody chose on the phone is remembered like one chosen in the desktop dialog.
+    if (plan.canvas && plan.explicit_mapping && !plan.entries.empty()) {
+        try {
+            std::map<std::string, ElegooCanvasMapping::Remembered> m = ElegooCanvasMapping::load();
+            ElegooCanvasMapping::remember(m, p.canvas_used, plan.choice, st.slots);
+            ElegooCanvasMapping::save(m);
+        } catch (...) {}
+    }
+    return true;
+}
+
 static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
 {
     json result;
@@ -1594,11 +1894,33 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
     result["post_action"] = p->upload.post_action == PrintHostPostUploadAction::StartPrint ? "start_print" : "none";
     result["two_step"]    = p->two_step;
     if (p->from_record) result["record"] = p->record_id;
+    const bool starts_print = p->upload.post_action == PrintHostPostUploadAction::StartPrint || p->two_step;
+    result["qidi_guard"]    = p->qidi_guard && starts_print;
+    result["canvas_guard"]  = p->canvas_guard && starts_print;
     if (p->dry_run) {
         result["dry_run"] = true;
         sink.progress(99, "dry run: nothing was sent");
         sink.done(true, "", result);
         return;
+    }
+    // A QIDI Box printer: the Box mapping goes out first, or nothing is sent at all.
+    if (p->qidi_guard && starts_print) {
+        sink.progress(1, "reading the QIDI Box");
+        std::string why;
+        if (!qidi_guard_start(*p, result, why)) {
+            sink.done(false, why, result);
+            return;
+        }
+    }
+    // An Elegoo Centauri Carbon 1: idle, and every filament on a loaded CANVAS tray of its own
+    // material, or nothing is uploaded at all.
+    if (p->canvas_guard && starts_print) {
+        sink.progress(1, "reading the printer and its CANVAS");
+        std::string why;
+        if (!canvas_guard_start(*p, result, why)) {
+            sink.done(false, why, result);
+            return;
+        }
     }
     std::string error;
     sink.progress(1, "uploading " + p->upload.upload_path.string());
@@ -1678,6 +2000,17 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
         return;
     }
     std::string error;
+    // The send was decided on a status up to a few seconds old: ask once more, uncached, before a
+    // print's file goes up, so a print started on the printer meanwhile is never interrupted.
+    if (p->mode == "print") {
+        const SnapmakerLan::Status now = SnapmakerLan::status_now(p->lan);
+        if (now.online && now.printing()) {
+            sink.done(false, p->printer_name + " is " + (now.state == "paused" ? "paused mid-print" : "printing") + " (" + now.filename +
+                                 "), so nothing was sent",
+                      result);
+            return;
+        }
+    }
     if (p->reuse_remote && p->mode == "print") {
         // A reprint of a file the printer still holds: nothing to upload, start it where it is.
         result["uploaded"]    = false;
