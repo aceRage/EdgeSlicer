@@ -221,43 +221,178 @@ static int int_at(const json& j, const char* key, int fallback)
     return j.is_object() && j.contains(key) && j[key].is_number() ? j[key].get<int>() : fallback;
 }
 
-// A QIDI Box (X-Max 4, X-Plus 4, Q2): `multi_color_controller`, read the way QIDIStudio's
-// QDSDevice::updateBoxDataByJson reads it - `box_count` and `boxes` either at the top level or
-// under `box`, each box a `filament_info` array of four slots and a `box_inserted_<n>` flag per
-// slot. Slot n of box b is Box slot b * 4 + n, the number the firmware's `value_t<tool>` names.
-// The extruder's own spool (`extra`) is left out: QIDIStudio's numbering for it is not settled.
-static void slots_from_qidi_box(const json& status, std::vector<Slot>& out, bool& have_filaments, bool& is_box)
+// save_variables values: Klipper keeps what SAVE_VARIABLE was given, an int or a quoted string.
+static int var_int(const json& vars, const std::string& key, int fallback);
+
+// A QIDI Box slot as the send dialog's swatches name it: "1A" .. "4D" (Box 1-4, slot A-D).
+static std::string qidi_slot_code(int index)
 {
+    if (index < 0)
+        return "?";
+    return std::to_string(index / 4 + 1) + std::string(1, (char) ('A' + index % 4));
+}
+
+// Is there filament in Box slot n (0-based, box * 4 + slot: Box 1 is slots 0-3, the number
+// value_t<tool> = 'slot<n>' names)? 1 yes, 0 no, -1 nobody said. Two firmware signals:
+//  * save_variables `slot<n>`, the Box's own per-slot state word: 0 empty, 1 / 3 available,
+//    2 loaded into the toolhead, negative blocked (not usable, so not "there");
+//  * the `box_stepper slot<n>` object's runout_button, 0 = filament at the slot's sensor - what
+//    QIDIStudio 2.07.02.60 (QDSDevice::updateBoxDataByJson) takes as "this slot has material".
+// Both answered and they disagree: not known, never a guess either way.
+// NOT filament_slot<n>: the firmware's saved_variables ship with filament_slot<n> = 1 (a PLA) on
+// every slot, and the id stays after the spool is pulled, so it says nothing about presence.
+static int qidi_slot_presence(const json& status, const json* vars, int n)
+{
+    int word = -1;
+    if (vars != nullptr) {
+        const int v = var_int(*vars, "slot" + std::to_string(n), std::numeric_limits<int>::min());
+        if (v != std::numeric_limits<int>::min())
+            word = v > 0 ? 1 : 0;
+    }
+    int sensor = -1;
+    const std::string key = "box_stepper slot" + std::to_string(n);
+    if (status.is_object() && status.contains(key) && status[key].is_object()) {
+        const json& o = status[key];
+        if (o.contains("runout_button") && o["runout_button"].is_number())
+            sensor = o["runout_button"].get<double>() == 0.0 ? 1 : 0;
+    }
+    if (word >= 0 && sensor >= 0)
+        return word == sensor ? word : -1;
+    return word >= 0 ? word : sensor;
+}
+
+// The `box_stepper slot<n>` objects the printer has: one per physical Box slot, registered by the
+// firmware for each Box it is configured with (box_config box0 -> slot0..3). Klipper answers a
+// query for an object it does not have with an empty object, so only a non-empty one counts.
+static std::vector<int> qidi_box_steppers(const json& status)
+{
+    std::vector<int> out;
+    for (int n = 0; n < 16; ++n) {
+        const std::string key = "box_stepper slot" + std::to_string(n);
+        if (status.is_object() && status.contains(key) && status[key].is_object() && !status[key].empty())
+            out.push_back(n);
+    }
+    return out;
+}
+
+// A string, or the first string of an array (color_rgb_str is an array of one).
+static std::string first_str(const json& j, const std::string& key)
+{
+    if (!j.is_object() || !j.contains(key))
+        return {};
+    const json& v = j[key];
+    if (v.is_string())
+        return v.get<std::string>();
+    if (v.is_array() && !v.empty() && v[0].is_string())
+        return v[0].get<std::string>();
+    return {};
+}
+
+// A QIDI Box (X-Max 4, X-Plus 4, Q2): `multi_color_controller`, read the way QIDIStudio's
+// QDSDevice::updateBoxDataByJson reads it. `box_count` at the top level or under `box`, and the
+// slots in either of the two shapes QIDIStudio has read:
+//  * up to its 2026-10-09 source: `boxes`, an array of Boxes, each a `filament_info` array of
+//    four slots and a `box_inserted_<n>` flag per slot;
+//  * since its 2026-10-19 source: flat keys, `box<b>_box_inserted_<n>` and
+//    `box<b>_filament_info_<n>_filament_type` / `_filament_str` / `_vendor_str` / `_color_rgb_str`.
+// Box b (0-based: box0 is Box 1) slot n is Box slot b * 4 + n, the number the firmware's
+// `value_t<tool>` names. Every Box the answer describes is returned, even past box_count, so
+// qidi_box_problem() can see an answer that does not add up; `count` is the box_count it gave,
+// -1 when it gave none. The extruder's own spool (`extra`) is left out.
+static void slots_from_qidi_box(const json& status, std::vector<Slot>& out, bool& have_filaments, bool& is_box, int& count)
+{
+    count = -1;
     if (!status.is_object() || !status.contains("multi_color_controller") || !status["multi_color_controller"].is_object())
         return;
     const json& mcc   = status["multi_color_controller"];
     const json& boxes = mcc.contains("box") && mcc["box"].is_object() ? mcc["box"] : mcc;
-    const int   count = int_at(mcc, "box_count", int_at(boxes, "box_count", 0));
+    count             = int_at(mcc, "box_count", int_at(boxes, "box_count", -1));
     if (count <= 0)
         return; // the controller is there, the Box is not plugged in
+    auto add = [&](int b, int n, bool loaded, const std::string& type, const std::string& sub, const std::string& vendor,
+                   const std::string& colour) {
+        Slot s;
+        s.index  = b * 4 + n;
+        s.name   = "Box " + std::to_string(b + 1) + " slot " + std::to_string(n + 1);
+        s.loaded = loaded;
+        if (s.loaded) {
+            s.type     = type;
+            s.sub_type = sub; // "PLA Rapido"
+            s.vendor   = vendor;
+            s.color    = colour_of(colour);
+            if (!s.type.empty() || !s.color.empty())
+                have_filaments = true;
+        }
+        out.push_back(std::move(s));
+    };
     const json& list = array_at(boxes, "boxes");
-    for (size_t b = 0; b < list.size() && b < 4; ++b) {
-        const json& box   = list[b];
-        const json& infos = array_at(box, "filament_info");
-        for (size_t n = 0; n < infos.size() && n < 4; ++n) {
-            const json& fi = infos[n];
-            Slot s;
-            s.index  = (int) (b * 4 + n);
-            s.name   = "Box " + std::to_string(b + 1) + " slot " + std::to_string(n + 1);
-            s.loaded = truthy_at(box, "box_inserted_" + std::to_string(n));
-            if (s.loaded) {
-                s.type     = str_at(fi, "filament_type");
-                s.sub_type = str_at(fi, "filament_str"); // "PLA Rapido"
-                s.vendor   = str_at(fi, "vendor_str");
-                const json& colours = array_at(fi, "color_rgb_str");
-                s.color    = colour_of(arr_str(colours, 0));
-                if (!s.type.empty() || !s.color.empty())
-                    have_filaments = true;
+    if (!list.empty()) {
+        for (size_t b = 0; b < list.size() && b < 4; ++b) {
+            const json& box   = list[b];
+            const json& infos = array_at(box, "filament_info");
+            for (size_t n = 0; n < infos.size() && n < 4; ++n) {
+                const json& fi = infos[n];
+                add((int) b, (int) n, truthy_at(box, "box_inserted_" + std::to_string(n)), str_at(fi, "filament_type"),
+                    str_at(fi, "filament_str"), str_at(fi, "vendor_str"), first_str(fi, "color_rgb_str"));
             }
-            out.push_back(std::move(s));
+        }
+    } else {
+        for (int b = 0; b < 4; ++b) {
+            const std::string box       = "box" + std::to_string(b) + "_";
+            bool              described = false;
+            for (int n = 0; n < 4 && !described; ++n)
+                described = boxes.contains(box + "box_inserted_" + std::to_string(n)) ||
+                            boxes.contains(box + "filament_info_" + std::to_string(n) + "_filament_type");
+            if (!described)
+                continue;
+            for (int n = 0; n < 4; ++n) {
+                const std::string fi = box + "filament_info_" + std::to_string(n) + "_";
+                add(b, n, truthy_at(boxes, box + "box_inserted_" + std::to_string(n)), first_str(boxes, fi + "filament_type"),
+                    first_str(boxes, fi + "filament_str"), first_str(boxes, fi + "vendor_str"), first_str(boxes, fi + "color_rgb_str"));
+            }
         }
     }
     is_box = !out.empty();
+}
+
+// Does the printer's answer about its Box add up? "" when it does, else why not, in words. A Box
+// answer that contradicts itself is not mapped automatically at all: a slot number off by a Box
+// points value_t<tool> at the wrong spool, or at none.
+//  * multi_color_controller and save_variables give different box counts;
+//  * the printer has box_stepper objects for other slots than box_count * 4 (slot0..3 per Box);
+//  * a slot past box_count * 4 reports filament (its state word, or the controller);
+//  * the controller says a slot is loaded and the slot's own state word / sensor says it is not,
+//    or the other way round.
+static std::string qidi_box_problem(const json& status, const json* vars, int mcc_count, const std::vector<Slot>& slots)
+{
+    const int vars_count = vars != nullptr ? var_int(*vars, "box_count", -1) : -1;
+    if (mcc_count >= 0 && vars_count >= 0 && mcc_count != vars_count)
+        return "multi_color_controller counts " + std::to_string(mcc_count) + " Box(es), save_variables " + std::to_string(vars_count);
+    const int count = mcc_count >= 0 ? mcc_count : vars_count;
+    if (count <= 0)
+        return {};
+    const int              n_slots  = std::min(4, count) * 4;
+    const std::vector<int> steppers = qidi_box_steppers(status);
+    if (!steppers.empty() && ((int) steppers.size() != n_slots || steppers.back() >= n_slots))
+        return "box_count says " + std::to_string(count) + " Box(es) (slots 1A to " + qidi_slot_code(n_slots - 1) +
+               "), but the printer has " + std::to_string(steppers.size()) + " Box slot motor(s), " + qidi_slot_code(steppers.front()) +
+               " to " + qidi_slot_code(steppers.back());
+    if (vars != nullptr)
+        for (int n = n_slots; n < 16; ++n)
+            if (var_int(*vars, "slot" + std::to_string(n), 0) > 0)
+                return "slot " + qidi_slot_code(n) + " reports filament, but box_count is " + std::to_string(count);
+    for (const Slot& s : slots) {
+        if (s.index >= n_slots) {
+            if (s.loaded)
+                return "slot " + qidi_slot_code(s.index) + " reports filament, but box_count is " + std::to_string(count);
+            continue;
+        }
+        const int present = qidi_slot_presence(status, vars, s.index);
+        if (present >= 0 && (present == 1) != s.loaded)
+            return "slot " + qidi_slot_code(s.index) + " is " + (s.loaded ? "loaded" : "empty") + " in multi_color_controller but " +
+                   (present == 1 ? "loaded" : "empty") + " by its own sensor / state";
+    }
+    return {};
 }
 
 // No print_task_config: the extruder objects still say how many tools there are. A slot list with
@@ -295,6 +430,8 @@ static bool qidi_variables_present(const json* vars)
     return vars != nullptr && (vars->contains("enable_box") || vars->contains("box_count") || vars->contains("filament_slot0"));
 }
 
+static std::vector<Slot> slots_from_variables(const json& vars, const json& status, const QidiFilaList& list, bool& have_filaments);
+
 static Status fill_from_status(const json& status, const std::string& host_type_key, const QidiFilaList* filas = nullptr)
 {
     Status st;
@@ -310,13 +447,14 @@ static Status fill_from_status(const json& status, const std::string& host_type_
                            qidi_variables_present(vars);
     st.qidi_polar_cooler = st.qidi && status.contains("output_pin polar_cooler") && status["output_pin polar_cooler"].is_object();
     slots_from_print_task_config(status, st.slots, st.slots_have_filaments);
+    int mcc_count = -1;
     if (st.slots.empty())
-        slots_from_qidi_box(status, st.slots, st.slots_have_filaments, st.qidi_box);
+        slots_from_qidi_box(status, st.slots, st.slots_have_filaments, st.qidi_box, mcc_count);
     // The Box named no materials there (or is not described there at all): read it the way
     // QIDIStudio does, from save_variables and the printer's filament list.
     if (st.qidi && !st.slots_have_filaments && qidi_variables_present(vars) && filas != nullptr) {
-        bool              have = false;
-        std::vector<Slot> from_vars = slots_from_qidi_variables(vars->dump(), *filas, have);
+        bool              have      = false;
+        std::vector<Slot> from_vars = slots_from_variables(*vars, status, *filas, have);
         if (!from_vars.empty()) {
             st.slots                = std::move(from_vars);
             st.slots_have_filaments = have;
@@ -325,11 +463,30 @@ static Status fill_from_status(const json& status, const std::string& host_type_
     }
     // A Box the firmware counts but whose slots nobody could read is still a Box: the send must not
     // treat it as absent and start on value_t<n> (qidi_send_policy needs a slot for every filament).
-    if (st.qidi && !st.qidi_box && vars != nullptr && int_at(*vars, "box_count", 0) > 0)
+    if (st.qidi && !st.qidi_box && vars != nullptr && var_int(*vars, "box_count", 0) > 0)
         st.qidi_box = true;
+    if (st.qidi) {
+        // An answer that contradicts itself (box counts, slot motors, sensors) is never mapped
+        // automatically: qidi_send_policy keeps the print to an upload.
+        const std::string why = qidi_box_problem(status, vars, mcc_count, st.slots);
+        if (!why.empty()) {
+            st.qidi_box              = true;
+            st.qidi_box_inconsistent = true;
+            st.qidi_box_problem      = why;
+        } else if (st.qidi_box) {
+            // Consistent: only the counted Boxes' slots are shown (and can be picked).
+            const int count = mcc_count >= 0 ? mcc_count : (vars != nullptr ? var_int(*vars, "box_count", 0) : 0);
+            const int limit = std::min(4, std::max(0, count)) * 4;
+            st.slots.erase(std::remove_if(st.slots.begin(), st.slots.end(), [limit](const Slot& s) { return s.index >= limit; }),
+                           st.slots.end());
+        }
+    }
     if (st.slots.empty())
         slots_from_extruders(status, st.slots);
-    if (st.slots.empty() || !st.slots_have_filaments)
+    if (st.qidi_box_inconsistent)
+        st.note = "The QIDI Box's answer does not add up (" + st.qidi_box_problem +
+                  "), so no slot is picked and the print is not started. The file can still be uploaded.";
+    else if (st.slots.empty() || !st.slots_have_filaments)
         st.note = no_filament_note(host_type_key);
     return st;
 }
@@ -443,10 +600,19 @@ Status probe(const Device& d, int timeout_s)
     // A model that may carry a QIDI Box also gets save_variables in the same call: that is where
     // QIDIStudio reads the Box from, and where value_t<n> / enable_box live.
     const bool  qidi_model = qidi_box_capable_model(d.printer_model);
+    // And the Box's slot motors, `box_stepper slot0..15` (their runout_button is QIDIStudio
+    // 2.07.02.60's "this slot has material"): which ones exist says how many Box slots the printer
+    // really has, the check that a box_count or a slot number is not off by a Box.
+    std::string qidi_objects;
+    if (qidi_model) {
+        qidi_objects = "&save_variables=variables";
+        for (int n = 0; n < 16; ++n)
+            qidi_objects += "&box_stepper%20slot" + std::to_string(n);
+    }
     std::string body;
     if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&multi_color_controller"
                               "&output_pin%20polar_cooler&extruder&extruder1&extruder2&extruder3" +
-                           std::string(qidi_model ? "&save_variables=variables" : ""),
+                           qidi_objects,
                        body, st.error, timeout_s)) {
         st.note = "this printer did not answer" + (st.error.empty() ? std::string() : (": " + st.error));
         return st;
@@ -555,37 +721,77 @@ static std::string var_str(const json& vars, const std::string& key)
     return {};
 }
 
-std::vector<Slot> slots_from_qidi_variables(const std::string& variables_json, const QidiFilaList& list, bool& have_filaments)
+// The Box slots save_variables describe, Box 1 slot A first (slot n = box * 4 + slot, the number
+// value_t<tool> names). Whether a slot holds filament is its own state word / sensor
+// (qidi_slot_presence), never filament_slot<n>: the firmware's default for every slot is
+// filament_slot<n> = 1 and the id outlives the spool, so an empty slot would read as a PLA one.
+// A loaded slot's material is filament_slot<n> in the filament list; 0 or an id the list lacks
+// leaves it loaded with the material unknown, which the send never maps by itself.
+static std::vector<Slot> slots_from_variables(const json& vars, const json& status, const QidiFilaList& list, bool& have_filaments)
 {
     std::vector<Slot> out;
+    have_filaments  = false;
+    const int boxes = std::min(4, var_int(vars, "box_count", 0));
+    for (int n = 0; n < boxes * 4; ++n) {
+        Slot s;
+        s.index  = n;
+        s.name   = "Box " + std::to_string(n / 4 + 1) + " slot " + std::to_string(n % 4 + 1);
+        s.loaded = qidi_slot_presence(status, &vars, n) == 1;
+        if (s.loaded) {
+            const int fila  = var_int(vars, "filament_slot" + std::to_string(n), 0);
+            const int color = var_int(vars, "color_slot" + std::to_string(n), -1);
+            auto      t     = list.type.find(fila);
+            if (fila > 0 && t != list.type.end() && !t->second.empty()) {
+                s.type  = t->second;
+                auto nm = list.name.find(fila);
+                if (nm != list.name.end())
+                    s.sub_type = nm->second;
+                auto c = list.colour.find(color);
+                if (c != list.colour.end())
+                    s.color = c->second;
+                have_filaments = true;
+            }
+        }
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+std::vector<Slot> slots_from_qidi_variables(const std::string& variables_json, const QidiFilaList& list, bool& have_filaments)
+{
     have_filaments = false;
     json vars;
     try {
         vars = json::parse(variables_json);
     } catch (...) {
-        return out;
+        return {};
     }
-    const int boxes = std::min(4, var_int(vars, "box_count", 0));
-    for (int n = 0; n < boxes * 4; ++n) {
-        Slot s;
-        s.index         = n;
-        s.name          = "Box " + std::to_string(n / 4 + 1) + " slot " + std::to_string(n % 4 + 1);
-        const int fila  = var_int(vars, "filament_slot" + std::to_string(n), 0);
-        const int color = var_int(vars, "color_slot" + std::to_string(n), -1);
-        auto      t     = list.type.find(fila);
-        if (fila > 0 && t != list.type.end() && !t->second.empty()) {
-            s.loaded = true;
-            s.type   = t->second;
-            auto nm  = list.name.find(fila);
-            if (nm != list.name.end())
-                s.sub_type = nm->second;
-            auto c = list.colour.find(color);
-            if (c != list.colour.end())
-                s.color = c->second;
-            have_filaments = true;
+    if (!vars.is_object())
+        return {};
+    return slots_from_variables(vars, json::object(), list, have_filaments);
+}
+
+std::string describe_qidi_box(const Status& st)
+{
+    std::string out = "QIDI Box: ";
+    if (!st.online)
+        return out + "not read (" + (st.error.empty() ? std::string("no answer") : st.error) + ")";
+    if (!st.qidi_box)
+        return out + "none";
+    out += std::to_string(st.slots.size()) + " slot(s)";
+    for (const Slot& s : st.slots) {
+        out += "; " + qidi_slot_code(s.index) + " ";
+        if (!s.loaded) {
+            out += "empty";
+            continue;
         }
-        out.push_back(std::move(s));
+        out += "loaded " + (s.type.empty() ? std::string("(material unknown)") : s.type);
+        if (!s.sub_type.empty() && s.sub_type != s.type)
+            out += " (" + s.sub_type + ")";
+        out += " " + (s.color.empty() ? std::string("(no colour)") : s.color);
     }
+    if (st.qidi_box_inconsistent)
+        out += "; INCONSISTENT: " + st.qidi_box_problem;
     return out;
 }
 
@@ -673,6 +879,23 @@ Status parse_moonraker_status(const std::string& status_json, const std::string&
         status = json::object();
     }
     Status st = fill_from_status(status, host_type_key);
+    st.probed = can_probe(host_type_key);
+    return st;
+}
+
+Status parse_qidi_status(const std::string& status_json, const QidiFilaList& filas, const std::string& host_type_key)
+{
+    json status;
+    try {
+        status = json::parse(status_json);
+    } catch (...) {
+        status = json::object();
+    }
+    // As probe() does: the controller first, save_variables and the filament list when it named
+    // no material.
+    Status st = fill_from_status(status, host_type_key);
+    if (st.qidi && !st.slots_have_filaments && qidi_variables_present(qidi_variables_of(status)))
+        st = fill_from_status(status, host_type_key, &filas);
     st.probed = can_probe(host_type_key);
     return st;
 }
@@ -868,9 +1091,16 @@ SlotSendPolicy slot_send_policy(const SlotSendFacts& f)
     // No slot unit feeding this print: nothing to map, nothing to go stale.
     if (!f.unit_in_use)
         return SlotSendPolicy::Start;
+    // The slot answer contradicts itself: no slot it names can be trusted, nothing is started.
+    if (f.slots_inconsistent)
+        return SlotSendPolicy::UploadOnlyInconsistent;
     // No used filament known at all is not "nothing to map": T0 still loads from somewhere.
     if (f.used_filaments <= 0 || f.mapped_filaments < f.used_filaments)
         return (f.mapped_filaments == 0 && f.as_sliced_ok) ? SlotSendPolicy::StartAsSliced : SlotSendPolicy::NeedsMapping;
+    // A filament goes to a slot the printer says is empty: the printer feeds nothing (or a spool
+    // nobody has read). Never started, whatever is confirmed.
+    if (f.mapped_to_empty > 0)
+        return SlotSendPolicy::MappedToEmpty;
     if (f.type_mismatches > 0)
         return SlotSendPolicy::ConfirmTypeMismatch;
     return SlotSendPolicy::Start;
@@ -889,8 +1119,13 @@ QidiSendPolicy qidi_send_policy(const QidiSendFacts& f)
     // No Box plugged in, or switched off for this print (enable_box 0 goes out): the extruder's own
     // spool feeds every tool, there is no saved value_t<n> to go stale.
     s.unit_in_use      = f.box_present && f.use_box;
+    // The Box answer contradicts itself (a box count or a slot number off by a Box): no slot it
+    // names can be trusted, so nothing is mapped and nothing is started.
+    s.slots_inconsistent = f.box_inconsistent;
     s.used_filaments   = f.used_filaments;
     s.mapped_filaments = f.mapped_filaments;
+    // value_t<tool> pointed at a slot the printer says is empty: never started, whatever is confirmed.
+    s.mapped_to_empty  = f.mapped_to_empty;
     s.type_mismatches  = f.type_mismatches;
     s.as_sliced_ok     = false; // a Box always feeds T<n> from value_t<n>: there is no safe "as sliced"
     return slot_send_policy(s);
@@ -905,18 +1140,22 @@ QidiAutoMapping qidi_auto_mapping(const Status& st, const std::vector<SendFilame
     f.box_present = st.qidi_box;
     f.busy        = busy_printing(st.state);
     // The send dialog's own starting value (qidi_option_defaults): the Box on whenever there is one.
-    f.use_box = st.qidi_box;
+    f.use_box          = st.qidi_box;
+    f.box_inconsistent = st.qidi_box_inconsistent;
     for (const SendFilament& fil : filaments) {
         if (!fil.used)
             continue;
         ++f.used_filaments;
-        if (!st.qidi_box)
+        // A Box answer that does not add up is never mapped: no slot number in it is trusted.
+        if (!st.qidi_box || st.qidi_box_inconsistent)
             continue;
         const int pos = auto_match_slot(st.slots, fil.colour, fil.type, true);
         if (pos <= 0 || pos > (int) st.slots.size())
             continue;
         const Slot& s = st.slots[pos - 1];
         ++f.mapped_filaments;
+        if (!s.loaded)
+            ++f.mapped_to_empty;
         if (!filament_types_match(fil.type, s.type))
             ++f.type_mismatches;
         if (!out.mapping.empty())
@@ -941,6 +1180,12 @@ std::string qidi_send_refusal(QidiSendPolicy policy)
     case QidiSendPolicy::ConfirmTypeMismatch:
         return "A filament on this plate would be fed from a QIDI Box slot holding another material, so the print was "
                "not started. Send it from the PC's send dialog to confirm the slots.";
+    case QidiSendPolicy::MappedToEmpty:
+        return "A filament on this plate would be fed from a QIDI Box slot the printer reports as empty, so the print was "
+               "not started. Load the filament in the Box, or pick a loaded slot in the PC's send dialog.";
+    case QidiSendPolicy::UploadOnlyInconsistent:
+        return "The QIDI Box's answer did not add up (its box count or slot numbers disagree), so no slot was picked and "
+               "the print was not started. Send it as an upload only, and check the Box on the printer's screen.";
     default:
         return {};
     }

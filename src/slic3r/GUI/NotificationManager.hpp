@@ -161,6 +161,9 @@ enum class NotificationType
     // EdgeSlicer: settings carried onto the new preset by a printer / preset switch (Tab::select_preset).
     // One at a time: the next switch replaces it.
     PresetSettingsCarried,
+    // Nozzle hardness (HRC) too low for the loaded filament, no fade-out.
+    // Appended at the end so existing NotificationType ordinals stay stable.
+    NozzleHrcWarning,
 };
 
 class NotificationManager

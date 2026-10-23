@@ -501,8 +501,18 @@ private:
     bool is_gcode_viewer() const { return m_app_mode == EAppMode::GCodeViewer; }
     bool is_recreating_gui() const { return m_is_recreating_gui; }
     bool is_hub_managed() const { return m_hub_managed; }
+    // Showcase S5, --showcase-render: a hidden instance that loads one project, renders a Showcase
+    // video or still and exits with the job's code. It starts no network, no page server, no hub,
+    // registers no file types and never shows a window. Set before the app is constructed.
+    static void set_showcase_render_mode(bool on) { s_showcase_render_mode = on; }
+    static bool showcase_render_mode() { return s_showcase_render_mode; }
     // Ultra: this instance's loopback API + the hub handshake (was the Stream tab's job).
     void start_remote_access();
+private:
+    static bool s_showcase_render_mode;
+    // S5: runs the render job once the project is loaded, then ends the process with its code.
+    void run_showcase_render_job();
+public:
     bool flutter_web_config_update_dlg_open() const
     {
         return m_flutter_web_config_update_dlg_open.load(std::memory_order_acquire);

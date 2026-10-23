@@ -25,6 +25,10 @@ namespace GUI {
 bool showcase_rasterize_watermark(const Showcase::Watermark &wm, const Showcase::Project &project, int image_w, int image_h,
                                   ShowcaseImage &mark, Showcase::RectI &where);
 
+// S3: where the mark goes on an image of image_w x image_h, without drawing it (the callouts keep
+// clear of it). Empty when it is off or has nothing to show.
+Showcase::RectI showcase_watermark_rect(const Showcase::Watermark &wm, const Showcase::Project &project, int image_w, int image_h);
+
 // Draws the scene's watermark onto an exported image (no-op when it is off).
 void showcase_apply_watermark(ShowcaseImage &image, const Showcase::Watermark &wm, const Showcase::Project &project);
 
