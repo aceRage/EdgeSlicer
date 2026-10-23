@@ -6,6 +6,12 @@
 #include "RemoteAccess.hpp"
 #include "BambuSetupNoticeDialog.hpp"
 #include "RemoteHub.hpp"
+#include "PartPlate.hpp"
+#include "Showcase/ShowcaseRenderer.hpp"
+#include "Showcase/ShowcaseView.hpp"
+#include "libslic3r/Showcase/ShowcaseRenderCli.hpp"
+
+#include <boost/nowide/iostream.hpp>
 #include "Theme.hpp"
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
@@ -1493,6 +1499,13 @@ void GUI_App::post_init()
         }
     }
 
+    // Showcase S5: a render job does nothing else at start-up (no update checks, no network, no
+    // login): it renders once the project's loading has settled, and ends the process.
+    if (s_showcase_render_mode) {
+        CallAfter([this] { run_showcase_render_job(); });
+        return;
+    }
+
 //#if BBL_HAS_FIRST_PAGE
     bool slow_bootup = false;
     if (app_config->get("slow_bootup") == "true") {
@@ -1737,6 +1750,8 @@ wxDEFINE_EVENT(EVT_SHOW_DIALOG, wxCommandEvent);
 wxDEFINE_EVENT(EVT_CONNECT_LAN_MODE_PRINT, wxCommandEvent);
 IMPLEMENT_APP(GUI_App)
 
+bool GUI_App::s_showcase_render_mode = false;
+
 //BBS: remove GCodeViewer as seperate APP logic
 //GUI_App::GUI_App(EAppMode mode)
 GUI_App::GUI_App()
@@ -1770,7 +1785,10 @@ GUI_App::GUI_App()
     m_page_http_server.set_request_handler(HttpServer::web_server_handle_request);
     // Our web views only: per-process secret, Host/Origin checks, no CORS, exclusive port.
     m_page_http_server.enable_page_security(true);
-    m_page_http_server.start();
+    // Showcase S5: a --showcase-render job serves no pages (and must not take the port of an open
+    // EdgeSlicer).
+    if (!s_showcase_render_mode)
+        m_page_http_server.start();
     profiler.mark("m_page_http_server.start");
     repoint_saved_device_covers();
     BOOST_LOG_TRIVIAL(info) << "[Flutter] Version:"
@@ -3274,6 +3292,12 @@ bool GUI_App::on_init_inner()
         m_hub_managed = InstanceRouting::resolve_hidden_start(
             wxGetEnv("SNORCA_HIDDEN", &env) ? std::optional<std::string>(env.ToStdString()) : std::nullopt,
             init_params != nullptr && init_params->start_hidden, app_config->get_bool("start_hidden"));
+        // Showcase S5: a render job is hidden whatever the settings say, and every dialog is
+        // answered by the hidden-instance policy from the first one on.
+        if (s_showcase_render_mode) {
+            m_hub_managed = true;
+            RemoteAccess::get().set_hidden(true);
+        }
         if (m_hub_managed)
             BOOST_LOG_TRIVIAL(info) << "starting hidden: no splash, no window until the hub shows it";
     }
@@ -3534,11 +3558,14 @@ bool GUI_App::on_init_inner()
     // Before anything re-registers: repair association commands left pointing at an
     // executable that no longer exists (the binary rename). Runs in the g-code viewer
     // too, which never reaches the association block below.
-    repair_stale_associations();
+    // Showcase S5: a render job touches no file associations.
+    if (!s_showcase_render_mode)
+        repair_stale_associations();
 #endif // __WXMSW__
 
     if (is_editor()) {
 #ifdef __WXMSW__
+        if (!s_showcase_render_mode) {
         if (app_config->get("associate_3mf") == "true")
             associate_files(L"3mf");
         if (app_config->get("associate_stl") == "true")
@@ -3556,6 +3583,7 @@ bool GUI_App::on_init_inner()
 
         if (app_config->get("associate_gcode") == "true")
             associate_files(L"gcode");
+        } // !s_showcase_render_mode
 #endif // __WXMSW__
 
         preset_updater = new PresetUpdater();
@@ -4088,7 +4116,9 @@ bool GUI_App::on_init_inner()
     m_initialized = true;
 
     // Ultra: register with the hub now; a hidden instance never builds the Stream tab.
-    start_remote_access();
+    // Showcase S5: never for a render job.
+    if (!s_showcase_render_mode)
+        start_remote_access();
 
     flush_logs();
 
@@ -4205,6 +4235,16 @@ void GUI_App::copy_network_if_available()
 bool GUI_App::on_init_network(bool try_backup)
 {
     StartupProfiler profiler("GUI_App::on_init_network");
+
+    // Showcase S5: a render job loads no network plug-in and reaches no printer or cloud.
+    if (s_showcase_render_mode) {
+        if (!m_device_manager)
+            m_device_manager = new Slic3r::DeviceManager();
+        if (!m_user_manager)
+            m_user_manager = new Slic3r::UserManager();
+        BOOST_LOG_TRIVIAL(info) << "showcase-render: no network";
+        return true;
+    }
 
     bool create_network_agent = false;
     auto should_load_networking_plugin = app_config->get_bool("installed_networking");
@@ -4952,6 +4992,144 @@ void GUI_App::relaunch_now()
     }
     m_relaunch_started = true;
     relaunch_slicer(init_params->argc, init_params->argv, init_params->input_files);
+}
+
+
+// Showcase S5: --showcase-render. The project was loaded by post_init(); here the plate is chosen,
+// sliced when asked (--slice: the build-up then lays the real toolpaths), the Showcase view shown
+// (hidden) and the job run; then the report is written and the process ends with the job's code,
+// without the usual shutdown (it saves nothing, so there is nothing to lose).
+void GUI_App::run_showcase_render_job()
+{
+    using namespace Slic3r::Showcase;
+    struct JobState
+    {
+        const RenderRequest *req = nullptr;
+        RenderReport         rep;
+        wxTimer             *timer = nullptr;
+        std::chrono::steady_clock::time_point started;
+        std::chrono::steady_clock::time_point idle_since;
+        bool                 saw_slicing = false;
+    };
+    auto st = std::make_shared<JobState>();
+    st->req = init_params != nullptr ? init_params->showcase_render.get() : nullptr;
+    if (st->req != nullptr) {
+        st->rep.project = st->req->project;
+        st->rep.path    = st->req->path;
+        st->rep.out     = st->req->out;
+        st->rep.plate   = st->req->plate;
+        st->rep.still   = st->req->still;
+    }
+    auto finish = [st](int exit_code) {
+        RenderReport &rep = st->rep;
+        rep.exit_code     = exit_code;
+        if (exit_code != RENDER_OK)
+            rep.ok = false;
+        for (const std::string &w : rep.warnings)
+            boost::nowide::cerr << "warning: " << w << std::endl;
+        for (const std::string &e : rep.errors)
+            boost::nowide::cerr << "error: " << e << std::endl;
+        if (st->req != nullptr && !st->req->report.empty()) {
+            boost::nowide::ofstream f(st->req->report, std::ios::binary | std::ios::trunc);
+            const std::string        text = render_report_json(rep) + "\n";
+            if (f)
+                f.write(text.data(), std::streamsize(text.size()));
+            if (!f || !f.good())
+                boost::nowide::cerr << "error: the report could not be written to " << st->req->report << std::endl;
+        }
+        boost::nowide::cout << (rep.ok ? "SHOWCASE_RENDER_OK" : "SHOWCASE_RENDER_FAILED") << " exit=" << exit_code << std::endl;
+        BOOST_LOG_TRIVIAL(warning) << "showcase-render: done, exit code " << exit_code;
+        boost::nowide::cout.flush();
+        boost::nowide::cerr.flush();
+        flush_logs();
+#ifdef _WIN32
+        ::TerminateProcess(::GetCurrentProcess(), UINT(exit_code));
+#else
+        std::_Exit(exit_code);
+#endif
+    };
+    if (st->req == nullptr || plater_ == nullptr || mainframe == nullptr) {
+        st->rep.errors.push_back("the hidden instance did not start");
+        finish(RENDER_FAILED);
+        return;
+    }
+    const RenderRequest &req   = *st->req;
+    Model               &model = plater_->model();
+    if (model.objects.empty()) {
+        st->rep.errors.push_back("the project has no objects (or could not be loaded): " + req.project);
+        finish(RENDER_PROJECT_ERROR);
+        return;
+    }
+    PartPlateList &plates = plater_->get_partplate_list();
+    if (req.plate < 1 || req.plate > plates.get_plate_count()) {
+        st->rep.errors.push_back("the project has " + std::to_string(plates.get_plate_count()) + " plate(s); --plate " + std::to_string(req.plate) +
+                                 " does not exist");
+        finish(RENDER_PROJECT_ERROR);
+        return;
+    }
+    plater_->select_plate(req.plate - 1);
+    if (plates.get_curr_plate() == nullptr || plates.get_curr_plate()->get_objects_on_this_plate().empty()) {
+        st->rep.errors.push_back("plate " + std::to_string(req.plate) + " has no objects");
+        finish(RENDER_PROJECT_ERROR);
+        return;
+    }
+
+    auto render = [this, st, finish]() {
+        plater_->select_view_3D("Showcase");
+        ShowcaseView *view = plater_->get_showcase_view();
+        if (view == nullptr) {
+            st->rep.errors.push_back("the Showcase view is not available");
+            finish(RENDER_FAILED);
+            return;
+        }
+        int code = RENDER_FAILED;
+        try {
+            code = view->run_render_job(*st->req, st->rep);
+        } catch (const std::exception &ex) {
+            st->rep.errors.push_back(std::string("the render stopped: ") + ex.what());
+            code = RENDER_FAILED;
+        }
+        finish(code);
+    };
+    if (!req.slice) {
+        render();
+        return;
+    }
+
+    // --slice: Preview slices the plate and loads its toolpaths (it loads them only while shown, and a
+    // hidden window's current panel counts as shown). Polled, so the event loop keeps running.
+    boost::nowide::cout << "showcase-render: slicing plate " << req.plate << std::endl;
+    plater_->select_view_3D("Preview", false);
+    plater_->reslice();
+    st->started    = std::chrono::steady_clock::now();
+    st->idle_since = st->started;
+    st->timer      = new wxTimer();
+    st->timer->Bind(wxEVT_TIMER, [this, st, finish, render](wxTimerEvent &) {
+        const auto now     = std::chrono::steady_clock::now();
+        const bool slicing = plater_->is_background_process_slicing();
+        if (slicing) {
+            st->saw_slicing = true;
+            st->idle_since  = now;
+        }
+        const bool ready = ShowcaseRenderer::toolpaths_available();
+        const double idle = std::chrono::duration<double>(now - st->idle_since).count();
+        const double all  = std::chrono::duration<double>(now - st->started).count();
+        if (ready && !slicing) {
+            st->timer->Stop();
+            st->rep.sliced = true;
+            boost::nowide::cout << "showcase-render: sliced in " << int(std::lround(all)) << " s" << std::endl;
+            CallAfter(render);
+            return;
+        }
+        // Slicing ended without toolpaths (an error, or nothing to slice), or it never ends.
+        if ((!slicing && idle > 20.) || all > 20. * 60.) {
+            st->timer->Stop();
+            st->rep.warnings.push_back(all > 20. * 60. ? "slicing took over 20 minutes: rendered without the slice" :
+                                                         "the plate could not be sliced (see the log): rendered without the slice");
+            CallAfter(render);
+        }
+    });
+    st->timer->Start(250);
 }
 
 void GUI_App::start_remote_access()

@@ -294,12 +294,17 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
     GUI/MainTabs.hpp
+    GUI/Showcase/ShowcaseCallouts.cpp
+    GUI/Showcase/ShowcaseCallouts.hpp
     GUI/Showcase/ShowcaseRenderer.cpp
     GUI/Showcase/ShowcaseRenderer.hpp
     GUI/Showcase/ShowcaseTextures.cpp
     GUI/Showcase/ShowcaseTextures.hpp
     GUI/Showcase/ShowcaseView.cpp
     GUI/Showcase/ShowcaseView.hpp
+    GUI/Showcase/ShowcaseViewVideo.cpp
+    GUI/Showcase/ShowcaseViewPath.cpp
+    GUI/Showcase/ShowcaseVideoSinks.hpp
     GUI/Showcase/ShowcaseWatermark.cpp
     GUI/Showcase/ShowcaseWatermark.hpp
     GUI/GUI_Utils.cpp
@@ -1007,6 +1012,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/LoginUserAgent.hpp
     Utils/HubHomeLogic.cpp
     Utils/HubHomeLogic.hpp
+    Utils/HubMosaic.cpp
+    Utils/HubMosaic.hpp
     Utils/PrintersMonitor.cpp
     Utils/PrintersMonitor.hpp
     Utils/HubHandover.hpp
@@ -1093,6 +1100,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/MQTT.hpp
     Utils/MQTT.cpp
     Utils/MqttReconnectPolicy.hpp
+    Utils/MqttLogRedact.hpp
     Utils/U1LocalFirst.cpp
     Utils/U1LocalFirst.hpp
     Utils/U1MoonrakerProbe.cpp
@@ -1111,6 +1119,10 @@ set(SLIC3R_GUI_SOURCES
     # Last on purpose: a new source in the middle of the list reshuffles the unity batches (HomeVaults.cpp
     # and HomeVendors.cpp share file-local names and must not land in one batch).
     GUI/FavoriteFilamentsUI.cpp
+    GUI/ThirdPartyFilamentMap.cpp
+    GUI/ThirdPartyFilamentMap.hpp
+    GUI/ThirdPartyFilamentMapPanel.cpp
+    GUI/ThirdPartyFilamentMapPanel.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
@@ -1139,6 +1151,7 @@ if (APPLE)
             GUI/ModelBrowserPanelMac.mm
             GUI/wxMediaCtrl2.mm
             GUI/wxMediaCtrl2.h
+            GUI/Showcase/ShowcaseVideoMac.mm
         )
     FIND_LIBRARY(DISKARBITRATION_LIBRARY DiskArbitration)
 else ()
@@ -1260,6 +1273,8 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Showcase/ShowcaseView.cpp                 # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/Showcase/ShowcaseRenderer.cpp             # glad + ImGui + wx image headers; file-local GL helpers
     GUI/Showcase/ShowcaseTextures.cpp             # glad before wx image headers, like ShowcaseRenderer.cpp
+    GUI/Showcase/ShowcaseViewVideo.cpp            # file-local helpers (seconds_text, spin_lights) with common names
+    GUI/Showcase/ShowcaseViewPath.cpp             # file-local helpers (showcase_read_text, showcase_box)
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
@@ -1281,6 +1296,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Tab.cpp                                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/AMSMaterialsSetting.cpp                   # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/AmsMappingPopup.cpp                       # ::CheckBox members vs GUI::CheckBox (Field.hpp)
+    GUI/ThirdPartyFilamentMapPanel.cpp            # includes AmsMappingPopup.hpp (::CheckBox vs GUI::CheckBox)
     GUI/CalibrationWizardPage.cpp                 # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/ExtrusionCalibration.cpp                  # ::CheckBox members vs GUI::CheckBox (Field.hpp)
 )
@@ -1334,7 +1350,9 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${CURL_LIBRARIES}
     )
 elseif (APPLE)
-    target_link_libraries(libslic3r_gui ${DISKARBITRATION_LIBRARY} "-framework Security")
+    target_link_libraries(libslic3r_gui ${DISKARBITRATION_LIBRARY} "-framework Security"
+        # Showcase S4: the Mac's video encoder (ShowcaseVideoMac.mm).
+        "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
 endif()
 
 if (SLIC3R_STATIC)

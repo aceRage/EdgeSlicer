@@ -95,6 +95,9 @@ public:
     // caller decides which of the two it varies with the realistic view setting.
     //
     void set_tone(float exposure, float saturation);
+    // EDGE (Showcase S5): see Viewer::set_smooth_look().
+    void set_smooth_look(bool enabled, const std::array<float, 128>& looks) { m_smooth_look = enabled; m_looks = looks; }
+    bool is_smooth_look() const { return m_smooth_look; }
     // ORCA: section view, see Viewer::set_clipping_plane()
     void set_clipping_plane(const std::array<float, 4>& plane) { m_clipping_plane = plane; }
     void set_light_top_dir(const Vec3& direction) { m_light_top_dir = direction; }
@@ -395,6 +398,11 @@ private:
     int m_uni_segments_exposure_id{ -1 };
     int m_uni_segments_saturation_id{ -1 };
     int m_uni_segments_light_top_dir_id{ -1 };
+    // EDGE (Showcase S5): the smooth bead look
+    int m_uni_segments_smooth_mode_id{ -1 };
+    int m_uni_segments_role_tex_id{ -1 };
+    int m_uni_segments_look_a_id{ -1 };
+    int m_uni_segments_look_b_id{ -1 };
     // ORCA: the layers greyed or dimmed around the one the sliders show, in the segments and options shaders.
     struct LayerColorsUniforms
     {
@@ -536,6 +544,10 @@ private:
     //
     unsigned int m_enabled_options_buf_id{ 0 };
     unsigned int m_enabled_options_tex_id{ 0 };
+    // EDGE (Showcase S5): per vertex, its extrusion role | min(extruder, 15) << 8 (R16UI), for the
+    // smooth bead look; drawn from a texture unit of its own.
+    unsigned int m_roles_buf_id{ 0 };
+    unsigned int m_roles_tex_id{ 0 };
     size_t m_enabled_options_count{ 0 };
     //
     // Caches for size of data sent to gpu, in bytes
@@ -571,6 +583,9 @@ private:
     //
     float m_exposure{ 1.0f };
     float m_saturation{ 1.0f };
+    // EDGE (Showcase S5)
+    bool m_smooth_look{ false };
+    std::array<float, 128> m_looks{};
     // ORCA: the light the segments shader shades with, in eye space.
     Vec3 m_light_top_dir{ -0.4574957f, 0.4574957f, 0.7624929f };
 
