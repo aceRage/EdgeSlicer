@@ -13799,8 +13799,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
     if (tolal_model_count <= 0 && !q->m_exported_file) {
         dlg.Hide();
         if (!is_user_cancel) {
-            MessageDialog msg(wxGetApp().mainframe, _L("The file does not contain any geometry data."), _L("Warning"), wxYES | wxICON_WARNING);
-            if (msg.ShowModal() == wxID_YES) {}
+            MessageDialog msg(wxGetApp().mainframe, _L("The file does not contain any geometry data."), _L("Warning"), wxOK | wxICON_WARNING);
+            msg.ShowModal();
         }
     }
     return obj_idxs;
