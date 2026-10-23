@@ -215,5 +215,122 @@ int recall(const std::map<std::string, Remembered>& memory, const UsedFilament& 
     return found;
 }
 
+// ------------------------------------------------------------------ unattended sends ----
+
+bool UnattendedPlan::may_start() const
+{
+    using PrintHostDevices::SlotSendPolicy;
+    return policy == SlotSendPolicy::Start || policy == SlotSendPolicy::StartAsSliced || policy == SlotSendPolicy::NotApplicable;
+}
+
+UnattendedPlan plan_unattended_send(const PrintHostDevices::Status& st, const std::vector<UsedFilament>& used,
+                                    const std::map<std::string, Remembered>& memory, const std::map<int, int>& mapping,
+                                    const std::string& printer)
+{
+    using namespace PrintHostDevices;
+    UnattendedPlan plan;
+    plan.canvas           = st.canvas;
+    plan.explicit_mapping = !mapping.empty();
+    SlotSendFacts& f      = plan.facts;
+    // An SDCP printer that answered at all said what it is doing: busy is checked with or without a
+    // CANVAS. One that did not answer is left to the upload and the start command, as the desktop
+    // dialog leaves it (slots_required stays false).
+    f.probe_ok    = st.online;
+    f.slot_unit   = st.online;
+    f.busy        = busy_printing(st.state);
+    f.unit_in_use = st.canvas && st.slots_have_filaments;
+    const std::vector<Slot>& slots = st.slots;
+    auto filament_name = [](const UsedFilament& u) {
+        std::string n = "Filament " + std::to_string(u.index + 1);
+        if (!boost::trim_copy(u.type).empty())
+            n += " (" + boost::trim_copy(u.type) + ")";
+        return n;
+    };
+    for (const UsedFilament& u : used) {
+        int pos = -1;
+        if (plan.explicit_mapping) {
+            const auto it = mapping.find(u.index);
+            pos           = it == mapping.end() ? -1 : it->second;
+        } else if (st.canvas) {
+            // The dialog's starting choice (PrintHostSendDialog::rebuild_*_rows, initial_slot_position):
+            // the remembered tray first, else the closest colour.
+            pos = recall(memory, u, slots);
+            if (pos < 0 || pos >= (int) slots.size())
+                pos = auto_match_slot(slots, u.colour, u.type, false) - 1;
+        }
+        plan.choice.push_back(pos);
+        ++f.used_filaments;
+        if (!f.unit_in_use)
+            continue;
+        const Slot* s = slot_at(slots, pos);
+        if (s == nullptr || !is_tray(*s)) {
+            plan.problems.push_back(filament_name(u) + (plan.explicit_mapping && pos >= 0 ? " is mapped to tray " + std::to_string(pos + 1) +
+                                                                                               ", which this CANVAS does not have"
+                                                                                         : " has no CANVAS tray"));
+            continue;
+        }
+        if (!s->loaded) {
+            plan.problems.push_back(filament_name(u) + " is mapped to tray " + slot_tile_label(slots, pos) + ", which is empty");
+            continue;
+        }
+        ++f.mapped_filaments;
+        // The dialog's own test (slot_type_mismatches): only where both sides name a material.
+        const std::string ft = boost::trim_copy(u.type);
+        if (!ft.empty() && !s->type.empty() && !filament_types_match(ft, s->type)) {
+            ++f.type_mismatches;
+            plan.problems.push_back("Filament " + std::to_string(u.index + 1) + " is " + ft + " but tray " + slot_tile_label(slots, pos) +
+                                    " holds " + s->type);
+        }
+    }
+    // Design D4's "as sliced": an empty slot_map lets the printer feed from the tray in the extruder,
+    // which is right only for a one-filament plate whose material is in that tray.
+    if (used.size() == 1 && st.active_slot >= 0 && st.active_slot < (int) slots.size()) {
+        const Slot& a = slots[st.active_slot];
+        f.as_sliced_ok = a.loaded && filament_types_match(used.front().type, a.type);
+    }
+    plan.policy = slot_send_policy(f);
+
+    auto joined = [&plan]() {
+        std::string out;
+        for (const std::string& p : plan.problems)
+            out += (out.empty() ? "" : "; ") + p;
+        return out;
+    };
+    switch (plan.policy) {
+    case SlotSendPolicy::Start:
+        if (st.canvas)
+            plan.entries = slot_map_for(used, plan.choice, slots, ElegooStartPrint::AS_SLICED_IDENTITY_MAP);
+        break;
+    case SlotSendPolicy::UploadOnlyBusy:
+        plan.refusal = (printer.empty() ? std::string("The printer") : printer) +
+                       " is busy printing, so nothing was sent and the print was not started. Wait for it to finish, or send "
+                       "the plate as an upload only.";
+        break;
+    case SlotSendPolicy::NeedsMapping:
+        plan.refusal = (plan.problems.empty() ? std::string("A filament on this plate has no CANVAS tray") : joined()) +
+                       " - map it in EdgeSlicer or upload only. Nothing was sent and the print was not started.";
+        break;
+    case SlotSendPolicy::ConfirmTypeMismatch:
+        plan.refusal = joined() + " - remap in EdgeSlicer or upload only. Nothing was sent and the print was not started.";
+        break;
+    case SlotSendPolicy::UploadOnlyNoProbe:
+        plan.refusal = "Couldn't read the CANVAS, so the print was not started. Send it as an upload only, or retry once the "
+                       "printer answers.";
+        break;
+    default: break; // NotApplicable, StartAsSliced: no entries
+    }
+    return plan;
+}
+
+void add_to_extended_info(const UnattendedPlan& plan, std::map<std::string, std::string>& info)
+{
+    // ElegooPrintHostSendDialog::extendedInfo: only when a CANVAS was read, else the command keeps
+    // its old shape exactly.
+    if (!plan.canvas)
+        return;
+    info["canvasAttached"] = "1";
+    info["slotMap"]        = ElegooStartPrint::format_slot_map(plan.entries);
+}
+
 } // namespace ElegooCanvasMapping
 } // namespace Slic3r
