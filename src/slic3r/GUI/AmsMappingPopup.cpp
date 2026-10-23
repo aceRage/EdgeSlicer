@@ -12,9 +12,11 @@
 #include "Widgets/ProgressDialog.hpp"
 #include "Widgets/RoundedRectangle.hpp"
 #include "Widgets/StaticBox.hpp"
+#include "Widgets/StateColor.hpp"
 
 #include <wx/progdlg.h>
 #include <wx/clipbrd.h>
+#include <wx/control.h>
 #include <wx/dcgraph.h>
 #include <wx/graphics.h>
 #include <miniz.h>
@@ -67,6 +69,22 @@ void MaterialItem::set_ams_info(wxColour col, wxString txt, int ctype, std::vect
     if (m_ams_coloul != col) { m_ams_coloul = col; need_refresh = true;}
     if (m_ams_name != txt) { m_ams_name = txt; need_refresh = true; }
     if (need_refresh) { Refresh();}
+}
+
+void MaterialItem::set_dropdown_visible(bool visible)
+{
+    if (m_dropdown_visible == visible)
+        return;
+    m_dropdown_visible = visible;
+    Refresh();
+}
+
+void MaterialItem::set_nozzle_badge(const wxString &badge)
+{
+    if (m_nozzle_badge == badge)
+        return;
+    m_nozzle_badge = badge;
+    Refresh();
 }
 
 void MaterialItem::disable()
@@ -160,8 +178,32 @@ void MaterialItem::render(wxDC &dc)
         dc.SetFont(::Label::Body_10);
     }
 
-    auto material_txt_size = dc.GetTextExtent(m_material_name);
-    dc.DrawText(m_material_name, wxPoint((MATERIAL_ITEM_SIZE.x - material_txt_size.x) / 2, (FromDIP(28) - material_txt_size.y) / 2));
+    wxString material_txt      = m_material_name;
+    auto     material_txt_size = dc.GetTextExtent(material_txt);
+    int      name_x            = (MATERIAL_ITEM_SIZE.x - material_txt_size.x) / 2;
+    wxSize   badge_ts(0, 0);
+    int      badge_w           = 0;
+    int      badge_h           = 0;
+    if (!m_nozzle_badge.empty()) {
+        // Pill sized to Body_10 text: a fixed 12 DIP circle clips "10" and is shorter than the glyph.
+        dc.SetFont(::Label::Body_10);
+        badge_ts         = dc.GetTextExtent(m_nozzle_badge);
+        const int pad    = FromDIP(2);
+        badge_w          = badge_ts.x + 2 * pad;
+        badge_h          = badge_ts.y + 2 * pad;
+        const int name_x_pad = badge_w + FromDIP(4);
+        const int name_max_w = GetSize().x - name_x_pad - FromDIP(4);
+        dc.SetFont(::Label::Body_13);
+        if (dc.GetTextExtent(material_txt).x > GetSize().x - 10)
+            dc.SetFont(::Label::Body_10);
+        if (dc.GetTextExtent(material_txt).x > name_max_w) {
+            dc.SetFont(::Label::Body_10);
+            material_txt      = wxControl::Ellipsize(material_txt, dc, wxELLIPSIZE_END, name_max_w);
+        }
+        material_txt_size = dc.GetTextExtent(material_txt);
+        name_x = std::max((MATERIAL_ITEM_SIZE.x - material_txt_size.x) / 2, name_x_pad);
+    }
+    dc.DrawText(material_txt, wxPoint(name_x, (FromDIP(28) - material_txt_size.y) / 2));
 
     // mapping num
     dc.SetFont(::Label::Body_10);
@@ -179,6 +221,24 @@ void MaterialItem::render(wxDC &dc)
 
     auto mapping_txt_size = dc.GetTextExtent(mapping_txt);
     dc.DrawText(mapping_txt, wxPoint((MATERIAL_ITEM_SIZE.x - mapping_txt_size.x) / 2, FromDIP(30) + (FromDIP(16) - mapping_txt_size.y) / 2));
+
+    if (!m_nozzle_badge.empty()) {
+        const wxPoint  o(FromDIP(2), FromDIP(2));
+        const wxColour badge_bg = StateColor::darkModeColorFor(wxColour(0x26, 0x2E, 0x30));
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(badge_bg));
+        dc.SetFont(::Label::Body_10);
+        if (badge_w <= 0 || badge_h <= 0) {
+            badge_ts      = dc.GetTextExtent(m_nozzle_badge);
+            const int pad = FromDIP(2);
+            badge_w       = badge_ts.x + 2 * pad;
+            badge_h       = badge_ts.y + 2 * pad;
+        }
+        dc.DrawRoundedRectangle(o.x, o.y, badge_w, badge_h, std::min(badge_w, badge_h) / 2);
+        dc.SetTextForeground(badge_bg.GetLuminance() < 0.6 ? *wxWHITE : wxColour(0x26, 0x2E, 0x30));
+        dc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
+        dc.DrawText(m_nozzle_badge, o.x + (badge_w - badge_ts.x) / 2, o.y + (badge_h - badge_ts.y) / 2);
+    }
 }
 
 void MaterialItem::doRender(wxDC &dc) 
@@ -273,12 +333,14 @@ void MaterialItem::doRender(wxDC &dc)
     }
 #endif
     //arrow
-    if ( (acolor.Red() > 160 && acolor.Green() > 160 && acolor.Blue() > 160) &&
-        (acolor.Red() < 180 && acolor.Green() < 180 && acolor.Blue() < 180)) {
-        dc.DrawBitmap(m_arraw_bitmap_white.bmp(), size.x - m_arraw_bitmap_white.GetBmpSize().x - FromDIP(7), size.y - m_arraw_bitmap_white.GetBmpSize().y);
-    }
-    else {
-        dc.DrawBitmap(m_arraw_bitmap_gray.bmp(), size.x - m_arraw_bitmap_gray.GetBmpSize().x - FromDIP(7), size.y - m_arraw_bitmap_gray.GetBmpSize().y);
+    if (m_dropdown_visible) {
+        if ( (acolor.Red() > 160 && acolor.Green() > 160 && acolor.Blue() > 160) &&
+            (acolor.Red() < 180 && acolor.Green() < 180 && acolor.Blue() < 180)) {
+            dc.DrawBitmap(m_arraw_bitmap_white.bmp(), size.x - m_arraw_bitmap_white.GetBmpSize().x - FromDIP(7), size.y - m_arraw_bitmap_white.GetBmpSize().y);
+        }
+        else {
+            dc.DrawBitmap(m_arraw_bitmap_gray.bmp(), size.x - m_arraw_bitmap_gray.GetBmpSize().x - FromDIP(7), size.y - m_arraw_bitmap_gray.GetBmpSize().y);
+        }
     }
 
     

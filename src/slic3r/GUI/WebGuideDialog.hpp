@@ -114,6 +114,11 @@ private:
     bool bFirstComplete{false};
     std::atomic<bool> m_destroy{false};
     boost::thread* m_load_task{ nullptr };
+    // The loading page gets userguide_profile_load_finish once both are true;
+    // every instance of it reports in, so the flag is never reset.
+    bool m_profile_ready{false};
+    bool m_page_ready{false};
+    void notify_profile_loaded();
 
     // User Config
     bool PrivacyUse;
