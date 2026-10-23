@@ -130,6 +130,8 @@ TEST_CASE("The wipe tower's flow tags keep a decimal point in a comma-decimal lo
         return;
     }
     const std::string gcode = slice_with_prime_tower(wipe_tower_prime_config());
+    // Type1 (WipeTower, not WipeTower2) is the only writer that uses to_string-style tags.
+    REQUIRE(gcode.find("CP TOOLCHANGE") != std::string::npos);
     // WipeTowerWriter forces the BBL flag, so the tower writes these spellings on every printer.
     // By the time the test asks, export has reset the flag for this Klipper config and
     // reserved_tag() would hand back the main G-code's ";HEIGHT:" / ";WIDTH:" instead.
@@ -155,4 +157,8 @@ TEST_CASE("The wipe tower's flow tags keep a decimal point in a comma-decimal lo
     }
     CHECK(heights > 0);
     CHECK(widths > 0);
+    // Six decimals match std::to_string / "%.6f". A later switch to default
+    // float_to_string_decimal_point (six significant digits) would still pass
+    // the comma scan on "0.3" and break C-locale G-code identity.
+    CHECK(gcode.find("; LAYER_HEIGHT: 0.300000") != std::string::npos);
 }
