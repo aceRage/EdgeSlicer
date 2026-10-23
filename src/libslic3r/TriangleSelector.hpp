@@ -5,6 +5,8 @@
 
 
 #include <cfloat>
+#include <cstdint>
+#include <functional>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
 
@@ -322,6 +324,24 @@ public:
     [[nodiscard]] int select_unsplit_triangle(const Vec3f &hit, int facet_idx) const;
     [[nodiscard]] int select_unsplit_triangle(const Vec3f &hit, int facet_idx, const Vec3i32 &neighbors) const;
 
+    // Carry painting to another mesh (booleans, split). Additive: does not change select_patch or paint-depth.
+    // State of the leaf under `pt` (mesh coords, on or very near original facet `facet_idx`).
+    // Walks the split tree to the child that best contains the point. `leaf_area` is that leaf's
+    // area in mesh coords when the facet is split by a stroke (0 otherwise).
+    [[nodiscard]] EnforcerBlockerType leaf_state_at(int facet_idx, const Vec3f &pt, float *leaf_area = nullptr) const;
+
+    struct SampledState {
+        EnforcerBlockerType state     = EnforcerBlockerType::NONE;
+        // Area of the painted piece the sample fell in (this selector's mesh coords); 0 = no limit.
+        // A triangle bigger than that could hide a stroke between its samples, so it is split.
+        float               leaf_area = 0.f;
+    };
+    // Repaint the whole mesh from a function that gives the state at any point (mesh coords).
+    // Each triangle is sampled at its corners, edge midpoints and centre; where the samples
+    // disagree, or the triangle is bigger than the painting it sits on, it is split (down to
+    // `edge_limit`) and sampled again.
+    void resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit);
+
     // Select all triangles fully inside the circle, subdivide where needed.
     void select_patch(int                       facet_start,                   // facet of the original mesh (unsplit) that the hit point belongs to
                       std::unique_ptr<Cursor> &&cursor,                        // Cursor containing information about the point where to start, camera position (mesh coords), matrix to get from mesh to world, and its shape and type.
@@ -541,6 +561,7 @@ private:
     bool is_facet_clipped(int facet_idx, const ClippingPlane &clp) const;
     int  push_triangle(int a, int b, int c, int source_triangle, EnforcerBlockerType state = EnforcerBlockerType{0});
     void perform_split(int facet_idx, const Vec3i32 &neighbors, EnforcerBlockerType old_state);
+    void apply_resample_plan(int facet_idx, const Vec3i32 &neighbors, const std::vector<int16_t> &plan, size_t &pos);
     Vec3i32 child_neighbors(const Triangle &tr, const Vec3i32 &neighbors, int child_idx) const;
     Vec3i32 child_neighbors_propagated(const Triangle &tr, const Vec3i32 &neighbors_propagated, int child_idx, const Vec3i32 &child_neighbors) const;
     // Return child of itriangle at a CCW oriented side (vertexi, vertexj), either first or 2nd part.
