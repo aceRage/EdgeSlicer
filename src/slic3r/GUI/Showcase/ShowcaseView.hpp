@@ -211,6 +211,15 @@ private:
 
     // --- S4: the videographer (ShowcaseViewVideo.cpp) -----------------------------------------------
     void                     build_video_section(wxBoxSizer *root);
+    // S5c: the camera of a video at t: the path, a static zoom-out framed on the build-up.
+    Showcase::CameraPose     video_pose(const Showcase::VideoSettings &v, const Showcase::CameraView &base, double t,
+                                        const std::vector<Showcase::PathEvent> &events);
+    // S5c: before a preview or an export: the callouts' first heights and, for static callouts, the
+    // anchors of the frame they keep.
+    void                     video_prepare_callouts(const Showcase::VideoSettings &v, const Showcase::CameraView &base,
+                                                    const std::vector<Showcase::PathEvent> &events);
+    void                     video_set_callout_pass(const Showcase::VideoSettings &v, double build, Showcase::BuildSource source);
+    void                     apply_section_header_colours();
     // S5b: the side panel's collapsible sections. Adds a section's clickable header to `root` and
     // returns the sizer its rows go in; whether it is folded is kept in the app config.
     wxBoxSizer              *add_panel_section(wxBoxSizer *root, const wxString &title, const std::string &key);
@@ -294,7 +303,26 @@ private:
         std::vector<Showcase::PathEvent> events_cache;
         bool                     pose_timeline = false;
         std::map<std::string, Showcase::CalloutVisual> pose_visuals;
+
+        // S5c: the callouts of a clip. Static ones keep the anchors of one frame (0..1 of the frame,
+        // per callout key and anchor; NaN = not in view there), "as used" ones need each callout's
+        // first print height.
+        bool                     static_valid = false;
+        std::map<std::string, std::vector<Showcase::PointD>> static_anchors;
+        double                   static_center_x = -1.;
+        Showcase::RectD          static_box;
+        std::map<std::string, double> first_z;
     };
+    // S5c: what the callouts of the video frame being drawn follow (the defaults: a still or the live view).
+    struct CalloutVideoPass
+    {
+        double built_z = 1e30;   // the build-up's height; anchors above it are not built yet
+        bool   as_used = false;  // a callout waits for its filament's first height
+        bool   fixed   = false;  // static callouts: VideoUi::static_anchors
+        double fade_mm = 1.;     // as used: the height a callout fades in over
+    };
+    CalloutVideoPass         m_co_video;
+    uint64_t                 m_co_video_rev = 0;   // bumped when m_co_video changes
     VideoUi                  m_video;
     wxTimer                  m_video_timer;
 
@@ -403,9 +431,12 @@ private:
     {
         std::string   key;
         wxBoxSizer   *body      = nullptr;
+        wxPanel      *head      = nullptr;   // S5c: the header row, on the theme's button colour
         wxStaticText *arrow     = nullptr;
+        wxStaticText *title     = nullptr;
         bool          collapsed = false;
     };
+    int                      m_side_content_w = 0;      // S5c: the widest the panel's rows have been (px)
     std::vector<PanelSection> m_sections;               // S5b
     wxBoxSizer              *m_side_root = nullptr;     // S5b: the panel's sizer
     wxChoice                *m_co_list = nullptr;
@@ -450,6 +481,8 @@ private:
     std::vector<wxWindow *>  m_vid_key_rows;       // shown for keyframes
     // S5
     wxCheckBox              *m_vid_build = nullptr;
+    wxChoice                *m_vid_co_motion = nullptr;   // S5c
+    wxChoice                *m_vid_co_appear = nullptr;   // S5c
     wxCheckBox              *m_vid_build_infill = nullptr;     // S5b
     wxCheckBox              *m_vid_build_supports = nullptr;   // S5b
     wxButton                *m_vid_path_import = nullptr;

@@ -151,6 +151,11 @@ public:
     // by a plane (the clip fallback).
     // S5b: `infill` / `supports`: whether a toolpath build-up lays them.
     void set_build(double fraction, Showcase::BuildSource source, bool infill = true, bool supports = true);
+    // S5c: the height (world, mm) a build-up at `fraction` has reached: the slice's layers or the clip's
+    // plane. 1e30 when nothing is building (fraction < 0) or it is finished.
+    double build_height_at(double fraction, Showcase::BuildSource source);
+    // Only the current plate's objects (and its prime tower unless hidden) are active.
+    void   update_visibility();
     // What the last frame used for the build-up: "" none, "toolpaths" or "clip".
     std::string build_used() const { return m_build_used; }
     // S5: the plate's slice can be drawn (Preview has its toolpaths loaded).
@@ -186,7 +191,6 @@ private:
         float    frame[4] = { 0.f, 0.f, 1.f, 1.f };
     };
 
-    void            update_visibility();
     bool            floor_drawn() const;
     void            floor_disc(Vec3d &center, double &radius) const;
     BoundingBoxf3   scene_box() const;

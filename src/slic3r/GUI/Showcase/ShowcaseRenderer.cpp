@@ -1758,6 +1758,24 @@ void ShowcaseRenderer::set_build(double fraction, Showcase::BuildSource source, 
     m_build_supports = supports;
 }
 
+double ShowcaseRenderer::build_height_at(double fraction, Showcase::BuildSource source)
+{
+    if (!std::isfinite(fraction) || fraction < 0. || fraction >= 1.)
+        return 1e30;
+    if (source != Showcase::BuildSource::Clip && toolpaths_available()) {
+        const GCodeViewer        &gv = wxGetApp().plater()->get_preview_canvas3D()->get_gcode_viewer();
+        const std::vector<double> zs = gv.get_layers_zs();
+        return Showcase::BuildSchedule(zs, zs.empty() ? 0. : zs.back()).at(fraction).z;
+    }
+    if (!m_model_tops_valid) {
+        m_model_tops       = model_layer_tops();
+        m_model_tops_valid = true;
+    }
+    update_visibility();
+    const BoundingBoxf3 box = objects_box();
+    return Showcase::BuildSchedule(m_model_tops, box.defined ? box.max.z() : 0.).at(fraction).z;
+}
+
 bool ShowcaseRenderer::toolpaths_available()
 {
     Plater *plater = wxGetApp().plater();

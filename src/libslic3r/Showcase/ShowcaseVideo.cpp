@@ -15,7 +15,9 @@ namespace {
 
 constexpr double PI = 3.14159265358979323846;
 
-const char *const PATH_NAMES[]   = { "orbit", "turntable", "orbit_bob", "keyframes" };
+const char *const PATH_NAMES[]   = { "orbit", "turntable", "orbit_bob", "keyframes", "static", "static_zoom_out" };
+const char *const CALLOUT_MOTION_NAMES[]     = { "animated", "static" };
+const char *const CALLOUT_APPEARANCE_NAMES[] = { "always", "as_used" };
 const char *const EASING_NAMES[] = { "linear", "ease_in_out", "ease_in", "ease_out" };
 const char *const FORMAT_NAMES[] = { "mp4", "webm", "webm_alpha", "gif", "webp", "png_sequence" };
 const char *const BUILD_SOURCE_NAMES[] = { "auto", "toolpaths", "clip" };
@@ -68,6 +70,10 @@ double clamp_finite(double v, double lo, double hi, double def) { return std::is
 } // namespace
 
 const char *to_string(VideoPath v) { return video_enum_name(v, PATH_NAMES); }
+const char *to_string(CalloutMotion v) { return video_enum_name(v, CALLOUT_MOTION_NAMES); }
+const char *to_string(CalloutAppearance v) { return video_enum_name(v, CALLOUT_APPEARANCE_NAMES); }
+bool from_string(const std::string &s, CalloutMotion &v) { return video_enum_parse(s, v, CALLOUT_MOTION_NAMES); }
+bool from_string(const std::string &s, CalloutAppearance &v) { return video_enum_parse(s, v, CALLOUT_APPEARANCE_NAMES); }
 const char *to_string(Easing v) { return video_enum_name(v, EASING_NAMES); }
 const char *to_string(VideoFormat v) { return video_enum_name(v, FORMAT_NAMES); }
 bool from_string(const std::string &s, VideoPath &v) { return video_enum_parse(s, v, PATH_NAMES); }
@@ -99,7 +105,8 @@ bool VideoSettings::operator==(const VideoSettings &o) const
     return path == o.path && duration == o.duration && fps == o.fps && resolution == o.resolution && quality == o.quality &&
            bitrate == o.bitrate && format == o.format && easing == o.easing && sweep_deg == o.sweep_deg && clockwise == o.clockwise &&
            bob_deg == o.bob_deg && bob_cycles == o.bob_cycles && hold_start == o.hold_start && hold_end == o.hold_end && loop == o.loop &&
-           callouts == o.callouts && keyframes == o.keyframes && build == o.build && events == o.events && path_name == o.path_name;
+           callouts == o.callouts && callout_motion == o.callout_motion && callout_appearance == o.callout_appearance &&
+           keyframes == o.keyframes && build == o.build && events == o.events && path_name == o.path_name;
 }
 
 void sanitize(VideoSettings &v)
@@ -151,9 +158,11 @@ double ease(Easing e, double u)
     }
 }
 
+bool is_static_path(VideoPath p) { return p == VideoPath::Static || p == VideoPath::StaticZoomOut; }
+
 bool seamless_loop(const VideoSettings &v)
 {
-    if (!v.loop || v.path == VideoPath::Keyframes || v.hold_start > 0. || v.hold_end > 0. || v.build.enabled)
+    if (!v.loop || v.path == VideoPath::Keyframes || is_static_path(v.path) || v.hold_start > 0. || v.hold_end > 0. || v.build.enabled)
         return false;
     // A whole number of turns comes back where it started.
     const double turns = v.sweep_deg / 360.;
@@ -415,11 +424,35 @@ double keyframe_run_time(const std::vector<Keyframe> &keys, size_t index)
     return t0 + (t1 - t0) * 0.5 * (lo + hi);
 }
 
+CameraPose frame_built_part(const CameraPose &base, const std::array<double, 3> &box_min, const std::array<double, 3> &box_max,
+                            double built_z, double max_zoom)
+{
+    CameraPose out = base;
+    const double height = box_max[2] - box_min[2];
+    if (!std::isfinite(built_z) || !(height > 1e-9) || built_z >= box_max[2])
+        return out;
+    // Never less than a twentieth of the model: the first layers would need an endless zoom.
+    const double top = std::clamp(built_z, box_min[2] + 0.05 * height, box_max[2]);
+    const V3     full_c{ 0.5 * (box_min[0] + box_max[0]), 0.5 * (box_min[1] + box_max[1]), 0.5 * (box_min[2] + box_max[2]) };
+    const V3     part_c{ full_c[0], full_c[1], 0.5 * (box_min[2] + top) };
+    const double full_r = 0.5 * v_len(v_sub(box_max, box_min));
+    const double part_r = 0.5 * v_len(V3{ box_max[0] - box_min[0], box_max[1] - box_min[1], top - box_min[2] });
+    const V3     shift  = v_sub(part_c, full_c);
+    out.eye    = v_add(base.eye, shift);
+    out.target = v_add(base.target, shift);
+    out.zoom   = base.zoom * std::clamp(part_r > 1e-9 ? full_r / part_r : 1., 1., std::max(1., max_zoom));
+    return out;
+}
+
 CameraPose evaluate_path(const VideoSettings &v, const CameraView &base, double t)
 {
     const double u = motion_fraction(v, t);
     if (v.path == VideoPath::Keyframes)
         return evaluate_keyframes(v.keyframes, u * v.duration, base);
+    if (is_static_path(v.path))
+        // S5c: the scene's camera throughout (StaticZoomOut is framed on the build-up by the caller,
+        // frame_built_part()).
+        return pose_of(base.eye, base.target, base.up, base.zoom);
 
     // Orbit, turntable and bob: round the base camera's target, at its distance and height.
     V3     target = base.target;
@@ -662,6 +695,11 @@ std::string video_to_json(const VideoSettings &v)
     j["hold_end"]   = v.hold_end;
     j["loop"]       = v.loop;
     j["callouts"]   = v.callouts;
+    // S5c keys only where used.
+    if (v.callout_motion != CalloutMotion::Animated)
+        j["callout_motion"] = to_string(v.callout_motion);
+    if (v.callout_appearance != CalloutAppearance::Always)
+        j["callout_appearance"] = to_string(v.callout_appearance);
     json keys       = json::array();
     for (const Keyframe &k : v.keyframes) {
         json kj = { { "time", k.time }, { "eye", k.eye }, { "target", k.target }, { "up", k.up }, { "zoom", k.zoom }, { "ease", to_string(k.ease) } };
@@ -714,6 +752,8 @@ bool video_from_json(const std::string &text, VideoSettings &out)
     v.hold_end   = vget<double>(j, "hold_end", v.hold_end);
     v.loop       = vget<bool>(j, "loop", v.loop);
     v.callouts   = vget<bool>(j, "callouts", v.callouts);
+    v.callout_motion     = venum(j, "callout_motion", v.callout_motion);
+    v.callout_appearance = venum(j, "callout_appearance", v.callout_appearance);
     if (j.contains("keyframes") && j["keyframes"].is_array())
         for (const json &kj : j["keyframes"]) {
             if (!kj.is_object() || !kj.contains("eye") || !kj.contains("target"))

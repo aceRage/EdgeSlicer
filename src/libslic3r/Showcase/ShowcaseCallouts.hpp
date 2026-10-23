@@ -8,7 +8,7 @@
 //     from object, part, painted, height-range and layer-change filament assignments (plan_callout_targets),
 //     and which of them a visible point belongs to (CalloutRegions::classify, used on the ID pass),
 //   - where an anchor goes in a region seen on screen (find_anchor_pixels: the pixel deepest inside),
-//   - colour names (D8: the Snapmaker colour library, then the user's text, then "≈ nearest name"),
+//   - colour names (D8: the Snapmaker colour library, then the user's text, then the nearest name),
 //   - the label text (build_callout_label),
 //   - the layout: left and right columns (S4: or bands above and below a wide, flat model) whose
 //     leaders never cross - S4 extends that to pinned labels and every leg of a multileader - and a
@@ -98,18 +98,18 @@ struct CalloutFields
 {
     bool brand      = true;
     bool product    = true;
-    // S5b: the material family (filament_type: PLA, PETG, ABS...) in the first line instead of the
-    // product. The product wins when both are on (it names the family too, "PLA Basic"); the family
-    // then leaves the details line, which would only repeat it.
-    bool family     = false;
+    // S5b/S5c: the material family (filament_type: PLA, PETG, ABS...) in the first line. The title is
+    // brand, then the product with or without its family: Product and Family on "PLA Basic", Product
+    // only "Basic", Family only "PLA" (the details line then leaves the type out, which would repeat
+    // it). On by default, so the default title is S3's.
+    bool family     = true;
     bool color_name = true;
     bool hex        = true;   // the hex code (S5b: the swatch is its own field; old scenes: both follow "hex")
     bool swatch     = true;   // S5b: the colour swatch
     bool type       = true;   // the filament type and the finish
     bool weight     = false;
     bool price      = false;
-    // S5b: between the first line's title and the colour name. The "≈" of an approximate colour
-    // name belongs to the name, not to this.
+    // S5b: between the first line's title and the colour name; only drawn when both are there.
     std::string separator = DEFAULT_CALLOUT_SEPARATOR;
 
     bool operator==(const CalloutFields &o) const;
@@ -201,6 +201,9 @@ struct CalloutTarget
     double           z_from   = -1.;
     std::string      color;
     std::vector<int> objects;   // the plate's objects showing it, in model order
+    // S5c: the lowest print height (world, mm) where it shows, for "as used" callouts in a build-up.
+    // Not compared: it says when, not what.
+    double           first_z = 0.;
 
     bool operator==(const CalloutTarget &o) const
     {
@@ -214,6 +217,7 @@ struct BaseRegion
     int           filament = 1;
     bool          object_default = true;   // the object's own filament (a height range may replace it)
     CalloutSource source = CalloutSource::Object;
+    double        z_min  = 0.;   // S5c: the lowest print height where it shows (world, mm)
 };
 
 // The filament assignments of a plate's objects, and the layer changes of the plate.
@@ -266,7 +270,7 @@ struct NamedColor
     const char *name;   // English, marked for translation
     const char *hex;
 };
-// The built-in list of about 150 names the "≈ nearest" fallback picks from.
+// The built-in list of about 150 names the "nearest" fallback picks from.
 const std::vector<NamedColor> &named_colors();
 
 // CIEDE2000 colour difference of two sRGB colours (0..255 per channel).
@@ -286,8 +290,9 @@ ColorNameMatch nearest_color_name(const std::string &hex);
 std::string library_color_name(const FilamentColorInfo *family, const std::vector<FilamentColorInfo> &library,
                                const std::vector<std::string> &colors, const std::string &lang);
 
-// D8: the library's name, else the user's, else "≈ " + the nearest built-in name (`translate`
-// turns that English name into the UI language; null = keep English). Empty for an invalid hex.
+// D8: the library's name, else the user's, else the nearest built-in name (`translate` turns that
+// English name into the UI language; null = keep English). S5c: no "≈" in front of a guess any
+// more. Empty for an invalid hex.
 std::string resolve_color_name(const std::string &library_name, const std::string &user_name, const std::string &hex,
                                const std::function<std::string(const char *)> &translate = nullptr);
 
@@ -337,7 +342,7 @@ std::string format_weight(double grams, const std::string &unit = "g");
 std::string format_price(double amount, const std::string &currency);
 CalloutLabel build_callout_label(const Callout &callout, const LabelFilament &filament, const CalloutFields &fields, const LabelWords &words);
 // The first line as drawn: title, then the label's separator (" – " unless the user set another)
-// and the colour name.
+// and the colour name. Either alone stands without the separator.
 std::string callout_first_line(const CalloutLabel &label);
 
 // S5b, "each colour once": which callouts stay. `colors` is each callout's colour (callouts with an

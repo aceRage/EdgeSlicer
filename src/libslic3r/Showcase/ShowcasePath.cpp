@@ -695,7 +695,7 @@ void read_event(const json &ej, const std::string &where, PathEvent &e, PathIssu
             e.enabled = true;   // a range shows the mark within it
         break;
     case PathEventType::Build:
-        r.allow({ "start", "end", "ease", "source", "infill", "supports" });
+        r.allow({ "start", "end", "ease", "source", "infill", "supports", "follow" });
         if (!e.range)
             r.error("at", "a build-up needs \"from\" and \"to\"");
         r.number("start", e.build_start, false, 0., 1.);
@@ -708,6 +708,7 @@ void read_event(const json &ej, const std::string &where, PathEvent &e, PathIssu
         }
         r.boolean("infill", e.build_infill);
         r.boolean("supports", e.build_supports);
+        r.boolean("follow", e.build_follow);
         break;
     }
     r.check_unknown();
@@ -925,6 +926,8 @@ json event_json(const PathEvent &e)
             j["source"] = to_string(e.build_source);
         opt("infill", e.build_infill);
         opt("supports", e.build_supports);
+        if (e.build_follow)
+            j["follow"] = true;
         break;
     }
     return j;
@@ -1557,7 +1560,13 @@ PathDocument export_path(const VideoSettings &v_in, const PathContext &ctx, cons
             w.duration = v.hold_start;
             doc.moves.push_back(w);
         }
-        if (v.path == VideoPath::OrbitBob) {
+        if (is_static_path(v.path)) {
+            // S5c: the camera holds; "static with zoom out" is its build event's "follow".
+            PathMove w;
+            w.op       = PathMoveOp::Wait;
+            w.duration = v.duration + v.hold_end;
+            doc.moves.push_back(w);
+        } else if (v.path == VideoPath::OrbitBob) {
             // No move for a bob: its keys, a glide run eased as the orbit was.
             const int n = std::max(8 * v.bob_cycles, int(std::ceil(v.sweep_deg / PATH_ORBIT_STEP_DEG)));
             for (int i = 0; i <= n; ++i) {
@@ -1607,6 +1616,7 @@ PathDocument export_path(const VideoSettings &v_in, const PathContext &ctx, cons
             b.build_infill = false;
         if (!v.build.supports)
             b.build_supports = false;
+        b.build_follow = v.path == VideoPath::StaticZoomOut;
         doc.events.push_back(b);
     }
     return doc;
@@ -1926,6 +1936,7 @@ TimelineState evaluate_timeline(const std::vector<PathEvent> &events, const Scen
             st.build_infill = *e.build_infill;
         if (e.build_supports)
             st.build_supports = *e.build_supports;
+        st.build_follow = e.build_follow;
     }
 
     bool any = false;

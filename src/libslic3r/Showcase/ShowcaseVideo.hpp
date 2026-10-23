@@ -26,12 +26,25 @@ struct CameraView;
 
 // New values go at the end: the JSON names and the panel's choices follow this order.
 // The layer build-up (S5) goes with any of them: VideoSettings::build.
-enum class VideoPath   : int { Orbit = 0, Turntable, OrbitBob, Keyframes };
+// S5c: Static holds the scene's camera; StaticZoomOut holds its angle and zooms out as the layer
+// build-up grows, keeping what is built so far framed and ending on the scene's own framing.
+enum class VideoPath   : int { Orbit = 0, Turntable, OrbitBob, Keyframes, Static, StaticZoomOut };
 enum class Easing      : int { Linear = 0, EaseInOut, EaseIn, EaseOut };
 // MP4 is H.264. WebMAlpha is VP9 with a transparent background. PNGSequence is always available.
 enum class VideoFormat : int { MP4 = 0, WebM, WebMAlpha, GIF, WebP, PNGSequence };
 
+// S5c: where the callouts of a video sit. Animated: they follow their spots on the model every
+// frame. Static: labels and leaders stay where the clip's first frame puts them.
+enum class CalloutMotion : int { Animated = 0, Static };
+// S5c: when they show. Always, or AsUsed: a filament's callout fades in once the layer build-up has
+// printed that filament (the prime tower does not count).
+enum class CalloutAppearance : int { Always = 0, AsUsed };
+
 const char *to_string(VideoPath v);
+const char *to_string(CalloutMotion v);
+const char *to_string(CalloutAppearance v);
+bool from_string(const std::string &s, CalloutMotion &v);
+bool from_string(const std::string &s, CalloutAppearance &v);
 const char *to_string(Easing v);
 const char *to_string(VideoFormat v);
 bool from_string(const std::string &s, VideoPath &v);
@@ -116,6 +129,8 @@ struct VideoSettings
     double      hold_end   = 0.;      // ... and after it
     bool        loop       = true;    // a full turn: the last frame leads into the first
     bool        callouts   = true;    // draw the scene's callouts (when they are on) in the video
+    CalloutMotion     callout_motion     = CalloutMotion::Animated;      // S5c
+    CalloutAppearance callout_appearance = CalloutAppearance::Always;    // S5c
     std::vector<Keyframe> keyframes;  // sorted by time
     // S5: the layer build-up over the motion (the timeline's "build" events override it).
     BuildUp     build;
@@ -130,6 +145,9 @@ struct VideoSettings
 
 // Clamps every field into its range and sorts the keyframes (a loaded file may say anything).
 void sanitize(VideoSettings &v);
+
+// S5c: the camera paths that do not move the camera (Static, StaticZoomOut).
+bool is_static_path(VideoPath p);
 
 // --- easing --------------------------------------------------------------------------------------
 
@@ -169,6 +187,13 @@ struct CameraPose
 // The pose at `t` seconds from the start of the video. `base` is the scene's camera: where an orbit
 // starts and what it circles, and the pose of a keyframe path without keys.
 CameraPose evaluate_path(const VideoSettings &v, const CameraView &base, double t);
+
+// S5c, "static with zoom out": `base` (the pose that frames the whole model, whose box is
+// `box_min`..`box_max`) moved and zoomed so the model up to the height `built_z` stays framed the same
+// way: the same angle, the target on what is built, the zoom up to `max_zoom` times. At the model's
+// top it is `base` itself.
+CameraPose frame_built_part(const CameraPose &base, const std::array<double, 3> &box_min, const std::array<double, 3> &box_max,
+                            double built_z, double max_zoom = 4.);
 inline CameraPose pose_at_frame(const VideoSettings &v, const CameraView &base, int frame)
 {
     return evaluate_path(v, base, frame_time(v, frame));

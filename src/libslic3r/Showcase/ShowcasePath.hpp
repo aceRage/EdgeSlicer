@@ -175,6 +175,8 @@ struct PathEvent
     BuildSource                   build_source = BuildSource::Auto;
     // S5b: lay the infill / the supports (toolpaths only); unset = the scene's choice.
     std::optional<bool>           build_infill, build_supports;
+    // S5c: the camera zooms so what is built so far stays framed ("static with zoom out").
+    bool                          build_follow = false;
 };
 
 enum class PathStart : int { Scene = 0, Default, View, Pose };
@@ -302,6 +304,8 @@ struct TimelineState
     // S5b: what of the slice the build-up lays.
     bool                                 build_infill   = true;
     bool                                 build_supports = true;
+    // S5c: frame the camera on what is built (a build event's "follow").
+    bool                                 build_follow   = false;
 };
 
 // The scene at `t` seconds: the base scene with every event up to then applied in order (sorted by

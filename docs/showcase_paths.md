@@ -131,7 +131,7 @@ short way round, and other values switch half way.
 | `look` | `preset`: a whole built-in look (`studio_white`, `dark_gradient`, `build_plate`, `desk_wood`, `outdoor`) for the backdrop, floor and lights |
 | `callouts` | `action` (`show`, `hide`, `highlight`), and which callouts: `filaments` (slots) and/or `labels` (callout keys such as `"f2"` or `"f2@12.40"`, or a callout's title). Naming neither means all of them. A highlight draws an accent ring round the label and its dots, and dims the others. |
 | `watermark` | `enabled`, `text`, `anchor` (`top_left` ... `bottom_right`), `opacity` (0-1), `size` (% of the height). A range shows the mark inside it. |
-| `build` | Needs `from` and `to`. `start` and `end` give how much of the print is shown, 0 to 1 (default 0 to 1). Also `ease`, `source`: `auto`, `toolpaths` or `clip`, and `infill` and `supports` (`true` or `false`; unset = the scene's choice, which is both on). Before the range the print shows `start`; after it, `end`. |
+| `build` | Needs `from` and `to`. `start` and `end` give how much of the print is shown, 0 to 1 (default 0 to 1). Also `ease`, `source`: `auto`, `toolpaths` or `clip`, and `infill` and `supports` (`true` or `false`; unset = the scene's choice, which is both on). `"follow": true` frames the camera on what is built so far (the Showcase tab's "Static with zoom out": the same angle, zoomed in on the first layers, ending on the path's own framing). Before the range the print shows `start`; after it, `end`. |
 
 **The layer build-up.**
 
@@ -144,6 +144,12 @@ short way round, and other values switch half way.
   leaves out sparse and internal solid infill and internal bridges; `"supports": false` leaves out
   supports, their interfaces and transitions. The clip of an unsliced model has neither. With
   `--showcase-render`, add `--slice` so a project without a slice gets toolpaths.
+- **Not drawn.** The machine's own extrusions (the start G-code's purge line, prime blobs) are left
+  out of every toolpath view in Showcase.
+- **Callouts in a build-up.** A callout's spot that is not built yet gets no leader; the label shows
+  without one until it is. With "As used" (a scene setting) a callout appears only once its filament
+  has been printed. A dashed leader with a hollow dot (stills and the live view) means the spot is
+  behind the model from that view; a video fades such a leader instead.
 
 ## `--showcase-render`
 
@@ -158,7 +164,9 @@ EdgeSlicer --showcase-render <project.3mf> --out <file> [--path <path.json>] [--
   tab. With `--path`, the path replaces the camera path and timeline. The scene's look (lights,
   backdrop, floor, materials, callouts, watermark) is the project's. That includes the callouts'
   fields (material family, hex code and swatch apart), their separator, "each colour once" and the
-  leader style, which the Showcase tab sets.
+  leader style, and the video's callout position (animated or static) and appearance (always or as
+  used), which the Showcase tab sets. The scene's camera path may also be `static` or
+  `static_zoom_out`; an exported path writes those as a `wait` move (and a following `build`).
 - **Format.**
   - From `--format`, else from the `--out` extension (`.mp4`, `.webm`, `.gif`, `.webp`).
   - `--format png`, or an `--out` without an extension, gives a folder of numbered PNG frames.

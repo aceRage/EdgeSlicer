@@ -1923,8 +1923,12 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
         m_viewer.set_view_type(libvgcode::EViewType::ColorPrint);
         for (size_t i = 0; i < libvgcode::OPTION_TYPES_COUNT; ++i)
             showcase_set_option(m_viewer, libvgcode::EOptionType(i), false);
-        for (size_t i = 0; i < size_t(libvgcode::EGCodeExtrusionRole::COUNT); ++i)
-            showcase_set_role(m_viewer, libvgcode::EGCodeExtrusionRole(i), true);
+        // S5c: not the machine's own extrusions (the start G-code's purge line, prime blobs: role Custom).
+        // Off the model, on a hidden plate they floated in the air.
+        for (size_t i = 0; i < size_t(libvgcode::EGCodeExtrusionRole::COUNT); ++i) {
+            const libvgcode::EGCodeExtrusionRole role = libvgcode::EGCodeExtrusionRole(i);
+            showcase_set_role(m_viewer, role, role != libvgcode::EGCodeExtrusionRole::Custom && role != libvgcode::EGCodeExtrusionRole::None);
+        }
         if (m_viewer.is_top_layer_only_view_range())
             m_viewer.toggle_top_layer_only_view_range();
         m_viewer.set_dim_previous_layers(false);

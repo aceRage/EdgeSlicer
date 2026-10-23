@@ -18,6 +18,7 @@
 #include "../OpenGLManager.hpp"
 #include "../PartPlate.hpp"
 #include "../Plater.hpp"
+#include "../Widgets/StateColor.hpp"
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
@@ -42,6 +43,8 @@
 #include <wx/textctrl.h>
 #include <wx/textdlg.h>
 #include <wx/utils.h>
+
+#include <limits>
 
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
@@ -147,7 +150,7 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
     });
     // S3: the filament callouts over the live view, their GL work and their mouse handling.
     m_renderer->set_callout_provider([this](int w, int h, ShowcaseImage &image) { return callouts_rasterize(w, h, image); },
-                                     [this]() { return m_callouts.version; });
+                                     [this]() { return m_callouts.version * 1000003ull + m_co_video_rev; });
     m_renderer->set_before_frame([this]() { callouts_before_frame(); });
     m_renderer->set_mouse_handler([this](wxMouseEvent &evt) {
         // S4: a video being written owns the view; a preview or a peek ends at the first click or wheel.
@@ -510,6 +513,7 @@ void ShowcaseView::on_change_color_mode(bool is_dark)
     if (m_canvas != nullptr)
         m_canvas->on_change_color_mode(is_dark);
     wxGetApp().UpdateDarkUIWin(this);
+    apply_section_header_colours();
     Refresh();
     if (m_sash != nullptr)
         m_sash->Refresh();
@@ -995,6 +999,8 @@ void ShowcaseView::build_panel()
     }
 
     m_side->SetSizer(root);
+    // S5c: the panel's width is that of its widest row, folded or not, so it never jumps.
+    m_side_content_w = root->CalcMin().x;
     apply_panel_sections();
     m_side->FitInside();
 
@@ -1609,7 +1615,9 @@ void ShowcaseView::fit_side_width()
     // Measured, not assumed: labels and controls come out wider in macOS's system font, and in longer
     // languages, than an em count tuned on Windows allows for. The vertical scroll bar takes its
     // share too where it is not an overlay.
-    const int content = m_side->GetSizer()->CalcMin().x + wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, m_side);
+    // S5c: never narrower than the widest the rows have been, so folding a section keeps the width.
+    m_side_content_w  = std::max(m_side_content_w, m_side->GetSizer()->CalcMin().x);
+    const int content = m_side_content_w + wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, m_side);
     int       width   = std::max({ 32 * em, content, m_side_width });
     // Leave the canvas some room; in a window too narrow for both the panel scrolls sideways.
     if (const int client = GetClientSize().x; client > 0)
@@ -1637,34 +1645,61 @@ wxBoxSizer *ShowcaseView::add_panel_section(wxBoxSizer *root, const wxString &ti
 {
     const int    em = wxGetApp().em_unit();
     PanelSection sec;
-    sec.key       = key;
-    sec.collapsed = wxGetApp().app_config->get("showcase_collapsed_" + key) == "1";
-    auto *head    = new wxBoxSizer(wxHORIZONTAL);
-    sec.arrow     = new wxStaticText(m_side, wxID_ANY, panel_section_arrow(sec.collapsed));
+    sec.key = key;
+    // S5c: folded until the user opens a section (then remembered either way).
+    sec.collapsed = wxGetApp().app_config->get("showcase_collapsed_" + key) != "0";
+    // A full-width row on the theme's button colour.
+    sec.head   = new wxPanel(m_side, wxID_ANY);
+    auto *head = new wxBoxSizer(wxHORIZONTAL);
+    sec.arrow  = new wxStaticText(sec.head, wxID_ANY, panel_section_arrow(sec.collapsed));
     sec.arrow->SetMinSize(wxSize(int(1.2 * em), -1));
-    auto *t = new wxStaticText(m_side, wxID_ANY, title);
-    t->SetFont(wxGetApp().bold_font());
+    sec.title = new wxStaticText(sec.head, wxID_ANY, title);
+    sec.title->SetFont(wxGetApp().bold_font());
     sec.arrow->SetFont(wxGetApp().bold_font());
-    head->Add(sec.arrow, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 3);
-    head->Add(t, 1, wxALIGN_CENTER_VERTICAL);
-    root->Add(head, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em);
-    root->Add(new wxStaticLine(m_side), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em / 2);
+    head->Add(sec.arrow, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, em / 2);
+    head->Add(sec.title, 1, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, em / 2);
+    sec.head->SetSizer(head);
+    root->Add(sec.head, 0, wxEXPAND | wxTOP, em / 2);
     sec.body = new wxBoxSizer(wxVERTICAL);
     root->Add(sec.body, 0, wxEXPAND);
     const size_t index = m_sections.size();
-    for (wxWindow *w : { static_cast<wxWindow *>(sec.arrow), static_cast<wxWindow *>(t) }) {
+    for (wxWindow *w : { static_cast<wxWindow *>(sec.head), static_cast<wxWindow *>(sec.arrow), static_cast<wxWindow *>(sec.title) }) {
         w->SetCursor(wxCursor(wxCURSOR_HAND));
         w->SetToolTip(_L("Click to show or hide this section."));
         w->Bind(wxEVT_LEFT_DOWN, [this, index](wxMouseEvent &) { toggle_panel_section(index); });
     }
     m_sections.push_back(sec);
+    apply_section_header_colours();
     return sec.body;
+}
+
+void ShowcaseView::apply_section_header_colours()
+{
+    // The regular button's background (Widgets/Button.cpp), themed like it.
+    const bool     dark = wxGetApp().dark_mode();
+    const wxColour bg   = dark ? StateColor::darkModeColorFor(wxColour("#DFDFDF")) : wxColour("#DFDFDF");
+    const wxColour fg   = dark ? StateColor::darkModeColorFor(wxColour("#262E30")) : wxColour("#262E30");
+    for (PanelSection &sec : m_sections) {
+        if (sec.head == nullptr)
+            continue;
+        if (sec.head->GetBackgroundColour() != bg) {
+            sec.head->SetBackgroundColour(bg);
+            sec.head->Refresh();
+        }
+        for (wxStaticText *t : { sec.arrow, sec.title })
+            if (t != nullptr) {
+                t->SetBackgroundColour(bg);
+                t->SetForegroundColour(fg);
+            }
+    }
 }
 
 void ShowcaseView::apply_panel_sections()
 {
     if (m_side_root == nullptr)
         return;
+    // A rebuilt row may have had the dark theme applied over the headers' colours.
+    apply_section_header_colours();
     for (const PanelSection &sec : m_sections)
         if (sec.collapsed && sec.body != nullptr)
             m_side_root->Hide(sec.body);
@@ -2463,6 +2498,20 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
         const Showcase::Callout &c = s.callouts.items[i];
         if (c.hidden || !keep[i])
             continue;
+        // S5c, as used: not before the build-up has printed its filament, then fading in.
+        double appear = 1.;
+        if (m_co_video.as_used && m_co_video.built_z < 1e29) {
+            auto         fz    = m_video.first_z.find(c.key);
+            const double first = fz != m_video.first_z.end() ? fz->second : 0.;
+            appear             = std::clamp((m_co_video.built_z - first) / std::max(1e-3, m_co_video.fade_mm), 0., 1.);
+            if (appear <= 1e-3)
+                continue;
+        }
+        // S5c, static: the anchors of the frame the clip keeps.
+        const std::vector<Showcase::PointD> *fixed_pts = nullptr;
+        if (m_co_video.fixed && m_video.static_valid)
+            if (auto it = m_video.static_anchors.find(c.key); it != m_video.static_anchors.end())
+                fixed_pts = &it->second;
         ShowcaseCalloutDraw d;
         d.item  = int(i);
         d.label = Showcase::build_callout_label(c, labels.filament(s, c), s.callouts.fields, labels.words());
@@ -2479,16 +2528,31 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
             Vec3d world;
             if (!showcase_anchor_world(*m_model, c.anchors[a], world))
                 continue;
+            // S5c: a spot the build-up has not printed yet gets no leader (it would point at air): the
+            // label stays, without a line, until it is built.
+            if (world.z() > m_co_video.built_z + 0.5)
+                continue;
+            if (m_co_video.fixed && m_video.static_valid) {
+                if (fixed_pts == nullptr || a >= fixed_pts->size() || !std::isfinite((*fixed_pts)[a].x))
+                    continue;
+                d.anchors.push_back((*fixed_pts)[a]);
+                d.occluded.push_back(false);
+                if (fade != nullptr)
+                    d.fade.push_back(1.);
+                continue;
+            }
             const Vec4d clip = vp * Vec4d(world.x(), world.y(), world.z(), 1.);
             if (clip.w() <= 1e-9)
                 continue;   // behind the camera
             d.anchors.push_back({ (clip.x() / clip.w() + 1.) * 0.5, (1. - clip.y() / clip.w()) * 0.5 });
+            // Design 3.3: an anchor the model hides from this view gets a dashed leader and a hollow dot
+            // (stills and the live view; a video fades it instead).
             d.occluded.push_back(occ != occluded.end() && a < occ->second.size() && occ->second[a]);
             if (fade != nullptr)
                 d.fade.push_back(fade->alpha(c.key, int(a)));
         }
         if (fade != nullptr)
-            d.alpha = fade->label_alpha(c.key, int(anchors));
+            d.alpha = m_co_video.fixed && m_video.static_valid ? 1. : fade->label_alpha(c.key, int(anchors));
         if (visuals != nullptr) {
             auto v = visuals->find(c.key);
             if (v != visuals->end()) {
@@ -2496,11 +2560,59 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
                 d.highlight = v->second.highlight;
             }
         }
+        d.visual *= appear;
         d.pinned     = c.pinned;
         d.pinned_pos = { c.label_pos[0], c.label_pos[1] };
         out.push_back(std::move(d));
     }
     return out;
+}
+
+// S5c (the video panel's, here for showcase_anchor_world())
+void ShowcaseView::video_prepare_callouts(const Showcase::VideoSettings &v, const Showcase::CameraView &base,
+                                          const std::vector<Showcase::PathEvent> &events)
+{
+    m_video.first_z.clear();
+    m_video.static_valid = false;
+    m_video.static_anchors.clear();
+    if (m_model == nullptr || m_renderer == nullptr)
+        return;
+    for (const Showcase::CalloutTarget &t : Showcase::CalloutRegions(*m_model, plate_objects(), plate_changes()).targets())
+        m_video.first_z[t.key] = t.first_z;
+    if (v.callout_motion != Showcase::CalloutMotion::Static)
+        return;
+    // The frame static callouts keep: the one that shows the whole model - the end of the motion when
+    // the print builds up (and a static zoom-out ends framed on all of it), else the first.
+    const double t     = v.build.enabled ? v.hold_start + v.duration : 0.;
+    Camera      &camera = wxGetApp().plater()->get_camera();
+    const Camera saved  = camera;
+    const Showcase::CameraPose pose = video_pose(v, base, t, events);
+    camera.look_at(Vec3d(pose.eye[0], pose.eye[1], pose.eye[2]), Vec3d(pose.target[0], pose.target[1], pose.target[2]),
+                   Vec3d(pose.up[0], pose.up[1], pose.up[2]));
+    camera.set_zoom(pose.zoom);
+    m_renderer->prepare_live_camera();
+    Matrix4d vp;
+    if (m_renderer->frame_view_projection(vp)) {
+        for (const Showcase::Callout &c : scene().callouts.items) {
+            std::vector<Showcase::PointD> pts;
+            for (const Showcase::CalloutAnchor &a : c.anchors) {
+                Vec3d       world;
+                Showcase::PointD p{ std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN() };
+                if (showcase_anchor_world(*m_model, a, world)) {
+                    const Vec4d clip = vp * Vec4d(world.x(), world.y(), world.z(), 1.);
+                    if (clip.w() > 1e-9)
+                        p = { (clip.x() / clip.w() + 1.) * 0.5, (1. - clip.y() / clip.w()) * 0.5 };
+                }
+                pts.push_back(p);
+            }
+            m_video.static_anchors[c.key] = std::move(pts);
+        }
+        m_video.static_center_x = callouts_model_center_x();
+        m_video.static_box      = callouts_model_box();
+        m_video.static_valid    = true;
+    }
+    camera = saved;
+    m_renderer->prepare_live_camera();
 }
 
 Showcase::RectD ShowcaseView::callouts_model_box() const
@@ -2548,7 +2660,12 @@ double ShowcaseView::callouts_model_center_x() const
 bool ShowcaseView::callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &image)
 {
     const Showcase::Scene &s = scene();
-    if (!m_active || !s.callouts.enabled || s.callouts.items.empty() || frame_w <= 0 || frame_h <= 0) {
+    // S5c: a video's preview follows its "Show Callouts" (S4 drew them in the preview regardless), and
+    // the path's timeline may switch them on or off.
+    const Showcase::Scene &shown   = m_video.borrowed && m_video.pose_timeline ? m_video.pose_scene : s;
+    const bool             in_clip = m_video.borrowed && s.video.callouts;
+    if (!m_active || (m_video.borrowed && !in_clip) || !shown.callouts.enabled || shown.callouts.items.empty() || frame_w <= 0 ||
+        frame_h <= 0) {
         m_callouts.hits = ShowcaseCalloutHits();
         return false;
     }
@@ -2560,8 +2677,9 @@ bool ShowcaseView::callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &i
     opt.overlay        = true;
     opt.selected       = m_callouts.selected;
     opt.reserved       = showcase_watermark_rect(s.export_settings.watermark, project(), frame_w, frame_h);
-    opt.model_center_x = callouts_model_center_x();
-    opt.model_box      = callouts_model_box();
+    const bool fixed   = m_co_video.fixed && m_video.static_valid;
+    opt.model_center_x = fixed ? m_video.static_center_x : callouts_model_center_x();
+    opt.model_box      = fixed ? m_video.static_box : callouts_model_box();
     showcase_draw_callouts(image, true, s, draws, opt, &m_callouts.hits);
     return true;
 }

@@ -401,8 +401,8 @@ TEST_CASE("Callout colour names", "[Showcase][Callouts]")
     SECTION("library, then the user's text, then the nearest name") {
         CHECK(resolve_color_name("Galaxy Black", "My black", "#1A1A1A") == "Galaxy Black");
         CHECK(resolve_color_name("", "My black", "#1A1A1A") == "My black");
-        CHECK(resolve_color_name("", "  ", "#1A1A1A") == "\xE2\x89\x88 Jet Black");
-        CHECK(resolve_color_name("", "", "#FFFFFF") == "White");   // exactly a named colour: no "≈"
+        CHECK(resolve_color_name("", "  ", "#1A1A1A") == "Jet Black");   // S5c: no "≈" in front of a guess
+        CHECK(resolve_color_name("", "", "#FFFFFF") == "White");
         CHECK(resolve_color_name("", "", "#FFFFFF", [](const char *s) { return std::string("[") + s + "]"; }) == "[White]");
         CHECK(resolve_color_name("", "", "bad").empty());
     }
@@ -499,7 +499,7 @@ TEST_CASE("Callout label text", "[Showcase][Callouts]")
         CHECK(l.hex.empty());
         CHECK(l.swatches.empty());
         CHECK(l.details.empty());
-        fields.product = fields.color_name = false;
+        fields.product = fields.family = fields.color_name = false;
         CHECK(build_callout_label(c, f, fields, words).empty());
     }
     SECTION("a standard finish, or one the type already says, is not repeated") {
@@ -896,7 +896,7 @@ TEST_CASE("S5b: hex code and swatch, material family, the separator", "[Showcase
     f.finish          = "Matte";
     f.standard_finish = false;
     f.colors          = { "#c12e1f" };
-    f.color_name      = "\xE2\x89\x88 Cardinal Red";
+    f.color_name      = "Cardinal Red";
     Callout c;
     c.key = make_callout_key(1);
     CalloutFields fields;
@@ -904,7 +904,7 @@ TEST_CASE("S5b: hex code and swatch, material family, the separator", "[Showcase
 
     SECTION("the default first line is unchanged") {
         const CalloutLabel l = build_callout_label(c, f, fields, words);
-        CHECK(callout_first_line(l) == "Bambu Lab PLA Basic \xE2\x80\x93 \xE2\x89\x88 Cardinal Red");
+        CHECK(callout_first_line(l) == "Bambu Lab PLA Basic \xE2\x80\x93 Cardinal Red");
         CHECK(fields.separator == " \xE2\x80\x93 ");
     }
     SECTION("the hex code and the swatch are separate") {
@@ -921,12 +921,12 @@ TEST_CASE("S5b: hex code and swatch, material family, the separator", "[Showcase
         fields.brand = fields.product = fields.color_name = fields.type = false;
         CHECK_FALSE(build_callout_label(c, f, fields, words).empty());
     }
-    SECTION("the user's separator; the approximate mark stays with the colour name") {
+    SECTION("the user's separator") {
         fields.separator = " / ";
         const CalloutLabel l = build_callout_label(c, f, fields, words);
-        CHECK(callout_first_line(l) == "Bambu Lab PLA Basic / \xE2\x89\x88 Cardinal Red");
+        CHECK(callout_first_line(l) == "Bambu Lab PLA Basic / Cardinal Red");
         fields.separator = ": ";
-        CHECK(callout_first_line(build_callout_label(c, f, fields, words)) == "Bambu Lab PLA Basic: \xE2\x89\x88 Cardinal Red");
+        CHECK(callout_first_line(build_callout_label(c, f, fields, words)) == "Bambu Lab PLA Basic: Cardinal Red");
     }
     SECTION("the material family stands in for the product, and is not said twice") {
         fields.product = false;
@@ -1074,9 +1074,89 @@ TEST_CASE("S5b: the new callout settings in the scene's JSON", "[Showcase][Callo
             const Callouts &c = q.scenes[0].callouts;
             CHECK(c.fields.hex == hex);
             CHECK(c.fields.swatch == hex);
-            CHECK_FALSE(c.fields.family);
+            CHECK(c.fields.family);   // S5c: on, so the title reads as it did
             CHECK(c.fields.separator == " \xE2\x80\x93 ");
             CHECK_FALSE(c.once_per_color);
         }
     }
+}
+
+TEST_CASE("S5c: the first line in every combination of brand, product and family", "[Showcase][Callouts]")
+{
+    LabelFilament f;
+    f.vendor      = "Bambu Lab";
+    f.preset_name = "Bambu PLA Basic @BBL X1C";
+    f.type        = "PLA";
+    f.colors      = { "#c12e1f" };
+    f.color_name  = "Cardinal Red";
+    Callout c;
+    c.key = make_callout_key(1);
+    LabelWords words;
+    struct Case { bool brand, product, family; const char *line; };
+    const Case cases[] = {
+        { true, true, true, "Bambu Lab PLA Basic EN Cardinal Red" },
+        { true, true, false, "Bambu Lab Basic EN Cardinal Red" },
+        { true, false, true, "Bambu Lab PLA EN Cardinal Red" },
+        { true, false, false, "Bambu Lab EN Cardinal Red" },
+        { false, true, true, "PLA Basic EN Cardinal Red" },
+        { false, true, false, "Basic EN Cardinal Red" },
+        { false, false, true, "PLA EN Cardinal Red" },
+        { false, false, false, "Cardinal Red" },   // only the colour name, no separator
+    };
+    for (const Case &k : cases) {
+        CalloutFields fields;
+        fields.brand   = k.brand;
+        fields.product = k.product;
+        fields.family  = k.family;
+        std::string want = k.line;
+        for (size_t at; (at = want.find("EN")) != std::string::npos;)
+            want.replace(at, 2, "\xE2\x80\x93");
+        INFO("brand " << k.brand << " product " << k.product << " family " << k.family);
+        const CalloutLabel l = build_callout_label(c, f, fields, words);
+        CHECK(callout_first_line(l) == want);
+        // No colour name: the title alone, never a dangling separator.
+        fields.color_name = false;
+        const std::string title_only = callout_first_line(build_callout_label(c, f, fields, words));
+        CHECK(title_only.find("\xE2\x80\x93") == std::string::npos);
+        CHECK(title_only == want.substr(0, want.find(" \xE2\x80\x93 ") == std::string::npos ? 0 : want.find(" \xE2\x80\x93 ")));
+    }
+    SECTION("a generic preset whose product is just the family") {
+        f.vendor      = "Generic";
+        f.preset_name = "Generic PLA @System";
+        CalloutFields fields;
+        fields.brand  = false;
+        fields.family = false;
+        CHECK(callout_first_line(build_callout_label(c, f, fields, words)) == "Cardinal Red");
+        fields.family = true;
+        CHECK(callout_first_line(build_callout_label(c, f, fields, words)) == "PLA \xE2\x80\x93 Cardinal Red");
+    }
+    SECTION("the family in the title leaves the details line") {
+        f.finish          = "Matte";
+        f.standard_finish = false;
+        CalloutFields fields;
+        fields.product = false;
+        CHECK(build_callout_label(c, f, fields, words).details == "Matte");
+        fields.product = true;
+        CHECK(build_callout_label(c, f, fields, words).details == "PLA \xC2\xB7 Matte");
+    }
+}
+
+TEST_CASE("S5c: callout targets know the height they start at", "[Showcase][Callouts]")
+{
+    Model model;
+    ModelObject *o = add_cube(model, 20., 0., 1);
+    // A second part, filament 2, from 12 mm up.
+    ModelVolume *v = o->add_volume(make_cube(5., 5., 4.));
+    v->set_offset(Vec3d(0., 0., 12.));
+    v->config.set("extruder", 2);
+    const std::vector<CalloutTarget> targets = plan_callout_targets(model, { 0 }, nullptr);
+    const CalloutTarget *a = find_target(targets, make_callout_key(1));
+    const CalloutTarget *b = find_target(targets, make_callout_key(2));
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+    CHECK_THAT(a->first_z, WithinAbs(0., 1e-6));
+    // The part's bottom in the world, where filament 2 is first printed.
+    const double want = v->mesh().transformed_bounding_box(o->instances.front()->get_matrix() * v->get_matrix()).min.z();
+    CHECK(want > 5.);
+    CHECK_THAT(b->first_z, WithinAbs(want, 1e-6));
 }

@@ -468,6 +468,7 @@ int ShowcaseView::run_render_job(const Showcase::RenderRequest &req, Showcase::R
     m_video.settings = v;
     m_video.events   = events;
     m_video.base     = s.camera;
+    video_prepare_callouts(v, m_video.base, m_video.events);
     m_video.fade     = CalloutFade(std::max(2, v.fps / 3), std::max(2, v.fps / 4));
     m_video.sides.clear();
     m_video.width  = w;

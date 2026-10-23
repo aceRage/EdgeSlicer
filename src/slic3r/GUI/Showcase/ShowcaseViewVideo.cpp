@@ -25,6 +25,8 @@
 #include "../Plater.hpp"
 
 #include <wx/bitmap.h>
+
+#include <limits>
 #include <wx/button.h>
 #include <wx/checkbox.h>
 #include <wx/choice.h>
@@ -223,6 +225,8 @@ void ShowcaseView::build_video_section(wxBoxSizer *root)
     paths.Add(_L("Turntable"));
     paths.Add(_L("Orbit with bob"));
     paths.Add(_L("Keyframes"));
+    paths.Add(_L("Static"));
+    paths.Add(_L("Static with zoom out"));
     m_vid_path = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, paths);
     m_vid_path->SetToolTip(_L("Orbit: the camera circles the model, the light stays. Turntable: the model turns in front of the camera. "
                               "Orbit with bob: the camera also rises and dips. Keyframes: a path through views you add."));
@@ -284,9 +288,27 @@ void ShowcaseView::build_video_section(wxBoxSizer *root)
     m_vid_loop = new wxCheckBox(m_side, wxID_ANY, _L("Seamless loop"));
     m_vid_loop->SetToolTip(_L("For whole turns without holds: the last frame leads straight into the first, so the video can repeat."));
     check_row(m_vid_loop, &m_vid_orbit_rows);
-    m_vid_callouts = new wxCheckBox(m_side, wxID_ANY, _L("Show the callouts"));
-    m_vid_callouts->SetToolTip(_L("The filament callouts (when they are on) in every frame. A label whose spot goes behind the model fades out."));
+    m_vid_callouts = new wxCheckBox(m_side, wxID_ANY, _L("Show Callouts"));
+    m_vid_callouts->SetToolTip(_L("The filament callouts (when they are on) in the preview and every frame. A label whose spot goes "
+                                  "behind the model fades out."));
     check_row(m_vid_callouts);
+    {
+        // S5c
+        wxArrayString motions;
+        motions.Add(_L("Animated"));
+        motions.Add(_L("Static"));
+        m_vid_co_motion = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, motions);
+        m_vid_co_motion->SetToolTip(_L("Animated: labels and leaders follow their spots on the model. Static: they stay where they are "
+                                       "on the frame that shows the whole model (the end of a build-up, else the first frame)."));
+        row(_L("Position"), m_vid_co_motion);
+        wxArrayString appears;
+        appears.Add(_L("Always"));
+        appears.Add(_L("As used"));
+        m_vid_co_appear = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, appears);
+        m_vid_co_appear->SetToolTip(_L("As used: during the layer build-up a filament's callout fades in once that filament has been "
+                                       "printed. The prime tower does not count."));
+        row(_L("Appearance"), m_vid_co_appear);
+    }
     // S5: the print growing layer by layer while the camera moves.
     m_vid_build = new wxCheckBox(m_side, wxID_ANY, _L("Layer build-up"));
     m_vid_build->SetToolTip(_L("The print grows from the plate, layer by layer, over the motion. With a sliced plate its toolpaths are "
@@ -473,6 +495,16 @@ void ShowcaseView::build_video_section(wxBoxSizer *root)
         const bool on = m_vid_callouts->GetValue();
         video_edit([on](Showcase::VideoSettings &v) { v.callouts = on; }, false);
     });
+    m_vid_co_motion->Bind(wxEVT_CHOICE, [this, video_edit](wxCommandEvent &) {
+        const int sel = m_vid_co_motion->GetSelection();
+        if (sel >= 0)
+            video_edit([sel](Showcase::VideoSettings &v) { v.callout_motion = Showcase::CalloutMotion(sel); }, false);
+    });
+    m_vid_co_appear->Bind(wxEVT_CHOICE, [this, video_edit](wxCommandEvent &) {
+        const int sel = m_vid_co_appear->GetSelection();
+        if (sel >= 0)
+            video_edit([sel](Showcase::VideoSettings &v) { v.callout_appearance = Showcase::CalloutAppearance(sel); }, false);
+    });
     m_vid_build->Bind(wxEVT_CHECKBOX, [this, video_edit](wxCommandEvent &) {
         const bool on = m_vid_build->GetValue();
         video_edit([on](Showcase::VideoSettings &v) { v.build.enabled = on; }, false);
@@ -614,6 +646,8 @@ void ShowcaseView::sync_video_controls()
     m_vid_hold_end->SetValue(v.hold_end);
     m_vid_loop->SetValue(v.loop);
     m_vid_callouts->SetValue(v.callouts);
+    m_vid_co_motion->SetSelection(int(v.callout_motion));
+    m_vid_co_appear->SetSelection(int(v.callout_appearance));
     m_vid_build->SetValue(v.build.enabled);
     m_vid_build_infill->SetValue(v.build.infill);
     m_vid_build_supports->SetValue(v.build.supports);
@@ -623,13 +657,14 @@ void ShowcaseView::sync_video_controls()
     refresh_keyframes();
 
     // Only the rows the path uses.
-    const bool orbit = v.path != Showcase::VideoPath::Keyframes;
+    const bool keys  = v.path == Showcase::VideoPath::Keyframes;
+    const bool orbit = !keys && !Showcase::is_static_path(v.path);
     for (wxWindow *w : m_vid_orbit_rows)
         w->Show(orbit);
     for (wxWindow *w : m_vid_bob_rows)
         w->Show(v.path == Showcase::VideoPath::OrbitBob);
     for (wxWindow *w : m_vid_key_rows)
-        w->Show(!orbit);
+        w->Show(keys);
     m_vid_time_label->SetLabel(seconds_text(double(m_vid_time->GetValue()) / 1000. * Showcase::total_seconds(v)) + " / " +
                                seconds_text(Showcase::total_seconds(v)));
     m_syncing = syncing;
@@ -679,8 +714,10 @@ void ShowcaseView::update_video_enabled()
     m_vid_key_update->Enable(editable && selected);
     m_vid_key_delete->Enable(editable && selected);
     m_vid_key_goto->Enable(!video_busy() && selected);
-    m_vid_loop->Enable(editable && v.path != Showcase::VideoPath::Keyframes);
+    m_vid_loop->Enable(editable && v.path != Showcase::VideoPath::Keyframes && !Showcase::is_static_path(v.path));
     m_vid_callouts->Enable(editable && scene().callouts.enabled);
+    m_vid_co_motion->Enable(editable && scene().callouts.enabled && v.callouts);
+    m_vid_co_appear->Enable(editable && scene().callouts.enabled && v.callouts && v.build.enabled);
     m_vid_build->Enable(editable);
     {
         // S5b: infill and supports come from the slice; the model's clip has neither.
@@ -936,20 +973,23 @@ void ShowcaseView::video_show_pose(double t)
 {
     if (m_renderer == nullptr || !m_active)
         return;
-    Camera &camera = wxGetApp().plater()->get_camera();
+    Camera &camera        = wxGetApp().plater()->get_camera();
+    const bool just_borrowed = !m_video.borrowed;
     if (!m_video.borrowed) {
         // The path starts from the view as it is now; it comes back when the preview ends.
         m_video.saved_camera = camera;
         m_video.base         = live_camera_view();
         m_video.borrowed     = true;
     }
-    const Showcase::VideoSettings &v    = scene().video;
-    const Showcase::CameraPose     pose = Showcase::evaluate_path(v, m_video.base, t);
+    const Showcase::VideoSettings          &v      = scene().video;
+    const std::vector<Showcase::PathEvent> &events = video_events(v);
+    if (just_borrowed)
+        video_prepare_callouts(v, m_video.base, events);
+    const Showcase::CameraPose pose = video_pose(v, m_video.base, t, events);
     camera.look_at(Vec3d(pose.eye[0], pose.eye[1], pose.eye[2]), Vec3d(pose.target[0], pose.target[1], pose.target[2]),
                    Vec3d(pose.up[0], pose.up[1], pose.up[2]));
     camera.set_zoom(pose.zoom);
     // S5: the path's timeline (lights, backdrop, floor, callouts, watermark) and the build-up at t.
-    const std::vector<Showcase::PathEvent> &events = video_events(v);
     const bool timeline = !events.empty() || v.build.enabled;
     if (pose.spin_deg != 0. || timeline) {
         Showcase::TimelineState st = Showcase::evaluate_timeline(events, scene(), t, Showcase::build_fraction(v, t));
@@ -959,6 +999,7 @@ void ShowcaseView::video_show_pose(double t)
         spin_lights(m_video.pose_scene, pose.spin_deg);
         m_renderer->set_scene(&m_video.pose_scene, &project());
         m_renderer->set_build(st.build, st.build_source, st.build_infill, st.build_supports);
+        video_set_callout_pass(v, st.build, st.build_source);
         if (timeline) {
             m_renderer->invalidate_watermark();
             ++m_callouts.version;
@@ -967,8 +1008,50 @@ void ShowcaseView::video_show_pose(double t)
         m_video.pose_timeline = false;
         m_renderer->set_scene(&scene(), &project());
         m_renderer->set_build(-1., Showcase::BuildSource::Auto);
+        video_set_callout_pass(v, -1., Showcase::BuildSource::Auto);
     }
     set_as_dirty();
+}
+
+Showcase::CameraPose ShowcaseView::video_pose(const Showcase::VideoSettings &v, const Showcase::CameraView &base, double t,
+                                              const std::vector<Showcase::PathEvent> &events)
+{
+    Showcase::CameraPose pose = Showcase::evaluate_path(v, base, t);
+    bool                  follow = v.path == Showcase::VideoPath::StaticZoomOut;
+    double                build  = Showcase::build_fraction(v, t);
+    Showcase::BuildSource source = v.build.source;
+    if (!events.empty()) {
+        const Showcase::TimelineState st = Showcase::evaluate_timeline(events, scene(), t, build);
+        follow |= st.build_follow;
+        build  = st.build;
+        source = st.build_source;
+    }
+    if (!follow || m_renderer == nullptr)
+        return pose;
+    m_renderer->update_visibility();
+    const BoundingBoxf3 box = m_renderer->objects_box();
+    if (!box.defined)
+        return pose;
+    // S5c: the height built so far; without a build-up, the motion stands in for it.
+    const double z = build >= 0. ? m_renderer->build_height_at(build, source) :
+                                   box.min.z() + (box.max.z() - box.min.z()) * Showcase::ease(v.easing, Showcase::motion_fraction(v, t));
+    return Showcase::frame_built_part(pose, { box.min.x(), box.min.y(), box.min.z() }, { box.max.x(), box.max.y(), box.max.z() }, z);
+}
+
+void ShowcaseView::video_set_callout_pass(const Showcase::VideoSettings &v, double build, Showcase::BuildSource source)
+{
+    const CalloutVideoPass before = m_co_video;
+    m_co_video         = CalloutVideoPass();
+    m_co_video.fixed   = v.callout_motion == Showcase::CalloutMotion::Static;
+    m_co_video.as_used = v.callout_appearance == Showcase::CalloutAppearance::AsUsed;
+    if (m_renderer == nullptr)
+        return;
+    m_co_video.built_z      = build >= 0. ? m_renderer->build_height_at(build, source) : 1e30;
+    const BoundingBoxf3 box = m_renderer->objects_box();
+    m_co_video.fade_mm      = box.defined ? std::max(0.5, 0.04 * (box.max.z() - box.min.z())) : 1.;
+    if (m_co_video.built_z != before.built_z || m_co_video.as_used != before.as_used || m_co_video.fixed != before.fixed ||
+        m_co_video.fade_mm != before.fade_mm)
+        ++m_co_video_rev;   // the live view's callout picture is drawn again
 }
 
 void ShowcaseView::video_restore_view()
@@ -984,7 +1067,10 @@ void ShowcaseView::video_restore_view()
     if (!m_video.borrowed)
         return;
     wxGetApp().plater()->get_camera() = m_video.saved_camera;
-    m_video.borrowed = false;
+    m_video.borrowed     = false;
+    m_co_video           = CalloutVideoPass();
+    m_video.static_valid = false;
+    ++m_co_video_rev;
     if (m_renderer != nullptr) {
         m_renderer->set_scene(&scene(), &project());
         m_renderer->set_build(-1., Showcase::BuildSource::Auto);
@@ -1202,6 +1288,7 @@ bool ShowcaseView::video_start_export(Showcase::VideoFormat format, const std::s
     m_video.settings = v;
     m_video.events   = video_events(v);
     m_video.base     = s.camera.valid ? s.camera : live_camera_view();
+    video_prepare_callouts(v, m_video.base, m_video.events);
     m_video.fade     = Showcase::CalloutFade(std::max(2, v.fps / 3), std::max(2, v.fps / 4));
     m_video.sides.clear();
     m_video.pending.reset();
@@ -1234,7 +1321,7 @@ bool ShowcaseView::video_render_frame(int index, Showcase::VideoFrame &out)
 bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFrame &out)
 {
     const Showcase::Scene     &s    = scene();
-    const Showcase::CameraPose pose = Showcase::evaluate_path(m_video.settings, m_video.base, t);
+    const Showcase::CameraPose pose = video_pose(m_video.settings, m_video.base, t, m_video.events);
     Camera                    &camera = wxGetApp().plater()->get_camera();
     const Camera               saved  = camera;
     camera.look_at(Vec3d(pose.eye[0], pose.eye[1], pose.eye[2]), Vec3d(pose.target[0], pose.target[1], pose.target[2]),
@@ -1252,6 +1339,7 @@ bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFra
     const Showcase::Scene &fs = m_video.frame_scene;
     m_renderer->set_scene(&m_video.frame_scene, &project());
     m_renderer->set_build(st.build, st.build_source, st.build_infill, st.build_supports);
+    video_set_callout_pass(m_video.settings, st.build, st.build_source);
     m_renderer->prepare_live_camera();
 
     ShowcaseImage image;
@@ -1270,8 +1358,9 @@ bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFra
         std::map<int, int>     sides;
         ShowcaseCalloutOptions opt;
         opt.reserved        = showcase_watermark_rect(fs.export_settings.watermark, project(), image.width, image.height);
-        opt.model_center_x  = callouts_model_center_x();
-        opt.model_box       = callouts_model_box();
+        const bool fixed    = m_co_video.fixed && m_video.static_valid;
+        opt.model_center_x  = fixed ? m_video.static_center_x : callouts_model_center_x();
+        opt.model_box       = fixed ? m_video.static_box : callouts_model_box();
         opt.previous_sides  = index > 0 ? &m_video.sides : nullptr;
         opt.sides           = &sides;
         opt.side_hysteresis = 0.06;
@@ -1283,6 +1372,7 @@ bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFra
 
     camera = saved;
     m_renderer->set_build(-1., Showcase::BuildSource::Auto);
+    m_co_video = CalloutVideoPass();
     m_renderer->set_scene(&scene(), &project());
     if (!ok) {
         BOOST_LOG_TRIVIAL(error) << "Showcase video: frame " << index << " could not be rendered. " << report;

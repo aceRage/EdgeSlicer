@@ -1015,3 +1015,74 @@ TEST_CASE("S5b: the build-up may leave out infill and supports", "[Showcase][Pat
         CHECK(bad_issues.has_errors());
     }
 }
+
+TEST_CASE("S5c: static camera paths and the video's callout options", "[Showcase][Path]")
+{
+    const PathContext ctx = sample_context();
+    SECTION("Static and Static with zoom out hold the scene's camera") {
+        for (VideoPath path : { VideoPath::Static, VideoPath::StaticZoomOut }) {
+            VideoSettings v;
+            v.path = path;
+            CHECK(is_static_path(v.path));
+            CHECK_FALSE(seamless_loop(v));
+            for (double t : { 0., 2.5, 8. }) {
+                const CameraPose p = evaluate_path(v, ctx.start, t);
+                CHECK(dist(p.eye, ctx.start.eye) < 1e-9);
+                CHECK(dist(p.target, ctx.start.target) < 1e-9);
+                CHECK_THAT(p.zoom, WithinAbs(ctx.start.zoom, 1e-12));
+            }
+            VideoPath back;
+            REQUIRE(from_string(to_string(path), back));
+            CHECK(back == path);
+        }
+    }
+    SECTION("zooming out on the build-up keeps the angle and ends on the whole model") {
+        CameraPose base;
+        base.eye    = { 100., -150., 120. };
+        base.target = { 0., 0., 20. };
+        base.zoom   = 2.;
+        const std::array<double, 3> lo{ { -20., -20., 0. } }, hi{ { 20., 20., 40. } };
+        const CameraPose done = frame_built_part(base, lo, hi, 40.);
+        CHECK(dist(done.eye, base.eye) < 1e-9);
+        CHECK_THAT(done.zoom, WithinAbs(2., 1e-12));
+        const CameraPose part = frame_built_part(base, lo, hi, 10.);
+        CHECK(part.zoom > base.zoom);
+        CHECK(part.zoom <= 4. * base.zoom + 1e-9);
+        CHECK(part.target[2] < base.target[2]);
+        // The same angle: the view direction does not change.
+        for (int i = 0; i < 3; ++i)
+            CHECK_THAT(part.eye[i] - part.target[i], WithinAbs(base.eye[i] - base.target[i], 1e-9));
+        // The zoom grows as less is built, never past the cap.
+        CHECK(frame_built_part(base, lo, hi, 5.).zoom >= part.zoom);
+        CHECK(frame_built_part(base, lo, hi, 0.).zoom <= 4. * base.zoom + 1e-9);
+    }
+    SECTION("the options round-trip; an S5 video writes no new keys; a static zoom-out exports a following build") {
+        Project p;
+        Scene  &s                   = p.ensure_scene_for_plate(0);
+        s.video.path                = VideoPath::StaticZoomOut;
+        s.video.callout_motion      = CalloutMotion::Static;
+        s.video.callout_appearance  = CalloutAppearance::AsUsed;
+        s.video.build.enabled       = true;
+        Project back;
+        REQUIRE(scenes_from_json(scenes_to_json(p), back));
+        CHECK(back.scenes[0].video == s.video);
+
+        Project plain;
+        plain.ensure_scene_for_plate(0);
+        const json j = json::parse(scenes_to_json(plain));
+        CHECK_FALSE(j["scenes"][0]["video"].contains("callout_motion"));
+        CHECK_FALSE(j["scenes"][0]["video"].contains("callout_appearance"));
+
+        const PathDocument doc = export_path(s.video, ctx, "Z");
+        REQUIRE(doc.moves.size() == 1);
+        CHECK(doc.moves[0].op == PathMoveOp::Wait);
+        REQUIRE(doc.events.size() == 1);
+        CHECK(doc.events[0].build_follow);
+        std::vector<PathEvent> ev;
+        PathIssues             issues;
+        REQUIRE(parse_path_events(path_events_to_json(doc.events), ev, issues));
+        REQUIRE(ev.size() == 1);
+        CHECK(ev[0].build_follow);
+        CHECK(evaluate_timeline(ev, s, 1.).build_follow);
+    }
+}

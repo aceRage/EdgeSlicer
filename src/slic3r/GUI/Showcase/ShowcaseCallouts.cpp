@@ -730,7 +730,7 @@ ShowcaseCalloutDialog::ShowcaseCalloutDialog(wxWindow *parent, const Showcase::C
         m_color->Enable(false);
         m_color->SetToolTip(_L("This colour's name comes from the Snapmaker colour library."));
     } else
-        m_color->SetToolTip(_L("Your name for this colour. Leave it empty for the nearest known name (shown with \"≈\")."));
+        m_color->SetToolTip(_L("Your name for this colour. Leave it empty for the nearest known name."));
     row(_L("Colour name"), m_color);
     m_note = new wxTextCtrl(this, wxID_ANY, wxString::FromUTF8(callout.note));
     m_note->SetToolTip(_L("An extra line under the label."));

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <limits>
 #include <set>
+#include <sstream>
 
 #include <boost/log/trivial.hpp>
 
@@ -240,10 +241,28 @@ constexpr double CO_Z_EPS = 1e-6;
 
 void co_add_base(std::vector<BaseRegion> &bases, const BaseRegion &b)
 {
-    for (const BaseRegion &e : bases)
-        if (e.filament == b.filament && e.object_default == b.object_default)
+    for (BaseRegion &e : bases)
+        if (e.filament == b.filament && e.object_default == b.object_default) {
+            e.z_min = std::min(e.z_min, b.z_min);
             return;
+        }
     bases.push_back(b);
+}
+
+// S5c: the lowest world height of an indexed triangle set under each of the object's instances.
+double co_min_z(const indexed_triangle_set &its, const ModelObject &mo, const ModelVolume &mv)
+{
+    double z = std::numeric_limits<double>::max();
+    for (const ModelInstance *inst : mo.instances) {
+        if (inst == nullptr)
+            continue;
+        const Transform3d m = inst->get_matrix() * mv.get_matrix();
+        for (const stl_triangle_vertex_indices &tri : its.indices)
+            for (int k = 0; k < 3; ++k)
+                if (tri[k] >= 0 && size_t(tri[k]) < its.vertices.size())
+                    z = std::min(z, (m * its.vertices[size_t(tri[k])].cast<double>()).z());
+    }
+    return z == std::numeric_limits<double>::max() ? 0. : z;
 }
 
 } // namespace
@@ -274,6 +293,7 @@ CalloutRegions::CalloutRegions(const Model &model, const std::vector<int> &objec
             b.filament       = own > 0 ? own : object_filament;
             b.object_default = own <= 0;
             b.source         = own > 0 ? CalloutSource::Part : CalloutSource::Object;
+            b.z_min          = co_min_z(mv->mesh().its, *mo, *mv);
             if (!mv->is_mm_painted()) {
                 co_add_base(o.bases, b);
                 continue;
@@ -288,7 +308,7 @@ CalloutRegions::CalloutRegions(const Model &model, const std::vector<int> &objec
                 if (s == 0)
                     co_add_base(o.bases, b);
                 else
-                    co_add_base(o.bases, BaseRegion{ int(s), false, CalloutSource::Paint });
+                    co_add_base(o.bases, BaseRegion{ int(s), false, CalloutSource::Paint, co_min_z(per_state[s], *mo, *mv) });
             }
         }
         for (const auto &range : mo->layer_config_ranges) {
@@ -386,11 +406,16 @@ std::vector<CalloutTarget> CalloutRegions::targets() const
             const double z = 0.5 * (cuts[i] + cuts[i + 1]);
             for (const BaseRegion &b : o.bases) {
                 CalloutTarget t = classify(o.idx, b, z);
+                // S5c: where it starts in this band: the band's bottom, or higher where its part does.
+                t.first_z = std::max(cuts[i], b.z_min);
                 auto it = std::find_if(out.begin(), out.end(), [&t](const CalloutTarget &e) { return e.key == t.key; });
                 if (it == out.end())
                     out.push_back(std::move(t));
-                else if (std::find(it->objects.begin(), it->objects.end(), o.idx) == it->objects.end())
-                    it->objects.push_back(o.idx);
+                else {
+                    it->first_z = std::min(it->first_z, t.first_z);
+                    if (std::find(it->objects.begin(), it->objects.end(), o.idx) == it->objects.end())
+                        it->objects.push_back(o.idx);
+                }
             }
         }
     }
@@ -795,9 +820,8 @@ std::string resolve_color_name(const std::string &library_name, const std::strin
     const ColorNameMatch m = nearest_color_name(hex);
     if (m.name.empty())
         return {};
-    const std::string name = translate ? translate(m.name.c_str()) : m.name;
-    // "≈": the nearest of the built-in names, not the maker's own.
-    return m.exact ? name : std::string("\xE2\x89\x88 ") + name;
+    // S5c: the nearest built-in name as it is (S3 put "≈ " in front of a guess).
+    return translate ? translate(m.name.c_str()) : m.name;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -850,10 +874,22 @@ CalloutLabel build_callout_label(const Callout &callout, const LabelFilament &f,
             label.title = words.mixed_title;
     } else {
         const std::string brand = fields.brand ? co_trim(f.vendor) : std::string();
-        // S5b: the product wins over the family; the family stands in when the product is off.
-        std::string product = fields.product ? product_name(f.preset_name, f.vendor) : std::string();
-        if (!fields.product && fields.family) {
-            product         = co_trim(f.type);
+        const std::string type  = co_trim(f.type);
+        // S5c: brand, then the product with its family ("PLA Basic"), without it ("Basic": Family off),
+        // or the family alone ("PLA": Product off).
+        std::string product;
+        if (fields.product) {
+            product = product_name(f.preset_name, f.vendor);
+            if (!fields.family && !type.empty()) {
+                std::string kept, word;
+                std::istringstream words_in(product);
+                while (words_in >> word)
+                    if (co_lower(word) != co_lower(type))
+                        kept += (kept.empty() ? "" : " ") + word;
+                product = kept;
+            }
+        } else if (fields.family) {
+            product         = type;
             family_in_title = !product.empty();
         }
         label.title = brand;
