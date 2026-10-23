@@ -1129,6 +1129,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_line(el, has_overhang_speed);
 
     toggle_line("slowdown_for_curled_perimeters", has_overhang_speed);
+    toggle_line("overhang_shadow_inner_wall", has_overhang_speed);
+    const bool has_overhang_shadow = has_overhang_speed && config->opt_bool("overhang_shadow_inner_wall");
+    toggle_line("overhang_shadow_speed_ratio", has_overhang_shadow);
+    toggle_line("overhang_shadow_distance", has_overhang_shadow);
 
     // Edge: layer-time speed smoothing. A/B fields when mode is a speed-up; C fields when Slow down.
     // Max variation is shared by every non-Off mode.
