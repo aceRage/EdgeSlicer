@@ -856,10 +856,22 @@ bool canvas_query_shared(const std::string& host, const CanvasQueryOptions& opts
     // The status the connection asks for on open says whether a CANVAS is attached; give it a moment.
     while (l->snapshot().status.ams_connect < 0 && now_ms() < deadline && l->connected())
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // A connection that has been up for a while may hold a status from before the last change (a
+    // print that just ended, a CANVAS unplugged): ask for a fresh one, as the short way does, and
+    // use it when it arrives in time. A printer that does not answer keeps the last one.
+    {
+        const long long         asked = now_ms();
+        std::shared_ptr<Waiter> sw    = l->request(Sdcp::CMD_STATUS, json::object(), false);
+        const long long         until = std::min(deadline, asked + 2000);
+        while (l->snapshot().status_at_ms < asked && now_ms() < until && l->connected())
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        l->forget(sw);
+    }
     const Sdcp::Snapshot before = l->snapshot();
     out                         = CanvasQueryResult();
     out.reached                 = true;
     out.ams_connect_status      = before.status.ams_connect;
+    out.print_state             = Sdcp::hub_state(before.status);
     if (before.status.ams_connect == 0) {
         out.no_canvas = true;
         out.error     = "no CANVAS is attached (AmsConnectStatus 0)";

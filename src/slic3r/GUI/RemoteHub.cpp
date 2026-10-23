@@ -21,7 +21,8 @@
 #include "slic3r/Utils/WinFirewall.hpp"
 #include "slic3r/Utils/TailscaleCli.hpp" // where the CLI lives per platform, and the POSIX way to run it
 #include "slic3r/Utils/HubPlatform.hpp"   // go2rtc/ffmpeg lookup, macOS/Linux firewall, port holder, route, keep-alive, child processes
-#include "slic3r/Utils/HubQuit.hpp"       // SIGTERM/SIGINT/SIGHUP -> the tray's Quit, and the shutdown safety net
+#include "slic3r/Utils/HubQuit.hpp"
+#include "slic3r/Utils/HubMosaic.hpp"     // the TV wall's camera mosaic (one H.264 stream per page)       // SIGTERM/SIGINT/SIGHUP -> the tray's Quit, and the shutdown safety net
 
 #include <boost/asio.hpp>
 #include <boost/beast/core/detail/base64.hpp>
@@ -1223,6 +1224,689 @@ static bool run_capture(const std::vector<std::string>& args, std::string& out, 
     return TailscaleCli::run_capture_posix(args, out, exit_code, timeout_ms, 1024 * 1024, timed_out, stop_early);
 #endif
 }
+
+// ---- A child process whose stdout is read as it runs (the camera mosaic's ffmpeg) ----------
+// run_capture() collects a command's whole output after it ends; the mosaic needs the opposite: an
+// ffmpeg that runs for as long as somebody watches, its raw H.264 read off stdout and passed on as
+// it arrives. stderr is kept (the last few KB) for the log when it fails. kill() may be called from
+// another thread; read() then returns 0.
+class StreamProc
+{
+public:
+    StreamProc() = default;
+    StreamProc(const StreamProc&) = delete;
+    StreamProc& operator=(const StreamProc&) = delete;
+    ~StreamProc() { kill(); wait_reap(); }
+
+    // `job` (Windows): the Job Object that ties the child to the hub (go2rtc's), or null.
+    // `with_stdin`: the child reads what write() sends (the mosaic encoder's raw frames);
+    // otherwise its stdin is empty.
+    bool start(const std::vector<std::string>& args, void* job, bool with_stdin = false)
+    {
+#ifdef _WIN32
+        std::wstring cmd;
+        for (const std::string& a : args) {
+            if (!cmd.empty()) cmd += L' ';
+            cmd += quote_arg(widen(a));
+        }
+        SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+        HANDLE out_r = nullptr, out_w = nullptr, err_r = nullptr, err_w = nullptr;
+        if (!::CreatePipe(&out_r, &out_w, &sa, 1 << 20)) return false;
+        if (!::CreatePipe(&err_r, &err_w, &sa, 0)) { ::CloseHandle(out_r); ::CloseHandle(out_w); return false; }
+        ::SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+        ::SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
+        HANDLE in_r = nullptr, in_w = nullptr;
+        if (with_stdin) {
+            if (!::CreatePipe(&in_r, &in_w, &sa, 1 << 20)) {
+                ::CloseHandle(out_r); ::CloseHandle(out_w); ::CloseHandle(err_r); ::CloseHandle(err_w);
+                return false;
+            }
+            ::SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
+        }
+        // The child inherits exactly its own pipe ends. The mosaic starts several of these at once
+        // (a feeder per camera, the encoder, the cards), and a plain bInheritHandles=TRUE would
+        // hand each child the other children's pipe ends that happen to be open at that moment:
+        // a feeder whose camera died then never reads as ended, because a sibling still holds its
+        // stdout open.
+        HANDLE inherit[3];
+        DWORD  n_inherit = 0;
+        inherit[n_inherit++] = out_w;
+        inherit[n_inherit++] = err_w;
+        if (in_r) inherit[n_inherit++] = in_r;
+        SIZE_T attr_size = 0;
+        ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+        std::vector<char> attr_buf(attr_size);
+        auto attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+        const bool inited = attr_size > 0 && ::InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size);
+        const bool listed = inited && ::UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, n_inherit * sizeof(HANDLE),
+                                                        nullptr, nullptr);
+        STARTUPINFOEXW six = {};
+        STARTUPINFOW&  si  = six.StartupInfo;
+        si.cb         = listed ? sizeof(six) : sizeof(si);
+        si.dwFlags    = STARTF_USESTDHANDLES;
+        si.hStdInput  = in_r;
+        si.hStdOutput = out_w;
+        si.hStdError  = err_w;
+        if (listed) six.lpAttributeList = attrs;
+        PROCESS_INFORMATION  pi = {};
+        std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+        buf.push_back(L'\0');
+        const BOOL ok = ::CreateProcessW(nullptr, buf.data(), nullptr, nullptr, TRUE,
+                                         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED |
+                                             (listed ? EXTENDED_STARTUPINFO_PRESENT : 0),
+                                         nullptr, nullptr, &si, &pi);
+        if (inited) ::DeleteProcThreadAttributeList(attrs);
+        ::CloseHandle(out_w);
+        ::CloseHandle(err_w);
+        if (in_r) ::CloseHandle(in_r);
+        if (!ok) { ::CloseHandle(out_r); ::CloseHandle(err_r); if (in_w) ::CloseHandle(in_w); return false; }
+        if (job) ::AssignProcessToJobObject((HANDLE) job, pi.hProcess); // dies with the hub
+        ::ResumeThread(pi.hThread);
+        ::CloseHandle(pi.hThread);
+        m_proc = pi.hProcess;
+        m_out  = out_r;
+        m_err  = err_r;
+        m_in   = in_w;
+        m_err_reader = std::thread([this]() {
+            char  b[2048];
+            DWORD n = 0;
+            while (::ReadFile((HANDLE) m_err, b, sizeof(b), &n, nullptr) && n > 0) append_err(b, n);
+        });
+        return true;
+#else
+        (void) job;
+        int out_p[2], err_p[2], in_p[2] = { -1, -1 };
+        if (::pipe(out_p) != 0) return false;
+        if (::pipe(err_p) != 0) { ::close(out_p[0]); ::close(out_p[1]); return false; }
+        if (with_stdin && ::pipe(in_p) != 0) {
+            ::close(out_p[0]); ::close(out_p[1]); ::close(err_p[0]); ::close(err_p[1]);
+            return false;
+        }
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            ::close(out_p[0]); ::close(out_p[1]); ::close(err_p[0]); ::close(err_p[1]);
+            if (in_p[0] >= 0) { ::close(in_p[0]); ::close(in_p[1]); }
+            return false;
+        }
+        if (pid == 0) {
+            ::dup2(out_p[1], 1);
+            ::dup2(err_p[1], 2);
+            ::close(out_p[0]); ::close(out_p[1]); ::close(err_p[0]); ::close(err_p[1]);
+            if (in_p[0] >= 0) {
+                ::dup2(in_p[0], 0);
+                ::close(in_p[0]); ::close(in_p[1]);
+            } else {
+                const int devnull = ::open("/dev/null", O_RDONLY);
+                if (devnull >= 0) { ::dup2(devnull, 0); ::close(devnull); }
+            }
+            std::vector<char*> argv;
+            for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+            argv.push_back(nullptr);
+            ::execv(args.front().c_str(), argv.data());
+            ::_exit(127);
+        }
+        ::close(out_p[1]);
+        ::close(err_p[1]);
+        if (in_p[0] >= 0) ::close(in_p[0]);
+        m_pid  = pid;
+        m_fd   = out_p[0];
+        m_efd  = err_p[0];
+        m_ifd  = in_p[1];
+        m_err_reader = std::thread([this]() {
+            char b[2048];
+            for (;;) {
+                const ssize_t n = ::read(m_efd, b, sizeof(b));
+                if (n <= 0) break;
+                append_err(b, (size_t) n);
+            }
+        });
+        return true;
+#endif
+    }
+
+    // Up to `cap` bytes of stdout; 0 at the end (the process ended or was killed).
+    size_t read(char* buf, size_t cap)
+    {
+#ifdef _WIN32
+        DWORD n = 0;
+        if (!m_out || !::ReadFile((HANDLE) m_out, buf, (DWORD) cap, &n, nullptr)) return 0;
+        return (size_t) n;
+#else
+        if (m_fd < 0) return 0;
+        for (;;) {
+            const ssize_t n = ::read(m_fd, buf, cap);
+            if (n < 0 && errno == EINTR) continue;
+            return n > 0 ? (size_t) n : 0;
+        }
+#endif
+    }
+
+    // All of `n` bytes to the child's stdin (started with_stdin); false once it is gone.
+    bool write(const char* data, size_t n)
+    {
+#ifdef _WIN32
+        while (n > 0) {
+            DWORD w = 0;
+            if (!m_in || !::WriteFile((HANDLE) m_in, data, (DWORD) std::min<size_t>(n, 1u << 20), &w, nullptr) || w == 0) return false;
+            data += w;
+            n -= w;
+        }
+        return true;
+#else
+        while (n > 0) {
+            if (m_ifd < 0) return false;
+            const ssize_t w = ::write(m_ifd, data, n);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) return false; // EPIPE: SIGPIPE is ignored by the hub
+            data += w;
+            n -= (size_t) w;
+        }
+        return true;
+#endif
+    }
+
+    void kill()
+    {
+        std::lock_guard<std::mutex> lock(m_kill_mutex);
+#ifdef _WIN32
+        if (m_proc && !m_killed) ::TerminateProcess((HANDLE) m_proc, 1);
+#else
+        if (m_pid > 0 && !m_killed) ::kill(m_pid, SIGKILL);
+#endif
+        m_killed = true;
+    }
+
+    std::string err_tail()
+    {
+        std::lock_guard<std::mutex> lock(m_err_mutex);
+        return m_err_text;
+    }
+
+private:
+    void append_err(const char* b, size_t n)
+    {
+        std::lock_guard<std::mutex> lock(m_err_mutex);
+        m_err_text.append(b, n);
+        if (m_err_text.size() > 4096) m_err_text.erase(0, m_err_text.size() - 4096);
+    }
+
+    void wait_reap()
+    {
+#ifdef _WIN32
+        if (m_proc) ::WaitForSingleObject((HANDLE) m_proc, 5000);
+        if (m_err_reader.joinable()) m_err_reader.join();
+        if (m_out) ::CloseHandle((HANDLE) m_out);
+        if (m_err) ::CloseHandle((HANDLE) m_err);
+        if (m_in) ::CloseHandle((HANDLE) m_in);
+        if (m_proc) ::CloseHandle((HANDLE) m_proc);
+        m_out = m_err = m_in = m_proc = nullptr;
+#else
+        if (m_pid > 0) { int st = 0; ::waitpid(m_pid, &st, 0); }
+        if (m_err_reader.joinable()) m_err_reader.join();
+        if (m_fd >= 0) ::close(m_fd);
+        if (m_efd >= 0) ::close(m_efd);
+        if (m_ifd >= 0) ::close(m_ifd);
+        m_pid = -1;
+        m_fd = m_efd = m_ifd = -1;
+#endif
+    }
+
+#ifdef _WIN32
+    void* m_proc = nullptr;
+    void* m_out  = nullptr;
+    void* m_err  = nullptr;
+    void* m_in   = nullptr;
+#else
+    pid_t m_pid = -1;
+    int   m_fd  = -1;
+    int   m_efd = -1;
+    int   m_ifd = -1;
+#endif
+    bool        m_killed = false;
+    std::mutex  m_kill_mutex;
+    std::mutex  m_err_mutex;
+    std::string m_err_text;
+    std::thread m_err_reader;
+};
+
+// ---- The camera mosaic's pipeline (the TV wall; see "Camera mosaic" below and HubMosaic.hpp) ----
+// One small ffmpeg per live cell decodes its camera into raw frames at the cell's size (a feeder);
+// a compositor thread puts the latest frame of every cell into the canvas at a steady rate and
+// writes it into ONE encoder ffmpeg; a reader thread passes the encoder's H.264 to whoever reads it
+// (go2rtc's /relay/mosaic connection) and keeps the latest GOP for the next one to connect.
+//
+// Startup is what this is built for. The encoder never waits on a camera: its first keyframe shows
+// a "Connecting..." card per cell, each camera appears when its own first frame arrives, and one
+// that fails becomes an "Offline" card (tried again with backoff) without disturbing the rest.
+// The hub starts the pipeline when the TV asks for a page, before go2rtc connects, so the cameras
+// connect while the TV's player is still setting up, and keeps it MOSAIC_LINGER_S after the last
+// viewer left (a page turn, a look at one camera and back) - then it stops by itself, so the GPU
+// encoder is never left running for nobody.
+//
+// Timing (ms after the TV's request) goes to the hub log as "RemoteHub: mosaic +<ms> ...": no
+// URLs there, they carry printer addresses and access codes.
+static const int MOSAIC_LINGER_S = 30;
+
+class MosaicPipeline
+{
+public:
+    using Clock = std::chrono::steady_clock;
+
+    // One reader of the encoded stream (a /relay/mosaic connection).
+    struct Sub
+    {
+        std::mutex              m;
+        std::condition_variable cv;
+        std::string             q;
+        bool                    closed = false;
+    };
+
+    MosaicPipeline(std::string ff, void* job, const HubMosaic::Spec& spec, Clock::time_point asked)
+        : m_ff(std::move(ff)), m_job(job), m_spec(spec), m_asked(asked), m_last_active(Clock::now())
+    {}
+    MosaicPipeline(const MosaicPipeline&)            = delete;
+    MosaicPipeline& operator=(const MosaicPipeline&) = delete;
+    ~MosaicPipeline() { stop(); }
+
+    // The encoder and every thread; false when the encoder did not even start.
+    bool start()
+    {
+        const HubMosaic::Spec spec = page();
+        if (!m_enc.start(HubMosaic::encoder_args_raw(m_ff, spec), m_job, true)) {
+            m_halted = true;
+            return false;
+        }
+        m_started = Clock::now();
+        log_at("encoder " + std::string(HubMosaic::encoder_name(spec.encoder)) + " started");
+        m_reader     = std::thread([this]() { read_encoder(); });
+        m_compositor = std::thread([this]() { composite(); });
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        start_page_locked();
+        return true;
+    }
+
+    // Idempotent; never from one of this pipeline's own threads.
+    void stop()
+    {
+        halt(false);
+        std::vector<std::unique_ptr<Feed>> feeds;
+        std::vector<std::thread>           aux;
+        {
+            std::lock_guard<std::mutex> lock(m_page_mutex);
+            feeds.swap(m_feeds);
+            aux.swap(m_aux);
+        }
+        for (auto& f : feeds) f->halt();
+        for (auto& f : feeds) if (f->th.joinable()) f->th.join();
+        for (auto& t : aux) if (t.joinable()) t.join();
+        if (m_compositor.joinable()) m_compositor.join();
+        if (m_reader.joinable()) m_reader.join();
+    }
+
+    bool running() const { return !m_halted; }
+    // The encoder ended by itself (not stopped): a GPU encoder that refused, say.
+    bool encoder_failed() const { return m_enc_failed; }
+    // ... and did so within a few seconds or before its first keyframe.
+    bool failed_early() const { return m_enc_failed && (!m_keyframe || m_ran_ms < 5000); }
+    std::string encoder_errors() { return m_enc.err_tail(); }
+
+    // Whether `s` can be shown by this encoder as it is (only the cells differ).
+    bool same_output(const HubMosaic::Spec& s) const
+    {
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        return s.size.w == m_spec.size.w && s.size.h == m_spec.size.h && HubMosaic::clamp_fps(s.fps) == HubMosaic::clamp_fps(m_spec.fps) &&
+               s.kbps == m_spec.kbps && s.encoder == m_spec.encoder;
+    }
+
+    // A new page on the running encoder: the old feeders go, the new ones start; the stream (and
+    // the TV's player) carries on.
+    void set_page(const HubMosaic::Spec& spec, Clock::time_point asked)
+    {
+        std::vector<std::unique_ptr<Feed>> old;
+        {
+            std::lock_guard<std::mutex> lock(m_page_mutex);
+            old.swap(m_feeds);
+            m_spec  = spec;
+            m_asked = asked;
+            start_page_locked();
+        }
+        for (auto& f : old) f->halt();
+        for (auto& f : old) if (f->th.joinable()) f->th.join();
+        touch();
+    }
+
+    void touch()
+    {
+        std::lock_guard<std::mutex> lock(m_sub_mutex);
+        m_last_active = Clock::now();
+    }
+
+    std::shared_ptr<Sub> subscribe()
+    {
+        auto s = std::make_shared<Sub>();
+        std::lock_guard<std::mutex> lock(m_sub_mutex);
+        s->q = m_cache.data(); // the latest keyframe on: a picture at once
+        s->closed = m_halted;
+        m_subs.push_back(s);
+        m_last_active = Clock::now();
+        return s;
+    }
+
+    void unsubscribe(const std::shared_ptr<Sub>& s)
+    {
+        std::lock_guard<std::mutex> lock(m_sub_mutex);
+        m_subs.erase(std::remove(m_subs.begin(), m_subs.end(), s), m_subs.end());
+        m_last_active = Clock::now();
+    }
+
+    long long ms_since_asked() const
+    {
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - m_asked).count();
+    }
+
+    void log_at(const std::string& what) const
+    {
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: mosaic +" << ms_since_asked() << " ms: " << what;
+    }
+
+private:
+    // One live cell's camera: its ffmpeg, retried with backoff while the page is up.
+    struct Feed
+    {
+        HubMosaic::Cell         cell;
+        HubMosaic::Rect         rect;
+        int                     index = 0;
+        std::mutex              m; // guards proc, frame, live, offline
+        std::condition_variable cv;
+        std::unique_ptr<StreamProc> proc;
+        std::vector<unsigned char> frame; // the latest whole frame (rect-sized yuv420p)
+        bool                    live    = false;
+        bool                    offline = false;
+        bool                    stop    = false;
+        std::thread             th;
+
+        void halt()
+        {
+            std::lock_guard<std::mutex> lock(m);
+            stop = true;
+            if (proc) proc->kill();
+            cv.notify_all();
+        }
+    };
+
+    static const char* kind_name(const HubMosaic::Cell& c) { return c.kind == HubMosaic::CellKind::Rtsp ? "rtsp" : "mjpeg"; }
+
+    HubMosaic::Spec page() const
+    {
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        return m_spec;
+    }
+
+    // m_page_mutex held: feeders for the live cells of m_spec, and the cards rendered.
+    void start_page_locked()
+    {
+        ++m_page_gen;
+        m_card_connecting.reset();
+        m_card_offline.reset();
+        for (int i = 0; i < m_spec.layout.cells() && i < (int) m_spec.cells.size(); ++i) {
+            const HubMosaic::Cell& c = m_spec.cells[i];
+            if (c.kind != HubMosaic::CellKind::Rtsp && c.kind != HubMosaic::CellKind::Mjpeg) continue;
+            auto f   = std::make_unique<Feed>();
+            f->cell  = c;
+            f->rect  = HubMosaic::cell_rect(m_spec.layout, m_spec.size, i);
+            f->index = i;
+            Feed* raw = f.get();
+            f->th     = std::thread([this, raw]() { feed(*raw); });
+            m_feeds.push_back(std::move(f));
+        }
+        const HubMosaic::Spec spec = m_spec;
+        const unsigned        gen  = m_page_gen;
+        m_aux.emplace_back([this, spec, gen]() { render_cards(spec, gen); });
+    }
+
+    // The "Connecting..." and "Offline" canvases of this page (one ffmpeg frame each).
+    void render_cards(const HubMosaic::Spec spec, unsigned gen)
+    {
+        const size_t n = HubMosaic::i420_size(spec.size.w, spec.size.h);
+        auto render = [&](const char* note) -> std::shared_ptr<std::vector<unsigned char>> {
+            StreamProc p;
+            if (!p.start(HubMosaic::card_args(m_ff, spec, note), m_job)) return nullptr;
+            auto   buf = std::make_shared<std::vector<unsigned char>>(n);
+            size_t got = 0;
+            while (got < n && !m_halted) {
+                const size_t r = p.read((char*) buf->data() + got, n - got);
+                if (r == 0) break;
+                got += r;
+            }
+            return got == n ? buf : nullptr;
+        };
+        auto connecting = render(HubMosaic::NOTE_CONNECTING);
+        {
+            std::lock_guard<std::mutex> lock(m_page_mutex);
+            if (m_page_gen != gen) return;
+            m_card_connecting = connecting;
+        }
+        auto offline = render(HubMosaic::NOTE_OFFLINE);
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        if (m_page_gen == gen) m_card_offline = offline;
+    }
+
+    void feed(Feed& f)
+    {
+        const size_t n        = HubMosaic::i420_size(f.rect.w, f.rect.h);
+        // An Elegoo CC1 has a viewer limit: the relay said it was free when the page was set; a
+        // failure is not retried in a loop (D12), the next page request asks again.
+        const bool   retry    = f.cell.url.find("/elegoo") == std::string::npos;
+        int          failures = 0;
+        bool         first    = true;
+        std::vector<unsigned char> buf(n);
+        // Lock order is m_page_mutex, then Feed::m (the compositor's): nothing below takes the
+        // page lock (log_at does) while holding f.m.
+        const std::vector<std::string> args = HubMosaic::feeder_args(m_ff, f.cell, f.rect, m_spec_font());
+        while (!m_halted) {
+            auto proc = std::make_unique<StreamProc>();
+            const auto t_spawn = Clock::now();
+            {
+                std::lock_guard<std::mutex> lock(f.m);
+                if (f.stop) return;
+                if (!proc->start(args, m_job)) {
+                    f.offline = true;
+                    return;
+                }
+                f.proc = std::move(proc);
+            }
+            StreamProc* p   = f.proc.get();
+            size_t      got = 0;
+            for (;;) {
+                const size_t r = p->read((char*) buf.data() + got, n - got);
+                if (r == 0) break;
+                got += r;
+                if (got < n) continue;
+                got = 0;
+                {
+                    std::lock_guard<std::mutex> lock(f.m);
+                    f.frame.swap(buf);
+                    if (buf.size() != n) buf.resize(n);
+                    f.live    = true;
+                    f.offline = false;
+                }
+                if (first) {
+                    first = false;
+                    log_at("cell " + std::to_string(f.index) + " (" + kind_name(f.cell) + ") first frame, " +
+                           std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t_spawn).count()) +
+                           " ms after its ffmpeg started");
+                }
+            }
+            const long long ran = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t_spawn).count();
+            {
+                std::lock_guard<std::mutex> lock(f.m);
+                f.live    = false;
+                f.offline = true;
+                if (f.stop || m_halted) return;
+            }
+            failures = ran > 30000 ? 1 : failures + 1;
+            const int wait = HubMosaic::retry_delay_ms(failures);
+            // The ffmpeg's own words may hold the camera URL (address, access code): not logged.
+            log_at("cell " + std::to_string(f.index) + " (" + kind_name(f.cell) + ") ended after " + std::to_string(ran) + " ms" +
+                   (retry ? ", again in " + std::to_string(wait) + " ms" : ", not retried"));
+            if (!retry) return;
+            std::unique_lock<std::mutex> lock(f.m);
+            f.cv.wait_for(lock, std::chrono::milliseconds(wait), [&]() { return f.stop || m_halted.load(); });
+            if (f.stop || m_halted) return;
+        }
+    }
+
+    std::string m_spec_font() const
+    {
+        std::lock_guard<std::mutex> lock(m_page_mutex);
+        return m_spec.font;
+    }
+
+    void composite()
+    {
+        HubMosaic::Spec spec   = page();
+        const size_t    n      = HubMosaic::i420_size(spec.size.w, spec.size.h);
+        std::vector<unsigned char> frame(n);
+        auto blank = [&]() {
+            std::fill(frame.begin(), frame.begin() + (size_t) spec.size.w * spec.size.h, (unsigned char) 0x22);
+            std::fill(frame.begin() + (size_t) spec.size.w * spec.size.h, frame.end(), (unsigned char) 0x80);
+        };
+        blank();
+        const auto period = std::chrono::microseconds(1000000 / HubMosaic::clamp_fps(spec.fps));
+        auto       next   = Clock::now();
+        unsigned   shown_gen = 0;
+        while (!m_halted) {
+            std::shared_ptr<std::vector<unsigned char>> connecting, offline;
+            std::vector<Feed*>                          feeds;
+            unsigned                                    gen = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_page_mutex);
+                spec       = m_spec;
+                connecting = m_card_connecting;
+                offline    = m_card_offline;
+                gen        = m_page_gen;
+                for (auto& f : m_feeds) feeds.push_back(f.get());
+                // Feeds are only destroyed after set_page()/stop() swapped them out and joined
+                // their threads; holding m_page_mutex while reading them keeps them alive.
+                if (gen != shown_gen && !connecting) blank();
+                if (connecting) {
+                    std::vector<bool> drawn(spec.layout.cells(), false);
+                    for (Feed* f : feeds) {
+                        std::lock_guard<std::mutex> fl(f->m);
+                        if (f->live && f->frame.size() == HubMosaic::i420_size(f->rect.w, f->rect.h)) {
+                            HubMosaic::blit_i420(frame.data(), spec.size, f->rect, f->frame.data());
+                        } else {
+                            const auto& card = (f->offline && offline) ? offline : connecting;
+                            HubMosaic::copy_cell_i420(frame.data(), card->data(), spec.size, f->rect);
+                        }
+                        drawn[f->index] = true;
+                    }
+                    for (int i = 0; i < spec.layout.cells(); ++i)
+                        if (!drawn[i])
+                            HubMosaic::copy_cell_i420(frame.data(), connecting->data(), spec.size,
+                                                      HubMosaic::cell_rect(spec.layout, spec.size, i));
+                    shown_gen = gen;
+                } else {
+                    for (Feed* f : feeds) {
+                        std::lock_guard<std::mutex> fl(f->m);
+                        if (f->live && f->frame.size() == HubMosaic::i420_size(f->rect.w, f->rect.h))
+                            HubMosaic::blit_i420(frame.data(), spec.size, f->rect, f->frame.data());
+                    }
+                    shown_gen = gen;
+                }
+            }
+            // The encoder is gone: read_encoder() sees it end and says why (halt(true)).
+            if (!m_enc.write((const char*) frame.data(), frame.size())) break;
+            // Nobody has read the stream (nor asked for a page) for a while: stop.
+            {
+                std::lock_guard<std::mutex> lock(m_sub_mutex);
+                if (m_subs.empty() && Clock::now() - m_last_active > std::chrono::seconds(MOSAIC_LINGER_S)) {
+                    log_at("no viewer for " + std::to_string(MOSAIC_LINGER_S) + " s, stopped");
+                    m_idle = true;
+                }
+            }
+            if (m_idle) break;
+            next += period;
+            const auto now = Clock::now();
+            if (next < now - period * 2) next = now; // fell behind (a stalled pipe): no burst after
+            std::this_thread::sleep_until(next);
+        }
+        if (m_idle) halt(false);
+    }
+
+    void read_encoder()
+    {
+        std::vector<char> buf(64 * 1024);
+        for (;;) {
+            const size_t r = m_enc.read(buf.data(), buf.size());
+            if (r == 0) break;
+            std::lock_guard<std::mutex> lock(m_sub_mutex);
+            const bool had = m_cache.keyframes_seen();
+            m_cache.feed(buf.data(), r);
+            if (!had && m_cache.keyframes_seen()) {
+                m_keyframe = true;
+                log_at("first keyframe");
+            }
+            if (!m_cache.keyframes_seen()) continue; // nothing a decoder can start on yet
+            for (auto& s : m_subs) {
+                std::lock_guard<std::mutex> sl(s->m);
+                if (s->closed) continue;
+                if (s->q.size() > (16u << 20)) {
+                    s->closed = true; // a reader that stopped reading: let it go
+                } else {
+                    s->q.append(buf.data(), r);
+                }
+                s->cv.notify_all();
+            }
+        }
+        m_ran_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - m_started).count();
+        halt(!m_halted && !m_idle);
+    }
+
+    // Ends every process (no joins: stop() does those) and closes every reader.
+    void halt(bool encoder_failed)
+    {
+        if (encoder_failed) m_enc_failed = true;
+        const bool was = m_halted.exchange(true);
+        if (!was && encoder_failed) log_at("encoder ended by itself");
+        m_enc.kill();
+        {
+            std::lock_guard<std::mutex> lock(m_page_mutex);
+            for (auto& f : m_feeds) f->halt();
+        }
+        std::lock_guard<std::mutex> lock(m_sub_mutex);
+        for (auto& s : m_subs) {
+            std::lock_guard<std::mutex> sl(s->m);
+            s->closed = true;
+            s->cv.notify_all();
+        }
+    }
+
+    const std::string  m_ff;
+    void* const        m_job;
+    mutable std::mutex m_page_mutex; // guards the page: m_spec, m_asked, m_page_gen, cards, m_feeds, m_aux
+    HubMosaic::Spec    m_spec;
+    Clock::time_point  m_asked;
+    unsigned           m_page_gen = 0;
+    std::shared_ptr<std::vector<unsigned char>> m_card_connecting, m_card_offline;
+    std::vector<std::unique_ptr<Feed>>          m_feeds;
+    std::vector<std::thread>                    m_aux;
+
+    std::mutex                        m_sub_mutex; // guards m_subs, m_cache, m_last_active
+    std::vector<std::shared_ptr<Sub>> m_subs;
+    HubMosaic::GopCache               m_cache;
+    Clock::time_point                 m_last_active;
+
+    StreamProc         m_enc;
+    Clock::time_point  m_started;
+    std::thread        m_reader, m_compositor;
+    std::atomic<bool>  m_halted { false };
+    std::atomic<bool>  m_idle { false };
+    std::atomic<bool>  m_enc_failed { false };
+    std::atomic<bool>  m_keyframe { false };
+    std::atomic<long long> m_ran_ms { 0 };
+};
 
 // ---- Tailscale (remote access): the user's own Tailscale install publishes the hub inside their
 // tailnet with `tailscale serve`; the phone runs the Tailscale app signed in to the same account.
@@ -2905,6 +3589,11 @@ private:
     std::string state_for_phone();
     bool  lookup_host(const std::string& id, std::string& ip, std::string& code);
     std::string relay_h264_url(const std::string& id); // the U1 raw stream behind /relay/h264?id=, or ""
+    // The TV wall's camera mosaic (see the section "Camera mosaic").
+    std::string mosaic_request(const std::string& query, int& status); // GET /r/<token>/mosaic
+    void        relay_mosaic(tcp::socket& client);                      // GET /relay/mosaic: go2rtc's edge_mosaic source
+    void        mosaic_cells(HubMosaic::Spec& spec, const std::vector<std::string>& ids);
+    HubMosaic::Encoder mosaic_encoder_locked(const std::string& ff);    // m_mosaic_mutex held
     FirewallState  firewall_state(bool refresh);       // cached; the query runs on a detached thread
     FirewallState  lan_firewall_state(bool refresh);   // same, but for the phone/LAN listener port
     TailscaleState remote_state(bool refresh);         // cached ~15 s; runs the tailscale CLI off the lock
@@ -2956,6 +3645,16 @@ private:
     long long                      m_refused_no_login_at { 0 };   // ... the latest one (unix seconds)
     long long                      m_refused_no_login_logged { 0 }; // when the log last said so
     int                            m_go2rtc_port { 0 };
+    int                            m_rtsp_port { 0 };            // go2rtc's loopback RTSP listener (0 = none: no ffmpeg)
+    std::mutex                     m_mosaic_mutex;               // guards the six below
+    HubMosaic::Spec                m_mosaic_spec;                // the page the mosaic shows
+    bool                           m_mosaic_set { false };
+    bool                           m_mosaic_listed { false };    // `ffmpeg -encoders` was read
+    std::vector<HubMosaic::Encoder> m_mosaic_untested;           // listed, not test-encoded yet, best first
+    std::vector<HubMosaic::Encoder> m_mosaic_encoders;           // test-encoded fine here, best first
+    std::shared_ptr<MosaicPipeline> m_mosaic_pipe;               // running (or lingering) for the page
+    std::atomic<unsigned>          m_mosaic_gen { 0 };           // bumped by a new page
+    std::atomic<unsigned>          m_mosaic_owner { 0 };         // the /relay/mosaic connection that runs it
     // What register_streams() has put into this go2rtc (name -> source). Only its single worker
     // touches it; go2rtc lives exactly as long as this server, so it never goes stale.
     std::map<std::string, std::string> m_registered_streams;
@@ -4264,6 +4963,10 @@ void HubServer::start_go2rtc()
         // than 8554 so two hubs on one PC cannot collide.
         const bool want_ffmpeg = !ffmpeg_path().empty();
         int rtsp_port = want_ffmpeg ? free_loopback_port() : 0;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_rtsp_port = rtsp_port; // the mosaic reads go2rtc streams from here
+        }
         if (want_ffmpeg && rtsp_port == 0)
             BOOST_LOG_TRIVIAL(warning) << "RemoteHub: no free loopback port for go2rtc's RTSP; quality variants will not start";
         if (rtsp_port > 0) cfg << "rtsp:\n  listen: \"127.0.0.1:" << rtsp_port << "\"\n";
@@ -4481,6 +5184,10 @@ std::map<std::string, std::string> HubServer::desired_streams()
         own    = m_own_streams;
     }
     std::map<std::string, std::string> want;
+    // The TV wall's mosaic: one fixed stream, fed by /relay/mosaic on the control plane like the
+    // U1 relay. go2rtc pulls it only while somebody watches, so the ffmpeg behind it runs only then.
+    if (port > 0 && !ffmpeg_path().empty())
+        want[HubMosaic::STREAM_NAME] = "http://127.0.0.1:" + std::to_string(port) + "/relay/mosaic?lt=" + secret;
     if (state.empty()) return Testing::merge_desired_streams(want, own);
     try {
         json j = json::parse(state);
@@ -4733,6 +5440,7 @@ std::string HubServer::state_for_phone()
     out["quality"]      = json::array();
     for (const std::string& q : quality_variants()) out["quality"].push_back(q);
     out["quality_mjpeg"] = true; // ?fps= on the Bambu relay, decoder-free
+    out["mosaic"]        = !ffmpeg_path().empty(); // /r/<token>/mosaic (the TV wall), needs the bundled ffmpeg
     try {
         json j = json::parse(state);
         for (const auto& h : j.value("hosts", json::array())) {
@@ -4794,6 +5502,386 @@ bool HubServer::lookup_host(const std::string& id, std::string& ip, std::string&
             }
     } catch (...) {}
     return false;
+}
+
+// ---- Camera mosaic (the TV wall) --------------------------------------------------------------
+// One H.264 stream with a whole page of cameras in it, so a TV with a couple of hardware decoders
+// plays a 2x2 or 3x3 wall with ONE (HubMosaic.hpp has the why). The TV asks for a page with
+// /r/<token>/mosaic, then plays the go2rtc stream "edge_mosaic" through the ordinary player. go2rtc
+// pulls that stream from /relay/mosaic here only while somebody watches; this runs one ffmpeg for
+// it and passes its raw H.264 on. A new page restarts the ffmpeg on the same connection (a short
+// gap), and when go2rtc drops the connection - the last viewer left - the ffmpeg is killed.
+//
+// Inputs are the sources the hub already serves, never a new connection to a printer: go2rtc
+// streams through go2rtc's own loopback RTSP (one camera connection however many watch), Bambu
+// P1/A1 and Elegoo CC1 cameras through the hub's MJPEG relay (one printer connection however many
+// watch). A CC1 the relay reports busy (its viewer limit) is not connected at all; its cell says
+// so, as does a camera that does not answer.
+
+static std::string mosaic_font()
+{
+    std::vector<std::string> cands;
+#ifdef _WIN32
+    const char* windir = std::getenv("WINDIR");
+    const std::string w = windir && *windir ? std::string(windir) : std::string("C:/Windows");
+    cands = { w + "/Fonts/arial.ttf", w + "/Fonts/segoeui.ttf" };
+#elif defined(__APPLE__)
+    cands = { "/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf", "/System/Library/Fonts/Helvetica.ttc" };
+#else
+    cands = { "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+              "/usr/share/fonts/TTF/DejaVuSans.ttf" };
+#endif
+    for (const std::string& c : cands) {
+        boost::system::error_code ec;
+        if (fs::exists(c, ec)) return c;
+    }
+    return "";
+}
+
+// The best H.264 encoder that works on this PC: listed by `ffmpeg -encoders` (once), then
+// test-encoded for a moment in order of preference (a listed NVENC on a PC without an NVIDIA GPU
+// fails here, not on the TV) until one works. The rest are only tried when that one fails later
+// (relay_mosaic drops it from m_mosaic_encoders): testing all of them up front cost the first
+// request ~2 s. m_mosaic_mutex held.
+HubMosaic::Encoder HubServer::mosaic_encoder_locked(const std::string& ff)
+{
+    if (!m_mosaic_listed) {
+        m_mosaic_listed = true;
+        std::string out;
+        int         code = 0;
+        if (run_capture({ ff, "-hide_banner", "-encoders" }, out, code, 10000) && code == 0)
+            m_mosaic_untested = HubMosaic::encoder_preference(out);
+    }
+    while (m_mosaic_encoders.empty() && !m_mosaic_untested.empty()) {
+        const HubMosaic::Encoder e = m_mosaic_untested.front();
+        m_mosaic_untested.erase(m_mosaic_untested.begin());
+        std::vector<std::string> args = { ff, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+                                          "color=c=black:s=1280x720:r=15", "-frames:v", "10", "-pix_fmt", "yuv420p" };
+        const std::vector<std::string> enc = HubMosaic::encoder_args(e, 2000);
+        args.insert(args.end(), enc.begin(), enc.end());
+        args.insert(args.end(), { "-f", "null", "-" });
+        std::string o;
+        int         c  = 0;
+        const auto  t0 = std::chrono::steady_clock::now();
+        const bool  ok = run_capture(args, o, c, 15000) && c == 0;
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: mosaic encoder " << HubMosaic::encoder_name(e) << (ok ? " works" : " does not work here")
+                                << " (tested in "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()
+                                << " ms)";
+        if (ok) m_mosaic_encoders.push_back(e);
+    }
+    return m_mosaic_encoders.empty() ? HubMosaic::Encoder::None : m_mosaic_encoders.front();
+}
+
+// The cells for `ids`, in order, each with what to play or what to say.
+void HubServer::mosaic_cells(HubMosaic::Spec& spec, const std::vector<std::string>& ids)
+{
+    std::string state;
+    int         rtsp = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        state = m_state;
+        rtsp  = m_rtsp_port;
+    }
+    std::map<std::string, json> hosts;
+    try {
+        json j = json::parse(state);
+        for (const auto& h : j.value("hosts", json::array()))
+            if (!h.value("id", "").empty()) hosts[h.value("id", "")] = h;
+    } catch (...) {}
+    const int relay = BambuCamRelay::get().port();
+    const int fps   = HubMosaic::clamp_fps(spec.fps);
+    spec.cells.assign(spec.layout.cells(), HubMosaic::Cell{});
+    for (size_t i = 0; i < ids.size() && i < spec.cells.size(); ++i) {
+        HubMosaic::Cell& c = spec.cells[i];
+        c.id               = ids[i];
+        auto it            = hosts.find(ids[i]);
+        if (it == hosts.end()) {
+            c.kind = HubMosaic::CellKind::Placeholder;
+            c.note = "Not on the hub";
+            continue;
+        }
+        const json&       h     = it->second;
+        const std::string rkind = h.value("rkind", "");
+        c.label                 = h.value("alias", "").empty() ? ids[i] : h.value("alias", "");
+        std::string rname       = h.value("rname", "");
+        if (!u1_h264_url(h).empty()) rname = u1_stream_name(ids[i]);
+        if (!rname.empty() && (rkind == "go2rtc" || !u1_h264_url(h).empty())) {
+            if (rtsp > 0) {
+                c.kind = HubMosaic::CellKind::Rtsp;
+                c.url  = "rtsp://127.0.0.1:" + std::to_string(rtsp) + "/" + rname;
+            } else {
+                c.kind = HubMosaic::CellKind::Placeholder;
+                c.note = "Not available";
+            }
+        } else if (rkind == "p1") {
+            const std::string ip = h.value("ip", ""), code = h.value("code", "");
+            if (relay > 0 && !ip.empty() && !code.empty()) {
+                c.kind = HubMosaic::CellKind::Mjpeg;
+                c.url  = "http://127.0.0.1:" + std::to_string(relay) + "/bambu?ip=" + percent_encode(ip) + "&code=" + percent_encode(code) +
+                        "&fps=" + std::to_string(fps);
+            } else {
+                c.kind = HubMosaic::CellKind::Placeholder;
+                c.note = "Offline";
+            }
+        } else if (rkind == "elegoo") {
+            const std::string ip = ElegooCam::host_from_address(h.value("ip", ""));
+            if (relay <= 0 || ip.empty()) {
+                c.kind = HubMosaic::CellKind::Placeholder;
+                c.note = "Offline";
+                continue;
+            }
+            // The relay's own word on the printer first: at its viewer limit, connecting would only
+            // be refused (and would never take a slot from anybody, but would cost a try).
+            std::string st;
+            Http::get("http://127.0.0.1:" + std::to_string(relay) + "/elegoo/status?ip=" + percent_encode(ip))
+                .timeout_connect(2)
+                .timeout_max(4)
+                .on_complete([&st](std::string body, unsigned) {
+                    try { st = json::parse(body).value("state", ""); } catch (...) {}
+                })
+                .perform_sync();
+            const std::string note = HubMosaic::elegoo_note(st);
+            if (!note.empty()) {
+                c.kind = HubMosaic::CellKind::Placeholder;
+                c.note = note;
+            } else {
+                c.kind = HubMosaic::CellKind::Mjpeg;
+                c.url  = "http://127.0.0.1:" + std::to_string(relay) + "/elegoo?ip=" + percent_encode(ip) + "&fps=" + std::to_string(fps);
+            }
+        } else {
+            c.kind = HubMosaic::CellKind::Placeholder;
+            c.note = "Plays only on the PC";
+        }
+    }
+    // No camera is tried here (that cost the TV up to 9 s before the first picture): each live
+    // cell gets its own feeder in MosaicPipeline, and one that does not answer turns into an
+    // "Offline" card there without holding up the others.
+}
+
+static const char* mosaic_cell_state(const HubMosaic::Cell& c)
+{
+    switch (c.kind) {
+    case HubMosaic::CellKind::Rtsp:
+    case HubMosaic::CellKind::Mjpeg: return "live";
+    case HubMosaic::CellKind::Placeholder: return "placeholder";
+    default: return "empty";
+    }
+}
+
+// GET /r/<token>/mosaic?ids=a,b,c,d&layout=2x2[&fps=15][&h=1080][&q=low|med|high]
+// Sets the page the mosaic shows (the one mosaic of this hub: a new page replaces the last) and
+// says what each cell shows. The TV then plays the go2rtc stream named in "stream".
+std::string HubServer::mosaic_request(const std::string& query, int& status)
+{
+    const auto  t_asked = std::chrono::steady_clock::now();
+    json        out;
+    const std::string ff = ffmpeg_path();
+    int         go2rtc   = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        go2rtc = m_go2rtc_port;
+    }
+    out["ok"] = false;
+    if (ff.empty() || go2rtc == 0) {
+        status        = 503;
+        out["reason"] = ff.empty() ? "no_ffmpeg" : "no_go2rtc";
+        return out.dump();
+    }
+    HubMosaic::Layout layout;
+    const std::string lname = query_param(query, "layout");
+    if (!HubMosaic::parse_layout(lname.empty() ? "2x2" : lname, layout)) {
+        status        = 400;
+        out["reason"] = "bad_layout";
+        return out.dump();
+    }
+    const std::vector<std::string> ids = HubMosaic::parse_ids(query_param(query, "ids"), (size_t) layout.cells());
+    if (ids.empty()) {
+        status        = 400;
+        out["reason"] = "no_ids";
+        return out.dump();
+    }
+    HubMosaic::Spec spec;
+    spec.layout = layout;
+    spec.size   = HubMosaic::output_size(std::atoi(query_param(query, "h").c_str()));
+    spec.fps    = HubMosaic::clamp_fps(std::atoi(query_param(query, "fps").c_str()));
+    spec.kbps   = HubMosaic::default_kbps(spec.size, spec.fps, query_param(query, "q"));
+    spec.font   = mosaic_font();
+    {
+        std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+        spec.encoder = mosaic_encoder_locked(ff);
+    }
+    if (spec.encoder == HubMosaic::Encoder::None) {
+        status        = 503;
+        out["reason"] = "no_encoder";
+        return out.dump();
+    }
+    const long long enc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_asked).count();
+    mosaic_cells(spec, ids);
+    bool     restarted = false;
+    unsigned gen       = 0;
+    // Start (or re-page) the pipeline now, before go2rtc connects: the cameras connect while the
+    // TV is still setting its player up. It stops by itself MOSAIC_LINGER_S after the last viewer.
+    std::shared_ptr<MosaicPipeline> old;
+    const char*                     how = "kept";
+    {
+        std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+        restarted = !m_mosaic_set || !spec.same_page(m_mosaic_spec);
+        m_mosaic_spec = spec;
+        m_mosaic_set  = true;
+        if (restarted) ++m_mosaic_gen;
+        gen = m_mosaic_gen;
+        auto& pipe = m_mosaic_pipe;
+        if (pipe && pipe->running() && pipe->same_output(spec)) {
+            if (restarted) {
+                pipe->set_page(spec, t_asked);
+                how = "new page on the running encoder";
+            }
+            pipe->touch();
+        } else {
+            old = std::move(pipe);
+            void* job = nullptr;
+            {
+                std::lock_guard<std::mutex> l2(m_mutex);
+                job = m_job;
+            }
+            pipe = std::make_shared<MosaicPipeline>(ff, job, spec, t_asked);
+            how  = "started";
+            if (!pipe->start()) {
+                pipe.reset();
+                how = "encoder did not start";
+            }
+        }
+    }
+    if (old) old->stop(); // its reader (a /relay/mosaic connection) moves to the new one
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: mosaic page " << layout.name() << " asked: answered in "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_asked).count()
+                            << " ms (encoder choice " << enc_ms << " ms), pipeline " << how;
+    out["ok"]         = true;
+    out["stream"]     = HubMosaic::STREAM_NAME;
+    out["generation"] = gen;
+    out["restarted"]  = restarted;
+    out["layout"]     = layout.name();
+    out["width"]      = spec.size.w;
+    out["height"]     = spec.size.h;
+    out["fps"]        = spec.fps;
+    out["encoder"]    = HubMosaic::encoder_name(spec.encoder);
+    json cells        = json::array();
+    for (int i = 0; i < layout.cells(); ++i) {
+        const HubMosaic::Cell& c = spec.cells[i];
+        const HubMosaic::Rect  r = HubMosaic::cell_rect(layout, spec.size, i);
+        cells.push_back({ { "id", c.id }, { "state", mosaic_cell_state(c) }, { "note", c.note }, { "label", c.label },
+                          { "x", r.x }, { "y", r.y }, { "w", r.w }, { "h", r.h } });
+    }
+    out["cells"] = cells;
+    status       = 200;
+    return out.dump();
+}
+
+// go2rtc's source for "edge_mosaic" (loopback + hub secret, like /relay/h264): the mosaic
+// pipeline's raw H.264 for as long as go2rtc holds the connection, starting at the latest keyframe
+// it already has. The pipeline normally runs already (mosaic_request started it); after it went
+// idle this starts it again.
+void HubServer::relay_mosaic(tcp::socket& client)
+{
+    const std::string ff = ffmpeg_path();
+    const unsigned    me = ++m_mosaic_owner; // one mosaic at a time: a newer connection ends this one
+    set_read_timeout(client, 0);
+    set_write_timeout(client, TUNNEL_WRITE_S);
+    set_keepalive(client, 30);
+    void* job = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        job = m_job;
+    }
+    bool headed = false;
+    int  quick  = 0;
+    while (m_mosaic_owner == me && !m_life.stopping()) {
+        std::shared_ptr<MosaicPipeline> pipe;
+        {
+            std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+            if (!m_mosaic_set || ff.empty() || m_mosaic_spec.encoder == HubMosaic::Encoder::None) {
+                if (!headed) respond(client, 404, "text/plain", "no mosaic requested");
+                return;
+            }
+            pipe = m_mosaic_pipe;
+            if (!pipe || !pipe->running()) {
+                pipe = std::make_shared<MosaicPipeline>(ff, job, m_mosaic_spec, std::chrono::steady_clock::now());
+                if (!pipe->start()) pipe.reset();
+                m_mosaic_pipe = pipe;
+            }
+        }
+        if (!pipe) {
+            if (!headed) respond(client, 503, "text/plain", "mosaic encoder did not start");
+            return;
+        }
+        if (!headed) {
+            write_all(client, "HTTP/1.1 200 OK\r\nContent-Type: video/h264\r\nCache-Control: no-store\r\n"
+                              "X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n");
+            headed = true;
+        }
+        auto   sub     = pipe->subscribe();
+        size_t waiting = 0;
+        {
+            std::lock_guard<std::mutex> lock(sub->m);
+            waiting = sub->q.size();
+        }
+        pipe->log_at("go2rtc connected, " + std::to_string(waiting) + " bytes from the latest keyframe ready");
+        size_t sent      = 0;
+        bool   client_ok = true;
+        for (;;) {
+            std::string chunk;
+            bool        closed = false;
+            {
+                std::unique_lock<std::mutex> lock(sub->m);
+                sub->cv.wait_for(lock, std::chrono::milliseconds(200), [&]() { return !sub->q.empty() || sub->closed; });
+                chunk.swap(sub->q);
+                closed = sub->closed;
+            }
+            if (!chunk.empty()) {
+                boost::system::error_code e;
+                asio::write(client, asio::buffer(chunk), e);
+                if (e) {
+                    client_ok = false; // go2rtc let go: nobody is watching any more
+                    break;
+                }
+                if (sent == 0) pipe->log_at("first bytes to go2rtc");
+                sent += chunk.size();
+            } else if (closed) {
+                break;
+            }
+            if (m_mosaic_owner != me || m_life.stopping()) break;
+        }
+        pipe->unsubscribe(sub);
+        if (!client_ok || m_mosaic_owner != me || m_life.stopping()) break;
+        if (!pipe->encoder_failed()) {
+            quick = 0;
+            continue; // replaced by a pipeline for another size, rate or encoder: read that one
+        }
+        std::string tail = pipe->encoder_errors();
+        if (tail.size() > 300) tail = tail.substr(tail.size() - 300);
+        HubMosaic::Encoder failed = HubMosaic::Encoder::None;
+        {
+            std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+            failed = m_mosaic_spec.encoder;
+        }
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: mosaic encoder ended (" << HubMosaic::encoder_name(failed) << "): " << tail;
+        quick = pipe->failed_early() ? quick + 1 : 0;
+        if (quick >= 2) {
+            // Twice in a row at once: give up on this encoder for the next one (a GPU encoder busy
+            // elsewhere, say). The cameras are not it: each is its own process now.
+            std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+            auto& encs = m_mosaic_encoders;
+            encs.erase(std::remove(encs.begin(), encs.end(), m_mosaic_spec.encoder), encs.end());
+            m_mosaic_spec.encoder = mosaic_encoder_locked(ff);
+            BOOST_LOG_TRIVIAL(warning) << "RemoteHub: mosaic falls back to " << HubMosaic::encoder_name(m_mosaic_spec.encoder);
+            if (m_mosaic_pipe == pipe) m_mosaic_pipe.reset();
+            quick = 0;
+            if (m_mosaic_spec.encoder == HubMosaic::Encoder::None) break;
+        } else if (!sleep_unless_stopping(1000)) {
+            break;
+        }
+    }
 }
 
 std::string HubServer::relay_h264_url(const std::string& id)
@@ -5954,7 +7042,7 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
 
         // The control plane answers only on the admin listener, and the admin listener answers
         // only the control plane. Anything a tunnel can front is on the other socket.
-        const bool control_route = r.path.compare(0, 5, "/hub/") == 0 || r.path == "/relay/h264";
+        const bool control_route = r.path.compare(0, 5, "/hub/") == 0 || r.path == "/relay/h264" || r.path == "/relay/mosaic";
         if (admin != control_route) { respond(client, 404, "text/plain", "not found"); return; }
 
         // Through Tailscale Serve (a loopback peer carrying Tailscale-User-Login, which Serve sets
@@ -6030,6 +7118,12 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             relay_h264(client, url);
             return;
         }
+        // go2rtc pulls the TV wall's camera mosaic through here (loopback + hub secret; see relay_mosaic).
+        if (r.path == "/relay/mosaic") {
+            if (!(peer.is_loopback() && ct_equal(query_param(r.query, "lt"), secret))) { respond(client, 404, "text/plain", "not found"); return; }
+            relay_mosaic(client);
+            return;
+        }
         // Control routes for the slicer instances and the hub page on this PC. They only exist on
         // the loopback-only admin listener (checked above), and on top of that: loopback peer,
         // loopback Host (no DNS rebinding), never cross-site, and the per-run secret as a custom
@@ -6093,6 +7187,13 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             // event fields: nothing here names this PC, its data dir, its instances' ports or the
             // secret, and the token gate above is the same one the page itself passed.
             respond_json(client, 200, events_json(std::atoi(query_param(r.query, "since").c_str())).dump());
+        } else if (rest == "/mosaic") {
+            // The TV wall: one H.264 stream for a page of cameras (relay_mosaic). Sets the page; the
+            // answer names the go2rtc stream to play and what each cell shows.
+            m_watch_ms = now_millis();
+            int               status = 500;
+            const std::string body   = mosaic_request(r.query, status);
+            respond_json(client, status, body);
         } else if (rest == "/bambu") {
             std::string ip, code;
             if (!lookup_host(query_param(r.query, "id"), ip, code) || code.empty()) { respond(client, 404, "text/plain", "unknown camera"); return; }
@@ -6381,6 +7482,14 @@ bool HubServer::shutdown()
     // (firewall, Tailscale) - to be gone before anything they use is destroyed. Not under m_mutex:
     // the connections take it. Crash a2375b06 was a tunnel thread destroying its socket after
     // HubApp had already destroyed this server, and the io_context with it.
+    // The mosaic's ffmpegs and threads end first: their readers (/relay/mosaic connections) are
+    // among the threads waited for below.
+    std::shared_ptr<MosaicPipeline> mosaic;
+    {
+        std::lock_guard<std::mutex> lock(m_mosaic_mutex);
+        mosaic.swap(m_mosaic_pipe);
+    }
+    if (mosaic) mosaic->stop();
     const bool drained = m_life.stop(std::chrono::milliseconds(SHUTDOWN_DRAIN_MS));
     if (!drained)
         BOOST_LOG_TRIVIAL(warning) << "RemoteHub: " << m_life.running() << " connection/helper thread(s) still running after "

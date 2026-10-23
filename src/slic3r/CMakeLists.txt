@@ -1012,6 +1012,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/LoginUserAgent.hpp
     Utils/HubHomeLogic.cpp
     Utils/HubHomeLogic.hpp
+    Utils/HubMosaic.cpp
+    Utils/HubMosaic.hpp
     Utils/PrintersMonitor.cpp
     Utils/PrintersMonitor.hpp
     Utils/HubHandover.hpp

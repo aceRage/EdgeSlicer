@@ -94,6 +94,39 @@ void remember(std::map<std::string, Remembered>& memory, const std::vector<UsedF
 // and colour), -1 when there is none or more than one tray fits equally.
 int recall(const std::map<std::string, Remembered>& memory, const UsedFilament& f, const std::vector<PrintHostDevices::Slot>& slots);
 
+// ---- a send with nobody at the dialog (the hub, the phone, an archive reprint) ----
+//
+// The desktop dialog's mapping, made the dialog's way, and then the slot send policy
+// (PrintHostDevices::slot_send_policy) instead of a question nobody can answer: every used filament
+// on a loaded tray of its own material, or the print is not started (and nothing is uploaded).
+
+struct UnattendedPlan
+{
+    PrintHostDevices::SlotSendPolicy            policy { PrintHostDevices::SlotSendPolicy::NotApplicable };
+    PrintHostDevices::SlotSendFacts             facts;
+    std::vector<int>                            choice;  // per `used`: its position in the slots, -1 = none
+    std::vector<ElegooStartPrint::SlotMapEntry> entries; // Cmd 128's slot_map
+    bool                                        canvas { false }; // a CANVAS answered: canvasAttached goes out
+    bool                                        explicit_mapping { false }; // the choices came from the request
+    std::vector<std::string>                    problems; // one sentence per filament that stops the start
+    std::string                                 refusal;  // why the print is not started; "" when it may start
+
+    // The print may start (Start, StartAsSliced, NotApplicable).
+    bool may_start() const;
+};
+
+// `st`: what the printer said (PrintHostDevices::probe). `used`: the filaments the plate prints
+// with. `mapping`: filament index -> position in st.slots, as the request named them; empty = the
+// dialog's starting choice for each: the remembered tray (recall), else the closest colour among the
+// loaded trays (PrintHostDevices::auto_match_slot). `printer` names the printer in the refusal.
+UnattendedPlan plan_unattended_send(const PrintHostDevices::Status& st, const std::vector<UsedFilament>& used,
+                                    const std::map<std::string, Remembered>& memory, const std::map<int, int>& mapping,
+                                    const std::string& printer);
+
+// The plan as ElegooLink's start command takes it (ElegooStartPrint.hpp): canvasAttached + slotMap
+// when a CANVAS answered, exactly what the dialog's extendedInfo() adds; nothing otherwise.
+void add_to_extended_info(const UnattendedPlan& plan, std::map<std::string, std::string>& info);
+
 } // namespace ElegooCanvasMapping
 } // namespace Slic3r
 
