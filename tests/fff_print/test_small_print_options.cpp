@@ -114,3 +114,17 @@ TEST_CASE("Arachne wall resolution options reach the wall generator", "[SmallPri
     };
     CHECK(wall_points("0.05") >= wall_points("0.5"));
 }
+
+// ---------------------------------------------------------------------------
+// OrcaSlicer #13870: curled-perimeter slowdown off by default (owner accepted, 2026-10-15)
+// ---------------------------------------------------------------------------
+TEST_CASE("slowdown_for_curled_perimeters is off by default", "[SmallPrintOptions][Defaults]")
+{
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const auto *opt = config.option<ConfigOptionBools>("slowdown_for_curled_perimeters");
+    REQUIRE(opt != nullptr);
+    REQUIRE_FALSE(opt->values.empty());
+    for (const unsigned char v : opt->values)
+        CHECK_FALSE(bool(v));
+    CHECK_FALSE(PrintRegionConfig::defaults().slowdown_for_curled_perimeters.get_at(0));
+}
