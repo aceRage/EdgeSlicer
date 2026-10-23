@@ -1697,6 +1697,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats, top_surface_speed))
     //BBS
     ((ConfigOptionBools,                 enable_overhang_speed))
+    ((ConfigOptionBool,                  overhang_shadow_inner_wall))
+    ((ConfigOptionPercent,               overhang_shadow_speed_ratio))
+    ((ConfigOptionPercent,               overhang_shadow_distance))
     ((ConfigOptionFloatsOrPercents,       overhang_1_4_speed))
     ((ConfigOptionFloatsOrPercents,       overhang_2_4_speed))
     ((ConfigOptionFloatsOrPercents,       overhang_3_4_speed))

@@ -1646,6 +1646,48 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable this option to slow printing down for different overhang degree.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools { true });
+
+    // Port of Neotko Overhang Shadow (cf1255c). Off by default; no Libre Mode lock; not enabled in any profile.
+    def = this->add("overhang_shadow_inner_wall", coBool);
+    def->label = L("Slow down inner walls next to overhangs");
+    def->category = L("Speed");
+    def->tooltip = L("Give the inner wall a share of the slowdown and fan its overhanging neighbour gets.\n\n"
+                     "The outer wall of an overhang is printed onto the inner wall next to it, and that "
+                     "inner wall went down at full speed a few seconds earlier because it is itself "
+                     "supported. This makes the anchor as careful as the wall it has to hold up.\n\n"
+                     "Costs nothing away from an overhang: a wall with solid material under it is graded "
+                     "the same either way. Requires 'Slow down for overhang', and has no effect when "
+                     "walls are printed outer wall first.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool{ false });
+
+    def = this->add("overhang_shadow_speed_ratio", coPercent);
+    def->label = L("Inner wall slowdown");
+    def->category = L("Speed");
+    def->tooltip = L("How much of the neighbouring wall's treatment this wall borrows. 100% grades the "
+                     "inner wall exactly as if it were the overhanging wall itself, which also brings the "
+                     "overhang fan with it. 50% takes it halfway. 0% disables the effect.\n\n"
+                     "The default of 30% is deliberately gentle: enough to make the anchor more likely to "
+                     "be there, without a speed change large enough to show on the wall.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(30));
+
+    def = this->add("overhang_shadow_distance", coPercent);
+    def->label = L("Inner wall reach");
+    def->category = L("Speed");
+    def->tooltip = L("How far outwards to look for the wall being mirrored, as a percentage of line "
+                     "width. 100% is the wall immediately next to this one. Larger values mirror "
+                     "something further out, so the slowdown reaches deeper into the walls.\n\n"
+                     "The default of 200% looks two line widths out, which catches the overhang even "
+                     "where it starts a little beyond the neighbouring wall.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(200));
     
     def = this->add("slowdown_for_curled_perimeters", coBools);
     def->label = L("Slow down for curled perimeters");

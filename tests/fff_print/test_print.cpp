@@ -842,6 +842,15 @@ std::string strip_gcode_timestamps(const std::string &gcode)
     return out;
 }
 
+// Non-BBL export appends the full config after this marker (GCode.cpp), so two
+// slices that only differ in unused keys will still mismatch if the block is kept.
+std::string gcode_before_config_block(const std::string &gcode)
+{
+    const std::string stripped = strip_gcode_timestamps(gcode);
+    const size_t      pos      = stripped.find("; CONFIG_BLOCK_START");
+    return pos == std::string::npos ? stripped : stripped.substr(0, pos);
+}
+
 size_t count_toolchange(const std::string &gcode, unsigned int extruder_id)
 {
     const std::string needle = "T" + std::to_string(extruder_id);
@@ -1798,6 +1807,75 @@ TEST_CASE("Bridge expansion extra above 0 grows the bridged area", "[Print][Brid
         // The extra zone must not eat the bridge: a second run at 0 matches the first.
         CHECK(bridge_area("0", walls) == Approx(base));
     }
+}
+
+TEST_CASE("Overhang shadow off: G-code is identical to ratio 0", "[Print][OverhangShadow]")
+{
+    const std::string off = gcode_before_config_block(slice({ TestMesh::overhang }, {
+        { "overhang_shadow_inner_wall", "0" },
+        { "overhang_shadow_speed_ratio", "30%" },
+        { "overhang_shadow_distance", "200%" },
+        { "enable_overhang_speed", "1" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops", "3" },
+    }));
+    const std::string zero = gcode_before_config_block(slice({ TestMesh::overhang }, {
+        { "overhang_shadow_inner_wall", "1" },
+        { "overhang_shadow_speed_ratio", "0%" },
+        { "overhang_shadow_distance", "200%" },
+        { "enable_overhang_speed", "1" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops", "3" },
+    }));
+    REQUIRE_FALSE(off.empty());
+    CHECK(off == zero);
+}
+
+TEST_CASE("Overhang shadow on: inner walls slow down, off stays the stock path", "[Print][OverhangShadow]")
+{
+    // Slowest feedrate of any G1 move in the motion part of the G-code.
+    auto min_feedrate = [](const std::string &gcode) {
+        double min_f = 1e9;
+        std::istringstream in(gcode);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.compare(0, 3, "G1 ") != 0)
+                continue;
+            const size_t pos = line.find(" F");
+            if (pos == std::string::npos)
+                continue;
+            const double f = std::atof(line.c_str() + pos + 2);
+            if (f > 0.)
+                min_f = std::min(min_f, f);
+        }
+        return min_f;
+    };
+    auto run = [](const char *on, const char *ratio) {
+        return gcode_before_config_block(slice({ TestMesh::overhang }, {
+            { "overhang_shadow_inner_wall", on },
+            { "overhang_shadow_speed_ratio", ratio },
+            { "overhang_shadow_distance", "200%" },
+            { "enable_overhang_speed", "1" },
+            { "layer_height", "0.2" },
+            { "initial_layer_print_height", "0.2" },
+            { "wall_loops", "3" },
+        }));
+    };
+    const std::string off  = run("0", "100%");
+    const std::string on   = run("1", "100%");
+    const std::string on50 = run("1", "50%");
+    REQUIRE_FALSE(off.empty());
+    REQUIRE_FALSE(on.empty());
+    // Enabled with a real ratio must change the output, and never raise the slowest speed.
+    CHECK(on != off);
+    CHECK(min_feedrate(on) <= min_feedrate(off));
+    // A smaller ratio is a different (gentler) grading than the full one.
+    CHECK(on50 != on);
+    CHECK(min_feedrate(on50) <= min_feedrate(off));
+    // The setting is a pure function of the config: slicing twice gives the same G-code.
+    CHECK(run("1", "100%") == on);
 }
 
 // Orca #16312: shrinkage used to be derived from Print::extruders(), which is empty on the first
