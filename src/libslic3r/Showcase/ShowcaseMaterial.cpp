@@ -103,6 +103,48 @@ Finish infer_finish(const std::string &preset_name, const std::string &filament_
     return Finish::Standard;
 }
 
+float default_toolpath_smoothness(Finish finish)
+{
+    switch (finish) {
+    case Finish::Matte: return 0.5f;
+    case Finish::Silk: return 0.8f;
+    case Finish::Gloss: return 0.75f;
+    case Finish::Transparent: return 0.7f;
+    case Finish::Metallic: return 0.7f;
+    case Finish::CarbonFiber: return 0.45f;
+    default: return 0.6f;
+    }
+}
+
+ToolpathLook toolpath_look(Finish finish, float smoothness)
+{
+    ToolpathLook l;
+    const float s = std::clamp(smoothness < 0.f || !std::isfinite(smoothness) ? default_toolpath_smoothness(finish) : smoothness, 0.f, 1.f);
+    l.smoothness  = s;
+    if (s <= 0.f)
+        return l;   // all off: Preview's look
+    // Design 2.6.3: the skin overlap at the finish's default Smoothness, scaled with the slider.
+    float overlap = 0.12f;   // standard 1.12
+    float bulge   = 2.f;     // rounded
+    float groove  = 0.6f;
+    switch (finish) {
+    case Finish::Matte: overlap = 0.10f; groove = 0.8f; break;   // matte hides less
+    case Finish::Silk: overlap = 0.18f; bulge = 3.f; groove = 0.45f; l.anisotropy = 0.75f * s; break;
+    case Finish::Gloss: overlap = 0.15f; groove = 0.5f; break;
+    case Finish::Transparent: overlap = 0.15f; groove = 0.4f; break;
+    case Finish::Metallic: overlap = 0.14f; groove = 0.5f; l.anisotropy = 0.2f * s; break;
+    case Finish::CarbonFiber: overlap = 0.10f; groove = 0.8f; break;
+    default: break;
+    }
+    const float k  = s / std::max(0.05f, default_toolpath_smoothness(finish));   // 1 at the finish's default
+    l.skin_overlap = 1.f + std::min(0.3f, overlap * k);
+    l.skin_flatten = std::clamp(s * 1.1f, 0.f, 1.f);
+    l.bulge        = 2.f + (bulge - 2.f) * s + 2.f * std::max(0.f, s - 0.5f);   // flatter beads as it smooths
+    l.groove       = std::clamp(1.f - (1.f - groove) * std::min(1.f, k), 0.f, 1.f);
+    l.ssao_skin    = std::clamp(1.f - 0.8f * s, 0.f, 1.f);
+    return l;
+}
+
 MaterialParams material_params(Finish finish)
 {
     MaterialParams p;

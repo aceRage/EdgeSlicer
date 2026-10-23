@@ -11638,6 +11638,14 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "serial:code[:lang]";
     def->set_default_value(new ConfigOptionString());
 
+    // Showcase S4: the video encoders without the GUI - a 2 s orbit of a test cube at 720p30 through
+    // the same frame queue, encoder thread and ffmpeg pipe (or PNG sequence) as a video export.
+    def = this->add("showcase_video_test", coString);
+    def->label = L("Test the Showcase video encoder");
+    def->tooltip = L("Development and test only: write a short test video to the given file (.mp4, .webm, .gif, .webp; anything else is a folder of PNG frames) and exit.");
+    def->cli_params = "file";
+    def->set_default_value(new ConfigOptionString());
+
     // Record our own description for an error code, for the codes Bambu publishes with an empty
     // one. Written to <datadir>/hms/overrides.json; see docs/hms-overrides.md.
     // --hms-add 0C00010000020015 "Nozzle Camera is malfunctioning." [--hms-add-lang en] [--hms-add-model 31B]

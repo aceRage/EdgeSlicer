@@ -6172,6 +6172,12 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 
     Point pos(evt.GetX(), evt.GetY());
 
+    // Showcase (S3): dragging, editing or picking a filament callout takes the event before the camera.
+    if (m_canvas_type == ECanvasType::CanvasShowcase && m_showcase_renderer != nullptr && m_showcase_renderer->on_mouse(evt)) {
+        m_mouse.position = evt.Leaving() ? Vec2d(-1.0, -1.0) : pos.cast<double>();
+        return;
+    }
+
     ImGuiWrapper* imgui = wxGetApp().imgui();
     if (m_tooltip.is_in_imgui() && evt.LeftUp())
         // ignore left up events coming from imgui windows and not processed by them
@@ -10350,15 +10356,27 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
             glsafe(::glPolygonOffset(4.0f, 4.0f));
             glsafe(::glDisable(GL_CULL_FACE));
 
-            shader->start_using();
-            shader->set_uniform("projection_matrix", Transform3d(light_proj));
+            // Showcase S5: during a layer build-up only what is laid casts a shadow.
+            GLShaderProgram* caster = shader;
+            if (render_settings.has_clip_top()) {
+                if (GLShaderProgram* clip = wxGetApp().get_shader("showcase_shadow_clip"); clip != nullptr)
+                    caster = clip;
+            }
+            caster->start_using();
+            caster->set_uniform("projection_matrix", Transform3d(light_proj));
+            if (caster != shader)
+                caster->set_uniform("clip_z", float(render_settings.clip_top));
             for (GLVolume* volume : m_volumes.volumes) {
                 if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
                     continue;
-                shader->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
+                caster->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
+                if (caster != shader) {
+                    caster->set_uniform("volume_world_matrix", volume->world_matrix());
+                    caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+                }
                 volume->model.render();
             }
-            shader->stop_using();
+            caster->stop_using();
 
             // Restore state
             glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));

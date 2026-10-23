@@ -7104,8 +7104,18 @@ static bool port_free_for_hub(int port)
     } catch (...) { return false; }
 }
 
+static std::atomic<bool> s_spawn_disabled { false };
+
+void disable_spawn() { s_spawn_disabled = true; }
+
 Info ensure_running(const std::string& token_hint, bool phone_on)
 {
+    // Showcase S5: a --showcase-render job never starts a hub (nor, through it, go2rtc), whichever
+    // caller asks - the Stream page's hub_start included. A hub would outlive the job.
+    if (s_spawn_disabled) {
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: not started (spawning disabled for this process)";
+        return Info{};
+    }
     std::lock_guard<std::mutex> ensure_lock(s_ensure_mutex);
     Info i = query();
     // A hub answers: an earlier spawn of ours either is that hub or, unable to take hub.lock, is on

@@ -1757,9 +1757,9 @@
       { path: 'fields.id', label: 'Id' }, { path: 'fields.name', label: 'Name' },
       { path: 'fields.thumbnail', label: 'Thumbnail URL' },
       { path: 'fields.page_url', label: 'Page URL (field, or template like https://site/m/{slug})' },
-      { path: 'fields.designer', label: 'Designer' }, { path: 'fields.license', label: 'License' },
-      { path: 'fields.tags', label: 'Tags or category' },
-      { path: 'fields.updated', label: 'Updated' }, { path: 'fields.description', label: 'Description' },
+      { path: 'fields.designer', label: 'Designer (field, or =text for a fixed value)' }, { path: 'fields.license', label: 'License (field, or =text for a fixed value)' },
+      { path: 'fields.tags', label: 'Tags or category (field, or =a, b for fixed tags)' },
+      { path: 'fields.updated', label: 'Updated' }, { path: 'fields.description', label: 'Description (field, or =text for a fixed value)' },
     ] },
     { group: 'Files of an item (optional)', fields: [
       { path: 'files.path', label: 'Files at', hint: 'print_profiles' },

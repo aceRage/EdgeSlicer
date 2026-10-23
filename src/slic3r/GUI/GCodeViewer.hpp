@@ -281,6 +281,28 @@ private:
     libvgcode::Viewer m_viewer;
     bool m_loaded_as_preview{ false };
 
+    // EDGE (Showcase S5): the Preview's settings, kept aside while Showcase draws the toolpaths.
+    struct ShowcaseSaved
+    {
+        bool                                                   active = false;
+        libvgcode::EViewType                                   view_type = libvgcode::EViewType::FeatureType;
+        std::array<bool, libvgcode::OPTION_TYPES_COUNT>        options{};
+        std::vector<std::pair<libvgcode::EGCodeExtrusionRole, bool>> roles;
+        bool                                                   top_layer_only = false;
+        bool                                                   dim_previous   = false;
+        libvgcode::Interval                                    layers{ 0, 0 };
+        libvgcode::Interval                                    visible{ 0, 0 };
+        // What Showcase set last, so a frame like the one before changes nothing.
+        int                                                    top_layer = -2;
+        double                                                 top_progress = -1.;
+        bool                                                   hide_wipe_tower = false;
+        bool                                                   show_infill     = true;   // S5b
+        bool                                                   show_supports   = true;   // S5b
+    };
+    ShowcaseSaved m_showcase;
+    // Puts the Preview's settings back; `ranges` = also its layer and move ranges (not after a load).
+    void restore_from_showcase(bool ranges);
+
 public:
     GCodeViewer();
     ~GCodeViewer();
@@ -315,6 +337,27 @@ public:
     // EDGE (phone / remote preview, GLCanvas3D::render_gcode_preview_image): the toolpaths alone,
     // with whatever camera is current on the Plater; no legend, sliders or other ImGui.
     void render_toolpaths_for_capture();
+    // EDGE (Showcase S5): the toolpaths in a presentation render, through the same libvgcode viewer as
+    // Preview. Showcase sets the viewer up for it (the whole print, or the layer build-up; extrusions
+    // only; colours by filament; nothing dimmed or greyed), keeping the Preview's own settings aside
+    // until end_showcase() - which Preview's render() also calls first, so Preview never sees them.
+    struct ShowcaseLook
+    {
+        int    top_layer       = -1;    // the last layer shown, 0-based; -1 = all of them
+        double top_progress    = 1.;    // how much of that layer, by moves (0..1)
+        bool   hide_wipe_tower = false;
+        bool   show_infill     = true;  // S5b: sparse and internal solid infill, internal bridges
+        bool   show_supports   = true;  // S5b: supports, their interfaces and transitions
+        bool   smooth          = false; // the smooth bead look (D13)
+        std::array<float, 128> looks{}; // per extruder: see libvgcode::Viewer::set_smooth_look()
+        bool   set_light       = false;
+        std::array<float, 3> light_dir_eye{ { -0.4574957f, 0.4574957f, 0.7624929f } };   // to the key light
+        float  exposure        = 1.f;
+    };
+    void render_for_showcase(const ShowcaseLook &look);
+    void end_showcase();
+    bool showcase_active() const { return m_showcase.active; }
+    size_t layers_count() const { return m_viewer.get_layers_count(); }
     // EDGE: id of the GCodeProcessorResult loaded last (the phone preview checks it is current).
     unsigned int loaded_result_id() const { return m_last_result_id; }
     // EDGE (#642): true while only the per-layer summary is loaded (memory guard).

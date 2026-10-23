@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <map>
 #include <memory>
 
 namespace Slic3r {
@@ -173,6 +174,33 @@ bool showcase_rasterize_watermark(const Showcase::Watermark &wm, const Showcase:
     }
     where = layout.block;
     return true;
+}
+
+Showcase::RectI showcase_watermark_rect(const Showcase::Watermark &wm, const Showcase::Project &project, int image_w, int image_h)
+{
+    if (!wm.enabled || !wm.has_content() || image_w <= 0 || image_h <= 0)
+        return {};
+    // The logo's shape, decoded once per picture.
+    static std::map<std::string, double> aspects;
+    double logo_aspect = 0.;
+    if (!wm.logo.empty()) {
+        auto it = aspects.find(wm.logo);
+        if (it == aspects.end()) {
+            ShowcaseImage logo;
+            double        aspect = 0.;
+            if (const Showcase::ImageBlob *blob = project.find_image(wm.logo); blob != nullptr && showcase_decode_image(blob->bytes, logo))
+                aspect = double(logo.width) / double(std::max(1, logo.height));
+            if (aspects.size() > 64)
+                aspects.clear();
+            it = aspects.emplace(wm.logo, aspect).first;
+        }
+        logo_aspect = it->second;
+    }
+    const wxString text = wxString::FromUTF8(wm.text);
+    const wxFont   font = showcase_watermark_font(wm, Showcase::watermark_font_px(wm, image_h, logo_aspect > 0.));
+    int            text_w = 0, text_h = 0;
+    showcase_measure_text(text, font, text_w, text_h);
+    return Showcase::layout_watermark(wm, image_w, image_h, logo_aspect, text_w, text_h).block;
 }
 
 void showcase_apply_watermark(ShowcaseImage &image, const Showcase::Watermark &wm, const Showcase::Project &project)
