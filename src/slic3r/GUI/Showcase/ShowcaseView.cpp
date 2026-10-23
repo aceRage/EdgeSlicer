@@ -2507,11 +2507,11 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
             if (appear <= 1e-3)
                 continue;
         }
-        // S5c, static: the anchors of the frame the clip keeps.
-        const std::vector<Showcase::PointD> *fixed_pts = nullptr;
+        // S5d, static: the label stays where the clip's layout put it; its leaders still follow the model.
+        const Showcase::PointD *fixed_label = nullptr;
         if (m_co_video.fixed && m_video.static_valid)
-            if (auto it = m_video.static_anchors.find(c.key); it != m_video.static_anchors.end())
-                fixed_pts = &it->second;
+            if (auto it = m_video.static_labels.find(c.key); it != m_video.static_labels.end())
+                fixed_label = &it->second;
         ShowcaseCalloutDraw d;
         d.item  = int(i);
         d.label = Showcase::build_callout_label(c, labels.filament(s, c), s.callouts.fields, labels.words());
@@ -2532,15 +2532,6 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
             // label stays, without a line, until it is built.
             if (world.z() > m_co_video.built_z + 0.5)
                 continue;
-            if (m_co_video.fixed && m_video.static_valid) {
-                if (fixed_pts == nullptr || a >= fixed_pts->size() || !std::isfinite((*fixed_pts)[a].x))
-                    continue;
-                d.anchors.push_back((*fixed_pts)[a]);
-                d.occluded.push_back(false);
-                if (fade != nullptr)
-                    d.fade.push_back(1.);
-                continue;
-            }
             const Vec4d clip = vp * Vec4d(world.x(), world.y(), world.z(), 1.);
             if (clip.w() <= 1e-9)
                 continue;   // behind the camera
@@ -2552,7 +2543,7 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
                 d.fade.push_back(fade->alpha(c.key, int(a)));
         }
         if (fade != nullptr)
-            d.alpha = m_co_video.fixed && m_video.static_valid ? 1. : fade->label_alpha(c.key, int(anchors));
+            d.alpha = fixed_label != nullptr ? 1. : fade->label_alpha(c.key, int(anchors));
         if (visuals != nullptr) {
             auto v = visuals->find(c.key);
             if (v != visuals->end()) {
@@ -2563,6 +2554,11 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
         d.visual *= appear;
         d.pinned     = c.pinned;
         d.pinned_pos = { c.label_pos[0], c.label_pos[1] };
+        if (fixed_label != nullptr && !c.pinned) {
+            // Laid out like a label the user pinned there: a leader to its nearest free side, every frame.
+            d.pinned     = true;
+            d.pinned_pos = *fixed_label;
+        }
         out.push_back(std::move(d));
     }
     return out;
@@ -2574,15 +2570,16 @@ void ShowcaseView::video_prepare_callouts(const Showcase::VideoSettings &v, cons
 {
     m_video.first_z.clear();
     m_video.static_valid = false;
-    m_video.static_anchors.clear();
+    m_video.static_labels.clear();
     if (m_model == nullptr || m_renderer == nullptr)
         return;
     for (const Showcase::CalloutTarget &t : Showcase::CalloutRegions(*m_model, plate_objects(), plate_changes()).targets())
         m_video.first_z[t.key] = t.first_z;
     if (v.callout_motion != Showcase::CalloutMotion::Static)
         return;
-    // The frame static callouts keep: the one that shows the whole model - the end of the motion when
-    // the print builds up (and a static zoom-out ends framed on all of it), else the first.
+    // S5d: static callouts keep the labels where the layout of one frame puts them - the frame that
+    // shows the whole model: the end of the motion when the print builds up (a static zoom-out ends
+    // framed on all of it), else the first. Their leaders follow the model every frame.
     const double t     = v.build.enabled ? v.hold_start + v.duration : 0.;
     Camera      &camera = wxGetApp().plater()->get_camera();
     const Camera saved  = camera;
@@ -2591,27 +2588,32 @@ void ShowcaseView::video_prepare_callouts(const Showcase::VideoSettings &v, cons
                    Vec3d(pose.up[0], pose.up[1], pose.up[2]));
     camera.set_zoom(pose.zoom);
     m_renderer->prepare_live_camera();
-    Matrix4d vp;
-    if (m_renderer->frame_view_projection(vp)) {
-        for (const Showcase::Callout &c : scene().callouts.items) {
-            std::vector<Showcase::PointD> pts;
-            for (const Showcase::CalloutAnchor &a : c.anchors) {
-                Vec3d       world;
-                Showcase::PointD p{ std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN() };
-                if (showcase_anchor_world(*m_model, a, world)) {
-                    const Vec4d clip = vp * Vec4d(world.x(), world.y(), world.z(), 1.);
-                    if (clip.w() > 1e-9)
-                        p = { (clip.x() / clip.w() + 1.) * 0.5, (1. - clip.y() / clip.w()) * 0.5 };
-                }
-                pts.push_back(p);
-            }
-            m_video.static_anchors[c.key] = std::move(pts);
+    const CalloutVideoPass pass = m_co_video;
+    m_co_video                  = CalloutVideoPass();   // every label, as on the finished model
+    const Showcase::RectI frame = m_renderer->live_frame();
+    const int             w     = frame.empty() ? 1920 : frame.w;
+    const int             h     = frame.empty() ? 1080 : frame.h;
+    const std::vector<ShowcaseCalloutDraw> draws = callouts_draw_list(callouts_labels());
+    if (!draws.empty()) {
+        ShowcaseImage layout;
+        layout.width  = w;
+        layout.height = h;
+        layout.rgba.assign(size_t(w) * size_t(h) * 4, 0);
+        ShowcaseCalloutOptions opt;
+        opt.reserved       = showcase_watermark_rect(scene().export_settings.watermark, project(), w, h);
+        opt.model_center_x = callouts_model_center_x();
+        opt.model_box      = callouts_model_box();
+        ShowcaseCalloutHits hits;
+        showcase_draw_callouts(layout, true, scene(), draws, opt, &hits);
+        if (!hits.legend) {   // a numbered legend stays put anyway
+            for (const ShowcaseCalloutHits::Item &it : hits.items)
+                if (it.item >= 0 && size_t(it.item) < scene().callouts.items.size())
+                    m_video.static_labels[scene().callouts.items[size_t(it.item)].key] = { it.box.x / double(w), it.box.y / double(h) };
+            m_video.static_valid = !m_video.static_labels.empty();
         }
-        m_video.static_center_x = callouts_model_center_x();
-        m_video.static_box      = callouts_model_box();
-        m_video.static_valid    = true;
     }
-    camera = saved;
+    m_co_video = pass;
+    camera     = saved;
     m_renderer->prepare_live_camera();
 }
 
@@ -2677,9 +2679,8 @@ bool ShowcaseView::callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &i
     opt.overlay        = true;
     opt.selected       = m_callouts.selected;
     opt.reserved       = showcase_watermark_rect(s.export_settings.watermark, project(), frame_w, frame_h);
-    const bool fixed   = m_co_video.fixed && m_video.static_valid;
-    opt.model_center_x = fixed ? m_video.static_center_x : callouts_model_center_x();
-    opt.model_box      = fixed ? m_video.static_box : callouts_model_box();
+    opt.model_center_x = callouts_model_center_x();
+    opt.model_box      = callouts_model_box();
     showcase_draw_callouts(image, true, s, draws, opt, &m_callouts.hits);
     return true;
 }

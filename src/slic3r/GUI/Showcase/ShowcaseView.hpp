@@ -304,13 +304,11 @@ private:
         bool                     pose_timeline = false;
         std::map<std::string, Showcase::CalloutVisual> pose_visuals;
 
-        // S5c: the callouts of a clip. Static ones keep the anchors of one frame (0..1 of the frame,
-        // per callout key and anchor; NaN = not in view there), "as used" ones need each callout's
-        // first print height.
+        // S5c/S5d: the callouts of a clip. Static ones keep their labels where the layout of one frame
+        // put them (top-left, 0..1 of the frame, per callout key) while their leaders follow the model;
+        // "as used" ones need each callout's first print height.
         bool                     static_valid = false;
-        std::map<std::string, std::vector<Showcase::PointD>> static_anchors;
-        double                   static_center_x = -1.;
-        Showcase::RectD          static_box;
+        std::map<std::string, Showcase::PointD> static_labels;
         std::map<std::string, double> first_z;
     };
     // S5c: what the callouts of the video frame being drawn follow (the defaults: a still or the live view).
@@ -318,7 +316,7 @@ private:
     {
         double built_z = 1e30;   // the build-up's height; anchors above it are not built yet
         bool   as_used = false;  // a callout waits for its filament's first height
-        bool   fixed   = false;  // static callouts: VideoUi::static_anchors
+        bool   fixed   = false;  // static callouts: labels at VideoUi::static_labels
         double fade_mm = 1.;     // as used: the height a callout fades in over
     };
     CalloutVideoPass         m_co_video;

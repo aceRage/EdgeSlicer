@@ -298,8 +298,9 @@ void ShowcaseView::build_video_section(wxBoxSizer *root)
         motions.Add(_L("Animated"));
         motions.Add(_L("Static"));
         m_vid_co_motion = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, motions);
-        m_vid_co_motion->SetToolTip(_L("Animated: labels and leaders follow their spots on the model. Static: they stay where they are "
-                                       "on the frame that shows the whole model (the end of a build-up, else the first frame)."));
+        m_vid_co_motion->SetToolTip(_L("Animated: the labels move with the model and are laid out again every frame. Static: the labels stay "
+                                       "where the frame that shows the whole model puts them (the end of a build-up, else the first "
+                                       "frame); their leaders still follow the model."));
         row(_L("Position"), m_vid_co_motion);
         wxArrayString appears;
         appears.Add(_L("Always"));
@@ -1358,9 +1359,8 @@ bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFra
         std::map<int, int>     sides;
         ShowcaseCalloutOptions opt;
         opt.reserved        = showcase_watermark_rect(fs.export_settings.watermark, project(), image.width, image.height);
-        const bool fixed    = m_co_video.fixed && m_video.static_valid;
-        opt.model_center_x  = fixed ? m_video.static_center_x : callouts_model_center_x();
-        opt.model_box       = fixed ? m_video.static_box : callouts_model_box();
+        opt.model_center_x  = callouts_model_center_x();
+        opt.model_box       = callouts_model_box();
         opt.previous_sides  = index > 0 ? &m_video.sides : nullptr;
         opt.sides           = &sides;
         opt.side_hysteresis = 0.06;

@@ -362,7 +362,13 @@ static const char* Segments_Fragment_Shader =
 "  vec2 n_facet = normalize(vec2(sign(s.x) / seg_info.y, (s.y >= 0.0 ? 1.0 : -1.0) / seg_info.x));\n"
 "  vec2 n2 = normalize(mix(n_facet, n_round, clamp(la.x, 0.0, 1.0)));\n"
 "  n2 = normalize(mix(n2, vec2(0.0, n2.y >= 0.0 ? 1.0 : -1.0), seg_info.z * clamp(la.z, 0.0, 1.0)));\n"
-"  crease = (1.0 - seg_info.z) * pow(abs(d.y), 6.0);\n"
+// EDGE (S5d): a bead less than a few pixels high aliases into contour rings on curved surfaces
+// (moire: the per-layer ripple is finer than a pixel). Fade the ripple and the groove towards the
+// averaged surface normal as the bead's height drops from 4 to 2 pixels (section is -1..1 across it).
+"  float lod = clamp((fwidth(section.y) - 0.5) / 0.5, 0.0, 1.0);\n"
+"  vec2 n_avg = normalize(vec2(sign(s.x) * (1.0 - seg_info.z) + 1e-4, (s.y >= 0.0 ? 1.0 : -1.0) * seg_info.z + 1e-4));\n"
+"  n2 = normalize(mix(n2, n_avg, lod));\n"
+"  crease = (1.0 - seg_info.z) * pow(abs(d.y), 6.0) * (1.0 - lod);\n"
 "  return normalize(seg_right * n2.x + seg_up * n2.y);\n"
 "}\n"
 "vec3 smooth_lit(vec3 n, float crease) {\n"
