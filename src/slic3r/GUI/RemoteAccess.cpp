@@ -1280,6 +1280,17 @@ RemoteAccess::ApiResponse RemoteAccess::api_jobs(int id)
     return r;
 }
 
+// filament_type of a filament preset by name (PLA, PETG-HF, ...), "" when there is no such preset.
+// The edited copy wins for the selected one, so an unsaved type change shows as the sidebar has it.
+static std::string filament_type_of(PresetBundle& bundle, const std::string& name)
+{
+    const Preset* p = bundle.filaments.find_preset(name, false);
+    if (p == nullptr) return "";
+    if (bundle.filaments.get_selected_preset_name() == name) p = &bundle.filaments.get_edited_preset();
+    const auto* t = p->config.option<ConfigOptionStrings>("filament_type");
+    return t != nullptr && !t->values.empty() ? t->values.front() : std::string();
+}
+
 // slice_v1: cancel a running slice job exactly as the desktop's slicing notification's Cancel does
 // (Plater::cancel_slicing -> BackgroundSlicingProcess::stop). Slicing "all" stops there as well:
 // a cancelled plate ends the run on the desktop too. Send and control jobs are not cancellable here.
@@ -1914,17 +1925,6 @@ void RemoteAccess::finish_job(int id, bool ok, const std::string& error, const n
             else                     m_send_running = false;
         }
     BOOST_LOG_TRIVIAL(info) << "RemoteAccess: job " << id << (ok ? " done" : " failed: " + error);
-}
-
-// filament_type of a filament preset by name (PLA, PETG-HF, ...), "" when there is no such preset.
-// The edited copy wins for the selected one, so an unsaved type change shows as the sidebar has it.
-static std::string filament_type_of(PresetBundle& bundle, const std::string& name)
-{
-    const Preset* p = bundle.filaments.find_preset(name, false);
-    if (p == nullptr) return "";
-    if (bundle.filaments.get_selected_preset_name() == name) p = &bundle.filaments.get_edited_preset();
-    const auto* t = p->config.option<ConfigOptionStrings>("filament_type");
-    return t != nullptr && !t->values.empty() ? t->values.front() : std::string();
 }
 
 // The sidebar's own combo boxes are the source of truth for "what can be picked" and selecting
