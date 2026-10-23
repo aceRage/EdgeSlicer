@@ -6243,6 +6243,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercents { 100 });
 
+    // Orca:
+    def = this->add("retract_after_wipe", coPercents);
+    def->label = L("Retract amount after wipe");
+    def->tooltip = L("The length of fast retraction after wipe, relative to retraction length.\n"
+                     "The value will be clamped by 100% minus the retract amount before the wipe value.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionPercents { 0 });
+
     def = this->add("retract_when_changing_layer", coBools);
     def->label = L("Retract when change layer");
     def->tooltip = L("Force a retraction when changes layer.");
@@ -8888,6 +8899,8 @@ void PrintConfigDef::init_fff_params()
         "retract_when_changing_layer", "wipe",
         // percents
         "retract_before_wipe",
+        // Orca
+        "retract_after_wipe",
         "long_retractions_when_cut",
         "retraction_distances_when_cut",
         "retract_length_toolchange",
@@ -8938,7 +8951,7 @@ void PrintConfigDef::init_extruder_option_keys()
     m_extruder_option_keys = {
         "nozzle_diameter", "min_layer_height", "max_layer_height", "extruder_offset",
         "retraction_length", "z_hop", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed",
-        "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
+        "retract_before_wipe", "retract_after_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
         "retract_when_changing_layer", "retract_length_toolchange", "retract_restart_extra_toolchange", "extruder_colour",
         "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut",
         // Snapmaker: flow-variant (already defined; resized with nozzle_diameter)
@@ -8948,6 +8961,7 @@ void PrintConfigDef::init_extruder_option_keys()
     m_extruder_retract_keys = {
         "deretraction_speed",
         "long_retractions_when_cut",
+        "retract_after_wipe",
         "retract_before_wipe",
         "retract_lift_above",
         "retract_lift_below",
@@ -8975,7 +8989,7 @@ void PrintConfigDef::init_filament_option_keys()
     m_filament_option_keys = {
         "filament_diameter", "min_layer_height", "max_layer_height",
         "retraction_length", "z_hop", "z_hop_types", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed",
-        "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
+        "retract_before_wipe", "retract_after_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
         "retract_when_changing_layer", "retract_length_toolchange", "retract_restart_extra_toolchange", "filament_colour",
         "filament_multi_colors", "filament_colour_mode",
         "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut",
@@ -8989,6 +9003,7 @@ void PrintConfigDef::init_filament_option_keys()
     m_filament_retract_keys = {
         "deretraction_speed",
         "long_retractions_when_cut",
+        "retract_after_wipe",
         "retract_before_wipe",
         "retract_lift_above",
         "retract_lift_below",
@@ -9831,7 +9846,7 @@ bool is_printer_extruder_variant_option(const std::string &key)
     static const std::set<std::string> options {
         "retraction_length", "z_hop", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce",
         "z_hop_types", "retraction_speed", "deretraction_speed", "retraction_minimum_travel", "retract_when_changing_layer",
-        "wipe", "wipe_distance", "retract_before_wipe", "retract_length_toolchange", "retract_restart_extra",
+        "wipe", "wipe_distance", "retract_before_wipe", "retract_after_wipe", "retract_length_toolchange", "retract_restart_extra",
         "retract_restart_extra_toolchange", "long_retractions_when_cut", "retraction_distances_when_cut",
     };
     return options.count(key) > 0;

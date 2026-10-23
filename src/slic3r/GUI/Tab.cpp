@@ -4639,6 +4639,8 @@ PageShp TabFilament::add_filament_overrides_page()
                                         //BBS
                                         "filament_wipe_distance",
                                         "filament_retract_before_wipe",
+                                        // Orca
+                                        "filament_retract_after_wipe",
                                         "filament_long_retractions_when_cut",
                                         "filament_retraction_distances_when_cut",
                                         "filament_retract_length_toolchange",
@@ -4682,6 +4684,8 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
                                             //BBS
                                             "filament_wipe_distance",
                                             "filament_retract_before_wipe",
+                                            // Orca
+                                            "filament_retract_after_wipe",
                                             "filament_long_retractions_when_cut",
                                             "filament_retraction_distances_when_cut",
                                             "filament_retract_length_toolchange",
@@ -6243,6 +6247,8 @@ if (is_marlin_flavor)
                 optgroup->append_single_option_line("wipe", "", field("wipe"));
                 optgroup->append_single_option_line("wipe_distance", "", field("wipe_distance"));
                 optgroup->append_single_option_line("retract_before_wipe", "", field("retract_before_wipe"));
+                // Orca
+                optgroup->append_single_option_line("retract_after_wipe", "", field("retract_after_wipe"));
 
                 optgroup = page->new_optgroup(L("Z-Hop"), L"param_extruder_lift_enforcement");
                 optgroup->append_single_option_line("retract_lift_enforce", "", field("retract_lift_enforce"));
@@ -6645,15 +6651,22 @@ void TabPrinter::toggle_options()
 
         // some options only apply when not using firmware retraction
         vec.resize(0);
-        vec = {"retraction_speed", "deretraction_speed",    "retract_before_wipe",
-               "retract_length",   "retract_restart_extra",
-               "wipe_distance"};
+        vec = {"retraction_speed", "deretraction_speed", "retract_before_wipe", "retract_after_wipe",
+               "retract_length", "retract_restart_extra", "wipe_distance"};
         for (auto el : vec)
             //BBS
             toggle_option(el, retraction && !use_firmware_retraction, at(el.c_str()));
 
         bool wipe = retraction && m_config->opt_bool("wipe", at("wipe"));
-        toggle_option("retract_before_wipe", wipe, at("retract_before_wipe"));
+        // Orca (#11015): before and after shares add up to at most 100%.
+        {
+            const auto percent_at = [this, &at](const char *key) {
+                const auto *opt = m_config->option<ConfigOptionPercents>(key);
+                return opt == nullptr || opt->values.empty() ? 0. : opt->get_at(size_t(at(key)));
+            };
+            toggle_option("retract_before_wipe", wipe && !is_approx(percent_at("retract_after_wipe"), 100.), at("retract_before_wipe"));
+            toggle_option("retract_after_wipe", wipe && !is_approx(percent_at("retract_before_wipe"), 100.), at("retract_after_wipe"));
+        }
         // Orca (#13812): wiping with firmware retraction is fine as long as the whole retraction is done before the wipe.
         const auto* retract_before_wipe_opt = static_cast<const ConfigOptionPercents*>(m_config->option("retract_before_wipe"));
         const size_t retract_before_wipe_idx = size_t(at("retract_before_wipe"));

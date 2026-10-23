@@ -4,6 +4,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Arachne/WallToolPaths.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/Extruder.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
@@ -231,4 +232,50 @@ TEST_CASE("Polyhole edge count is capped by hole_to_polyhole_max_edges", "[Small
     const Polygons small = create_polyholes(Point(0, 0), scaled<coord_t>(2.), scaled<coord_t>(0.4), true, 50);
     REQUIRE(small.size() == 5);
     CHECK(small.front().size() == 8);
+}
+
+// ---------------------------------------------------------------------------
+// OrcaSlicer #11015: retract amount after wipe
+// ---------------------------------------------------------------------------
+TEST_CASE("retract_after_wipe defaults to 0 and is clamped by the before-wipe share", "[SmallPrintOptions][RetractAfterWipe]")
+{
+    const DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    REQUIRE(full.has("retract_after_wipe"));
+    // The filament override is a nullable key of the definition, not part of the full config.
+    REQUIRE(print_config_def.has("filament_retract_after_wipe"));
+    CHECK(full.option<ConfigOptionPercents>("retract_after_wipe")->get_at(0) == Approx(0.));
+
+    GCodeConfig config;
+    config.retract_before_wipe.values = { 70. };
+    config.retract_after_wipe.values  = { 50. };
+    Extruder extruder(0, &config, false);
+    CHECK(extruder.retract_before_wipe() == Approx(0.7));
+    // 50% asked, only 30% left after the 70% before the wipe.
+    CHECK(extruder.retract_after_wipe() == Approx(0.3));
+
+    config.retract_before_wipe.values = { 20. };
+    config.retract_after_wipe.values  = { 150. };
+    CHECK(extruder.retract_after_wipe() == Approx(0.8));
+
+    config.retract_after_wipe.values = { -10. };
+    CHECK(extruder.retract_after_wipe() == Approx(0.));
+}
+
+TEST_CASE("retract_after_wipe moves part of the retraction after the wipe", "[SmallPrintOptions][RetractAfterWipe]")
+{
+    auto sliced = [](const char *after) {
+        return slice({ TestMesh::cube_20x20x20 }, {
+            { "wipe", "1" },
+            { "wipe_distance", "2" },
+            { "retraction_length", "1" },
+            { "retract_before_wipe", "0%" },
+            { "retract_after_wipe", after },
+        });
+    };
+    const std::string none = sliced("0%");
+    const std::string half = sliced("50%");
+    REQUIRE_FALSE(none.empty());
+    // With 0% before and 0% after, all of the retraction happens during the wipe; with 50% after,
+    // half of it is a separate retraction once the wipe is done.
+    CHECK(none != half);
 }
