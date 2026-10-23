@@ -1770,15 +1770,11 @@ void PerimeterGenerator::process_classic()
 
             // if brim will be printed, reverse the order of perimeters so that
             // we continue inwards after having finished the brim
-            // TODO: add test for perimeter order
             bool is_outer_wall_first = this->config->wall_sequence == WallSequence::OuterInner;
-            if (is_outer_wall_first ||
-                //BBS: always print outer wall first when there indeed has brim.
-                (this->layer_id == 0 &&
-                    this->object_config->brim_type == BrimType::btOuterOnly &&
-                    this->object_config->brim_width.value > 0))
+            if (is_outer_wall_first || this->outer_walls_first_for_brim())
                 entities.reverse();
             // Orca: sandwich mode. Apply after 1st layer.
+            // Edge: keep the offset_layers sandwich gate (Orca #16421's classic thin-wall-hole skip is not ported).
             else if ((this->config->wall_sequence == WallSequence::InnerOuterInner) && layer_id > 0 && !this->config->offset_layers){
                 entities.reverse(); // reverse all entities - order them from external to internal
                 if(entities.entities.size()>2){ // 3 walls minimum needed to do inner outer inner ordering
@@ -2339,11 +2335,25 @@ std::vector<PerimeterGeneratorArachneExtrusion> reorderPerimetersByProximity(std
 
     // Function to reorder perimeters starting from a given reference index
     auto reorderFromReference = [&](int referenceIndex) {
-        std::unordered_set<int> firstLevelIndices;
-        firstLevelIndices.insert(referenceIndex);
-
-        // Find first level touching perimeters
-        std::vector<int> firstLevelTouchingIndices = findAllTouchingPerimeters(entities, firstLevelIndices, threshold_external, threshold_internal, 1);
+        // Find first level touching perimeters. The odd centre line of a wall too narrow for two inner walls is shared
+        // by the outer walls on both sides, so those join this island and are printed before it too, holes first.
+        std::vector<int> outerIndices{referenceIndex};
+        std::vector<int> firstLevelTouchingIndices;
+        for (size_t next = 0; next < outerIndices.size(); ++next)
+            for (int idx : findAllTouchingPerimeters(entities, {outerIndices[next]}, threshold_external, threshold_internal, 1)) {
+                if (std::find(firstLevelTouchingIndices.begin(), firstLevelTouchingIndices.end(), idx) != firstLevelTouchingIndices.end())
+                    continue;
+                firstLevelTouchingIndices.push_back(idx);
+                if (!entities[idx].extrusion->is_odd)
+                    continue;
+                for (size_t i = 0; i < entities.size(); ++i)
+                    if (entities[i].extrusion->inset_idx == 0 && includedIndices.count(int(i)) == 0 &&
+                        std::find(outerIndices.begin(), outerIndices.end(), int(i)) == outerIndices.end() &&
+                        arachne_lines_touch(*entities[i].extrusion, *entities[idx].extrusion, double(threshold_external)))
+                        outerIndices.push_back(int(i));
+            }
+        std::stable_partition(outerIndices.begin(), outerIndices.end(),
+                              [&entities](int idx) { return entities[idx].extrusion->is_closed && !entities[idx].is_contour; });
         // Bring the largest first level perimeter to the front
         // The longest first neighbour is most likely the dominant proximate perimeter
         // hence printing it immediately after the external perimeter should speed things up
@@ -2354,8 +2364,10 @@ std::vector<PerimeterGeneratorArachneExtrusion> reorderPerimetersByProximity(std
             std::iter_swap(maxIt, firstLevelTouchingIndices.end() - 1);
         }
         // Insert first level perimeters into reordered list
-        reordered.push_back(entities[referenceIndex]);
-        includedIndices.insert(referenceIndex);
+        for (int idx : outerIndices) {
+            reordered.push_back(entities[idx]);
+            includedIndices.insert(idx);
+        }
 
         for (int idx : firstLevelTouchingIndices) {
             if (includedIndices.count(idx) == 0) {
@@ -2665,7 +2677,7 @@ void PerimeterGenerator::process_arachne()
         
         if (layer_id == 0){ // disable inner outer inner algorithm after the first layer
         	is_outer_wall_first =
-            	this->config->wall_sequence == WallSequence::OuterInner;
+            	this->config->wall_sequence == WallSequence::OuterInner || this->outer_walls_first_for_brim();
         }
         if (is_outer_wall_first) {
             start_perimeter = 0;
@@ -2959,6 +2971,17 @@ ExPolygons PerimeterGenerator::printable_slices(const ExPolygons &slices) const
         min_width = print_config->spiral_mode ? std::min(min_width, min_feature_size) : min_feature_size;
     }
     return min_width > EPSILON ? opening_ex(slices, float(scale_(min_width / 2.))) : slices;
+}
+
+bool PerimeterGenerator::outer_walls_first_for_brim() const
+{
+    return layer_id == 0 && brim_puts_outer_walls_first(object_config->brim_type.value, object_config->brim_width.value);
+}
+
+bool brim_puts_outer_walls_first(BrimType brim_type, double brim_width)
+{
+    // Edge has no btLeadingEdgeOnly. Keep only Outer only, matching Edge's previous first-layer rule.
+    return brim_width > 0 && brim_type == btOuterOnly;
 }
 
 std::vector<Polygons> PerimeterGenerator::generate_lower_polygons_series(float width)
