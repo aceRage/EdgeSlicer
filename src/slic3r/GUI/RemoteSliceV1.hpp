@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -79,6 +80,64 @@ bool etag_matches(const std::string& if_none_match, const std::string& etag);
 std::string image_cache_headers(const std::string& version, const std::string& etag);
 // For /result: always revalidate (prices can change without a re-slice), ETag to make that free.
 std::string result_cache_headers(const std::string& etag);
+
+// ---- POST /api/plates/{index}/send/preview (PR B, feature "slice_send_preview") ----
+// The mapping sheet of a plate send, one shape for every kind of printer: which of the plate's
+// filaments goes where (an AMS tray, a U1 toolhead, a CANVAS tray, a QIDI Box slot), what the send
+// would refuse and the wire form of the mapping to send back. Nothing is sent by a preview.
+
+struct SheetFilament
+{
+    int         index { 0 };  // 0-based project filament (the G-code's T number)
+    std::string type;
+    std::string color;        // #RRGGBB
+    double      grams { 0. };
+};
+
+struct SheetTarget
+{
+    std::string id;           // what the wire form names: "<ams>-<slot>" (AMS), else the position ("0", "1", ...)
+    std::string label;        // what the printer calls it: "A1", "T1", "1A"
+    std::string type;
+    std::string color;        // #RRGGBB, "" when unknown or empty
+    bool        ready { false }; // something usable is loaded
+    std::string side;         // "L" / "R" on a two-extruder Bambu printer, else ""
+};
+
+struct Sheet
+{
+    std::string                mapping_kind { "none" }; // ams | toolheads | canvas | qidi_box | none
+    bool                       editable { false };      // the send takes this sheet's mapping back
+    std::vector<SheetFilament> filaments;               // the ones the plate prints with
+    std::vector<SheetTarget>   targets;
+    std::map<int, int>         choice;                  // filament index -> position in targets, -1 = none
+    std::map<int, int>         automatic;               // what the automatic mapping picks
+    std::map<int, std::vector<std::string>> problems;   // per filament: why the send would refuse it
+    std::vector<std::string>   warnings;                // shown, never refused for
+    std::string                policy;                  // the slot send policy (CANVAS, QIDI Box), "" otherwise
+    std::string                mapping;                 // the wire form to send back ("" for none / qidi_box)
+    bool                       can_send { true };       // a print would go ahead with this mapping
+};
+
+// The sheet's part of the answer: mapping_kind, editable, filaments [{index, type, color, grams,
+// target (a target id or null), auto, problems []}], targets [{id, label, type, color, ready, side}],
+// mapping, policy, warnings [], can_send.
+nlohmann::json sheet_json(const Sheet& sheet);
+
+// "<filament>:<position>,..." of a choice map (only the filaments with a target): what
+// /api/plates/{i}/send takes as `mapping` for a Snapmaker U1 and an Elegoo CANVAS.
+std::string positions_wire(const std::map<int, int>& choice);
+
+// A Snapmaker U1 (toolheads): the send's own refusals as problems - a used filament with no
+// toolhead, a toolhead the printer does not have, an empty toolhead (unless `force`) - and a
+// material other than the filament's as a warning (the send does not refuse that). Sets can_send
+// and mapping.
+void check_toolheads(Sheet& sheet, bool force);
+
+// The Bambu reprint preview (BambuReprint::evaluate) as a plate sheet: adds mapping_kind "ams",
+// editable, targets (from trays) and per filament color and target. The reprint's own fields
+// (colour, tray, trays, problems, job, options...) stay, so the app's reprint mapping model reads it.
+void decorate_ams_preview(nlohmann::json& preview);
 
 } // namespace SliceV1
 } // namespace GUI

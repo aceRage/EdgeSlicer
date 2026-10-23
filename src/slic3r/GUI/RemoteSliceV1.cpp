@@ -7,6 +7,8 @@
 
 #include <boost/format.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -18,8 +20,9 @@ namespace SliceV1 {
 const std::vector<std::string>& pair_features()
 {
     // slice_v1: the contract (result + cancel + presets type + instances progress + cache headers);
-    // slice_result / slice_cancel: the two sub-features the app checks one by one.
-    static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel" };
+    // slice_result / slice_cancel: the two sub-features the app checks one by one;
+    // slice_send_preview: POST /plates/{i}/send/preview and ams_mapping on a plate send.
+    static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview" };
     return f;
 }
 
@@ -237,6 +240,111 @@ std::string image_cache_headers(const std::string& version, const std::string& e
 std::string result_cache_headers(const std::string& etag)
 {
     return "Cache-Control: private, no-cache\r\nETag: " + etag + "\r\n";
+}
+
+// ---- send preview ----
+
+std::string positions_wire(const std::map<int, int>& choice)
+{
+    std::string out;
+    for (const auto& [filament, pos] : choice) {
+        if (pos < 0) continue;
+        if (!out.empty()) out += ",";
+        out += std::to_string(filament) + ":" + std::to_string(pos);
+    }
+    return out;
+}
+
+nlohmann::json sheet_json(const Sheet& s)
+{
+    nlohmann::json j;
+    j["mapping_kind"] = s.mapping_kind;
+    j["editable"]     = s.editable;
+    nlohmann::json tj = nlohmann::json::array();
+    for (const SheetTarget& t : s.targets)
+        tj.push_back({ { "id", t.id }, { "label", t.label }, { "type", t.type }, { "color", t.color }, { "ready", t.ready }, { "side", t.side } });
+    j["targets"] = tj;
+    nlohmann::json fj = nlohmann::json::array();
+    for (const SheetFilament& f : s.filaments) {
+        nlohmann::json o;
+        o["index"]    = f.index;
+        o["type"]     = f.type;
+        o["color"]    = f.color;
+        o["grams"]    = round2(f.grams);
+        const auto c   = s.choice.find(f.index);
+        const int  pos = c == s.choice.end() ? -1 : c->second;
+        o["target"]   = pos >= 0 && pos < (int) s.targets.size() ? nlohmann::json(s.targets[size_t(pos)].id) : nlohmann::json(nullptr);
+        const auto a   = s.automatic.find(f.index);
+        o["auto"]     = pos >= 0 && a != s.automatic.end() && a->second == pos;
+        nlohmann::json pj = nlohmann::json::array();
+        const auto p   = s.problems.find(f.index);
+        if (p != s.problems.end())
+            for (const std::string& t : p->second) pj.push_back(t);
+        o["problems"] = pj;
+        fj.push_back(o);
+    }
+    j["filaments"] = fj;
+    // The reprint sheet's top-level list as well: {filament, code, text}.
+    nlohmann::json all = nlohmann::json::array();
+    for (const auto& [filament, texts] : s.problems)
+        for (const std::string& t : texts) all.push_back({ { "filament", filament }, { "code", "mapping" }, { "text", t } });
+    j["problems"]  = all;
+    j["mapping"]   = s.mapping;
+    j["policy"]    = s.policy;
+    j["warnings"]  = s.warnings;
+    j["can_send"]  = s.can_send;
+    return j;
+}
+
+static std::string upper(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char) std::toupper(c); });
+    return s;
+}
+
+void check_toolheads(Sheet& s, bool force)
+{
+    const int heads = (int) s.targets.size();
+    for (const SheetFilament& f : s.filaments) {
+        const auto c   = s.choice.find(f.index);
+        const int  pos = c == s.choice.end() ? -1 : c->second;
+        std::vector<std::string> probs;
+        // RemoteSend::prepare_snapmaker's refusals, in its words.
+        if (pos < 0)
+            probs.push_back("filament " + std::to_string(f.index + 1) + " has no toolhead; every filament the file uses needs one");
+        else if (heads > 0 && pos >= heads)
+            probs.push_back("the printer has " + std::to_string(heads) + " toolheads, so there is no toolhead " + std::to_string(pos + 1));
+        else if (heads > 0 && !s.targets[size_t(pos)].ready && !force)
+            probs.push_back("toolhead " + std::to_string(pos + 1) + " is empty; load it, pick another, or send force=1");
+        else if (heads > 0 && !f.type.empty() && !s.targets[size_t(pos)].type.empty() && upper(f.type) != upper(s.targets[size_t(pos)].type))
+            s.warnings.push_back("Filament " + std::to_string(f.index + 1) + " (" + f.type + ") prints from toolhead " + std::to_string(pos + 1) +
+                                 ", which holds " + s.targets[size_t(pos)].type + ".");
+        if (!probs.empty()) s.problems[f.index] = probs;
+    }
+    s.can_send = s.problems.empty();
+    s.mapping  = positions_wire(s.choice);
+}
+
+void decorate_ams_preview(nlohmann::json& p)
+{
+    p["mapping_kind"] = "ams";
+    p["editable"]     = true;
+    nlohmann::json targets = nlohmann::json::array();
+    if (p.contains("trays") && p["trays"].is_array())
+        for (const auto& t : p["trays"])
+            targets.push_back({ { "id", t.value("id", std::string()) },
+                                { "label", t.value("name", std::string()) },
+                                { "type", t.value("type", std::string()) },
+                                { "color", t.value("colour", std::string()) },
+                                { "ready", t.value("ready", false) },
+                                { "side", t.value("side", std::string()) } });
+    p["targets"] = targets;
+    if (p.contains("filaments") && p["filaments"].is_array())
+        for (auto& f : p["filaments"]) {
+            f["color"]  = f.value("colour", std::string());
+            f["target"] = f.contains("tray") ? f["tray"] : nlohmann::json(nullptr);
+        }
+    if (!p.contains("policy")) p["policy"] = "";
 }
 
 } // namespace SliceV1

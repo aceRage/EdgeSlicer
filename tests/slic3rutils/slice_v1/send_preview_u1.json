@@ -1,0 +1,23 @@
+{
+  "mapping_kind": "toolheads",
+  "editable": true,
+  "targets": [
+    {"id": "0", "label": "T1", "type": "PLA", "color": "#FFFFFF", "ready": true, "side": ""},
+    {"id": "1", "label": "T2", "type": "PETG", "color": "#000000", "ready": true, "side": ""},
+    {"id": "2", "label": "T3", "type": "", "color": "", "ready": false, "side": ""},
+    {"id": "3", "label": "T4", "type": "PLA", "color": "#FF0000", "ready": true, "side": ""}
+  ],
+  "filaments": [
+    {"index": 0, "type": "PLA", "color": "#FFFFFF", "grams": 20.5, "target": "0", "auto": true, "problems": []},
+    {"index": 1, "type": "PLA", "color": "#101010", "grams": 3.25, "target": "1", "auto": false, "problems": []},
+    {"index": 3, "type": "PLA", "color": "#FF0000", "grams": 1.0, "target": "2", "auto": false,
+     "problems": ["toolhead 3 is empty; load it, pick another, or send force=1"]}
+  ],
+  "problems": [
+    {"filament": 3, "code": "mapping", "text": "toolhead 3 is empty; load it, pick another, or send force=1"}
+  ],
+  "mapping": "0:0,1:1,3:2",
+  "policy": "",
+  "warnings": ["Filament 2 (PLA) prints from toolhead 2, which holds PETG."],
+  "can_send": false
+}

@@ -275,3 +275,116 @@ TEST_CASE("slice_v1 /pair features: the native Slice tab's flags are listed", "[
     for (const char* s : { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" })
         CHECK(has(s));
 }
+
+// ---- PR B: the send preview sheet ----------------------------------------------------------
+
+namespace {
+
+SliceV1::Sheet u1_sheet()
+{
+    SliceV1::Sheet s;
+    s.mapping_kind = "toolheads";
+    s.editable     = true;
+    s.filaments    = { { 0, "PLA", "#FFFFFF", 20.5 }, { 1, "PLA", "#101010", 3.25 }, { 3, "PLA", "#FF0000", 1.0 } };
+    s.targets      = { { "0", "T1", "PLA", "#FFFFFF", true, "" },
+                       { "1", "T2", "PETG", "#000000", true, "" },
+                       { "2", "T3", "", "", false, "" },
+                       { "3", "T4", "PLA", "#FF0000", true, "" } };
+    s.choice       = { { 0, 0 }, { 1, 1 }, { 3, 2 } };
+    s.automatic    = { { 0, 0 }, { 1, 3 }, { 3, 3 } };
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("slice_v1 send preview: a U1 sheet with an empty toolhead and a material warning", "[SliceV1]")
+{
+    SliceV1::Sheet s = u1_sheet();
+    SliceV1::check_toolheads(s, false);
+    require_same(SliceV1::sheet_json(s), read_fixture("send_preview_u1.json"));
+}
+
+TEST_CASE("slice_v1 send preview: force lets an empty toolhead through, as the send does", "[SliceV1]")
+{
+    SliceV1::Sheet s = u1_sheet();
+    SliceV1::check_toolheads(s, true);
+    CHECK(s.can_send);
+    CHECK(s.problems.empty());
+}
+
+TEST_CASE("slice_v1 send preview: a filament with no toolhead or one past the last is refused", "[SliceV1]")
+{
+    SliceV1::Sheet s = u1_sheet();
+    s.choice[0] = -1;
+    s.choice[1] = 7;
+    SliceV1::check_toolheads(s, true);
+    CHECK_FALSE(s.can_send);
+    REQUIRE(s.problems.count(0) == 1);
+    REQUIRE(s.problems.count(1) == 1);
+    CHECK(s.problems[0].front().find("has no toolhead") != std::string::npos);
+    CHECK(s.problems[1].front().find("no toolhead 8") != std::string::npos);
+    CHECK(s.mapping == "1:7,3:2"); // filament 0 has none, so it is left out of the wire form
+}
+
+TEST_CASE("slice_v1 send preview: positions_wire is what /send takes as mapping", "[SliceV1]")
+{
+    CHECK(SliceV1::positions_wire({}) == "");
+    CHECK(SliceV1::positions_wire({ { 0, 1 }, { 1, -1 }, { 2, 0 } }) == "0:1,2:0");
+}
+
+TEST_CASE("slice_v1 send preview: a plate-level problem (slot policy) is listed but on no filament", "[SliceV1]")
+{
+    SliceV1::Sheet s;
+    s.mapping_kind = "canvas";
+    s.filaments    = { { 0, "PLA", "#FFFFFF", 5. } };
+    s.targets      = { { "0", "1A", "PETG", "#000000", true, "" } };
+    s.choice       = { { 0, 0 } };
+    s.problems[-1] = { "Filament 1 (PLA) is on tray 1A, which holds PETG." };
+    s.policy       = "type_mismatch";
+    s.can_send     = false;
+    const json j   = SliceV1::sheet_json(s);
+    REQUIRE(j["problems"].size() == 1);
+    CHECK(j["problems"][0]["filament"] == -1);
+    CHECK(j["filaments"][0]["problems"].empty());
+    CHECK(j["policy"] == "type_mismatch");
+    CHECK(j["can_send"] == false);
+}
+
+TEST_CASE("slice_v1 send preview: the Bambu reprint sheet gains the plate sheet's fields", "[SliceV1]")
+{
+    json p = json::parse(R"({
+        "printer": {"id": "X", "name": "X1C", "model": "BL-P001"},
+        "filaments": [
+            {"index": 0, "type": "PLA", "colour": "#E6EBE3", "grams": 58.3, "side": "", "tray": "0-0", "auto": true, "problems": []},
+            {"index": 2, "type": "PETG", "colour": "#000000", "grams": 2.0, "side": "", "tray": null, "auto": false, "problems": ["no tray"]}
+        ],
+        "trays": [
+            {"ams_id": 0, "slot_id": 0, "id": "0-0", "name": "A1", "side": "", "exists": true, "ready": true, "type": "PLA", "match_type": "PLA", "colour": "#E6EBE3"}
+        ],
+        "mapping": "0:0-0", "problems": [], "options": {}, "warnings": [], "can_send": false
+    })");
+    SliceV1::decorate_ams_preview(p);
+    CHECK(p["mapping_kind"] == "ams");
+    CHECK(p["editable"] == true);
+    REQUIRE(p["targets"].size() == 1);
+    CHECK(p["targets"][0] == json::parse(R"({"id": "0-0", "label": "A1", "type": "PLA", "color": "#E6EBE3", "ready": true, "side": ""})"));
+    CHECK(p["filaments"][0]["color"] == "#E6EBE3");
+    CHECK(p["filaments"][0]["target"] == "0-0");
+    CHECK(p["filaments"][1]["target"].is_null());
+    // the reprint's own fields are still there for the app's BambuMapping model
+    CHECK(p["filaments"][0]["colour"] == "#E6EBE3");
+    CHECK(p["filaments"][0]["tray"] == "0-0");
+    CHECK(p["mapping"] == "0:0-0");
+    CHECK(p["policy"] == "");
+}
+
+TEST_CASE("slice_v1 send preview: the hub proxies the preview route and /pair says so", "[SliceV1][RemoteHub]")
+{
+    using RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("POST", "/api/plates/0/send/preview"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/send/preview"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/x/send/preview"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/send/preview/x"));
+    const auto f = RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "slice_send_preview") != f.end());
+}
