@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -205,6 +206,9 @@ private:
     bool             m_slicing { false };
     int              m_slicing_percent { 0 };   // of the plate being sliced, from note_slice_progress
     int              m_slicing_plate { -1 };    // that plate (-1 when nothing is slicing)
+    // slice_v1: the PC's current plate as last seen on the GUI thread (api_plates, a slice,
+    // and a refresh api_info posts), so /api/info can report it without waiting for the GUI.
+    std::atomic<int> m_current_plate { 0 };
     bool             m_hidden { false };
     std::deque<Attention> m_attention; // ring of auto-answered dialogs, 50 entries
     bool             m_needs_attention { false };

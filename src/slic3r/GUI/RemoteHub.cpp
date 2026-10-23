@@ -3461,6 +3461,7 @@ struct Instance
     bool        slicing { false };
     int         slicing_plate { -1 };   // slice_v1: the plate being sliced, -1 while idle
     int         slicing_percent { 0 };  // and how far
+    int         current_plate { 0 };    // slice_v1: the plate the PC shows
     bool        hidden { false };
     bool        needs_attention { false };
     std::string attention_reason;
@@ -5926,6 +5927,7 @@ Instance HubServer::probe_instance(Instance inst)
                 inst.slicing  = j.value("slicing", false);
                 inst.slicing_plate   = j.value("slicing_plate", -1);
                 inst.slicing_percent = j.value("slicing_percent", 0);
+                inst.current_plate   = j.value("current_plate", 0);
                 inst.hidden   = j.value("hidden", inst.hidden);
                 inst.needs_attention  = j.value("needs_attention", false);
                 inst.attention_reason = j.value("attention_reason", "");
@@ -6009,6 +6011,7 @@ json HubServer::instances_json()
         ji["slicing"] = inst.slicing;
         ji["slicing_plate"]   = inst.slicing ? inst.slicing_plate : -1; // slice_v1
         ji["slicing_percent"] = inst.slicing ? inst.slicing_percent : 0;
+        ji["current_plate"]   = inst.current_plate;
         ji["hidden"]  = inst.hidden;
         ji["needs_attention"]  = inst.needs_attention;
         ji["attention_reason"] = inst.attention_reason;
