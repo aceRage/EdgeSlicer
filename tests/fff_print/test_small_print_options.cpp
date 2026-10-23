@@ -205,3 +205,30 @@ TEST_CASE("An object-level small support perimeter speed is read as a percentage
     // 300% of the object's 100 mm/s support speed (the global speed map may only add to it).
     CHECK(max_speed >= 300. - EPSILON);
 }
+
+// ---------------------------------------------------------------------------
+// OrcaSlicer #12349: limit polyhole edges
+// ---------------------------------------------------------------------------
+namespace Slic3r {
+// Defined in PrintObject.cpp.
+Polygons create_polyholes(const Point center, const coord_t radius, const coord_t nozzle_diameter, bool multiple, int max_edges);
+}
+
+TEST_CASE("Polyhole edge count is capped by hole_to_polyhole_max_edges", "[SmallPrintOptions][Polyholes]")
+{
+    CHECK(PrintRegionConfig::defaults().hole_to_polyhole_max_edges.value == 50);
+
+    // 4 * 20 * 0.4 / 0.4 = 80 edges without a cap.
+    const Polygons uncapped = create_polyholes(Point(0, 0), scaled<coord_t>(20.), scaled<coord_t>(0.4), false, 1000);
+    REQUIRE(uncapped.size() == 1);
+    CHECK(uncapped.front().size() == 80);
+
+    const Polygons capped = create_polyholes(Point(0, 0), scaled<coord_t>(20.), scaled<coord_t>(0.4), false, 50);
+    REQUIRE(capped.size() == 1);
+    CHECK(capped.front().size() == 50);
+
+    // Small holes are below the cap and unchanged.
+    const Polygons small = create_polyholes(Point(0, 0), scaled<coord_t>(2.), scaled<coord_t>(0.4), true, 50);
+    REQUIRE(small.size() == 5);
+    CHECK(small.front().size() == 8);
+}
