@@ -10627,6 +10627,22 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         double oh4_abs = oh4_fop.percent ? (oh4_fop.value * 0.01 * ref_speed) : oh4_fop.value;
         const bool slowdown_curled = this->process_flow_value(m_config.slowdown_for_curled_perimeters);
 
+        // Overhang Shadow: only the inner wall (erPerimeter) behind an overhang borrows that
+        // overhang's slowdown and fan. Overhang perimeters and bridge infill stay on the stock
+        // path. Off by default (ratio/reach stay 0). No effect when walls print outer-first.
+        float shadow_ratio = 0.f;
+        float shadow_reach = 0.f;
+        if (overhang_speed_on && path.role() == erPerimeter && m_config.overhang_shadow_inner_wall.value) {
+            const WallInfillOrder order = m_config.wall_infill_order.value;
+            const bool outer_first = order == WallInfillOrder::OuterInnerInfill ||
+                                     order == WallInfillOrder::InfillOuterInner ||
+                                     m_config.wall_sequence.value == WallSequence::OuterInner;
+            if (!outer_first) {
+                shadow_ratio = float(m_config.overhang_shadow_speed_ratio.value / 100.0);
+                shadow_reach = float(path.width * m_config.overhang_shadow_distance.value / 100.0);
+            }
+        }
+
         if (slowdown_curled) {
             ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
                 {FloatOrPercent{100, true},
@@ -10637,7 +10653,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                  (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true}});
 
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
-                                                                                  ref_speed, speed, slowdown_curled, fan_overlap_threshold);
+                                                                                  ref_speed, speed, slowdown_curled, fan_overlap_threshold,
+                                                                                  shadow_ratio, shadow_reach);
         } else {
             ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
                 {FloatOrPercent{100, true},
@@ -10648,7 +10665,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                  FloatOrPercent{this->process_flow_value(m_config.bridge_speed) * 100 / ref_speed, true}});
 
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
-                                                                                  ref_speed, speed, slowdown_curled, fan_overlap_threshold);
+                                                                                  ref_speed, speed, slowdown_curled, fan_overlap_threshold,
+                                                                                  shadow_ratio, shadow_reach);
         }
         // Orca #14788: with the slowdown off the points only carry the overhang fan transitions, printed at the
         // path's own speed.

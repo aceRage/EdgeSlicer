@@ -1386,6 +1386,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "ensure_vertical_shell_thickness"
             || opt_key == "bridge_angle"
             || opt_key == "internal_bridge_angle" // ORCA: Internal bridge angle override
+            || opt_key == "bridge_expansion_extra"
             //BBS
             || opt_key == "bridge_density"
             || opt_key == "internal_bridge_density") {
@@ -1458,6 +1459,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "overhang_reverse_threshold"
             || opt_key == "wall_direction"
             || opt_key == "enable_overhang_speed"
+            || opt_key == "overhang_shadow_inner_wall"
+            || opt_key == "overhang_shadow_speed_ratio"
+            || opt_key == "overhang_shadow_distance"
             || opt_key == "detect_thin_wall"
             || opt_key == "precise_outer_wall") {
             steps.emplace_back(posPerimeters);
