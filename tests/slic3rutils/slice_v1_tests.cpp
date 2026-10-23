@@ -151,7 +151,11 @@ TEST_CASE("slice_v1 result: unknown prices, fees and markup", "[SliceV1]")
     r.has_filament_costs = false; // a G-code exported without prices
     r.time_cost          = 1.5;
     r.has_time_cost      = true;
-    r.print_statistics.modes[size_t(Mode::Normal)].time  = 3600.f;
+    // PrintEstimatedStatistics::reset() does not clear the modes; say every time used here.
+    r.print_statistics.modes[size_t(Mode::Normal)].time         = 3600.f;
+    r.print_statistics.modes[size_t(Mode::Normal)].prepare_time = 0.f;
+    r.print_statistics.modes[size_t(Mode::Stealth)].time        = 0.f;
+    r.print_statistics.total_filamentchanges                    = 0;
     r.print_statistics.model_volumes_per_extruder = { { 0, 10000. } };
     r.print_statistics.total_volumes_per_extruder = { { 0, 10000. } };
     r.toolpath_outside = true;
