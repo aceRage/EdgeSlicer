@@ -25,13 +25,26 @@ enum class Quality : int;
 struct CameraView;
 
 // New values go at the end: the JSON names and the panel's choices follow this order.
-// Layer build-up (the toolpath source) comes with S5.
-enum class VideoPath   : int { Orbit = 0, Turntable, OrbitBob, Keyframes };
+// The layer build-up (S5) goes with any of them: VideoSettings::build.
+// S5c: Static holds the scene's camera; StaticZoomOut holds its angle and zooms out as the layer
+// build-up grows, keeping what is built so far framed and ending on the scene's own framing.
+enum class VideoPath   : int { Orbit = 0, Turntable, OrbitBob, Keyframes, Static, StaticZoomOut };
 enum class Easing      : int { Linear = 0, EaseInOut, EaseIn, EaseOut };
 // MP4 is H.264. WebMAlpha is VP9 with a transparent background. PNGSequence is always available.
 enum class VideoFormat : int { MP4 = 0, WebM, WebMAlpha, GIF, WebP, PNGSequence };
 
+// S5c: where the callouts of a video sit. Animated: they follow their spots on the model every
+// frame. Static: labels and leaders stay where the clip's first frame puts them.
+enum class CalloutMotion : int { Animated = 0, Static };
+// S5c: when they show. Always, or AsUsed: a filament's callout fades in once the layer build-up has
+// printed that filament (the prime tower does not count).
+enum class CalloutAppearance : int { Always = 0, AsUsed };
+
 const char *to_string(VideoPath v);
+const char *to_string(CalloutMotion v);
+const char *to_string(CalloutAppearance v);
+bool from_string(const std::string &s, CalloutMotion &v);
+bool from_string(const std::string &s, CalloutAppearance &v);
 const char *to_string(Easing v);
 const char *to_string(VideoFormat v);
 bool from_string(const std::string &s, VideoPath &v);
@@ -50,6 +63,14 @@ struct Keyframe
     std::array<double, 3> up{ { 0., 0., 1. } };   // the roll
     double                zoom = 1.;              // the focal length, as the camera's zoom
     Easing                ease = Easing::EaseInOut;   // how the segment arriving at this key speeds up and slows down
+    // S5 (compiled paths, ShowcasePath.hpp): how far the model has turned at this key (a turntable
+    // in a path; the lights and the environment turn the other way, as for VideoPath::Turntable).
+    double                spin = 0.;
+    // S5: the camera passes through this key without stopping. A run of glide keys is eased as one
+    // segment, from the key before it to the first key after it that does not glide (with that key's
+    // ease), at an even speed along the whole run; the glide keys' own times are then only where the
+    // run passes them. An orbit in a path is such a run, so it eases in and out once, not per key.
+    bool                  glide = false;
 
     bool operator==(const Keyframe &o) const;
     bool operator!=(const Keyframe &o) const { return !(*this == o); }
@@ -58,7 +79,36 @@ struct Keyframe
 constexpr double MIN_VIDEO_SECONDS = 1.;
 constexpr double MAX_VIDEO_SECONDS = 60.;
 constexpr double MAX_HOLD_SECONDS  = 10.;
-constexpr int    MAX_KEYFRAMES     = 64;
+// S5: a compiled path (an orbit is a key every 15 degrees) needs more than the 64 S4 allowed.
+constexpr int    MAX_KEYFRAMES     = 512;
+
+// S5: the layer build-up (design 4.1): the print grows from the plate while the camera moves. With
+// toolpaths (a sliced plate) the layers of the slice are shown up to a height, otherwise the model is
+// cut by a horizontal plane (the "clip" fallback).
+enum class BuildSource : int { Auto = 0, Toolpaths, Clip };
+const char *to_string(BuildSource v);
+bool        from_string(const std::string &s, BuildSource &v);
+
+struct BuildUp
+{
+    bool        enabled = false;
+    // Over the motion (between the holds): 0 = the empty plate, 1 = the finished print.
+    double      from    = 0.;
+    double      to      = 1.;
+    Easing      easing  = Easing::Linear;
+    BuildSource source  = BuildSource::Auto;
+    // S5b: what of the slice the build-up lays (toolpaths only; the clip of the model has neither).
+    // Both on, as S5 showed every extrusion.
+    bool        infill   = true;   // sparse and internal solid infill, internal bridges
+    bool        supports = true;   // supports, their interfaces and transitions
+
+    bool operator==(const BuildUp &o) const
+    {
+        return enabled == o.enabled && from == o.from && to == o.to && easing == o.easing && source == o.source && infill == o.infill &&
+               supports == o.supports;
+    }
+    bool operator!=(const BuildUp &o) const { return !(*this == o); }
+};
 
 struct VideoSettings
 {
@@ -79,7 +129,15 @@ struct VideoSettings
     double      hold_end   = 0.;      // ... and after it
     bool        loop       = true;    // a full turn: the last frame leads into the first
     bool        callouts   = true;    // draw the scene's callouts (when they are on) in the video
+    CalloutMotion     callout_motion     = CalloutMotion::Animated;      // S5c
+    CalloutAppearance callout_appearance = CalloutAppearance::Always;    // S5c
     std::vector<Keyframe> keyframes;  // sorted by time
+    // S5: the layer build-up over the motion (the timeline's "build" events override it).
+    BuildUp     build;
+    // S5: what an imported path file timed besides the camera (lights, backdrop, floor, callouts,
+    // the watermark, the build-up): its "events" array, as JSON text (ShowcasePath.hpp). Empty = none.
+    std::string events;
+    std::string path_name;            // the imported path's name, informational
 
     bool operator==(const VideoSettings &o) const;
     bool operator!=(const VideoSettings &o) const { return !(*this == o); }
@@ -87,6 +145,9 @@ struct VideoSettings
 
 // Clamps every field into its range and sorts the keyframes (a loaded file may say anything).
 void sanitize(VideoSettings &v);
+
+// S5c: the camera paths that do not move the camera (Static, StaticZoomOut).
+bool is_static_path(VideoPath p);
 
 // --- easing --------------------------------------------------------------------------------------
 
@@ -106,6 +167,9 @@ double frame_time(const VideoSettings &v, int frame);
 // How far along the motion a time is, 0..1 (before easing). 0 in the start hold, 1 in the end hold;
 // in a seamless loop it never reaches 1.
 double motion_fraction(const VideoSettings &v, double t);
+// S5: how much of the print the build-up shows at `t` (0 the empty plate .. 1 finished), from
+// VideoSettings::build; < 0 when the video has no build-up.
+double build_fraction(const VideoSettings &v, double t);
 
 // --- the camera path -----------------------------------------------------------------------------
 
@@ -123,6 +187,13 @@ struct CameraPose
 // The pose at `t` seconds from the start of the video. `base` is the scene's camera: where an orbit
 // starts and what it circles, and the pose of a keyframe path without keys.
 CameraPose evaluate_path(const VideoSettings &v, const CameraView &base, double t);
+
+// S5c, "static with zoom out": `base` (the pose that frames the whole model, whose box is
+// `box_min`..`box_max`) moved and zoomed so the model up to the height `built_z` stays framed the same
+// way: the same angle, the target on what is built, the zoom up to `max_zoom` times. At the model's
+// top it is `base` itself.
+CameraPose frame_built_part(const CameraPose &base, const std::array<double, 3> &box_min, const std::array<double, 3> &box_max,
+                            double built_z, double max_zoom = 4.);
 inline CameraPose pose_at_frame(const VideoSettings &v, const CameraView &base, int frame)
 {
     return evaluate_path(v, base, frame_time(v, frame));
@@ -130,6 +201,9 @@ inline CameraPose pose_at_frame(const VideoSettings &v, const CameraView &base, 
 
 // The keyframe spline on its own (time in seconds of motion). Keys must be sorted by time.
 CameraPose evaluate_keyframes(const std::vector<Keyframe> &keys, double t, const CameraView &fallback);
+// S5: when the camera actually passes key `index`: its own time, or for a glide key the moment its
+// eased run reaches it (by length along the run).
+double     keyframe_run_time(const std::vector<Keyframe> &keys, size_t index);
 
 // Centripetal Catmull-Rom (alpha 0.5) between p1 and p2 at s in [0, 1], p0 and p3 the neighbours.
 std::array<double, 3> catmull_rom(const std::array<double, 3> &p0, const std::array<double, 3> &p1, const std::array<double, 3> &p2,

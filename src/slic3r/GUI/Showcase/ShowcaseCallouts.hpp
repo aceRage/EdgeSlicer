@@ -39,6 +39,10 @@ struct ShowcaseCalloutDraw
     // label's own opacity. Empty: no fade, an occluded anchor gets a dashed leader (stills).
     std::vector<double>           fade;
     double                        alpha = 1.;
+    // S5: a path's timeline (Showcase::CalloutVisual): how much it shows the callout (0..1, on top of
+    // the fade) and how much it highlights it (an accent ring round the label and its dots).
+    double                        visual    = 1.;
+    double                        highlight = 0.;
 };
 
 struct ShowcaseCalloutOptions
@@ -94,6 +98,8 @@ public:
     const Showcase::LabelWords &words() const { return m_words; }
     // Changes whenever a label could read differently.
     std::string               signature() const;
+    // The callout's colour(s), "#RRGGBB" (several for a multi-colour filament).
+    std::vector<std::string>  colors_of(const Showcase::Callout &callout) const;
 
 private:
     struct Slot
@@ -104,8 +110,6 @@ private:
         std::vector<std::string> colors;
         int                      family = -1;   // index into m_library, -1 = not a library filament
     };
-    std::vector<std::string> colors_of(const Showcase::Callout &callout) const;
-
     std::vector<Slot>              m_slots;      // physical filaments, slot - 1
     std::map<int, double>          m_weight_g;   // slot -> grams, from the slice
     std::map<int, double>          m_price;      // slot -> money, from the slice and your prices

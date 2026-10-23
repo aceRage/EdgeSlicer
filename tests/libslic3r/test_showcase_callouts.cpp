@@ -285,7 +285,8 @@ TEST_CASE("Callout layout: the column split", "[Showcase][Callouts]")
         CHECK_THAT(r.labels[0].box.y, WithinAbs(60., 1e-9));
         CHECK_THAT(r.labels[1].box.right(), WithinAbs(1000., 1e-9));
         CHECK_THAT(r.labels[1].box.bottom(), WithinAbs(600., 1e-9));
-        REQUIRE(r.labels[0].leader.size() == 2);
+        // S5b: Elbow (the default) turns a right angle into that side.
+        REQUIRE(r.labels[0].leader.size() == 3);
         CHECK_THAT(r.labels[0].leader.back().x, WithinAbs(150., 1e-9));   // the side facing the anchor
     }
 }
@@ -400,8 +401,8 @@ TEST_CASE("Callout colour names", "[Showcase][Callouts]")
     SECTION("library, then the user's text, then the nearest name") {
         CHECK(resolve_color_name("Galaxy Black", "My black", "#1A1A1A") == "Galaxy Black");
         CHECK(resolve_color_name("", "My black", "#1A1A1A") == "My black");
-        CHECK(resolve_color_name("", "  ", "#1A1A1A") == "\xE2\x89\x88 Jet Black");
-        CHECK(resolve_color_name("", "", "#FFFFFF") == "White");   // exactly a named colour: no "≈"
+        CHECK(resolve_color_name("", "  ", "#1A1A1A") == "Jet Black");   // S5c: no "≈" in front of a guess
+        CHECK(resolve_color_name("", "", "#FFFFFF") == "White");
         CHECK(resolve_color_name("", "", "#FFFFFF", [](const char *s) { return std::string("[") + s + "]"; }) == "[White]");
         CHECK(resolve_color_name("", "", "bad").empty());
     }
@@ -492,13 +493,13 @@ TEST_CASE("Callout label text", "[Showcase][Callouts]")
         CHECK(build_callout_label(c, f, fields, words).details == "PLA \xC2\xB7 Silk");
     }
     SECTION("fields off") {
-        fields.brand = fields.hex = fields.type = false;
+        fields.brand = fields.hex = fields.swatch = fields.type = false;
         const CalloutLabel l = build_callout_label(c, f, fields, words);
         CHECK(l.title == "PLA Pro");
         CHECK(l.hex.empty());
         CHECK(l.swatches.empty());
         CHECK(l.details.empty());
-        fields.product = fields.color_name = false;
+        fields.product = fields.family = fields.color_name = false;
         CHECK(build_callout_label(c, f, fields, words).empty());
     }
     SECTION("a standard finish, or one the type already says, is not repeated") {
@@ -880,4 +881,282 @@ TEST_CASE("Callouts survive the project 3MF and stay out of a Bambu export", "[S
     }
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
+}
+
+// ------------------------------------------------------------------------------------------------
+// S5b: the owner's round after hand-testing S5
+// ------------------------------------------------------------------------------------------------
+
+TEST_CASE("S5b: hex code and swatch, material family, the separator", "[Showcase][Callouts]")
+{
+    LabelFilament f;
+    f.vendor          = "Bambu Lab";
+    f.preset_name     = "Bambu PLA Basic @BBL X1C";
+    f.type            = "PLA";
+    f.finish          = "Matte";
+    f.standard_finish = false;
+    f.colors          = { "#c12e1f" };
+    f.color_name      = "Cardinal Red";
+    Callout c;
+    c.key = make_callout_key(1);
+    CalloutFields fields;
+    LabelWords    words;
+
+    SECTION("the default first line is unchanged") {
+        const CalloutLabel l = build_callout_label(c, f, fields, words);
+        CHECK(callout_first_line(l) == "Bambu Lab PLA Basic \xE2\x80\x93 Cardinal Red");
+        CHECK(fields.separator == " \xE2\x80\x93 ");
+    }
+    SECTION("the hex code and the swatch are separate") {
+        fields.swatch = false;
+        CalloutLabel l = build_callout_label(c, f, fields, words);
+        CHECK(l.hex == "#C12E1F");
+        CHECK(l.swatches.empty());
+        fields.swatch = true;
+        fields.hex    = false;
+        l             = build_callout_label(c, f, fields, words);
+        CHECK(l.hex.empty());
+        REQUIRE(l.swatches.size() == 1);
+        // A label of just a swatch is not empty.
+        fields.brand = fields.product = fields.color_name = fields.type = false;
+        CHECK_FALSE(build_callout_label(c, f, fields, words).empty());
+    }
+    SECTION("the user's separator") {
+        fields.separator = " / ";
+        const CalloutLabel l = build_callout_label(c, f, fields, words);
+        CHECK(callout_first_line(l) == "Bambu Lab PLA Basic / Cardinal Red");
+        fields.separator = ": ";
+        CHECK(callout_first_line(build_callout_label(c, f, fields, words)) == "Bambu Lab PLA Basic: Cardinal Red");
+    }
+    SECTION("the material family stands in for the product, and is not said twice") {
+        fields.product = false;
+        fields.family  = true;
+        CalloutLabel l = build_callout_label(c, f, fields, words);
+        CHECK(l.title == "Bambu Lab PLA");
+        CHECK(l.details == "Matte");
+        fields.brand = false;
+        CHECK(build_callout_label(c, f, fields, words).title == "PLA");
+        // The type off: no details at all.
+        fields.type = false;
+        CHECK(build_callout_label(c, f, fields, words).details.empty());
+    }
+    SECTION("with the product on, the product wins") {
+        fields.family = true;
+        const CalloutLabel l = build_callout_label(c, f, fields, words);
+        CHECK(l.title == "Bambu Lab PLA Basic");
+        CHECK(l.details == "PLA \xC2\xB7 Matte");
+    }
+}
+
+TEST_CASE("S5b: each colour once keeps the most visible callout per colour", "[Showcase][Callouts]")
+{
+    // Two filaments of the same red (one written in lower case), a blue, and one with no colour.
+    const std::vector<std::string> colors = { "#FF0000", "#0000FF", "#ff0000", "", "#0000FF" };
+    SECTION("the larger region wins") {
+        const std::vector<bool> keep = once_per_color_keep(colors, { 10., 50., 30., 0., 50. });
+        CHECK(keep == std::vector<bool>{ false, true, true, true, false });   // blue: a tie goes to the first
+    }
+    SECTION("unknown areas: the first of each colour") {
+        const std::vector<bool> keep = once_per_color_keep(colors, {});
+        CHECK(keep == std::vector<bool>{ true, true, false, true, false });
+    }
+    SECTION("off by default, and kept in the scene") {
+        Callouts c;
+        CHECK_FALSE(c.once_per_color);
+        c.once_per_color = true;
+        CHECK(c != Callouts());
+    }
+}
+
+namespace {
+bool axis_aligned(const std::vector<PointD> &pts)
+{
+    for (size_t i = 0; i + 1 < pts.size(); ++i)
+        if (std::abs(pts[i].x - pts[i + 1].x) > 1e-6 && std::abs(pts[i].y - pts[i + 1].y) > 1e-6)
+            return false;
+    return true;
+}
+} // namespace
+
+TEST_CASE("S5b: Elbow leaders are right-angled, Straight ones are not", "[Showcase][Callouts]")
+{
+    // Anchors bunched on the model so the column pushes their labels up and down.
+    std::vector<LayoutLabel> labels;
+    for (int i = 0; i < 5; ++i) {
+        LayoutLabel l;
+        l.anchor = { 600. + 25. * i, 430. + 8. * i };
+        l.w      = 180.;
+        l.h      = 40.;
+        labels.push_back(l);
+    }
+    LayoutParams p;
+    p.frame_w        = 1600.;
+    p.frame_h        = 900.;
+    p.margin         = 24.;
+    p.gap            = 10.;
+    p.landing        = 16.;
+    p.mode           = CalloutLayout::Columns;
+    p.max_per_column = 50;
+    p.model_center_x = 1000.;   // all on the left
+
+    p.leader = LeaderStyle::Straight;
+    const CalloutLayoutResult straight = layout_callouts(labels, p);
+    check_layout(labels, p, straight);
+    int sloped = 0;
+    for (const PlacedLabel &pl : straight.labels) {
+        REQUIRE(pl.leader.size() == 2);
+        sloped += axis_aligned(pl.leader) ? 0 : 1;
+    }
+    CHECK(sloped >= 3);
+
+    p.leader = LeaderStyle::Elbow;
+    const CalloutLayoutResult elbow = layout_callouts(labels, p);
+    check_layout(labels, p, elbow);
+    CHECK_FALSE(layout_has_crossings(elbow));
+    int bent = 0;
+    for (const PlacedLabel &pl : elbow.labels) {
+        INFO("leader of " << pl.leader.size() << " points");
+        CHECK(axis_aligned(pl.leader));
+        bent += pl.leader.size() == 4 ? 1 : 0;
+        CHECK_THAT(pl.leader.back().x, WithinAbs(pl.box.right(), 1e-6));
+    }
+    CHECK(bent >= 3);
+
+    SECTION("bands too") {
+        LayoutParams q = p;
+        q.mode         = CalloutLayout::Bands;
+        std::vector<LayoutLabel> wide = labels;
+        for (size_t i = 0; i < wide.size(); ++i)
+            wide[i].anchor = { 500. + 40. * double(i), 450. + 3. * double(i) };
+        const CalloutLayoutResult r = layout_callouts(wide, q);
+        CHECK(r.bands);
+        CHECK_FALSE(layout_has_crossings(r));
+        for (const PlacedLabel &pl : r.labels)
+            CHECK(axis_aligned(pl.leader));
+    }
+    SECTION("a pinned label gets a right-angled leader where it can") {
+        std::vector<LayoutLabel> one(1);
+        one[0].anchor     = { 800., 600. };
+        one[0].w          = 180.;
+        one[0].h          = 40.;
+        one[0].pinned     = true;
+        one[0].pinned_pos = { 300., 100. };
+        const CalloutLayoutResult r = layout_callouts(one, p);
+        REQUIRE(r.labels[0].leader.size() == 3);
+        CHECK(axis_aligned(r.labels[0].leader));
+        p.leader = LeaderStyle::Straight;
+        CHECK(layout_callouts(one, p).labels[0].leader.size() == 2);
+    }
+}
+
+TEST_CASE("S5b: the new callout settings in the scene's JSON", "[Showcase][Callouts]")
+{
+    SECTION("they round-trip") {
+        Project p;
+        Scene  &s                = p.ensure_scene_for_plate(0);
+        s.callouts               = sample_callouts();
+        s.callouts.once_per_color = true;
+        s.callouts.fields.family  = true;
+        s.callouts.fields.hex     = true;
+        s.callouts.fields.swatch  = false;
+        s.callouts.fields.separator = " \xC2\xB7 ";
+        Project back;
+        REQUIRE(scenes_from_json(scenes_to_json(p), back));
+        CHECK(back.scenes[0].callouts == s.callouts);
+    }
+    SECTION("an S5 scene: the old \"hex\" drives the swatch too, and the rest keep their defaults") {
+        for (bool hex : { true, false }) {
+            const std::string text = std::string(R"({"schema": 2, "scenes": [{"id": "x", "plate_index": 0, "callouts": {
+                "enabled": true, "fields": {"brand": true, "product": true, "color_name": true, "hex": )") +
+                                     (hex ? "true" : "false") + R"(, "type": true}}}]})";
+            Project q;
+            REQUIRE(scenes_from_json(text, q));
+            const Callouts &c = q.scenes[0].callouts;
+            CHECK(c.fields.hex == hex);
+            CHECK(c.fields.swatch == hex);
+            CHECK(c.fields.family);   // S5c: on, so the title reads as it did
+            CHECK(c.fields.separator == " \xE2\x80\x93 ");
+            CHECK_FALSE(c.once_per_color);
+        }
+    }
+}
+
+TEST_CASE("S5c: the first line in every combination of brand, product and family", "[Showcase][Callouts]")
+{
+    LabelFilament f;
+    f.vendor      = "Bambu Lab";
+    f.preset_name = "Bambu PLA Basic @BBL X1C";
+    f.type        = "PLA";
+    f.colors      = { "#c12e1f" };
+    f.color_name  = "Cardinal Red";
+    Callout c;
+    c.key = make_callout_key(1);
+    LabelWords words;
+    struct Case { bool brand, product, family; const char *line; };
+    const Case cases[] = {
+        { true, true, true, "Bambu Lab PLA Basic EN Cardinal Red" },
+        { true, true, false, "Bambu Lab Basic EN Cardinal Red" },
+        { true, false, true, "Bambu Lab PLA EN Cardinal Red" },
+        { true, false, false, "Bambu Lab EN Cardinal Red" },
+        { false, true, true, "PLA Basic EN Cardinal Red" },
+        { false, true, false, "Basic EN Cardinal Red" },
+        { false, false, true, "PLA EN Cardinal Red" },
+        { false, false, false, "Cardinal Red" },   // only the colour name, no separator
+    };
+    for (const Case &k : cases) {
+        CalloutFields fields;
+        fields.brand   = k.brand;
+        fields.product = k.product;
+        fields.family  = k.family;
+        std::string want = k.line;
+        for (size_t at; (at = want.find("EN")) != std::string::npos;)
+            want.replace(at, 2, "\xE2\x80\x93");
+        INFO("brand " << k.brand << " product " << k.product << " family " << k.family);
+        const CalloutLabel l = build_callout_label(c, f, fields, words);
+        CHECK(callout_first_line(l) == want);
+        // No colour name: the title alone, never a dangling separator.
+        fields.color_name = false;
+        const std::string title_only = callout_first_line(build_callout_label(c, f, fields, words));
+        CHECK(title_only.find("\xE2\x80\x93") == std::string::npos);
+        CHECK(title_only == want.substr(0, want.find(" \xE2\x80\x93 ") == std::string::npos ? 0 : want.find(" \xE2\x80\x93 ")));
+    }
+    SECTION("a generic preset whose product is just the family") {
+        f.vendor      = "Generic";
+        f.preset_name = "Generic PLA @System";
+        CalloutFields fields;
+        fields.brand  = false;
+        fields.family = false;
+        CHECK(callout_first_line(build_callout_label(c, f, fields, words)) == "Cardinal Red");
+        fields.family = true;
+        CHECK(callout_first_line(build_callout_label(c, f, fields, words)) == "PLA \xE2\x80\x93 Cardinal Red");
+    }
+    SECTION("the family in the title leaves the details line") {
+        f.finish          = "Matte";
+        f.standard_finish = false;
+        CalloutFields fields;
+        fields.product = false;
+        CHECK(build_callout_label(c, f, fields, words).details == "Matte");
+        fields.product = true;
+        CHECK(build_callout_label(c, f, fields, words).details == "PLA \xC2\xB7 Matte");
+    }
+}
+
+TEST_CASE("S5c: callout targets know the height they start at", "[Showcase][Callouts]")
+{
+    Model model;
+    ModelObject *o = add_cube(model, 20., 0., 1);
+    // A second part, filament 2, from 12 mm up.
+    ModelVolume *v = o->add_volume(make_cube(5., 5., 4.));
+    v->set_offset(Vec3d(0., 0., 12.));
+    v->config.set("extruder", 2);
+    const std::vector<CalloutTarget> targets = plan_callout_targets(model, { 0 }, nullptr);
+    const CalloutTarget *a = find_target(targets, make_callout_key(1));
+    const CalloutTarget *b = find_target(targets, make_callout_key(2));
+    REQUIRE(a != nullptr);
+    REQUIRE(b != nullptr);
+    CHECK_THAT(a->first_z, WithinAbs(0., 1e-6));
+    // The part's bottom in the world, where filament 2 is first printed.
+    const double want = v->mesh().transformed_bounding_box(o->instances.front()->get_matrix() * v->get_matrix()).min.z();
+    CHECK(want > 5.);
+    CHECK_THAT(b->first_z, WithinAbs(want, 1e-6));
 }

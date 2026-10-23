@@ -11,6 +11,8 @@
 #include "ShowcaseCallouts.hpp"
 #include "ShowcaseWatermark.hpp"
 
+#include "libslic3r/Showcase/ShowcasePath.hpp"
+#include "libslic3r/Showcase/ShowcaseRenderCli.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
 
 #include "../Camera.hpp"
@@ -79,6 +81,10 @@ public:
     void on_project_changed();
     void on_change_color_mode(bool is_dark);
 
+    // S5, --showcase-render: renders the request's video or still of the current plate (the hidden
+    // instance has loaded the project and shown this view). Fills `report`; returns the exit code.
+    int run_render_job(const Showcase::RenderRequest &request, Showcase::RenderReport &report);
+
 private:
     Showcase::Project       &project();
     int                      current_plate() const;
@@ -142,9 +148,12 @@ private:
     void                     callouts_update_occlusion(const Showcase::Scene &scene);
     // The callouts as drawn now: label text and where the anchors land on the safe frame. S4: a video
     // frame passes its own occlusion and the fade state.
+    // S5: `frame_scene` and `visuals` - a moment of a path's timeline (callouts shown, hidden, highlighted).
     std::vector<ShowcaseCalloutDraw> callouts_draw_list(const ShowcaseLabelContext &labels,
                                                         const std::map<std::string, std::vector<bool>> *occluded = nullptr,
-                                                        const Showcase::CalloutFade *fade = nullptr);
+                                                        const Showcase::CalloutFade *fade = nullptr,
+                                                        const Showcase::Scene *frame_scene = nullptr,
+                                                        const std::map<std::string, Showcase::CalloutVisual> *visuals = nullptr);
     double                   callouts_model_center_x() const;
     bool                     callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &image);
     // Draws the callouts onto an exported image (before the watermark).
@@ -169,6 +178,8 @@ private:
         };
         std::vector<Pick> picks;           // dots the user dropped, picked on the next frame
         uint64_t version = 1;              // bumped whenever the labels may look different
+        // S5b: each callout's largest visible region in the last ID pass (pixels), for "each colour once".
+        std::map<std::string, int> areas;
         uint64_t occlusion_camera = 0;     // the camera the occlusion was worked out for
         std::map<std::string, std::vector<bool>> occluded;
         ShowcaseCalloutHits hits;          // the last live drawing, frame pixels
@@ -199,7 +210,22 @@ private:
     void                     on_delete_callout_style();
 
     // --- S4: the videographer (ShowcaseViewVideo.cpp) -----------------------------------------------
-    void                     build_video_section(wxBoxSizer *col);
+    void                     build_video_section(wxBoxSizer *root);
+    // S5c: the camera of a video at t: the path, a static zoom-out framed on the build-up.
+    Showcase::CameraPose     video_pose(const Showcase::VideoSettings &v, const Showcase::CameraView &base, double t,
+                                        const std::vector<Showcase::PathEvent> &events);
+    // S5c: before a preview or an export: the callouts' first heights and, for static callouts, the
+    // anchors of the frame they keep.
+    void                     video_prepare_callouts(const Showcase::VideoSettings &v, const Showcase::CameraView &base,
+                                                    const std::vector<Showcase::PathEvent> &events);
+    void                     video_set_callout_pass(const Showcase::VideoSettings &v, double build, Showcase::BuildSource source);
+    void                     apply_section_header_colours();
+    // S5b: the side panel's collapsible sections. Adds a section's clickable header to `root` and
+    // returns the sizer its rows go in; whether it is folded is kept in the app config.
+    wxBoxSizer              *add_panel_section(wxBoxSizer *root, const wxString &title, const std::string &key);
+    void                     toggle_panel_section(size_t index);
+    // Hides the rows of the folded sections again (after rows were shown or rebuilt).
+    void                     apply_panel_sections();
     void                     sync_video_controls();
     void                     update_video_enabled();
     void                     refresh_keyframes();
@@ -223,6 +249,24 @@ private:
     void                     video_finish(bool cancelled);
     void                     video_cancel();
     bool                     video_busy() const { return m_video.job != nullptr; }
+
+    // --- S5: path files, the timeline, the build-up and the toolpath source (ShowcaseViewPath.cpp) ---
+    void                     on_import_path();
+    void                     on_export_path();
+    void                     refresh_path_info();
+    // What the paths' moves need: the camera to start from, the plate's objects and filaments, the
+    // saved views; zooms through `frame_height_px` (the live safe frame's height in the tab).
+    Showcase::PathContext    path_context(double frame_height_px);
+    // The video's events, parsed once per change of their text.
+    const std::vector<Showcase::PathEvent> &video_events(const Showcase::VideoSettings &v);
+    // The scene's view frame height, noted whenever its camera, views or keyframes are set.
+    void                     note_frame_height(Showcase::Scene &s);
+    // S5: shows the path at `t` seconds (the scrubber, the drawn timeline).
+    void                     video_scrub(double t);
+    void                     paint_timeline();
+    void                     on_timeline_mouse(wxMouseEvent &evt);
+    // A frame of the export at time `t` (callouts, watermark and the timeline included).
+    bool                     video_render_frame_at(double t, int index, Showcase::VideoFrame &out);
 
     struct VideoUi
     {
@@ -252,7 +296,31 @@ private:
         int                      height = 0;
         std::chrono::steady_clock::time_point started;
         ShowcaseVideoProgressDialog *progress = nullptr;
+
+        // S5: the timeline. The export's events; the preview's state of the moment it shows.
+        std::vector<Showcase::PathEvent> events;
+        std::string              events_text;          // what events_cache was parsed from
+        std::vector<Showcase::PathEvent> events_cache;
+        bool                     pose_timeline = false;
+        std::map<std::string, Showcase::CalloutVisual> pose_visuals;
+
+        // S5c/S5d: the callouts of a clip. Static ones keep their labels where the layout of one frame
+        // put them (top-left, 0..1 of the frame, per callout key) while their leaders follow the model;
+        // "as used" ones need each callout's first print height.
+        bool                     static_valid = false;
+        std::map<std::string, Showcase::PointD> static_labels;
+        std::map<std::string, double> first_z;
     };
+    // S5c: what the callouts of the video frame being drawn follow (the defaults: a still or the live view).
+    struct CalloutVideoPass
+    {
+        double built_z = 1e30;   // the build-up's height; anchors above it are not built yet
+        bool   as_used = false;  // a callout waits for its filament's first height
+        bool   fixed   = false;  // static callouts: labels at VideoUi::static_labels
+        double fade_mm = 1.;     // as used: the height a callout fades in over
+    };
+    CalloutVideoPass         m_co_video;
+    uint64_t                 m_co_video_rev = 0;   // bumped when m_co_video changes
     VideoUi                  m_video;
     wxTimer                  m_video_timer;
 
@@ -354,7 +422,21 @@ private:
     wxColourPickerCtrl      *m_co_line = nullptr;
     wxColourPickerCtrl      *m_co_bg = nullptr;
     wxSlider                *m_co_bg_opacity = nullptr;
-    std::vector<wxCheckBox *> m_co_fields;   // brand, product, colour name, hex, type, weight, price
+    std::vector<wxCheckBox *> m_co_fields;   // brand, product, family, colour name, hex, swatch, type, weight, price
+    wxTextCtrl              *m_co_separator = nullptr;   // S5b
+    wxCheckBox              *m_co_once = nullptr;        // S5b: each colour once
+    struct PanelSection
+    {
+        std::string   key;
+        wxBoxSizer   *body      = nullptr;
+        wxPanel      *head      = nullptr;   // S5c: the header row, on the theme's button colour
+        wxStaticText *arrow     = nullptr;
+        wxStaticText *title     = nullptr;
+        bool          collapsed = false;
+    };
+    int                      m_side_content_w = 0;      // S5c: the widest the panel's rows have been (px)
+    std::vector<PanelSection> m_sections;               // S5b
+    wxBoxSizer              *m_side_root = nullptr;     // S5b: the panel's sizer
     wxChoice                *m_co_list = nullptr;
     wxButton                *m_co_edit = nullptr;
     wxButton                *m_co_hide = nullptr;
@@ -395,6 +477,20 @@ private:
     std::vector<wxWindow *>  m_vid_orbit_rows;     // shown for orbit paths
     std::vector<wxWindow *>  m_vid_bob_rows;       // shown for the bob
     std::vector<wxWindow *>  m_vid_key_rows;       // shown for keyframes
+    // S5
+    wxCheckBox              *m_vid_build = nullptr;
+    wxChoice                *m_vid_co_motion = nullptr;   // S5c
+    wxChoice                *m_vid_co_appear = nullptr;   // S5c
+    wxCheckBox              *m_vid_build_infill = nullptr;     // S5b
+    wxCheckBox              *m_vid_build_supports = nullptr;   // S5b
+    wxButton                *m_vid_path_import = nullptr;
+    wxButton                *m_vid_path_export = nullptr;
+    wxButton                *m_vid_path_clear = nullptr;
+    wxStaticText            *m_vid_path_info = nullptr;
+    wxWindow                *m_vid_timeline = nullptr;   // the drawn timeline: keyframes, events, the moment shown
+    wxChoice                *m_source = nullptr;
+    wxCheckBox              *m_smooth_auto = nullptr;
+    wxSlider                *m_smooth = nullptr;
 };
 
 } // namespace GUI

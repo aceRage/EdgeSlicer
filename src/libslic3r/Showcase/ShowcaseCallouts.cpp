@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <limits>
 #include <set>
+#include <sstream>
 
 #include <boost/log/trivial.hpp>
 
@@ -105,10 +106,12 @@ bool Callout::operator==(const Callout &o) const
            color_name == o.color_name && note == o.note && hidden == o.hidden;
 }
 
+const char *const DEFAULT_CALLOUT_SEPARATOR = " \xE2\x80\x93 ";   // " – "
+
 bool CalloutFields::operator==(const CalloutFields &o) const
 {
-    return brand == o.brand && product == o.product && color_name == o.color_name && hex == o.hex && type == o.type && weight == o.weight &&
-           price == o.price;
+    return brand == o.brand && product == o.product && family == o.family && color_name == o.color_name && hex == o.hex &&
+           swatch == o.swatch && type == o.type && weight == o.weight && price == o.price && separator == o.separator;
 }
 
 bool CalloutStyle::operator==(const CalloutStyle &o) const
@@ -120,8 +123,8 @@ bool CalloutStyle::operator==(const CalloutStyle &o) const
 
 bool Callouts::operator==(const Callouts &o) const
 {
-    return enabled == o.enabled && layout == o.layout && max_per_column == o.max_per_column && fields == o.fields && style == o.style &&
-           items == o.items;
+    return enabled == o.enabled && layout == o.layout && max_per_column == o.max_per_column && once_per_color == o.once_per_color &&
+           fields == o.fields && style == o.style && items == o.items;
 }
 
 const Callout *Callouts::find(const std::string &key) const
@@ -238,10 +241,28 @@ constexpr double CO_Z_EPS = 1e-6;
 
 void co_add_base(std::vector<BaseRegion> &bases, const BaseRegion &b)
 {
-    for (const BaseRegion &e : bases)
-        if (e.filament == b.filament && e.object_default == b.object_default)
+    for (BaseRegion &e : bases)
+        if (e.filament == b.filament && e.object_default == b.object_default) {
+            e.z_min = std::min(e.z_min, b.z_min);
             return;
+        }
     bases.push_back(b);
+}
+
+// S5c: the lowest world height of an indexed triangle set under each of the object's instances.
+double co_min_z(const indexed_triangle_set &its, const ModelObject &mo, const ModelVolume &mv)
+{
+    double z = std::numeric_limits<double>::max();
+    for (const ModelInstance *inst : mo.instances) {
+        if (inst == nullptr)
+            continue;
+        const Transform3d m = inst->get_matrix() * mv.get_matrix();
+        for (const stl_triangle_vertex_indices &tri : its.indices)
+            for (int k = 0; k < 3; ++k)
+                if (tri[k] >= 0 && size_t(tri[k]) < its.vertices.size())
+                    z = std::min(z, (m * its.vertices[size_t(tri[k])].cast<double>()).z());
+    }
+    return z == std::numeric_limits<double>::max() ? 0. : z;
 }
 
 } // namespace
@@ -272,6 +293,7 @@ CalloutRegions::CalloutRegions(const Model &model, const std::vector<int> &objec
             b.filament       = own > 0 ? own : object_filament;
             b.object_default = own <= 0;
             b.source         = own > 0 ? CalloutSource::Part : CalloutSource::Object;
+            b.z_min          = co_min_z(mv->mesh().its, *mo, *mv);
             if (!mv->is_mm_painted()) {
                 co_add_base(o.bases, b);
                 continue;
@@ -286,7 +308,7 @@ CalloutRegions::CalloutRegions(const Model &model, const std::vector<int> &objec
                 if (s == 0)
                     co_add_base(o.bases, b);
                 else
-                    co_add_base(o.bases, BaseRegion{ int(s), false, CalloutSource::Paint });
+                    co_add_base(o.bases, BaseRegion{ int(s), false, CalloutSource::Paint, co_min_z(per_state[s], *mo, *mv) });
             }
         }
         for (const auto &range : mo->layer_config_ranges) {
@@ -384,11 +406,16 @@ std::vector<CalloutTarget> CalloutRegions::targets() const
             const double z = 0.5 * (cuts[i] + cuts[i + 1]);
             for (const BaseRegion &b : o.bases) {
                 CalloutTarget t = classify(o.idx, b, z);
+                // S5c: where it starts in this band: the band's bottom, or higher where its part does.
+                t.first_z = std::max(cuts[i], b.z_min);
                 auto it = std::find_if(out.begin(), out.end(), [&t](const CalloutTarget &e) { return e.key == t.key; });
                 if (it == out.end())
                     out.push_back(std::move(t));
-                else if (std::find(it->objects.begin(), it->objects.end(), o.idx) == it->objects.end())
-                    it->objects.push_back(o.idx);
+                else {
+                    it->first_z = std::min(it->first_z, t.first_z);
+                    if (std::find(it->objects.begin(), it->objects.end(), o.idx) == it->objects.end())
+                        it->objects.push_back(o.idx);
+                }
             }
         }
     }
@@ -793,9 +820,8 @@ std::string resolve_color_name(const std::string &library_name, const std::strin
     const ColorNameMatch m = nearest_color_name(hex);
     if (m.name.empty())
         return {};
-    const std::string name = translate ? translate(m.name.c_str()) : m.name;
-    // "≈": the nearest of the built-in names, not the maker's own.
-    return m.exact ? name : std::string("\xE2\x89\x88 ") + name;
+    // S5c: the nearest built-in name as it is (S3 put "≈ " in front of a guess).
+    return translate ? translate(m.name.c_str()) : m.name;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -840,29 +866,49 @@ std::string format_price(double amount, const std::string &currency)
 CalloutLabel build_callout_label(const Callout &callout, const LabelFilament &f, const CalloutFields &fields, const LabelWords &words)
 {
     CalloutLabel label;
+    bool         family_in_title = false;
     if (!co_trim(callout.title).empty())
         label.title = co_trim(callout.title);
     else if (f.mixed) {
-        if (fields.brand || fields.product)
+        if (fields.brand || fields.product || fields.family)
             label.title = words.mixed_title;
     } else {
-        const std::string brand   = fields.brand ? co_trim(f.vendor) : std::string();
-        const std::string product = fields.product ? product_name(f.preset_name, f.vendor) : std::string();
-        label.title               = brand;
+        const std::string brand = fields.brand ? co_trim(f.vendor) : std::string();
+        const std::string type  = co_trim(f.type);
+        // S5c: brand, then the product with its family ("PLA Basic"), without it ("Basic": Family off),
+        // or the family alone ("PLA": Product off).
+        std::string product;
+        if (fields.product) {
+            product = product_name(f.preset_name, f.vendor);
+            if (!fields.family && !type.empty()) {
+                std::string kept, word;
+                std::istringstream words_in(product);
+                while (words_in >> word)
+                    if (co_lower(word) != co_lower(type))
+                        kept += (kept.empty() ? "" : " ") + word;
+                product = kept;
+            }
+        } else if (fields.family) {
+            product         = type;
+            family_in_title = !product.empty();
+        }
+        label.title = brand;
         if (!product.empty())
             label.title += (label.title.empty() ? "" : " ") + product;
     }
+    label.separator = fields.separator;
     if (fields.color_name)
         label.color_name = f.color_name;
-    if (fields.hex && !f.colors.empty()) {
+    if (fields.swatch && !f.colors.empty())
         label.swatches = f.colors;
-        label.hex      = co_upper_hex(f.colors.front());
-    }
+    if (fields.hex && !f.colors.empty())
+        label.hex = co_upper_hex(f.colors.front());
     std::vector<std::string> parts;
     if (f.mixed && !f.mixed_parts.empty())
         parts.push_back(f.mixed_parts);
     if (fields.type) {
-        if (!co_trim(f.type).empty())
+        // The family already in the first line is not said twice.
+        if (!co_trim(f.type).empty() && !family_in_title)
             parts.push_back(co_trim(f.type));
         if (!f.standard_finish && !f.finish.empty() && co_lower(f.type).find(co_lower(f.finish)) == std::string::npos)
             parts.push_back(f.finish);
@@ -893,7 +939,31 @@ std::string callout_first_line(const CalloutLabel &label)
         return label.color_name;
     if (label.color_name.empty())
         return label.title;
-    return label.title + " \xE2\x80\x93 " + label.color_name;   // " – "
+    return label.title + label.separator + label.color_name;
+}
+
+std::vector<bool> once_per_color_keep(const std::vector<std::string> &colors, const std::vector<double> &scores)
+{
+    std::vector<bool>             keep(colors.size(), true);
+    std::map<std::string, size_t> best;
+    for (size_t i = 0; i < colors.size(); ++i) {
+        const std::string c = co_upper_hex(co_trim(colors[i]));
+        if (c.empty())
+            continue;
+        const double score = i < scores.size() ? scores[i] : 0.;
+        auto         it    = best.find(c);
+        if (it == best.end()) {
+            best.emplace(c, i);
+            continue;
+        }
+        const double held = it->second < scores.size() ? scores[it->second] : 0.;
+        if (score > held) {
+            keep[it->second] = false;
+            it->second       = i;
+        } else
+            keep[i] = false;
+    }
+    return keep;
 }
 
 double hex_luminance(const std::string &hex, double fallback)
@@ -1179,6 +1249,91 @@ bool co_layout_columns(const std::vector<LayoutLabel> &labels, const LayoutParam
             return false;
         };
 
+        // S5b: Elbow leaders are orthogonal ("opo" leaders): level from the anchor to a lane of their
+        // own beside the column, up or down the lane, then level into the label. The lanes' order comes
+        // from the pairs of leaders (a topological order); where there is none, or no room for the lanes
+        // between the column and the anchors, the column keeps S3's sloped leader with a level landing.
+        // (S3 drew only that, with a landing about one text height long, so Elbow looked like Straight.)
+        auto place_elbow = [&](const std::vector<int> &ord) {
+            place(ord, false);   // the boxes
+            std::vector<int> routed;
+            double extreme = side < 0 ? std::numeric_limits<double>::max() : -std::numeric_limits<double>::max();
+            for (int i : ord)
+                if (labels[size_t(i)].has_anchor) {
+                    routed.push_back(i);
+                    extreme = side < 0 ? std::min(extreme, labels[size_t(i)].anchor.x) : std::max(extreme, labels[size_t(i)].anchor.x);
+                }
+            if (routed.empty())
+                return true;
+            const size_t m        = routed.size();
+            const double room     = side < 0 ? extreme - x_land : x_land - extreme;
+            const double lane_gap = std::min(std::max(p.gap, 1.), room / double(m + 1));
+            if (lane_gap < 1.)
+                return false;
+            auto ay = [&](size_t k) { return labels[size_t(routed[k])].anchor.y; };
+            auto cy = [&](size_t k) {
+                const RectD &box = res.labels[size_t(routed[k])].box;
+                return box.y + 0.5 * box.h;
+            };
+            auto in_range = [&](double y, size_t k) {
+                const double eps = 1e-6;
+                return y >= std::min(ay(k), cy(k)) - eps && y <= std::max(ay(k), cy(k)) + eps;
+            };
+            // nearer[a] -> b: a's lane must be nearer the column than b's.
+            std::vector<std::vector<size_t>> nearer(m);
+            std::vector<int>                 indeg(m, 0);
+            auto must_be_nearer = [&](size_t a, size_t b) {
+                nearer[a].push_back(b);
+                ++indeg[b];
+            };
+            for (size_t a = 0; a < m; ++a)
+                for (size_t b = 0; b < m; ++b) {
+                    if (a == b)
+                        continue;
+                    // b's lane runs through the level a leaves its anchor at: b nearer, under it.
+                    if (in_range(ay(a), b))
+                        must_be_nearer(b, a);
+                    // b's lane runs through the level a enters its label at: a nearer, inside it.
+                    if (in_range(cy(a), b))
+                        must_be_nearer(a, b);
+                }
+            std::vector<size_t> rank_order;
+            std::vector<bool>   done(m, false);
+            for (size_t step = 0; step < m; ++step) {
+                size_t pick = m;
+                for (size_t k = 0; k < m && pick == m; ++k)
+                    if (!done[k] && indeg[k] == 0)
+                        pick = k;
+                if (pick == m)
+                    return false;   // a cycle: no lane order crosses nothing
+                done[pick] = true;
+                rank_order.push_back(pick);
+                for (size_t b : nearer[pick])
+                    --indeg[b];
+            }
+            std::vector<double> lane(m, x_land);
+            for (size_t r = 0; r < m; ++r)
+                lane[rank_order[r]] = x_land - side * lane_gap * double(r + 1);
+            for (size_t k = 0; k < m; ++k) {
+                const LayoutLabel &l  = labels[size_t(routed[k])];
+                PlacedLabel       &pl = res.labels[size_t(routed[k])];
+                pl.leader.clear();
+                pl.leader.push_back(l.anchor);
+                if (std::abs(ay(k) - cy(k)) > 0.5) {
+                    pl.leader.push_back({ lane[k], ay(k) });
+                    pl.leader.push_back({ lane[k], cy(k) });
+                }
+                pl.leader.push_back({ x_edge, cy(k) });
+            }
+            for (size_t a = 0; a < m; ++a)
+                for (size_t b = a + 1; b < m; ++b)
+                    if (polylines_cross(res.labels[size_t(routed[a])].leader, res.labels[size_t(routed[b])].leader))
+                        return false;
+            return true;
+        };
+        if (p.leader == LeaderStyle::Elbow && place_elbow(order))
+            continue;
+
         // Straight leaders in anchor order; where two cross, the two labels swap places (each swap
         // shortens the leaders, so this settles). If it does not, the leaders bend: out to the side
         // level with their anchor first, which can never cross.
@@ -1309,7 +1464,7 @@ std::vector<PointD> co_box_ports(const RectD &b, const PointD &from)
 // each pinned label takes the first of its sides whose leader crosses nothing drawn, then every extra
 // leg its first free join (the leader's bend, the label's landing, a side of the label). Whatever
 // still crosses is left out and the label numbered instead, so the promise holds by construction.
-void co_untangle(const std::vector<LayoutLabel> &labels, CalloutLayoutResult &res)
+void co_untangle(const std::vector<LayoutLabel> &labels, CalloutLayoutResult &res, LeaderStyle style)
 {
     const size_t         n = labels.size();
     std::vector<CoDrawn> drawn;
@@ -1334,8 +1489,29 @@ void co_untangle(const std::vector<LayoutLabel> &labels, CalloutLayoutResult &re
             continue;
         PlacedLabel &pl = res.labels[i];
         bool         placed = false;
-        for (const PointD &port : co_box_ports(pl.box, labels[i].anchor)) {
-            const std::vector<PointD> leader = { labels[i].anchor, port };
+        // S5b, Elbow: first a right-angled leader to each side (along, then level into a side port;
+        // across, then up or down into the top or bottom), then the straight ones.
+        const PointD                     &an = labels[i].anchor;
+        std::vector<std::vector<PointD>> candidates;
+        if (style == LeaderStyle::Elbow)
+            for (const PointD &port : co_box_ports(pl.box, an)) {
+                const bool side_port = std::abs(port.y - (pl.box.y + 0.5 * pl.box.h)) < 1e-9 &&
+                                       (std::abs(port.x - pl.box.x) < 1e-9 || std::abs(port.x - pl.box.right()) < 1e-9);
+                if (std::abs(port.x - an.x) <= 0.5 || std::abs(port.y - an.y) <= 0.5)
+                    continue;   // already level or plumb: the straight one below
+                if (side_port) {
+                    const bool left = std::abs(port.x - pl.box.x) < 1e-9;
+                    if (left ? an.x <= port.x : an.x >= port.x)
+                        candidates.push_back({ an, { an.x, port.y }, port });
+                } else {
+                    const bool top = std::abs(port.y - pl.box.y) < 1e-9;
+                    if (top ? an.y <= port.y : an.y >= port.y)
+                        candidates.push_back({ an, { port.x, an.y }, port });
+                }
+            }
+        for (const PointD &port : co_box_ports(pl.box, an))
+            candidates.push_back({ an, port });
+        for (const std::vector<PointD> &leader : candidates) {
             if (!co_conflicts(drawn, int(i), leader)) {
                 pl.leader = leader;
                 drawn.push_back({ int(i), leader });
@@ -1431,7 +1607,7 @@ CalloutLayoutResult layout_callouts(const std::vector<LayoutLabel> &labels, cons
     }
 
     if (!legend) {
-        co_untangle(labels, res);
+        co_untangle(labels, res, p.leader);
         return res;
     }
 

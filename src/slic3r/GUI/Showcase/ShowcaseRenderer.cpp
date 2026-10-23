@@ -9,6 +9,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/Showcase/ShowcasePath.hpp"
 
 #include "../3DScene.hpp"
 #include "../Camera.hpp"
@@ -34,6 +35,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <set>
 #include <sstream>
 
 namespace Slic3r {
@@ -350,6 +352,7 @@ RealisticRenderSettings ShowcaseRenderer::render_settings(const DrawTarget &t) c
     rs.ssao_radius_scale = t.ssao_radius_scale;
     rs.ssao_keep_alpha   = m_scene->background.type == Showcase::BackgroundType::Transparent && !t.live;
     rs.plate_shadow      = !m_scene->floor.hide_plate;
+    rs.clip_top          = m_build_clip_z;
     if (floor_drawn()) {
         Vec3d  c;
         double r;
@@ -846,7 +849,7 @@ void ShowcaseRenderer::draw_objects()
     // Every volume's colour, its own print volume test off (a presentation never darkens an object
     // that overhangs the plate), no clipping, no sinking contours.
     volumes.set_print_volume({ 3, { -FLT_MAX, -FLT_MAX, FLT_MAX, FLT_MAX }, { -FLT_MAX, FLT_MAX } });
-    volumes.set_z_range(-FLT_MAX, FLT_MAX);
+    volumes.set_z_range(-FLT_MAX, m_build_clip_z < 1e9 ? float(m_build_clip_z) : FLT_MAX);
     volumes.set_clipping_plane(ClippingPlane::ClipsNothing().get_data());
     volumes.set_show_sinking_contours(false);
 
@@ -1011,6 +1014,9 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored)
     shader->set_uniform("layer_table", SHOWCASE_LAYER_UNIT);
     // Nothing below the floor: a sinking part would show through a floor that writes no depth.
     shader->set_uniform("clip_floor", mirrored || floor_drawn());
+    // S5: the build-up's clip plane (the cut shows its inside as a cap: both sides drawn below).
+    const bool build_clip = m_build_clip_z < 1e9;
+    shader->set_uniform("build_clip_z", build_clip ? float(m_build_clip_z) : 1e30f);
 
     auto draw = [&](const Item &it) {
         GLVolume *v = it.volume;
@@ -1063,8 +1069,8 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored)
     glsafe(::glEnable(GL_DEPTH_TEST));
     glsafe(::glDepthMask(GL_TRUE));
     glsafe(::glDisable(GL_BLEND));
-    // A mirror flips the winding: draw both sides there.
-    if (mirrored)
+    // A mirror flips the winding: draw both sides there. So does the build-up's cut.
+    if (mirrored || build_clip)
         glsafe(::glDisable(GL_CULL_FACE));
     else {
         glsafe(::glEnable(GL_CULL_FACE));
@@ -1195,6 +1201,7 @@ void ShowcaseRenderer::render_contact_shadow()
     footprint->start_using();
     footprint->set_uniform("projection_matrix", ortho);
     footprint->set_uniform("contact_height", float(height));
+    footprint->set_uniform("clip_z", m_build_clip_z < 1e9 ? float(m_build_clip_z) : 1e30f);
     for (GLVolume *v : m_canvas.m_volumes.volumes) {
         if (v == nullptr || !v->is_active || (v->is_modifier && !v->is_wipe_tower))
             continue;
@@ -1283,6 +1290,24 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
     glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
 
     update_visibility();
+    // S5: the layer build-up of this frame: the slice's layers, or the model cut by a plane.
+    const bool toolpaths = use_toolpaths();
+    m_build_clip_z       = 1e30;
+    m_build_used.clear();
+    if (m_build_fraction >= 0.) {
+        if (toolpaths)
+            m_build_used = "toolpaths";
+        else {
+            if (!m_model_tops_valid) {
+                m_model_tops       = model_layer_tops();
+                m_model_tops_valid = true;
+            }
+            const BoundingBoxf3 box = objects_box();
+            const Showcase::BuildSchedule schedule(m_model_tops, box.defined ? box.max.z() : 0.);
+            m_build_clip_z = m_build_fraction >= 1. ? 1e30 : schedule.at(m_build_fraction).z;
+            m_build_used   = "clip";
+        }
+    }
     m_canvas.set_render_settings_override(render_settings(t));
     m_canvas.m_shadow_map_valid = false;
 
@@ -1311,8 +1336,9 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
         draw_floor(t);
     }
 
-    // 5. The objects: the filament materials (S2), or S1's phong when that shader is missing.
-    if (!draw_objects_material(false))
+    // 5. The objects: the filament materials (S2), or S1's phong when that shader is missing; S5: or
+    // the plate's toolpaths (the toolpath source, or a build-up of the sliced plate).
+    if (!(toolpaths && draw_toolpaths()) && !draw_objects_material(false))
         draw_objects();
 
     // 6. Ambient occlusion over the finished colour and depth.
@@ -1710,6 +1736,170 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
 
     report = log.str();
     BOOST_LOG_TRIVIAL(info) << report;
+    return true;
+}
+
+// ------------------------------------------------------------------------------------------------
+// S5: the off-screen view, the layer build-up and the toolpath source
+// ------------------------------------------------------------------------------------------------
+
+void ShowcaseRenderer::set_offscreen_view(int width, int height)
+{
+    m_live_vp_w  = std::max(1, width);
+    m_live_vp_h  = std::max(1, height);
+    m_live_frame = Showcase::RectI{ 0, 0, m_live_vp_w, m_live_vp_h };
+}
+
+void ShowcaseRenderer::set_build(double fraction, Showcase::BuildSource source, bool infill, bool supports)
+{
+    m_build_fraction = std::isfinite(fraction) ? std::min(fraction, 1.) : -1.;
+    m_build_source   = source;
+    m_build_infill   = infill;
+    m_build_supports = supports;
+}
+
+double ShowcaseRenderer::build_height_at(double fraction, Showcase::BuildSource source)
+{
+    if (!std::isfinite(fraction) || fraction < 0. || fraction >= 1.)
+        return 1e30;
+    if (source != Showcase::BuildSource::Clip && toolpaths_available()) {
+        const GCodeViewer        &gv = wxGetApp().plater()->get_preview_canvas3D()->get_gcode_viewer();
+        const std::vector<double> zs = gv.get_layers_zs();
+        return Showcase::BuildSchedule(zs, zs.empty() ? 0. : zs.back()).at(fraction).z;
+    }
+    if (!m_model_tops_valid) {
+        m_model_tops       = model_layer_tops();
+        m_model_tops_valid = true;
+    }
+    update_visibility();
+    const BoundingBoxf3 box = objects_box();
+    return Showcase::BuildSchedule(m_model_tops, box.defined ? box.max.z() : 0.).at(fraction).z;
+}
+
+bool ShowcaseRenderer::toolpaths_available()
+{
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr || plater->get_preview_canvas3D() == nullptr)
+        return false;
+    const GCodeViewer &gv = plater->get_preview_canvas3D()->get_gcode_viewer();
+    return gv.has_data() && !gv.toolpaths_skipped() && gv.layers_count() > 0;
+}
+
+void ShowcaseRenderer::release_toolpaths()
+{
+    Plater *plater = wxGetApp().plater();
+    if (plater != nullptr && plater->get_preview_canvas3D() != nullptr)
+        plater->get_preview_canvas3D()->get_gcode_viewer().end_showcase();
+}
+
+bool ShowcaseRenderer::use_toolpaths() const
+{
+    if (m_scene == nullptr || !toolpaths_available())
+        return false;
+    if (m_build_fraction >= 0.)
+        return m_build_source != Showcase::BuildSource::Clip;
+    return m_scene->source == "toolpaths";
+}
+
+// The tops of the layers the plate's objects will be sliced into (as the layer lines use), in world
+// heights: the build-up's steps when the plate has no slice.
+std::vector<double> ShowcaseRenderer::model_layer_tops()
+{
+    std::vector<double> tops;
+    const Model &model = wxGetApp().model();
+    if (wxGetApp().preset_bundle == nullptr)
+        return tops;
+    std::set<int> done;
+    DynamicPrintConfig full;
+    try {
+        full = wxGetApp().preset_bundle->full_config();
+    } catch (const std::exception &) {
+        return tops;
+    }
+    for (const GLVolume *v : m_canvas.m_volumes.volumes) {
+        if (v == nullptr || !v->is_active || v->is_wipe_tower || v->object_idx() < 0 || size_t(v->object_idx()) >= model.objects.size())
+            continue;
+        const int key = v->object_idx() * 4096 + v->instance_idx();
+        if (!done.insert(key).second)
+            continue;
+        const ModelObject *mo = model.objects[size_t(v->object_idx())];
+        if (v->instance_idx() < 0 || size_t(v->instance_idx()) >= mo->instances.size())
+            continue;
+        try {
+            const SlicingParameters sp = PrintObject::slicing_parameters(full, *mo, float(mo->max_z()), Vec3d::Ones());
+            std::vector<coordf_t>   profile;
+            PrintObject::update_layer_height_profile(*mo, sp, profile);
+            const std::vector<coordf_t> boundaries = generate_object_layers(sp, profile, false);
+            // The object's layers start where the instance sits (a sinking part starts below 0).
+            const double bottom = mo->instance_bounding_box(size_t(v->instance_idx())).min.z();
+            for (size_t i = 1; i < boundaries.size(); i += 2)
+                tops.push_back(bottom + boundaries[i]);
+        } catch (const std::exception &ex) {
+            BOOST_LOG_TRIVIAL(warning) << "Showcase build-up: no layers for object " << v->object_idx() << ": " << ex.what();
+        }
+    }
+    return tops;
+}
+
+bool ShowcaseRenderer::draw_toolpaths()
+{
+    Plater *plater = wxGetApp().plater();
+    if (m_scene == nullptr || plater == nullptr || plater->get_preview_canvas3D() == nullptr)
+        return false;
+    GCodeViewer &gv = plater->get_preview_canvas3D()->get_gcode_viewer();
+    if (!gv.has_data() || gv.toolpaths_skipped())
+        return false;
+
+    GCodeViewer::ShowcaseLook look;
+    look.hide_wipe_tower = m_scene->floor.hide_wipe_tower;
+    // S5b: only a build-up leaves out infill or supports; the toolpath source shows the whole slice.
+    look.show_infill   = m_build_fraction < 0. || m_build_infill;
+    look.show_supports = m_build_fraction < 0. || m_build_supports;
+    if (m_build_fraction >= 0. && m_build_fraction < 1.) {
+        // Every layer takes the same time, the top one laid move by move.
+        const std::vector<double>     zs = gv.get_layers_zs();
+        const Showcase::BuildSchedule schedule(zs, zs.empty() ? 0. : zs.back());
+        const Showcase::BuildSchedule::Position pos = schedule.at(m_build_fraction);
+        if (pos.layer < 0) {
+            look.top_layer    = 0;
+            look.top_progress = 0.;
+        } else {
+            look.top_layer    = std::min(pos.layer, int(gv.layers_count()) - 1);
+            look.top_progress = pos.progress;
+        }
+    }
+    // D13: the smooth look per extruder, from the scene's Smoothness (or each filament's finish).
+    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    const float smoothness = m_scene->materials.toolpath_smoothness;
+    bool        any_smooth = false;
+    for (size_t e = 0; e < 16; ++e) {
+        const int        filament = int(e) + 1;
+        Showcase::Finish finish   = Showcase::Finish::Standard;
+        if (size_t(filament) <= filaments.size())
+            finish = m_scene->materials.finish_for(filament, filaments[e].preset_name, filaments[e].type);
+        else if (const Showcase::Finish *f = m_scene->materials.override_for(filament))
+            finish = *f;
+        const Showcase::ToolpathLook l = Showcase::toolpath_look(finish, smoothness);
+        const float v[8] = { l.smoothness, l.skin_overlap, l.skin_flatten, l.bulge, l.groove, l.ssao_skin, l.anisotropy, 0.f };
+        std::copy(v, v + 8, look.looks.begin() + e * 8);
+        any_smooth |= l.smoothness > 0.f;
+    }
+    look.smooth = any_smooth;
+    // The key light where the scene puts it (D14), in eye space as libvgcode lights.
+    const Camera &camera = plater->get_camera();
+    const std::vector<Showcase::LightSource> lights = scene_lights(camera);
+    if (!lights.empty()) {
+        const Vec3d w   = Vec3d(lights[0].dir[0], lights[0].dir[1], lights[0].dir[2]).normalized();
+        const Vec3d eye = (camera.get_view_matrix().matrix().block<3, 3>(0, 0) * w).normalized();
+        look.set_light     = true;
+        look.light_dir_eye = { float(eye.x()), float(eye.y()), float(eye.z()) };
+    }
+    look.exposure = std::exp2(m_scene->lighting.exposure);
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glDisable(GL_BLEND));
+    gv.render_for_showcase(look);
+    glsafe(::glEnable(GL_CULL_FACE));
     return true;
 }
 

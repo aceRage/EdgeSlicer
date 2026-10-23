@@ -25,9 +25,12 @@
 #include "../Plater.hpp"
 
 #include <wx/bitmap.h>
+
+#include <limits>
 #include <wx/button.h>
 #include <wx/checkbox.h>
 #include <wx/choice.h>
+#include <wx/dcbuffer.h>
 #include <wx/dialog.h>
 #include <wx/dirdlg.h>
 #include <wx/filedlg.h>
@@ -185,15 +188,10 @@ std::unique_ptr<Showcase::FrameSink> showcase_make_native_mp4_sink(const std::st
 // The Video panel
 // ------------------------------------------------------------------------------------------------
 
-void ShowcaseView::build_video_section(wxBoxSizer *col)
+void ShowcaseView::build_video_section(wxBoxSizer *root)
 {
-    const int em = wxGetApp().em_unit();
-    {
-        auto *t = new wxStaticText(m_side, wxID_ANY, _L("Video"));
-        t->SetFont(wxGetApp().bold_font());
-        col->Add(t, 0, wxLEFT | wxRIGHT | wxTOP, em);
-        col->Add(new wxStaticLine(m_side), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em / 2);
-    }
+    const int   em  = wxGetApp().em_unit();
+    wxBoxSizer *col = add_panel_section(root, _L("Video"), "video");
     auto *grid = new wxFlexGridSizer(2, em / 2, em);
     grid->AddGrowableCol(1, 1);
     col->Add(grid, 0, wxEXPAND | wxALL, em);
@@ -227,6 +225,8 @@ void ShowcaseView::build_video_section(wxBoxSizer *col)
     paths.Add(_L("Turntable"));
     paths.Add(_L("Orbit with bob"));
     paths.Add(_L("Keyframes"));
+    paths.Add(_L("Static"));
+    paths.Add(_L("Static with zoom out"));
     m_vid_path = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, paths);
     m_vid_path->SetToolTip(_L("Orbit: the camera circles the model, the light stays. Turntable: the model turns in front of the camera. "
                               "Orbit with bob: the camera also rises and dips. Keyframes: a path through views you add."));
@@ -288,9 +288,43 @@ void ShowcaseView::build_video_section(wxBoxSizer *col)
     m_vid_loop = new wxCheckBox(m_side, wxID_ANY, _L("Seamless loop"));
     m_vid_loop->SetToolTip(_L("For whole turns without holds: the last frame leads straight into the first, so the video can repeat."));
     check_row(m_vid_loop, &m_vid_orbit_rows);
-    m_vid_callouts = new wxCheckBox(m_side, wxID_ANY, _L("Show the callouts"));
-    m_vid_callouts->SetToolTip(_L("The filament callouts (when they are on) in every frame. A label whose spot goes behind the model fades out."));
+    m_vid_callouts = new wxCheckBox(m_side, wxID_ANY, _L("Show Callouts"));
+    m_vid_callouts->SetToolTip(_L("The filament callouts (when they are on) in the preview and every frame. A label whose spot goes "
+                                  "behind the model fades out."));
     check_row(m_vid_callouts);
+    {
+        // S5c
+        wxArrayString motions;
+        motions.Add(_L("Animated"));
+        motions.Add(_L("Static"));
+        m_vid_co_motion = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, motions);
+        m_vid_co_motion->SetToolTip(_L("Animated: the labels move with the model and are laid out again every frame. Static: the labels stay "
+                                       "where the frame that shows the whole model puts them (the end of a build-up, else the first "
+                                       "frame); their leaders still follow the model."));
+        row(_L("Position"), m_vid_co_motion);
+        wxArrayString appears;
+        appears.Add(_L("Always"));
+        appears.Add(_L("As used"));
+        m_vid_co_appear = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, appears);
+        m_vid_co_appear->SetToolTip(_L("As used: during the layer build-up a filament's callout fades in once that filament has been "
+                                       "printed. The prime tower does not count."));
+        row(_L("Appearance"), m_vid_co_appear);
+    }
+    // S5: the print growing layer by layer while the camera moves.
+    m_vid_build = new wxCheckBox(m_side, wxID_ANY, _L("Layer build-up"));
+    m_vid_build->SetToolTip(_L("The print grows from the plate, layer by layer, over the motion. With a sliced plate its toolpaths are "
+                               "laid; without a slice the model is cut by a plane at the height reached."));
+    check_row(m_vid_build);
+    {
+        // S5b: what of the slice the build-up lays.
+        auto *parts          = new wxBoxSizer(wxHORIZONTAL);
+        m_vid_build_infill   = new wxCheckBox(m_side, wxID_ANY, _L("Infill"));
+        m_vid_build_supports = new wxCheckBox(m_side, wxID_ANY, _L("Supports"));
+        parts->Add(m_vid_build_infill, 0, wxRIGHT, em);
+        parts->Add(m_vid_build_supports, 0);
+        grid->Add(new wxStaticText(m_side, wxID_ANY, ""));
+        grid->Add(parts, 0, wxLEFT, em);
+    }
 
     // Keyframes.
     m_vid_keys = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxSize(12 * em, -1));
@@ -320,6 +354,45 @@ void ShowcaseView::build_video_section(wxBoxSizer *col)
         for (wxWindow *w : std::initializer_list<wxWindow *>{ m_vid_key_add, m_vid_key_update, m_vid_key_goto, m_vid_key_delete })
             m_vid_key_rows.push_back(w);
     }
+
+    // S5: a path file - keyframes, high-level moves and timed events, written by hand or by an agent
+    // (docs/showcase_paths.md). Imported, it becomes this video's keyframes and timeline.
+    {
+        auto *buttons     = new wxBoxSizer(wxHORIZONTAL);
+        m_vid_path_import = new wxButton(m_side, wxID_ANY, _L("Import..."));
+        m_vid_path_import->SetToolTip(_L("Reads a Showcase path file (.json): its camera moves become keyframes you can edit, and its "
+                                         "timed changes (lights, backdrop, callouts, watermark, build-up) play with the video."));
+        m_vid_path_export = new wxButton(m_side, wxID_ANY, _L("Export..."));
+        m_vid_path_export->SetToolTip(_L("Writes this video's camera path and timed changes as a path file, to edit or to render with "
+                                         "--showcase-render."));
+        m_vid_path_clear = new wxButton(m_side, wxID_ANY, _L("Clear timeline"));
+        m_vid_path_clear->SetToolTip(_L("Removes the imported path's timed changes; the keyframes stay."));
+        buttons->Add(m_vid_path_import, 0, wxRIGHT, em / 2);
+        buttons->Add(m_vid_path_export, 0, wxRIGHT, em / 2);
+        buttons->Add(m_vid_path_clear, 0);
+        auto *l = new wxStaticText(m_side, wxID_ANY, _L("Path file"));
+        grid->Add(l, 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(buttons);
+        m_vid_path_info = new wxStaticText(m_side, wxID_ANY, "");
+        grid->AddSpacer(0);
+        grid->Add(m_vid_path_info, 1, wxEXPAND);
+    }
+
+    // S5: the drawn timeline - keyframes as diamonds (a glide key as a dot), the timed changes as bars
+    // under them, the moment shown as a line. A click on a diamond selects the key, anywhere else shows
+    // that moment.
+    m_vid_timeline = new wxWindow(m_side, wxID_ANY, wxDefaultPosition, wxSize(-1, 4 * em), wxFULL_REPAINT_ON_RESIZE);
+    m_vid_timeline->SetBackgroundStyle(wxBG_STYLE_PAINT);
+    m_vid_timeline->SetToolTip(_L("The video's timeline: keyframes (diamonds; a dot where the camera passes through), "
+                                  "timed changes (bars) and the moment shown. Click a keyframe to select it, anywhere else to look there."));
+    m_vid_timeline->Bind(wxEVT_PAINT, [this](wxPaintEvent &) { paint_timeline(); });
+    m_vid_timeline->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent &evt) { on_timeline_mouse(evt); });
+    m_vid_timeline->Bind(wxEVT_MOTION, [this](wxMouseEvent &evt) {
+        if (evt.LeftIsDown())
+            on_timeline_mouse(evt);
+    });
+    grid->AddSpacer(0);
+    grid->Add(m_vid_timeline, 1, wxEXPAND);
 
     // The timeline: a scrubber that shows a moment of the path, the preview, the export.
     m_vid_time = new wxSlider(m_side, wxID_ANY, 0, 0, 1000);
@@ -423,6 +496,36 @@ void ShowcaseView::build_video_section(wxBoxSizer *col)
         const bool on = m_vid_callouts->GetValue();
         video_edit([on](Showcase::VideoSettings &v) { v.callouts = on; }, false);
     });
+    m_vid_co_motion->Bind(wxEVT_CHOICE, [this, video_edit](wxCommandEvent &) {
+        const int sel = m_vid_co_motion->GetSelection();
+        if (sel >= 0)
+            video_edit([sel](Showcase::VideoSettings &v) { v.callout_motion = Showcase::CalloutMotion(sel); }, false);
+    });
+    m_vid_co_appear->Bind(wxEVT_CHOICE, [this, video_edit](wxCommandEvent &) {
+        const int sel = m_vid_co_appear->GetSelection();
+        if (sel >= 0)
+            video_edit([sel](Showcase::VideoSettings &v) { v.callout_appearance = Showcase::CalloutAppearance(sel); }, false);
+    });
+    m_vid_build->Bind(wxEVT_CHECKBOX, [this, video_edit](wxCommandEvent &) {
+        const bool on = m_vid_build->GetValue();
+        video_edit([on](Showcase::VideoSettings &v) { v.build.enabled = on; }, false);
+    });
+    m_vid_build_infill->Bind(wxEVT_CHECKBOX, [this, video_edit](wxCommandEvent &) {
+        const bool on = m_vid_build_infill->GetValue();
+        video_edit([on](Showcase::VideoSettings &v) { v.build.infill = on; }, false);
+    });
+    m_vid_build_supports->Bind(wxEVT_CHECKBOX, [this, video_edit](wxCommandEvent &) {
+        const bool on = m_vid_build_supports->GetValue();
+        video_edit([on](Showcase::VideoSettings &v) { v.build.supports = on; }, false);
+    });
+    m_vid_path_import->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_import_path(); });
+    m_vid_path_export->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_export_path(); });
+    m_vid_path_clear->Bind(wxEVT_BUTTON, [this, video_edit](wxCommandEvent &) {
+        video_edit([](Showcase::VideoSettings &v) {
+            v.events.clear();
+            v.path_name.clear();
+        }, true);
+    });
 
     m_vid_keys->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         if (m_syncing)
@@ -505,21 +608,7 @@ void ShowcaseView::build_video_section(wxBoxSizer *col)
     m_vid_time->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
         if (m_syncing || video_busy())
             return;
-        const double t = double(m_vid_time->GetValue()) / 1000. * Showcase::total_seconds(scene().video);
-        m_vid_time_label->SetLabel(seconds_text(t) + " / " + seconds_text(Showcase::total_seconds(scene().video)));
-        if (!m_video.previewing) {
-            video_show_pose(t);
-            // A peek: the view goes back by itself a moment after the slider rests.
-            m_video.peek_ticks = 90;
-            if (!m_video_timer.IsRunning())
-                m_video_timer.Start(16);
-        } else {
-            m_video.preview_offset = t;
-            m_video.preview_start  = std::chrono::steady_clock::now();
-        }
-        // Where the next keyframe goes.
-        if (scene().video.path == Showcase::VideoPath::Keyframes && m_video.selected_key < 0)
-            m_vid_key_time->SetValue(std::max(0., t - scene().video.hold_start));
+        video_scrub(double(m_vid_time->GetValue()) / 1000. * Showcase::total_seconds(scene().video));
     });
     m_vid_preview->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { video_toggle_preview(); });
     m_vid_export->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_export_video(); });
@@ -558,18 +647,25 @@ void ShowcaseView::sync_video_controls()
     m_vid_hold_end->SetValue(v.hold_end);
     m_vid_loop->SetValue(v.loop);
     m_vid_callouts->SetValue(v.callouts);
+    m_vid_co_motion->SetSelection(int(v.callout_motion));
+    m_vid_co_appear->SetSelection(int(v.callout_appearance));
+    m_vid_build->SetValue(v.build.enabled);
+    m_vid_build_infill->SetValue(v.build.infill);
+    m_vid_build_supports->SetValue(v.build.supports);
+    refresh_path_info();
     if (m_video.selected_key >= int(v.keyframes.size()))
         m_video.selected_key = int(v.keyframes.size()) - 1;
     refresh_keyframes();
 
     // Only the rows the path uses.
-    const bool orbit = v.path != Showcase::VideoPath::Keyframes;
+    const bool keys  = v.path == Showcase::VideoPath::Keyframes;
+    const bool orbit = !keys && !Showcase::is_static_path(v.path);
     for (wxWindow *w : m_vid_orbit_rows)
         w->Show(orbit);
     for (wxWindow *w : m_vid_bob_rows)
         w->Show(v.path == Showcase::VideoPath::OrbitBob);
     for (wxWindow *w : m_vid_key_rows)
-        w->Show(!orbit);
+        w->Show(keys);
     m_vid_time_label->SetLabel(seconds_text(double(m_vid_time->GetValue()) / 1000. * Showcase::total_seconds(v)) + " / " +
                                seconds_text(Showcase::total_seconds(v)));
     m_syncing = syncing;
@@ -587,10 +683,13 @@ void ShowcaseView::refresh_keyframes()
     const std::vector<Showcase::Keyframe> &keys = scene().video.keyframes;
     m_vid_keys->Clear();
     for (size_t i = 0; i < keys.size(); ++i)
-        m_vid_keys->Append(wxString::Format("%d   %s", int(i) + 1, seconds_text(keys[i].time)));
+        m_vid_keys->Append(wxString::Format("%d   %s", int(i) + 1, seconds_text(keys[i].time)) +
+                           (keys[i].glide ? "   " + _L("(passes through)") : wxString()));
     if (m_video.selected_key >= int(keys.size()))
         m_video.selected_key = int(keys.size()) - 1;
     m_vid_keys->SetSelection(m_video.selected_key);
+    if (m_vid_timeline != nullptr)
+        m_vid_timeline->Refresh();
     if (m_video.selected_key >= 0) {
         const Showcase::Keyframe &k = keys[size_t(m_video.selected_key)];
         m_vid_key_time->SetValue(k.time);
@@ -616,8 +715,27 @@ void ShowcaseView::update_video_enabled()
     m_vid_key_update->Enable(editable && selected);
     m_vid_key_delete->Enable(editable && selected);
     m_vid_key_goto->Enable(!video_busy() && selected);
-    m_vid_loop->Enable(editable && v.path != Showcase::VideoPath::Keyframes);
+    m_vid_loop->Enable(editable && v.path != Showcase::VideoPath::Keyframes && !Showcase::is_static_path(v.path));
     m_vid_callouts->Enable(editable && scene().callouts.enabled);
+    m_vid_co_motion->Enable(editable && scene().callouts.enabled && v.callouts);
+    m_vid_co_appear->Enable(editable && scene().callouts.enabled && v.callouts && v.build.enabled);
+    m_vid_build->Enable(editable);
+    {
+        // S5b: infill and supports come from the slice; the model's clip has neither.
+        const bool sliced = ShowcaseRenderer::toolpaths_available();
+        const bool parts  = editable && v.build.enabled && v.build.source != Showcase::BuildSource::Clip && sliced;
+        const wxString tip = sliced ? _L("Lay the infill and the supports (with any ironing) with the walls while the print grows. Untick to show only the "
+                                         "shell growing.")
+                                    : _L("Slice the plate first: infill and supports come from the plate's toolpaths.");
+        for (wxCheckBox *cb : { m_vid_build_infill, m_vid_build_supports }) {
+            cb->Enable(parts);
+            if (cb->GetToolTipText() != tip)
+                cb->SetToolTip(tip);
+        }
+    }
+    m_vid_path_import->Enable(editable);
+    m_vid_path_export->Enable(!video_busy());
+    m_vid_path_clear->Enable(editable && (!v.events.empty() || !v.path_name.empty()));
     m_vid_time->Enable(!video_busy());
     m_vid_preview->Enable(!video_busy());
     m_vid_preview->SetLabel(m_video.previewing ? _L("Stop") : _L("Preview"));
@@ -659,6 +777,196 @@ void ShowcaseView::video_size(int &w, int &h)
 }
 
 // ------------------------------------------------------------------------------------------------
+// S5: the drawn timeline
+// ------------------------------------------------------------------------------------------------
+
+void ShowcaseView::video_scrub(double t)
+{
+    const double total = Showcase::total_seconds(scene().video);
+    t                  = std::clamp(t, 0., total);
+    m_vid_time_label->SetLabel(seconds_text(t) + " / " + seconds_text(total));
+    if (!m_video.previewing) {
+        video_show_pose(t);
+        // A peek: the view goes back by itself a moment after the slider rests.
+        m_video.peek_ticks = 90;
+        if (!m_video_timer.IsRunning())
+            m_video_timer.Start(16);
+    } else {
+        m_video.preview_offset = t;
+        m_video.preview_start  = std::chrono::steady_clock::now();
+    }
+    // Where the next keyframe goes.
+    if (scene().video.path == Showcase::VideoPath::Keyframes && m_video.selected_key < 0)
+        m_vid_key_time->SetValue(std::max(0., t - scene().video.hold_start));
+    if (m_vid_timeline != nullptr)
+        m_vid_timeline->Refresh();
+}
+
+namespace {
+
+// The timeline's geometry: x of a time, and back.
+struct TimelineGeom
+{
+    double x0 = 0., x1 = 1., total = 1.;
+    double x(double t) const { return x0 + (x1 - x0) * std::clamp(t / std::max(1e-9, total), 0., 1.); }
+    double t(double x) const { return std::clamp((x - x0) / std::max(1e-9, x1 - x0), 0., 1.) * total; }
+};
+
+TimelineGeom timeline_geom(const wxSize &size, double total, int em)
+{
+    TimelineGeom g;
+    g.x0    = 0.6 * em;
+    g.x1    = std::max(g.x0 + 1., double(size.x) - 0.6 * em);
+    g.total = std::max(1e-6, total);
+    return g;
+}
+
+wxColour timeline_event_colour(Showcase::PathEventType t)
+{
+    switch (t) {
+    case Showcase::PathEventType::Lighting: return wxColour(240, 180, 40);
+    case Showcase::PathEventType::Background:
+    case Showcase::PathEventType::Look: return wxColour(120, 140, 200);
+    case Showcase::PathEventType::Floor: return wxColour(150, 120, 90);
+    case Showcase::PathEventType::Callouts: return wxColour(255, 138, 0);
+    case Showcase::PathEventType::Watermark: return wxColour(160, 160, 160);
+    default: return wxColour(0, 150, 136);   // build
+    }
+}
+
+} // namespace
+
+void ShowcaseView::paint_timeline()
+{
+    wxAutoBufferedPaintDC dc(m_vid_timeline);
+    const wxSize          size = m_vid_timeline->GetClientSize();
+    const bool            dark = wxGetApp().dark_mode();
+    const int             em   = wxGetApp().em_unit();
+    dc.SetBackground(wxBrush(dark ? wxColour(45, 45, 49) : wxColour(246, 246, 246)));
+    dc.Clear();
+    const Showcase::VideoSettings &v     = scene().video;
+    const double                   total = Showcase::total_seconds(v);
+    const TimelineGeom             g     = timeline_geom(size, total, em);
+    const wxColour                 ink   = dark ? wxColour(200, 200, 200) : wxColour(70, 70, 70);
+    const int                      axis_y = int(0.45 * size.y);
+
+    // Seconds: a tick each, a number every few.
+    dc.SetPen(wxPen(ink));
+    dc.DrawLine(int(g.x0), axis_y, int(g.x1), axis_y);
+    const double px_per_s = (g.x1 - g.x0) / std::max(1e-6, total);
+    int          label_every = 1;
+    for (int step : { 1, 2, 5, 10, 15, 30 })
+        if (px_per_s * step >= 3. * em) {
+            label_every = step;
+            break;
+        }
+    wxFont tick_font = m_vid_timeline->GetFont();
+    tick_font.SetPointSize(std::max(6, tick_font.GetPointSize() - 2));
+    dc.SetFont(tick_font);
+    dc.SetTextForeground(ink);
+    for (int s = 0; s <= int(std::floor(total + 1e-9)); ++s) {
+        const int x = int(std::lround(g.x(double(s))));
+        dc.DrawLine(x, axis_y - 2, x, axis_y + 3);
+        if (s % label_every == 0)
+            dc.DrawText(wxString::Format("%d", s), x + 2, axis_y + 2);
+    }
+
+    // The holds of an orbit, shaded.
+    if (v.hold_start > 0. || v.hold_end > 0.) {
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(dark ? wxColour(70, 70, 76) : wxColour(225, 225, 225)));
+        if (v.hold_start > 0.)
+            dc.DrawRectangle(int(g.x(0.)), 2, int(g.x(v.hold_start) - g.x(0.)), axis_y - 3);
+        if (v.hold_end > 0.)
+            dc.DrawRectangle(int(g.x(total - v.hold_end)), 2, int(g.x(total) - g.x(total - v.hold_end)), axis_y - 3);
+    }
+
+    // The timed changes: a bar per event, in rows under the axis.
+    const std::vector<Showcase::PathEvent> &events = video_events(v);
+    std::vector<Showcase::PathEvent>        shown  = events;
+    if (v.build.enabled) {
+        Showcase::PathEvent b;
+        b.type  = Showcase::PathEventType::Build;
+        b.range = true;
+        b.from  = v.hold_start;
+        b.to    = v.hold_start + v.duration;
+        shown.push_back(b);
+    }
+    const int rows   = 3;
+    const int row_h  = std::max(2, (size.y - axis_y - em) / rows);
+    int       row    = 0;
+    for (const Showcase::PathEvent &e : shown) {
+        const double a  = e.range ? e.from : e.at;
+        const double b  = e.range ? e.to : std::max(e.at + e.transition, e.at + 0.05 * total);
+        const int    y  = axis_y + em + (row++ % rows) * row_h;
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(timeline_event_colour(e.type)));
+        dc.DrawRectangle(int(g.x(a)), y, std::max(2, int(g.x(b) - g.x(a))), std::max(2, row_h - 1));
+    }
+
+    // The keyframes: a diamond where the camera stops, a dot where it passes through.
+    if (v.path == Showcase::VideoPath::Keyframes) {
+        for (size_t i = 0; i < v.keyframes.size(); ++i) {
+            const double t   = v.hold_start + Showcase::keyframe_run_time(v.keyframes, i);
+            const int    x   = int(std::lround(g.x(t)));
+            const bool   sel = int(i) == m_video.selected_key;
+            dc.SetPen(wxPen(sel ? wxColour(0, 150, 136) : ink, sel ? 2 : 1));
+            dc.SetBrush(wxBrush(sel ? wxColour(0, 150, 136) : (dark ? wxColour(230, 230, 230) : wxColour(255, 255, 255))));
+            if (v.keyframes[i].glide)
+                dc.DrawCircle(x, axis_y - em / 2, std::max(2, em / 5));
+            else {
+                const int  r      = std::max(3, em / 2);
+                wxPoint    pts[4] = { wxPoint(x, axis_y - em / 2 - r), wxPoint(x + r, axis_y - em / 2), wxPoint(x, axis_y - em / 2 + r),
+                                      wxPoint(x - r, axis_y - em / 2) };
+                dc.DrawPolygon(4, pts);
+            }
+        }
+    }
+
+    // The moment shown.
+    if (m_vid_time != nullptr) {
+        const double t = double(m_vid_time->GetValue()) / 1000. * total;
+        const int    x = int(std::lround(g.x(t)));
+        dc.SetPen(wxPen(wxColour(220, 60, 60), 2));
+        dc.DrawLine(x, 0, x, size.y);
+    }
+}
+
+void ShowcaseView::on_timeline_mouse(wxMouseEvent &evt)
+{
+    if (video_busy() || m_vid_timeline == nullptr)
+        return;
+    const Showcase::VideoSettings &v     = scene().video;
+    const double                   total = Showcase::total_seconds(v);
+    const int                      em    = wxGetApp().em_unit();
+    const TimelineGeom             g     = timeline_geom(m_vid_timeline->GetClientSize(), total, em);
+    const wxPoint                  p     = evt.GetPosition();
+    // A keyframe under the pointer is selected (a click, not a drag).
+    if (evt.LeftDown() && v.path == Showcase::VideoPath::Keyframes) {
+        int    best   = -1;
+        double best_d = 0.6 * em;
+        for (size_t i = 0; i < v.keyframes.size(); ++i) {
+            const double d = std::abs(g.x(v.hold_start + Showcase::keyframe_run_time(v.keyframes, i)) - double(p.x));
+            if (d < best_d) {
+                best_d = d;
+                best   = int(i);
+            }
+        }
+        if (best >= 0 && p.y < int(0.45 * m_vid_timeline->GetClientSize().y) + em / 2) {
+            m_video.selected_key = best;
+            refresh_keyframes();
+            update_video_enabled();
+            m_vid_timeline->Refresh();
+            return;
+        }
+    }
+    const double t = g.t(double(p.x));
+    if (m_vid_time != nullptr)
+        m_vid_time->SetValue(int(std::lround(t / std::max(1e-6, total) * 1000.)));
+    video_scrub(t);
+}
+
+// ------------------------------------------------------------------------------------------------
 // Preview and peek
 // ------------------------------------------------------------------------------------------------
 
@@ -666,24 +974,85 @@ void ShowcaseView::video_show_pose(double t)
 {
     if (m_renderer == nullptr || !m_active)
         return;
-    Camera &camera = wxGetApp().plater()->get_camera();
+    Camera &camera        = wxGetApp().plater()->get_camera();
+    const bool just_borrowed = !m_video.borrowed;
     if (!m_video.borrowed) {
         // The path starts from the view as it is now; it comes back when the preview ends.
         m_video.saved_camera = camera;
         m_video.base         = live_camera_view();
         m_video.borrowed     = true;
     }
-    const Showcase::CameraPose pose = Showcase::evaluate_path(scene().video, m_video.base, t);
+    const Showcase::VideoSettings          &v      = scene().video;
+    const std::vector<Showcase::PathEvent> &events = video_events(v);
+    if (just_borrowed)
+        video_prepare_callouts(v, m_video.base, events);
+    const Showcase::CameraPose pose = video_pose(v, m_video.base, t, events);
     camera.look_at(Vec3d(pose.eye[0], pose.eye[1], pose.eye[2]), Vec3d(pose.target[0], pose.target[1], pose.target[2]),
                    Vec3d(pose.up[0], pose.up[1], pose.up[2]));
     camera.set_zoom(pose.zoom);
-    if (pose.spin_deg != 0.) {
-        m_video.pose_scene = scene();
+    // S5: the path's timeline (lights, backdrop, floor, callouts, watermark) and the build-up at t.
+    const bool timeline = !events.empty() || v.build.enabled;
+    if (pose.spin_deg != 0. || timeline) {
+        Showcase::TimelineState st = Showcase::evaluate_timeline(events, scene(), t, Showcase::build_fraction(v, t));
+        m_video.pose_scene    = std::move(st.scene);
+        m_video.pose_visuals  = std::move(st.callouts);
+        m_video.pose_timeline = timeline;
         spin_lights(m_video.pose_scene, pose.spin_deg);
         m_renderer->set_scene(&m_video.pose_scene, &project());
-    } else
+        m_renderer->set_build(st.build, st.build_source, st.build_infill, st.build_supports);
+        video_set_callout_pass(v, st.build, st.build_source);
+        if (timeline) {
+            m_renderer->invalidate_watermark();
+            ++m_callouts.version;
+        }
+    } else {
+        m_video.pose_timeline = false;
         m_renderer->set_scene(&scene(), &project());
+        m_renderer->set_build(-1., Showcase::BuildSource::Auto);
+        video_set_callout_pass(v, -1., Showcase::BuildSource::Auto);
+    }
     set_as_dirty();
+}
+
+Showcase::CameraPose ShowcaseView::video_pose(const Showcase::VideoSettings &v, const Showcase::CameraView &base, double t,
+                                              const std::vector<Showcase::PathEvent> &events)
+{
+    Showcase::CameraPose pose = Showcase::evaluate_path(v, base, t);
+    bool                  follow = v.path == Showcase::VideoPath::StaticZoomOut;
+    double                build  = Showcase::build_fraction(v, t);
+    Showcase::BuildSource source = v.build.source;
+    if (!events.empty()) {
+        const Showcase::TimelineState st = Showcase::evaluate_timeline(events, scene(), t, build);
+        follow |= st.build_follow;
+        build  = st.build;
+        source = st.build_source;
+    }
+    if (!follow || m_renderer == nullptr)
+        return pose;
+    m_renderer->update_visibility();
+    const BoundingBoxf3 box = m_renderer->objects_box();
+    if (!box.defined)
+        return pose;
+    // S5c: the height built so far; without a build-up, the motion stands in for it.
+    const double z = build >= 0. ? m_renderer->build_height_at(build, source) :
+                                   box.min.z() + (box.max.z() - box.min.z()) * Showcase::ease(v.easing, Showcase::motion_fraction(v, t));
+    return Showcase::frame_built_part(pose, { box.min.x(), box.min.y(), box.min.z() }, { box.max.x(), box.max.y(), box.max.z() }, z);
+}
+
+void ShowcaseView::video_set_callout_pass(const Showcase::VideoSettings &v, double build, Showcase::BuildSource source)
+{
+    const CalloutVideoPass before = m_co_video;
+    m_co_video         = CalloutVideoPass();
+    m_co_video.fixed   = v.callout_motion == Showcase::CalloutMotion::Static;
+    m_co_video.as_used = v.callout_appearance == Showcase::CalloutAppearance::AsUsed;
+    if (m_renderer == nullptr)
+        return;
+    m_co_video.built_z      = build >= 0. ? m_renderer->build_height_at(build, source) : 1e30;
+    const BoundingBoxf3 box = m_renderer->objects_box();
+    m_co_video.fade_mm      = box.defined ? std::max(0.5, 0.04 * (box.max.z() - box.min.z())) : 1.;
+    if (m_co_video.built_z != before.built_z || m_co_video.as_used != before.as_used || m_co_video.fixed != before.fixed ||
+        m_co_video.fade_mm != before.fade_mm)
+        ++m_co_video_rev;   // the live view's callout picture is drawn again
 }
 
 void ShowcaseView::video_restore_view()
@@ -699,9 +1068,19 @@ void ShowcaseView::video_restore_view()
     if (!m_video.borrowed)
         return;
     wxGetApp().plater()->get_camera() = m_video.saved_camera;
-    m_video.borrowed = false;
-    if (m_renderer != nullptr)
+    m_video.borrowed     = false;
+    m_co_video           = CalloutVideoPass();
+    m_video.static_valid = false;
+    ++m_co_video_rev;
+    if (m_renderer != nullptr) {
         m_renderer->set_scene(&scene(), &project());
+        m_renderer->set_build(-1., Showcase::BuildSource::Auto);
+        if (m_video.pose_timeline) {
+            m_renderer->invalidate_watermark();
+            ++m_callouts.version;
+        }
+    }
+    m_video.pose_timeline = false;
     set_as_dirty();
 }
 
@@ -757,6 +1136,8 @@ void ShowcaseView::on_video_timer(wxTimerEvent &)
         video_show_pose(t);
         m_vid_time->SetValue(int(std::lround(t / std::max(1e-6, total) * 1000.)));
         m_vid_time_label->SetLabel(seconds_text(t) + " / " + seconds_text(total));
+        if (m_vid_timeline != nullptr)
+            m_vid_timeline->Refresh();
         return;
     }
     if (m_video.peek_ticks > 0 && --m_video.peek_ticks == 0) {
@@ -906,7 +1287,9 @@ bool ShowcaseView::video_start_export(Showcase::VideoFormat format, const std::s
     m_video.worker   = std::move(worker);
     m_video.job      = std::make_unique<Showcase::VideoJob>(Showcase::total_frames(v));
     m_video.settings = v;
+    m_video.events   = video_events(v);
     m_video.base     = s.camera.valid ? s.camera : live_camera_view();
+    video_prepare_callouts(v, m_video.base, m_video.events);
     m_video.fade     = Showcase::CalloutFade(std::max(2, v.fps / 3), std::max(2, v.fps / 4));
     m_video.sides.clear();
     m_video.pending.reset();
@@ -933,51 +1316,63 @@ bool ShowcaseView::video_start_export(Showcase::VideoFormat format, const std::s
 
 bool ShowcaseView::video_render_frame(int index, Showcase::VideoFrame &out)
 {
+    return video_render_frame_at(Showcase::frame_time(m_video.settings, index), index, out);
+}
+
+bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFrame &out)
+{
     const Showcase::Scene     &s    = scene();
-    const Showcase::CameraPose pose = Showcase::pose_at_frame(m_video.settings, m_video.base, index);
+    const Showcase::CameraPose pose = video_pose(m_video.settings, m_video.base, t, m_video.events);
     Camera                    &camera = wxGetApp().plater()->get_camera();
     const Camera               saved  = camera;
     camera.look_at(Vec3d(pose.eye[0], pose.eye[1], pose.eye[2]), Vec3d(pose.target[0], pose.target[1], pose.target[2]),
                    Vec3d(pose.up[0], pose.up[1], pose.up[2]));
     camera.set_zoom(pose.zoom);
 
-    // The scene of this frame: the video's size and quality, a turntable's lights turned.
-    m_video.frame_scene                         = s;
+    // The scene of this frame: S5's timeline at t (lights, backdrop, floor, callouts, watermark, the
+    // build-up), the video's size and quality, a turntable's lights turned.
+    Showcase::TimelineState st = Showcase::evaluate_timeline(m_video.events, s, t, Showcase::build_fraction(m_video.settings, t));
+    m_video.frame_scene                         = std::move(st.scene);
     m_video.frame_scene.export_settings.width   = m_video.width;
     m_video.frame_scene.export_settings.height  = m_video.height;
     m_video.frame_scene.export_settings.quality = m_video.settings.quality;
     spin_lights(m_video.frame_scene, pose.spin_deg);
+    const Showcase::Scene &fs = m_video.frame_scene;
     m_renderer->set_scene(&m_video.frame_scene, &project());
+    m_renderer->set_build(st.build, st.build_source, st.build_infill, st.build_supports);
+    video_set_callout_pass(m_video.settings, st.build, st.build_source);
     m_renderer->prepare_live_camera();
 
     ShowcaseImage image;
     std::string   report;
     bool          ok = m_renderer->render_export(image, report) && !image.empty();
-    if (ok && m_video.settings.callouts && s.callouts.enabled && !s.callouts.items.empty()) {
+    if (ok && m_video.settings.callouts && fs.callouts.enabled && !fs.callouts.items.empty()) {
         // The callouts of this pose: which anchors are hidden now, their fade, the layout with the
         // sides of the last frame so labels do not jump (design 3.3 item 6, R13).
-        const std::map<std::string, std::vector<bool>> occluded = callouts_compute_occlusion(s);
-        for (const Showcase::Callout &c : s.callouts.items) {
+        const std::map<std::string, std::vector<bool>> occluded = callouts_compute_occlusion(fs);
+        for (const Showcase::Callout &c : fs.callouts.items) {
             auto it = occluded.find(c.key);
             for (size_t a = 0; a < c.anchors.size(); ++a)
                 m_video.fade.update(c.key, int(a), it != occluded.end() && a < it->second.size() && it->second[a]);
         }
-        const std::vector<ShowcaseCalloutDraw> draws = callouts_draw_list(callouts_labels(), &occluded, &m_video.fade);
+        const std::vector<ShowcaseCalloutDraw> draws = callouts_draw_list(callouts_labels(), &occluded, &m_video.fade, &fs, &st.callouts);
         std::map<int, int>     sides;
         ShowcaseCalloutOptions opt;
-        opt.reserved        = showcase_watermark_rect(s.export_settings.watermark, project(), image.width, image.height);
+        opt.reserved        = showcase_watermark_rect(fs.export_settings.watermark, project(), image.width, image.height);
         opt.model_center_x  = callouts_model_center_x();
         opt.model_box       = callouts_model_box();
         opt.previous_sides  = index > 0 ? &m_video.sides : nullptr;
         opt.sides           = &sides;
         opt.side_hysteresis = 0.06;
-        showcase_draw_callouts(image, s.background.type == Showcase::BackgroundType::Transparent, s, draws, opt);
+        showcase_draw_callouts(image, fs.background.type == Showcase::BackgroundType::Transparent, fs, draws, opt);
         m_video.sides = std::move(sides);
     }
     if (ok)
-        showcase_apply_watermark(image, s.export_settings.watermark, project());
+        showcase_apply_watermark(image, fs.export_settings.watermark, project());
 
     camera = saved;
+    m_renderer->set_build(-1., Showcase::BuildSource::Auto);
+    m_co_video = CalloutVideoPass();
     m_renderer->set_scene(&scene(), &project());
     if (!ok) {
         BOOST_LOG_TRIVIAL(error) << "Showcase video: frame " << index << " could not be rendered. " << report;

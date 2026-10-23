@@ -329,6 +329,11 @@ void RemoteAccess::install_dialog_policy() { s_dialog_hook.Register(); }
 
 void RemoteAccess::show_window(const std::string& reason)
 {
+    // Showcase S5: a --showcase-render job has nobody in front of it and never shows a window.
+    if (GUI_App::showcase_render_mode()) {
+        BOOST_LOG_TRIVIAL(warning) << "showcase-render: a window was asked for (" << reason << "), not shown";
+        return;
+    }
     auto show = [reason]() {
         MainFrame* mf = wxGetApp().mainframe;
         if (mf == nullptr) return;

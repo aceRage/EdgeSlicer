@@ -44,6 +44,9 @@ wxColour callout_colour(const std::string &hex, unsigned char alpha = 255)
                     (unsigned char) std::lround(c[2] * 255.f), alpha);
 }
 
+// S5: the accent a path's "highlight" draws round a callout.
+wxColour showcase_highlight_colour() { return wxColour(255, 138, 0); }
+
 wxColour callout_with_alpha(const wxColour &c, double a)
 {
     return wxColour(c.Red(), c.Green(), c.Blue(), (unsigned char) std::lround(std::clamp(a, 0., 1.) * 255.));
@@ -161,7 +164,7 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             m.draw    = int(i);
             m.line1   = callout_first_line(l);
             m.swatch  = !l.swatches.empty();
-            m.hex     = m.swatch ? l.hex : std::string();
+            m.hex     = l.hex;   // S5b: the hex code and the swatch are separate fields
             m.details = l.details;
             m.note    = l.note;
             double h  = 0.;
@@ -231,17 +234,27 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             for (size_t k = 0; k < measured.size(); ++k)
                 (*opt.sides)[callouts[size_t(measured[k].draw)].item] = layout.bands ? layout.labels[k].band : layout.labels[k].side;
         }
-        // S4: fades. A layer with an opacity for each part that is not fully there.
-        auto with_layer = [&gc](double opacity, const std::function<void()> &draw) {
+        // S4: fades. Every part that is not fully there is drawn with its colours' alpha scaled by its
+        // opacity. (S5: not with wxGraphicsContext::BeginLayer(), which GDI+ - the Windows renderer
+        // for a wxImage - leaves unimplemented, so nothing faded there.)
+        double layer_opacity = 1.;
+        auto   layered = [&layer_opacity](const wxColour &c) {
+            return wxColour(c.Red(), c.Green(), c.Blue(), (unsigned char) std::lround(double(c.Alpha()) * std::clamp(layer_opacity, 0., 1.)));
+        };
+        auto set_pen = [&gc, &layered](wxGraphicsPenInfo info) {
+            info.Colour(layered(info.GetColour()));
+            gc->SetPen(gc->CreatePen(info));
+        };
+        auto set_brush = [&gc, &layered](const wxColour &c) { gc->SetBrush(gc->CreateBrush(wxBrush(layered(c)))); };
+        auto set_font  = [&gc, &layered](const wxFont &font, const wxColour &c) { gc->SetFont(font, layered(c)); };
+        auto with_layer = [&layer_opacity](double opacity, const std::function<void()> &draw) {
             opacity = std::clamp(opacity, 0., 1.);
             if (opacity <= 0.004)
                 return;
-            const bool layer = opacity < 0.996;
-            if (layer)
-                gc->BeginLayer(opacity);
+            const double before = layer_opacity;
+            layer_opacity       = before * opacity;
             draw();
-            if (layer)
-                gc->EndLayer();
+            layer_opacity = before;
         };
 
         // --- colours ---------------------------------------------------------------------------
@@ -269,12 +282,12 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             const wxString s = wxString::FromUTF8(text);
             if (halo) {
                 const double h = std::max(1., 0.07 * F);
-                gc->SetFont(font, halo_of(colour));
+                set_font(font, halo_of(colour));
                 const double offsets[8][2] = { { -h, 0. }, { h, 0. }, { 0., -h }, { 0., h }, { -h, -h }, { h, h }, { -h, h }, { h, -h } };
                 for (const auto &o : offsets)
                     gc->DrawText(s, x + o[0], y + o[1]);
             }
-            gc->SetFont(font, colour);
+            set_font(font, colour);
             gc->DrawText(s, x, y);
         };
 
@@ -292,9 +305,9 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 for (size_t i = 1; i < pts.size(); ++i)
                     path.AddLineToPoint(pts[i].x, pts[i].y);
                 // A thin halo first, so the leader reads over the model too.
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(callout_with_alpha(halo, 0.45), lw + 2. * std::max(1., 0.5 * lw)).Join(wxJOIN_ROUND).Cap(wxCAP_ROUND)));
+                set_pen((wxGraphicsPenInfo(callout_with_alpha(halo, 0.45), lw + 2. * std::max(1., 0.5 * lw)).Join(wxJOIN_ROUND).Cap(wxCAP_ROUND)));
                 gc->StrokePath(path);
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(ink, lw, dashed ? wxPENSTYLE_SHORT_DASH : wxPENSTYLE_SOLID).Join(wxJOIN_ROUND).Cap(wxCAP_ROUND)));
+                set_pen((wxGraphicsPenInfo(ink, lw, dashed ? wxPENSTYLE_SHORT_DASH : wxPENSTYLE_SOLID).Join(wxJOIN_ROUND).Cap(wxCAP_ROUND)));
                 gc->StrokePath(path);
             };
             std::vector<PointD> dots;
@@ -302,7 +315,8 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 dots.push_back({ d.anchors[a].x * W, d.anchors[a].y * H });
             // Video (S4): leaders fade instead of turning dashed.
             const bool video = !d.fade.empty();
-            auto fade_of = [&d, video](size_t a) { return video ? (a < d.fade.size() ? d.fade[a] : 1.) : 1.; };
+            // S5: a path's timeline dims or hides a callout (visual) on top of the occlusion fade.
+            auto fade_of = [&d, video](size_t a) { return (video ? (a < d.fade.size() ? d.fade[a] : 1.) : 1.) * std::clamp(d.visual, 0., 1.); };
             auto dashed  = [&d, video](size_t a) { return !video && a < d.occluded.size() && d.occluded[a]; };
             // Which anchors have no line to their label (S4: left out so nothing crosses).
             auto unlinked = [&pl, &layout](size_t a) {
@@ -323,41 +337,56 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 if (pl.badge > 0 && unlinked(a)) {
                     // S4: the label's number instead of a line.
                     with_layer(fade_of(a), [&]() {
-                        gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(halo, std::max(1., 0.08 * F))));
-                        gc->SetBrush(wxBrush(ink));
+                        set_pen((wxGraphicsPenInfo(halo, std::max(1., 0.08 * F))));
+                        set_brush((ink));
                         const double r = 0.8 * badge_r;
                         gc->DrawEllipse(dots[a].x - r, dots[a].y - r, 2. * r, 2. * r);
                         const std::string num = std::to_string(pl.badge);
                         double nw = 0., nh = 0.;
                         extent(font_small, num, nw, nh);
-                        gc->SetFont(font_small, wxColour(halo.Red(), halo.Green(), halo.Blue()));
+                        set_font(font_small, wxColour(halo.Red(), halo.Green(), halo.Blue()));
                         gc->DrawText(wxString::FromUTF8(num), dots[a].x - 0.5 * nw, dots[a].y - 0.5 * nh);
                     });
                     continue;
                 }
                 if (video && !layout.legend) {
                     with_layer(fade_of(a), [&]() {
-                        gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(halo, std::max(1., 0.45 * lw))));
-                        gc->SetBrush(wxBrush(ink));
-                        gc->DrawEllipse(dots[a].x - dot_r, dots[a].y - dot_r, 2. * dot_r, 2. * dot_r);
+                        // S5: a highlighted callout's dots grow a little and get the accent ring.
+                        const double r = dot_r * (1. + 0.5 * std::clamp(d.highlight, 0., 1.));
+                        if (d.highlight > 0.004) {
+                            set_pen((wxGraphicsPenInfo(callout_with_alpha(showcase_highlight_colour(), d.highlight), std::max(1., 0.9 * lw))));
+                            gc->SetBrush(*wxTRANSPARENT_BRUSH);
+                            gc->DrawEllipse(dots[a].x - 1.8 * r, dots[a].y - 1.8 * r, 3.6 * r, 3.6 * r);
+                        }
+                        set_pen((wxGraphicsPenInfo(halo, std::max(1., 0.45 * lw))));
+                        set_brush((ink));
+                        gc->DrawEllipse(dots[a].x - r, dots[a].y - r, 2. * r, 2. * r);
                     });
                     continue;
                 }
                 if (layout.legend) {
                     // The legend's number on the model.
-                    gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(halo, std::max(1., 0.08 * F))));
-                    gc->SetBrush(wxBrush(occluded ? callout_with_alpha(ink, 0.55) : ink));
+                    set_pen((wxGraphicsPenInfo(halo, std::max(1., 0.08 * F))));
+                    set_brush((occluded ? callout_with_alpha(ink, 0.55) : ink));
                     gc->DrawEllipse(dots[a].x - badge_r, dots[a].y - badge_r, 2. * badge_r, 2. * badge_r);
                     const std::string num = std::to_string(pl.number);
                     double nw = 0., nh = 0.;
                     extent(font_small, num, nw, nh);
-                    gc->SetFont(font_small, wxColour(halo.Red(), halo.Green(), halo.Blue()));
+                    set_font(font_small, wxColour(halo.Red(), halo.Green(), halo.Blue()));
                     gc->DrawText(wxString::FromUTF8(num), dots[a].x - 0.5 * nw, dots[a].y - 0.5 * nh);
                     continue;
                 }
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(occluded ? ink : halo, std::max(1., 0.45 * lw))));
-                gc->SetBrush(occluded ? wxBrush(callout_with_alpha(halo, 0.6)) : wxBrush(ink));
-                gc->DrawEllipse(dots[a].x - dot_r, dots[a].y - dot_r, 2. * dot_r, 2. * dot_r);
+                with_layer(fade_of(a), [&]() {
+                    const double r = dot_r * (1. + 0.5 * std::clamp(d.highlight, 0., 1.));
+                    if (d.highlight > 0.004) {
+                        set_pen((wxGraphicsPenInfo(callout_with_alpha(showcase_highlight_colour(), d.highlight), std::max(1., 0.9 * lw))));
+                        gc->SetBrush(*wxTRANSPARENT_BRUSH);
+                        gc->DrawEllipse(dots[a].x - 1.8 * r, dots[a].y - 1.8 * r, 3.6 * r, 3.6 * r);
+                    }
+                    set_pen((wxGraphicsPenInfo(occluded ? ink : halo, std::max(1., 0.45 * lw))));
+                    set_brush(occluded ? callout_with_alpha(halo, 0.6) : ink);
+                    gc->DrawEllipse(dots[a].x - r, dots[a].y - r, 2. * r, 2. * r);
+                });
             }
             if (hits != nullptr) {
                 ShowcaseCalloutHits::Item hit;
@@ -371,8 +400,8 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
         // --- the legend's key ------------------------------------------------------------------
         if (layout.legend && !layout.legend_box.empty()) {
             const RectD &b = layout.legend_box;
-            gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(callout_with_alpha(callout_colour(auto_ink(hex_luminance(st.background))), 0.15), 1.)));
-            gc->SetBrush(wxBrush(box_bg));
+            set_pen((wxGraphicsPenInfo(callout_with_alpha(callout_colour(auto_ink(hex_luminance(st.background))), 0.15), 1.)));
+            set_brush((box_bg));
             gc->DrawRoundedRectangle(b.x, b.y, b.w, b.h, 0.4 * F);
         }
 
@@ -387,23 +416,22 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             const wxColour             second = callout_with_alpha(ink, 0.78);
             const bool                 halo   = !on_box;
             // S4, video: a label fades with the last of its anchors (never in the legend's key).
-            const double label_alpha = layout.legend ? 1. : std::clamp(d.alpha, 0., 1.);
+            const double label_alpha = layout.legend ? 1. : std::clamp(d.alpha * d.visual, 0., 1.);
             if (label_alpha <= 0.004)
                 continue;
-            const bool label_layer = label_alpha < 0.996;
-            if (label_layer)
-                gc->BeginLayer(label_alpha);
+            const double before_label = layer_opacity;
+            layer_opacity             = before_label * label_alpha;
 
             if (boxed && !layout.legend) {
                 const double radius = st.shape == CalloutShape::Pill ? 0.5 * b.h : 0.3 * F;
                 // A soft two-step shadow under the card.
                 gc->SetPen(*wxTRANSPARENT_PEN);
                 for (int s = 1; s <= 2; ++s) {
-                    gc->SetBrush(wxBrush(wxColour(0, 0, 0, 22)));
+                    set_brush((wxColour(0, 0, 0, 22)));
                     gc->DrawRoundedRectangle(b.x, b.y + 0.07 * F * s, b.w, b.h, radius);
                 }
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(callout_with_alpha(callout_colour(auto_ink(hex_luminance(st.background))), 0.15), 1.)));
-                gc->SetBrush(wxBrush(box_bg));
+                set_pen((wxGraphicsPenInfo(callout_with_alpha(callout_colour(auto_ink(hex_luminance(st.background))), 0.15), 1.)));
+                set_brush((box_bg));
                 gc->DrawRoundedRectangle(b.x, b.y, b.w, b.h, radius);
             }
             if (layout.legend) {
@@ -411,13 +439,13 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 const double cx = b.x - 0.5 * p.legend_badge, cy = b.y + pad_y + 0.5 * h_main;
                 const wxColour badge = ink_at(b);
                 gc->SetPen(*wxTRANSPARENT_PEN);
-                gc->SetBrush(wxBrush(badge));
+                set_brush((badge));
                 gc->DrawEllipse(cx - badge_r, cy - badge_r, 2. * badge_r, 2. * badge_r);
                 const std::string num = std::to_string(pl.number);
                 double nw = 0., nh = 0.;
                 extent(font_small, num, nw, nh);
                 const wxColour on_badge = halo_of(badge);
-                gc->SetFont(font_small, wxColour(on_badge.Red(), on_badge.Green(), on_badge.Blue()));
+                set_font(font_small, wxColour(on_badge.Red(), on_badge.Green(), on_badge.Blue()));
                 gc->DrawText(wxString::FromUTF8(num), cx - 0.5 * nw, cy - 0.5 * nh);
             }
 
@@ -427,11 +455,11 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 const double sy = y + 0.5 * (h_main - sw);
                 gc->SetPen(*wxTRANSPARENT_PEN);
                 for (size_t c = 0; c < colors.size(); ++c) {
-                    gc->SetBrush(wxBrush(callout_colour(colors[c])));
+                    set_brush((callout_colour(colors[c])));
                     const double x0 = x + sw * double(c) / double(colors.size()), x1 = x + sw * double(c + 1) / double(colors.size());
                     gc->DrawRectangle(x0, sy, x1 - x0, sw);
                 }
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(callout_with_alpha(halo ? halo_of(ink) : ink, 0.35), std::max(1., 0.05 * F))));
+                set_pen((wxGraphicsPenInfo(callout_with_alpha(halo ? halo_of(ink) : ink, 0.35), std::max(1., 0.05 * F))));
                 gc->SetBrush(*wxTRANSPARENT_BRUSH);
                 gc->DrawRectangle(x, sy, sw, sw);
                 x += sw + sw_gap;
@@ -443,7 +471,7 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             if (st.shape == CalloutShape::Technical && !layout.legend) {
                 // AutoCAD's multileader: the text sits on a line the leader lands on.
                 const double ly = y + 0.12 * F;
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(ink_at(b), lw)));
+                set_pen((wxGraphicsPenInfo(ink_at(b), lw)));
                 gc->StrokeLine(b.x, ly, b.right(), ly);
                 y += underline;
             }
@@ -456,9 +484,18 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 y += line_gap;
                 draw_text(font_small, m.note, second, b.x + pad_x, y, halo);
             }
+            if (d.highlight > 0.004 && !layout.legend) {
+                // S5: a path's highlight - an accent ring round the label.
+                const double g = 0.25 * F;
+                set_pen((wxGraphicsPenInfo(callout_with_alpha(showcase_highlight_colour(), std::clamp(d.highlight, 0., 1.)),
+                                                           std::max(1.5, 0.16 * F))
+                                             .Join(wxJOIN_ROUND)));
+                gc->SetBrush(*wxTRANSPARENT_BRUSH);
+                gc->DrawRoundedRectangle(b.x - g, b.y - g, b.w + 2. * g, b.h + 2. * g, 0.4 * F);
+            }
             if (opt.overlay && d.item == opt.selected) {
                 // The live view's selection; never in an export.
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(wxColour(0, 150, 136), std::max(1., 0.1 * F), wxPENSTYLE_SHORT_DASH)));
+                set_pen((wxGraphicsPenInfo(wxColour(0, 150, 136), std::max(1., 0.1 * F), wxPENSTYLE_SHORT_DASH)));
                 gc->SetBrush(*wxTRANSPARENT_BRUSH);
                 const double g = 0.2 * F;
                 gc->DrawRoundedRectangle(b.x - g, b.y - g, b.w + 2. * g, b.h + 2. * g, 0.3 * F);
@@ -468,17 +505,16 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 const wxColour badge_ink = ink_at(b);
                 const wxColour on_badge  = halo_of(badge_ink);
                 const double   r         = 0.8 * badge_r;
-                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(on_badge, std::max(1., 0.08 * F))));
-                gc->SetBrush(wxBrush(badge_ink));
+                set_pen((wxGraphicsPenInfo(on_badge, std::max(1., 0.08 * F))));
+                set_brush((badge_ink));
                 gc->DrawEllipse(b.x - r, b.y - r, 2. * r, 2. * r);
                 const std::string num = std::to_string(pl.badge);
                 double nw = 0., nh = 0.;
                 extent(font_small, num, nw, nh);
-                gc->SetFont(font_small, wxColour(on_badge.Red(), on_badge.Green(), on_badge.Blue()));
+                set_font(font_small, wxColour(on_badge.Red(), on_badge.Green(), on_badge.Blue()));
                 gc->DrawText(wxString::FromUTF8(num), b.x - 0.5 * nw, b.y - 0.5 * nh);
             }
-            if (label_layer)
-                gc->EndLayer();
+            layer_opacity = before_label;
         }
         // The context writes its pixels back into `canvas` when it is destroyed, here.
     }
@@ -694,7 +730,7 @@ ShowcaseCalloutDialog::ShowcaseCalloutDialog(wxWindow *parent, const Showcase::C
         m_color->Enable(false);
         m_color->SetToolTip(_L("This colour's name comes from the Snapmaker colour library."));
     } else
-        m_color->SetToolTip(_L("Your name for this colour. Leave it empty for the nearest known name (shown with \"≈\")."));
+        m_color->SetToolTip(_L("Your name for this colour. Leave it empty for the nearest known name."));
     row(_L("Colour name"), m_color);
     m_note = new wxTextCtrl(this, wxID_ANY, wxString::FromUTF8(callout.note));
     m_note->SetToolTip(_L("An extra line under the label."));

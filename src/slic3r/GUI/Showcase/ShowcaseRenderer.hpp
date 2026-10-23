@@ -87,7 +87,11 @@ public:
     // The backdrop or floor picture changed: upload it again on the next frame.
     void invalidate_images() { m_bg_image_key.clear(); m_floor_key.clear(); }
     // The objects or the print settings may have changed: the layer lines are worked out again.
-    void invalidate_layers() { m_layers_valid = false; }
+    void invalidate_layers()
+    {
+        m_layers_valid     = false;
+        m_model_tops_valid = false;
+    }
 
     // The watermark preview over the live view. Called with the safe frame's size; returns the mark
     // for an image of that size, or an empty image. `version` changes whenever the mark does.
@@ -137,6 +141,30 @@ public:
     // The safe frame of the last live frame, in canvas pixels, origin top-left.
     Showcase::RectI live_frame() const { return m_live_frame; }
 
+    // S5, --showcase-render: no live frame is ever drawn in the hidden instance, so the "live view" is
+    // a view exactly the export's size (the safe frame is all of it): the camera's zoom is then pixels
+    // per mm of the output, and the callouts, the ID pass and the export all see the same frame.
+    void set_offscreen_view(int width, int height);
+
+    // S5: the layer build-up. `fraction` < 0 = none (the whole print), else 0..1 of it. With
+    // toolpaths (Auto, when the plate is sliced) the slice's layers grow; otherwise the model is cut
+    // by a plane (the clip fallback).
+    // S5b: `infill` / `supports`: whether a toolpath build-up lays them.
+    void set_build(double fraction, Showcase::BuildSource source, bool infill = true, bool supports = true);
+    // S5c: the height (world, mm) a build-up at `fraction` has reached: the slice's layers or the clip's
+    // plane. 1e30 when nothing is building (fraction < 0) or it is finished.
+    double build_height_at(double fraction, Showcase::BuildSource source);
+    // Only the current plate's objects (and its prime tower unless hidden) are active.
+    void   update_visibility();
+    // What the last frame used for the build-up: "" none, "toolpaths" or "clip".
+    std::string build_used() const { return m_build_used; }
+    // S5: the plate's slice can be drawn (Preview has its toolpaths loaded).
+    static bool toolpaths_available();
+    // S5: Preview gets its own toolpath settings back (the tab is left).
+    static void release_toolpaths();
+    // S5: the layer tops the build-up steps through without a slice (mm, the plate's objects).
+    std::vector<double> model_layer_tops();
+
     // The objects of the current plate (and its prime tower when shown).
     BoundingBoxf3 objects_box() const;
     // Points the camera at the plate's objects from the front-right and fits them in the safe frame.
@@ -163,7 +191,6 @@ private:
         float    frame[4] = { 0.f, 0.f, 1.f, 1.f };
     };
 
-    void            update_visibility();
     bool            floor_drawn() const;
     void            floor_disc(Vec3d &center, double &radius) const;
     BoundingBoxf3   scene_box() const;
@@ -173,6 +200,9 @@ private:
     void            draw_background(const DrawTarget &t);
     void            draw_floor(const DrawTarget &t);
     void            draw_objects();
+    // S5: the plate's toolpaths through Preview's viewer (the toolpath source, the build-up).
+    bool            draw_toolpaths();
+    bool            use_toolpaths() const;
     // S2: the objects through showcase_material; false when that shader is not there.
     bool            draw_objects_material(bool mirrored);
     void            draw_overlay(int vp_w, int vp_h);
@@ -247,6 +277,16 @@ private:
     int                        m_wm_frame_w = 0;
     int                        m_wm_frame_h = 0;
     Showcase::RectI            m_wm_rect;
+
+    // S5
+    double                     m_build_fraction = -1.;
+    Showcase::BuildSource      m_build_source   = Showcase::BuildSource::Auto;
+    bool                       m_build_infill   = true;   // S5b
+    bool                       m_build_supports = true;   // S5b
+    double                     m_build_clip_z   = 1e30;   // the clip fallback's plane, this frame
+    std::string                m_build_used;
+    std::vector<double>        m_model_tops;
+    bool                       m_model_tops_valid = false;
 
     // S4
     bool                       m_batch = false;
