@@ -681,6 +681,7 @@ void RemoteAccess::note_slice_progress(int plate, int percent, const std::string
     m_slicing = true;
     if (plate != m_slicing_plate) m_slicing_percent = 0; // slice all moved on to the next plate
     m_slicing_plate = plate;
+    if (plate >= 0) m_current_plate = plate;
     if (percent >= 0) m_slicing_percent = std::max(m_slicing_percent, std::min(percent, 100));
     for (Job& j : m_jobs)
         if (j.kind == "slice" && j.state == "running" && (j.plate == -1 || j.plate == plate)) {
@@ -718,6 +719,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_plates()
         j["project"]       = plater->get_project_filename().ToUTF8().data();
         j["printer"]       = bundle->printers.get_selected_preset_name();
         j["current_plate"] = plates.get_curr_plate_index();
+        RemoteAccess::get().m_current_plate = plates.get_curr_plate_index();
         j["slicing"]       = plater->is_background_process_slicing();
         j["filaments"]     = nlohmann::json::array();
         std::vector<double> density;
@@ -2395,6 +2397,12 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_save()
 // Cheap (no GUI thread): what the hub lists for this instance.
 RemoteAccess::ApiResponse RemoteAccess::api_info()
 {
+    // Refresh the cached current plate for the next read (the hub probes every few seconds);
+    // never wait for the GUI thread here, a busy slicer must still answer /api/info.
+    post_to_main([]() {
+        if (Plater* plater = wxGetApp().plater())
+            RemoteAccess::get().m_current_plate = plater->get_partplate_list().get_curr_plate_index();
+    });
     ApiResponse r;
     nlohmann::json j;
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -2407,6 +2415,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_info()
     // slicing_percent, as /api/plates reports it; -1 / 0 while idle).
     j["slicing_plate"]   = m_slicing ? m_slicing_plate : -1;
     j["slicing_percent"] = m_slicing ? m_slicing_percent : 0;
+    j["current_plate"]   = m_current_plate.load();
     j["hidden"]  = m_hidden;
     j["version"] = std::string(SLIC3R_VERSION);
     // Where this PC keeps the G-code archive. The hub reads it so that a running job's
