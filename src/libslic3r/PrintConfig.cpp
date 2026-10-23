@@ -3247,7 +3247,7 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = u8"°";
     def->min      = 5;
     def->max      = 85;
-    def->mode     = comExpert;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionFloat(45));
 
     def           = this->add("lightning_prune_angle", coFloat);
@@ -3257,7 +3257,7 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = u8"°";
     def->min      = 5;
     def->max      = 85;
-    def->mode     = comExpert;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionFloat(45));
 
     def           = this->add("lightning_straightening_angle", coFloat);
@@ -3267,7 +3267,7 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = u8"°";
     def->min      = 5;
     def->max      = 85;
-    def->mode     = comExpert;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionFloat(45));
 
     auto def_infill_anchor_min = def = this->add("infill_anchor", coFloatOrPercent);
@@ -6251,7 +6251,7 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = "%";
     def->min = 0;
     def->max = 100;
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionPercents { 0 });
 
     def = this->add("retract_when_changing_layer", coBools);
@@ -8720,7 +8720,7 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Quality");
     def->tooltip = L("Maximum number of polyhole edges"
             "\nThis setting limits the amount of edges a polyhole can have");
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->min = 3;
     def->set_default_value(new ConfigOptionInt(50));
 
@@ -8850,7 +8850,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip  = L("This value determines the smallest wall line segment length in mm. "
         "The smaller you set this value, the more accurate and precise the walls will be.");
     def->sidetext = L("mm");	// millimeters, CIS languages need translation
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->min = 0.005;
     def->max = 0.5f;
     def->set_default_value(new ConfigOptionFloat(0.5f));
@@ -8862,7 +8862,7 @@ void PrintConfigDef::init_fff_params()
         "the print will be less accurate, but the G-Code will be smaller. 'Maximum wall deviation' limits 'Maximum wall resolution', "
         "so if the two conflict, 'Maximum wall deviation' takes precedence.");
     def->sidetext = L("mm");	// millimeters, CIS languages need translation
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->min = 0.005f;
     def->max = 0.05f;
     def->set_default_value(new ConfigOptionFloat(0.025f));
