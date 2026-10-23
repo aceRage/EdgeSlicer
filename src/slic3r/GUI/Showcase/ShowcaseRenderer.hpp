@@ -1,7 +1,9 @@
 #ifndef slic3r_GUI_ShowcaseRenderer_hpp_
 #define slic3r_GUI_ShowcaseRenderer_hpp_
 
-// Showcase tab (phases S1, S2): draws the Showcase canvas and renders still images from it.
+// Showcase tab (phases S1 to S4): draws the Showcase canvas and renders still images from it.
+// S3 adds the ID pass the filament callouts are anchored with, and their overlay on the live view.
+// S4 renders video frames through the same export, keeping the off-screen buffers between frames.
 //
 // One drawing function serves the live view and the export (design 2.2): backdrop, the printer's
 // plate or a floor, the shadow map with a world-fixed light (D14), the objects of the current
@@ -23,8 +25,11 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
+
+class wxMouseEvent;
 
 namespace Slic3r {
 namespace GUI {
@@ -32,6 +37,7 @@ namespace GUI {
 struct Camera; // a struct in Camera.hpp: MSVC mangles class and struct differently (LNK2001)
 class GLCanvas3D;
 class GLModel;
+struct ShowcaseFramebuffers;
 
 // An RGBA image, top row first, straight (not premultiplied) alpha.
 struct ShowcaseImage
@@ -40,6 +46,31 @@ struct ShowcaseImage
     int                  height = 0;
     std::vector<uint8_t> rgba;
     bool empty() const { return width <= 0 || height <= 0 || rgba.empty(); }
+};
+
+// S3: the plate's objects drawn once in flat colours, one per filament region (design 3.3, the
+// "ID pass"), over exactly the safe frame. Callout anchors are found in it, re-anchoring picks in
+// it, and it tells which anchors something else hides.
+struct ShowcaseIdPass
+{
+    struct Entry
+    {
+        int                  object_idx   = -1;
+        int                  volume_idx   = -1;
+        int                  instance_idx = 0;
+        Showcase::BaseRegion base;
+    };
+    int                width  = 0;
+    int                height = 0;
+    std::vector<int>   ids;     // index into entries per pixel, -1 = nothing; top row first
+    std::vector<float> depth;   // window depth 0..1; top row first
+    std::vector<Entry> entries;
+    Matrix4d           view_projection = Matrix4d::Identity();   // world -> clip of the safe frame
+
+    bool         valid() const { return width > 0 && height > 0 && ids.size() == size_t(width) * size_t(height); }
+    const Entry *entry_at(int x, int y) const;
+    // The world point seen at a pixel; false where there is no object.
+    bool         world_at(int x, int y, Vec3d &out) const;
 };
 
 class ShowcaseRenderer
@@ -56,13 +87,41 @@ public:
     // The backdrop or floor picture changed: upload it again on the next frame.
     void invalidate_images() { m_bg_image_key.clear(); m_floor_key.clear(); }
     // The objects or the print settings may have changed: the layer lines are worked out again.
-    void invalidate_layers() { m_layers_valid = false; }
+    void invalidate_layers()
+    {
+        m_layers_valid     = false;
+        m_model_tops_valid = false;
+    }
 
     // The watermark preview over the live view. Called with the safe frame's size; returns the mark
     // for an image of that size, or an empty image. `version` changes whenever the mark does.
     using WatermarkProvider = std::function<bool(int frame_w, int frame_h, ShowcaseImage &mark, Showcase::RectI &where)>;
     void set_watermark_provider(WatermarkProvider provider) { m_watermark_provider = std::move(provider); }
     void invalidate_watermark() { ++m_watermark_version; }
+
+    // S3: the callouts over the live view, drawn on the CPU (D6) into a picture of the safe frame's
+    // size. Asked again whenever `version` or the camera changes.
+    using OverlayProvider = std::function<bool(int frame_w, int frame_h, ShowcaseImage &image)>;
+    void set_callout_provider(OverlayProvider provider, std::function<uint64_t()> version)
+    {
+        m_callout_provider = std::move(provider);
+        m_callout_version  = std::move(version);
+        m_callout_key      = 0;
+    }
+    // Runs at the start of each live frame with the camera set up and the context current (the
+    // callouts' ID passes).
+    void set_before_frame(std::function<void()> fn) { m_before_frame = std::move(fn); }
+    // The Showcase canvas' mouse events before the camera gets them; the handler returns true for
+    // the ones it used (dragging a callout).
+    void set_mouse_handler(std::function<bool(wxMouseEvent &)> fn) { m_mouse_handler = std::move(fn); }
+    bool on_mouse(wxMouseEvent &evt) { return m_mouse_handler && m_mouse_handler(evt); }
+
+    // The live camera's view and projection cropped to the safe frame: world -> clip coordinates of
+    // exactly what an export shows. False before the first live frame.
+    bool frame_view_projection(Matrix4d &out) const;
+    // S3: the ID pass, `long_side` pixels along the safe frame's longer side. The context must be
+    // current (from the before-frame hook).
+    bool render_id_pass(int long_side, ShowcaseIdPass &out);
 
     // The live frame (GLCanvas3D::render calls it for the Showcase canvas).
     void render_frame();
@@ -71,8 +130,40 @@ public:
     // (supersampling, multisampling, fallbacks) for the log. False when nothing could be rendered.
     bool render_export(ShowcaseImage &out, std::string &report);
 
+    // S4: a video renders many exports of one size in a row. Between these calls the off-screen
+    // buffers stay allocated (sized for the first frame) instead of being made for each frame.
+    void begin_batch();
+    void end_batch();
+    // S4: the live view's viewport and a projection fitted to the scene, for the camera as it is now
+    // (a video frame's pose): what frame_view_projection() and the ID pass then use.
+    void prepare_live_camera();
+
     // The safe frame of the last live frame, in canvas pixels, origin top-left.
     Showcase::RectI live_frame() const { return m_live_frame; }
+
+    // S5, --showcase-render: no live frame is ever drawn in the hidden instance, so the "live view" is
+    // a view exactly the export's size (the safe frame is all of it): the camera's zoom is then pixels
+    // per mm of the output, and the callouts, the ID pass and the export all see the same frame.
+    void set_offscreen_view(int width, int height);
+
+    // S5: the layer build-up. `fraction` < 0 = none (the whole print), else 0..1 of it. With
+    // toolpaths (Auto, when the plate is sliced) the slice's layers grow; otherwise the model is cut
+    // by a plane (the clip fallback).
+    // S5b: `infill` / `supports`: whether a toolpath build-up lays them.
+    void set_build(double fraction, Showcase::BuildSource source, bool infill = true, bool supports = true);
+    // S5c: the height (world, mm) a build-up at `fraction` has reached: the slice's layers or the clip's
+    // plane. 1e30 when nothing is building (fraction < 0) or it is finished.
+    double build_height_at(double fraction, Showcase::BuildSource source);
+    // Only the current plate's objects (and its prime tower unless hidden) are active.
+    void   update_visibility();
+    // What the last frame used for the build-up: "" none, "toolpaths" or "clip".
+    std::string build_used() const { return m_build_used; }
+    // S5: the plate's slice can be drawn (Preview has its toolpaths loaded).
+    static bool toolpaths_available();
+    // S5: Preview gets its own toolpath settings back (the tab is left).
+    static void release_toolpaths();
+    // S5: the layer tops the build-up steps through without a slice (mm, the plate's objects).
+    std::vector<double> model_layer_tops();
 
     // The objects of the current plate (and its prime tower when shown).
     BoundingBoxf3 objects_box() const;
@@ -100,7 +191,6 @@ private:
         float    frame[4] = { 0.f, 0.f, 1.f, 1.f };
     };
 
-    void            update_visibility();
     bool            floor_drawn() const;
     void            floor_disc(Vec3d &center, double &radius) const;
     BoundingBoxf3   scene_box() const;
@@ -110,6 +200,9 @@ private:
     void            draw_background(const DrawTarget &t);
     void            draw_floor(const DrawTarget &t);
     void            draw_objects();
+    // S5: the plate's toolpaths through Preview's viewer (the toolpath source, the build-up).
+    bool            draw_toolpaths();
+    bool            use_toolpaths() const;
     // S2: the objects through showcase_material; false when that shader is not there.
     bool            draw_objects_material(bool mirrored);
     void            draw_overlay(int vp_w, int vp_h);
@@ -117,6 +210,7 @@ private:
     void            ensure_floor_model();
     bool            ensure_background_texture();
     void            ensure_watermark_texture(int frame_w, int frame_h);
+    void            ensure_callout_texture(int frame_w, int frame_h);
 
     // S2 helpers.
     struct LayerInfo
@@ -183,6 +277,30 @@ private:
     int                        m_wm_frame_w = 0;
     int                        m_wm_frame_h = 0;
     Showcase::RectI            m_wm_rect;
+
+    // S5
+    double                     m_build_fraction = -1.;
+    Showcase::BuildSource      m_build_source   = Showcase::BuildSource::Auto;
+    bool                       m_build_infill   = true;   // S5b
+    bool                       m_build_supports = true;   // S5b
+    double                     m_build_clip_z   = 1e30;   // the clip fallback's plane, this frame
+    std::string                m_build_used;
+    std::vector<double>        m_model_tops;
+    bool                       m_model_tops_valid = false;
+
+    // S4
+    bool                       m_batch = false;
+    std::unique_ptr<ShowcaseFramebuffers> m_batch_fb;
+    int                        m_batch_w = 0, m_batch_h = 0, m_batch_msaa = -1;
+
+    // S3
+    OverlayProvider            m_callout_provider;
+    std::function<uint64_t()>  m_callout_version;
+    uint64_t                   m_callout_key = 0;
+    unsigned int               m_callout_texture = 0;
+    bool                       m_callout_shown = false;
+    std::function<void()>      m_before_frame;
+    std::function<bool(wxMouseEvent &)> m_mouse_handler;
 };
 
 } // namespace GUI

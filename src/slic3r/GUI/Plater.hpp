@@ -760,6 +760,8 @@ public:
     GLCanvas3D* get_current_canvas3D(bool exclude_preview = false);
     GLCanvas3D* get_view3D_canvas3D();
     GLCanvas3D* get_preview_canvas3D();
+    // Showcase S5: the Showcase view (the --showcase-render job drives it); null before it exists.
+    class ShowcaseView* get_showcase_view();
     // Ultra: make OpenGL usable on both canvases without any window ever being shown
     // (hub-managed instances). False = OpenGL unusable; callers must fail, not draw.
     bool        ensure_gl_ready();

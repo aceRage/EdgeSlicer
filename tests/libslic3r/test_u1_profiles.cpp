@@ -589,3 +589,67 @@ TEST_CASE("U1 PLA, PVA and TPU presets have Cool Plate bed temperatures", "[Pres
     }
     CHECK(checked > 50);
 }
+
+TEST_CASE("The U1 model lists Generic PLA @U1 as default materials for the wizard deselect-all path", "[Preset][U1]")
+{
+    SnapmakerTree &t  = tree();
+    const auto     vit = t.bundle->vendors.find(PresetBundle::SM_BUNDLE);
+    REQUIRE(vit != t.bundle->vendors.end());
+    const VendorProfile::PrinterModel *model = nullptr;
+    for (const VendorProfile::PrinterModel &m : vit->second.models)
+        if (m.name == U1_MODEL) {
+            model = &m;
+            break;
+        }
+    REQUIRE(model != nullptr);
+
+    const std::vector<std::string> wanted = {
+        "Generic PLA @U1 0.2 nozzle",
+        "Generic PLA @U1 0.4 nozzle",
+        "Generic PLA @U1 0.6 nozzle",
+        "Generic PLA @U1 0.8 nozzle",
+    };
+    for (const std::string &name : wanted) {
+        INFO(name);
+        CHECK(std::find(model->default_materials.begin(), model->default_materials.end(), name) !=
+              model->default_materials.end());
+        const Preset *filament = t.bundle->filaments.find_preset(name, false);
+        REQUIRE(filament != nullptr);
+        CHECK(filament->is_system);
+    }
+}
+
+TEST_CASE("Each U1 machine falls back to a compatible Generic PLA @U1 filament", "[Preset][U1]")
+{
+    SnapmakerTree &t = tree();
+
+    struct Expect {
+        const char               *printer;
+        std::vector<std::string>  filaments;
+    };
+    const Expect expected[] = {
+        { "Snapmaker U1 (0.2 nozzle)",     { "Generic PLA @U1 0.2 nozzle" } },
+        { "Snapmaker U1 (0.4 nozzle)",     { "Generic PLA @U1 0.4 nozzle" } },
+        { "Snapmaker U1 (0.6 nozzle)",     { "Generic PLA @U1 0.6 nozzle" } },
+        { "Snapmaker U1 (0.8 nozzle)",     { "Generic PLA @U1 0.8 nozzle" } },
+        { "Snapmaker U1 (0.4+0.6 nozzle)",
+          { "Generic PLA @U1 0.4 nozzle", "Generic PLA @U1 0.4 nozzle", "Generic PLA @U1 0.6 nozzle",
+            "Generic PLA @U1 0.6 nozzle" } },
+    };
+    for (const Expect &e : expected) {
+        INFO(e.printer);
+        const Preset *printer = t.bundle->printers.find_preset(e.printer, false);
+        REQUIRE(printer != nullptr);
+        const auto *dfp = printer->config.option<ConfigOptionStrings>("default_filament_profile");
+        REQUIRE(dfp != nullptr);
+        CHECK(dfp->values == e.filaments);
+        for (const std::string &name : e.filaments) {
+            INFO(name);
+            const Preset *filament = t.bundle->filaments.find_preset(name, false);
+            REQUIRE(filament != nullptr);
+            const auto *compat = filament->config.option<ConfigOptionStrings>("compatible_printers");
+            REQUIRE(compat != nullptr);
+            CHECK(std::find(compat->values.begin(), compat->values.end(), e.printer) != compat->values.end());
+        }
+    }
+}
