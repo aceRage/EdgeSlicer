@@ -8,7 +8,8 @@ using namespace Slic3r;
 using namespace Slic3r::HubMosaic;
 
 // The TV wall's camera mosaic: one H.264 stream per page of cameras (RemoteHub /r/<token>/mosaic,
-// /relay/mosaic). The layout math, the ffmpeg command line, the encoder choice and the SPS gate.
+// /relay/mosaic). The layout math, the ffmpeg command lines, the encoder choice, the canvas copies,
+// the keyframe cache and the SPS gate.
 
 static bool has(const std::vector<std::string>& v, const std::string& s) { return std::find(v.begin(), v.end(), s) != v.end(); }
 
@@ -193,29 +194,143 @@ TEST_CASE("mosaic: no font, no text; text never escapes its quotes", "[HubMosaic
     CHECK(font_value("").empty());
 }
 
-TEST_CASE("mosaic: the command line reads the relays and writes raw H.264 to stdout", "[HubMosaic]")
+TEST_CASE("mosaic: a feeder decodes one camera into its cell as raw frames", "[HubMosaic]")
 {
-    const auto a = build_args("ffmpeg.exe", page_2x2());
+    const Spec s  = page_2x2();
+    const Rect r1 = cell_rect(s.layout, s.size, 1);
+    const auto a  = feeder_args("ffmpeg.exe", s.cells[1], r1, s.font);
     CHECK(a.front() == "ffmpeg.exe");
     CHECK(has(a, "-nostdin"));
-    // The go2rtc stream over loopback RTSP (TCP), the Bambu relay as multipart JPEG.
-    const size_t rtsp = index_of(a, "rtsp://127.0.0.1:41001/u1_192_0_2_108");
-    REQUIRE(rtsp < a.size());
-    CHECK(a[rtsp - 1] == "-i");
+    // The Bambu relay as multipart JPEG, one input, no buffering, no frame-threaded decoding.
+    CHECK(has(a, "mpjpeg"));
+    CHECK(std::count(a.begin(), a.end(), std::string("-i")) == 1);
     const size_t mj = index_of(a, "http://127.0.0.1:6000/bambu?ip=192.0.2.150&code=x&fps=15");
     REQUIRE(mj < a.size());
-    CHECK(mj > rtsp);
-    CHECK(has(a, "mpjpeg"));
-    // Exactly two inputs: the placeholder and the empty cell are drawn.
-    CHECK(std::count(a.begin(), a.end(), std::string("-i")) == 2);
+    CHECK(a[mj - 1] == "-i");
+    CHECK(has(a, "nobuffer"));
+    CHECK(has(a, "low_delay"));
+    const size_t vf = index_of(a, "-vf");
+    REQUIRE(vf + 1 < a.size());
+    CHECK(a[vf + 1].find("scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:") == 0);
+    CHECK(a[vf + 1].find("text='P1S'") != std::string::npos);
+    CHECK(a[vf + 1].find("fontfile='C\\:/Windows/Fonts/arial.ttf'") != std::string::npos);
+    CHECK(a[a.size() - 4] == "rawvideo");
+    CHECK(a[a.size() - 2] == "yuv420p");
+    CHECK(a.back() == "pipe:1");
+    // A go2rtc stream over loopback RTSP (TCP).
+    const auto r = feeder_args("ffmpeg.exe", s.cells[0], cell_rect(s.layout, s.size, 0), "");
+    CHECK(has(r, "rtsp://127.0.0.1:41001/u1_192_0_2_108"));
+    CHECK(has(r, "tcp"));
+    CHECK_FALSE(has(r, "mpjpeg"));
+    CHECK(r[index_of(r, "-vf") + 1].find("drawtext") == std::string::npos); // no font, no label
+}
+
+TEST_CASE("mosaic: the cards draw every live cell as a note, never read a camera", "[HubMosaic]")
+{
+    const auto a = card_args("ffmpeg.exe", page_2x2(), NOTE_CONNECTING);
+    CHECK(std::count(a.begin(), a.end(), std::string("-i")) == 0);
+    const std::string g = a[index_of(a, "-filter_complex") + 1];
+    CHECK(g.find("text='Connecting...'") != std::string::npos);
+    CHECK(g.find("text='Left U1'") != std::string::npos);              // the live cell's label
+    CHECK(g.find("text='Viewer limit reached'") != std::string::npos); // the placeholder as it is
+    CHECK(g.find("rtsp://") == std::string::npos);
+    CHECK(has(a, "-frames:v"));
+    CHECK(a[index_of(a, "-frames:v") + 1] == "1");
+    CHECK(a.back() == "pipe:1");
+    const auto off = card_args("ffmpeg.exe", page_2x2(), NOTE_OFFLINE);
+    CHECK(off[index_of(off, "-filter_complex") + 1].find("text='Offline'") != std::string::npos);
+}
+
+TEST_CASE("mosaic: the encoder reads raw canvas frames and writes raw H.264 to stdout", "[HubMosaic]")
+{
+    const auto a = encoder_args_raw("ffmpeg.exe", page_2x2());
+    CHECK(a.front() == "ffmpeg.exe");
+    CHECK_FALSE(has(a, "-nostdin")); // stdin is its input
+    CHECK(a[index_of(a, "-i") + 1] == "pipe:0");
+    CHECK(a[index_of(a, "-s") + 1] == "1920x1080");
+    CHECK(a[index_of(a, "-r") + 1] == "15");
+    CHECK(has(a, "rawvideo"));
     CHECK(has(a, "h264_nvenc"));
     CHECK(has(a, "dump_extra=freq=keyframe"));
     CHECK(a[a.size() - 3] == "-f");
     CHECK(a[a.size() - 2] == "h264");
     CHECK(a.back() == "pipe:1");
-    const size_t g = index_of(a, "-g");
-    REQUIRE(g + 1 < a.size());
-    CHECK(a[g + 1] == "30"); // a keyframe every 2 s at 15 fps
+    CHECK(a[index_of(a, "-g") + 1] == "15"); // a keyframe every second at 15 fps
+    CHECK(a[index_of(a, "-bf") + 1] == "0");
+}
+
+TEST_CASE("mosaic: cells are written into and copied out of the canvas", "[HubMosaic]")
+{
+    const Size canvas{ 8, 4 };
+    Layout     l;
+    parse_layout("2x2", l);
+    const Rect r = cell_rect(l, canvas, 3); // x 4, y 2, 4 x 2
+    REQUIRE(r.x == 4);
+    REQUIRE(r.y == 2);
+    std::vector<unsigned char> frame(i420_size(8, 4), 0);
+    // A 4x2 cell: Y 1..8, U 101 102, V 201 202.
+    const std::vector<unsigned char> cell = { 1, 2, 3, 4, 5, 6, 7, 8, 101, 102, 201, 202 };
+    REQUIRE(cell.size() == i420_size(4, 2));
+    blit_i420(frame.data(), canvas, r, cell.data());
+    CHECK(frame[2 * 8 + 4] == 1);
+    CHECK(frame[2 * 8 + 7] == 4);
+    CHECK(frame[3 * 8 + 4] == 5);
+    CHECK(frame[3 * 8 + 7] == 8);
+    CHECK(frame[0] == 0);
+    // U plane 4x2 at offset 32: row 1, columns 2..3; V at offset 40.
+    CHECK(frame[32 + 1 * 4 + 2] == 101);
+    CHECK(frame[32 + 1 * 4 + 3] == 102);
+    CHECK(frame[40 + 1 * 4 + 2] == 201);
+    CHECK(frame[40 + 1 * 4 + 3] == 202);
+    CHECK(frame[32] == 0);
+
+    std::vector<unsigned char> copy(i420_size(8, 4), 9);
+    copy_cell_i420(copy.data(), frame.data(), canvas, r);
+    CHECK(copy[2 * 8 + 4] == 1);
+    CHECK(copy[3 * 8 + 7] == 8);
+    CHECK(copy[32 + 1 * 4 + 3] == 102);
+    CHECK(copy[40 + 1 * 4 + 2] == 201);
+    CHECK(copy[0] == 9); // outside the cell: untouched
+    CHECK(copy[32] == 9);
+}
+
+TEST_CASE("mosaic: a late reader starts at the latest keyframe", "[HubMosaic]")
+{
+    GopCache          cache;
+    const std::string p("\x00\x00\x01\x41\xAA", 5);                         // a P-slice
+    const std::string key1("\x00\x00\x00\x01\x67\x42\x00\x00\x01\x65\x01", 11); // SPS + IDR
+    const std::string key2("\x00\x00\x00\x01\x67\x43\x00\x00\x01\x65\x02", 11);
+    cache.feed(p.data(), p.size());
+    CHECK(cache.data().empty());
+    CHECK_FALSE(cache.keyframes_seen());
+    cache.feed(key1.data(), key1.size());
+    CHECK(cache.keyframes_seen());
+    CHECK(cache.data() == key1);
+    cache.feed(p.data(), p.size());
+    CHECK(cache.data() == key1 + p);
+    // The next keyframe, its start code split across two reads: the cache starts over at it.
+    cache.feed(key2.data(), 3);
+    cache.feed(key2.data() + 3, key2.size() - 3);
+    CHECK(cache.data() == key2);
+    // Past the cap without a keyframe it holds nothing rather than an unbounded GOP.
+    GopCache small(16);
+    small.feed(key1.data(), key1.size());
+    small.feed(p.data(), p.size());
+    CHECK(small.data().size() == 16);
+    small.feed(p.data(), p.size());
+    CHECK(small.data().empty());
+    small.feed(key2.data(), key2.size());
+    CHECK(small.data() == key2);
+}
+
+TEST_CASE("mosaic: a failed camera is tried again with backoff", "[HubMosaic]")
+{
+    CHECK(retry_delay_ms(1) == 3000);
+    CHECK(retry_delay_ms(2) == 6000);
+    CHECK(retry_delay_ms(3) == 12000);
+    CHECK(retry_delay_ms(4) == 24000);
+    CHECK(retry_delay_ms(5) == 30000);
+    CHECK(retry_delay_ms(50) == 30000);
 }
 
 TEST_CASE("mosaic: a new page is a different spec, the same page is not", "[HubMosaic]")

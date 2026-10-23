@@ -242,31 +242,110 @@ std::string build_filter(const Spec& spec)
     return g.str();
 }
 
-std::vector<std::string> build_args(const std::string& ffmpeg, const Spec& spec)
+std::vector<std::string> feeder_args(const std::string& ffmpeg, const Cell& cell, const Rect& r, const std::string& font)
+{
+    std::vector<std::string> a = { ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error" };
+    if (cell.kind == CellKind::Rtsp) a.insert(a.end(), { "-rtsp_transport", "tcp", "-timeout", "5000000" });
+    else a.insert(a.end(), { "-f", "mpjpeg", "-rw_timeout", "5000000" });
+    // No input buffering, no frame-threaded decoding (low_delay: frame threads hold back a frame
+    // per thread), and a probe that ends at the first frame with its parameters, capped at 1 s.
+    a.insert(a.end(), { "-fflags", "nobuffer", "-flags", "low_delay", "-probesize", "500000", "-analyzeduration", "1000000",
+                        "-i", cell.url, "-an" });
+    const std::string wh       = std::to_string(r.w) + ":" + std::to_string(r.h);
+    const int         label_px = std::max(14, std::min(32, r.h / 14));
+    a.insert(a.end(), { "-vf",
+                        "scale=" + wh + ":force_original_aspect_ratio=decrease,pad=" + wh +
+                            ":(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p" +
+                            drawtext(font_value(font), cell.label, label_px, false),
+                        "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1" });
+    return a;
+}
+
+std::vector<std::string> card_args(const std::string& ffmpeg, const Spec& spec, const std::string& live_note)
+{
+    Spec cards = spec;
+    for (Cell& c : cards.cells)
+        if (c.kind == CellKind::Rtsp || c.kind == CellKind::Mjpeg) {
+            c.kind = CellKind::Placeholder;
+            c.note = live_note;
+            c.url.clear();
+        }
+    return { ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-filter_complex", build_filter(cards),
+             "-map", "[out]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1" };
+}
+
+std::vector<std::string> encoder_args_raw(const std::string& ffmpeg, const Spec& spec)
 {
     const int fps = clamp_fps(spec.fps);
-    std::vector<std::string> a = { ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error" };
-    const int n = spec.layout.cells();
-    for (int i = 0; i < n && i < (int) spec.cells.size(); ++i) {
-        const Cell& c = spec.cells[i];
-        if (c.kind == CellKind::Rtsp) {
-            // Timestamps from the arrival clock: every input on one time line, whatever its source
-            // stamped (cameras differ, and the MJPEG relays stamp nothing).
-            a.insert(a.end(), { "-rtsp_transport", "tcp", "-timeout", "5000000", "-fflags", "nobuffer",
-                                "-use_wallclock_as_timestamps", "1", "-i", c.url });
-        } else if (c.kind == CellKind::Mjpeg) {
-            a.insert(a.end(), { "-f", "mpjpeg", "-rw_timeout", "5000000", "-fflags", "nobuffer",
-                                "-use_wallclock_as_timestamps", "1", "-i", c.url });
-        }
-    }
-    a.insert(a.end(), { "-filter_complex", build_filter(spec), "-map", "[out]", "-an" });
+    // No -nostdin: stdin is the input (ffmpeg then never reads keys from it anyway).
+    std::vector<std::string> a = { ffmpeg, "-hide_banner", "-nostats", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p",
+                                   "-s", std::to_string(spec.size.w) + "x" + std::to_string(spec.size.h), "-r", std::to_string(fps),
+                                   "-i", "pipe:0", "-an" };
     const std::vector<std::string> enc = encoder_args(spec.encoder, spec.kbps);
     a.insert(a.end(), enc.begin(), enc.end());
-    // A keyframe every 2 s, SPS/PPS in front of each (a viewer joining mid-stream can start at the
-    // next one), no B-frames, raw Annex B on stdout, flushed per packet.
-    a.insert(a.end(), { "-g", std::to_string(fps * 2), "-bf", "0", "-bsf:v", "dump_extra=freq=keyframe", "-flush_packets", "1",
+    // A keyframe every second, SPS/PPS in front of each (a viewer joining mid-stream starts at the
+    // next one, or at once from the hub's GopCache), no B-frames, raw Annex B on stdout, flushed
+    // per packet.
+    a.insert(a.end(), { "-g", std::to_string(fps), "-bf", "0", "-bsf:v", "dump_extra=freq=keyframe", "-flush_packets", "1",
                         "-f", "h264", "pipe:1" });
     return a;
+}
+
+void copy_cell_i420(unsigned char* dst, const unsigned char* src, const Size& canvas, const Rect& r)
+{
+    const size_t W = (size_t) canvas.w, H = (size_t) canvas.h;
+    for (int y = 0; y < r.h; ++y) {
+        const size_t o = (size_t) (r.y + y) * W + r.x;
+        std::copy(src + o, src + o + r.w, dst + o);
+    }
+    const size_t cw = (size_t) r.w / 2, uo = W * H, vo = W * H + W * H / 4;
+    for (int y = 0; y < r.h / 2; ++y) {
+        const size_t o = (size_t) (r.y / 2 + y) * (W / 2) + r.x / 2;
+        std::copy(src + uo + o, src + uo + o + cw, dst + uo + o);
+        std::copy(src + vo + o, src + vo + o + cw, dst + vo + o);
+    }
+}
+
+void blit_i420(unsigned char* dst, const Size& canvas, const Rect& r, const unsigned char* cell)
+{
+    const size_t W = (size_t) canvas.w, H = (size_t) canvas.h, w = (size_t) r.w, h = (size_t) r.h;
+    for (size_t y = 0; y < h; ++y) std::copy(cell + y * w, cell + y * w + w, dst + (r.y + y) * W + r.x);
+    const size_t cw = w / 2, uo = W * H, vo = W * H + W * H / 4, su = w * h, sv = w * h + w * h / 4;
+    for (size_t y = 0; y < h / 2; ++y) {
+        const size_t o = (r.y / 2 + y) * (W / 2) + r.x / 2;
+        std::copy(cell + su + y * cw, cell + su + y * cw + cw, dst + uo + o);
+        std::copy(cell + sv + y * cw, cell + sv + y * cw + cw, dst + vo + o);
+    }
+}
+
+void GopCache::feed(const char* data, size_t n)
+{
+    if (n == 0) return;
+    // Look for the last SPS start code in what came before (its last 4 bytes) plus this chunk.
+    const std::string scan = m_tail + std::string(data, n);
+    long long sps = -1;
+    for (size_t k = 0; k + 3 < scan.size(); ++k)
+        if (scan[k] == 0 && scan[k + 1] == 0 && scan[k + 2] == 1 && ((unsigned char) scan[k + 3] & 0x1f) == 7)
+            sps = (long long) ((k > 0 && scan[k - 1] == 0) ? k - 1 : k);
+    if (sps >= 0) {
+        m_data.assign(scan, (size_t) sps, std::string::npos);
+        m_open = true;
+        m_seen = true;
+    } else if (m_open) {
+        m_data.append(data, n);
+        if (m_data.size() > m_cap) {
+            m_data.clear();
+            m_open = false;
+        }
+    }
+    m_tail = scan.size() > 4 ? scan.substr(scan.size() - 4) : scan;
+}
+
+int retry_delay_ms(int failures)
+{
+    if (failures <= 1) return 3000;
+    if (failures >= 5) return 30000;
+    return std::min(30000, 3000 << (failures - 1));
 }
 
 std::string elegoo_note(const std::string& state)
