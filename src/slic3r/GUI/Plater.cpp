@@ -16117,42 +16117,9 @@ void Plater::priv::reload_from_disk()
                               boost::algorithm::iequals(fs::path(old_volume->source.input_file).filename().string(), fs::path(path).filename().string());
             bool has_name = !old_volume->name.empty() && boost::algorithm::iequals(old_volume->name, fs::path(path).filename().string());
             if (has_source || has_name) {
-                int  new_volume_idx = -1;
-                int  new_object_idx = -1;
-                bool match_found    = false;
-                // take idxs from the matching volume
-                if (has_source && old_volume->source.object_idx < int(new_model.objects.size())) {
-                    const ModelObject *obj = new_model.objects[old_volume->source.object_idx];
-                    if (old_volume->source.volume_idx < int(obj->volumes.size())) {
-                        if (obj->volumes[old_volume->source.volume_idx]->source.input_file == old_volume->source.input_file) {
-                            new_volume_idx = old_volume->source.volume_idx;
-                            new_object_idx = old_volume->source.object_idx;
-                            match_found    = true;
-                        }
-                    }
-                }
-
-                if (!match_found && has_name) {
-                    // take idxs from the 1st matching volume
-                    for (size_t o = 0; o < new_model.objects.size(); ++o) {
-                        ModelObject *obj   = new_model.objects[o];
-                        bool         found = false;
-                        for (size_t v = 0; v < obj->volumes.size(); ++v) {
-                            if (obj->volumes[v]->name == old_volume->name) {
-                                new_volume_idx = (int) v;
-                                new_object_idx = (int) o;
-                                found          = true;
-                                break;
-                            }
-                        }
-                        if (found) break;
-                        // BBS: step model,object loaded as a volume. GUI_ObfectList.cpp load_modifier()
-                        if (obj->name == old_volume->name) {
-                            new_object_idx = (int) o;
-                            break;
-                        }
-                    }
-                }
+                // take idxs from the matching volume (see find_reload_from_disk_match: the indices a 3MF project
+                // remembers go stale when objects are deleted or reordered)
+                const auto [new_object_idx, new_volume_idx] = find_reload_from_disk_match(new_model, *old_volume, has_source, has_name);
 
                 if (new_object_idx < 0 || int(new_model.objects.size()) <= new_object_idx) {
                     fail_list.push_back(from_u8(has_source ? old_volume->source.input_file : old_volume->name));
