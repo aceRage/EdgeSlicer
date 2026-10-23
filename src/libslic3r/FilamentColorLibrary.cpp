@@ -281,6 +281,41 @@ int FilamentColorModeToConfig(FilamentColorMode mode)
     return static_cast<int>(FilamentColorMode::Segment);
 }
 
+bool ImportedFilamentMultiFieldsNeedRebuild(size_t imported_multi_count,
+                                            size_t imported_mode_count,
+                                            size_t desired_count)
+{
+    return imported_multi_count < desired_count || imported_mode_count < desired_count;
+}
+
+bool RebuildFilamentMultiFieldsFromPlainColors(const std::vector<std::string>& filament_colour,
+                                               std::vector<std::string>& multi_colors,
+                                               std::vector<int>& color_modes,
+                                               size_t desired_count,
+                                               size_t imported_multi_count,
+                                               size_t imported_mode_count)
+{
+    const size_t count = std::min(desired_count, filament_colour.size());
+    const int segment_mode = FilamentColorModeToConfig(FilamentColorMode::Segment);
+    bool wrote = false;
+
+    if (imported_multi_count < desired_count) {
+        multi_colors.resize(count);
+        for (size_t i = std::min(imported_multi_count, count); i < count; ++i) {
+            multi_colors[i] = filament_colour[i];
+            wrote = true;
+        }
+    }
+    if (imported_mode_count < desired_count) {
+        color_modes.resize(count);
+        for (size_t i = std::min(imported_mode_count, count); i < count; ++i) {
+            color_modes[i] = segment_mode;
+            wrote = true;
+        }
+    }
+    return wrote;
+}
+
 bool FilamentColor::Empty() const
 {
     return colors.empty();
