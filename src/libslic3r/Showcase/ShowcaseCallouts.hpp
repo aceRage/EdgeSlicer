@@ -10,8 +10,10 @@
 //   - where an anchor goes in a region seen on screen (find_anchor_pixels: the pixel deepest inside),
 //   - colour names (D8: the Snapmaker colour library, then the user's text, then "≈ nearest name"),
 //   - the label text (build_callout_label),
-//   - the layout: left and right columns whose leaders never cross, a numbered legend when crowded
-//     (layout_callouts).
+//   - the layout: left and right columns (S4: or bands above and below a wide, flat model) whose
+//     leaders never cross - S4 extends that to pinned labels and every leg of a multileader - and a
+//     numbered legend when crowded (layout_callouts),
+//   - S4: the user's own saved styles (CalloutStyleLibrary).
 // The GUI rasterises the result with wxGraphicsContext (D6) for the screen and every export alike.
 
 #include <array>
@@ -33,7 +35,8 @@ namespace Showcase {
 enum class CalloutSource : int { Object = 0, Part, Paint, HeightRange, ToolChange, ColorChange };
 enum class CalloutShape  : int { Minimal = 0, Card, Pill, Technical };
 enum class LeaderStyle   : int { Straight = 0, Elbow };
-enum class CalloutLayout : int { Auto = 0, Columns, Legend };
+// Bands (S4): rows above and below the model, for wide, flat models.
+enum class CalloutLayout : int { Auto = 0, Columns, Legend, Bands };
 // Built-in looks (design 3.4). Applying one sets the shape, colours, leader and size.
 enum class CalloutStylePreset : int { Minimal = 0, CardLight, CardDark, Pill, Technical };
 
@@ -122,6 +125,33 @@ struct CalloutStyle
 
 std::vector<CalloutStylePreset> callout_style_presets();
 void                            apply_callout_style_preset(CalloutStyle &style, CalloutStylePreset preset);
+
+// S4: styles the user saved under a name, kept across projects (the GUI stores the list in its data
+// folder). JSON in ShowcaseScene.cpp, next to the scene's own style.
+struct UserCalloutStyle
+{
+    std::string  name;
+    CalloutStyle style;
+    bool operator==(const UserCalloutStyle &o) const { return name == o.name && style == o.style; }
+};
+class CalloutStyleLibrary
+{
+public:
+    const std::vector<UserCalloutStyle> &styles() const { return m_styles; }
+    const UserCalloutStyle              *find(const std::string &name) const;
+    // Adds or replaces the style of that name (an empty name is refused); returns its index or -1.
+    int                                  put(const std::string &name, const CalloutStyle &style);
+    bool                                 remove(const std::string &name);
+    // The first saved style the given one equals, or null.
+    const UserCalloutStyle              *match(const CalloutStyle &style) const;
+
+    std::string to_json() const;
+    // Invalid text gives false and an empty library.
+    bool        from_json(const std::string &text);
+
+private:
+    std::vector<UserCalloutStyle> m_styles;
+};
 
 struct Callouts
 {
@@ -320,6 +350,8 @@ struct LayoutLabel
     double w = 0., h = 0.;   // the label's size
     bool   pinned = false;
     PointD pinned_pos;       // pinned: the top-left, frame pixels
+    // S4: the other regions of a multileader. Each gets a leg to the label (PlacedLabel::legs).
+    std::vector<PointD> extra_anchors;
 };
 
 struct LayoutParams
@@ -334,25 +366,48 @@ struct LayoutParams
     int                 max_per_column = 8;
     double              legend_badge = 0.;   // the legend: the number's width in front of each row
     std::vector<RectD>  reserved;            // kept free of labels (the watermark)
+    // S4: where the model is on the frame (empty = unknown). Automatic puts the labels in bands above
+    // and below a wide, flat model that leaves no room beside it.
+    RectD               model_box;
+    // S4, video: each label's side (or band) in the previous frame, -1 / 1, 0 = none. A label keeps its
+    // side until its anchor is more than side_hysteresis pixels past the model's middle, so labels do
+    // not jump across while the camera moves.
+    std::vector<int>    previous_side;
+    double              side_hysteresis = 0.;
 };
 
 struct PlacedLabel
 {
     RectD               box;
-    int                 side = 0;     // -1 left column, 1 right column, 0 pinned or in the legend
+    int                 side = 0;     // -1 left column, 1 right column, 0 pinned, in a band or in the legend
+    int                 band = 0;     // S4: -1 the band above the model, 1 below, 0 none
     std::vector<PointD> leader;       // from the anchor to the label; empty in the legend
     int                 number = 0;   // the legend's number, 1-based
+    // S4: one leg per extra anchor, from it to the label (empty: that leg would have crossed another
+    // leader and is not drawn).
+    std::vector<std::vector<PointD>> legs;
+    // S4: the main leader would have crossed another one and is not drawn (leader is empty).
+    bool                leader_dropped = false;
+    // S4: a label with a leader or leg left out gets a number, shown on it and on those anchors'
+    // dots, so they still pair up. 0 = none.
+    int                 badge = 0;
 };
 
 struct CalloutLayoutResult
 {
     bool                     legend = false;
+    bool                     bands  = false;  // S4: in bands above and below the model
     std::vector<PlacedLabel> labels;          // one per LayoutLabel, in order
     RectD                    legend_box;      // legend: the key's box
     bool                     bent = false;    // a column's leaders were bent to keep them apart
+    int                      dropped = 0;     // S4: leaders and legs left out to keep the rest apart
 };
 
+// Never crossing (S4): no two drawn leaders or legs meet, the legs of one label only at the point
+// where they join.
 CalloutLayoutResult layout_callouts(const std::vector<LayoutLabel> &labels, const LayoutParams &params);
+// Checks that promise: true when two drawn leaders or legs meet anywhere they should not.
+bool layout_has_crossings(const CalloutLayoutResult &layout);
 
 // True when the segments [a, b] and [c, d] meet (touching included).
 bool segments_cross(const PointD &a, const PointD &b, const PointD &c, const PointD &d);

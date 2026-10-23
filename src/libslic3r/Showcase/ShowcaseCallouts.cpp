@@ -43,7 +43,7 @@ template<class E, size_t N> bool callout_enum_parse(const std::string &s, E &v, 
 const char *const SOURCE_NAMES[] = { "object", "part", "paint", "height_range", "tool_change", "color_change" };
 const char *const SHAPE_NAMES[]  = { "minimal", "card", "pill", "technical" };
 const char *const LEADER_NAMES[] = { "straight", "elbow" };
-const char *const LAYOUT_NAMES[] = { "auto", "columns", "legend" };
+const char *const LAYOUT_NAMES[] = { "auto", "columns", "legend", "bands" };
 
 std::string co_lower(std::string s)
 {
@@ -1018,6 +1018,375 @@ bool polylines_cross(const std::vector<PointD> &a, const std::vector<PointD> &b)
     return false;
 }
 
+namespace {
+
+// The middle the columns split at: the model's, else the middle of the anchors, else the frame's.
+double co_center(const std::vector<LayoutLabel> &labels, const std::vector<int> &anchored, const LayoutParams &p)
+{
+    if (p.model_center_x >= 0.)
+        return p.model_center_x;
+    if (anchored.empty())
+        return 0.5 * p.frame_w;
+    double mn = std::numeric_limits<double>::max(), mx = -mn;
+    for (int i : anchored) {
+        mn = std::min(mn, labels[size_t(i)].anchor.x);
+        mx = std::max(mx, labels[size_t(i)].anchor.x);
+    }
+    return 0.5 * (mn + mx);
+}
+
+// S3's columns for the labels in `free_items`: left and right of the model, in anchor order, swapped
+// or bent where two leaders would cross. False when they do not fit and Automatic should use the
+// legend instead (with Columns asked for, they are squeezed in anyway).
+bool co_layout_columns(const std::vector<LayoutLabel> &labels, const LayoutParams &p, const std::vector<int> &free_items, CalloutLayoutResult &res)
+{
+    const size_t     n = labels.size();
+    std::vector<int> anchored;
+    for (int i : free_items)
+        if (labels[size_t(i)].has_anchor)
+            anchored.push_back(i);
+    const double center = co_center(labels, anchored, p);
+
+    std::vector<int> left, right;
+    // Anchors left of the model's middle go left, the rest right: the left column is a prefix of the
+    // anchors sorted by x, so no leader of one column can reach the other's.
+    std::vector<int> by_x = anchored;
+    std::stable_sort(by_x.begin(), by_x.end(), [&labels](int a, int b) { return labels[size_t(a)].anchor.x < labels[size_t(b)].anchor.x; });
+    auto count_left = [&](double x) {
+        return int(std::count_if(by_x.begin(), by_x.end(), [&labels, x](int i) { return labels[size_t(i)].anchor.x < x; }));
+    };
+    int k = count_left(center);
+    // S4, video: a label stays on its side while its anchor is within the hysteresis of the middle.
+    // Any split point between the two counts keeps the prefix rule, so it stays crossing-free.
+    if (p.side_hysteresis > 0. && p.previous_side.size() == n) {
+        const int k_lo = count_left(center - p.side_hysteresis), k_hi = count_left(center + p.side_hysteresis);
+        int best = k, best_score = -1, best_dist = 0;
+        for (int kk = k_lo; kk <= k_hi; ++kk) {
+            int score = 0;
+            for (int j = 0; j < int(by_x.size()); ++j) {
+                const int prev = p.previous_side[size_t(by_x[size_t(j)])];
+                if ((prev < 0 && j < kk) || (prev > 0 && j >= kk))
+                    ++score;
+            }
+            const int dist = std::abs(kk - k);
+            if (score > best_score || (score == best_score && dist < best_dist)) {
+                best       = kk;
+                best_score = score;
+                best_dist  = dist;
+            }
+        }
+        k = best;
+    }
+    std::vector<int> unanchored;
+    for (int i : free_items)
+        if (!labels[size_t(i)].has_anchor)
+            unanchored.push_back(i);
+    const bool limit = p.mode == CalloutLayout::Auto;
+    auto split = [&](int kk) {
+        left.assign(by_x.begin(), by_x.begin() + kk);
+        right.assign(by_x.begin() + kk, by_x.end());
+        right.insert(right.end(), unanchored.begin(), unanchored.end());
+    };
+    // Balance: move the label whose anchor is nearest the middle across while a column overflows.
+    const int k_start   = k;
+    bool      fits      = false;
+    int       direction = 0;
+    for (int iter = 0; iter <= int(n) + 1; ++iter) {
+        split(k);
+        const bool fl = co_column_fits(labels, left, p, -1, limit);
+        const bool fr = co_column_fits(labels, right, p, 1, limit);
+        if (fl && fr) {
+            fits = true;
+            break;
+        }
+        if (!fl && !fr)
+            break;
+        const int step = fl ? 1 : -1;
+        if (direction != 0 && step != direction)
+            break;   // both ways overflow in turn: nothing balances it
+        direction = step;
+        k += step;
+        if (k < 0 || k > int(by_x.size()))
+            break;
+    }
+    if (!fits) {
+        if (limit)
+            return false;
+        // Columns asked for: keep them, squeezed (labels may overlap at the ends).
+        k = std::clamp(k_start, 0, int(by_x.size()));
+        split(k);
+    }
+
+    for (int side : { -1, 1 }) {
+        std::vector<int> &members = side < 0 ? left : right;
+        if (members.empty())
+            continue;
+        const double w      = co_column_width(labels, members);
+        const double x0     = side < 0 ? p.margin : p.frame_w - p.margin - w;
+        const double x_edge = side < 0 ? x0 + w : x0;   // where every leader meets its label
+        const double x_land = x_edge - side * (p.leader == LeaderStyle::Elbow ? p.landing : 0.);
+        double lo, hi;
+        co_column_bounds(p, x0, x0 + w, lo, hi);
+
+        auto ideal_y = [&labels](int i) { return labels[size_t(i)].has_anchor ? labels[size_t(i)].anchor.y : 1e9; };
+        std::vector<int> order = members;
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return ideal_y(a) < ideal_y(b); });
+
+        auto place = [&](const std::vector<int> &ord, bool bent) {
+            std::vector<double> ideal, hs, tops;
+            for (int i : ord) {
+                const LayoutLabel &l = labels[size_t(i)];
+                ideal.push_back(l.has_anchor ? l.anchor.y - 0.5 * l.h : hi);
+                hs.push_back(l.h);
+            }
+            co_pack_column(ideal, hs, p.gap, lo, hi, tops);
+            // Bent leaders turn just past the column's outermost anchor.
+            double turn = 0.;
+            if (bent) {
+                double extreme = side < 0 ? std::numeric_limits<double>::max() : -std::numeric_limits<double>::max();
+                for (int i : ord)
+                    if (labels[size_t(i)].has_anchor)
+                        extreme = side < 0 ? std::min(extreme, labels[size_t(i)].anchor.x) : std::max(extreme, labels[size_t(i)].anchor.x);
+                const double room = side < 0 ? extreme - x_land : x_land - extreme;
+                turn = extreme + side * std::max(0., std::min(p.gap, 0.5 * room));
+            }
+            for (size_t kk = 0; kk < ord.size(); ++kk) {
+                const int          i = ord[kk];
+                const LayoutLabel &l = labels[size_t(i)];
+                PlacedLabel       &pl = res.labels[size_t(i)];
+                pl.side = side;
+                pl.box  = { side < 0 ? x_edge - l.w : x_edge, tops[kk], l.w, l.h };
+                pl.leader.clear();
+                if (!l.has_anchor)
+                    continue;
+                const double cy = tops[kk] + 0.5 * l.h;
+                pl.leader.push_back(l.anchor);
+                if (bent)
+                    pl.leader.push_back({ turn, l.anchor.y });
+                pl.leader.push_back({ x_land, cy });
+                if (x_land != x_edge)
+                    pl.leader.push_back({ x_edge, cy });
+            }
+        };
+        auto first_crossing = [&](const std::vector<int> &ord, size_t &a, size_t &b) {
+            for (size_t i = 0; i < ord.size(); ++i)
+                for (size_t j = i + 1; j < ord.size(); ++j)
+                    if (polylines_cross(res.labels[size_t(ord[i])].leader, res.labels[size_t(ord[j])].leader)) {
+                        a = i;
+                        b = j;
+                        return true;
+                    }
+            return false;
+        };
+
+        // Straight leaders in anchor order; where two cross, the two labels swap places (each swap
+        // shortens the leaders, so this settles). If it does not, the leaders bend: out to the side
+        // level with their anchor first, which can never cross.
+        place(order, false);
+        size_t a = 0, b = 0;
+        bool   crossing = first_crossing(order, a, b);
+        for (int iter = 0; crossing && iter < 4 * int(order.size() * order.size()) + 4; ++iter) {
+            std::swap(order[size_t(a)], order[size_t(b)]);
+            place(order, false);
+            crossing = first_crossing(order, a, b);
+        }
+        if (crossing) {
+            std::stable_sort(order.begin(), order.end(), [&](int x, int y) { return ideal_y(x) < ideal_y(y); });
+            place(order, true);
+            res.bent = true;
+        }
+    }
+    return true;
+}
+
+PointD co_swap(const PointD &p) { return { p.y, p.x }; }
+RectD  co_swap(const RectD &r) { return { r.y, r.x, r.h, r.w }; }
+
+// S4: is the model wide and flat with no room beside it for columns, but room above and below?
+bool co_prefer_bands(const std::vector<LayoutLabel> &labels, const LayoutParams &p, const std::vector<int> &free_items)
+{
+    const RectD &m = p.model_box;
+    if (m.empty() || m.w < 1.8 * m.h || free_items.empty())
+        return false;
+    double widest = 0., tallest = 0.;
+    for (int i : free_items) {
+        widest  = std::max(widest, labels[size_t(i)].w);
+        tallest = std::max(tallest, labels[size_t(i)].h);
+    }
+    const double beside = std::min(m.x, p.frame_w - m.right()) - p.margin - p.gap - p.landing;
+    if (beside >= widest)
+        return false;   // the columns fit beside it
+    const double above = m.y - p.margin - p.gap, below = p.frame_h - m.bottom() - p.margin - p.gap;
+    return tallest <= above && tallest <= below;
+}
+
+// S4: bands above and below the model are the columns turned on their side: the same layout run on
+// the frame with x and y swapped, so they keep its promises (anchor order, no crossings).
+bool co_layout_bands(const std::vector<LayoutLabel> &labels, const LayoutParams &p, const std::vector<int> &free_items, CalloutLayoutResult &res)
+{
+    std::vector<LayoutLabel> t(labels.size());
+    for (int i : free_items) {
+        const LayoutLabel &l = labels[size_t(i)];
+        LayoutLabel       &s = t[size_t(i)];
+        s.has_anchor = l.has_anchor;
+        s.anchor     = co_swap(l.anchor);
+        s.w          = l.h;
+        s.h          = l.w;
+    }
+    LayoutParams q   = p;
+    q.frame_w        = p.frame_h;
+    q.frame_h        = p.frame_w;
+    q.model_center_x = !p.model_box.empty() ? p.model_box.y + 0.5 * p.model_box.h : -1.;
+    q.model_box      = co_swap(p.model_box);
+    q.reserved.clear();
+    for (const RectD &r : p.reserved)
+        q.reserved.push_back(co_swap(r));
+    if (q.mode == CalloutLayout::Bands)
+        q.mode = CalloutLayout::Columns;
+    CalloutLayoutResult r;
+    r.labels.resize(labels.size());
+    if (!co_layout_columns(t, q, free_items, r))
+        return false;
+    for (int i : free_items) {
+        const PlacedLabel &tp = r.labels[size_t(i)];
+        PlacedLabel       &pl = res.labels[size_t(i)];
+        pl.box  = co_swap(tp.box);
+        pl.band = tp.side;
+        pl.side = 0;
+        pl.leader.clear();
+        for (const PointD &pt : tp.leader)
+            pl.leader.push_back(co_swap(pt));
+    }
+    res.bent = res.bent || r.bent;
+    return true;
+}
+
+// The polyline stopped just short of its last point: legs of one label meet where they join, which
+// is not a crossing.
+std::vector<PointD> co_trim_end(std::vector<PointD> pts)
+{
+    if (pts.size() >= 2) {
+        PointD       &e = pts.back();
+        const PointD &q = pts[pts.size() - 2];
+        const double  l = std::hypot(e.x - q.x, e.y - q.y);
+        if (l > 1e-9) {
+            const double cut = std::min(0.5 * l, 0.5) / l;
+            e = { e.x - (e.x - q.x) * cut, e.y - (e.y - q.y) * cut };
+        }
+    }
+    return pts;
+}
+
+struct CoDrawn
+{
+    int                 label;
+    std::vector<PointD> pts;
+};
+
+bool co_conflicts(const std::vector<CoDrawn> &drawn, int label, const std::vector<PointD> &pts)
+{
+    if (pts.size() < 2)
+        return false;
+    const std::vector<PointD> trimmed = co_trim_end(pts);
+    for (const CoDrawn &d : drawn)
+        if (d.label == label ? polylines_cross(trimmed, co_trim_end(d.pts)) : polylines_cross(pts, d.pts))
+            return true;
+    return false;
+}
+
+// Where a leader can meet a pinned label (or a leg any label): the middles of its four sides, nearest
+// to `from` first.
+std::vector<PointD> co_box_ports(const RectD &b, const PointD &from)
+{
+    std::vector<PointD> ports = { { b.x, b.y + 0.5 * b.h }, { b.right(), b.y + 0.5 * b.h }, { b.x + 0.5 * b.w, b.y }, { b.x + 0.5 * b.w, b.bottom() } };
+    std::stable_sort(ports.begin(), ports.end(), [&from](const PointD &a, const PointD &c) {
+        return std::hypot(a.x - from.x, a.y - from.y) < std::hypot(c.x - from.x, c.y - from.y);
+    });
+    return ports;
+}
+
+// S4: no crossings at all. The column (or band) leaders go in first - they are already apart - then
+// each pinned label takes the first of its sides whose leader crosses nothing drawn, then every extra
+// leg its first free join (the leader's bend, the label's landing, a side of the label). Whatever
+// still crosses is left out and the label numbered instead, so the promise holds by construction.
+void co_untangle(const std::vector<LayoutLabel> &labels, CalloutLayoutResult &res)
+{
+    const size_t         n = labels.size();
+    std::vector<CoDrawn> drawn;
+    std::vector<bool>    missing(n, false);
+    auto accept_or_drop = [&](size_t i) {
+        PlacedLabel &pl = res.labels[i];
+        if (pl.leader.size() < 2)
+            return;
+        if (co_conflicts(drawn, int(i), pl.leader)) {
+            pl.leader.clear();
+            pl.leader_dropped = true;
+            missing[i]        = true;
+            ++res.dropped;
+        } else
+            drawn.push_back({ int(i), pl.leader });
+    };
+    for (size_t i = 0; i < n; ++i)
+        if (!labels[i].pinned && labels[i].has_anchor)
+            accept_or_drop(i);
+    for (size_t i = 0; i < n; ++i) {
+        if (!labels[i].pinned || !labels[i].has_anchor)
+            continue;
+        PlacedLabel &pl = res.labels[i];
+        bool         placed = false;
+        for (const PointD &port : co_box_ports(pl.box, labels[i].anchor)) {
+            const std::vector<PointD> leader = { labels[i].anchor, port };
+            if (!co_conflicts(drawn, int(i), leader)) {
+                pl.leader = leader;
+                drawn.push_back({ int(i), leader });
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            pl.leader.clear();
+            pl.leader_dropped = true;
+            missing[i]        = true;
+            ++res.dropped;
+        }
+    }
+    for (size_t i = 0; i < n; ++i) {
+        const LayoutLabel &l  = labels[i];
+        PlacedLabel       &pl = res.labels[i];
+        pl.legs.assign(l.extra_anchors.size(), {});
+        for (size_t a = 0; a < l.extra_anchors.size(); ++a) {
+            const PointD       &from = l.extra_anchors[a];
+            std::vector<PointD> joins;
+            if (pl.leader.size() >= 3)
+                joins.push_back(pl.leader[1]);
+            if (pl.leader.size() >= 2)
+                joins.push_back(pl.leader.back());
+            for (const PointD &port : co_box_ports(pl.box, from))
+                joins.push_back(port);
+            bool placed = false;
+            for (const PointD &j : joins) {
+                const std::vector<PointD> leg = { from, j };
+                if (!co_conflicts(drawn, int(i), leg)) {
+                    pl.legs[a] = leg;
+                    drawn.push_back({ int(i), leg });
+                    placed = true;
+                    break;
+                }
+            }
+            if (!placed) {
+                missing[i] = true;
+                ++res.dropped;
+            }
+        }
+    }
+    int badge = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (missing[i])
+            res.labels[i].badge = ++badge;
+}
+
+} // namespace
+
 CalloutLayoutResult layout_callouts(const std::vector<LayoutLabel> &labels, const LayoutParams &p)
 {
     CalloutLayoutResult res;
@@ -1027,7 +1396,7 @@ CalloutLayoutResult layout_callouts(const std::vector<LayoutLabel> &labels, cons
         return res;
 
     // Pinned labels stay where the user put them (inside the frame), with a straight leader to
-    // their nearer side.
+    // their nearer side (co_untangle may choose another side).
     std::vector<int> free_items, anchored;
     for (size_t i = 0; i < n; ++i) {
         const LayoutLabel &l = labels[i];
@@ -1046,156 +1415,29 @@ CalloutLayoutResult layout_callouts(const std::vector<LayoutLabel> &labels, cons
         if (l.has_anchor)
             anchored.push_back(int(i));
     }
-
-    double center = p.model_center_x;
-    if (center < 0.) {
-        if (anchored.empty())
-            center = 0.5 * p.frame_w;
-        else {
-            double mn = std::numeric_limits<double>::max(), mx = -mn;
-            for (int i : anchored) {
-                mn = std::min(mn, labels[size_t(i)].anchor.x);
-                mx = std::max(mx, labels[size_t(i)].anchor.x);
-            }
-            center = 0.5 * (mn + mx);
-        }
-    }
+    const double center = co_center(labels, anchored, p);
 
     bool legend = p.mode == CalloutLayout::Legend;
-    // --- columns -------------------------------------------------------------------------------
-    std::vector<int> left, right;
     if (!legend && !free_items.empty()) {
-        // Anchors left of the model's middle go left, the rest right: the left column is a prefix
-        // of the anchors sorted by x, so no leader of one column can reach the other's.
-        std::vector<int> by_x = anchored;
-        std::stable_sort(by_x.begin(), by_x.end(), [&labels](int a, int b) { return labels[size_t(a)].anchor.x < labels[size_t(b)].anchor.x; });
-        int k = int(std::count_if(by_x.begin(), by_x.end(), [&labels, center](int i) { return labels[size_t(i)].anchor.x < center; }));
-        std::vector<int> unanchored;
-        for (int i : free_items)
-            if (!labels[size_t(i)].has_anchor)
-                unanchored.push_back(i);
-        const bool limit = p.mode == CalloutLayout::Auto;
-        auto split = [&](int kk) {
-            left.assign(by_x.begin(), by_x.begin() + kk);
-            right.assign(by_x.begin() + kk, by_x.end());
-            right.insert(right.end(), unanchored.begin(), unanchored.end());
-        };
-        // Balance: move the label whose anchor is nearest the middle across while a column overflows.
-        bool fits = false;
-        int  direction = 0;
-        for (int iter = 0; iter <= int(n) + 1; ++iter) {
-            split(k);
-            const bool fl = co_column_fits(labels, left, p, -1, limit);
-            const bool fr = co_column_fits(labels, right, p, 1, limit);
-            if (fl && fr) {
-                fits = true;
-                break;
-            }
-            if (!fl && !fr)
-                break;
-            const int step = fl ? 1 : -1;
-            if (direction != 0 && step != direction)
-                break;   // both ways overflow in turn: nothing balances it
-            direction = step;
-            k += step;
-            if (k < 0 || k > int(by_x.size()))
-                break;
+        bool placed = false;
+        if (p.mode == CalloutLayout::Bands || (p.mode == CalloutLayout::Auto && co_prefer_bands(labels, p, free_items))) {
+            placed    = co_layout_bands(labels, p, free_items, res);
+            res.bands = placed;
         }
-        if (!fits) {
-            if (p.mode == CalloutLayout::Auto)
-                legend = true;
-            else {
-                // Columns asked for: keep them, squeezed (labels may overlap at the ends).
-                k = int(std::count_if(by_x.begin(), by_x.end(), [&labels, center](int i) { return labels[size_t(i)].anchor.x < center; }));
-                split(k);
-            }
-        }
+        if (!placed)
+            placed = co_layout_columns(labels, p, free_items, res);
+        if (!placed)
+            legend = true;   // Automatic, too many for the columns
     }
 
     if (!legend) {
-        for (int side : { -1, 1 }) {
-            std::vector<int> &members = side < 0 ? left : right;
-            if (members.empty())
-                continue;
-            const double w      = co_column_width(labels, members);
-            const double x0     = side < 0 ? p.margin : p.frame_w - p.margin - w;
-            const double x_edge = side < 0 ? x0 + w : x0;   // where every leader meets its label
-            const double x_land = x_edge - side * (p.leader == LeaderStyle::Elbow ? p.landing : 0.);
-            double lo, hi;
-            co_column_bounds(p, x0, x0 + w, lo, hi);
-
-            auto ideal_y = [&labels](int i) { return labels[size_t(i)].has_anchor ? labels[size_t(i)].anchor.y : 1e9; };
-            std::vector<int> order = members;
-            std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return ideal_y(a) < ideal_y(b); });
-
-            auto place = [&](const std::vector<int> &ord, bool bent) {
-                std::vector<double> ideal, hs, tops;
-                for (int i : ord) {
-                    const LayoutLabel &l = labels[size_t(i)];
-                    ideal.push_back(l.has_anchor ? l.anchor.y - 0.5 * l.h : hi);
-                    hs.push_back(l.h);
-                }
-                co_pack_column(ideal, hs, p.gap, lo, hi, tops);
-                // Bent leaders turn just past the column's outermost anchor.
-                double turn = 0.;
-                if (bent) {
-                    double extreme = side < 0 ? std::numeric_limits<double>::max() : -std::numeric_limits<double>::max();
-                    for (int i : ord)
-                        if (labels[size_t(i)].has_anchor)
-                            extreme = side < 0 ? std::min(extreme, labels[size_t(i)].anchor.x) : std::max(extreme, labels[size_t(i)].anchor.x);
-                    const double room = side < 0 ? extreme - x_land : x_land - extreme;
-                    turn = extreme + side * std::max(0., std::min(p.gap, 0.5 * room));
-                }
-                for (size_t k = 0; k < ord.size(); ++k) {
-                    const int          i = ord[k];
-                    const LayoutLabel &l = labels[size_t(i)];
-                    PlacedLabel       &pl = res.labels[size_t(i)];
-                    pl.side = side;
-                    pl.box  = { side < 0 ? x_edge - l.w : x_edge, tops[k], l.w, l.h };
-                    pl.leader.clear();
-                    if (!l.has_anchor)
-                        continue;
-                    const double cy = tops[k] + 0.5 * l.h;
-                    pl.leader.push_back(l.anchor);
-                    if (bent)
-                        pl.leader.push_back({ turn, l.anchor.y });
-                    pl.leader.push_back({ x_land, cy });
-                    if (x_land != x_edge)
-                        pl.leader.push_back({ x_edge, cy });
-                }
-            };
-            auto first_crossing = [&](const std::vector<int> &ord, size_t &a, size_t &b) {
-                for (size_t i = 0; i < ord.size(); ++i)
-                    for (size_t j = i + 1; j < ord.size(); ++j)
-                        if (polylines_cross(res.labels[size_t(ord[i])].leader, res.labels[size_t(ord[j])].leader)) {
-                            a = i;
-                            b = j;
-                            return true;
-                        }
-                return false;
-            };
-
-            // Straight leaders in anchor order; where two cross, the two labels swap places (each
-            // swap shortens the leaders, so this settles). If it does not, the leaders bend: out to
-            // the side level with their anchor first, which can never cross.
-            place(order, false);
-            size_t a = 0, b = 0;
-            bool   crossing = first_crossing(order, a, b);
-            for (int iter = 0; crossing && iter < 4 * int(order.size() * order.size()) + 4; ++iter) {
-                std::swap(order[a], order[b]);
-                place(order, false);
-                crossing = first_crossing(order, a, b);
-            }
-            if (crossing) {
-                std::stable_sort(order.begin(), order.end(), [&](int x, int y) { return ideal_y(x) < ideal_y(y); });
-                place(order, true);
-                res.bent = true;
-            }
-        }
+        co_untangle(labels, res);
         return res;
     }
 
     // --- the numbered legend -------------------------------------------------------------------
+    res = CalloutLayoutResult();
+    res.labels.resize(n);
     res.legend = true;
     std::vector<int> entries;
     for (size_t i = 0; i < n; ++i)
@@ -1250,6 +1492,68 @@ CalloutLayoutResult layout_callouts(const std::vector<LayoutLabel> &labels, cons
         x += col_w[c] + 2. * pad;
     }
     return res;
+}
+
+bool layout_has_crossings(const CalloutLayoutResult &layout)
+{
+    if (layout.legend)
+        return false;
+    std::vector<CoDrawn> drawn;
+    for (size_t i = 0; i < layout.labels.size(); ++i) {
+        const PlacedLabel &pl = layout.labels[i];
+        if (pl.leader.size() >= 2)
+            drawn.push_back({ int(i), pl.leader });
+        for (const std::vector<PointD> &leg : pl.legs)
+            if (leg.size() >= 2)
+                drawn.push_back({ int(i), leg });
+    }
+    for (size_t a = 0; a < drawn.size(); ++a)
+        for (size_t b = a + 1; b < drawn.size(); ++b) {
+            const bool same = drawn[a].label == drawn[b].label;
+            if (same ? polylines_cross(co_trim_end(drawn[a].pts), co_trim_end(drawn[b].pts)) : polylines_cross(drawn[a].pts, drawn[b].pts))
+                return true;
+        }
+    return false;
+}
+
+// ------------------------------------------------------------------------------------------------
+// S4: the user's saved styles
+// ------------------------------------------------------------------------------------------------
+
+const UserCalloutStyle *CalloutStyleLibrary::find(const std::string &name) const
+{
+    for (const UserCalloutStyle &s : m_styles)
+        if (s.name == name)
+            return &s;
+    return nullptr;
+}
+
+int CalloutStyleLibrary::put(const std::string &name, const CalloutStyle &style)
+{
+    if (name.empty())
+        return -1;
+    for (size_t i = 0; i < m_styles.size(); ++i)
+        if (m_styles[i].name == name) {
+            m_styles[i].style = style;
+            return int(i);
+        }
+    m_styles.push_back({ name, style });
+    return int(m_styles.size()) - 1;
+}
+
+bool CalloutStyleLibrary::remove(const std::string &name)
+{
+    const size_t before = m_styles.size();
+    m_styles.erase(std::remove_if(m_styles.begin(), m_styles.end(), [&name](const UserCalloutStyle &s) { return s.name == name; }), m_styles.end());
+    return m_styles.size() != before;
+}
+
+const UserCalloutStyle *CalloutStyleLibrary::match(const CalloutStyle &style) const
+{
+    for (const UserCalloutStyle &s : m_styles)
+        if (s.style == style)
+            return &s;
+    return nullptr;
 }
 
 } // namespace Showcase

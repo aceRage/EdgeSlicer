@@ -6,6 +6,7 @@
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Showcase/ShowcaseEncoder.hpp"
 #include "libslic3r/Showcase/ShowcaseWebP.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -147,7 +148,14 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
     m_renderer->set_callout_provider([this](int w, int h, ShowcaseImage &image) { return callouts_rasterize(w, h, image); },
                                      [this]() { return m_callouts.version; });
     m_renderer->set_before_frame([this]() { callouts_before_frame(); });
-    m_renderer->set_mouse_handler([this](wxMouseEvent &evt) { return callouts_on_mouse(evt); });
+    m_renderer->set_mouse_handler([this](wxMouseEvent &evt) {
+        // S4: a video being written owns the view; a preview or a peek ends at the first click or wheel.
+        if (video_busy())
+            return true;
+        if (m_video.borrowed && (evt.ButtonDown() || evt.GetWheelRotation() != 0))
+            video_restore_view();
+        return callouts_on_mouse(evt);
+    });
     // A callout drag holds the mouse; losing it ends the drag where it is.
     m_canvas_widget->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent &evt) {
         m_callouts.drag = CalloutUi::Drag::None;
@@ -155,6 +163,9 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
     });
 
     m_watermark_presets.load();
+    load_callout_styles();
+    m_video_timer.SetOwner(this);
+    Bind(wxEVT_TIMER, &ShowcaseView::on_video_timer, this, m_video_timer.GetId());
 
     build_panel();
 
@@ -227,6 +238,10 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
 
 ShowcaseView::~ShowcaseView()
 {
+    // S4: a video still being written stops (its partial file goes).
+    m_video_timer.Stop();
+    if (m_video.worker)
+        m_video.worker->cancel();
     m_renderer.reset();
     delete m_canvas;
     delete m_canvas_widget;
@@ -329,7 +344,8 @@ void ShowcaseView::apply_scene_camera()
 
 void ShowcaseView::store_scene_camera(bool mark_dirty)
 {
-    if (read_only())
+    // S4: a preview's camera is borrowed, never the scene's.
+    if (read_only() || m_video.borrowed)
         return;
     Camera              &camera = wxGetApp().plater()->get_camera();
     Showcase::CameraView v;
@@ -374,6 +390,8 @@ void ShowcaseView::on_deactivate()
 {
     if (!m_active)
         return;
+    video_cancel();
+    video_restore_view();
     store_scene_camera(true);
     m_active = false;
     m_callouts.drag = CalloutUi::Drag::None;
@@ -388,6 +406,9 @@ void ShowcaseView::on_deactivate()
 
 void ShowcaseView::on_project_changed()
 {
+    video_cancel();
+    m_video.borrowed = false;   // the scene it belonged to is gone
+    m_video.previewing = false;
     m_draft_plate = -1;
     if (m_renderer == nullptr)
         return;
@@ -418,6 +439,13 @@ void ShowcaseView::on_idle_check()
 // Another plate became current: its own scene, with its own camera.
 void ShowcaseView::on_plate_switched()
 {
+    video_cancel();
+    if (m_video.borrowed) {
+        // The plate being left gets its own camera back, not the preview's.
+        wxGetApp().plater()->get_camera() = m_video.saved_camera;
+        m_video.borrowed   = false;
+        m_video.previewing = false;
+    }
     // Keep the camera of the plate being left (current_plate() already names the new one).
     const int new_plate = current_plate();
     if (!read_only()) {
@@ -723,8 +751,10 @@ void ShowcaseView::build_panel()
     co_layouts.Add(_L("Automatic"));
     co_layouts.Add(_L("Columns"));
     co_layouts.Add(_L("Numbered legend"));
+    co_layouts.Add(_L("Rows above and below"));
     m_co_layout = choice(co_layouts);
-    m_co_layout->SetToolTip(_L("Automatic: labels in columns left and right of the model, a numbered legend when there are too many."));
+    m_co_layout->SetToolTip(_L("Automatic: labels in columns left and right of the model, in rows above and below a wide, flat "
+                               "model, a numbered legend when there are too many."));
     row(_L("Layout"), m_co_layout);
     wxArrayString co_styles;
     for (Showcase::CalloutStylePreset preset : Showcase::callout_style_presets()) {
@@ -737,8 +767,21 @@ void ShowcaseView::build_panel()
         }
     }
     m_co_style = choice(co_styles);
-    m_co_style->SetToolTip(_L("Sets the label shape, colours, leaders and size. The font stays."));
+    m_co_style->SetToolTip(_L("Sets the label shape, colours, leaders and size. A built-in style keeps your font; a style you saved "
+                              "brings its own."));
     row(_L("Style"), m_co_style);
+    {
+        // S4: the user's own styles, kept across projects.
+        auto *buttons    = new wxBoxSizer(wxHORIZONTAL);
+        m_co_style_save   = new wxButton(m_side, wxID_ANY, _L("Save style..."));
+        m_co_style_delete = new wxButton(m_side, wxID_ANY, _L("Delete style"));
+        buttons->Add(m_co_style_save, 0, wxRIGHT, em / 2);
+        buttons->Add(m_co_style_delete, 0);
+        grid->AddSpacer(0);
+        grid->Add(buttons);
+        m_co_style_save->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_save_callout_style(); });
+        m_co_style_delete->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_delete_callout_style(); });
+    }
     m_co_font = new wxFontPickerCtrl(m_side, wxID_ANY, wxFont(wxFontInfo(12)), wxDefaultPosition, wxSize(12 * em, -1),
                                      wxFNTP_FONTDESC_AS_LABEL);
     row(_L("Font"), m_co_font);
@@ -814,6 +857,9 @@ void ShowcaseView::build_panel()
             });
         });
     }
+
+    // --- Video (S4) --------------------------------------------------------------------------------
+    build_video_section(col);
 
     // --- Export --------------------------------------------------------------------------------
     header(_L("Export"));
@@ -1179,6 +1225,11 @@ void ShowcaseView::build_panel()
         const std::vector<Showcase::CalloutStylePreset> presets = Showcase::callout_style_presets();
         if (sel >= 0 && size_t(sel) < presets.size())
             edit([&presets, sel](Showcase::Scene &s) { Showcase::apply_callout_style_preset(s.callouts.style, presets[size_t(sel)]); }, true);
+        else if (sel >= 0 && size_t(sel) - presets.size() < m_callout_styles.styles().size()) {
+            // S4: one of the user's styles, font included.
+            const Showcase::CalloutStyle style = m_callout_styles.styles()[size_t(sel) - presets.size()].style;
+            edit([&style](Showcase::Scene &s) { s.callouts.style = style; }, true);
+        }
     });
     m_co_font->Bind(wxEVT_FONTPICKER_CHANGED, [this](wxFontPickerEvent &) {
         const wxFont f = m_co_font->GetSelectedFont();
@@ -1459,18 +1510,7 @@ void ShowcaseView::sync_controls()
     const Showcase::Callouts &co = s.callouts;
     m_co_enabled->SetValue(co.enabled);
     m_co_layout->SetSelection(int(co.layout));
-    {
-        // The style choice names the preset the style still matches, else nothing.
-        const std::vector<Showcase::CalloutStylePreset> presets = Showcase::callout_style_presets();
-        int sel = -1;
-        for (size_t i = 0; i < presets.size(); ++i) {
-            Showcase::CalloutStyle probe = co.style;
-            Showcase::apply_callout_style_preset(probe, presets[i]);
-            if (probe == co.style)
-                sel = int(i);
-        }
-        m_co_style->SetSelection(sel);
-    }
+    refresh_callout_styles();
     wxFontInfo co_font(12);
     if (!co.style.font_face.empty())
         co_font.FaceName(wxString::FromUTF8(co.style.font_face));
@@ -1489,6 +1529,7 @@ void ShowcaseView::sync_controls()
             m_co_fields[i]->SetValue(fields[i]);
     }
     refresh_callout_list();
+    sync_video_controls();
 
     m_syncing = false;
     update_enabled();
@@ -1595,6 +1636,10 @@ void ShowcaseView::update_enabled()
     m_co_hide->SetLabel(selected && co.items[size_t(m_callouts.selected)].hidden ? _L("Show") : _L("Hide"));
     m_co_unpin->Enable(editable && has_items &&
                        std::any_of(co.items.begin(), co.items.end(), [](const Showcase::Callout &c) { return c.pinned; }));
+    m_co_style_save->Enable(co_on);
+    m_co_style_delete->Enable(co_on && m_callout_styles.match(co.style) != nullptr);
+
+    update_video_enabled();
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2188,15 +2233,24 @@ void ShowcaseView::callouts_update_occlusion(const Showcase::Scene &s)
     if (key == m_callouts.occlusion_camera)
         return;
     m_callouts.occlusion_camera = key;
+    std::map<std::string, std::vector<bool>> occluded = callouts_compute_occlusion(s);
+    if (occluded != m_callouts.occluded) {
+        m_callouts.occluded = std::move(occluded);
+        ++m_callouts.version;
+    }
+}
+
+std::map<std::string, std::vector<bool>> ShowcaseView::callouts_compute_occlusion(const Showcase::Scene &s)
+{
+    std::map<std::string, std::vector<bool>> occluded;
     ShowcaseIdPass pass;
-    if (!m_renderer->render_id_pass(384, pass))
-        return;
+    if (s.callouts.items.empty() || !m_renderer->render_id_pass(384, pass))
+        return occluded;
     // Design 3.3, 6.: an anchor something stands in front of gets a dashed leader. Compared as
     // distances along the view (ortho or perspective alike), with a tolerance for the coarse pass.
     const Transform3d  &view = wxGetApp().plater()->get_camera().get_view_matrix();
     const BoundingBoxf3 box  = m_renderer->objects_box();
     const double        tol  = box.defined ? std::max(0.3, 0.015 * box.radius()) : 0.5;
-    std::map<std::string, std::vector<bool>> occluded;
     for (const Showcase::Callout &c : s.callouts.items) {
         std::vector<bool> flags;
         for (const Showcase::CalloutAnchor &a : c.anchors) {
@@ -2223,14 +2277,14 @@ void ShowcaseView::callouts_update_occlusion(const Showcase::Scene &s)
         }
         occluded[c.key] = std::move(flags);
     }
-    if (occluded != m_callouts.occluded) {
-        m_callouts.occluded = std::move(occluded);
-        ++m_callouts.version;
-    }
+    return occluded;
 }
 
-std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const ShowcaseLabelContext &labels)
+std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const ShowcaseLabelContext &labels,
+                                                                  const std::map<std::string, std::vector<bool>> *occluded_in,
+                                                                  const Showcase::CalloutFade *fade)
 {
+    const std::map<std::string, std::vector<bool>> &occluded = occluded_in != nullptr ? *occluded_in : m_callouts.occluded;
     std::vector<ShowcaseCalloutDraw> out;
     const Showcase::Scene &s = scene();
     Matrix4d               vp;
@@ -2244,7 +2298,7 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
         ShowcaseCalloutDraw d;
         d.item  = int(i);
         d.label = Showcase::build_callout_label(c, labels.filament(s, c), s.callouts.fields, labels.words());
-        auto occ = m_callouts.occluded.find(c.key);
+        auto occ = occluded.find(c.key);
         for (size_t a = 0; a < c.anchors.size(); ++a) {
             if (m_callouts.drag == CalloutUi::Drag::Dot && m_callouts.moved && m_callouts.drag_item == int(i) &&
                 m_callouts.drag_anchor == int(a) && !frame.empty()) {
@@ -2260,13 +2314,44 @@ std::vector<ShowcaseCalloutDraw> ShowcaseView::callouts_draw_list(const Showcase
             if (clip.w() <= 1e-9)
                 continue;   // behind the camera
             d.anchors.push_back({ (clip.x() / clip.w() + 1.) * 0.5, (1. - clip.y() / clip.w()) * 0.5 });
-            d.occluded.push_back(occ != m_callouts.occluded.end() && a < occ->second.size() && occ->second[a]);
+            d.occluded.push_back(occ != occluded.end() && a < occ->second.size() && occ->second[a]);
+            if (fade != nullptr)
+                d.fade.push_back(fade->alpha(c.key, int(a)));
         }
+        if (fade != nullptr)
+            d.alpha = fade->label_alpha(c.key, int(c.anchors.size()));
         d.pinned     = c.pinned;
         d.pinned_pos = { c.label_pos[0], c.label_pos[1] };
         out.push_back(std::move(d));
     }
     return out;
+}
+
+Showcase::RectD ShowcaseView::callouts_model_box() const
+{
+    Matrix4d vp;
+    if (m_renderer == nullptr || !m_renderer->frame_view_projection(vp))
+        return {};
+    const BoundingBoxf3 box = m_renderer->objects_box();
+    if (!box.defined)
+        return {};
+    double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (int i = 0; i < 8; ++i) {
+        const Vec3d c((i & 1) ? box.max.x() : box.min.x(), (i & 2) ? box.max.y() : box.min.y(), (i & 4) ? box.max.z() : box.min.z());
+        const Vec4d clip = vp * Vec4d(c.x(), c.y(), c.z(), 1.);
+        if (clip.w() <= 1e-9)
+            return {};   // partly behind the camera: no useful box
+        const double x = (clip.x() / clip.w() + 1.) * 0.5, y = (1. - clip.y() / clip.w()) * 0.5;
+        x0 = std::min(x0, x);
+        y0 = std::min(y0, y);
+        x1 = std::max(x1, x);
+        y1 = std::max(y1, y);
+    }
+    x0 = std::clamp(x0, 0., 1.);
+    y0 = std::clamp(y0, 0., 1.);
+    x1 = std::clamp(x1, 0., 1.);
+    y1 = std::clamp(y1, 0., 1.);
+    return { x0, y0, x1 - x0, y1 - y0 };
 }
 
 double ShowcaseView::callouts_model_center_x() const
@@ -2300,6 +2385,7 @@ bool ShowcaseView::callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &i
     opt.selected       = m_callouts.selected;
     opt.reserved       = showcase_watermark_rect(s.export_settings.watermark, project(), frame_w, frame_h);
     opt.model_center_x = callouts_model_center_x();
+    opt.model_box      = callouts_model_box();
     showcase_draw_callouts(image, true, s, draws, opt, &m_callouts.hits);
     return true;
 }
@@ -2314,6 +2400,7 @@ void ShowcaseView::callouts_apply_to_export(ShowcaseImage &image, bool has_alpha
     ShowcaseCalloutOptions opt;
     opt.reserved       = showcase_watermark_rect(s.export_settings.watermark, project(), image.width, image.height);
     opt.model_center_x = callouts_model_center_x();
+    opt.model_box      = callouts_model_box();
     showcase_draw_callouts(image, has_alpha, s, callouts_draw_list(labels), opt);
 }
 

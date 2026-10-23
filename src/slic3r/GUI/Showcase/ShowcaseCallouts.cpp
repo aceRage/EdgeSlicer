@@ -28,6 +28,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 
 namespace Slic3r {
@@ -197,6 +198,8 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
         p.model_center_x = opt.model_center_x >= 0. ? opt.model_center_x * W : -1.;
         if (!opt.reserved.empty())
             p.reserved.push_back({ opt.reserved.x - p.gap, opt.reserved.y - p.gap, opt.reserved.w + 2. * p.gap, opt.reserved.h + 2. * p.gap });
+        if (!opt.model_box.empty())
+            p.model_box = { opt.model_box.x * W, opt.model_box.y * H, opt.model_box.w * W, opt.model_box.h * H };
         std::vector<LayoutLabel> in;
         for (const MeasuredLabel &m : measured) {
             const ShowcaseCalloutDraw &d = callouts[size_t(m.draw)];
@@ -204,15 +207,42 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             l.has_anchor = !d.anchors.empty();
             if (l.has_anchor)
                 l.anchor = { d.anchors.front().x * W, d.anchors.front().y * H };
+            for (size_t a = 1; a < d.anchors.size(); ++a)
+                l.extra_anchors.push_back({ d.anchors[a].x * W, d.anchors[a].y * H });
             l.w          = m.w;
             l.h          = m.h;
             l.pinned     = d.pinned;
             l.pinned_pos = { d.pinned_pos.x * W, d.pinned_pos.y * H };
             in.push_back(l);
         }
+        if (opt.previous_sides != nullptr) {
+            // S4, video: the sides of the previous frame, so labels do not jump across.
+            p.side_hysteresis = opt.side_hysteresis * W;
+            for (const MeasuredLabel &m : measured) {
+                auto it = opt.previous_sides->find(callouts[size_t(m.draw)].item);
+                p.previous_side.push_back(it == opt.previous_sides->end() ? 0 : it->second);
+            }
+        }
         const CalloutLayoutResult layout = layout_callouts(in, p);
         if (hits != nullptr)
             hits->legend = layout.legend;
+        if (opt.sides != nullptr) {
+            opt.sides->clear();
+            for (size_t k = 0; k < measured.size(); ++k)
+                (*opt.sides)[callouts[size_t(measured[k].draw)].item] = layout.bands ? layout.labels[k].band : layout.labels[k].side;
+        }
+        // S4: fades. A layer with an opacity for each part that is not fully there.
+        auto with_layer = [&gc](double opacity, const std::function<void()> &draw) {
+            opacity = std::clamp(opacity, 0., 1.);
+            if (opacity <= 0.004)
+                return;
+            const bool layer = opacity < 0.996;
+            if (layer)
+                gc->BeginLayer(opacity);
+            draw();
+            if (layer)
+                gc->EndLayer();
+        };
 
         // --- colours ---------------------------------------------------------------------------
         const wxColour box_bg = callout_colour(st.background, (unsigned char) std::lround(std::clamp(st.background_opacity, 0.f, 1.f) * 255.f));
@@ -270,15 +300,49 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             std::vector<PointD> dots;
             for (size_t a = 0; a < d.anchors.size(); ++a)
                 dots.push_back({ d.anchors[a].x * W, d.anchors[a].y * H });
-            const bool hidden0 = !d.occluded.empty() && d.occluded[0];
-            if (!layout.legend && !pl.leader.empty()) {
-                stroke(pl.leader, hidden0);
-                // The other regions of the same filament: a leader from each to the first bend.
+            // Video (S4): leaders fade instead of turning dashed.
+            const bool video = !d.fade.empty();
+            auto fade_of = [&d, video](size_t a) { return video ? (a < d.fade.size() ? d.fade[a] : 1.) : 1.; };
+            auto dashed  = [&d, video](size_t a) { return !video && a < d.occluded.size() && d.occluded[a]; };
+            // Which anchors have no line to their label (S4: left out so nothing crosses).
+            auto unlinked = [&pl, &layout](size_t a) {
+                if (layout.legend)
+                    return false;
+                return a == 0 ? pl.leader_dropped : (a - 1 >= pl.legs.size() || pl.legs[a - 1].empty());
+            };
+            if (!layout.legend) {
+                if (!pl.leader.empty())
+                    with_layer(fade_of(0), [&]() { stroke(pl.leader, dashed(0)); });
+                // The other regions of the same filament: each its own leg to the label (S4).
                 for (size_t a = 1; a < dots.size(); ++a)
-                    stroke({ dots[a], pl.leader[1] }, a < d.occluded.size() && d.occluded[a]);
+                    if (a - 1 < pl.legs.size() && !pl.legs[a - 1].empty())
+                        with_layer(fade_of(a), [&]() { stroke(pl.legs[a - 1], dashed(a)); });
             }
             for (size_t a = 0; a < dots.size(); ++a) {
-                const bool occluded = a < d.occluded.size() && d.occluded[a];
+                const bool occluded = !video && a < d.occluded.size() && d.occluded[a];
+                if (pl.badge > 0 && unlinked(a)) {
+                    // S4: the label's number instead of a line.
+                    with_layer(fade_of(a), [&]() {
+                        gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(halo, std::max(1., 0.08 * F))));
+                        gc->SetBrush(wxBrush(ink));
+                        const double r = 0.8 * badge_r;
+                        gc->DrawEllipse(dots[a].x - r, dots[a].y - r, 2. * r, 2. * r);
+                        const std::string num = std::to_string(pl.badge);
+                        double nw = 0., nh = 0.;
+                        extent(font_small, num, nw, nh);
+                        gc->SetFont(font_small, wxColour(halo.Red(), halo.Green(), halo.Blue()));
+                        gc->DrawText(wxString::FromUTF8(num), dots[a].x - 0.5 * nw, dots[a].y - 0.5 * nh);
+                    });
+                    continue;
+                }
+                if (video && !layout.legend) {
+                    with_layer(fade_of(a), [&]() {
+                        gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(halo, std::max(1., 0.45 * lw))));
+                        gc->SetBrush(wxBrush(ink));
+                        gc->DrawEllipse(dots[a].x - dot_r, dots[a].y - dot_r, 2. * dot_r, 2. * dot_r);
+                    });
+                    continue;
+                }
                 if (layout.legend) {
                     // The legend's number on the model.
                     gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(halo, std::max(1., 0.08 * F))));
@@ -322,6 +386,13 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
             const wxColour             ink    = text_ink(b, on_box);
             const wxColour             second = callout_with_alpha(ink, 0.78);
             const bool                 halo   = !on_box;
+            // S4, video: a label fades with the last of its anchors (never in the legend's key).
+            const double label_alpha = layout.legend ? 1. : std::clamp(d.alpha, 0., 1.);
+            if (label_alpha <= 0.004)
+                continue;
+            const bool label_layer = label_alpha < 0.996;
+            if (label_layer)
+                gc->BeginLayer(label_alpha);
 
             if (boxed && !layout.legend) {
                 const double radius = st.shape == CalloutShape::Pill ? 0.5 * b.h : 0.3 * F;
@@ -392,6 +463,22 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 const double g = 0.2 * F;
                 gc->DrawRoundedRectangle(b.x - g, b.y - g, b.w + 2. * g, b.h + 2. * g, 0.3 * F);
             }
+            if (pl.badge > 0 && !layout.legend) {
+                // S4: the number its unlinked dots carry, on the label's corner.
+                const wxColour badge_ink = ink_at(b);
+                const wxColour on_badge  = halo_of(badge_ink);
+                const double   r         = 0.8 * badge_r;
+                gc->SetPen(gc->CreatePen(wxGraphicsPenInfo(on_badge, std::max(1., 0.08 * F))));
+                gc->SetBrush(wxBrush(badge_ink));
+                gc->DrawEllipse(b.x - r, b.y - r, 2. * r, 2. * r);
+                const std::string num = std::to_string(pl.badge);
+                double nw = 0., nh = 0.;
+                extent(font_small, num, nw, nh);
+                gc->SetFont(font_small, wxColour(on_badge.Red(), on_badge.Green(), on_badge.Blue()));
+                gc->DrawText(wxString::FromUTF8(num), b.x - 0.5 * nw, b.y - 0.5 * nh);
+            }
+            if (label_layer)
+                gc->EndLayer();
         }
         // The context writes its pixels back into `canvas` when it is destroyed, here.
     }

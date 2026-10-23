@@ -1,12 +1,12 @@
 #ifndef slic3r_GUI_ShowcaseView_hpp_
 #define slic3r_GUI_ShowcaseView_hpp_
 
-// Showcase tab (phases S1, S2, design tests/design_showcase_tab.md): the plater's third page, after
+// Showcase tab (phases S1 to S4, design tests/design_showcase_tab.md): the plater's third page, after
 // Preview (D1). A canvas of its own (GLCanvas3D::CanvasShowcase, hosted the way AssembleView is)
 // next to a side panel with the scene: backdrop, floor, lights and environment, filament materials
-// and layer lines, camera and saved views, filament callouts (S3), still export and the user's
-// watermark. The scene belongs to the current plate (D17) and is saved in the 3MF
-// (Model::showcase). Nothing here edits the model.
+// and layer lines, camera and saved views, filament callouts (S3), the video (S4, its half in
+// ShowcaseViewVideo.cpp), still export and the user's watermark. The scene belongs to the current
+// plate (D17) and is saved in the 3MF (Model::showcase). Nothing here edits the model.
 
 #include "ShowcaseCallouts.hpp"
 #include "ShowcaseWatermark.hpp"
@@ -15,15 +15,23 @@
 
 #include "../Camera.hpp"
 
+#include <chrono>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <wx/panel.h>
+#include <wx/timer.h>
+
+namespace Slic3r { namespace Showcase { class EncoderWorker; class VideoJob; struct VideoFrame; } }
 
 class wxGLCanvas;
 class wxBoxSizer;
 class wxButton;
+class wxGauge;
+class wxSpinCtrlDouble;
+class wxStaticBitmap;
 class wxCheckBox;
 class wxChoice;
 class wxColourPickerCtrl;
@@ -48,6 +56,7 @@ namespace GUI {
 class Bed3D;
 class GLCanvas3D;
 class ShowcaseRenderer;
+class ShowcaseVideoProgressDialog;
 
 class ShowcaseView : public wxPanel
 {
@@ -119,6 +128,10 @@ private:
     // The plate's objects (model indices) and its layer changes.
     std::vector<int>         plate_objects() const;
     const CustomGCode::Info *plate_changes() const;
+    // S4: anchors something stands in front of, from an ID pass of the current camera.
+    std::map<std::string, std::vector<bool>> callouts_compute_occlusion(const Showcase::Scene &scene);
+    // S4: the model's box on the safe frame, 0..1 (empty when unknown).
+    Showcase::RectD          callouts_model_box() const;
     // Drops anchors on objects that are gone and asks for anchors (and the callout list worked out
     // from the model again) on the next frame. `regenerate`: also re-anchor every callout not placed
     // by hand, from the current view.
@@ -127,8 +140,11 @@ private:
     void                     callouts_before_frame();
     void                     callouts_find_anchors(Showcase::Scene &scene, bool regenerate);
     void                     callouts_update_occlusion(const Showcase::Scene &scene);
-    // The callouts as drawn now: label text and where the anchors land on the safe frame.
-    std::vector<ShowcaseCalloutDraw> callouts_draw_list(const ShowcaseLabelContext &labels);
+    // The callouts as drawn now: label text and where the anchors land on the safe frame. S4: a video
+    // frame passes its own occlusion and the fade state.
+    std::vector<ShowcaseCalloutDraw> callouts_draw_list(const ShowcaseLabelContext &labels,
+                                                        const std::map<std::string, std::vector<bool>> *occluded = nullptr,
+                                                        const Showcase::CalloutFade *fade = nullptr);
     double                   callouts_model_center_x() const;
     bool                     callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &image);
     // Draws the callouts onto an exported image (before the watermark).
@@ -172,6 +188,73 @@ private:
     };
     CalloutUi                m_callouts;
     const ShowcaseLabelContext &callouts_labels();
+
+    // --- S4: the user's saved callout styles ------------------------------------------------------
+    Showcase::CalloutStyleLibrary m_callout_styles;
+    static std::string       callout_styles_path();   // <data dir>/showcase/callout_styles.json
+    void                     load_callout_styles();
+    bool                     save_callout_styles();
+    void                     refresh_callout_styles();
+    void                     on_save_callout_style();
+    void                     on_delete_callout_style();
+
+    // --- S4: the videographer (ShowcaseViewVideo.cpp) -----------------------------------------------
+    void                     build_video_section(wxBoxSizer *col);
+    void                     sync_video_controls();
+    void                     update_video_enabled();
+    void                     refresh_keyframes();
+    // The live camera as a scene camera.
+    Showcase::CameraView     live_camera_view() const;
+    // The video's size: the resolution at the safe frame's aspect.
+    void                     video_size(int &w, int &h);
+    // Shows the path's pose at `t` seconds without keeping it: the camera (and, for a turntable, the
+    // lights) are borrowed until video_restore_view().
+    void                     video_show_pose(double t);
+    void                     video_restore_view();
+    bool                     video_camera_borrowed() const { return m_video.borrowed; }
+    void                     video_toggle_preview();
+    void                     video_stop_preview();
+    void                     on_video_timer(wxTimerEvent &evt);
+    // The export: asks where to, picks the encoder, then renders a frame per timer tick.
+    void                     on_export_video();
+    bool                     video_start_export(Showcase::VideoFormat format, const std::string &path, std::string &error);
+    void                     video_tick();
+    bool                     video_render_frame(int index, Showcase::VideoFrame &out);
+    void                     video_finish(bool cancelled);
+    void                     video_cancel();
+    bool                     video_busy() const { return m_video.job != nullptr; }
+
+    struct VideoUi
+    {
+        // Preview and peek: the camera and the scene the renderer had before.
+        bool                     borrowed = false;
+        Camera                   saved_camera;
+        Showcase::Scene          pose_scene;      // the scene with a turntable's lights turned
+        Showcase::CameraView     base;            // what the path starts from
+        bool                     previewing = false;
+        std::chrono::steady_clock::time_point preview_start;
+        double                   preview_offset = 0.;
+        int                      peek_ticks = 0;  // >0: restore the view after so many timer ticks
+        int                      selected_key = -1;
+
+        // The export.
+        std::unique_ptr<Showcase::VideoJob>      job;
+        std::unique_ptr<Showcase::EncoderWorker> worker;
+        std::unique_ptr<Showcase::VideoFrame>    pending;   // rendered, waiting for room in the queue
+        Showcase::VideoSettings  settings;
+        Showcase::Scene          frame_scene;
+        Showcase::CalloutFade    fade;
+        std::map<int, int>       sides;
+        std::string              path;
+        Showcase::VideoFormat    format = Showcase::VideoFormat::MP4;
+        bool                     alpha  = false;
+        int                      width  = 0;
+        int                      height = 0;
+        std::chrono::steady_clock::time_point started;
+        ShowcaseVideoProgressDialog *progress = nullptr;
+    };
+    VideoUi                  m_video;
+    wxTimer                  m_video_timer;
 
     wxGLCanvas              *m_canvas_widget = nullptr;
     GLCanvas3D              *m_canvas        = nullptr;
@@ -278,6 +361,40 @@ private:
     wxButton                *m_co_regenerate = nullptr;
     wxButton                *m_co_unpin = nullptr;
     wxStaticText            *m_co_hint = nullptr;
+    // S4
+    wxButton                *m_co_style_save = nullptr;
+    wxButton                *m_co_style_delete = nullptr;
+    wxChoice                *m_vid_path = nullptr;
+    wxSpinCtrlDouble        *m_vid_duration = nullptr;
+    wxChoice                *m_vid_fps = nullptr;
+    wxChoice                *m_vid_resolution = nullptr;
+    wxChoice                *m_vid_quality = nullptr;
+    wxSlider                *m_vid_bitrate = nullptr;
+    wxChoice                *m_vid_format = nullptr;
+    wxChoice                *m_vid_easing = nullptr;
+    wxSpinCtrl              *m_vid_sweep = nullptr;
+    wxCheckBox              *m_vid_clockwise = nullptr;
+    wxSpinCtrl              *m_vid_bob = nullptr;
+    wxSpinCtrl              *m_vid_bob_cycles = nullptr;
+    wxSpinCtrlDouble        *m_vid_hold_start = nullptr;
+    wxSpinCtrlDouble        *m_vid_hold_end = nullptr;
+    wxCheckBox              *m_vid_loop = nullptr;
+    wxCheckBox              *m_vid_callouts = nullptr;
+    wxChoice                *m_vid_keys = nullptr;
+    wxSpinCtrlDouble        *m_vid_key_time = nullptr;
+    wxChoice                *m_vid_key_ease = nullptr;
+    wxButton                *m_vid_key_add = nullptr;
+    wxButton                *m_vid_key_update = nullptr;
+    wxButton                *m_vid_key_delete = nullptr;
+    wxButton                *m_vid_key_goto = nullptr;
+    wxSlider                *m_vid_time = nullptr;
+    wxStaticText            *m_vid_time_label = nullptr;
+    wxButton                *m_vid_preview = nullptr;
+    wxButton                *m_vid_export = nullptr;
+    wxStaticText            *m_vid_info = nullptr;
+    std::vector<wxWindow *>  m_vid_orbit_rows;     // shown for orbit paths
+    std::vector<wxWindow *>  m_vid_bob_rows;       // shown for the bob
+    std::vector<wxWindow *>  m_vid_key_rows;       // shown for keyframes
 };
 
 } // namespace GUI

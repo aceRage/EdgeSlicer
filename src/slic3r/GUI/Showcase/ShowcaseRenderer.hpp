@@ -1,8 +1,9 @@
 #ifndef slic3r_GUI_ShowcaseRenderer_hpp_
 #define slic3r_GUI_ShowcaseRenderer_hpp_
 
-// Showcase tab (phases S1, S2, S3): draws the Showcase canvas and renders still images from it.
+// Showcase tab (phases S1 to S4): draws the Showcase canvas and renders still images from it.
 // S3 adds the ID pass the filament callouts are anchored with, and their overlay on the live view.
+// S4 renders video frames through the same export, keeping the off-screen buffers between frames.
 //
 // One drawing function serves the live view and the export (design 2.2): backdrop, the printer's
 // plate or a floor, the shadow map with a world-fixed light (D14), the objects of the current
@@ -24,6 +25,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -35,6 +37,7 @@ namespace GUI {
 struct Camera; // a struct in Camera.hpp: MSVC mangles class and struct differently (LNK2001)
 class GLCanvas3D;
 class GLModel;
+struct ShowcaseFramebuffers;
 
 // An RGBA image, top row first, straight (not premultiplied) alpha.
 struct ShowcaseImage
@@ -122,6 +125,14 @@ public:
     // Renders the scene's export settings into `out`. `report` gets one line per decision taken
     // (supersampling, multisampling, fallbacks) for the log. False when nothing could be rendered.
     bool render_export(ShowcaseImage &out, std::string &report);
+
+    // S4: a video renders many exports of one size in a row. Between these calls the off-screen
+    // buffers stay allocated (sized for the first frame) instead of being made for each frame.
+    void begin_batch();
+    void end_batch();
+    // S4: the live view's viewport and a projection fitted to the scene, for the camera as it is now
+    // (a video frame's pose): what frame_view_projection() and the ID pass then use.
+    void prepare_live_camera();
 
     // The safe frame of the last live frame, in canvas pixels, origin top-left.
     Showcase::RectI live_frame() const { return m_live_frame; }
@@ -236,6 +247,11 @@ private:
     int                        m_wm_frame_w = 0;
     int                        m_wm_frame_h = 0;
     Showcase::RectI            m_wm_rect;
+
+    // S4
+    bool                       m_batch = false;
+    std::unique_ptr<ShowcaseFramebuffers> m_batch_fb;
+    int                        m_batch_w = 0, m_batch_h = 0, m_batch_msaa = -1;
 
     // S3
     OverlayProvider            m_callout_provider;
