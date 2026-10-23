@@ -11,6 +11,7 @@
 #include "slic3r/GUI/RemoteHub.hpp"
 #include "slic3r/GUI/RemoteSliceV1.hpp"
 
+#include "libslic3r/CostEstimate.hpp"
 #include "libslic3r/CostPricing.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 
