@@ -10054,6 +10054,10 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
         ConfigOptionStrings* mco = preset_bundle->project_config.option<ConfigOptionStrings>("filament_multi_colors");
         ConfigOptionInts*    cmo = preset_bundle->project_config.option<ConfigOptionInts>("filament_colour_mode");
 
+        // Snapmaker #1052: slot 0's name is taken only after Edge's own fallback
+        // (CANVAS Generic @ECC, then vendor/colour resolve). Upstream records a
+        // single resolve_filament_preset(); that would skip the CANVAS Generic path.
+        std::string slot0_matched_preset;
         for (size_t i = 0; i < effective_size; ++i) {
             const std::string synced_colour = into_u8(getMainColor(syncedData[i].m_color).GetAsString(wxC2S_HTML_SYNTAX));
             Preset* matched = nullptr;
@@ -10072,6 +10076,8 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
                                                   syncedData[i].m_vendor, synced_colour);
             if (matched) {
                 preset_bundle->set_filament_preset(i, matched->name);
+                if (i == 0)
+                    slot0_matched_preset = matched->name;
             }
 
             if (co && i < co->values.size()) {
@@ -10100,6 +10106,33 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
 
         const size_t num_filaments = effective_size;
         wxGetApp().plater()->on_filaments_change(num_filaments);
+
+        // Snapmaker #1052: single-filament projects slice from the edited filament
+        // preset, which set_filament_preset() above does not switch. Deferred via
+        // CallAfter: running the switch and the config propagation inline inside
+        // the sync dialog's event context froze the UI.
+        const bool switch_edited_preset = num_filaments == 1 && !slot0_matched_preset.empty() &&
+            preset_bundle->filaments.get_edited_preset().name != slot0_matched_preset;
+        {
+            const std::string preset_to_select = slot0_matched_preset;
+            wxGetApp().CallAfter([switch_edited_preset, preset_to_select]() {
+                // Re-fetch: a captured Plater* could dangle across GUI recreation.
+                Plater* plater = wxGetApp().plater();
+                if (plater == nullptr)
+                    return;
+                if (switch_edited_preset) {
+                    // Edge's normal filament-select path (Plater::priv::on_select_preset):
+                    // Tab::select_preset then on_config_change, so the Tab and the plater
+                    // config both pick up the synced preset.
+                    Tab* filament_tab = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
+                    if (filament_tab != nullptr)
+                        filament_tab->select_preset(preset_to_select);
+                }
+                PresetBundle* bundle = wxGetApp().preset_bundle;
+                if (bundle != nullptr)
+                    plater->on_config_change(bundle->full_config());
+            });
+        }
 
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
         preset_bundle->export_selections(*wxGetApp().app_config);
