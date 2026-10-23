@@ -1450,6 +1450,29 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    // Ported from Neotko OrcaFS-NeotkoCM e2cfcff6d98727cd4cf569a180a000960d6d6aef.
+    // Extra millimetres of bridge anchoring, independent of wall count. Default 0 is a no-op.
+    def = this->add("bridge_expansion_extra", coFloat);
+    def->label = L("Bridging infill extra expansion");
+    def->category = L("Quality");
+    def->tooltip = L("Extra distance the bridging infill grows into the surrounding area of the "
+                     "same part, on top of the automatic expansion.\n\n"
+                     "The bridge then starts extruding over solid material before it reaches the "
+                     "gap, so the strand is already anchored when it begins to span. Raise this if "
+                     "bridges detach or curl at their ends.\n\n"
+                     "With a large value the bridge takes over the whole surrounding region and the "
+                     "entire layer prints as one continuous bridge — useful to remove the seam "
+                     "artefact where the bridged area meets the supported area. There is no cap: "
+                     "set it as high as you need.\n\n"
+                     "0 = automatic expansion only (unchanged behaviour). The automatic amount is "
+                     "derived from the wall count, so this setting also lets you decouple bridge "
+                     "anchoring from the number of walls.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 999;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("bridge_density", coPercent);
     def->label = L("External bridge density");
     def->category = L("Strength");
