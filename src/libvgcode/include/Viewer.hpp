@@ -86,6 +86,14 @@ public:
     //
     void set_tone(float exposure, float saturation);
     //
+    // EDGE (Showcase S5, D13): the smooth bead look - per-fragment rounded cross-sections, top and
+    // bottom skin widened and flattened. Off (the default, and always in Preview) draws exactly as
+    // before. `looks` holds 16 extruders x 8 floats: smoothness, skin overlap, skin flatten, bulge,
+    // groove, SSAO skin weight, anisotropy, unused.
+    //
+    void set_smooth_look(bool enabled, const std::array<float, 128>& looks);
+    bool is_smooth_look() const;
+    //
     // ORCA: section view. Cuts away where dot(plane, (x, y, z, 1)) < 0; { 0, 0, 0, 1 } keeps all.
     //
     void set_clipping_plane(const std::array<float, 4>& plane);

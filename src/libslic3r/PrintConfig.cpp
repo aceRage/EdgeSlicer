@@ -1450,6 +1450,29 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    // Ported from Neotko OrcaFS-NeotkoCM e2cfcff6d98727cd4cf569a180a000960d6d6aef.
+    // Extra millimetres of bridge anchoring, independent of wall count. Default 0 is a no-op.
+    def = this->add("bridge_expansion_extra", coFloat);
+    def->label = L("Bridging infill extra expansion");
+    def->category = L("Quality");
+    def->tooltip = L("Extra distance the bridging infill grows into the surrounding area of the "
+                     "same part, on top of the automatic expansion.\n\n"
+                     "The bridge then starts extruding over solid material before it reaches the "
+                     "gap, so the strand is already anchored when it begins to span. Raise this if "
+                     "bridges detach or curl at their ends.\n\n"
+                     "With a large value the bridge takes over the whole surrounding region and the "
+                     "entire layer prints as one continuous bridge — useful to remove the seam "
+                     "artefact where the bridged area meets the supported area. There is no cap: "
+                     "set it as high as you need.\n\n"
+                     "0 = automatic expansion only (unchanged behaviour). The automatic amount is "
+                     "derived from the wall count, so this setting also lets you decouple bridge "
+                     "anchoring from the number of walls.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 999;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("bridge_density", coPercent);
     def->label = L("External bridge density");
     def->category = L("Strength");
@@ -1623,6 +1646,48 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Enable this option to slow printing down for different overhang degree.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools { true });
+
+    // Port of Neotko Overhang Shadow (cf1255c). Off by default; no Libre Mode lock; not enabled in any profile.
+    def = this->add("overhang_shadow_inner_wall", coBool);
+    def->label = L("Slow down inner walls next to overhangs");
+    def->category = L("Speed");
+    def->tooltip = L("Give the inner wall a share of the slowdown and fan its overhanging neighbour gets.\n\n"
+                     "The outer wall of an overhang is printed onto the inner wall next to it, and that "
+                     "inner wall went down at full speed a few seconds earlier because it is itself "
+                     "supported. This makes the anchor as careful as the wall it has to hold up.\n\n"
+                     "Costs nothing away from an overhang: a wall with solid material under it is graded "
+                     "the same either way. Requires 'Slow down for overhang', and has no effect when "
+                     "walls are printed outer wall first.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool{ false });
+
+    def = this->add("overhang_shadow_speed_ratio", coPercent);
+    def->label = L("Inner wall slowdown");
+    def->category = L("Speed");
+    def->tooltip = L("How much of the neighbouring wall's treatment this wall borrows. 100% grades the "
+                     "inner wall exactly as if it were the overhanging wall itself, which also brings the "
+                     "overhang fan with it. 50% takes it halfway. 0% disables the effect.\n\n"
+                     "The default of 30% is deliberately gentle: enough to make the anchor more likely to "
+                     "be there, without a speed change large enough to show on the wall.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(30));
+
+    def = this->add("overhang_shadow_distance", coPercent);
+    def->label = L("Inner wall reach");
+    def->category = L("Speed");
+    def->tooltip = L("How far outwards to look for the wall being mirrored, as a percentage of line "
+                     "width. 100% is the wall immediately next to this one. Larger values mirror "
+                     "something further out, so the slowdown reaches deeper into the walls.\n\n"
+                     "The default of 200% looks two line widths out, which catches the overhang even "
+                     "where it starts a little beyond the neighbouring wall.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(200));
     
     def = this->add("slowdown_for_curled_perimeters", coBools);
     def->label = L("Slow down for curled perimeters");
@@ -11613,6 +11678,14 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->label = L("Look up an HMS error code");
     def->tooltip = L("Development and test only: <serial>:<code>[:<language>] - print the printer's own text for that error code and exit.");
     def->cli_params = "serial:code[:lang]";
+    def->set_default_value(new ConfigOptionString());
+
+    // Showcase S4: the video encoders without the GUI - a 2 s orbit of a test cube at 720p30 through
+    // the same frame queue, encoder thread and ffmpeg pipe (or PNG sequence) as a video export.
+    def = this->add("showcase_video_test", coString);
+    def->label = L("Test the Showcase video encoder");
+    def->tooltip = L("Development and test only: write a short test video to the given file (.mp4, .webm, .gif, .webp; anything else is a folder of PNG frames) and exit.");
+    def->cli_params = "file";
     def->set_default_value(new ConfigOptionString());
 
     // Record our own description for an error code, for the codes Bambu publishes with an empty

@@ -224,9 +224,27 @@ bool ExportSettings::operator==(const ExportSettings &o) const
 
 bool Scene::operator==(const Scene &o) const
 {
-    return id == o.id && name == o.name && plate_index == o.plate_index && source == o.source && preset_base == o.preset_base &&
+    return id == o.id && name == o.name && plate_index == o.plate_index && view_frame_height == o.view_frame_height && source == o.source &&
+           preset_base == o.preset_base &&
            background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && views == o.views &&
-           export_settings == o.export_settings && materials == o.materials;
+           export_settings == o.export_settings && materials == o.materials && callouts == o.callouts && video == o.video;
+}
+
+double backdrop_luminance(const Background &bg, double nx, double ny)
+{
+    const double l1 = hex_luminance(bg.color1, 1.), l2 = hex_luminance(bg.color2, l1);
+    switch (bg.type) {
+    case BackgroundType::Solid: return l1;
+    case BackgroundType::VerticalGradient: return l1 + (l2 - l1) * std::clamp(ny, 0., 1.);
+    case BackgroundType::RadialGradient: {
+        // Colour 1 in the middle, colour 2 at the corners.
+        const double dx = nx - 0.5, dy = ny - 0.5;
+        return l1 + (l2 - l1) * std::clamp(std::sqrt(dx * dx + dy * dy) / std::sqrt(0.5), 0., 1.);
+    }
+    // A transparent export lands on whatever the user puts under it: assume a light page.
+    case BackgroundType::Transparent: return 1.;
+    default: return 0.5 * (l1 + l2);
+    }
 }
 
 const Finish *Materials::override_for(int filament) const
@@ -502,6 +520,178 @@ Watermark watermark_from_json(const json &j)
     return w;
 }
 
+// A callout style; unknown keys of `raw` are kept (S4: also a saved style of the user's).
+json callout_style_to_json(const CalloutStyle &style, const json &raw)
+{
+    json st = raw.is_object() ? raw : json::object();
+    st["shape"]              = to_string(style.shape);
+    st["font"]               = style.font_face;
+    st["bold"]               = style.bold;
+    st["size_pct"]           = style.size_pct;
+    st["auto_colors"]        = style.auto_colors;
+    st["text_color"]         = style.text_color;
+    st["line_color"]         = style.line_color;
+    st["background"]         = style.background;
+    st["background_opacity"] = style.background_opacity;
+    st["leader"]             = to_string(style.leader);
+    return st;
+}
+
+CalloutStyle callout_style_from_json(const json &st)
+{
+    CalloutStyle s;
+    s.shape              = enum_or(st, "shape", s.shape);
+    s.font_face          = get_or<std::string>(st, "font", "");
+    s.bold               = get_or<bool>(st, "bold", false);
+    s.size_pct           = clamp_or(get_or<float>(st, "size_pct", s.size_pct), 0.5f, 10.f, 2.2f);
+    s.auto_colors        = get_or<bool>(st, "auto_colors", s.auto_colors);
+    s.text_color         = normalize_hex_color(get_or<std::string>(st, "text_color", s.text_color), s.text_color);
+    s.line_color         = normalize_hex_color(get_or<std::string>(st, "line_color", s.line_color), s.line_color);
+    s.background         = normalize_hex_color(get_or<std::string>(st, "background", s.background), s.background);
+    s.background_opacity = clamp_or(get_or<float>(st, "background_opacity", s.background_opacity), 0.f, 1.f, 0.92f);
+    s.leader             = enum_or(st, "leader", s.leader);
+    return s;
+}
+
+// S3: the scene's callouts. Unknown keys of the section, its fields and its style are kept.
+json callouts_to_json(const Callouts &c, const json &raw)
+{
+    auto sub = [&raw](const char *key) {
+        if (raw.is_object()) {
+            auto it = raw.find(key);
+            if (it != raw.end() && it->is_object())
+                return *it;
+        }
+        return json::object();
+    };
+    json k;
+    k["enabled"]        = c.enabled;
+    k["layout"]         = to_string(c.layout);
+    k["max_per_column"] = c.max_per_column;
+    k["once_per_color"] = c.once_per_color;
+
+    json f = sub("fields");
+    f["brand"]      = c.fields.brand;
+    f["product"]    = c.fields.product;
+    f["family"]     = c.fields.family;
+    f["color_name"] = c.fields.color_name;
+    f["hex"]        = c.fields.hex;
+    f["swatch"]     = c.fields.swatch;
+    f["separator"]  = c.fields.separator;
+    f["type"]       = c.fields.type;
+    f["weight"]     = c.fields.weight;
+    f["price"]      = c.fields.price;
+    k["fields"]     = f;
+
+    k["style"] = callout_style_to_json(c.style, sub("style"));
+
+    json items = json::array();
+    for (const Callout &co : c.items) {
+        json it;
+        it["key"]      = co.key;
+        it["filament"] = co.filament;
+        it["source"]   = to_string(co.source);
+        if (co.z_from >= 0.)
+            it["z_from"] = co.z_from;
+        if (!co.color.empty())
+            it["color"] = co.color;
+        json anchors = json::array();
+        for (const CalloutAnchor &a : co.anchors)
+            anchors.push_back({ { "object", a.object_idx }, { "instance", a.instance_idx }, { "at", a.local } });
+        it["anchors"]     = anchors;
+        it["user_anchor"] = co.user_anchor;
+        it["pinned"]      = co.pinned;
+        if (co.pinned)
+            it["label_pos"] = co.label_pos;
+        if (!co.title.empty())
+            it["title"] = co.title;
+        if (!co.color_name.empty())
+            it["color_name"] = co.color_name;
+        if (!co.note.empty())
+            it["note"] = co.note;
+        it["hidden"] = co.hidden;
+        items.push_back(it);
+    }
+    k["items"] = items;
+
+    json out = raw.is_object() ? raw : json::object();
+    for (auto it = k.begin(); it != k.end(); ++it)
+        out[it.key()] = it.value();
+    return out;
+}
+
+Callouts callouts_from_json(const json &j)
+{
+    Callouts c;
+    if (!j.is_object())
+        return c;
+    c.enabled        = get_or<bool>(j, "enabled", false);
+    c.layout         = enum_or(j, "layout", c.layout);
+    c.max_per_column = std::clamp(get_or<int>(j, "max_per_column", c.max_per_column), 1, 50);
+    c.once_per_color = get_or<bool>(j, "once_per_color", false);
+
+    const json f        = j.contains("fields") ? j["fields"] : json();
+    c.fields.brand      = get_or<bool>(f, "brand", c.fields.brand);
+    c.fields.product    = get_or<bool>(f, "product", c.fields.product);
+    c.fields.color_name = get_or<bool>(f, "color_name", c.fields.color_name);
+    c.fields.hex        = get_or<bool>(f, "hex", c.fields.hex);
+    // S5b: before the swatch was a field of its own, "hex" meant the hex code and the swatch.
+    c.fields.swatch     = get_or<bool>(f, "swatch", c.fields.hex);
+    c.fields.family     = get_or<bool>(f, "family", c.fields.family);
+    c.fields.separator  = get_or<std::string>(f, "separator", c.fields.separator);
+    c.fields.type       = get_or<bool>(f, "type", c.fields.type);
+    c.fields.weight     = get_or<bool>(f, "weight", c.fields.weight);
+    c.fields.price      = get_or<bool>(f, "price", c.fields.price);
+
+    c.style = callout_style_from_json(j.contains("style") ? j["style"] : json());
+
+    if (j.contains("items") && j["items"].is_array())
+        for (const json &it : j["items"]) {
+            if (!it.is_object())
+                continue;
+            Callout co;
+            co.filament = get_or<int>(it, "filament", 0);
+            if (co.filament < 1 || co.filament > 1024)
+                continue;
+            co.source = enum_or(it, "source", co.source);
+            co.z_from = get_or<double>(it, "z_from", -1.);
+            if (!std::isfinite(co.z_from) || co.z_from < 0.)
+                co.z_from = -1.;
+            co.color = get_or<std::string>(it, "color", "");
+            if (!co.color.empty())
+                co.color = normalize_hex_color(co.color, "");
+            co.key = get_or<std::string>(it, "key", "");
+            if (co.key.empty())
+                co.key = make_callout_key(co.filament, co.z_from, co.color);
+            // One callout per key: a doubled entry (a hand-edited file) keeps the first.
+            if (c.find(co.key) != nullptr)
+                continue;
+            if (it.contains("anchors") && it["anchors"].is_array())
+                for (const json &aj : it["anchors"]) {
+                    CalloutAnchor a;
+                    a.object_idx   = get_or<int>(aj, "object", -1);
+                    a.instance_idx = std::max(0, get_or<int>(aj, "instance", 0));
+                    a.local        = vec3_or(aj, "at", { 0., 0., 0. });
+                    if (a.object_idx >= 0 && aj.is_object() && aj.contains("at") && int(co.anchors.size()) < MAX_CALLOUT_LEADERS)
+                        co.anchors.push_back(a);
+                }
+            co.user_anchor = get_or<bool>(it, "user_anchor", false) && !co.anchors.empty();
+            co.pinned      = get_or<bool>(it, "pinned", false);
+            if (co.pinned && it.contains("label_pos") && it["label_pos"].is_array() && it["label_pos"].size() == 2 &&
+                it["label_pos"][0].is_number() && it["label_pos"][1].is_number()) {
+                const double x = it["label_pos"][0].get<double>(), y = it["label_pos"][1].get<double>();
+                co.label_pos   = { std::isfinite(x) ? std::clamp(x, 0., 1.) : 0., std::isfinite(y) ? std::clamp(y, 0., 1.) : 0. };
+            } else
+                co.pinned = false;
+            co.title      = get_or<std::string>(it, "title", "");
+            co.color_name = get_or<std::string>(it, "color_name", "");
+            co.note       = get_or<std::string>(it, "note", "");
+            co.hidden     = get_or<bool>(it, "hidden", false);
+            c.items.push_back(std::move(co));
+        }
+    return c;
+}
+
 json scene_to_json_object(const Scene &s)
 {
     json raw = json::object();
@@ -514,6 +704,9 @@ json scene_to_json_object(const Scene &s)
     j["id"]          = s.id;
     j["name"]        = s.name;
     j["plate_index"] = s.plate_index;
+    // S5: only once known, so an S4 scene writes back as it was read.
+    if (s.view_frame_height > 0)
+        j["view_frame_height"] = s.view_frame_height;
     j["source"]      = s.source;
     j["preset_base"] = s.preset_base;
 
@@ -590,7 +783,14 @@ json scene_to_json_object(const Scene &s)
     for (const MaterialOverride &m : s.materials.overrides)
         filaments.push_back({ { "slot", m.filament }, { "finish", to_string(m.finish) } });
     ma["filaments"] = filaments;
+    // S5: only when set, so an S4 scene writes back as it was read.
+    if (s.materials.toolpath_smoothness >= 0.f)
+        ma["toolpath_smoothness"] = s.materials.toolpath_smoothness;
     j["materials"] = merged(raw, "materials", ma);
+
+    j["callouts"] = callouts_to_json(s.callouts, raw.is_object() && raw.contains("callouts") ? raw["callouts"] : json());
+    // S4: the video's camera path and output, unknown keys of the section kept.
+    j["video"] = merged(raw, "video", json::parse(video_to_json(s.video), nullptr, false));
     return j;
 }
 
@@ -603,6 +803,7 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.id          = get_or<std::string>(j, "id", "");
     s.name        = get_or<std::string>(j, "name", "");
     s.plate_index = std::max(0, get_or<int>(j, "plate_index", 0));
+    s.view_frame_height = std::clamp(get_or<int>(j, "view_frame_height", 0), 0, 100000);
     s.source      = get_or<std::string>(j, "source", "model");
     if (s.source != "model" && s.source != "toolpaths")
         s.source = "model";
@@ -670,6 +871,10 @@ bool scene_from_json_object(const json &j, Scene &s)
 
     const json ma              = j.contains("materials") ? j["materials"] : json();
     s.materials.layer_lines    = enum_or(ma, "layer_lines", s.materials.layer_lines);
+    {
+        const double sm               = get_or<double>(ma, "toolpath_smoothness", -1.);
+        s.materials.toolpath_smoothness = std::isfinite(sm) && sm >= 0. ? float(std::min(1., sm)) : -1.f;
+    }
     if (ma.is_object() && ma.contains("filaments") && ma["filaments"].is_array())
         for (const json &f : ma["filaments"]) {
             const int slot = get_or<int>(f, "slot", 0);
@@ -677,12 +882,56 @@ bool scene_from_json_object(const json &j, Scene &s)
             if (slot >= 1 && slot <= 1024 && from_string(get_or<std::string>(f, "finish", ""), finish))
                 s.materials.set_override(slot, &finish);
         }
+
+    // S3. An S1 or S2 scene has none: callouts off, nothing generated yet.
+    if (j.contains("callouts"))
+        s.callouts = callouts_from_json(j["callouts"]);
+    // S4. An S1 to S3 scene has none: the default orbit.
+    if (j.contains("video") && j["video"].is_object())
+        video_from_json(j["video"].dump(), s.video);
     return true;
 }
 
 } // namespace
 
 std::string scene_to_json(const Scene &scene) { return scene_to_json_object(scene).dump(); }
+
+std::string callout_style_to_json(const CalloutStyle &style) { return callout_style_to_json(style, json()).dump(); }
+
+bool callout_style_from_json(const std::string &text, CalloutStyle &out)
+{
+    const json j = json::parse(text, nullptr, false);
+    if (!j.is_object())
+        return false;
+    out = callout_style_from_json(j);
+    return true;
+}
+
+// S4: the user's saved callout styles, {"styles": [{"name": ..., "style": {...}}]}.
+std::string CalloutStyleLibrary::to_json() const
+{
+    json list = json::array();
+    for (const UserCalloutStyle &s : m_styles)
+        list.push_back({ { "name", s.name }, { "style", callout_style_to_json(s.style, json()) } });
+    json j;
+    j["styles"] = list;
+    return j.dump(2);
+}
+
+bool CalloutStyleLibrary::from_json(const std::string &text)
+{
+    m_styles.clear();
+    const json j = json::parse(text, nullptr, false);
+    if (!j.is_object() || !j.contains("styles") || !j["styles"].is_array())
+        return false;
+    for (const json &e : j["styles"]) {
+        const std::string name = get_or<std::string>(e, "name", "");
+        if (name.empty() || !e.contains("style") || !e["style"].is_object() || find(name) != nullptr)
+            continue;
+        m_styles.push_back({ name, callout_style_from_json(e["style"]) });
+    }
+    return true;
+}
 
 std::string watermark_to_json(const Watermark &wm) { return watermark_to_json(wm, json()).dump(); }
 

@@ -81,6 +81,9 @@ using namespace nlohmann;
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/Showcase/ShowcaseEncoder.hpp"
+#include "libslic3r/Showcase/ShowcasePath.hpp"
+#include "libslic3r/Showcase/ShowcaseRenderCli.hpp"
 
 #include "Snapmaker_Orca.hpp"
 //BBS: add exception handler for win32
@@ -113,6 +116,10 @@ using namespace nlohmann;
 
 #ifdef __WXGTK__
 #include <X11/Xlib.h>
+#include <unistd.h>
+#ifdef SLIC3R_GUI
+#include "slic3r/GUI/Widgets/WebView.hpp"
+#endif
 #endif
 
 #ifdef SLIC3R_GUI
@@ -1231,8 +1238,29 @@ int CLI::run(int argc, char **argv)
 #ifdef __WXGTK__
     // On Linux, wxGTK has no support for Wayland, and the app crashes on
     // startup if gtk3 is used. This env var has to be set explicitly to
-    // instruct the window manager to fall back to X server mode.
+    // instruct the window manager to fall back to X server mode. Keep the
+    // always-X11 force; Orca #16385's EGL/Wayland default path does not apply.
+#ifdef SLIC3R_GUI
+    // NVIDIA's proprietary driver cannot back WebKitGTK's DMABUF renderer.
+    // Force the shared-memory transport, which keeps compositing and threaded
+    // scrolling; the second variable clears Debian/Ubuntu/openSUSE's isNVIDIA().
+    if (::access("/proc/driver/nvidia/version", F_OK) == 0 && WebView::SupportsForceSharedMemory()) {
+        ::setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", /* replace */ false);
+        ::setenv("WEBKIT_FORCE_DMABUF_RENDERER", "1", /* replace */ false);
+    }
+#endif
+
     ::setenv("GDK_BACKEND", "x11", /* replace */ true);
+
+#ifdef SLIC3R_GUI
+    // Forced X11 in a Wayland session runs through XWayland. WebKit2GTK
+    // accelerated compositing could fail silently there before 2.42.
+    {
+        const char *wayland_env = ::getenv("WAYLAND_DISPLAY");
+        if (wayland_env && *wayland_env && WebView::NeedsCompositingWorkaround())
+            ::setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", /* replace */ false);
+    }
+#endif
 
     // Also on Linux, we need to tell Xlib that we will be using threads,
     // lest we crash when we fire up GStreamer.
@@ -1261,6 +1289,13 @@ int CLI::run(int argc, char **argv)
     // it only rewrites the Windows Firewall rules of this exe and its go2rtc.exe.
     if (Slic3r::WinFirewall::is_fix_cli(argc, argv))
         return Slic3r::WinFirewall::run_fix_cli(argc, argv);
+#endif
+
+#ifdef SLIC3R_GUI
+    // Showcase S5: a Showcase video or still of a project, rendered without a window. Nothing else on
+    // the command line runs with it.
+    if (Slic3r::Showcase::is_showcase_render_cli(argc, argv))
+        return this->run_showcase_render(argc, argv);
 #endif
 
     if (!this->setup(argc, argv))
@@ -1300,6 +1335,16 @@ int CLI::run(int argc, char **argv)
                             << "MIGRATE_CONF_PATHS=" << r.conf_paths_rewritten << std::endl
                             << "MIGRATE_ERROR=" << r.error << std::endl;
         return r.error.empty() ? 0 : CLI_ENVIRONMENT_ERROR;
+    }
+
+    // Showcase S4: prove the video encoder path headless (no window, no GL) and exit.
+    if (const ConfigOptionString* video_test = m_config.opt<ConfigOptionString>("showcase_video_test");
+        video_test && !video_test->value.empty()) {
+        if (!m_actions.empty()) {
+            boost::nowide::cerr << "--showcase-video-test cannot be combined with other actions" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        return Slic3r::Showcase::run_video_selftest(video_test->value, boost::nowide::cout) == 0 ? 0 : CLI_ENVIRONMENT_ERROR;
     }
 
 #ifdef SLIC3R_GUI
@@ -7108,6 +7153,122 @@ int CLI::run(int argc, char **argv)
 
     return 0;
 }
+
+
+#ifdef SLIC3R_GUI
+int CLI::run_showcase_render(int argc, char **argv)
+{
+    using namespace Slic3r::Showcase;
+    namespace fs = boost::filesystem;
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; ++i)
+        args.emplace_back(argv[i] != nullptr ? argv[i] : "");
+    RenderRequest req;
+    std::string   error;
+    if (!parse_render_args(args, req, error)) {
+        boost::nowide::cerr << "error: " << error << std::endl << std::endl << render_usage();
+        return RENDER_USAGE;
+    }
+    if (req.help) {
+        boost::nowide::cout << render_usage();
+        return RENDER_OK;
+    }
+    // Absolute paths: the GUI is free to change the working folder.
+    auto absolute = [](std::string &p) {
+        if (!p.empty()) {
+            boost::system::error_code ec;
+            const fs::path a = fs::absolute(fs::path(p));
+            p                = a.lexically_normal().string();
+        }
+    };
+    absolute(req.project);
+    absolute(req.path);
+    absolute(req.out);
+    absolute(req.report);
+    // A report even for what fails before the render starts.
+    auto early = [&req](int code, const std::vector<std::string> &errors, const std::vector<std::string> &warnings = {}) {
+        for (const std::string &w : warnings)
+            boost::nowide::cerr << "warning: " << w << std::endl;
+        for (const std::string &e : errors)
+            boost::nowide::cerr << "error: " << e << std::endl;
+        if (!req.report.empty()) {
+            RenderReport rep;
+            rep.ok        = false;
+            rep.exit_code = code;
+            rep.project   = req.project;
+            rep.path      = req.path;
+            rep.out       = req.out;
+            rep.plate     = req.plate;
+            rep.still     = req.still;
+            rep.errors    = errors;
+            rep.warnings  = warnings;
+            boost::nowide::ofstream f(req.report, std::ios::binary | std::ios::trunc);
+            const std::string        text = render_report_json(rep) + "\n";
+            if (f)
+                f.write(text.data(), std::streamsize(text.size()));
+        }
+        boost::nowide::cout << "SHOWCASE_RENDER_FAILED exit=" << code << std::endl;
+        return code;
+    };
+    boost::system::error_code ec;
+    if (!fs::is_regular_file(fs::path(req.project), ec))
+        return early(RENDER_PROJECT_ERROR, { "the project does not exist: " + req.project });
+    if (!req.path.empty()) {
+        // The path file is checked here, before anything starts: its syntax and every value. Whether its
+        // objects, filaments and views exist is checked against the project in the render.
+        boost::nowide::ifstream f(req.path, std::ios::binary);
+        if (!f)
+            return early(RENDER_INVALID_PATH, { "the path file does not exist or cannot be read: " + req.path });
+        std::stringstream ss;
+        ss << f.rdbuf();
+        PathDocument doc;
+        PathIssues   issues;
+        if (!parse_path(ss.str(), doc, issues)) {
+            std::vector<std::string> errors, warnings;
+            for (const PathIssue &i : issues.items())
+                (i.error ? errors : warnings).push_back((i.where.empty() ? "" : i.where + ": ") + i.message);
+            return early(RENDER_INVALID_PATH, errors, warnings);
+        }
+    }
+    if (!req.out.empty()) {
+        const fs::path parent = fs::path(req.out).parent_path();
+        if (!parent.empty() && !fs::is_directory(parent, ec))
+            return early(RENDER_USAGE, { "the folder for --out does not exist: " + parent.string() });
+    }
+
+    // The data folder and the log, as a normal start with only --datadir would set them up.
+    std::vector<std::string> setup_args = { argc > 0 && argv[0] != nullptr ? std::string(argv[0]) : std::string("EdgeSlicer") };
+    if (!req.datadir.empty()) {
+        setup_args.emplace_back("--datadir");
+        setup_args.emplace_back(req.datadir);
+    }
+    std::vector<char *> setup_argv;
+    for (std::string &a : setup_args)
+        setup_argv.push_back(a.data());
+    setup_argv.push_back(nullptr);
+    if (!this->setup(int(setup_args.size()), setup_argv.data()))
+        return early(RENDER_USAGE, { "the data folder could not be set up" });
+    {
+        std::string temp_path = per_user_temp_dir(wxFileName::GetTempDir().utf8_str().data(), per_user_temp_id());
+        try {
+            boost::filesystem::create_directories(temp_path);
+        } catch (const std::exception &) {}
+        set_temporary_dir(temp_path);
+    }
+    BOOST_LOG_TRIVIAL(warning) << "showcase-render: " << req.project << (req.path.empty() ? std::string() : " with " + req.path) << " -> " << req.out;
+    boost::nowide::cout << "showcase-render: loading " << req.project << std::endl;
+
+    Slic3r::GUI::GUI_InitParams params;
+    params.argc            = int(setup_args.size());
+    params.argv            = setup_argv.data();
+    params.input_files     = { req.project };
+    params.start_hidden    = true;
+    params.showcase_render = std::make_shared<RenderRequest>(req);
+    const int r = Slic3r::GUI::GUI_Run(params);
+    // The job ends the process itself; coming back here means the hidden instance never got to it.
+    return early(RENDER_FAILED, { "the hidden instance stopped before rendering (GUI exit code " + std::to_string(r) + "; see the log)" });
+}
+#endif // SLIC3R_GUI
 
 bool CLI::setup(int argc, char **argv)
 {
