@@ -4,10 +4,12 @@
 // Showcase (tab after Preview): presentation renders of the model. This is the GL-free half - the
 // scene description, its JSON form in the 3MF (Metadata/showcase/scenes.json), the built-in presets
 // and the pure layout maths the renderer and the exporter share (export sizes, the safe frame, the
-// user's branding watermark). Design: tests/design_showcase_tab.md (phases S1, S2).
+// user's branding watermark) and, from S3, the scene's filament callouts (ShowcaseCallouts.hpp).
+// Design: tests/design_showcase_tab.md (phases S1, S2, S3).
 //
 // Kept wxWidgets- and GL-free so the 3MF code, the CLI and the unit tests can use it.
 
+#include "ShowcaseCallouts.hpp"
 #include "ShowcaseMaterial.hpp"
 
 #include <array>
@@ -24,6 +26,8 @@ namespace Showcase {
 // materials, textured and reflective floors, WebP, the project cover. A schema 1 file reads as is
 // (the new settings take their defaults); an S1 build opens a schema 2 file read-only, so it never
 // writes back a floor or backdrop type it does not know.
+// S3 adds "callouts" to a scene without a new number: an S2 build keeps a scene's unknown keys and
+// writes them back untouched, so the callouts survive it; an S1 build opens the file read-only.
 constexpr int SCHEMA_VERSION = 2;
 
 // The archive folder. Nothing in the core model references it, so other readers ignore it.
@@ -140,6 +144,11 @@ struct Lighting
     bool operator!=(const Lighting &o) const { return !(*this == o); }
 };
 
+// S3: how light the backdrop is (0 black .. 1 white) at a point of the frame (0..1, origin top-left),
+// as the scene describes it - so a callout's ink is picked the same for the screen and every export.
+// Pictures and environments count as the scene's two colours.
+double backdrop_luminance(const Background &background, double nx, double ny);
+
 // The direction TO the light for the given angles, world space, unit length.
 std::array<double, 3> light_direction(float azimuth_deg, float elevation_deg);
 
@@ -249,6 +258,7 @@ struct Scene
     std::vector<CameraView> views;                  // saved, named views
     ExportSettings          export_settings;
     Materials               materials;
+    Callouts                callouts;   // S3
 
     // Keys this build does not know, as a JSON object text, written back on save (forward compat).
     std::string             extra_json;

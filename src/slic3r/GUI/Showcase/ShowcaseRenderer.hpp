@@ -1,7 +1,8 @@
 #ifndef slic3r_GUI_ShowcaseRenderer_hpp_
 #define slic3r_GUI_ShowcaseRenderer_hpp_
 
-// Showcase tab (phases S1, S2): draws the Showcase canvas and renders still images from it.
+// Showcase tab (phases S1, S2, S3): draws the Showcase canvas and renders still images from it.
+// S3 adds the ID pass the filament callouts are anchored with, and their overlay on the live view.
 //
 // One drawing function serves the live view and the export (design 2.2): backdrop, the printer's
 // plate or a floor, the shadow map with a world-fixed light (D14), the objects of the current
@@ -26,6 +27,8 @@
 #include <string>
 #include <vector>
 
+class wxMouseEvent;
+
 namespace Slic3r {
 namespace GUI {
 
@@ -40,6 +43,31 @@ struct ShowcaseImage
     int                  height = 0;
     std::vector<uint8_t> rgba;
     bool empty() const { return width <= 0 || height <= 0 || rgba.empty(); }
+};
+
+// S3: the plate's objects drawn once in flat colours, one per filament region (design 3.3, the
+// "ID pass"), over exactly the safe frame. Callout anchors are found in it, re-anchoring picks in
+// it, and it tells which anchors something else hides.
+struct ShowcaseIdPass
+{
+    struct Entry
+    {
+        int                  object_idx   = -1;
+        int                  volume_idx   = -1;
+        int                  instance_idx = 0;
+        Showcase::BaseRegion base;
+    };
+    int                width  = 0;
+    int                height = 0;
+    std::vector<int>   ids;     // index into entries per pixel, -1 = nothing; top row first
+    std::vector<float> depth;   // window depth 0..1; top row first
+    std::vector<Entry> entries;
+    Matrix4d           view_projection = Matrix4d::Identity();   // world -> clip of the safe frame
+
+    bool         valid() const { return width > 0 && height > 0 && ids.size() == size_t(width) * size_t(height); }
+    const Entry *entry_at(int x, int y) const;
+    // The world point seen at a pixel; false where there is no object.
+    bool         world_at(int x, int y, Vec3d &out) const;
 };
 
 class ShowcaseRenderer
@@ -63,6 +91,30 @@ public:
     using WatermarkProvider = std::function<bool(int frame_w, int frame_h, ShowcaseImage &mark, Showcase::RectI &where)>;
     void set_watermark_provider(WatermarkProvider provider) { m_watermark_provider = std::move(provider); }
     void invalidate_watermark() { ++m_watermark_version; }
+
+    // S3: the callouts over the live view, drawn on the CPU (D6) into a picture of the safe frame's
+    // size. Asked again whenever `version` or the camera changes.
+    using OverlayProvider = std::function<bool(int frame_w, int frame_h, ShowcaseImage &image)>;
+    void set_callout_provider(OverlayProvider provider, std::function<uint64_t()> version)
+    {
+        m_callout_provider = std::move(provider);
+        m_callout_version  = std::move(version);
+        m_callout_key      = 0;
+    }
+    // Runs at the start of each live frame with the camera set up and the context current (the
+    // callouts' ID passes).
+    void set_before_frame(std::function<void()> fn) { m_before_frame = std::move(fn); }
+    // The Showcase canvas' mouse events before the camera gets them; the handler returns true for
+    // the ones it used (dragging a callout).
+    void set_mouse_handler(std::function<bool(wxMouseEvent &)> fn) { m_mouse_handler = std::move(fn); }
+    bool on_mouse(wxMouseEvent &evt) { return m_mouse_handler && m_mouse_handler(evt); }
+
+    // The live camera's view and projection cropped to the safe frame: world -> clip coordinates of
+    // exactly what an export shows. False before the first live frame.
+    bool frame_view_projection(Matrix4d &out) const;
+    // S3: the ID pass, `long_side` pixels along the safe frame's longer side. The context must be
+    // current (from the before-frame hook).
+    bool render_id_pass(int long_side, ShowcaseIdPass &out);
 
     // The live frame (GLCanvas3D::render calls it for the Showcase canvas).
     void render_frame();
@@ -117,6 +169,7 @@ private:
     void            ensure_floor_model();
     bool            ensure_background_texture();
     void            ensure_watermark_texture(int frame_w, int frame_h);
+    void            ensure_callout_texture(int frame_w, int frame_h);
 
     // S2 helpers.
     struct LayerInfo
@@ -183,6 +236,15 @@ private:
     int                        m_wm_frame_w = 0;
     int                        m_wm_frame_h = 0;
     Showcase::RectI            m_wm_rect;
+
+    // S3
+    OverlayProvider            m_callout_provider;
+    std::function<uint64_t()>  m_callout_version;
+    uint64_t                   m_callout_key = 0;
+    unsigned int               m_callout_texture = 0;
+    bool                       m_callout_shown = false;
+    std::function<void()>      m_before_frame;
+    std::function<bool(wxMouseEvent &)> m_mouse_handler;
 };
 
 } // namespace GUI

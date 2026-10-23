@@ -46,6 +46,8 @@ src/slic3r/GUI/GUI_Preview.cpp
 src/slic3r/GUI/Showcase/ShowcaseView.cpp
 src/slic3r/GUI/Showcase/ShowcaseTextures.cpp
 src/slic3r/GUI/Showcase/ShowcaseWatermark.cpp
+src/slic3r/GUI/Showcase/ShowcaseCallouts.cpp
+src/libslic3r/Showcase/ShowcaseCallouts.cpp
 src/slic3r/GUI/HintNotification.cpp
 src/slic3r/GUI/IMSlider.cpp
 src/slic3r/GUI/Widgets/SideTools.cpp

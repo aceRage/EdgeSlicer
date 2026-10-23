@@ -107,6 +107,8 @@ set(lisbslic3r_sources
     Showcase/ShowcaseScene.hpp
     Showcase/ShowcaseAssets.cpp
     Showcase/ShowcaseAssets.hpp
+    Showcase/ShowcaseCallouts.cpp
+    Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
     Showcase/ShowcaseMaterial.hpp
     Showcase/ShowcaseWebP.cpp

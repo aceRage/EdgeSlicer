@@ -294,6 +294,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
     GUI/MainTabs.hpp
+    GUI/Showcase/ShowcaseCallouts.cpp
+    GUI/Showcase/ShowcaseCallouts.hpp
     GUI/Showcase/ShowcaseRenderer.cpp
     GUI/Showcase/ShowcaseRenderer.hpp
     GUI/Showcase/ShowcaseTextures.cpp

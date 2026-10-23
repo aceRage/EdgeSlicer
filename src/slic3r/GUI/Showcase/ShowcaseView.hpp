@@ -4,9 +4,11 @@
 // Showcase tab (phases S1, S2, design tests/design_showcase_tab.md): the plater's third page, after
 // Preview (D1). A canvas of its own (GLCanvas3D::CanvasShowcase, hosted the way AssembleView is)
 // next to a side panel with the scene: backdrop, floor, lights and environment, filament materials
-// and layer lines, camera and saved views, still export and the user's watermark. The scene belongs to the current plate (D17) and is saved in the 3MF
+// and layer lines, camera and saved views, filament callouts (S3), still export and the user's
+// watermark. The scene belongs to the current plate (D17) and is saved in the 3MF
 // (Model::showcase). Nothing here edits the model.
 
+#include "ShowcaseCallouts.hpp"
 #include "ShowcaseWatermark.hpp"
 
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
@@ -113,6 +115,64 @@ private:
     void                     on_export(bool to_clipboard);
     bool                     add_image_file(const std::string &path, int max_side, bool always_png, std::string &sha);
 
+    // --- S3: filament callouts -------------------------------------------------------------------
+    // The plate's objects (model indices) and its layer changes.
+    std::vector<int>         plate_objects() const;
+    const CustomGCode::Info *plate_changes() const;
+    // Drops anchors on objects that are gone and asks for anchors (and the callout list worked out
+    // from the model again) on the next frame. `regenerate`: also re-anchor every callout not placed
+    // by hand, from the current view.
+    void                     callouts_sync(bool regenerate);
+    // GL work at the start of a live frame: anchors, re-anchoring a dropped dot, what is hidden.
+    void                     callouts_before_frame();
+    void                     callouts_find_anchors(Showcase::Scene &scene, bool regenerate);
+    void                     callouts_update_occlusion(const Showcase::Scene &scene);
+    // The callouts as drawn now: label text and where the anchors land on the safe frame.
+    std::vector<ShowcaseCalloutDraw> callouts_draw_list(const ShowcaseLabelContext &labels);
+    double                   callouts_model_center_x() const;
+    bool                     callouts_rasterize(int frame_w, int frame_h, ShowcaseImage &image);
+    // Draws the callouts onto an exported image (before the watermark).
+    void                     callouts_apply_to_export(ShowcaseImage &image, bool has_alpha);
+    bool                     callouts_on_mouse(wxMouseEvent &evt);
+    void                     callouts_edit(int item);
+    void                     callouts_context_menu(int item);
+    void                     callouts_select(int item);
+    void                     refresh_callout_list();
+    // Something the labels show changed: draw them again.
+    void                     callouts_changed() { ++m_callouts.version; set_as_dirty(); }
+
+    struct CalloutUi
+    {
+        bool     pending    = false;   // anchors to find on the next frame
+        bool     regenerate = false;
+        struct Pick
+        {
+            std::string key;
+            int         anchor = 0;
+            double      nx = 0., ny = 0.;   // 0..1 of the frame
+        };
+        std::vector<Pick> picks;           // dots the user dropped, picked on the next frame
+        uint64_t version = 1;              // bumped whenever the labels may look different
+        uint64_t occlusion_camera = 0;     // the camera the occlusion was worked out for
+        std::map<std::string, std::vector<bool>> occluded;
+        ShowcaseCalloutHits hits;          // the last live drawing, frame pixels
+        int      selected = -1;
+        enum class Drag { None, Label, Dot } drag = Drag::None;
+        int      drag_item   = -1;
+        int      drag_anchor = 0;
+        double   grab_dx = 0., grab_dy = 0.;   // label drag: the pointer inside the label
+        double   press_x = 0., press_y = 0.;
+        double   drag_x  = 0., drag_y  = 0.;   // dot drag: where the dot is now, frame pixels
+        bool     moved = false;
+        int      cursor = 0;               // 0 arrow, 1 move, 2 hand
+        // What the filaments look like, kept while nothing changes (the camera moving included).
+        std::shared_ptr<ShowcaseLabelContext> labels;
+        uint64_t labels_version = 0;
+        bool     labels_usage   = false;
+    };
+    CalloutUi                m_callouts;
+    const ShowcaseLabelContext &callouts_labels();
+
     wxGLCanvas              *m_canvas_widget = nullptr;
     GLCanvas3D              *m_canvas        = nullptr;
     std::unique_ptr<ShowcaseRenderer> m_renderer;
@@ -199,6 +259,25 @@ private:
     wxSlider                *m_wm_size = nullptr;
     wxSlider                *m_wm_opacity = nullptr;
     wxSlider                *m_wm_margin = nullptr;
+    // S3
+    wxCheckBox              *m_co_enabled = nullptr;
+    wxChoice                *m_co_layout = nullptr;
+    wxChoice                *m_co_style = nullptr;
+    wxFontPickerCtrl        *m_co_font = nullptr;
+    wxSlider                *m_co_size = nullptr;
+    wxChoice                *m_co_leader = nullptr;
+    wxCheckBox              *m_co_auto_colors = nullptr;
+    wxColourPickerCtrl      *m_co_text = nullptr;
+    wxColourPickerCtrl      *m_co_line = nullptr;
+    wxColourPickerCtrl      *m_co_bg = nullptr;
+    wxSlider                *m_co_bg_opacity = nullptr;
+    std::vector<wxCheckBox *> m_co_fields;   // brand, product, colour name, hex, type, weight, price
+    wxChoice                *m_co_list = nullptr;
+    wxButton                *m_co_edit = nullptr;
+    wxButton                *m_co_hide = nullptr;
+    wxButton                *m_co_regenerate = nullptr;
+    wxButton                *m_co_unpin = nullptr;
+    wxStaticText            *m_co_hint = nullptr;
 };
 
 } // namespace GUI
