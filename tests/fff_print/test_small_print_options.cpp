@@ -2,6 +2,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Arachne/WallToolPaths.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -67,4 +68,49 @@ TEST_CASE("Filament or process role-change G-code works without the machine one"
         { "process_change_extrusion_role_gcode", ";ROLE_PROCESS_ONLY {last_extrusion_role}->{extrusion_role}" },
     });
     CHECK(count_occurrences(gcode, ";ROLE_PROCESS_ONLY ") > 0);
+}
+
+// ---------------------------------------------------------------------------
+// OrcaSlicer #11925: Arachne maximum wall resolution / deviation
+// ---------------------------------------------------------------------------
+TEST_CASE("Arachne wall resolution options default to the former constants", "[SmallPrintOptions][Arachne]")
+{
+    const PrintObjectConfig &object_defaults = PrintObjectConfig::defaults();
+    CHECK(object_defaults.wall_maximum_resolution.value == Approx(0.5));
+    CHECK(object_defaults.wall_maximum_deviation.value == Approx(0.025));
+
+    PrintConfig print_config;
+    const Arachne::WallToolPathsParams params = Arachne::make_paths_params(1, object_defaults, print_config);
+    CHECK(params.wall_maximum_resolution == Arachne::meshfix_maximum_resolution());
+    CHECK(params.wall_maximum_deviation == Arachne::meshfix_maximum_deviation());
+
+    // A default-constructed parameter set (concentric fill) keeps the constants too.
+    const Arachne::WallToolPathsParams plain;
+    CHECK(plain.wall_maximum_resolution == Arachne::meshfix_maximum_resolution());
+    CHECK(plain.wall_maximum_deviation == Arachne::meshfix_maximum_deviation());
+}
+
+TEST_CASE("Arachne wall resolution options reach the wall generator", "[SmallPrintOptions][Arachne]")
+{
+    PrintObjectConfig object_config = PrintObjectConfig::defaults();
+    object_config.wall_maximum_resolution.value = 0.1;
+    object_config.wall_maximum_deviation.value  = 0.01;
+    PrintConfig print_config;
+    const Arachne::WallToolPathsParams params = Arachne::make_paths_params(1, object_config, print_config);
+    CHECK(params.wall_maximum_resolution == scaled<coord_t>(0.1));
+    CHECK(params.wall_maximum_deviation == scaled<coord_t>(0.01));
+
+    // A finer resolution keeps at least as many wall points on a curved model.
+    auto wall_points = [](const char *resolution) {
+        // A 15 mm sphere: curved walls without a long slice.
+        TriangleMesh sphere = mesh(TestMesh::sphere_50mm);
+        sphere.scale(0.3f);
+        const std::string gcode = slice({ sphere }, {
+            { "wall_generator", "arachne" },
+            { "wall_maximum_resolution", resolution },
+            { "wall_maximum_deviation", "0.025" },
+        });
+        return count_occurrences(gcode, "\nG1 X");
+    };
+    CHECK(wall_points("0.05") >= wall_points("0.5"));
 }
