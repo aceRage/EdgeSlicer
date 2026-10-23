@@ -142,7 +142,8 @@ short way round, and other values switch half way.
 - **Timing.** Every layer takes the same time, as on the printer.
 - **Infill and supports.** With toolpaths the build-up lays every extrusion. `"infill": false`
   leaves out sparse and internal solid infill and internal bridges; `"supports": false` leaves out
-  supports, their interfaces and transitions. The clip of an unsliced model has neither. With
+  supports, their interfaces and transitions, and all ironing (support ironing is
+  written with the same role as the model's; the model's ironing only retraces a top surface). The clip of an unsliced model has neither. With
   `--showcase-render`, add `--slice` so a project without a slice gets toolpaths.
 - **Not drawn.** The machine's own extrusions (the start G-code's purge line, prime blobs) are left
   out of every toolpath view in Showcase.

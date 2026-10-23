@@ -1950,9 +1950,14 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
         m_showcase.top_layer   = -2;
     }
     if (look.show_supports != m_showcase.show_supports) {
+        // S5e: support ironing (support_ironing) is written with the plain Ironing role, so the viewer
+        // cannot tell it from the model's. Ironing goes with the supports here: the model's ironing only
+        // retraces a top surface already drawn, at a tiny flow, so leaving it out shows nothing less.
+        // Showcase only; Preview keeps its role switches.
         for (libvgcode::EGCodeExtrusionRole role : { libvgcode::EGCodeExtrusionRole::SupportMaterial,
                                                      libvgcode::EGCodeExtrusionRole::SupportMaterialInterface,
-                                                     libvgcode::EGCodeExtrusionRole::SupportTransition })
+                                                     libvgcode::EGCodeExtrusionRole::SupportTransition,
+                                                     libvgcode::EGCodeExtrusionRole::Ironing })
             showcase_set_role(m_viewer, role, look.show_supports);
         m_showcase.show_supports = look.show_supports;
         m_showcase.top_layer     = -2;

@@ -724,7 +724,7 @@ void ShowcaseView::update_video_enabled()
         // S5b: infill and supports come from the slice; the model's clip has neither.
         const bool sliced = ShowcaseRenderer::toolpaths_available();
         const bool parts  = editable && v.build.enabled && v.build.source != Showcase::BuildSource::Clip && sliced;
-        const wxString tip = sliced ? _L("Lay the infill and the supports with the walls while the print grows. Untick to show only the "
+        const wxString tip = sliced ? _L("Lay the infill and the supports (with any ironing) with the walls while the print grows. Untick to show only the "
                                          "shell growing.")
                                     : _L("Slice the plate first: infill and supports come from the plate's toolpaths.");
         for (wxCheckBox *cb : { m_vid_build_infill, m_vid_build_supports }) {
