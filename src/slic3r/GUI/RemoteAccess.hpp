@@ -145,6 +145,10 @@ private:
     ApiResponse api_plate_preview(int plate);
     ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy);
     ApiResponse api_plate_preview_status(int plate);
+    // slice_v1 (the app's native Slice tab): results detail and warnings of a sliced plate, and
+    // cancelling a running slice job the way the desktop's slicing notification does.
+    ApiResponse api_plate_result(int plate);
+    ApiResponse api_job_cancel(int id);
     ApiResponse api_object_transform(const std::string& form_body);
     // watching=false: the hub's own background poll while nobody looks (ElegooSdcpMonitor::note_watching).
     ApiResponse api_printers(int plate = -1, bool watching = true);
@@ -198,6 +202,8 @@ private:
     std::string      m_title, m_path, m_last_error;
     ColorImport      m_last_color_import;
     bool             m_slicing { false };
+    int              m_slicing_percent { 0 };   // of the plate being sliced, from note_slice_progress
+    int              m_slicing_plate { -1 };    // that plate (-1 when nothing is slicing)
     bool             m_hidden { false };
     std::deque<Attention> m_attention; // ring of auto-answered dialogs, 50 entries
     bool             m_needs_attention { false };

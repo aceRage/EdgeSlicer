@@ -1,0 +1,29 @@
+{
+  "index": 0,
+  "result_id": 1842,
+  "time_s": 9000,
+  "time_silent_s": 12000,
+  "prepare_time_s": 120,
+  "gcode_bytes": 7130112,
+  "filaments": [
+    {"index": 0, "preset": "Bambu PLA Basic @BBL X1C", "type": "PLA", "color": "#E6EBE3",
+     "grams": 49.6, "meters": 16.63, "cost": 0.99, "price_per_kg": 20.0,
+     "model_g": 44.64, "support_g": 2.48, "flush_g": 1.86, "tower_g": 0.62},
+    {"index": 1, "preset": "Generic PETG @BBL X1C", "type": "PETG", "color": "#F5822F",
+     "grams": 12.7, "meters": 4.16, "cost": 0.32, "price_per_kg": 25.0,
+     "model_g": 11.43, "support_g": 0.0, "flush_g": 1.27, "tower_g": 0.0}
+  ],
+  "total": {"grams": 62.3, "meters": 20.79, "cost": 6.31, "material_cost": 1.31, "machine_cost": 5.0,
+            "flush_grams": 3.13, "filament_changes": 24},
+  "cost": {"prices_known": true, "machine_rate_known": true, "machine_rate_per_h": 2.0,
+           "material": 1.31, "machine": 5.0, "fees": 0.0, "total_cost": 6.31, "markup": 0.0,
+           "selling_price": 6.31, "has_markup": false},
+  "warnings": [
+    {"code": "slicing", "severity": "warning", "text": "It seems object Hex planter has floating regions.", "object": "Hex planter"},
+    {"code": "bed_temperature_too_high_than_filament", "severity": "warning",
+     "text": "The bed temperature is above a filament's softening temperature, which may clog the nozzle."},
+    {"code": "gcode_path_conflict", "severity": "warning",
+     "text": "Conflicts of G-code paths have been found at layer 205, z = 41.20 mm. Please separate the conflicted objects farther (Hex planter <-> Drip ring).",
+     "z": [41.2, 41.2]}
+  ]
+}
