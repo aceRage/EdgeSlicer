@@ -3991,7 +3991,13 @@ bool GUI_App::on_init_inner()
         // Remembered so the first printer switch can skip the re-sync when nothing has changed.
         const std::string before = mirror_change_fingerprint(bs_uid);
         profiler.mark("bambu preset mirror: change fingerprint");
-        record_bambu_preset_mirror_run(mirror_bambu_user_presets_ex(bs_uid).clean, before, bs_uid);
+        if (mirror_startup_can_skip(before)) {
+            // Nothing changed since the last clean run, also across restarts (PresetMirrorCore.hpp).
+            s_preset_mirror_gate.seed(before);
+            BOOST_LOG_TRIVIAL(info) << "[preset-mirror] Bambu Studio presets and the mirrored copies unchanged since the last sync; startup sync skipped";
+        } else {
+            record_bambu_preset_mirror_run(mirror_bambu_user_presets_ex(bs_uid).clean, before, bs_uid);
+        }
     }
     profiler.mark("bambu preset mirror: run (sync_bambu_user_presets)");
 
@@ -6847,6 +6853,9 @@ void GUI_App::enable_user_preset_folder(bool enable)
 void GUI_App::record_bambu_preset_mirror_run(bool clean, const std::string& fingerprint_before, const std::string& logged_in_uid)
 {
     s_preset_mirror_gate.record_run(clean, fingerprint_before, clean ? mirror_change_fingerprint(logged_in_uid) : std::string());
+    // Across restarts too: the next start skips its run while this fingerprint still holds; a run
+    // that was not clean removes the record, so the next start runs.
+    mirror_persist_gate(s_preset_mirror_gate.last());
 }
 
 void GUI_App::reload_after_bambu_preset_mirror(int copied)
