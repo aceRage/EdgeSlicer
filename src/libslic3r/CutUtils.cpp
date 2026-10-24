@@ -299,8 +299,44 @@ void Cut::post_process(ModelObject* upper, ModelObject* lower, ModelObjectPtrs& 
 }
 
 
-void Cut::finalize(const ModelObjectPtrs& objects)
+Cut::SavedPaintings Cut::save_paintings(const ModelObject* object) const
 {
+    SavedPaintings saved;
+    if (object == nullptr || !m_attributes.has(ModelObjectCutAttribute::KeepPaint) ||
+        m_instance < 0 || size_t(m_instance) >= object->instances.size())
+        return saved;
+    // The same frame process_volume_cut() and its curved / drawn / flexi siblings carry a part into
+    // before add_cut_volume() takes the result back out of the cut frame: the halves' meshes (plus
+    // their init shift) sit in exactly this frame, which is what restore_painting() maps from.
+    const Transform3d instance_matrix = object->instances[m_instance]->get_transformation().get_matrix_no_offset();
+    for (const ModelVolume* volume : object->volumes) {
+        std::optional<TriangleSelector::SavedPainting> sp = volume->save_painting();
+        if (!sp)
+            continue;
+        sp->mesh.transform(instance_matrix * volume->get_matrix(), true);
+        saved.emplace_back(std::move(sp));
+    }
+    return saved;
+}
+
+void Cut::finalize(const ModelObjectPtrs& objects, const SavedPaintings& saved_paintings)
+{
+    // OrcaSlicer #13472: paint the halves from the parts they were cut out of. Every saved part is
+    // remapped onto every model part of every result (keep_existing_paint, so they add up); the
+    // remap only takes faces that overlap a painted source face with the same orientation, so a
+    // cut face, a kerf band or a joint body stays unpainted. Connector solids are skipped.
+    for (const auto& saved_painting : saved_paintings) {
+        if (!saved_painting)
+            continue;
+        for (ModelObject* object : objects) {
+            if (object == nullptr)
+                continue;
+            for (ModelVolume* volume : object->volumes)
+                if (volume->is_model_part() && !volume->is_cut_connector() && !volume->mesh().empty())
+                    volume->restore_painting(saved_painting, true);
+        }
+    }
+
     //clear model from temporarry objects
     m_model.clear_objects();
 
@@ -385,6 +421,8 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     ModelObject* mo = m_model.objects.front();
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - start";
+
+    const SavedPaintings saved_paintings = save_paintings(mo);
 
     // The two halves must stay parts of ONE object or the joint is not print-in-place:
     // this cut type forces keep-as-parts, keep-upper and keep-lower on regardless of the
@@ -522,7 +560,7 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - end";
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
     return m_model.objects;
 }
 
@@ -611,6 +649,9 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - start";
 
+    // Before the loop below resets every part's painting.
+    const SavedPaintings saved_paintings = save_paintings(mo);
+
     ModelObject* upper{ nullptr };
     if (m_attributes.has(ModelObjectCutAttribute::KeepUpper))
         mo->clone_for_cut(&upper);
@@ -698,7 +739,7 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - end";
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
 
     return m_model.objects;
 }
@@ -789,6 +830,9 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_draw_stroke - start";
 
+    // Before the loop below resets every part's painting.
+    const SavedPaintings saved_paintings = save_paintings(mo);
+
     ModelObject* upper{ nullptr };
     if (m_attributes.has(ModelObjectCutAttribute::KeepUpper))
         mo->clone_for_cut(&upper);
@@ -862,7 +906,7 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_draw_stroke - end";
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
 
     return m_model.objects;
 }
@@ -886,6 +930,9 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
     ModelObject* mo = m_model.objects.front();
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - start";
+
+    // Before the loop below resets every part's painting.
+    const SavedPaintings saved_paintings = save_paintings(mo);
 
     // Clone the object to duplicate instances, materials etc.
     ModelObject* upper{ nullptr };
@@ -965,7 +1012,7 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - end";
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
 
     return m_model.objects;
 }
@@ -1018,9 +1065,13 @@ static void merge_solid_parts_inside_object(ModelObjectPtrs& objects)
 }
 
 
-const ModelObjectPtrs& Cut::perform_by_contour(std::vector<Part> parts, int dowels_count)
+const ModelObjectPtrs& Cut::perform_by_contour(const ModelObject* src_object, std::vector<Part> parts, int dowels_count)
 {
     ModelObject* cut_mo = m_model.objects.front();
+
+    // The parts here are PartSelection's split pieces, which carry no painting: take it from the
+    // object as it was before the split (OrcaSlicer #13472).
+    const SavedPaintings saved_paintings = save_paintings(src_object);
 
     // Clone the object to duplicate instances, materials etc.
     ModelObject* upper{ nullptr };
@@ -1062,7 +1113,7 @@ const ModelObjectPtrs& Cut::perform_by_contour(std::vector<Part> parts, int dowe
         merge_solid_parts_inside_object(cut_object_ptrs);
 
         // replace initial objects in model with cut object 
-        finalize(cut_object_ptrs);
+        finalize(cut_object_ptrs, saved_paintings);
     }
     else if (volumes.size() > cut_parts_cnt) {
         // Means that object is cut with connectors
@@ -1093,7 +1144,7 @@ const ModelObjectPtrs& Cut::perform_by_contour(std::vector<Part> parts, int dowe
         merge_solid_parts_inside_object(cut_object_ptrs);
 
         // replace initial objects in model with cut object
-        finalize(cut_object_ptrs);
+        finalize(cut_object_ptrs, saved_paintings);
 
         // Add Dowel-connectors as separate objects to model
         if (cut_connectors_obj.size() >= 3)
@@ -1119,6 +1170,11 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Tran
         upper->name = upper->name + "_A";
         lower->name = lower->name + "_B";
     }
+
+    // OrcaSlicer #13472. The nested plane cuts below run without KeepPaint and drop it; the
+    // painting is taken here, from the object before any of them, and put back in finalize().
+    const SavedPaintings saved_paintings = save_paintings(cut_mo);
+
     const double groove_half_depth = 0.5 * double(groove.depth);
 
     Model tmp_model_for_cut = Model();
@@ -1245,7 +1301,7 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Tran
         merge_solid_parts_inside_object(cut_object_ptrs);
     }
 
-    finalize(cut_object_ptrs);
+    finalize(cut_object_ptrs, saved_paintings);
 
     return m_model.objects;
 }
