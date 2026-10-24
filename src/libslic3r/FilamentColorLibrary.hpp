@@ -22,6 +22,25 @@ std::string GetFilamentMatchName(const std::string& name);
 FilamentColorMode FilamentColorModeFromConfig(int modeValue);
 int FilamentColorModeToConfig(FilamentColorMode mode);
 
+// Geometry-only 3MF imports apply filament_colour even when the file omits
+// filament_multi_colors / filament_colour_mode. Swatches render those two
+// fields first, so a missing copy leaves leftover or empty slot colors.
+// imported_*_count is 0 when the 3MF omitted the key.
+bool ImportedFilamentMultiFieldsNeedRebuild(size_t imported_multi_count,
+                                            size_t imported_mode_count,
+                                            size_t desired_count);
+
+// Fill only the slots the 3MF did not supply. Existing imported multi-colour
+// strings (including Full Spectrum / gradient `|` lists) and their modes stay
+// untouched. Missing multi slots copy filament_colour; missing modes use Segment.
+// Returns true if any slot was written.
+bool RebuildFilamentMultiFieldsFromPlainColors(const std::vector<std::string>& filament_colour,
+                                               std::vector<std::string>& multi_colors,
+                                               std::vector<int>& color_modes,
+                                               size_t desired_count,
+                                               size_t imported_multi_count,
+                                               size_t imported_mode_count);
+
 struct FilamentColor
 {
     std::vector<std::string> colors;

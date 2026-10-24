@@ -13,6 +13,7 @@
 #include "Plater.hpp"
 #include "RemoteAccess.hpp"
 #include "RemoteControl.hpp" // speaks_sdcp
+#include "RemoteSliceV1.hpp"   // slice_v1 send preview sheet
 #include "SelectMachine.hpp" // CloudTaskNozzleId
 #include "SpoolmanDialog.hpp" // deduct_after_send_async
 #include "Jobs/PrintJob.hpp" // PrintPrepareData
@@ -454,7 +455,31 @@ static std::pair<int, std::string> prepare_bambu(const Request& req, PartPlate* 
         // send honours what the desktop was last told. Zero elsewhere leaves those payloads alone.
         if (!ps.nozzles_info.empty() && ps.nozzles_info != "[]")
             ps.auto_offset_cali = remembered("nozzle_offset_cali") ? 2 : 0;
-        if (obj->is_support_ams_mapping() && ps.task_use_ams) {
+        if (obj->is_support_ams_mapping() && ps.task_use_ams && !req.ams_mapping.empty()) {
+            // slice_v1: the trays the phone picked on its preview sheet (/send/preview). The plate's
+            // exported file is read back as a job and mapped exactly the way the preview and a
+            // reprint map it (BambuReprint), so what the sheet showed is what is sent, and a pick the
+            // printer cannot print (no such tray, another material, the wrong side) is refused here.
+            const BambuReprint::Job job = BambuReprint::load_job(jd._3mf_path.string());
+            if (!job.error.empty()) return { 409, job.error };
+            BambuReprint::Request br;
+            br.mode    = "print";
+            br.mapping = req.ams_mapping;
+            br.use_ams = 1;
+            br.force   = req.force;
+            const BambuReprint::Evaluation ev = BambuReprint::evaluate(obj, job, br);
+            if (ev.status != 200) return { ev.status, ev.error };
+            if (!ev.can_send) {
+                const json probs = ev.preview.value("problems", json::array());
+                return { 409, probs.empty() ? std::string("the filaments cannot be mapped to this printer's AMS")
+                                            : probs.front().value("text", std::string("the filaments cannot be mapped")) };
+            }
+            ps.ams_mapping      = ev.ams_mapping;
+            ps.ams_mapping2     = ev.ams_mapping2;
+            ps.ams_mapping_info = ev.ams_mapping_info;
+            if (obj->is_multi_extruders())
+                ps.task_use_ams = BambuSendMapping::use_ams(ev.result, ps.task_use_ams);
+        } else if (obj->is_support_ams_mapping() && ps.task_use_ams) {
             const std::vector<FilamentInfo> mapped = ams_mapping(obj, plate_filaments(plate), ps.ams_mapping, ps.ams_mapping2, ps.ams_mapping_info);
             // A two-extruder job printing from an external spool: BambuStudio's use_ams rule.
             if (obj->is_multi_extruders())
@@ -552,6 +577,96 @@ static std::vector<SnapmakerLan::FileFilament> file_filaments_of(PartPlate* plat
     return out;
 }
 
+static bool parse_mapping(const std::string& text, size_t filaments, std::vector<int>& out, std::string& error);
+
+// The plate's filaments the way the Elegoo send dialog keys them (Plater's plate_filaments_for_send):
+// type, colour, the preset's alias for the remembered CANVAS mapping, and the nozzle temperature.
+// Only the ones this plate's slice result used.
+static std::vector<ElegooCanvasMapping::UsedFilament> canvas_used_of(PartPlate* plate)
+{
+    std::vector<ElegooCanvasMapping::UsedFilament> out;
+    PresetBundle*                                  bundle = wxGetApp().preset_bundle;
+    if (!bundle)
+        return out;
+    const DynamicPrintConfig   full    = bundle->full_config();
+    const ConfigOptionStrings* colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+    const ConfigOptionStrings* types   = full.option<ConfigOptionStrings>("filament_type");
+    const ConfigOptionInts*    temps   = full.option<ConfigOptionInts>("nozzle_temperature");
+    std::map<size_t, double>   volumes;
+    if (plate && plate->is_slice_result_valid() && plate->get_slice_result())
+        for (const auto& kv : plate->get_slice_result()->print_statistics.total_volumes_per_extruder)
+            volumes[kv.first] = kv.second;
+    for (size_t i = 0; i < bundle->filament_presets.size(); ++i) {
+        auto it = volumes.find(i);
+        if (it == volumes.end() || it->second <= 0)
+            continue;
+        ElegooCanvasMapping::UsedFilament u;
+        u.index       = (int) i;
+        u.colour      = (colours && i < colours->values.size()) ? colours->values[i] : std::string();
+        u.type        = (types && i < types->values.size()) ? types->values[i] : std::string();
+        u.nozzle_temp = (temps && i < temps->values.size()) ? temps->values[i] : 0;
+        if (const Preset* fp = bundle->filaments.find_preset(bundle->filament_presets[i]))
+            u.alias = fp->alias.empty() ? fp->name : fp->alias;
+        else
+            u.alias = bundle->filament_presets[i];
+        out.push_back(std::move(u));
+    }
+    return out;
+}
+
+// The same from an archived record's filaments (no alias there: the remembered mapping then simply
+// does not match, and the colour match picks).
+static std::vector<ElegooCanvasMapping::UsedFilament> canvas_used_of(const std::vector<SnapmakerLan::FileFilament>& filaments)
+{
+    std::vector<ElegooCanvasMapping::UsedFilament> out;
+    for (const SnapmakerLan::FileFilament& f : filaments) {
+        if (!f.used)
+            continue;
+        ElegooCanvasMapping::UsedFilament u;
+        u.index  = f.index;
+        u.type   = f.type;
+        u.colour = f.color;
+        out.push_back(std::move(u));
+    }
+    return out;
+}
+
+// A print on what is an Elegoo Centauri Carbon 1: run_host() reads it and maps the CANVAS before
+// anything is uploaded (canvas_guard_start). `mapping` is the request's "<filament>:<tray>,..."
+// (0-based, the tray's position in the CANVAS list), "as_sliced" for no mapping at all (design D4),
+// or "" for the dialog's automatic choice. False with `error` for a mapping that cannot be read.
+static bool arm_canvas_guard(Prepared& p, PrintHostDevices::Device target, const std::string& preset_model,
+                             std::vector<ElegooCanvasMapping::UsedFilament> used, size_t filament_count, const std::string& mapping,
+                             std::string& error)
+{
+    if (target.printer_model.empty())
+        target.printer_model = preset_model;
+    if (target.host_type != "elegoolink" || !canvas_capable_model(target.printer_model))
+        return true;
+    p.canvas_guard  = true;
+    p.canvas_device = target;
+    p.canvas_mapping.clear();
+    if (mapping == "as_sliced") {
+        for (const ElegooCanvasMapping::UsedFilament& u : used)
+            p.canvas_mapping[u.index] = -1;
+    } else if (!mapping.empty()) {
+        for (const ElegooCanvasMapping::UsedFilament& u : used)
+            filament_count = std::max(filament_count, (size_t) u.index + 1);
+        std::vector<int> v;
+        if (!parse_mapping(mapping, filament_count, v, error))
+            return false;
+        for (size_t i = 0; i < v.size(); ++i)
+            if (v[i] >= 0)
+                p.canvas_mapping[(int) i] = v[i];
+        // A mapping that names none of the used filaments would read as "the automatic choice".
+        if (p.canvas_mapping.empty())
+            for (const ElegooCanvasMapping::UsedFilament& u : used)
+                p.canvas_mapping[u.index] = -1;
+    }
+    p.canvas_used = std::move(used);
+    return true;
+}
+
 // "0:1,1:2" - the file's filament 0 prints on toolhead 1, filament 1 on toolhead 2.
 static bool parse_mapping(const std::string& text, size_t filaments, std::vector<int>& out, std::string& error)
 {
@@ -589,6 +704,17 @@ static bool parse_mapping(const std::string& text, size_t filaments, std::vector
     return true;
 }
 
+// A Snapmaker's status for a send decision. The cached answer (up to PROBE_TTL_MS old) is fine for
+// "it is idle" - run_snapmaker asks again before the start - but a "printing" from the cache may be
+// a print that ended a moment ago, so that one is asked again before the send is refused.
+static SnapmakerLan::Status status_for_send(const SnapmakerLan::Device& d)
+{
+    SnapmakerLan::Status st = SnapmakerLan::status(d);
+    if (st.online && st.printing())
+        st = SnapmakerLan::status_now(d);
+    return st;
+}
+
 // A Snapmaker on the LAN: no connect, no host object, just its address (SnapmakerLan).
 static std::pair<int, std::string> prepare_snapmaker(const Request& req, PartPlate* plate, std::shared_ptr<Prepared> p,
                                                      std::shared_ptr<Prepared>& out)
@@ -597,7 +723,7 @@ static std::pair<int, std::string> prepare_snapmaker(const Request& req, PartPla
     SnapmakerLan::Device d;
     if (!SnapmakerLan::find(req.printer.substr(3), d))
         return { 404, "no such printer: " + req.printer };
-    const SnapmakerLan::Status st = SnapmakerLan::status(d);
+    const SnapmakerLan::Status st = status_for_send(d);
     if (!st.online)
         return { 409, d.name + " is not answering on the network" };
     if (st.login_required)
@@ -695,9 +821,11 @@ static std::pair<int, std::string> prepare_host(const Request& req, PartPlate* p
         // Where the last plate went, so the desktop send dialog and the Device tab preselect the
         // printer the phone just used. Recorded here rather than after the upload, exactly as the
         // desktop records it when its dialog is confirmed: it is the choice, not the outcome.
-        try {
-            PrintHostDevices::set_last_used(model_key, d.id);
-        } catch (...) {}
+        if (!req.preview) {
+            try {
+                PrintHostDevices::set_last_used(model_key, d.id);
+            } catch (...) {}
+        }
     } else {
         if (bundle->use_bbl_network()) return { 409, "the current printer preset sends through the Bambu network; pick that printer by its id" };
         const std::string url = cfg.opt_string("print_host");
@@ -749,6 +877,11 @@ static std::pair<int, std::string> prepare_host(const Request& req, PartPlate* p
             target = PrintHostDevices::from_config(cfg);
         auto* model_opt = cfg.option<ConfigOptionString>("printer_model");
         arm_qidi_guard(*p, target, model_opt ? model_opt->value : std::string(), file_filaments_of(plate));
+        // ... or on an Elegoo Centauri Carbon 1: run() checks it is idle and maps the CANVAS first.
+        std::string error;
+        if (!arm_canvas_guard(*p, target, model_opt ? model_opt->value : std::string(), canvas_used_of(plate),
+                              bundle->filament_presets.size(), req.mapping, error))
+            return { 400, error };
     }
     out                    = p;
     return { 200, "" };
@@ -802,7 +935,9 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
     if (!plate->is_slice_result_valid() || plate->get_slice_result() == nullptr || !plate->is_slice_result_ready_for_print())
         return { 409, "this plate is not sliced, or its result is not printable" };
     // The export helpers and the file name work on the current plate, exactly as the dialogs do.
-    if (plates.get_curr_plate_index() != req.plate) plater->select_plate(req.plate, false);
+    // A preview leaves the PC's shown plate alone: it reads the plate's own slice result and
+    // G-code, and names the file with export_name_for(); nothing is uploaded from it.
+    if (!req.preview && plates.get_curr_plate_index() != req.plate) plater->select_plate(req.plate, false);
 
     auto p        = std::make_shared<Prepared>();
     p->mode       = req.mode;
@@ -1145,6 +1280,365 @@ std::pair<int, std::string> preview_record(const Request& req, json& out)
     return prepare_bambu_record(req, rec, printer, recorded, recorded_kd, record_model, same_printer, mode, unused, &out);
 }
 
+// ------------------------------------------------- slice_v1: a plate send's preview ----
+
+static const char* slot_policy_name(PrintHostDevices::SlotSendPolicy p)
+{
+    using P = PrintHostDevices::SlotSendPolicy;
+    switch (p) {
+    case P::NotApplicable: return "not_applicable";
+    case P::Start: return "start";
+    case P::UploadOnlyBusy: return "upload_only_busy";
+    case P::UploadOnlyNoProbe: return "upload_only_no_probe";
+    case P::NeedsMapping: return "needs_mapping";
+    case P::ConfirmTypeMismatch: return "type_mismatch";
+    case P::StartAsSliced: return "start_as_sliced";
+    case P::MappedToEmpty: return "mapped_to_empty";
+    case P::UploadOnlyInconsistent: return "upload_only_inconsistent";
+    }
+    return "";
+}
+
+// The checks prepare() makes on the plate before anything else (GUI thread).
+static std::pair<int, std::string> plate_sendable(const Request& req)
+{
+    Plater* plater = wxGetApp().plater();
+    if (!plater) return { 503, "no plater" };
+    PartPlateList& plates = plater->get_partplate_list();
+    if (req.plate < 0 || req.plate >= plates.get_plate_count()) return { 404, "no such plate" };
+    if (plater->is_background_process_slicing()) return { 409, "the slicer is slicing" };
+    PartPlate* plate = plates.get_plate(req.plate);
+    if (!plate->is_slice_result_valid() || plate->get_slice_result() == nullptr || !plate->is_slice_result_ready_for_print())
+        return { 409, "this plate is not sliced, or its result is not printable" };
+    return { 200, "" };
+}
+
+static std::vector<SliceV1::SheetFilament> sheet_filaments(const std::vector<SnapmakerLan::FileFilament>& fils)
+{
+    std::vector<SliceV1::SheetFilament> out;
+    for (const SnapmakerLan::FileFilament& f : fils) {
+        if (!f.used) continue;
+        SliceV1::SheetFilament s;
+        s.index = f.index;
+        s.type  = f.type;
+        s.color = f.color;
+        s.grams = f.used_g;
+        out.push_back(s);
+    }
+    return out;
+}
+
+static std::vector<SliceV1::SheetTarget> sheet_slots(const std::vector<PrintHostDevices::Slot>& slots)
+{
+    std::vector<SliceV1::SheetTarget> out;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        SliceV1::SheetTarget t;
+        t.label = PrintHostDevices::slot_tile_label(slots, (int) i);
+        t.id    = t.label;
+        t.wire  = std::to_string(i); // the position, what /send's mapping names
+        t.type  = slots[i].type;
+        t.color = slots[i].loaded ? slots[i].color : std::string();
+        t.ready = slots[i].loaded;
+        out.push_back(t);
+    }
+    return out;
+}
+
+// What the DeviceManager holds for a Bambu printer, read without selecting or connecting it (GUI thread).
+static SliceV1::CachedPrinter cached_printer(const std::string& printer)
+{
+    SliceV1::CachedPrinter c;
+    DeviceManager* dm  = wxGetApp().getDeviceManager();
+    MachineObject* obj = dm ? find_machine(dm, printer) : nullptr;
+    if (!obj) return c;
+    c.known     = true;
+    c.name      = obj->dev_name;
+    c.online    = obj->is_online();
+    c.connected = obj->is_connected();
+    if (obj->last_update_time.time_since_epoch().count() > 0)
+        c.age_s = std::chrono::duration<double>(std::chrono::system_clock::now() - obj->last_update_time).count();
+    return c;
+}
+
+// A Bambu printer: the plate's file exported the way a send exports it, read back as a job and put
+// through the reprint preview (BambuReprint::evaluate) - the send dialog's checks and AMS mapping.
+// Without req.live the printer is never selected or connected: the preview is built from the
+// DeviceManager's current state of it (source "cached"), or, with none usable, says so (source
+// "none", needs_live) so the app can ask again with live=1.
+static std::pair<int, std::string> preview_plate_bambu(const Request& req, const std::string& mode, json& out)
+{
+    auto rc     = std::make_shared<std::pair<int, std::string>>(500, "not run");
+    auto wait   = std::make_shared<bool>(false);
+    auto cached = std::make_shared<SliceV1::CachedPrinter>();
+    auto used   = std::make_shared<std::vector<SnapmakerLan::FileFilament>>();
+    if (!on_main([rc, wait, cached, used, req]() {
+            *rc = plate_sendable(req);
+            if (rc->first != 200) return;
+            if (req.live) {
+                *rc = preselect(req, *wait);
+                return;
+            }
+            *cached = cached_printer(req.printer);
+            *used   = file_filaments_of(wxGetApp().plater()->get_partplate_list().get_plate(req.plate));
+        }, 30000))
+        return { 503, "the slicer is busy" };
+    if (rc->first != 200) return *rc;
+    if (!req.live) {
+        const std::string why = SliceV1::cached_state_problem(*cached);
+        if (!why.empty()) {
+            out            = SliceV1::no_state_sheet(sheet_filaments(*used), why, cached->age_s);
+            out["printer"] = { { "id", req.printer }, { "kind", "bambu" }, { "has_ams", false } };
+            if (!cached->name.empty()) out["printer"]["name"] = cached->name;
+            return { 200, "" };
+        }
+    }
+    if (*wait) {
+        auto ready = std::make_shared<bool>(false);
+        for (int i = 0; i < 30 && !*ready; ++i) { // up to 15 s, as a send waits
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            on_main([ready, req]() { *ready = printer_ready(req.printer); }, 3000);
+        }
+    }
+    // The plate's .gcode.3mf, which is what a send uploads and what a reprint reads. A live preview
+    // makes it the way a send does (the plate becomes the current one, Plater::send_gcode). A
+    // cached preview must not change what the PC shows: it writes the same export (export_3mf with
+    // send_gcode's strategy, for that plate index) to a temp file of its own, without selecting the
+    // plate and without touching the send path's own temp file, and removes it once read. Only the
+    // job data (slice_info, project settings, filament sequence) is read from it.
+    auto path      = std::make_shared<std::string>();
+    auto temporary = std::make_shared<bool>(false);
+    if (!on_main([rc, path, temporary, req]() {
+            *rc = plate_sendable(req);
+            if (rc->first != 200) return;
+            Plater*        plater = wxGetApp().plater();
+            PartPlateList& plates = plater->get_partplate_list();
+            if (req.live) {
+                if (plates.get_curr_plate_index() != req.plate) plater->select_plate(req.plate, false);
+                if (plater->send_gcode(req.plate, nullptr) < 0) { *rc = { 500, "Abnormal print file data. Please slice again" }; return; }
+                PrintPrepareData jd;
+                plater->get_print_job_data(&jd);
+                *path = jd._3mf_path.string();
+                return;
+            }
+            boost::system::error_code ec;
+            const fs::path tmp = fs::temp_directory_path(ec) /
+                                 ("edgeslicer_preview_" + std::to_string((long) wxGetProcessId()) + "_" + std::to_string(req.plate) + ".gcode.3mf");
+            if (ec) { *rc = { 500, "no temp folder for the preview" }; return; }
+            const SaveStrategy strategy = SaveStrategy::Silence | SaveStrategy::SkipModel | SaveStrategy::WithGcode | SaveStrategy::SkipAuxiliary;
+            if (plater->export_3mf(tmp, strategy, req.plate) < 0) { *rc = { 500, "Abnormal print file data. Please slice again" }; return; }
+            *path      = tmp.string();
+            *temporary = true;
+        }, 5 * 60 * 1000))
+        return { 503, "the slicer is busy" };
+    if (rc->first != 200) return *rc;
+    auto job = std::make_shared<BambuReprint::Job>(BambuReprint::load_job(*path));
+    if (*temporary) {
+        boost::system::error_code ec;
+        fs::remove(fs::path(*path), ec);
+    }
+    if (!job->error.empty()) return { 409, job->error };
+
+    BambuReprint::Request br;
+    br.mode               = mode;
+    br.mapping            = req.ams_mapping;
+    br.bed_leveling       = req.bed_leveling;
+    br.flow_cali          = req.flow_cali;
+    br.timelapse          = req.timelapse;
+    br.use_ams            = req.use_ams;
+    br.nozzle_offset_cali = req.nozzle_offset_cali;
+    br.force              = req.force;
+    auto              ev       = std::make_shared<BambuReprint::Evaluation>();
+    auto              editable = std::make_shared<bool>(false);
+    const std::string printer  = req.printer;
+    if (!on_main([ev, job, br, printer, editable]() {
+            DeviceManager* dm  = wxGetApp().getDeviceManager();
+            MachineObject* obj = dm ? find_machine(dm, printer) : nullptr;
+            if (!obj) { ev->status = 404; ev->error = "no such printer: " + printer; return; }
+            *ev       = BambuReprint::evaluate(obj, *job, br);
+            *editable = obj->is_support_ams_mapping() && obj->has_ams();
+        }, 20000))
+        return { 503, "the slicer is busy" };
+    if (ev->status != 200) return { ev->status, ev->error };
+    out = ev->preview;
+    // The H2C nozzle-mapping handshake asks the printer, so only a live preview makes it.
+    if (req.live && !ev->nozzle_mapping_request.empty() && ev->can_send)
+        out["nozzle_mapping"] = nozzle_mapping_probe(printer, ev->nozzle_mapping_request);
+    SliceV1::decorate_ams_preview(out);
+    out["editable"]      = *editable && ev->use_ams;
+    out["unload_at_end"] = nullptr;
+    if (out.contains("printer") && out["printer"].is_object()) out["printer"]["kind"] = "bambu";
+    out["source"]     = req.live ? "live" : "cached";
+    out["needs_live"] = false;
+    out["ams_age_s"]  = !req.live && cached->age_s >= 0. ? json(std::round(cached->age_s)) : json(nullptr);
+    return { 200, "" };
+}
+
+std::pair<int, std::string> preview_plate(const Request& req_in, json& out)
+{
+    const std::string mode = req_in.mode.empty() ? std::string("print") : req_in.mode;
+    if (mode != "upload" && mode != "print") return { 400, "mode must be upload or print" };
+    if (req_in.printer.empty()) return { 400, "printer is required" };
+    const std::string kind = printer_kind_of(req_in.printer);
+
+    if (kind == "bambu") {
+        const auto rc = preview_plate_bambu(req_in, mode, out);
+        if (rc.first == 200) {
+            out["plate"] = req_in.plate;
+            out["mode"]  = mode;
+        }
+        return rc;
+    }
+
+    // Everything else: prepare() itself works out what the send would do (the file, the U1's
+    // toolheads and mapping, the CANVAS / QIDI Box guards), with nothing recorded and nothing sent.
+    Request req = req_in;
+    req.mode    = mode;
+    req.confirm = true; // a preview is not a print; prepare() only wants it for mode=print
+    req.dry_run = true;
+    req.preview = true;
+    req.force   = true; // an empty U1 toolhead is a problem on the sheet, not a refusal
+    auto prepared = std::make_shared<std::shared_ptr<Prepared>>();
+    auto rc       = std::make_shared<std::pair<int, std::string>>(500, "not run");
+    auto used     = std::make_shared<std::vector<SnapmakerLan::FileFilament>>();
+    if (!on_main([rc, prepared, used, req]() {
+            *rc = prepare(req, *prepared);
+            if (rc->first == 200) {
+                PartPlate* plate = wxGetApp().plater()->get_partplate_list().get_plate(req.plate);
+                *used            = file_filaments_of(plate);
+            }
+        }, 5 * 60 * 1000))
+        return { 503, "the slicer is busy" };
+    if (rc->first != 200) return *rc;
+    std::shared_ptr<Prepared> p = *prepared;
+    if (!p) return { 500, "preparing the preview failed" };
+
+    SliceV1::Sheet sheet;
+    sheet.filaments = sheet_filaments(*used);
+    json unload     = nullptr;
+    if (p->kind == "snapmaker" && mode == "print") {
+        // A Snapmaker U1: the file's filaments to toolheads, auto-matched the way its own app does.
+        sheet.mapping_kind = "toolheads";
+        sheet.editable     = true;
+        for (size_t i = 0; i < p->toolheads.size(); ++i) {
+            SliceV1::SheetTarget t;
+            t.label = "T" + std::to_string(i + 1);
+            t.id    = t.label;
+            t.wire  = std::to_string(i);
+            t.type  = p->toolheads[i].type;
+            t.color = p->toolheads[i].loaded ? p->toolheads[i].color : std::string();
+            t.ready = p->toolheads[i].loaded;
+            sheet.targets.push_back(t);
+        }
+        const std::vector<int> automatic = SnapmakerLan::auto_match(p->file_filaments, p->toolheads);
+        for (const SnapmakerLan::FileFilament& f : p->file_filaments) {
+            if (!f.used) continue;
+            sheet.choice[f.index]    = (size_t) f.index < p->mapping.size() ? p->mapping[f.index] : -1;
+            sheet.automatic[f.index] = (size_t) f.index < automatic.size() ? automatic[f.index] : -1;
+        }
+        SliceV1::check_toolheads(sheet, req_in.force);
+        unload = { { "supported", p->unload_supported }, { "value", p->unload_at_end } };
+    } else if (p->canvas_guard && mode == "print") {
+        // An Elegoo Centauri Carbon with a CANVAS: what canvas_guard_start() would read and decide.
+        const PrintHostDevices::Status st =
+            PrintHostDevices::probe(p->canvas_device, PrintHostDevices::probe_timeout_for(p->canvas_device.printer_model));
+        std::map<std::string, ElegooCanvasMapping::Remembered> memory;
+        try {
+            memory = ElegooCanvasMapping::load();
+        } catch (...) {}
+        const std::map<std::string, ElegooCanvasMapping::Remembered> none;
+        const ElegooCanvasMapping::UnattendedPlan plan = ElegooCanvasMapping::plan_unattended_send(
+            st, p->canvas_used, p->canvas_mapping.empty() ? memory : none, p->canvas_mapping, p->printer_name);
+        const ElegooCanvasMapping::UnattendedPlan autoplan =
+            ElegooCanvasMapping::plan_unattended_send(st, p->canvas_used, memory, std::map<int, int>(), p->printer_name);
+        sheet.mapping_kind = "canvas";
+        sheet.editable     = st.online && st.canvas;
+        sheet.targets      = sheet_slots(st.slots);
+        for (size_t i = 0; i < p->canvas_used.size(); ++i) {
+            const int idx        = p->canvas_used[i].index;
+            sheet.choice[idx]    = i < plan.choice.size() ? plan.choice[i] : -1;
+            sheet.automatic[idx] = i < autoplan.choice.size() ? autoplan.choice[i] : -1;
+        }
+        sheet.policy   = slot_policy_name(plan.policy);
+        sheet.can_send = plan.may_start();
+        if (!plan.problems.empty())
+            sheet.problems[-1] = plan.problems;
+        else if (!sheet.can_send && !plan.refusal.empty())
+            sheet.problems[-1] = { SliceV1::preview_tense(plan.refusal) };
+        sheet.mapping = SliceV1::positions_wire(sheet.choice);
+        if (!st.online)
+            sheet.warnings.push_back(p->printer_name + " did not answer");
+        else if (!st.note.empty())
+            sheet.warnings.push_back(st.note);
+    } else if (p->qidi_guard && mode == "print") {
+        // A QIDI printer that may have a Box: what qidi_guard_start() would read and decide. The
+        // Box is always mapped automatically (material first); a send takes no mapping for it.
+        const PrintHostDevices::Status st = PrintHostDevices::probe(p->qidi_device, p->qidi_model_box ? 10 : 3);
+        std::vector<PrintHostDevices::SendFilament> fils;
+        for (const SnapmakerLan::FileFilament& f : p->file_filaments) {
+            PrintHostDevices::SendFilament s;
+            s.index  = f.index;
+            s.type   = f.type;
+            s.colour = f.color;
+            s.used   = f.used;
+            fils.push_back(std::move(s));
+        }
+        PrintHostDevices::QidiAutoMapping am = PrintHostDevices::qidi_auto_mapping(st, fils);
+        am.facts.model_may_have_box          = p->qidi_model_box;
+        const PrintHostDevices::QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(am.facts);
+        if (policy != PrintHostDevices::QidiSendPolicy::NotApplicable) {
+            // The app's contract has no Box kind: "none" (nothing to pick), with the Box's slots and
+            // the automatic mapping shown read-only, and the policy's verdict in can_send.
+            sheet.mapping_kind = "none";
+            sheet.editable     = false;
+            sheet.targets      = sheet_slots(st.slots);
+            // am.mapping is "<filament>:<slot index>,..." (Slot::index, box * 4 + slot).
+            std::map<int, int> by_index;
+            for (size_t i = 0; i < st.slots.size(); ++i) by_index[st.slots[i].index] = (int) i;
+            size_t pos = 0;
+            while (pos < am.mapping.size()) {
+                const size_t      comma = am.mapping.find(',', pos);
+                const std::string item  = am.mapping.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                pos                     = comma == std::string::npos ? am.mapping.size() : comma + 1;
+                const size_t colon      = item.find(':');
+                if (colon == std::string::npos) continue;
+                try {
+                    const int f    = std::stoi(item.substr(0, colon));
+                    const int slot = std::stoi(item.substr(colon + 1));
+                    auto      it   = by_index.find(slot);
+                    sheet.choice[f] = sheet.automatic[f] = it == by_index.end() ? -1 : it->second;
+                } catch (...) {}
+            }
+            sheet.policy   = slot_policy_name(policy);
+            sheet.can_send = policy == PrintHostDevices::QidiSendPolicy::Start;
+            if (!sheet.can_send) sheet.problems[-1] = { SliceV1::preview_tense(PrintHostDevices::qidi_send_refusal(policy)) };
+            if (st.qidi_box_inconsistent && !st.qidi_box_problem.empty()) sheet.warnings.push_back(st.qidi_box_problem);
+        }
+    }
+
+    out                  = SliceV1::sheet_json(sheet);
+    out["plate"]         = req_in.plate;
+    out["mode"]          = mode;
+    out["printer"]       = { { "id", req_in.printer }, { "name", p->printer_name }, { "kind", p->kind }, { "has_ams", false } };
+    out["options"]       = json::object();
+    out["unload_at_end"] = unload;
+    out["source"]        = "live"; // read from the printer (or its own status cache) for this preview
+    out["needs_live"]    = false;
+    out["ams_age_s"]     = nullptr;
+    // prepare() named the file after the current plate (a preview does not switch to the requested
+    // one); the sheet names the requested plate's own file, as a send of it would.
+    if (req_in.name.empty()) {
+        const std::string ext  = p->kind == "snapmaker" || !p->upload.use_3mf ? ".gcode" : ".gcode.3mf";
+        auto              name = std::make_shared<std::string>();
+        const int         idx  = req_in.plate;
+        on_main([name, idx, ext]() { *name = export_name_for(idx, ext); }, 5000);
+        if (!name->empty()) out["upload_name"] = *name;
+    } else if (p->kind == "snapmaker")
+        out["upload_name"] = p->lan_filename;
+    else if (!p->upload.upload_path.empty())
+        out["upload_name"] = p->upload.upload_path.filename().string();
+    return { 200, "" };
+}
+
 std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_ptr<Prepared>& out)
 {
     if (req.record.empty())
@@ -1220,7 +1714,7 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
                                                                          d.model, GcodeArchive::model_names());
             if (!why.empty()) return { 409, why };
         }
-        const SnapmakerLan::Status st = SnapmakerLan::status(d);
+        const SnapmakerLan::Status st = status_for_send(d);
         if (!st.online)
             return { 409, d.name + " is not answering on the network" };
         if (st.login_required)
@@ -1356,8 +1850,13 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
                                                               : PrintHostPostUploadAction::None;
     // A reprint that starts a print on what may be a QIDI with a QIDI Box: mapped from the
     // record's filaments, exactly as a fresh send (arm_qidi_guard).
-    if (mode == "print")
-        arm_qidi_guard(*p, *qdev, *tmodel, file_filaments_of_record(j));
+    if (mode == "print") {
+        const std::vector<SnapmakerLan::FileFilament> filaments = file_filaments_of_record(j);
+        arm_qidi_guard(*p, *qdev, *tmodel, filaments);
+        std::string error;
+        if (!arm_canvas_guard(*p, *qdev, *tmodel, canvas_used_of(filaments), filaments.size(), req.mapping, error))
+            return { 400, error };
+    }
     out = p;
     return { 200, "" };
 }
@@ -1661,6 +2160,10 @@ static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
     PrintHostDevices::QidiAutoMapping am  = PrintHostDevices::qidi_auto_mapping(st, filaments);
     am.facts.model_may_have_box           = p.qidi_model_box;
     const PrintHostDevices::QidiSendPolicy policy = PrintHostDevices::qidi_send_policy(am.facts);
+    // What this send saw in the Box, slot by slot, for the log a report comes with.
+    if (st.qidi || p.qidi_model_box)
+        BOOST_LOG_TRIVIAL(warning) << "RemoteSend: " << PrintHostDevices::describe_qidi_box(st) << " (policy " << (int) policy
+                                   << ", mapping '" << am.mapping << "')";
 
     json q;
     q["probe_ok"]    = am.facts.probe_ok;
@@ -1671,6 +2174,8 @@ static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
     q["mapped"]      = am.facts.mapped_filaments;
     q["mapping"]     = am.mapping;
     q["policy"]      = (int) policy;
+    if (st.qidi_box_inconsistent)
+        q["box_problem"] = st.qidi_box_problem;
     result["qidi"]   = q;
 
     if (policy == PrintHostDevices::QidiSendPolicy::NotApplicable)
@@ -1711,6 +2216,57 @@ static bool qidi_guard_start(Prepared& p, json& result, std::string& why)
     return true;
 }
 
+// Off the GUI thread. An Elegoo Centauri Carbon 1: read it the way the desktop send dialog does
+// (PrintHostDevices::probe: its status and CANVAS, through the hub's on-demand SDCP connection),
+// map the filaments the dialog's way and decide with the slot send policy. True: the start command
+// carries the CANVAS fields (ElegooLink reads them from extended_info). False with the reason:
+// nothing has been uploaded or started.
+static bool canvas_guard_start(Prepared& p, json& result, std::string& why)
+{
+    const PrintHostDevices::Status st     = PrintHostDevices::probe(p.canvas_device, PrintHostDevices::probe_timeout_for(p.canvas_device.printer_model));
+    std::map<std::string, ElegooCanvasMapping::Remembered> memory;
+    try {
+        if (p.canvas_mapping.empty())
+            memory = ElegooCanvasMapping::load();
+    } catch (...) {}
+    const ElegooCanvasMapping::UnattendedPlan plan =
+        ElegooCanvasMapping::plan_unattended_send(st, p.canvas_used, memory, p.canvas_mapping, p.printer_name);
+
+    json c;
+    c["reached"]  = st.online;
+    c["state"]    = st.state;
+    c["canvas"]   = st.canvas;
+    c["policy"]   = (int) plan.policy;
+    c["explicit"] = plan.explicit_mapping;
+    c["used"]     = plan.facts.used_filaments;
+    c["mapped"]   = plan.facts.mapped_filaments;
+    c["mismatches"] = plan.facts.type_mismatches;
+    c["slot_map"] = ElegooStartPrint::format_slot_map(plan.entries);
+    if (!plan.problems.empty())
+        c["problems"] = plan.problems;
+    result["canvas"] = c;
+
+    if (!plan.may_start()) {
+        why = plan.refusal;
+        BOOST_LOG_TRIVIAL(warning) << "RemoteSend: Elegoo print not started (policy " << (int) plan.policy << ", state '" << st.state
+                                   << "', canvas " << st.canvas << ", used " << plan.facts.used_filaments << ", mapped "
+                                   << plan.facts.mapped_filaments << ", mismatches " << plan.facts.type_mismatches << ")";
+        return false;
+    }
+    ElegooCanvasMapping::add_to_extended_info(plan, p.upload.extended_info);
+    BOOST_LOG_TRIVIAL(info) << "RemoteSend: CANVAS slot_map for this print: [" << ElegooStartPrint::format_slot_map(plan.entries) << "]"
+                            << (plan.canvas ? "" : " (no CANVAS: the start command keeps its old shape)");
+    // A mapping somebody chose on the phone is remembered like one chosen in the desktop dialog.
+    if (plan.canvas && plan.explicit_mapping && !plan.entries.empty()) {
+        try {
+            std::map<std::string, ElegooCanvasMapping::Remembered> m = ElegooCanvasMapping::load();
+            ElegooCanvasMapping::remember(m, p.canvas_used, plan.choice, st.slots);
+            ElegooCanvasMapping::save(m);
+        } catch (...) {}
+    }
+    return true;
+}
+
 static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
 {
     json result;
@@ -1728,6 +2284,7 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
     if (p->from_record) result["record"] = p->record_id;
     const bool starts_print = p->upload.post_action == PrintHostPostUploadAction::StartPrint || p->two_step;
     result["qidi_guard"]    = p->qidi_guard && starts_print;
+    result["canvas_guard"]  = p->canvas_guard && starts_print;
     if (p->dry_run) {
         result["dry_run"] = true;
         sink.progress(99, "dry run: nothing was sent");
@@ -1739,6 +2296,16 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
         sink.progress(1, "reading the QIDI Box");
         std::string why;
         if (!qidi_guard_start(*p, result, why)) {
+            sink.done(false, why, result);
+            return;
+        }
+    }
+    // An Elegoo Centauri Carbon 1: idle, and every filament on a loaded CANVAS tray of its own
+    // material, or nothing is uploaded at all.
+    if (p->canvas_guard && starts_print) {
+        sink.progress(1, "reading the printer and its CANVAS");
+        std::string why;
+        if (!canvas_guard_start(*p, result, why)) {
             sink.done(false, why, result);
             return;
         }
@@ -1821,6 +2388,17 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
         return;
     }
     std::string error;
+    // The send was decided on a status up to a few seconds old: ask once more, uncached, before a
+    // print's file goes up, so a print started on the printer meanwhile is never interrupted.
+    if (p->mode == "print") {
+        const SnapmakerLan::Status now = SnapmakerLan::status_now(p->lan);
+        if (now.online && now.printing()) {
+            sink.done(false, p->printer_name + " is " + (now.state == "paused" ? "paused mid-print" : "printing") + " (" + now.filename +
+                                 "), so nothing was sent",
+                      result);
+            return;
+        }
+    }
     if (p->reuse_remote && p->mode == "print") {
         // A reprint of a file the printer still holds: nothing to upload, start it where it is.
         result["uploaded"]    = false;

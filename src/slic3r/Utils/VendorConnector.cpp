@@ -623,12 +623,25 @@ static std::string clean_url(const Spec& spec, const std::string& ref)
     return is_allowed_url(url) ? url : std::string();
 }
 
+// A mapping value starting with "=" is a fixed text used for every item ("=N3D"); "==x" is the
+// literal "=x". Anything else is a path into the item. Not used for id/name (they must differ per item).
+static bool literal_of(const std::string& mapping, std::string& out)
+{
+    if (mapping.empty() || mapping[0] != '=')
+        return false;
+    out = trim(mapping.substr(1)); // "==x" keeps one "="
+    return true;
+}
+
 static std::string field(const Spec& spec, const json& item, const char* name, size_t max_len = 400)
 {
     auto it = spec.fields.find(name);
     if (it == spec.fields.end() || it->second.empty())
         return std::string();
-    std::string v = trim(scalar_text(at_path(item, it->second)));
+    std::string v;
+    if (std::string(name) != "id" && std::string(name) != "name" && literal_of(it->second, v))
+        return v.size() > max_len ? v.substr(0, max_len) : v;
+    v = trim(scalar_text(at_path(item, it->second)));
     return v.size() > max_len ? v.substr(0, max_len) : v;
 }
 
@@ -677,7 +690,19 @@ std::vector<Item> map_items(const Spec& spec, const json& page)
         it.description = field(spec, raw, "description", 2000);
         it.updated     = field(spec, raw, "updated", 64);
         auto tg = spec.fields.find("tags");
-        if (tg != spec.fields.end() && !tg->second.empty()) {
+        std::string tag_lit;
+        if (tg != spec.fields.end() && literal_of(tg->second, tag_lit)) {
+            size_t pos = 0; // "=a, b": the same tags on every item
+            while (pos <= tag_lit.size()) {
+                const size_t c = tag_lit.find(',', pos);
+                const std::string v = trim(tag_lit.substr(pos, c == std::string::npos ? std::string::npos : c - pos));
+                if (!v.empty() && v.size() <= 80 && it.tags.size() < 30 && std::find(it.tags.begin(), it.tags.end(), v) == it.tags.end())
+                    it.tags.push_back(v);
+                if (c == std::string::npos)
+                    break;
+                pos = c + 1;
+            }
+        } else if (tg != spec.fields.end() && !tg->second.empty()) {
             const json t = at_path(raw, tg->second);
             auto add = [&it](const std::string& s) {
                 const std::string v = trim(s);

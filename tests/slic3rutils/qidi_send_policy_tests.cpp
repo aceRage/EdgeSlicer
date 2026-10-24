@@ -290,9 +290,10 @@ TEST_CASE("the QIDI filament list parses types, names and colours", "[qidi][send
 TEST_CASE("save_variables give the Box slots when multi_color_controller names no material", "[qidi][send]")
 {
     const QidiFilaList l    = parse_qidi_filas_cfg(k_filas_cfg);
-    // Box 1: slot 1 PLA white, slot 2 ASA black, slots 3 and 4 empty. value_t0 still on the ASA
-    // slot from the last print - the state the reported printer was in.
+    // Box 1: slot 1 PLA white, slot 2 ASA black, slots 3 and 4 empty (their state words 0). value_t0
+    // still on the ASA slot from the last print - the state the reported printer was in.
     const std::string vars  = "{\"box_count\":1,\"enable_box\":1,\"value_t0\":\"slot1\","
+                              "\"slot0\":1,\"slot1\":1,\"slot2\":0,\"slot3\":0,"
                               "\"filament_slot0\":1,\"color_slot0\":1,\"filament_slot1\":5,\"color_slot1\":2,"
                               "\"filament_slot2\":0,\"filament_slot3\":0}";
     bool              have  = false;
@@ -390,4 +391,293 @@ TEST_CASE("the probe waits longer for a QIDI Box printer only", "[qidi][send]")
     CHECK(probe_timeout_for("Qidi X-Max 4") > 3);
     CHECK(probe_timeout_for("Snapmaker U1") == 3);
     CHECK(probe_timeout_for("") == 3);
+}
+
+// ---- The Box as the firmware really lays it out (fix/qidi-box-index) ---------------------------
+//
+// The 2.4.6.3 report: a QIDI with all its filament in Box 1 (1C ASA) was shown "Unit 1" empty and
+// "Unit 2" 2A-2C PLA, and the send pointed value_t1 at slot7. The send read "loaded" off
+// filament_slot<n>, which the firmware's saved_variables ship as 1 (a PLA) on every slot and keep
+// after a spool is pulled; whether a slot holds filament is its own state word slot<n> and its
+// box_stepper slot<n> sensor (runout_button 0, as QIDIStudio 2.07.02.60 reads it). Box 1 is
+// slots 0-3 (box_config box0 -> box_stepper slot0..3), and value_t<tool> = 'slot<n>' names the
+// same n. Payloads below are shaped like the firmware's save_variables and objects.
+
+#include <nlohmann/json.hpp>
+
+#include <map>
+#include <set>
+
+namespace {
+
+struct FwSlot
+{
+    int  state { 0 };  // save_variables slot<n>: 0 empty, 1 available, 2 loaded, <0 blocked
+    int  fila { 1 };   // filament_slot<n>: the firmware default is 1 on every slot
+    int  colour { 1 }; // color_slot<n>
+};
+
+// save_variables `variables` the way a QIDI Box firmware keeps them: every key 0..16 present with
+// the shipped defaults, then the slots given here.
+nlohmann::json firmware_vars(int box_count, const std::map<int, FwSlot>& slots)
+{
+    nlohmann::json v = nlohmann::json::object();
+    v["box_count"]      = box_count;
+    v["enable_box"]     = 1;
+    v["last_load_slot"] = "slot-1";
+    for (int n = 0; n <= 16; ++n) {
+        v["filament_slot" + std::to_string(n)] = 1;
+        v["color_slot" + std::to_string(n)]    = 1;
+        v["vendor_slot" + std::to_string(n)]   = 1;
+        if (n < 16) {
+            v["slot" + std::to_string(n)]    = 0;
+            v["runout_" + std::to_string(n)] = 0;
+        }
+    }
+    for (const auto& [n, s] : slots) {
+        v["slot" + std::to_string(n)]          = s.state;
+        v["filament_slot" + std::to_string(n)] = s.fila;
+        v["color_slot" + std::to_string(n)]    = s.colour;
+    }
+    return v;
+}
+
+// A Moonraker status answer with save_variables and the box_stepper objects for `steppers` slots
+// (Klipper answers {} for a stepper it does not have). `present` = slots whose sensor sees filament.
+std::string firmware_status(const nlohmann::json& vars, int steppers, const std::set<int>& present,
+                            const nlohmann::json& mcc = nlohmann::json())
+{
+    nlohmann::json st;
+    st["print_stats"]    = { { "state", "standby" } };
+    st["save_variables"] = { { "variables", vars } };
+    for (int n = 0; n < 16; ++n)
+        st["box_stepper slot" + std::to_string(n)] =
+            n < steppers ? nlohmann::json { { "runout_button", present.count(n) ? 0 : 1 } } : nlohmann::json::object();
+    if (!mcc.is_null())
+        st["multi_color_controller"] = mcc;
+    return st.dump();
+}
+
+// The filament list's ids used below: 1 PLA Rapido, 5 ASA; colours 1 #FAFAFA, 2 #060606.
+const QidiFilaList& filas()
+{
+    static const QidiFilaList l = parse_qidi_filas_cfg(k_filas_cfg);
+    return l;
+}
+
+const Slot* slot_at(const Status& st, int index)
+{
+    for (const Slot& s : st.slots)
+        if (s.index == index)
+            return &s;
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("QIDI Box 1 is slots 0-3: one Box, filament only in Box 1, 1C ASA", "[qidi][send][qidibox]")
+{
+    // 1A PLA white, 1B empty (filament_slot1 still the default 1), 1C ASA black, 1D empty.
+    const nlohmann::json vars = firmware_vars(1, { { 0, { 1, 1, 1 } }, { 2, { 1, 5, 2 } } });
+
+    SECTION("save_variables alone: empty slots stay empty whatever filament_slot<n> says") {
+        bool              have  = false;
+        const std::vector<Slot> slots = slots_from_qidi_variables(vars.dump(), filas(), have);
+        REQUIRE(slots.size() == 4);
+        CHECK(have);
+        CHECK(slots[0].index == 0);
+        CHECK(slots[0].name == "Box 1 slot 1");
+        CHECK(slots[0].loaded);
+        CHECK(slots[0].type == "PLA");
+        CHECK_FALSE(slots[1].loaded); // the old read called this a PLA (filament_slot1 = 1)
+        CHECK(slots[1].type.empty());
+        CHECK(slots[2].index == 2);
+        CHECK(slots[2].name == "Box 1 slot 3");
+        CHECK(slots[2].loaded);
+        CHECK(slots[2].type == "ASA");
+        CHECK(slots[2].color == "#060606");
+        CHECK_FALSE(slots[3].loaded);
+    }
+    SECTION("the full answer, with the slot sensors: the ASA plate goes to 1C = slot2") {
+        const Status st = parse_qidi_status(firmware_status(vars, 4, { 0, 2 }), filas());
+        REQUIRE(st.qidi_box);
+        CHECK_FALSE(st.qidi_box_inconsistent);
+        REQUIRE(st.slots.size() == 4);
+        const QidiAutoMapping am = qidi_auto_mapping(st, { filament(0, "ASA", "#000000") });
+        CHECK(am.mapping == "0:2");
+        CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::Start);
+        CHECK(qidi_start_script(QidiPrintOptions { 1, -1, -1 }, am.mapping) ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\nSAVE_VARIABLE VARIABLE=value_t0 VALUE=\"'slot2'\"\n");
+    }
+    SECTION("a white PLA plate goes to 1A, never to the empty 1B that still says PLA") {
+        const Status st = parse_qidi_status(firmware_status(vars, 4, { 0, 2 }), filas());
+        const QidiAutoMapping am = qidi_auto_mapping(st, { filament(0, "PLA", "#FAFAFA"), filament(1, "PLA", "#FAFAFA") });
+        CHECK(am.mapping == "0:0,1:0");
+        CHECK(am.facts.mapped_to_empty == 0);
+        CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::Start);
+    }
+    SECTION("the state word and the sensor disagree on a slot: it is not taken as loaded") {
+        // slot2 says available, its sensor says empty.
+        const Status st = parse_qidi_status(firmware_status(vars, 4, { 0 }), filas());
+        const Slot*  c  = slot_at(st, 2);
+        REQUIRE(c != nullptr);
+        CHECK_FALSE(c->loaded);
+        const QidiAutoMapping am = qidi_auto_mapping(st, { filament(0, "ASA", "#000000") });
+        CHECK(am.mapping.empty());
+        CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::NeedsMapping);
+    }
+    SECTION("the send log names every slot by its Box letter, and nothing else") {
+        const Status      st   = parse_qidi_status(firmware_status(vars, 4, { 0, 2 }), filas());
+        const std::string line = describe_qidi_box(st);
+        CHECK(line.find("1A loaded PLA (PLA Rapido) #FAFAFA") != std::string::npos);
+        CHECK(line.find("1B empty") != std::string::npos);
+        CHECK(line.find("1C loaded ASA #060606") != std::string::npos);
+        CHECK(line.find("1D empty") != std::string::npos);
+        CHECK(line.find("2A") == std::string::npos);
+        CHECK(line.find("INCONSISTENT") == std::string::npos);
+    }
+}
+
+TEST_CASE("QIDI two Boxes with filament only in Box 1: Box 2 is empty, not the defaults", "[qidi][send][qidibox]")
+{
+    // Box 2 (slots 4-7) has nothing loaded; its filament_slot<n> are the shipped 1 (PLA).
+    const nlohmann::json vars = firmware_vars(2, { { 0, { 1, 1, 1 } }, { 1, { 1, 1, 2 } }, { 2, { 2, 5, 2 } } });
+    const Status         st   = parse_qidi_status(firmware_status(vars, 8, { 0, 1, 2 }), filas());
+    REQUIRE(st.qidi_box);
+    CHECK_FALSE(st.qidi_box_inconsistent);
+    REQUIRE(st.slots.size() == 8);
+    for (int n = 4; n < 8; ++n) {
+        const Slot* s = slot_at(st, n);
+        REQUIRE(s != nullptr);
+        CHECK_FALSE(s->loaded);
+        CHECK(s->type.empty());
+    }
+    CHECK(slot_at(st, 2)->type == "ASA");
+    const QidiAutoMapping am = qidi_auto_mapping(st, { filament(0, "PLA", "#060606"), filament(1, "ASA", "#000000") });
+    CHECK(am.mapping == "0:1,1:2");
+    CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::Start);
+}
+
+TEST_CASE("QIDI: the reported 2.4.6.3 picture is refused, not mapped one Box off", "[qidi][send][qidibox]")
+{
+    // What the report showed: box_count 2, Box 1's spools untagged (filament_slot 0) but there,
+    // Box 2's filament_slot4..6 the shipped PLA default - and the printer has slot motors for one
+    // Box only. The old read showed Unit 1 empty, Unit 2 A-C PLA, and mapped T1 to slot7.
+    const nlohmann::json vars =
+        firmware_vars(2, { { 0, { 1, 0, 0 } }, { 1, { 1, 0, 0 } }, { 2, { 1, 0, 0 } }, { 7, { 0, 0, 0 } } });
+
+    SECTION("slot motors for one Box, box_count 2: inconsistent, upload only") {
+        const Status st = parse_qidi_status(firmware_status(vars, 4, { 0, 1, 2 }), filas());
+        CHECK(st.qidi_box);
+        CHECK(st.qidi_box_inconsistent);
+        CHECK(st.qidi_box_problem.find("box_count says 2") != std::string::npos);
+        const QidiAutoMapping am = qidi_auto_mapping(st, { filament(1, "PLA", "#FAFAFA") });
+        CHECK(am.mapping.empty());
+        CHECK(am.facts.box_inconsistent);
+        CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::UploadOnlyInconsistent);
+        CHECK(describe_qidi_box(st).find("INCONSISTENT") != std::string::npos);
+    }
+    SECTION("without the slot motors in the answer: Box 2 reads empty, Box 1 loaded but unnamed, refused") {
+        const Status st = parse_qidi_status(firmware_status(vars, 0, {}), filas());
+        CHECK_FALSE(st.qidi_box_inconsistent);
+        for (int n = 4; n < 8; ++n)
+            CHECK_FALSE(slot_at(st, n)->loaded);
+        CHECK(slot_at(st, 2)->loaded);
+        CHECK(slot_at(st, 2)->type.empty());
+        const QidiAutoMapping am = qidi_auto_mapping(st, { filament(1, "PLA", "#FAFAFA") });
+        CHECK(am.mapping.empty()); // never slot7, never any slot of Box 2
+        CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::NeedsMapping);
+    }
+}
+
+TEST_CASE("QIDI multi_color_controller: both shapes, Box 1 is box0, and a shifted answer is refused", "[qidi][send][qidibox]")
+{
+    SECTION("flat keys (QIDIStudio's 2026-10-19 read): box0_ is Box 1") {
+        nlohmann::json mcc = { { "box_count", 1 } };
+        for (int n = 0; n < 4; ++n)
+            mcc["box0_box_inserted_" + std::to_string(n)] = (n == 0 || n == 2) ? 1 : 0;
+        mcc["box0_filament_info_0_filament_type"] = "PLA";
+        mcc["box0_filament_info_0_color_rgb_str"] = { "#FFFFFF" };
+        mcc["box0_filament_info_2_filament_type"] = "ASA";
+        mcc["box0_filament_info_2_filament_str"]  = "ASA";
+        mcc["box0_filament_info_2_color_rgb_str"] = { "#202020" };
+        const Status st = parse_moonraker_status(nlohmann::json { { "print_stats", { { "state", "standby" } } },
+                                                                  { "multi_color_controller", mcc } }
+                                                     .dump(),
+                                                 "octoprint");
+        REQUIRE(st.qidi_box);
+        CHECK_FALSE(st.qidi_box_inconsistent);
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.slots[2].index == 2);
+        CHECK(st.slots[2].type == "ASA");
+        CHECK(st.slots[2].color == "#202020");
+        CHECK_FALSE(st.slots[3].loaded);
+        CHECK(qidi_auto_mapping(st, { filament(0, "ASA", "#202020") }).mapping == "0:2");
+    }
+    SECTION("box_count 1 but the filament reported in the second Box: refused") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"multi_color_controller\":{\"box_count\":1,\"boxes\":["
+            "   {\"box_inserted_0\":0,\"box_inserted_1\":0,\"box_inserted_2\":0,\"box_inserted_3\":0,\"filament_info\":[{},{},{},{}]},"
+            "   {\"box_inserted_0\":1,\"box_inserted_1\":1,\"box_inserted_2\":1,\"box_inserted_3\":0,\"filament_info\":["
+            "     {\"filament_type\":\"PLA\",\"color_rgb_str\":[\"#FFFFFF\"]},{\"filament_type\":\"PLA\",\"color_rgb_str\":[\"#000000\"]},"
+            "     {\"filament_type\":\"ASA\",\"color_rgb_str\":[\"#202020\"]},{}]}]}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.qidi_box_inconsistent);
+        CHECK(st.qidi_box_problem.find("2A reports filament, but box_count is 1") != std::string::npos);
+        const QidiAutoMapping am = qidi_auto_mapping(st, { filament(0, "ASA", "#202020") });
+        CHECK(am.mapping.empty());
+        CHECK(qidi_send_policy(am.facts) == QidiSendPolicy::UploadOnlyInconsistent);
+    }
+    SECTION("the controller and save_variables count different Boxes: refused") {
+        const nlohmann::json vars = firmware_vars(2, { { 0, { 1, 1, 1 } } });
+        nlohmann::json       mcc  = { { "box_count", 1 } };
+        mcc["box0_box_inserted_0"]                 = 1;
+        mcc["box0_filament_info_0_filament_type"] = "PLA";
+        const Status st = parse_qidi_status(firmware_status(vars, 0, {}, mcc), filas());
+        CHECK(st.qidi_box_inconsistent);
+        CHECK(st.qidi_box_problem.find("counts 1 Box(es), save_variables 2") != std::string::npos);
+    }
+    SECTION("the controller calls a slot loaded that its own state word calls empty: refused") {
+        const nlohmann::json vars = firmware_vars(1, { { 0, { 1, 1, 1 } } }); // slot2 state 0
+        nlohmann::json       mcc  = { { "box_count", 1 } };
+        for (int n = 0; n < 4; ++n)
+            mcc["box0_box_inserted_" + std::to_string(n)] = (n == 0 || n == 2) ? 1 : 0;
+        mcc["box0_filament_info_0_filament_type"] = "PLA";
+        mcc["box0_filament_info_2_filament_type"] = "ASA";
+        const Status st = parse_qidi_status(firmware_status(vars, 4, { 0 }, mcc), filas());
+        CHECK(st.qidi_box_inconsistent);
+        CHECK(st.qidi_box_problem.find("slot 1C") != std::string::npos);
+    }
+}
+
+TEST_CASE("qidi_send_policy never starts on an empty slot or an answer that does not add up", "[qidi][send][qidibox]")
+{
+    SECTION("a filament picked onto an empty slot: never started, not even after a confirm") {
+        QidiSendFacts f    = good_facts();
+        f.mapped_to_empty  = 1;
+        f.type_mismatches  = 1; // an empty slot names no material either
+        CHECK(qidi_send_policy(f) == QidiSendPolicy::MappedToEmpty);
+    }
+    SECTION("an inconsistent Box: upload only, whatever was mapped") {
+        QidiSendFacts f    = good_facts();
+        f.box_inconsistent = true;
+        CHECK(qidi_send_policy(f) == QidiSendPolicy::UploadOnlyInconsistent);
+    }
+    SECTION("busy still wins: nothing goes to a running print") {
+        QidiSendFacts f    = good_facts();
+        f.box_inconsistent = true;
+        f.busy             = true;
+        CHECK(qidi_send_policy(f) == QidiSendPolicy::UploadOnlyBusy);
+    }
+    SECTION("the person switched the Box off for this print: the extruder spool, nothing mapped") {
+        QidiSendFacts f    = good_facts();
+        f.box_inconsistent = true;
+        f.use_box          = false;
+        CHECK(qidi_send_policy(f) == QidiSendPolicy::Start);
+    }
+    SECTION("both refusals say why") {
+        CHECK(qidi_send_refusal(QidiSendPolicy::MappedToEmpty).find("empty") != std::string::npos);
+        CHECK(qidi_send_refusal(QidiSendPolicy::UploadOnlyInconsistent).find("did not add up") != std::string::npos);
+    }
 }

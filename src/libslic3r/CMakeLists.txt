@@ -107,10 +107,20 @@ set(lisbslic3r_sources
     Showcase/ShowcaseScene.hpp
     Showcase/ShowcaseAssets.cpp
     Showcase/ShowcaseAssets.hpp
+    Showcase/ShowcaseCallouts.cpp
+    Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
     Showcase/ShowcaseMaterial.hpp
     Showcase/ShowcaseWebP.cpp
     Showcase/ShowcaseWebP.hpp
+    Showcase/ShowcaseVideo.cpp
+    Showcase/ShowcaseVideo.hpp
+    Showcase/ShowcaseEncoder.cpp
+    Showcase/ShowcaseEncoder.hpp
+    Showcase/ShowcasePath.cpp
+    Showcase/ShowcasePath.hpp
+    Showcase/ShowcaseRenderCli.cpp
+    Showcase/ShowcaseRenderCli.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
@@ -746,6 +756,10 @@ slic3r_unity_build(libslic3r SKIP
     Shape/TextShape.cpp             # OCCT's Handle() macro breaks CGAL headers in neighbours
     Geometry/VoronoiUtilsCgal.cpp   # CGAL must come before OCCT's Handle() macro (Model.hpp -> STEP.hpp)
     FlushVolCalc.cpp                # calls RGB2HSV() from libslic3r_gui; alone it is dropped by the linker in libslic3r_tests
+    Showcase/ShowcaseVideo.cpp      # file-local vector helpers (V3, v_add, PI) with common names
+    Showcase/ShowcaseEncoder.cpp    # boost::process pulls in <windows.h>; png.h setjmp
+    Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
+    Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
 )
 
 if (SLIC3R_STATIC)

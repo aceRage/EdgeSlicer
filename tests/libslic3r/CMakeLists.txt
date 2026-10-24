@@ -10,10 +10,13 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
 	test_untrusted_input.cpp
+	test_post_process_packed_gcode.cpp
 	test_zip_entry_path.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
+	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
+	test_arrange_seq_print.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
 	test_device_info_json.cpp
@@ -103,11 +106,14 @@ add_executable(${_TEST_NAME}_tests
 	test_polygon.cpp
 	test_extruder_variant_normalize.cpp
 	test_preset_diff.cpp
+	test_preset_normalize.cpp
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
+	test_preset_load_full_set.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
+	test_preset_detached_children.cpp
 	test_filament_remap.cpp
 	test_calib_settings.cpp
 	test_preset_printer_type.cpp
@@ -155,6 +161,9 @@ add_executable(${_TEST_NAME}_tests
     test_cost_pricing.cpp
     test_showcase_scene.cpp
     test_showcase_materials.cpp
+    test_showcase_callouts.cpp
+    test_showcase_video.cpp
+    test_showcase_path.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp

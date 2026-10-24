@@ -8,6 +8,7 @@
 #include "I18N.hpp"
 #include "Layer.hpp"
 #include "MutablePolygon.hpp"
+#include "PerimeterGenerator.hpp"
 #include "PrintConfig.hpp"
 #include "Support/SupportMaterial.hpp"
 #include "Support/SupportSpotsGenerator.hpp"
@@ -27,6 +28,7 @@
 #include "Format/STL.hpp"
 #include "format.hpp"
 
+#include <algorithm>
 #include <float.h>
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/concurrent_vector.h>
@@ -155,10 +157,10 @@ std::vector<std::reference_wrapper<const PrintRegion>> PrintObject::all_regions(
     return out;
 }
 
-Polygons create_polyholes(const Point center, const coord_t radius, const coord_t nozzle_diameter, bool multiple)
+Polygons create_polyholes(const Point center, const coord_t radius, const coord_t nozzle_diameter, bool multiple, int max_edges)
 {
     // n = max(round(2 * d), 3); // for 0.4mm nozzle
-    size_t nb_edges = (int)std::max(3, (int)std::round(4.0 * unscaled(radius) * 0.4 / unscaled(nozzle_diameter)));
+    size_t nb_edges = (int)std::min(max_edges, std::max(3, (int)std::round(4.0 * unscaled(radius) * 0.4 / unscaled(nozzle_diameter))));
     // cylinder(h = h, r = d / cos (180 / n), $fn = n);
     //create x polyholes by rotation if multiple
     int nb_polyhole = 1;
@@ -188,8 +190,8 @@ void PrintObject::_transform_hole_to_polyholes()
 {
     // get all circular holes for each layer
     // the id is center-diameter-extruderid
-    //the tuple is Point center; float diameter_max; int extruder_id; coord_t max_variation; bool twist;
-    std::vector<std::vector<std::pair<std::tuple<Point, float, int, coord_t, bool>, Polygon*>>> layerid2center;
+    //the tuple is Point center; float diameter_max; int extruder_id; coord_t max_variation; bool twist; int max_edges;
+    std::vector<std::vector<std::pair<std::tuple<Point, float, int, coord_t, bool, int>, Polygon*>>> layerid2center;
     for (size_t i = 0; i < this->m_layers.size(); i++) layerid2center.emplace_back();
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, m_layers.size()),
@@ -228,9 +230,10 @@ void PrintObject::_transform_hole_to_polyholes()
                                 // SCALED_EPSILON was a bit too harsh. Now using a config, as some may want some harsh setting and some don't.
                                 coord_t max_variation = std::max(SCALED_EPSILON, scale_(this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_threshold.get_abs_value(unscaled(diameter_sum / hole.points.size()))));
                                 bool twist = this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_twisted.value;
+                                int max_edges = this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_max_edges.value;
                                 if (diameter_max - diameter_min < max_variation * 2 && diameter_line_max - diameter_line_min < max_variation * 2) {
                                     layerid2center[layer_idx].emplace_back(
-                                        std::tuple<Point, float, int, coord_t, bool>{center, diameter_max, layer->m_regions[region_idx]->region().config().wall_filament.value, max_variation, twist}, & hole);
+                                        std::tuple<Point, float, int, coord_t, bool, int>{center, diameter_max, layer->m_regions[region_idx]->region().config().wall_filament.value, max_variation, twist, max_edges}, & hole);
                                 }
                             }
                         }
@@ -241,14 +244,14 @@ void PrintObject::_transform_hole_to_polyholes()
         }
     });
     //sort holes per center-diameter
-    std::map<std::tuple<Point, float, int, coord_t, bool>, std::vector<std::pair<Polygon*, int>>> id2layerz2hole;
+    std::map<std::tuple<Point, float, int, coord_t, bool, int>, std::vector<std::pair<Polygon*, int>>> id2layerz2hole;
 
     //search & find hole that span at least X layers
     const size_t min_nb_layers = 2;
     for (size_t layer_idx = 0; layer_idx < this->m_layers.size(); ++layer_idx) {
         for (size_t hole_idx = 0; hole_idx < layerid2center[layer_idx].size(); ++hole_idx) {
             //get all other same polygons
-            std::tuple<Point, float, int, coord_t, bool>& id = layerid2center[layer_idx][hole_idx].first;
+            std::tuple<Point, float, int, coord_t, bool, int>& id = layerid2center[layer_idx][hole_idx].first;
             float max_z = layers()[layer_idx]->print_z;
             std::vector<std::pair<Polygon*, int>> holes;
             holes.emplace_back(layerid2center[layer_idx][hole_idx].second, layer_idx);
@@ -256,7 +259,7 @@ void PrintObject::_transform_hole_to_polyholes()
                 if (layers()[search_layer_idx]->print_z - layers()[search_layer_idx]->height - max_z > EPSILON) break;
                 //search an other polygon with same id
                 for (size_t search_hole_idx = 0; search_hole_idx < layerid2center[search_layer_idx].size(); ++search_hole_idx) {
-                    std::tuple<Point, float, int, coord_t, bool>& search_id = layerid2center[search_layer_idx][search_hole_idx].first;
+                    std::tuple<Point, float, int, coord_t, bool, int>& search_id = layerid2center[search_layer_idx][search_hole_idx].first;
                     if (std::get<2>(id) == std::get<2>(search_id)
                         && std::get<0>(id).distance_to(std::get<0>(search_id)) < std::get<3>(id)
                         && std::abs(std::get<1>(id) - std::get<1>(search_id)) < std::get<3>(id)
@@ -277,7 +280,7 @@ void PrintObject::_transform_hole_to_polyholes()
     }
     //create a polyhole per id and replace holes points by it.
     for (auto entry : id2layerz2hole) {
-        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(print()->config().nozzle_diameter.get_at(std::get<2>(entry.first) - 1)), std::get<4>(entry.first));
+        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(print()->config().nozzle_diameter.get_at(std::get<2>(entry.first) - 1)), std::get<4>(entry.first), std::get<5>(entry.first));
         for (auto& poly_to_replace : entry.second) {
             Polygon polyhole = polyholes[poly_to_replace.second % polyholes.size()];
             //search the clone in layers->slices
@@ -644,9 +647,12 @@ bool PrintObject::need_z_contouring() const
         return false;
     }
 
-    // Contouring needs a single instance to raycast against; see contour_z().
-    if (m_model_object == nullptr || m_model_object->instances.size() != 1) {
-        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, unexpected number of instances";
+    // A PrintObject groups the instances that share their whole transformation but the XY
+    // shift: an instance rotated, scaled or mirrored differently is a PrintObject of its own.
+    // The first instance therefore stands for all of them (Orca #16461). Skip only when there
+    // is no instance to raycast against.
+    if (m_instances.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, no instances";
         return false;
     }
 
@@ -668,7 +674,8 @@ void PrintObject::contour_z()
 
     TriangleMesh mesh = this->m_model_object->raw_mesh();
 
-    ModelInstance           *inst          = m_model_object->instances.front();
+    // The first instance stands for all copies that share this PrintObject's transformation.
+    const ModelInstance     *inst          = m_instances.front().model_instance;
     Point                    center_offset = this->center_offset();
     Geometry::Transformation trans         = inst->get_transformation();
 
@@ -1108,6 +1115,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "outer_wall_speed"
             || opt_key == "small_perimeter_speed"
             || opt_key == "small_perimeter_threshold"
+            || opt_key == "small_support_perimeter_speed"
+            || opt_key == "small_support_perimeter_threshold"
             || opt_key == "sparse_infill_speed"
             || opt_key == "inner_wall_speed"
             || opt_key == "support_speed"
@@ -1115,12 +1124,13 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "top_surface_speed") {
             // Brim is printed below supports, support invalidates brim and skirt.
             steps.emplace_back(posSupportMaterial);
-            if (opt_key == "brim_type") {
-                const auto* old_brim_type = old_config.option<ConfigOptionEnum<BrimType>>(opt_key);
-                const auto* new_brim_type = new_config.option<ConfigOptionEnum<BrimType>>(opt_key);
-                //BBS: When switch to manual brim, the object must have brim, then re-generate perimeter
-                //to make the wall order of first layer to be outer-first
-                if (old_brim_type->value == btOuterOnly || new_brim_type->value == btOuterOnly)
+            if (opt_key == "brim_type" || opt_key == "brim_width") {
+                // Regenerate the walls when the brim starts or stops putting the first layer's outer walls first.
+                auto outer_walls_first = [](const ConfigOptionResolver &config) {
+                    return brim_puts_outer_walls_first(config.option<ConfigOptionEnum<BrimType>>("brim_type")->value,
+                                                       config.option<ConfigOptionFloat>("brim_width")->value);
+                };
+                if (outer_walls_first(old_config) != outer_walls_first(new_config))
                     steps.emplace_back(posPerimeters);
             }
         } else if (
@@ -1240,6 +1250,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "hole_to_polyhole"
             || opt_key == "hole_to_polyhole_threshold"
             || opt_key == "hole_to_polyhole_twisted"
+            || opt_key == "hole_to_polyhole_max_edges"
             ) {
             steps.emplace_back(posSlice);
         } else if (opt_key == "image_fill_params" || opt_key == "image_fill_detail") {
@@ -1379,6 +1390,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "ensure_vertical_shell_thickness"
             || opt_key == "bridge_angle"
             || opt_key == "internal_bridge_angle" // ORCA: Internal bridge angle override
+            || opt_key == "bridge_expansion_extra"
             //BBS
             || opt_key == "bridge_density"
             || opt_key == "internal_bridge_density") {
@@ -1405,6 +1417,9 @@ bool PrintObject::invalidate_state_by_config_options(
                    || opt_key == "infill_shift_step"
                    || opt_key == "sparse_infill_rotate_template"
                    || opt_key == "solid_infill_rotate_template"
+                   || opt_key == "lightning_overhang_angle"
+                   || opt_key == "lightning_prune_angle"
+                   || opt_key == "lightning_straightening_angle"
                    || opt_key == "skeleton_infill_density"
                    || opt_key == "skin_infill_density"
                    || opt_key == "infill_lock_depth"
@@ -1451,6 +1466,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "overhang_reverse_threshold"
             || opt_key == "wall_direction"
             || opt_key == "enable_overhang_speed"
+            || opt_key == "overhang_shadow_inner_wall"
+            || opt_key == "overhang_shadow_speed_ratio"
+            || opt_key == "overhang_shadow_distance"
             || opt_key == "detect_thin_wall"
             || opt_key == "precise_outer_wall") {
             steps.emplace_back(posPerimeters);
@@ -1465,6 +1483,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "wall_transition_filter_deviation"
             || opt_key == "wall_transition_angle"
             || opt_key == "wall_distribution_count"
+            || opt_key == "wall_maximum_resolution"
+            || opt_key == "wall_maximum_deviation"
             || opt_key == "min_feature_size"
             || opt_key == "min_length_factor"
             || opt_key == "min_bead_width") {
@@ -1496,6 +1516,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "outer_wall_speed"
             || opt_key == "small_perimeter_speed"
             || opt_key == "small_perimeter_threshold"
+            || opt_key == "small_support_perimeter_speed"
+            || opt_key == "small_support_perimeter_threshold"
             || opt_key == "sparse_infill_speed"
             || opt_key == "inner_wall_speed"
             || opt_key == "internal_solid_infill_speed"
@@ -2757,6 +2779,33 @@ template<typename T> void debug_draw(std::string name, const T& a, const T& b, c
 }
 #endif
 
+// Whether a fill surface of the layer with the given id prints at full density, by the density Fill.cpp gives its type, once
+// bridge_over_infill() and combine_infill() have run.
+static bool prints_dense(const Surface &surface, const PrintRegionConfig &region_config, const PrintObjectConfig &object_config, size_t layer_id)
+{
+    switch (surface.surface_type) {
+    case stInternal: return region_config.sparse_infill_density.value == 100;
+    case stTop: return region_config.top_surface_density.value == 100;
+    case stBottom: return region_config.bottom_surface_density.value == 100;
+    case stBottomOverSupport: return region_config.bottom_surface_density.value == 100;
+    case stBottomBridge: return region_config.bridge_density.value == 100;
+    case stInternalSolid:
+        // Elephant foot compensation thins it on the layers just above the first (only with no raft, as Fill.cpp),
+        // and combining infill leaves voids below the top layer of each group.
+        if (region_config.infill_combination.value ||
+            (object_config.raft_layers.value == 0 && object_config.elefant_foot_layers_density.value < 100 && layer_id > 0 &&
+             layer_id <= size_t(std::max(object_config.elefant_foot_compensation_layers.value, 1))))
+            return false;
+        // Where it lies over sparse infill, bridge_over_infill() turns it into an internal bridge.
+        [[fallthrough]];
+    case stInternalBridge:
+    case stSecondInternalBridge:
+    case stInternalAfterExternalBridge:
+        return region_config.bridge_density.value == 100 && object_config.internal_bridge_density.value == 100;
+    default: return false;
+    }
+}
+
 // This method applies bridge flow to the first internal solid layer above sparse infill.
 void PrintObject::bridge_over_infill()
 {
@@ -2811,6 +2860,9 @@ void PrintObject::bridge_over_infill()
                 // unsupported area will serve as a filter for polygons worth bridging.
                 Polygons   unsupported_area;
                 Polygons   lower_layer_solids;
+                // Whether every fill surface of the lower layer prints at full density, which the early-out below needs. Kept
+                // apart from the unchanged rule for what counts as a solid to expand.
+                bool       dense_below = true;
                 for (const LayerRegion *region : layer->lower_layer->regions()) {
                     Polygons fill_polys = to_polygons(region->fill_expolygons);
                     // initially consider the whole layer unsupported, but also gather solid layers to later cut off supported parts
@@ -2820,6 +2872,7 @@ void PrintObject::bridge_over_infill()
                             Polygons p = to_polygons(surface.expolygon);
                             lower_layer_solids.insert(lower_layer_solids.end(), p.begin(), p.end());
                         }
+                        dense_below = dense_below && prints_dense(surface, region->region().config(), po->config(), layer->lower_layer->id());
                     }
                 }
                 unsupported_area = closing(unsupported_area, float(SCALED_EPSILON));
@@ -2833,10 +2886,15 @@ void PrintObject::bridge_over_infill()
                 // By expanding the lower layer solids, we avoid making bridges from the tiny internal overhangs that are (very likely) supported by previous layer solids
                 // NOTE that we cannot filter out polygons worth bridging by their area, because sometimes there is a very small internal island that will grow into large hole
                 lower_layer_solids = shrink(lower_layer_solids, 1 * spacing); // first remove thin regions that will not support anything
-                lower_layer_solids = expand(lower_layer_solids, (1 + expansion_multiplier) * spacing); // then expand back (opening), and further for parts supported by internal solids
                 // By shrinking the unsupported area, we avoid making bridges from narrow ensuring region along perimeters.
                 unsupported_area   = shrink(unsupported_area, expansion_multiplier * spacing);
-                unsupported_area   = diff(unsupported_area, lower_layer_solids);
+                // Then expand the solids back (opening), and further for parts supported by internal solids. Over a lower layer
+                // printed at full density the expansion nearly always covers everything, which diff_expanded() proves at a
+                // fraction of the cost. Where Clipper's own offset decimation folds a sliver of solid thinner than about 0.01
+                // of the reach, about 16 µm here, its result may differ from the full expansion's; that is accepted.
+                const float reach  = float((1 + expansion_multiplier) * spacing);
+                unsupported_area   = dense_below ? diff_expanded(unsupported_area, lower_layer_solids, reach) :
+                                                   diff(unsupported_area, expand(lower_layer_solids, reach));
                 
                 for (const LayerRegion *region : layer->regions()) {
                     SurfacesPtr region_internal_solids = region->fill_surfaces.filter_by_type(stInternalSolid);
@@ -3661,6 +3719,11 @@ void PrintObject::bridge_over_infill()
                 ExPolygons additional_ensuring = intersection_ex(additional_ensuring_areas, near_perimeters);
 
                 SurfacesPtr internal_infills = region->fill_surfaces.filter_by_type(stInternal);
+                // Orca #16570: Sloping walls shift adjacent infill contours, so their boundary bands
+                // may intersect in a strip too narrow to print. Widen these contacts into
+                // sparse infill to retain support after the fill's half-spacing inset.
+                additional_ensuring = intersection_ex(internal_infills,
+                    expand_ex(to_polygons(additional_ensuring), region->flow(frSolidInfill).scaled_spacing()));
                 ExPolygons new_internal_infills = diff_ex(internal_infills, cut_from_infill);
                 new_internal_infills            = diff_ex(new_internal_infills, additional_ensuring);
                 for (const ExPolygon &ep : new_internal_infills) {

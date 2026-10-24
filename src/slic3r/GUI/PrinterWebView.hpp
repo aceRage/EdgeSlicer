@@ -81,7 +81,9 @@ public:
     // device of the model's list) gets one when it has an address; whether that printer speaks a
     // file API the tab knows is the tab's business (it says so when it does not). An empty source
     // hides the tab and goes back to the page.
-    void set_storage_device(const PrintHostDevices::Device& device, const std::string& key);
+    // `preset_model` stands in for a device that does not name its printer_model (an Elegoo
+    // Centauri Carbon 1's files are read over SDCP, other models' are not).
+    void set_storage_device(const PrintHostDevices::Device& device, const std::string& key, const std::string& preset_model = std::string());
     void set_storage_source(PrinterStoragePanel::Source source);
 
     // The read-only CANVAS card above the page (ElegooCanvasUI.hpp): shown for a Centauri Carbon 1

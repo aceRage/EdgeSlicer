@@ -1,4 +1,5 @@
 #include "ImGuiWrapper.hpp"
+#include "ImGuiFontRanges.hpp"
 
 #include <cstdio>
 #include <vector>
@@ -1080,6 +1081,11 @@ void ImGuiWrapper::tooltip(const char *label, float wrap_width)
     ImGui::PopStyleColor(1);
     ImGui::PopTextWrapPos();
     ImGui::EndTooltip();
+}
+
+void ImGuiWrapper::tooltip(const std::string &label, float wrap_width)
+{
+    tooltip(label.c_str(), wrap_width);
 }
 
 void ImGuiWrapper::tooltip(const wxString &label, float wrap_width)
@@ -2726,20 +2732,17 @@ void ImGuiWrapper::init_font(bool compress)
     io.Fonts->Clear();
 
     // Create ranges of characters from m_glyph_ranges, possibly adding some OS specific special characters.
+    // OrcaSlicer #15419: every UI language also gets the common alphabetic scripts, because names drawn
+    // through the atlas do not follow the UI language (see ImGuiFontRanges.hpp). The currency symbols of the
+    // cost section's Preferences > Currency symbol stay in as well.
     ImVector<ImWchar> ranges;
-    ImVector<ImWchar> basic_ranges;
-    ImFontAtlas::GlyphRangesBuilder builder;
-    builder.AddRanges(m_glyph_ranges);
-    builder.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesDefault());
-    // Currency symbols (EUR, INR, KRW, RUB, ...) for the cost section's Preferences > Currency symbol.
-    static const ImWchar ranges_currency[] = { 0x20A0, 0x20BF, 0 };
-    builder.AddRanges(ranges_currency);
+    const ImWchar *extra_ranges = nullptr;
 #ifdef __APPLE__
     if (m_font_cjk)
         // Apple keyboard shortcuts are only contained in the CJK fonts.
-        builder.AddRanges(ranges_keyboard_shortcuts);
+        extra_ranges = ranges_keyboard_shortcuts;
 #endif
-    builder.BuildRanges(&ranges); // Build the final result (ordered ranges with all the unique characters submitted)
+    ImGuiFonts::build_text_glyph_ranges(*io.Fonts, m_glyph_ranges, extra_ranges, ranges);
 
     io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
     ImFontConfig cfg = ImFontConfig();
@@ -2747,26 +2750,11 @@ void ImGuiWrapper::init_font(bool compress)
     //FIXME replace with io.Fonts->AddFontFromMemoryTTF(buf_decompressed_data, (int)buf_decompressed_size, m_font_size, nullptr, ranges.Data);
     //https://github.com/ocornut/imgui/issues/220
 
-    // Orca: temp fix for Korean font
-    auto font_name_regular = "HarmonyOS_Sans_SC_Regular.ttf";
-    auto font_name_bold = "HarmonyOS_Sans_SC_Bold.ttf";
-    if(m_glyph_ranges == ImGui::GetIO().Fonts->GetGlyphRangesKorean()) {
-        font_name_regular = "NanumGothic-Regular.ttf";
-        font_name_bold = "NanumGothic-Bold.ttf";
-    }
-    default_font = io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + font_name_regular).c_str(), m_font_size, &cfg, ranges.Data);
-    if (default_font == nullptr) {
-        default_font = io.Fonts->AddFontDefault();
-        if (default_font == nullptr) {
-            throw Slic3r::RuntimeError("ImGui: Could not load deafult font");
-        }
-    }
-
-    bold_font        = io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + font_name_bold).c_str(), m_font_size, &cfg, ranges.Data);
-    if (bold_font == nullptr) {
-        bold_font = io.Fonts->AddFontDefault();
-        if (bold_font == nullptr) { throw Slic3r::RuntimeError("ImGui: Could not load deafult font"); }
-    }
+    // Regular and bold text fonts. The Korean font covers little besides its own script, so the default font
+    // is merged in behind it for the rest of the ranges (OrcaSlicer #15419).
+    if (!ImGuiFonts::add_text_fonts(*io.Fonts, Slic3r::resources_dir() + "/fonts", m_glyph_ranges, ranges, m_font_size, cfg,
+                                    default_font, bold_font))
+        throw Slic3r::RuntimeError("ImGui: Could not load deafult font");
 
 #ifdef _WIN32
     // Render the text a bit larger (see GLCanvas3D::_resize() and issue #3401), but only if the scale factor

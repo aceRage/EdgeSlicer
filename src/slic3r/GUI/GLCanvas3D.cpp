@@ -1784,56 +1784,37 @@ int GLCanvas3D::s_frames_in_progress = 0;
 
 void GLCanvas3D::load_arrange_settings()
 {
-    std::string dist_fff_str =
-        wxGetApp().app_config->get("arrange", "min_object_distance_fff");
+    // Orca #15425: each key must match what _render_arrange_menu writes, which appends a per-mode
+    // postfix to the base name. The sequential-print keys used to be read as
+    // "min_object_distance_seq_print_fff" / "enable_rotation_seq_print", which nothing writes.
+    auto load_float = [](const char *key, float &out) {
+        // The menu writes these with float_to_string_decimal_point, so parse them back
+        // the same way rather than with anything locale-dependent.
+        std::string value  = wxGetApp().app_config->get("arrange", key);
+        size_t      parsed = 0;
+        double      number = string_to_double_decimal_point(value, &parsed);
+        if (parsed > 0)
+            out = float(number);
+    };
+    auto load_bool = [](const char *key, bool &out) {
+        std::string value = wxGetApp().app_config->get("arrange", key);
+        if (!value.empty())
+            out = (value == "1" || value == "true");
+    };
 
-    std::string dist_fff_seq_print_str =
-        wxGetApp().app_config->get("arrange", "min_object_distance_seq_print_fff");
+    load_float("min_object_distance_fff",           m_arrange_settings_fff.distance);
+    load_float("min_object_distance_fff_seq_print", m_arrange_settings_fff_seq_print.distance);
+    load_float("min_object_distance_sla",           m_arrange_settings_sla.distance);
 
-    std::string dist_sla_str =
-        wxGetApp().app_config->get("arrange", "min_object_distance_sla");
+    load_bool("enable_rotation_fff",           m_arrange_settings_fff.enable_rotation);
+    load_bool("enable_rotation_fff_seq_print", m_arrange_settings_fff_seq_print.enable_rotation);
+    load_bool("enable_rotation_sla",           m_arrange_settings_sla.enable_rotation);
 
-    std::string en_rot_fff_str =
-        wxGetApp().app_config->get("arrange", "enable_rotation_fff");
-
-    std::string en_rot_fff_seqp_str =
-        wxGetApp().app_config->get("arrange", "enable_rotation_seq_print");
-
-    std::string en_rot_sla_str =
-        wxGetApp().app_config->get("arrange", "enable_rotation_sla");
-
-    std::string en_allow_multiple_materials_str =
-        wxGetApp().app_config->get("arrange", "allow_multi_materials_on_same_plate");
-
-    std::string en_avoid_region_str =
-        wxGetApp().app_config->get("arrange", "avoid_extrusion_cali_region");
-
-
-
-    if (!dist_fff_str.empty())
-        m_arrange_settings_fff.distance = std::stof(dist_fff_str);
-
-    if (!dist_fff_seq_print_str.empty())
-        m_arrange_settings_fff_seq_print.distance = std::stof(dist_fff_seq_print_str);
-
-    if (!dist_sla_str.empty())
-        m_arrange_settings_sla.distance = std::stof(dist_sla_str);
-
-    if (!en_rot_fff_str.empty())
-        m_arrange_settings_fff.enable_rotation = (en_rot_fff_str == "1" || en_rot_fff_str == "true");
-
-    if (!en_allow_multiple_materials_str.empty())
-        m_arrange_settings_fff.allow_multi_materials_on_same_plate = (en_allow_multiple_materials_str == "1" || en_allow_multiple_materials_str == "true");
-
-
-    if (!en_rot_fff_seqp_str.empty())
-        m_arrange_settings_fff_seq_print.enable_rotation = (en_rot_fff_seqp_str == "1" || en_rot_fff_seqp_str == "true");
-
-    if(!en_avoid_region_str.empty())
-        m_arrange_settings_fff.avoid_extrusion_cali_region = (en_avoid_region_str == "1" || en_avoid_region_str == "true");
-
-    if (!en_rot_sla_str.empty())
-        m_arrange_settings_sla.enable_rotation = (en_rot_sla_str == "1" || en_rot_sla_str == "true");
+    // These two keys carry no postfix, so the one stored value covers both FFF modes.
+    load_bool("allow_multi_materials_on_same_plate", m_arrange_settings_fff.allow_multi_materials_on_same_plate);
+    load_bool("allow_multi_materials_on_same_plate", m_arrange_settings_fff_seq_print.allow_multi_materials_on_same_plate);
+    load_bool("avoid_extrusion_cali_region",         m_arrange_settings_fff.avoid_extrusion_cali_region);
+    load_bool("avoid_extrusion_cali_region",         m_arrange_settings_fff_seq_print.avoid_extrusion_cali_region);
 
     //BBS: add specific arrange settings
     m_arrange_settings_fff_seq_print.is_seq_print = true;
@@ -6172,6 +6153,12 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 
     Point pos(evt.GetX(), evt.GetY());
 
+    // Showcase (S3): dragging, editing or picking a filament callout takes the event before the camera.
+    if (m_canvas_type == ECanvasType::CanvasShowcase && m_showcase_renderer != nullptr && m_showcase_renderer->on_mouse(evt)) {
+        m_mouse.position = evt.Leaving() ? Vec2d(-1.0, -1.0) : pos.cast<double>();
+        return;
+    }
+
     ImGuiWrapper* imgui = wxGetApp().imgui();
     if (m_tooltip.is_in_imgui() && evt.LeftUp())
         // ignore left up events coming from imgui windows and not processed by them
@@ -7049,7 +7036,22 @@ void GLCanvas3D::do_move(const std::string& snapshot_type, bool force_volume_mov
     }
 
     //BBS: notify instance updates to part plater list
-    m_selection.notify_instance_update(-1, 0);
+    // Orca #15613: only what moved - the selected instances, or every instance of an object one of
+    // whose parts moved. Notifying a plate about an instance that stayed put invalidates its slice
+    // result, and notifying instance 0 alone left a moved copy unregistered on its new plate.
+    {
+        const bool whole_object = selection_mode == Selection::Volume || force_volume_move;
+        std::set<std::pair<int, int>> notified;
+        for (unsigned int i : m_selection.get_volume_idxs()) {
+            const GLVolume* v          = m_volumes.volumes[i];
+            const int       object_idx = v->object_idx();
+            if (object_idx < 0 || object_idx >= static_cast<int>(m_model->objects.size()))
+                continue;
+            const std::pair<int, int> key(object_idx, whole_object ? -1 : v->instance_idx());
+            if (notified.insert(key).second)
+                m_selection.notify_instance_update(key.first, key.second);
+        }
+    }
 
     // Fixes flying instances (skipped when the caller wants an instance to stay where it was put)
     for (const std::pair<int, int>& i : done) {
@@ -7962,7 +7964,7 @@ bool GLCanvas3D::_render_orient_menu(float left, float right, float bottom, floa
 }
 
 //BBS: GUI refactor: adjust main toolbar position
-bool GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, float top)
+void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, float top)
 {
     ImGuiWrapper *imgui = wxGetApp().imgui();
 
@@ -7987,7 +7989,9 @@ bool GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
 
     imgui->begin(_L("Arrange options"), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
 
-    ArrangeSettings settings = get_arrange_settings();
+    // Orca #15425: edit the live settings directly. The old code edited a copy and compared its
+    // address with m_arrange_settings_fff_seq_print, which never matched, so sequential-print
+    // settings were written under the layered keys.
     ArrangeSettings &settings_out = get_arrange_settings();
     const float slider_icon_width = imgui->get_slider_icon_size().x;
     const float cursor_slider_left = imgui->calc_text_size(_L("Spacing")).x + imgui->scaled(1.5f);
@@ -7996,13 +8000,9 @@ bool GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
     auto &appcfg = wxGetApp().app_config;
     PrinterTechnology ptech = current_printer_technology();
 
-    bool settings_changed = false;
-    float dist_min = 0.f;  // 0 means auto
     std::string dist_key = "min_object_distance", rot_key = "enable_rotation";
-    std::string bed_shrink_x_key = "bed_shrink_x", bed_shrink_y_key = "bed_shrink_y";
     std::string multi_material_key = "allow_multi_materials_on_same_plate";
     std::string avoid_extrusion_key = "avoid_extrusion_cali_region";
-    std::string align_to_y_axis_key = "align_to_y_axis";
     std::string postfix;
     //BBS:
     bool seq_print = false;
@@ -8010,59 +8010,41 @@ bool GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
     if (ptech == ptSLA) {
         postfix      = "_sla";
     } else if (ptech == ptFFF) {
-        seq_print = &settings == &m_arrange_settings_fff_seq_print;
-        if (seq_print) {
-            postfix      = "_fff_seq_print";
-        } else {
-            postfix     = "_fff";
-        }
+        seq_print    = wxGetApp().global_print_sequence() == PrintSequence::ByObject;
+        postfix      = seq_print ? "_fff_seq_print" : "_fff";
     }
 
     dist_key += postfix;
     rot_key  += postfix;
-    bed_shrink_x_key += postfix;
-    bed_shrink_y_key += postfix;
 
     ImGui::AlignTextToFramePadding();
     imgui->text(_L("Spacing"));
     ImGui::SameLine(1.2 * cursor_slider_left);
     ImGui::PushItemWidth(window_width - slider_icon_width);
-    bool b_Spacing = imgui->bbl_slider_float_style("##Spacing", &settings.distance, dist_min, 100.0f, "%5.2f") || dist_min > settings.distance;
+    bool b_Spacing = imgui->bbl_slider_float_style("##Spacing", &settings_out.distance, 0.f, 100.0f, "%5.2f", 1.0f, /*clamp=*/false);
     ImGui::SameLine(window_width - slider_icon_width + 1.3 * cursor_slider_left);
     ImGui::PushItemWidth(1.5 * slider_icon_width);
-    bool b_spacing_input = ImGui::BBLDragFloat("##spacing_input", &settings.distance, 0.05f, 0.0f, 0.0f, "%.2f");
-    if (b_Spacing || b_spacing_input)
-    {
-        settings.distance = std::max(dist_min, settings.distance);
-        settings_out.distance = settings.distance;
+    bool b_spacing_input = ImGui::BBLDragFloat("##spacing_input", &settings_out.distance, 0.05f, 0.0f, 0.0f, "%.2f");
+    if (b_Spacing || b_spacing_input) {
+        settings_out.distance = std::max(0.f, settings_out.distance);
         appcfg->set("arrange", dist_key.c_str(), float_to_string_decimal_point(settings_out.distance));
-        settings_changed = true;
     }
     imgui->text(_L("0 means auto spacing."));
 
     ImGui::Separator();
-    if (imgui->bbl_checkbox(_L("Auto rotate for arrangement"), settings.enable_rotation)) {
-        settings_out.enable_rotation = settings.enable_rotation;
+    if (imgui->bbl_checkbox(_L("Auto rotate for arrangement"), settings_out.enable_rotation))
         appcfg->set("arrange", rot_key.c_str(), settings_out.enable_rotation);
-        settings_changed = true;
-    }
 
-    if (imgui->bbl_checkbox(_L("Allow multiple materials on same plate"), settings.allow_multi_materials_on_same_plate)) {
-        settings_out.allow_multi_materials_on_same_plate = settings.allow_multi_materials_on_same_plate;
-        appcfg->set("arrange", multi_material_key.c_str(), settings_out.allow_multi_materials_on_same_plate );
-        settings_changed = true;
-    }
+    if (imgui->bbl_checkbox(_L("Allow multiple materials on same plate"), settings_out.allow_multi_materials_on_same_plate))
+        appcfg->set("arrange", multi_material_key.c_str(), settings_out.allow_multi_materials_on_same_plate);
 
     // only show this option if the printer has micro Lidar and can do first layer scan
     DynamicPrintConfig &current_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
     const bool has_lidar = wxGetApp().preset_bundle->is_bbl_vendor();
     auto                op             = current_config.option("scan_first_layer");
     if (has_lidar && op && op->getBool()) {
-        if (imgui->bbl_checkbox(_L("Avoid extrusion calibration region"), settings.avoid_extrusion_cali_region)) {
-            settings_out.avoid_extrusion_cali_region = settings.avoid_extrusion_cali_region;
-            appcfg->set("arrange", avoid_extrusion_key.c_str(), settings_out.avoid_extrusion_cali_region ? "1" : "0");
-            settings_changed = true;
-        }
+        if (imgui->bbl_checkbox(_L("Avoid extrusion calibration region"), settings_out.avoid_extrusion_cali_region))
+            appcfg->set("arrange", avoid_extrusion_key.c_str(), settings_out.avoid_extrusion_cali_region);
     } else {
         settings_out.avoid_extrusion_cali_region = false;
     }
@@ -8074,11 +8056,8 @@ bool GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
             settings_out.align_to_y_axis = false;
         }
 
-        if (imgui->bbl_checkbox(_L("Align to Y axis"), settings.align_to_y_axis)) {
-            settings_out.align_to_y_axis = settings.align_to_y_axis;
-            appcfg->set("arrange", align_to_y_axis_key, settings_out.align_to_y_axis ? "1" : "0");
-            settings_changed = true;
-        }
+        // Not persisted: Plater sets it from printer_structure on every printer change.
+        imgui->bbl_checkbox(_L("Align to Y axis"), settings_out.align_to_y_axis);
 
         if (settings_out.enable_rotation == true) { imgui->disabled_end(); }
     }
@@ -8094,7 +8073,6 @@ bool GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
 
     if (imgui->button(_L("Reset"))) {
         settings_out = ArrangeSettings{};
-        settings_out.distance = std::max(dist_min, settings_out.distance);
         //BBS: add specific arrange settings
         if (seq_print) settings_out.is_seq_print = true;
 
@@ -8104,18 +8082,16 @@ bool GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         else
             settings_out.align_to_y_axis = false;
 
-        appcfg->set("arrange", dist_key, float_to_string_decimal_point(settings_out.distance));
-        appcfg->set("arrange", rot_key, settings_out.enable_rotation ? "1" : "0");
-        appcfg->set("arrange", align_to_y_axis_key, settings_out.align_to_y_axis ? "1" : "0");
-        settings_changed = true;
+        appcfg->erase("arrange", dist_key);
+        appcfg->erase("arrange", rot_key);
+        appcfg->erase("arrange", multi_material_key);
+        appcfg->erase("arrange", avoid_extrusion_key);
     }
     ImGui::PopStyleVar(1);
     imgui->end();
 
     //BBS
     ImGuiWrapper::pop_toolbar_style();
-
-    return settings_changed;
 }
 
 static const float cameraProjection[16] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
@@ -10350,15 +10326,27 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
             glsafe(::glPolygonOffset(4.0f, 4.0f));
             glsafe(::glDisable(GL_CULL_FACE));
 
-            shader->start_using();
-            shader->set_uniform("projection_matrix", Transform3d(light_proj));
+            // Showcase S5: during a layer build-up only what is laid casts a shadow.
+            GLShaderProgram* caster = shader;
+            if (render_settings.has_clip_top()) {
+                if (GLShaderProgram* clip = wxGetApp().get_shader("showcase_shadow_clip"); clip != nullptr)
+                    caster = clip;
+            }
+            caster->start_using();
+            caster->set_uniform("projection_matrix", Transform3d(light_proj));
+            if (caster != shader)
+                caster->set_uniform("clip_z", float(render_settings.clip_top));
             for (GLVolume* volume : m_volumes.volumes) {
                 if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
                     continue;
-                shader->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
+                caster->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
+                if (caster != shader) {
+                    caster->set_uniform("volume_world_matrix", volume->world_matrix());
+                    caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+                }
                 volume->model.render();
             }
-            shader->stop_using();
+            caster->stop_using();
 
             // Restore state
             glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
@@ -12683,6 +12671,7 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
     std::string text;
     ErrorType error = ErrorType::PLATER_WARNING;
     const ModelObject* conflictObj=nullptr;
+    const ModelInstance* conflictInst=nullptr;
     switch (warning) {
     case EWarning::GCodeConflict: {
         static std::string prevConflictText;
@@ -12697,8 +12686,12 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
                 height % objName1 % objName2)
                    .str();
         prevConflictText        = text;
-        const PrintObject *obj2 = reinterpret_cast<const PrintObject *>(m_gcode_viewer.m_conflict_result.value()._obj2);
-        conflictObj             = obj2->model_object();
+        // ORCA #12122: the conflict names the PrintInstance, so the jump selects that instance.
+        const PrintInstance *inst2 = reinterpret_cast<const PrintInstance *>(m_gcode_viewer.m_conflict_result.value()._obj2);
+        if (inst2) {
+            if (inst2->model_instance) conflictInst = inst2->model_instance;
+            else if (inst2->print_object) conflictObj = inst2->print_object->model_object();
+        }
         break;
     }
     case EWarning::ObjectOutside:      text = _u8L("An object is laid over the plate boundaries."); break;
@@ -12745,8 +12738,12 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
             notification_manager.close_plater_error_notification(text);
         break;
     case SLICING_SERIOUS_WARNING:
-        if (state)
-            notification_manager.push_slicing_serious_warning_notification(text, conflictObj ? std::vector<ModelObject const*>{conflictObj} : std::vector<ModelObject const*>{});
+        if (state) {
+            if (conflictInst)
+                notification_manager.push_slicing_serious_warning_notification(text, std::vector<ModelInstance const*>{conflictInst});
+            else
+                notification_manager.push_slicing_serious_warning_notification(text, conflictObj ? std::vector<ModelObject const*>{conflictObj} : std::vector<ModelObject const*>{});
+        }
         else
             notification_manager.close_slicing_serious_warning_notification(text);
         break;

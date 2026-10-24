@@ -828,7 +828,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("bottom_surface_density", has_bottom_shell);
 
     for (auto el : { "infill_direction", "sparse_infill_line_width", "gap_fill_target","filter_out_gap_fill","infill_wall_overlap",
-        "sparse_infill_speed", "bridge_speed", "internal_bridge_speed", "bridge_angle", "internal_bridge_angle",
+        "sparse_infill_speed", "bridge_speed", "internal_bridge_speed", "bridge_angle", "internal_bridge_angle", "bridge_expansion_extra",
         "solid_infill_direction", "solid_infill_rotate_template", "internal_solid_infill_pattern", "solid_infill_filament",
         })
         toggle_field(el, have_infill || has_solid_infill);
@@ -1007,6 +1007,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     (config->opt_int("skirt_height") > 1 || config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
     toggle_line("support_speed", have_support_material || have_skirt_height || stab_on);
     toggle_line("support_interface_speed", have_support_material && have_support_interface);
+    // Orca #13459
+    for (auto el : {"small_support_perimeter_speed", "small_support_perimeter_threshold"})
+        toggle_line(el, have_support_material);
 
     // BBS
     //toggle_field("support_material_synchronize_layers", have_support_soluble);
@@ -1129,6 +1132,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_line(el, has_overhang_speed);
 
     toggle_line("slowdown_for_curled_perimeters", has_overhang_speed);
+    toggle_line("overhang_shadow_inner_wall", has_overhang_speed);
+    const bool has_overhang_shadow = has_overhang_speed && config->opt_bool("overhang_shadow_inner_wall");
+    toggle_line("overhang_shadow_speed_ratio", has_overhang_shadow);
+    toggle_line("overhang_shadow_distance", has_overhang_shadow);
 
     // Edge: layer-time speed smoothing. A/B fields when mode is a speed-up; C fields when Slow down.
     // Max variation is shared by every non-Off mode.
@@ -1168,7 +1175,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
-        "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width"})
+        "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width",
+        "wall_maximum_resolution", "wall_maximum_deviation"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
 
@@ -1190,7 +1198,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("min_width_top_surface", config->opt_bool("only_one_wall_top") || ((config->opt_float("min_length_factor") > 0.5f) && have_arachne)); // 0.5 is default value
 
-    for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted" })
+    for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges" })
         toggle_line(el, config->opt_bool("hole_to_polyhole"));
 
     bool has_detect_overhang_wall = config->opt_bool("detect_overhang_wall");
@@ -1264,6 +1272,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
 
     toggle_line("infill_overhang_angle", config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLateralHoneycomb);
+
+    bool lightning_options = config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLightning;
+    for (auto el : { "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle" })
+        toggle_line(el, lightning_options);
 }
 
 void ConfigManipulation::update_print_sla_config(DynamicPrintConfig* config, const bool is_global_config/* = false*/)

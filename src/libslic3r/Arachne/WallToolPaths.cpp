@@ -54,6 +54,12 @@ WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfi
         input_params.wall_distribution_count = print_object_config.wall_distribution_count.value;
 
         input_params.is_top_or_bottom_layer = false; // Set to default value
+
+        if (const auto& wall_maximum_resolution_opt = print_object_config.wall_maximum_resolution)
+            input_params.wall_maximum_resolution = scaled<coord_t>(wall_maximum_resolution_opt.value);
+
+        if (const auto& wall_maximum_deviation_opt = print_object_config.wall_maximum_deviation)
+            input_params.wall_maximum_deviation = scaled<coord_t>(wall_maximum_deviation_opt.value);
     }
 
     return input_params;
@@ -125,7 +131,11 @@ void simplify(Polygon &thiss, const int64_t smallest_line_segment_squared, const
         accumulated_area_removed += removed_area_next;
 
         const int64_t length2 = (current - previous).cast<int64_t>().squaredNorm();
-        if (length2 < scaled<int64_t>(25.)) {
+
+        // Orca:
+        // Checking if the segment's length is smaller than 5 microns (0.005mm).
+        // The value of `length2` is scaled and squared, so we need to compare it with the squared value of 5 microns
+        if (length2 < Slic3r::sqr(scaled<coord_t>(0.005))) {
             // We're allowed to always delete segments of less than 5 micron.
             continue;
         }
@@ -473,8 +483,8 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
     if (this->inset_count < 1)
         return toolpaths;
 
-    const coord_t smallest_segment = Slic3r::Arachne::meshfix_maximum_resolution();
-    const coord_t allowed_distance = Slic3r::Arachne::meshfix_maximum_deviation();
+    const coord_t smallest_segment = m_params.wall_maximum_resolution;
+    const coord_t allowed_distance = m_params.wall_maximum_deviation;
     const coord_t epsilon_offset = (allowed_distance / 2) - 1;
     const double  transitioning_angle = Geometry::deg2rad(m_params.wall_transition_angle);
     const coord_t discretization_step_size = scaled<coord_t>(0.8);
@@ -547,7 +557,7 @@ const std::vector<VariableWidthLines> &WallToolPaths::generate()
 
     separateOutInnerContour();
 
-    simplifyToolPaths(toolpaths);
+    simplifyToolPaths(toolpaths, m_params);
 
     removeEmptyToolPaths(toolpaths);
     assert(std::is_sorted(toolpaths.cbegin(), toolpaths.cend(),
@@ -688,16 +698,21 @@ void WallToolPaths::removeSmallLines(std::vector<VariableWidthLines> &toolpaths)
     }
 }
 
-void WallToolPaths::simplifyToolPaths(std::vector<VariableWidthLines> &toolpaths)
+void WallToolPaths::simplifyToolPaths(std::vector<VariableWidthLines>& toolpaths, const WallToolPathsParams& params)
 {
-    for (size_t toolpaths_idx = 0; toolpaths_idx < toolpaths.size(); ++toolpaths_idx)
+    const int64_t maximum_resolution = params.wall_maximum_resolution;
+    const int64_t maximum_deviation  = params.wall_maximum_deviation;
+
+    const int64_t smallest_line_segment_squared  = maximum_resolution * maximum_resolution;
+    const int64_t allowed_error_distance_squared = maximum_deviation * maximum_deviation;
+
+    const int64_t maximum_extrusion_area_deviation = Slic3r::Arachne::meshfix_maximum_extrusion_area_deviation(); // unit: μm²
+
+    for (VariableWidthLines& lines : toolpaths)
     {
-        const int64_t maximum_resolution = Slic3r::Arachne::meshfix_maximum_resolution();
-        const int64_t maximum_deviation = Slic3r::Arachne::meshfix_maximum_deviation();
-        const int64_t maximum_extrusion_area_deviation = Slic3r::Arachne::meshfix_maximum_extrusion_area_deviation(); // unit: μm²
-        for (auto& line : toolpaths[toolpaths_idx])
+        for (ExtrusionLine& line : lines)
         {
-            line.simplify(maximum_resolution * maximum_resolution, maximum_deviation * maximum_deviation, maximum_extrusion_area_deviation);
+            line.simplify(smallest_line_segment_squared, allowed_error_distance_squared, maximum_extrusion_area_deviation);
         }
     }
 }
@@ -786,7 +801,8 @@ bool WallToolPaths::removeEmptyToolPaths(std::vector<VariableWidthLines> &toolpa
      * Get the order constraints of the insets when printing walls per region / hole.
      * Each returned pair consists of adjacent wall lines where the left has an inset_idx one lower than the right.
      *
-     * Odd walls should always go after their enclosing wall polygons.
+     * Odd walls follow the same order as even ones, so that the centre line of a narrow wall is an inner wall
+     * like any other when printing inner to outer.
      *
      * \param outer_to_inner Whether the wall polygons with a lower inset_idx should go before those with a higher one.
  */
@@ -860,12 +876,7 @@ WallToolPaths::ExtrusionLineSet WallToolPaths::getRegionOrder(const std::vector<
                 continue; // not directly adjacent
             if (!shorter_then(loc_here - lineloc_nearby.j.p, (lineloc_here.j.w + lineloc_nearby.j.w) / 2 * diagonal_extension))
                 continue; // points are too far away from each other
-            if (here->is_odd || nearby->is_odd) {
-                if (here->is_odd && !nearby->is_odd && nearby->inset_idx < here->inset_idx)
-                    order_requirements.emplace(std::make_pair(nearby, here));
-                if (nearby->is_odd && !here->is_odd && here->inset_idx < nearby->inset_idx)
-                    order_requirements.emplace(std::make_pair(here, nearby));
-            } else if ((nearby->inset_idx < here->inset_idx) == outer_to_inner) {
+            if ((nearby->inset_idx < here->inset_idx) == outer_to_inner) {
                 order_requirements.emplace(std::make_pair(nearby, here));
             } else {
                 assert((nearby->inset_idx > here->inset_idx) == outer_to_inner);
