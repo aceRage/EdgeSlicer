@@ -725,6 +725,10 @@ void MediaPlayCtrl::own_ready(int seq, const std::string &machine, int port, int
         return;
     if (port <= 0 || go2rtc_port <= 0) {
         BOOST_LOG_TRIVIAL(warning) << "MediaPlayCtrl: [own camera] the hub or its go2rtc is not running";
+        if (RemoteHub::no_hub()) {
+            stop_own(_L("No hub is running, and this copy was started with --no-hub, so it does not start one. Start the hub from the main EdgeSlicer, or start this copy with --take-hub."));
+            return;
+        }
         stop_own(_L("The camera relay (go2rtc) is not running. See hub.log in the log folder, or turn off \"New Bambu LiveView\" in Preferences."));
         return;
     }
