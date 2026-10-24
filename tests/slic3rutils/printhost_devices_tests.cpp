@@ -10,6 +10,7 @@
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
+#include "slic3r/GUI/ThirdPartyFilamentMap.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -426,6 +427,11 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK(st.slots[3].loaded);
         CHECK(st.slots[3].color.empty());
         CHECK(st.note.empty());
+        CHECK_FALSE(st.happy_hare);
+        CHECK_FALSE(st.afc);
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[0].index / 4, st.slots[0].index % 4) == "1A");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[3].index / 4, st.slots[3].index % 4) == "1D");
+        CHECK(st.slots[0].color == "#FFFFFF");
     }
 
     SECTION("a QIDI printer with no Box plugged in is a plain Klipper") {
@@ -614,6 +620,273 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         // No slot of that material, or no material on the plate filament: "As sliced".
         CHECK(auto_match_slot(slots, "#FF0000", "PETG", true) == 0);
         CHECK(auto_match_slot(slots, "#FF0000", "", true) == 0);
+    }
+
+    SECTION("Happy Hare names its gates and what is loaded in them") {
+        // Shape of GET /printer/objects/query?mmu, as MoonrakerPrinterAgent::fetch_hh_filament_info reads it.
+        const std::string query =
+            R"({"result":{"status":{"mmu":{
+                "num_gates":4,
+                "gate_status":[1,2,0,-1],
+                "gate_material":["PLA","PETG","ABS","TPU"],
+                "gate_color":["#FF0000","0x00FF00","#0000FF","#FFFFFF"],
+                "gate_temperature":[210,240,0,0]
+            }}}})";
+        const Status st = parse_happy_hare_mmu(query, "octoprint");
+        CHECK(st.online);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.slots[0].index == 0);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[0].loaded);
+        CHECK(st.slots[1].type == "PETG");
+        CHECK(st.slots[1].color == "#00FF00"); // 0x prefix
+        CHECK(st.slots[1].loaded);
+        CHECK_FALSE(st.slots[2].loaded); // gate_status 0
+        CHECK(st.slots[2].type.empty());
+        CHECK_FALSE(st.slots[3].loaded); // gate_status -1
+        CHECK(st.slots[0].label() == "T1 PLA");
+        CHECK(st.note.empty());
+        CHECK(st.happy_hare);
+        CHECK_FALSE(st.qidi_box);
+        CHECK_FALSE(st.afc);
+        // Panel tiles group gates by four: 1A–1D. Slot::label() (combo / sent index) is unchanged.
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[0].index / 4, st.slots[0].index % 4) == "1A");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[3].index / 4, st.slots[3].index % 4) == "1D");
+
+        // The same object inside a status snapshot is enough for parse_moonraker_status.
+        const std::string status =
+            R"({"print_stats":{"state":"standby"},
+                "mmu":{"num_gates":2,"gate_status":[1,0],"gate_material":["ASA",""],"gate_color":["202020",""]}})";
+        const Status from_status = parse_moonraker_status(status, "octoprint");
+        CHECK(from_status.state == "standby");
+        REQUIRE(from_status.slots.size() == 2);
+        CHECK(from_status.slots_have_filaments);
+        CHECK(from_status.slots[0].type == "ASA");
+        CHECK(from_status.slots[0].color == "#202020");
+        CHECK_FALSE(from_status.slots[1].loaded);
+    }
+
+    SECTION("an empty Happy Hare mmu is not a mapping table") {
+        CHECK_FALSE(parse_happy_hare_mmu(R"({"result":{"status":{"mmu":{}}}})", "octoprint").slots_have_filaments);
+        CHECK_FALSE(parse_happy_hare_mmu(R"({"mmu":{"num_gates":0}})", "octoprint").slots_have_filaments);
+        const Status empty_gates = parse_happy_hare_mmu(
+            R"({"num_gates":2,"gate_status":[0,0],"gate_material":["",""],"gate_color":["",""]})", "octoprint");
+        REQUIRE(empty_gates.slots.size() == 2);
+        CHECK_FALSE(empty_gates.slots_have_filaments);
+        CHECK_FALSE(empty_gates.note.empty());
+    }
+
+    SECTION("Snapmaker print_task_config wins over a Happy Hare mmu in the same status") {
+        const std::string status =
+            R"({"print_task_config":{"filament_type":["PLA"],"filament_color_rgba":["FF0000FF"],"filament_exist":[true]},
+                "mmu":{"num_gates":1,"gate_status":[1],"gate_material":["PETG"],"gate_color":["00FF00"]}})";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        REQUIRE(st.slots.size() == 1);
+        CHECK(st.slots[0].type == "PLA");
+    }
+
+    SECTION("AFC / BoxTurtle lane_data names its lanes") {
+        // Shape of GET /server/database/item?namespace=lane_data, as
+        // MoonrakerPrinterAgent::fetch_moonraker_filament_data and scripts/test_moonraker_lane_data.py.
+        const std::string body =
+            R"({"result":{"namespace":"lane_data","value":{
+                "lane2":{"lane":"1","material":"PETG","color":"#00FF00","nozzle_temp":240,"bed_temp":80},
+                "lane1":{"lane":"0","material":"PLA","color":"0xFF0000","nozzle_temp":210,"bed_temp":60},
+                "lane3":{"lane":"2","material":"","color":"#None"}
+            }}})";
+        const Status st = parse_afc_lane_data(body, "octoprint");
+        CHECK(st.online);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 3); // sorted by the `lane` tool number, not the JSON key
+        CHECK(st.slots[0].index == 0);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[0].loaded);
+        CHECK(st.slots[1].index == 1);
+        CHECK(st.slots[1].type == "PETG");
+        CHECK_FALSE(st.slots[2].loaded);
+        CHECK(st.slots[2].type.empty());
+        CHECK(st.slots[2].color.empty());
+        CHECK(st.note.empty());
+        CHECK(st.afc);
+        CHECK_FALSE(st.happy_hare);
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[0].index / 4, st.slots[0].index % 4) == "1A");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[1].index / 4, st.slots[1].index % 4) == "1B");
+        CHECK(st.slots[0].color == "#FF0000");
+
+        const std::string lanes_array =
+            R"({"lanes":[{"lane":0,"material":"ASA","color":"#202020"},{"lane":"1","material":"TPU","color":"#111111"}]})";
+        const Status from_array = parse_afc_lane_data(lanes_array, "octoprint");
+        REQUIRE(from_array.slots.size() == 2);
+        CHECK(from_array.slots[0].type == "ASA");
+        CHECK(from_array.slots[1].type == "TPU");
+    }
+
+    SECTION("AFC lane_data with no materials is not a mapping table") {
+        CHECK_FALSE(parse_afc_lane_data("{}", "octoprint").slots_have_filaments);
+        CHECK_FALSE(parse_afc_lane_data(R"({"result":{"value":{}}})", "octoprint").slots_have_filaments);
+        CHECK_FALSE(parse_afc_lane_data("not json", "octoprint").online);
+    }
+
+    SECTION("Happy Hare named colours map to hex; unparsable names stay empty") {
+        CHECK(print_host_slot_colour("red") == "#FF0000");
+        CHECK(print_host_slot_colour("0x00FF00") == "#00FF00");
+        CHECK(print_host_slot_colour("#None").empty());
+        CHECK(print_host_slot_colour("chartreuse").empty());
+        CHECK(print_host_slot_colour("").empty());
+
+        const Status st = parse_happy_hare_mmu(
+            R"({"num_gates":4,"gate_status":[1,1,1,1],
+                "gate_material":["PLA","PLA","PLA","PLA"],
+                "gate_color":["red","Blue","chartreuse","#None"]})",
+            "octoprint");
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[0].color_name.empty());
+        CHECK(st.slots[1].color == "#0000FF");
+        CHECK(st.slots[2].color.empty()); // unmapped CSS name: not '#RRGGBB', so not a colour
+        CHECK(st.slots[2].color_name == "chartreuse");
+        CHECK(st.slots[2].label().find("chartreuse") != std::string::npos);
+        CHECK(st.slots[3].color.empty()); // #None
+        CHECK(st.slots[3].color_name.empty());
+
+        const Status afc = parse_afc_lane_data(
+            R"({"lane1":{"lane":0,"material":"PLA","color":"chartreuse"}})", "octoprint");
+        REQUIRE(afc.slots.size() == 1);
+        CHECK(afc.slots[0].color.empty());
+        CHECK(afc.slots[0].color_name == "chartreuse");
+        CHECK(afc.slots[0].loaded);
+    }
+
+    SECTION("num_gates above 32 is clamped, not dropped") {
+        const Status st = parse_happy_hare_mmu(
+            R"({"num_gates":40,"gate_status":[1],"gate_material":["PLA"],"gate_color":["red"]})",
+            "octoprint");
+        REQUIRE(st.slots.size() == 32);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[0].loaded);
+        CHECK_FALSE(st.slots[31].loaded);
+    }
+
+    SECTION("wrong-type Happy Hare fields do not throw") {
+        CHECK(parse_happy_hare_mmu(R"({"num_gates":[],"gate_status":1,"gate_material":{"0":"PLA"}})", "octoprint")
+                  .slots.empty());
+        CHECK(parse_happy_hare_mmu(R"({"num_gates":"nope"})", "octoprint").slots.empty());
+        const Status st = parse_happy_hare_mmu(
+            R"({"num_gates":"2","gate_status":[1,1],"gate_material":["PLA",1],"gate_color":[true,"green"]})",
+            "octoprint");
+        REQUIRE(st.slots.size() == 2);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[1].type.empty()); // material was a number
+        CHECK(st.slots[1].color == "#008000");
+    }
+
+    SECTION("a huge gate_status array is truncated to num_gates") {
+        // Two loaded gates, then padding. Starting from [1] plus zeros made gate 1
+        // empty, so the parser (which skips leftover names on status <= 0) left type blank.
+        std::string body = R"({"num_gates":2,"gate_status":[1,1)";
+        for (int i = 0; i < 200; ++i)
+            body += ",0";
+        body += R"(],"gate_material":["PLA","PETG"],"gate_color":["red","blue"]})";
+        const Status st = parse_happy_hare_mmu(body, "octoprint");
+        REQUIRE(st.slots.size() == 2);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[1].type == "PETG");
+    }
+
+    SECTION("a QIDI Box in the same status is not replaced by Happy Hare gates") {
+        const std::string status =
+            R"({"print_stats":{"state":"standby"},
+                "multi_color_controller":{"box_count":1,"boxes":[]},
+                "mmu":{"num_gates":1,"gate_status":[1],"gate_material":["PLA"],"gate_color":["red"]}})";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK_FALSE(st.slots_have_filaments);
+        CHECK(st.qidi);
+        CHECK_FALSE(st.happy_hare); // QIDI firmware: its numbering is never replaced by gates
+    }
+
+    SECTION("AFC lanes cap at 32, de-duplicate, and reject out-of-range indices") {
+        const Status dup = parse_afc_lane_data(
+            R"({"lane1":{"lane":0,"material":"PLA","color":"red"},
+                "lane2":{"lane":0,"material":"PETG","color":"blue"},
+                "lane3":{"lane":99,"material":"ABS","color":"yellow"},
+                "lane4":{"lane":-3,"material":"TPU","color":"white"}})",
+            "octoprint");
+        REQUIRE(dup.slots.size() == 1);
+        CHECK(dup.slots[0].index == 0);
+        CHECK(dup.slots[0].type == "PLA");
+
+        std::string many = "{\"lanes\":[";
+        for (int i = 0; i < 40; ++i) {
+            if (i)
+                many += ",";
+            many += "{\"lane\":" + std::to_string(i) + ",\"material\":\"PLA\",\"color\":\"red\"}";
+        }
+        many += "]}";
+        const Status capped = parse_afc_lane_data(many, "octoprint");
+        REQUIRE(capped.slots.size() == 32);
+        CHECK(capped.slots.back().index == 31);
+    }
+
+    SECTION("Happy Hare's own get_status keys beyond the gate arrays are ignored") {
+        // What Happy Hare publishes to Moonraker (the public docs list these under printer.mmu):
+        // alongside the gate arrays there are enabled / gate / tool / filament / ttg_map /
+        // endless_spool_groups / gate_color_rgb. None of them may change the slot list.
+        const std::string status =
+            R"({"print_stats":{"state":"standby"},
+                "mmu":{"enabled":true,"num_gates":4,"is_homed":true,"tool":-1,"gate":0,"filament":"Loaded",
+                       "ttg_map":[0,1,2,3],"gate_status":[1,1,0,-1],
+                       "gate_material":["PLA","PETG","","ABS"],
+                       "gate_color":["ff0000","00ff00","","blue"],
+                       "gate_color_rgb":[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.5,0.5,0.5],[0.0,0.0,1.0]],
+                       "endless_spool_groups":[0,1,2,3],"action":"Idle"}})";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.happy_hare);
+        CHECK_FALSE(st.afc);
+        CHECK(st.slots_have_filaments);
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[1].type == "PETG");
+        CHECK_FALSE(st.slots[2].loaded);
+        CHECK_FALSE(st.slots[3].loaded); // gate_status -1: unknown, never shown as loaded
+        CHECK(st.mmu_grouped());
+    }
+
+    SECTION("AFC lane_data: the system entry and non-lane keys are ignored") {
+        const std::string body =
+            R"({"result":{"namespace":"lane_data","key":null,"value":{
+                "system":{"cur_lane":null,"cur_extruder":"extruder","extruders":{"extruder":{"lane_loaded":null}}},
+                "lane1":{"lane":"0","material":"PLA","color":"#ff0000","map":"T0"},
+                "lane2":{"lane":"1","material":"PETG","color":"#00ff00","map":"T1"}
+            }}})";
+        const Status st = parse_afc_lane_data(body, "octoprint");
+        REQUIRE(st.slots.size() == 2);
+        CHECK(st.afc);
+        CHECK(st.mmu_grouped());
+        CHECK(st.slots[1].type == "PETG");
+    }
+
+    SECTION("only the MMU kinds are shown four to a unit") {
+        // A plain Klipper tool list and a Snapmaker toolhead list keep their T<n> labels.
+        const Status plain = parse_moonraker_status(R"({"print_stats":{"state":"standby"},"extruder":{"nozzle_diameter":0.4},"extruder1":{"nozzle_diameter":0.4}})", "octoprint");
+        CHECK_FALSE(plain.happy_hare);
+        CHECK_FALSE(plain.afc);
+        CHECK_FALSE(plain.mmu_grouped());
+        const auto tiles = Slic3r::GUI::third_party_slots_from(plain.slots, plain.mmu_grouped());
+        REQUIRE(tiles.size() == 2);
+        CHECK(Slic3r::GUI::slot_display_label(tiles[1]) == "T2");
+
+        const Status hh = parse_happy_hare_mmu(
+            R"({"num_gates":6,"gate_status":[1,1,1,1,1,1],"gate_material":["PLA","PLA","PLA","PLA","PLA","PLA"],
+                "gate_color":["red","red","red","red","red","red"]})",
+            "octoprint");
+        const auto hh_tiles = Slic3r::GUI::third_party_slots_from(hh.slots, hh.mmu_grouped());
+        REQUIRE(hh_tiles.size() == 6);
+        CHECK(Slic3r::GUI::slot_display_label(hh_tiles[0]) == "1A");
+        CHECK(Slic3r::GUI::slot_display_label(hh_tiles[5]) == "2B");
     }
 
     SECTION("something that is not a Moonraker printer") {
