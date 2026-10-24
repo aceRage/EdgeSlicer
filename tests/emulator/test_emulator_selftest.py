@@ -153,6 +153,28 @@ try:
     check(s["multi_color_controller"]["box_count"] == 0 and s["save_variables"]["variables"]["box_count"] == 0, "box_unplugged")
     emu.reset(PID, {"faults": {"box_unplugged": False}})
 
+    print("-- the Box as the firmware lays it out (fix/qidi-box-index) --")
+    q = ("/printer/objects/query?multi_color_controller&save_variables=variables" +
+         "".join("&box_stepper%%20slot%d" % n for n in range(16)))
+    s = json.loads(http(q)[1])["result"]["status"]
+    v = s["save_variables"]["variables"]
+    check(all(("filament_slot%d" % n) in v for n in range(17)), "filament_slot0..16 all present, as the firmware keeps them")
+    check(v["slot2"] == 0 and v["filament_slot2"] == 1, "empty 1C: state word 0, filament_slot still the shipped 1")
+    check(v["slot0"] == 1 and v["slot1"] == 1 and v["slot3"] == 1, "loaded slots: state word 1")
+    check(s["box_stepper slot0"] == {"runout_button": 0} and s["box_stepper slot2"] == {"runout_button": 1},
+          "box_stepper sensors: 1A loaded, 1C empty")
+    check(s["box_stepper slot4"] == {}, "a slot motor the printer lacks answers {} (Klipper's way)")
+    emu.reset(PID, {"qidi": {"mcc_shape": "flat"}})
+    s = json.loads(http("/printer/objects/query?multi_color_controller")[1])["result"]["status"]
+    m = s["multi_color_controller"]
+    check(m["box_count"] == 1 and m["box0_box_inserted_1"] == 1 and m["box0_box_inserted_2"] == 0 and
+          m["box0_filament_info_1_filament_type"] == "ASA" and "boxes" not in m, "flat multi_color_controller: box0_ is Box 1")
+    emu.reset(PID, {"qidi": {"mcc_shape": "array", "box_report": "vars_only", "vars_box_count": 2}})
+    s = json.loads(http(q)[1])["result"]["status"]
+    check(s["save_variables"]["variables"]["box_count"] == 2 and s["multi_color_controller"] == {"box_count": 1} and
+          s["box_stepper slot3"] != {} and s["box_stepper slot4"] == {}, "vars_box_count: a stale count, motors for one Box")
+    emu.reset(PID, {"qidi": {"box_report": "mcc+vars", "vars_box_count": None}})
+
     print("-- slow probe, timeout, connection refused, http_error, 8080-only upload --")
     emu.set(PID, {"faults": {"probe_delay_s": 3}})
     t0 = time.time()

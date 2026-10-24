@@ -47,6 +47,15 @@ class EmulatorProcess:
         self.proc = None
 
     def start(self, timeout=20):
+        """Start the emulator and wait for every printer to listen. On any failure the emulator
+        this started is stopped again before the error is raised."""
+        try:
+            return self._start(timeout)
+        except BaseException:
+            self.stop()
+            raise
+
+    def _start(self, timeout):
         os.makedirs(self.home, exist_ok=True)
         cfg = os.path.join(self.home, "printers.json")
         with open(cfg, "w", encoding="utf-8", newline="\n") as f:

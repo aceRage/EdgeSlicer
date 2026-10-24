@@ -12,7 +12,10 @@ from .store import UploadStore
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PRESET_DIR = os.path.join(HERE, "presets")
-DEFAULT_PRINTERS = ["qidi_xmax4_box", "qidi_q2_nobox"]
+# The printers a first start creates. A printers.json from an earlier phase gets the ones it never
+# had added once (its "seeded" list remembers them, so a printer the owner removed stays removed).
+DEFAULT_PRINTERS = ["qidi_xmax4_box", "qidi_q2_nobox", "elegoo_cc1_canvas", "u1_4head"]
+E1_DEFAULTS = ["qidi_xmax4_box", "qidi_q2_nobox"]
 
 
 def deep_merge(dst, patch):
@@ -48,6 +51,7 @@ class Supervisor:
         self.home = home
         os.makedirs(home, exist_ok=True)
         self.config_path = config_path or os.path.join(home, "printers.json")
+        self.default_config = config_path is None
         self.save_enabled = save
         self.lock = threading.RLock()
         self.log = CommandLog(os.path.join(home, "logs"))
@@ -61,8 +65,25 @@ class Supervisor:
         if os.path.exists(self.config_path):
             with open(self.config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
+            cfg.setdefault("printers", [])
+            if self.default_config:
+                # Only the owner's own printers.json (never a gate's --config) grows new defaults.
+                seeded = cfg.setdefault("seeded", list(E1_DEFAULTS))
+                ids = {p.get("id") for p in cfg["printers"]}
+                added = False
+                for n in DEFAULT_PRINTERS:
+                    if n in seeded or n not in self.presets:
+                        continue
+                    seeded.append(n)
+                    added = True
+                    if self.presets[n].get("id") not in ids:
+                        cfg["printers"].append(copy.deepcopy(self.presets[n]))
+                if added:
+                    self.config = cfg
+                    self._write(cfg)
         else:
-            cfg = {"printers": [copy.deepcopy(self.presets[n]) for n in DEFAULT_PRINTERS if n in self.presets]}
+            cfg = {"printers": [copy.deepcopy(self.presets[n]) for n in DEFAULT_PRINTERS if n in self.presets],
+                   "seeded": list(DEFAULT_PRINTERS)}
             self.config = cfg
             self._write(cfg)
         cfg.setdefault("printers", [])

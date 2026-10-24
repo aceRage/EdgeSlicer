@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""EdgeSlicer printer emulator (phase E1: Moonraker / QIDI).
+"""EdgeSlicer printer emulator (phase E2: Moonraker / QIDI, Elegoo Centauri Carbon 1, Snapmaker U1).
 
 Local, fake printers that EdgeSlicer can be pointed at by IP. Every request is logged and decoded.
 Python 3.8+, standard library only. Never contacts a real printer; binds to 127.0.0.x unless a
@@ -229,7 +229,7 @@ def serve(args):
                                                                       "; held by " + holder if holder else ""))
         return 2
     sup.start_all()
-    print("EdgeSlicer printer emulator (E1)")
+    print("EdgeSlicer printer emulator (E2)")
     print("  control page  %s" % url)
     print("  home          %s" % home)
     print("  config        %s" % sup.config_path)
@@ -257,7 +257,7 @@ def serve(args):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    ap = argparse.ArgumentParser(description="EdgeSlicer printer emulator (E1)", add_help=True)
+    ap = argparse.ArgumentParser(description="EdgeSlicer printer emulator (E2)", add_help=True)
     ap.add_argument("command", nargs="?", default="serve")
     ap.add_argument("--control", default=None, help="the running emulator, default http://127.0.0.1:8790")
     ap.add_argument("--control-port", type=int, default=DEFAULT_CONTROL_PORT)
