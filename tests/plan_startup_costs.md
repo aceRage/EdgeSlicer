@@ -147,8 +147,33 @@ anyway (no expected diff).
 - The CBOR cache stays on by default (owner decision). F1 is what lets the library's cache entry survive
   between starts.
 
-## 6. Owner's profiled start (to fill in)
+## 6. Owner's profiled start (2026-10-24 11:26, cold-ish)
 
-One cold-ish start of `C:/Dev/EdgeSlicerTest/startup_prof` with `ORCA_STARTUP_PROFILE=1`. Then
-`grep "\[StartupProfile\]"` the newest log in `%APPDATA%\EdgeSlicer\log`. Paste the numbers here and
-re-rank section 3.
+One start of `C:/Dev/EdgeSlicerTest/startup_prof` with `ORCA_STARTUP_PROFILE=1`. Uptime is measured
+from libslic3r's static initialisation: the window was shown at **29.4 s** and startup settled at
+**37.4 s**.
+
+| Step | ms | Notes |
+|---|---|---|
+| PresetUpdater ctor | **6,416** | `bundles_to_install=1 (OrcaFilamentLibrary)`: `remove_old_dir` **5,373**, copy 891 |
+| Bambu preset mirror run | **9,105** | Its fingerprint took 8 ms |
+| System presets | 3,035 | BBL 1,962 (cache key 638, CBOR decode 175). OrcaFilamentLibrary 893: `cache_hit=0`, `cache=written`, because of the reinstall |
+| User presets | 1,893 | Process folder 650 (141 files: `info_ms` 204, `parse_ms` 354). `filament/base` 835 (504 files: `parse_ms` 546, `info_ms` 141). Filament folder 299. One defer round everywhere, `lookup_ms` ~0 |
+| `new MainFrame` | 7,288 | Member initialisers (before the ctor body) **1,033**; topbar 154; ParamsPanel 163; Plater 3,748; preset tabs 749; PrinterWebView 144; initial_config 456; menubar 131; `update_layout` 395 |
+| Inside Plater | 3,748 | Sidebar ~765 (ObjectList 234, filament section 205, printer section 187); **ShowcaseView 1,941**; View3D 163; UVEditorPanel 176; `menus.init` 180 |
+| load_current_presets | 441 | |
+| Show to `on_init_inner` return | 1,645 | |
+| post_init | 3,474 | `init_opengl` 603, `canvas3D init` 358, **imgui `new_frame` 1,236**, first render 784 |
+| post_init CallAfter | 55 | Not a target: wizard, WebPresetDialog and updater sync are cheap |
+
+Re-ranked, by measured gain:
+
+1. F1, library reinstall (6.4 s, plus the library's cache rewrite).
+2. F2, mirror gate across restarts (9.1 s).
+3. ShowcaseView ctor (1.9 s): defer it like the other lazy panels. New, not in section 3.
+4. imgui first frame (1.2 s) and GL init.
+5. User presets (1.9 s): the `.info` reads and parsing dominate, which suits parallel parsing (F3).
+6. MainFrame member dialogs (1.0 s).
+7. BBL cache key (0.64 s, stats every file).
+
+F6 (post_init CallAfter) drops off the list.
