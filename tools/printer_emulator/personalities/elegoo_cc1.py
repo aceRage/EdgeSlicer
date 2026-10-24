@@ -16,7 +16,9 @@ its own 127.0.0.x):
                   Cmd 0 status, Cmd 1 attributes, Cmd 324 CANVAS (Ack 0 + canvas_list, Ack 1 when
                   detached), Cmd 128 start print (logged with its full slot_map: present, [] or
                   absent), Cmd 129 / 131 / 130 pause / resume / stop, Cmd 386 camera URL
-                  ("<ip>:3031/video", no scheme, as V1.4.49), Cmd 403 light and fans
+                  ("<ip>:3031/video", no scheme, as V1.4.49), Cmd 403 light and fans,
+                  Cmd 258 file list (only {"Url": "/local"}) and Cmd 259 delete (only
+                  {"FileList": ["/local/<name>", ...]}) - the Storage tab's commands
                   status pushes every second while printing, and on every change
   :3031         GET /video   MJPEG: a test pattern with the printer's name and a clock
 
@@ -24,6 +26,14 @@ UNVERIFIED (no capture yet): the upload's error body for an MD5 mismatch ({"code
 "messages": [{"field", "message"}]} is what ElegooLink parses, the code value is made up), the
 Ack a real printer gives a slot_map naming an empty tray, and the SDCP status numbers for
 "error". Everything is marked so in the log payloads ("unverified").
+
+Cmd 258 / 259 follow pycentauri (github.com/bjan/pycentauri, Apache-2.0; verified on the
+OpenCentauri build of the CC1 firmware): the answer is Data.Data {Ack, FileList [{name "/local/x",
+FileSize, TotalLayers, CreateTime (unix seconds), type 1}]}, the delete answers {Ack} plus ErrData
+(the SDCP V3.0.0 specification) for what it did not delete. Both are UNVERIFIED on stock V1.4.49.
+pycentauri found that a 258 / 259 with another payload shape can crash the real firmware, so any
+other shape is answered Ack 2 here and logged as "unexpected_payload" - a gate can assert that
+EdgeSlicer never sends one. Seeded files: the config's "files" list ({name, size, layers}).
 """
 import hashlib
 import json
@@ -64,7 +74,13 @@ FAULTS = [
      "help": "Connects, then never answers a command or pushes a status: a printer that hangs."},
     {"key": "file_check_s", "label": "File check after upload (seconds)", "type": "number",
      "help": "CurrentStatus 8 for N s after an upload; ElegooLink waits for it before Cmd 128."},
+    {"key": "files_unsupported", "label": "No file commands (258 / 259 unanswered)", "type": "bool",
+     "help": "A firmware without the Storage tab's commands: Cmd 258 and 259 are never answered."},
+    {"key": "delete_noop", "label": "Delete acknowledges but keeps the file", "type": "bool",
+     "help": "Cmd 259 answers Ack 0 and deletes nothing, so the next Cmd 258 still lists the file."},
 ]
+
+LAYER_RE = re.compile(rb"^;\s*LAYER_CHANGE\s*$", re.M)
 
 
 def norm_colour(c):
@@ -134,6 +150,12 @@ class ElegooCC1:
         self.rgb = [255, 255, 255]
         self.fans = {"ModelFan": 0, "AuxiliaryFan": 0, "BoxFan": 0}
         self.last_start = None
+        # Files already on the printer, for the Storage tab without an upload first.
+        for f in self.cfg.get("files") or []:
+            if isinstance(f, dict) and f.get("name"):
+                name = str(f["name"]).rsplit("/", 1)[-1]
+                self.files[name] = {"name": name, "size": int(f.get("size") or 0), "layers": int(f.get("layers") or 0),
+                                    "stored_at": float(f.get("created") or time.time()), "seeded": True, "filaments": []}
         if self.print_state in BUSY:
             self.current_file = "emu_job.gcode"
             self.progress, self.layer, self.ticks = 17, 12, 600
@@ -336,6 +358,7 @@ class ElegooCC1:
         stored = self.printer.store.put(self.printer.id, filename, whole)
         info["stored"] = stored.get("stored")
         info["filaments"] = file_filaments(whole)
+        info["layers"] = len(LAYER_RE.findall(whole))
         info["stored_at"] = stored["stored_at"]
         self.files[filename] = info
         self.printer.sub_log(req, "upload_chunk", chunk)
@@ -464,6 +487,8 @@ class ElegooCC1:
             self.printer.event("canvas", {"cmd": 324, "ack": 0, "attached": True, "trays": len(payload["canvas_list"][0]["tray_list"]),
                                           "active_tray_id": payload["active_tray_id"]}, port=req.port)
             return [self.response(324, rid, {"Ack": 0}), self.response(324, rid, payload)]
+        if cmd in (258, 259):
+            return self.file_command(cmd, rid, d.get("Data"), req)
         if cmd == 128:
             return [self.response(128, rid, {"Ack": self.start_print(body, req)})]
         if cmd in (129, 130, 131):
@@ -500,6 +525,43 @@ class ElegooCC1:
             return [self.response(403, rid, {"Ack": 0})]
         self.printer.event("ws_cmd", {"cmd": cmd, "data": body, "ack": 2, "unknown": True}, port=req.port)
         return [self.response(cmd if cmd is not None else -1, rid, {"Ack": 2})]
+
+    def file_command(self, cmd, rid, body, req):
+        """Cmd 258 (file list) and Cmd 259 (delete), each only in the exact shape pycentauri verified."""
+        if fault_on(self.faults, "files_unsupported"):
+            self.printer.event("files", {"cmd": cmd, "data": body, "answered": False, "fault": "files_unsupported"}, port=req.port)
+            return []
+        if cmd == 258:
+            if body != {"Url": "/local"}:
+                self.printer.event("files", {"cmd": 258, "data": body, "ack": 2, "unexpected_payload": True,
+                                             "why": "a real CC1 may crash on another shape (pycentauri)"}, port=req.port, status=400)
+                return [self.response(258, rid, {"Ack": 2})]
+            listed = [{"name": "/local/" + n, "FileSize": f.get("size", 0), "TotalLayers": f.get("layers", 0),
+                       "CreateTime": int(f.get("stored_at") or 0), "type": 1} for n, f in sorted(self.files.items())]
+            self.printer.event("files", {"cmd": 258, "ack": 0, "listed": [x["name"] for x in listed],
+                                         "unverified": "field names and CreateTime unit on stock V1.4.49"}, port=req.port)
+            return [self.response(258, rid, {"Ack": 0, "FileList": listed})]
+        paths = body.get("FileList") if isinstance(body, dict) else None
+        if not isinstance(body, dict) or set(body) != {"FileList"} or not isinstance(paths, list) or \
+                not all(isinstance(p, str) and p.startswith("/local/") for p in paths):
+            self.printer.event("files", {"cmd": 259, "data": body, "ack": 2, "unexpected_payload": True,
+                                         "why": "a real CC1 may crash on another shape (pycentauri)"}, port=req.port, status=400)
+            return [self.response(259, rid, {"Ack": 2})]
+        failed, deleted = [], []
+        for p in paths:
+            name = p[len("/local/"):]
+            if name not in self.files or (self.busy() and name == self.current_file) or "/" in name:
+                failed.append(p)
+            elif not fault_on(self.faults, "delete_noop"):
+                del self.files[name]
+                deleted.append(name)
+        data = {"Ack": 0}
+        if failed:
+            data["ErrData"] = failed
+        self.printer.event("files", {"cmd": 259, "ack": 0, "deleted": deleted, "failed": failed,
+                                     "noop": fault_on(self.faults, "delete_noop"),
+                                     "unverified": "ErrData on stock V1.4.49"}, port=req.port)
+        return [self.response(259, rid, data)]
 
     def start_print(self, body, req):
         """Cmd 128. Logs the whole command, the slot_map in its three forms, and what each slot_map

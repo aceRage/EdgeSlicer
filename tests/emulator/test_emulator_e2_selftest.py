@@ -153,6 +153,42 @@ def cc1_tests(emu):
     check(w.recv_json(want=is_response(128))["Data"]["Data"] == {"Ack": 7}, "fault refuse_start=7: Ack 7")
     emu.set(CC1, {"faults": {"refuse_start": 0}})
 
+    print("-- CC1: the Storage tab's Cmd 258 / 259 --")
+    mark = emu.reset(CC1, files=[{"name": "seeded.gcode", "size": 4321, "layers": 77, "created": 1729000000}])
+    elegoo_upload(CC1_HOST, CC1_HTTP, "junk.gcode", GCODE + b";LAYER_CHANGE\n;LAYER_CHANGE\n", chunk=8000)
+    w.cmd(258, {"Url": "/local"})
+    r = w.recv_json(want=is_response(258))["Data"]["Data"]
+    names = [f["name"] for f in r.get("FileList", [])]
+    check(r.get("Ack") == 0 and names == ["/local/junk.gcode", "/local/seeded.gcode"], "Cmd 258: Ack 0, both files: %s" % names)
+    seeded = next((f for f in r.get("FileList", []) if f["name"] == "/local/seeded.gcode"), {})
+    check(seeded.get("FileSize") == 4321 and seeded.get("TotalLayers") == 77 and seeded.get("CreateTime") == 1729000000
+          and seeded.get("type") == 1, "seeded entry: FileSize, TotalLayers, CreateTime, type 1")
+    junk = next((f for f in r.get("FileList", []) if f["name"] == "/local/junk.gcode"), {})
+    check(junk.get("TotalLayers") == 2, "uploaded entry: its LAYER_CHANGE count (%s)" % junk.get("TotalLayers"))
+    w.cmd(258, {})
+    check(w.recv_json(want=is_response(258))["Data"]["Data"] == {"Ack": 2}, "Cmd 258 with another payload: Ack 2")
+    expect(emu, CC1, "the unexpected 258 payload is logged", "files", mark, unexpected_payload=True)
+    w.cmd(259, {"FileList": ["junk.gcode"]})
+    check(w.recv_json(want=is_response(259))["Data"]["Data"] == {"Ack": 2}, "Cmd 259 without /local/: Ack 2")
+    w.cmd(128, {"Filename": "/local/seeded.gcode"})
+    check(w.recv_json(want=is_response(128))["Data"]["Data"] == {"Ack": 0}, "a seeded file starts (Cmd 128 Ack 0)")
+    w.cmd(259, {"FileList": ["/local/seeded.gcode", "/local/junk.gcode"]})
+    d = w.recv_json(want=is_response(259))["Data"]["Data"]
+    check(d.get("Ack") == 0 and d.get("ErrData") == ["/local/seeded.gcode"], "Cmd 259: the printing file is kept (ErrData): %s" % d)
+    check(sorted(emu.state(CC1)["files"]) == ["seeded.gcode"], "junk.gcode deleted, seeded.gcode kept")
+    emu.reset(CC1, faults={"delete_noop": True}, files=[{"name": "keep.gcode"}])
+    w.cmd(259, {"FileList": ["/local/keep.gcode"]})
+    check(w.recv_json(want=is_response(259))["Data"]["Data"] == {"Ack": 0}, "fault delete_noop: Ack 0")
+    check(emu.state(CC1)["files"] == ["keep.gcode"], "fault delete_noop: the file is still there")
+    emu.reset(CC1, faults={"files_unsupported": True})
+    w.cmd(258, {"Url": "/local"})
+    try:
+        w.recv_json(timeout=2, want=is_response(258))
+        check(False, "fault files_unsupported: Cmd 258 is never answered")
+    except (TimeoutError, OSError):
+        check(True, "fault files_unsupported: Cmd 258 is never answered")
+    emu.reset(CC1, faults={}, files=[])
+
     print("-- CC1: pushes, camera, viewer limit --")
     emu.set_state(CC1, "printing")
     t0, pushes = time.time(), 0
