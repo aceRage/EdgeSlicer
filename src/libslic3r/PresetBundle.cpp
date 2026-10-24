@@ -219,7 +219,6 @@ static std::vector<std::string> s_project_options {
     "filament_colour_mode",
     "wipe_tower_x",
     "wipe_tower_y",
-    "wipe_tower_rotation_angle",
     "curr_bed_type",
     // Bambu two-extruder printers: the printer state synced before slicing (BambuStudio keeps it
     // outside the presets too, PresetBundle::extruder_ams_counts / extruder_nozzle_stat).
