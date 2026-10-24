@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -686,13 +688,14 @@ TEST_CASE("Undertop surface pattern fills the solid layer under a sparse top", "
 
 TEST_CASE("Gyroid infill of an object matches the infill of a larger object with the same center", "[Fill]")
 {
-    // Orca #16002 parametric half: Edge has no marching-squares / gyroid_optimized
-    // branch, so that GENERATE dimension is dropped. DensityAdjust and
-    // AABBTreeLines::LinesDistancer both exist on Edge; the test uses them as upstream does.
+    // Orca #16002: both the parametric waves and (since the #13379 port) the optimized
+    // marching-squares branch. DensityAdjust and AABBTreeLines::LinesDistancer both exist on Edge;
+    // the test uses them as upstream does.
+    const bool   optimized = GENERATE(false, true);
     const int    multiline = GENERATE(1, 2);
     const float  density   = GENERATE(0.05f, 0.2f);
     const double spacing   = 0.45;
-    CAPTURE(multiline, density);
+    CAPTURE(optimized, multiline, density);
 
     auto circle = [](double radius) {
         Polygon contour = make_circle_num_segments(scale_(radius), 120);
@@ -701,16 +704,17 @@ TEST_CASE("Gyroid infill of an object matches the infill of a larger object with
     };
     const ExPolygon object = circle(20.);
     const ExPolygon larger = circle(30.);
-    auto fill = [multiline, density, spacing](const ExPolygon &region, double z) {
+    auto fill = [optimized, multiline, density, spacing](const ExPolygon &region, double z) {
         std::unique_ptr<Fill> filler(Fill::new_from_type(ipGyroid));
         filler->spacing = spacing;
         filler->angle   = float(M_PI / 7.);
         filler->z       = z;
 
         FillParams params;
-        params.density     = density;
-        params.multiline   = multiline;
-        params.dont_adjust = true;
+        params.density          = density;
+        params.multiline        = multiline;
+        params.gyroid_optimized = optimized;
+        params.dont_adjust      = true;
         Surface surface(stInternal, region);
         return filler->fill_surface(&surface, params);
     };
@@ -731,7 +735,11 @@ TEST_CASE("Gyroid infill of an object matches the infill of a larger object with
     // little more: 12.6 um at multiline 2, density 0.05, z=17.38 on MSVC (deterministic), far below
     // the 0.45 mm line spacing. A real phase shift is a large fraction of the wave period (the
     // pinned multiline-1 test below catches that), so 20 um stays meaningful. Multiline 1 keeps 10 um.
-    const double tolerance = multiline > 1 ? 0.02 : 0.01;
+    // Marching squares (the optimized branch) simplifies rings that start elsewhere in each object,
+    // so it gets upstream's SPARSE_INFILL_RESOLUTION + 10 um. With multiline 2 our multiline_fill offsets
+    // those simplified rings per bounding box (see above), which moved a copy by 82 um at density 0.05,
+    // z=2.897 on MSVC: still under a fifth of the 0.45 mm spacing, so 0.1 mm is allowed there.
+    const double tolerance = optimized ? (multiline > 1 ? 0.1 : SPARSE_INFILL_RESOLUTION + 0.01) : (multiline > 1 ? 0.02 : 0.01);
     // Half a z period of the waves, through both switches between horizontal and vertical waves.
     const double wave_distance = spacing * multiline / (density * FillGyroid::DensityAdjust);
     for (int step = 0; step <= 8; ++step) {
@@ -1199,5 +1207,405 @@ TEST_CASE("Elephant foot layers density thins the solid layers above the first o
         const std::vector<double> thinned = solid_lengths({{"bottom_shell_layers", 6}, {"elefant_foot_compensation_layers", 3},
                                                            {"raft_layers", 2}, {"elefant_foot_layers_density", "80%"}});
         CHECK(thinned == full);
+    }
+}
+
+// Orca: the spiral inset pattern chains the concentric loops into a single continuous path per
+// island, so it has to cope with the degenerate loops offsetting leaves behind and it must not join
+// loops that only look adjacent. (Ported from OrcaSlicer #15085.)
+namespace {
+
+Slic3r::Polylines spiral_inset_fill(const Slic3r::ExPolygon &surface_shape, double spacing, float density = 1.f)
+{
+    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("spiralinset"));
+    filler->spacing = spacing;
+    // Cancel the half-spacing contraction fill_surface() applies, so the filler sees the shape as given.
+    filler->overlap = 0.5 * spacing;
+
+    Slic3r::FillParams fill_params;
+    fill_params.density     = density;
+    fill_params.dont_adjust = true;
+
+    Slic3r::Surface surface(Slic3r::stBottom, surface_shape);
+    return filler->fill_surface(&surface, fill_params);
+}
+
+Slic3r::ExPolygon spiral_rectangle(double x, double y, double w, double h)
+{
+    return Slic3r::ExPolygon({Slic3r::Point::new_scale(x, y), Slic3r::Point::new_scale(x + w, y),
+                              Slic3r::Point::new_scale(x + w, y + h), Slic3r::Point::new_scale(x, y + h)});
+}
+
+// Area of the surface the toolpaths fail to cover, and the largest single patch of it, in mm2. Each
+// bead is measured at its own width so the variable width walls are not sold short.
+std::pair<double, double> spiral_uncovered_area(const Slic3r::ExPolygon &surface_shape, const Slic3r::Polygons &covered)
+{
+    double total = 0, biggest = 0;
+    for (const Slic3r::ExPolygon &gap : Slic3r::diff_ex(Slic3r::ExPolygons{surface_shape}, Slic3r::union_(covered))) {
+        const double area = unscale<double>(unscale<double>(gap.area()));
+        total += area;
+        biggest = std::max(biggest, area);
+    }
+    return {total, biggest};
+}
+
+Slic3r::Polygons spiral_beads_of(const Slic3r::Polylines &paths, double width)
+{
+    return Slic3r::offset(paths, float(scale_(0.5 * width)));
+}
+
+Slic3r::Polygons spiral_beads_of(const Slic3r::ThickPolylines &paths)
+{
+    Slic3r::Polygons covered;
+    for (const Slic3r::ThickPolyline &path : paths)
+        for (size_t i = 0; i + 1 < path.points.size(); ++i) {
+            Slic3r::Polyline segment;
+            segment.points = {path.points[i], path.points[i + 1]};
+            Slic3r::append(covered, Slic3r::offset(Slic3r::Polylines{segment},
+                                                  float(0.5 * std::max(path.width[2 * i], path.width[2 * i + 1]))));
+        }
+    return covered;
+}
+
+} // namespace
+
+TEST_CASE("Spiral inset fill drops loops shorter than the end clipping", "[Fill][SpiralInset][Regression]")
+{
+    // A sliver whose whole perimeter is shorter than the length clipped off the end of a loop, so the
+    // clipping consumes the path entirely. Such a loop carries no extrusion and must be dropped
+    // rather than kept as an empty path and read back from.
+    const double spacing = 0.45;
+
+    Slic3r::Polylines paths;
+    REQUIRE_NOTHROW(paths = spiral_inset_fill(spiral_rectangle(0, 0, 0.05, 0.05), spacing));
+    for (const Slic3r::Polyline &path : paths)
+        CHECK(path.size() >= 2);
+
+    // The same surface at a size the clipping cannot swallow still gets filled.
+    REQUIRE_NOTHROW(paths = spiral_inset_fill(spiral_rectangle(0, 0, 5, 5), spacing));
+    REQUIRE(paths.size() == 1);
+    CHECK(paths.front().size() >= 2);
+}
+
+TEST_CASE("Spiral inset fill keeps separate islands on separate paths", "[Fill][SpiralInset]")
+{
+    // Two lobes joined by a neck narrower than the loop spacing: the inward offsets break the surface
+    // into two islands, which cannot share one spiral, and no path may leave the surface.
+    const double spacing = 0.45;
+    Slic3r::ExPolygon dumbbell = spiral_rectangle(0, 0, 6, 6);
+    dumbbell = Slic3r::union_ex(Slic3r::ExPolygons{dumbbell, spiral_rectangle(6, 2.9, 4, 0.2), spiral_rectangle(10, 0, 6, 6)}).front();
+
+    const Slic3r::Polylines paths = spiral_inset_fill(dumbbell, spacing);
+    REQUIRE(paths.size() >= 2);
+
+    // Inflate by a hair so that loops sitting exactly on the outline still count as contained.
+    const Slic3r::ExPolygons within = Slic3r::offset_ex(dumbbell, float(SCALED_EPSILON));
+    REQUIRE(within.size() == 1);
+    for (const Slic3r::Polyline &path : paths) {
+        CHECK(path.size() >= 2);
+        CHECK(within.front().contains(path));
+    }
+}
+
+TEST_CASE("Spiral inset fill stays connected across sharp corners", "[Fill][SpiralInset][Regression]")
+{
+    // At a corner of half-angle a, the next ring inward retreats along the bisector by spacing/sin(a),
+    // which leaves it several spacings from the end of the ring it continues. Judging the break by
+    // distance broke the spiral into loose rings at every spike; nesting is what decides the island.
+    const double spacing = 0.45;
+    const Slic3r::ExPolygon spike({Slic3r::Point::new_scale(0, 0), Slic3r::Point::new_scale(30, 0),
+                                   Slic3r::Point::new_scale(15, 4)});
+
+    const Slic3r::Polylines paths = spiral_inset_fill(spike, spacing);
+    CHECK(paths.size() == 1);
+
+    const Slic3r::ExPolygons within = Slic3r::offset_ex(spike, float(SCALED_EPSILON));
+    REQUIRE(within.size() == 1);
+    for (const Slic3r::Polyline &path : paths)
+        CHECK(within.front().contains(path));
+}
+
+TEST_CASE("Spiral inset fill starts on a convex corner", "[Fill][SpiralInset][Regression]")
+{
+    // The only right angle on this outline is the reflex one: the two edges meeting at the origin
+    // span 90 degrees exactly as a square corner would, but the material lies outside them. The next
+    // ring in steps away from a reflex corner along the bisector instead of hugging it, so starting
+    // the spiral there sent it across a long diagonal on every single ring.
+    const double spacing = 0.45;
+    const Slic3r::ExPolygon notched({Slic3r::Point::new_scale(0, 0), Slic3r::Point::new_scale(0, 10),
+                                     Slic3r::Point::new_scale(-16, 18), Slic3r::Point::new_scale(-16, -2),
+                                     Slic3r::Point::new_scale(-8, -16), Slic3r::Point::new_scale(18, -16),
+                                     Slic3r::Point::new_scale(10, 0)});
+
+    const Slic3r::Polylines paths = spiral_inset_fill(notched, spacing);
+    REQUIRE(paths.size() >= 1);
+
+    // Every edge of the outline is at least 45 degrees off the bisector of that reflex corner, and
+    // so is every ring offset from it. A long segment running along the bisector can therefore only
+    // be the spiral striking out across the rings to reach the next one.
+    for (const Slic3r::Polyline &path : paths)
+        for (const Slic3r::Line &segment : path.lines()) {
+            const Vec2d  v         = (segment.b - segment.a).cast<double>();
+            const double direction = std::fmod(std::atan2(v.y(), v.x()) * 180.0 / PI + 180.0, 180.0);
+            if (std::abs(direction - 45.0) > 25.0)
+                continue;
+            CAPTURE(direction, unscale<double>(segment.length()));
+            CHECK(segment.length() <= scale_(1.5 * spacing));
+        }
+}
+
+TEST_CASE("Spiral inset fill closes the gaps with variable width walls", "[Fill][SpiralInset]")
+{
+    // Fixed width loops cannot fill a region that is not a whole number of lines across and leave the
+    // remainder open, which on a ring shows up as a wedge several lines wide. Plain concentric avoids
+    // that by building solid surfaces out of Arachne's variable width walls, and so must this pattern.
+    const double spacing = 0.45;
+    Slic3r::ExPolygon ring = spiral_rectangle(0, 0, 24, 24);
+    Slic3r::Polygon   hole;
+    for (int i = 0; i < 64; ++i) {
+        const double angle = -2.0 * PI * i / 64.0; // clockwise, so it reads as a hole
+        hole.points.emplace_back(Slic3r::Point::new_scale(12 + 7.3 * std::cos(angle), 12 + 7.3 * std::sin(angle)));
+    }
+    ring.holes.emplace_back(hole);
+
+    Slic3r::PrintConfig       print_config;
+    Slic3r::PrintObjectConfig object_config;
+    auto make_filler = [&]() {
+        std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("spiralinset"));
+        filler->spacing             = spacing;
+        filler->overlap             = 0.5 * spacing; // cancel the contraction, so both see the same surface
+        filler->print_config        = &print_config;
+        filler->print_object_config = &object_config;
+        return filler;
+    };
+
+    Slic3r::FillParams params;
+    params.density      = 1.f;
+    params.dont_adjust  = false;
+    params.layer_height = 0.2;
+
+    const Slic3r::Surface surface(Slic3r::stTop, ring);
+
+    std::unique_ptr<Slic3r::Fill> fixed = make_filler();
+    const Slic3r::Polylines fixed_width = fixed->fill_surface(&surface, params);
+    REQUIRE(!fixed_width.empty());
+    const auto fixed_gaps = spiral_uncovered_area(ring, spiral_beads_of(fixed_width, fixed->spacing));
+
+    params.use_arachne = true;
+    std::unique_ptr<Slic3r::Fill> variable = make_filler();
+    const Slic3r::ThickPolylines variable_width = variable->fill_surface_arachne(&surface, params);
+    REQUIRE(!variable_width.empty());
+    const auto variable_gaps = spiral_uncovered_area(ring, spiral_beads_of(variable_width));
+
+    CAPTURE(fixed_gaps.first, fixed_gaps.second, variable_gaps.first, variable_gaps.second);
+    // The wedges the fixed width loops leave behind are what the variable width walls take up.
+    CHECK(variable_gaps.second < 0.5 * fixed_gaps.second);
+    CHECK(variable_gaps.first < fixed_gaps.first);
+
+    // And the walls are still chained into spirals rather than printed one path per wall. The ring is
+    // at its narrowest (12 - 7.3) mm across and is filled from both sides, so it is at least this many
+    // walls thick there and thicker elsewhere. Arachne's short thin feature walls cannot join a spiral,
+    // so only the substantial paths count towards this.
+    const size_t walls_across = size_t(2.0 * (12.0 - 7.3) / spacing);
+    size_t       spirals      = 0;
+    for (const Slic3r::ThickPolyline &path : variable_width)
+        if (path.length() > scale_(10.0 * spacing))
+            ++spirals;
+    CAPTURE(spirals, walls_across, variable_width.size(), fixed_width.size());
+    CHECK(2 * spirals < walls_across);
+}
+
+// EdgeSlicer: the top/bottom surface fill order options (OrcaSlicer #14179) are not ported, so the
+// spiral always runs the way upstream's "Default" order does: outward, from the centre to the edge.
+TEST_CASE("Spiral inset fill runs outward from the centre", "[Fill][SpiralInset]")
+{
+    const double            spacing = 0.45;
+    const Slic3r::ExPolygon square  = spiral_rectangle(0, 0, 10, 10);
+    const Slic3r::Polylines paths   = spiral_inset_fill(square, spacing);
+    REQUIRE(paths.size() == 1);
+
+    const Slic3r::Point centre = Slic3r::Point::new_scale(5, 5);
+    const Slic3r::Polyline &spiral = paths.front();
+    CAPTURE(unscale<double>(spiral.first_point().distance_to(centre)), unscale<double>(spiral.last_point().distance_to(centre)));
+    // It starts near the middle and ends on the outermost ring, within a spacing of the outline.
+    CHECK(spiral.first_point().distance_to(centre) < scale_(2.0 * spacing));
+    CHECK(spiral.last_point().distance_to(centre) > scale_(5.0 - 1.5 * spacing));
+}
+
+TEST_CASE("Spiral inset fill is deterministic and covers a solid square", "[Fill][SpiralInset]")
+{
+    const double            spacing = 0.45;
+    const Slic3r::ExPolygon square  = spiral_rectangle(0, 0, 20, 12);
+
+    const Slic3r::Polylines first  = spiral_inset_fill(square, spacing);
+    const Slic3r::Polylines second = spiral_inset_fill(square, spacing);
+    REQUIRE(first.size() == second.size());
+    for (size_t i = 0; i < first.size(); ++i)
+        CHECK(first[i].points == second[i].points);
+
+    // Fixed width loops (no Arachne here) leave a sliver in the middle when the width is not a whole
+    // number of lines, but the surface is still almost entirely covered.
+    const auto gaps = spiral_uncovered_area(square, spiral_beads_of(first, spacing));
+    CAPTURE(gaps.first, gaps.second);
+    CHECK(gaps.first < 0.05 * 20. * 12.);
+    CHECK(gaps.second < 0.04 * 20. * 12.);
+}
+
+TEST_CASE("Spiral inset fill at a sparse density stays inside and fills less", "[Fill][SpiralInset]")
+{
+    const double            spacing = 0.45;
+    const Slic3r::ExPolygon square  = spiral_rectangle(0, 0, 20, 20);
+
+    const Slic3r::Polylines solid  = spiral_inset_fill(square, spacing, 1.f);
+    const Slic3r::Polylines sparse = spiral_inset_fill(square, spacing, 0.2f);
+    REQUIRE(!sparse.empty());
+
+    const Slic3r::ExPolygons within = Slic3r::offset_ex(square, float(SCALED_EPSILON));
+    REQUIRE(within.size() == 1);
+    double solid_length = 0, sparse_length = 0;
+    for (const Slic3r::Polyline &path : solid)
+        solid_length += path.length();
+    for (const Slic3r::Polyline &path : sparse) {
+        CHECK(within.front().contains(path));
+        sparse_length += path.length();
+    }
+    // About a fifth of the solid length; allow slack for the outermost ring both keep.
+    CAPTURE(unscale<double>(solid_length), unscale<double>(sparse_length));
+    CHECK(sparse_length < 0.35 * solid_length);
+    CHECK(sparse_length > 0.1 * solid_length);
+}
+
+TEST_CASE("Spiral inset internal solid infill uses plain loops, not Arachne walls", "[Fill][SpiralInset][Regression]")
+{
+    // OrcaSlicer #15705: Arachne's standalone thin walls could become an extra centre plug after the
+    // spiral had finished, so internal solid infill keeps the fixed width loops. Top and bottom
+    // surfaces still get the variable width walls.
+    const double      spacing = 0.45;
+    Slic3r::ExPolygon ring    = spiral_rectangle(0, 0, 24, 24);
+    Slic3r::Polygon   hole;
+    for (int i = 0; i < 64; ++i) {
+        const double angle = -2.0 * PI * i / 64.0;
+        hole.points.emplace_back(Slic3r::Point::new_scale(12 + 7.3 * std::cos(angle), 12 + 7.3 * std::sin(angle)));
+    }
+    ring.holes.emplace_back(hole);
+
+    Slic3r::PrintConfig       print_config;
+    Slic3r::PrintObjectConfig object_config;
+    auto fill = [&](Slic3r::ExtrusionRole role) {
+        std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("spiralinset"));
+        filler->spacing             = spacing;
+        filler->overlap             = 0.5 * spacing;
+        filler->print_config        = &print_config;
+        filler->print_object_config = &object_config;
+        Slic3r::FillParams params;
+        params.density        = 1.f;
+        params.dont_adjust    = false;
+        params.layer_height   = 0.2;
+        params.use_arachne    = true;
+        params.extrusion_role = role;
+        const Slic3r::Surface surface(Slic3r::stInternalSolid, ring);
+        Slic3r::ThickPolylines out = filler->fill_surface_arachne(&surface, params);
+        return std::make_pair(std::move(out), filler->spacing);
+    };
+
+    const auto internal = fill(Slic3r::erSolidInfill);
+    REQUIRE(!internal.first.empty());
+    for (const Slic3r::ThickPolyline &path : internal.first)
+        for (const coordf_t w : path.width)
+            CHECK(w == Approx(scaled<coord_t>(internal.second)).margin(1.));
+
+    // A top surface on the same shape still varies its widths.
+    const auto top = fill(Slic3r::erTopSolidInfill);
+    REQUIRE(!top.first.empty());
+    coordf_t min_w = std::numeric_limits<coordf_t>::max(), max_w = 0;
+    for (const Slic3r::ThickPolyline &path : top.first)
+        for (const coordf_t w : path.width) {
+            min_w = std::min(min_w, w);
+            max_w = std::max(max_w, w);
+        }
+    CHECK(max_w - min_w > scale_(0.01));
+}
+
+// OrcaSlicer #13379: the optional "Z-buckling bias" gyroid. Our FillGyroid is our own grid-anchored
+// version (#221); the optimized wave is a separate branch and must leave plain gyroid alone.
+namespace {
+
+Slic3r::Polylines gyroid_fill(const Slic3r::ExPolygon &shape, double z, float density, bool optimized)
+{
+    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("gyroid"));
+    filler->spacing = 0.45;
+    filler->angle   = 0.f;
+    filler->z       = z;
+
+    Slic3r::FillParams params;
+    params.density          = density;
+    params.dont_adjust      = true;
+    params.layer_height     = 0.2;
+    params.gyroid_optimized = optimized;
+
+    Slic3r::Surface surface(Slic3r::stInternal, shape);
+    return filler->fill_surface(&surface, params);
+}
+
+double total_length_mm(const Slic3r::Polylines &paths)
+{
+    double length = 0;
+    for (const Slic3r::Polyline &path : paths)
+        length += unscale<double>(path.length());
+    return length;
+}
+
+Slic3r::ExPolygon gyroid_square(double size)
+{
+    return Slic3r::ExPolygon({Slic3r::Point::new_scale(0, 0), Slic3r::Point::new_scale(size, 0),
+                              Slic3r::Point::new_scale(size, size), Slic3r::Point::new_scale(0, size)});
+}
+
+} // namespace
+
+TEST_CASE("Gyroid optimized flag defaults off and leaves plain gyroid unchanged", "[Fill][Gyroid]")
+{
+    CHECK_FALSE(Slic3r::FillParams{}.gyroid_optimized);
+    CHECK_FALSE(Slic3r::DynamicPrintConfig::full_print_config().opt_bool("gyroid_optimized"));
+
+    const Slic3r::ExPolygon square = gyroid_square(30);
+    for (const double z : {0.4, 3.0, 7.2}) {
+        CAPTURE(z);
+        const Slic3r::Polylines a = gyroid_fill(square, z, 0.15f, false);
+        const Slic3r::Polylines b = gyroid_fill(square, z, 0.15f, false);
+        REQUIRE(!a.empty());
+        REQUIRE(a.size() == b.size());
+        for (size_t i = 0; i < a.size(); ++i)
+            CHECK(a[i].points == b[i].points);
+    }
+}
+
+TEST_CASE("Optimized gyroid fills the surface with about the same line length", "[Fill][Gyroid]")
+{
+    const Slic3r::ExPolygon  square = gyroid_square(30);
+    const Slic3r::ExPolygons within = Slic3r::offset_ex(square, float(SCALED_EPSILON));
+    REQUIRE(within.size() == 1);
+
+    for (const float density : {0.1f, 0.15f, 0.3f}) {
+        for (const double z : {0.4, 3.0, 7.2}) {
+            CAPTURE(density, z);
+            const Slic3r::Polylines standard  = gyroid_fill(square, z, density, false);
+            const Slic3r::Polylines optimized = gyroid_fill(square, z, density, true);
+            REQUIRE(!optimized.empty());
+            for (const Slic3r::Polyline &path : optimized)
+                CHECK(within.front().contains(path));
+
+            // "Filament use is preserved": the per-slice line length stays close to plain gyroid.
+            const double l_std = total_length_mm(standard), l_opt = total_length_mm(optimized);
+            CAPTURE(l_std, l_opt);
+            CHECK(l_opt > 0.75 * l_std);
+            CHECK(l_opt < 1.25 * l_std);
+
+            // Deterministic.
+            const Slic3r::Polylines again = gyroid_fill(square, z, density, true);
+            REQUIRE(again.size() == optimized.size());
+            for (size_t i = 0; i < again.size(); ++i)
+                CHECK(again[i].points == optimized[i].points);
+        }
     }
 }

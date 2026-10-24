@@ -445,7 +445,7 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 // the tray the way the swatches do. Positional (third_party_slots_from), never the raw tray id.
 static wxString third_party_slot_tile_label(const PrintHostDevices::Status& st, int protocol_index)
 {
-    for (const ThirdPartyDeviceSlot& ds : third_party_slots_from(st.slots, st.qidi_box))
+    for (const ThirdPartyDeviceSlot& ds : third_party_slots_from(st.slots, st.mmu_grouped()))
         if (ds.index == protocol_index)
             return from_u8(slot_display_label(ds));
     return wxString::Format("%d", protocol_index + 1);
@@ -684,6 +684,12 @@ void PrintHostSendDialog::refresh_device_status()
                 text += "  ";
             text += _L("QIDI Box: each filament is fed from the slot picked below. A print is only started "
                        "once every filament has a slot.");
+        } else if ((m_device_status.happy_hare || m_device_status.afc) && m_device_status.slots_have_filaments) {
+            if (!text.IsEmpty())
+                text += "  ";
+            // Read-only on purpose: no gate or lane mapping goes out at print start.
+            text += _L("Happy Hare / AFC: the gates or lanes are shown as the printer reports them. The slicer does not "
+                       "set which one feeds each filament; the printer's own tool-to-gate map does.");
         }
         // A printer that may carry a QIDI Box and did not answer: nobody knows what its Box would
         // feed, so a print is not started without the person saying so.
@@ -1044,7 +1050,7 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         model.filaments.push_back(std::move(sf));
         m_mapping_filament.push_back(f.index);
     }
-    model.slots     = third_party_slots_from(m_device_status.slots, m_device_status.qidi_box);
+    model.slots     = third_party_slots_from(m_device_status.slots, m_device_status.mmu_grouped());
     model.read_only = third_party_map_read_only();
     model.mapping.resize(model.filaments.size(), -1);
     // Always fill the visual auto-match, including read-only (K3): the cards show the match, but
@@ -1057,6 +1063,14 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         // filament's own material first and never colour alone. Same rule as the wxChoice rows.
         model.mapping[i] = initial_slot_position(m_device_status.slots, preselect_slot(*f), f->colour, f->type,
                                                  m_device_status.qidi_box);
+        // Happy Hare / AFC: nothing is sent, so show what the printer does without being told:
+        // tool T<n> feeds from gate/lane n (its default tool-to-gate map), not a colour match.
+        if (m_device_status.happy_hare || m_device_status.afc) {
+            model.mapping[i] = -1;
+            for (size_t p = 0; p < m_device_status.slots.size(); ++p)
+                if (m_device_status.slots[p].index == model.filaments[i].index)
+                    model.mapping[i] = (int) p;
+        }
     }
 
     m_filament_map = new ThirdPartyFilamentMapPanel(m_mapping_panel);

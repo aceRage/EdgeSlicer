@@ -2971,8 +2971,10 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
     float first_wipe_line   = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
 
     float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, layer_height_par);
+    // Orca #12491: plan with the spacing toolchange_Wipe() will use on this layer.
+    const bool first_layer_plan = (m_plan.size() - 1) == m_first_layer_idx;
     float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, layer_height_par, m_perimeter_width, m_extra_flow,
-                                             m_extra_spacing_wipe, width);
+                                             wipe_planning_spacing(first_layer_plan), width);
 
     m_plan.back().tool_changes.push_back(
         WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume));
@@ -3004,8 +3006,9 @@ void WipeTower2::plan_local_z_toolchange(float z_par, float layer_height_par, un
     float first_wipe_line   = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
 
     float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, layer_height_par);
+    const bool first_layer_plan = (m_plan.size() - 1) == m_first_layer_idx; // Orca #12491
     float wiping_depth      = get_wipe_depth(wipe_volume - first_wipe_volume, layer_height_par, m_perimeter_width, m_extra_flow,
-                                             m_extra_spacing_wipe, width);
+                                             wipe_planning_spacing(first_layer_plan), width);
 
     m_plan.back().local_z_tool_changes.push_back(
         WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume));
@@ -3113,8 +3116,9 @@ void WipeTower2::save_on_last_wipe()
                 float volume_we_need_depth_for = std::max(0.f, volume_left_to_wipe - length_to_volume(toolchange.first_wipe_line,
                                                                                                       m_perimeter_width * m_extra_flow,
                                                                                                       m_layer_info->height));
+                // Orca #12491: same spacing toolchange_Wipe() uses on this layer.
                 float depth_to_wipe = get_wipe_depth(volume_we_need_depth_for, m_layer_info->height, m_perimeter_width, m_extra_flow,
-                                                     m_extra_spacing_wipe, width);
+                                                     wipe_planning_spacing(is_first_layer()), width);
 
                 toolchange.required_depth = toolchange.ramming_depth + depth_to_wipe;
                 toolchange.wipe_volume    = volume_left_to_wipe;
@@ -3365,10 +3369,12 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
         int planSize = static_cast<int>(m_plan.size());
         for (int idx = 0; idx < planSize; idx++) {
             for (auto& toolchange : m_plan[idx].tool_changes) {
-                toolchange = set_toolchange(toolchange.old_tool, toolchange.new_tool, m_plan[idx].height, toolchange.wipe_volume);
+                toolchange = set_toolchange(toolchange.old_tool, toolchange.new_tool, m_plan[idx].height, toolchange.wipe_volume,
+                                            size_t(idx) == m_first_layer_idx);
             }
             for (auto& toolchange : m_plan[idx].local_z_tool_changes) {
-                toolchange = set_toolchange(toolchange.old_tool, toolchange.new_tool, m_plan[idx].height, toolchange.wipe_volume);
+                toolchange = set_toolchange(toolchange.old_tool, toolchange.new_tool, m_plan[idx].height, toolchange.wipe_volume,
+                                            size_t(idx) == m_first_layer_idx);
             }
         }
         plan_tower(); // need Re-calculate depth
@@ -3566,7 +3572,7 @@ Polygon WipeTower2::generate_rib_polygon(const WipeTower::box_coordinates& wt_bo
 }
 
 // from plan_toolchange
-WipeTower2::WipeTowerInfo::ToolChange WipeTower2::set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume)
+WipeTower2::WipeTowerInfo::ToolChange WipeTower2::set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume, bool first_layer)
 {
     float ramming_volume = m_semm
         ? 0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(), m_filpar[old_tool].ramming_speed.end(), 0.f)
@@ -3586,7 +3592,7 @@ WipeTower2::WipeTowerInfo::ToolChange WipeTower2::set_toolchange(int old_tool, i
     float first_wipe_line = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
     float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, layer_height);
     float wiping_depth = get_wipe_depth(wipe_volume - first_wipe_volume, layer_height,
-        m_perimeter_width, m_extra_flow, m_extra_spacing_wipe, width);
+        m_perimeter_width, m_extra_flow, wipe_planning_spacing(first_layer), width);
 
     return WipeTowerInfo::ToolChange(old_tool, new_tool, ramming_depth + wiping_depth, ramming_depth, first_wipe_line, wipe_volume);
 }
