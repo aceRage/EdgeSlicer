@@ -1881,7 +1881,9 @@ bool wipe_tower_rotation_supported()
 
 double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config)
 {
-    return wipe_tower_rotation_supported() ? wipe_tower_rotation_deg(config) : 0.;
+    // Config only: PartPlate also runs in the CLI, where there is no GUI_App to ask
+    // (printer_model names Bambu Lab printers, which is what the CLI's Print keys on too).
+    return wipe_tower_rotation_deg(config);
 }
 
 // Plate-local box the prime tower may occupy: the whole plate, or on a dual-nozzle printer (H2D / H2C / X2D)

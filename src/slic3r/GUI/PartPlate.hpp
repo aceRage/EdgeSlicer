@@ -79,10 +79,11 @@ using GCodeResult = GCodeProcessorResult;
 
 // Whether the selected printer's prime tower can be rotated: WipeTower2 only. Bambu Lab printers
 // build the Type1 tower, which Print::apply keeps unrotated, so the Process field is greyed out
-// and the Rotate tool stays inert on it.
+// and the Rotate tool stays inert on it. GUI only (asks GUI_App's preset bundle).
 bool wipe_tower_rotation_supported();
-// The prime tower's rotation in degrees as the GUI should draw, clamp and arrange it: the
-// config's wipe_tower_rotation_angle, or 0 where wipe_tower_rotation_supported() is false.
+// The prime tower's rotation in degrees as the plate should draw, clamp and arrange it: the
+// config's wipe_tower_rotation_angle, or 0 for a Bambu Lab printer (wipe_tower_rotation_deg()).
+// Safe in the CLI.
 double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config);
 
 class PartPlate : public ObjectBase
