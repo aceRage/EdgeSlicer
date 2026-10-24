@@ -699,31 +699,51 @@ public:
         m_in_frame = false;
     }
 
-    void SetText(const wxString& text)
+    // `progress` (0..100) moves the startup progress bar (OrcaSlicer #14155); -1 keeps it where it
+    // is, which is what the per-frame re-apply from AdvanceFrame() passes. The bar never moves back.
+    void SetText(const wxString& text, int progress = -1)
     {
         // Remembered so AdvanceFrame() can put the same line back over each new frame.
         m_last_text = text;
-        set_bitmap(m_main_bitmap);
-        if (!text.empty()) {
-            wxBitmap bitmap(m_main_bitmap);
+        if (progress >= 0)
+            m_progress = std::max(m_progress, std::clamp(progress, 0, 100));
+        if (text.empty() && m_progress < 0) {
+            set_bitmap(m_main_bitmap);
+            return;
+        }
 
-            wxMemoryDC memDC;
-            memDC.SelectObject(bitmap);
+        wxBitmap bitmap(m_main_bitmap);
+        wxMemoryDC memDC;
+        memDC.SelectObject(bitmap);
+        if (!text.empty()) {
             memDC.SetFont(m_action_font);
             memDC.SetTextForeground(wxColour(143, 143, 143));
             int width = bitmap.GetWidth();
             int text_height = memDC.GetTextExtent(text).GetHeight();
-            int text_width = memDC.GetTextExtent(text).GetWidth();
             wxRect text_rect(wxPoint(0, m_action_line_y_position), wxPoint(width, m_action_line_y_position + text_height));
             memDC.DrawLabel(text, text_rect, wxALIGN_CENTER);
-
-            memDC.SelectObject(wxNullBitmap);
-            set_bitmap(bitmap);
-#ifdef __WXOSX__
-            // without this code splash screen wouldn't be updated under OSX
-            wxYield();
-#endif
         }
+        if (m_progress >= 0 && m_progress_rect.GetWidth() > 0) {
+            // A slim rounded track under the loading line, inset from the card's rounded corners,
+            // filled in the wordmark's red.
+            const double radius = m_progress_rect.GetHeight() / 2.0;
+            memDC.SetPen(*wxTRANSPARENT_PEN);
+            memDC.SetBrush(wxBrush(wxColour(230, 230, 230)));
+            memDC.DrawRoundedRectangle(m_progress_rect, radius);
+            const int fill_width = m_progress_rect.GetWidth() * m_progress / 100;
+            if (fill_width > 0) {
+                memDC.SetBrush(wxBrush(wxColour(0xE0, 0x26, 0x2B)));
+                memDC.DrawRoundedRectangle(wxRect(m_progress_rect.GetLeft(), m_progress_rect.GetTop(),
+                                                  std::max(fill_width, m_progress_rect.GetHeight()), m_progress_rect.GetHeight()),
+                                           radius);
+            }
+        }
+        memDC.SelectObject(wxNullBitmap);
+        set_bitmap(bitmap);
+#ifdef __WXOSX__
+        // without this code splash screen wouldn't be updated under OSX
+        wxYield();
+#endif
     }
 
     void Decorate(wxBitmap& bmp)
@@ -791,6 +811,8 @@ public:
 
         // Dynamic text y position (for SetText)
         m_action_line_y_position = scaleY(258);
+        // Startup progress bar (SetText), below the loading line and clear of the rounded corners.
+        m_progress_rect = wxRect(scaleX(110), scaleY(286), scaleX(200), std::max(3, scaleY(4)));
     }
 
     // Round the window's corners: the frame takes the shape of a rounded rectangle cut from a
@@ -877,6 +899,8 @@ private:
     wxBitmap    m_main_bitmap;
     wxFont      m_action_font;
     int         m_action_line_y_position;
+    wxRect      m_progress_rect;      // the startup progress bar's track, set by Decorate()
+    int         m_progress {-1};      // 0..100 once startup has reported a step; -1 = no bar yet
     float       m_scale {1.0};
 
     // Animation state. m_animated goes false for good if wxGraphicsContext cannot be created, and
@@ -956,10 +980,11 @@ wxString splash_dots()
 // Name the startup phase on the splash (OrcaSlicer #13667). Through the active-splash pointer,
 // like tick_splash_animation(): the splash closes itself on user input, so the local `scrn` in
 // on_init_inner() may already be gone. No-op without a splash (switched off, or hub-managed).
-void set_startup_splash_phase(const wxString& text)
+// `progress` moves the startup progress bar (OrcaSlicer #14155) to that percentage.
+void set_startup_splash_phase(const wxString& text, int progress)
 {
     if (g_active_splash != nullptr)
-        g_active_splash->SetText(text + splash_dots());
+        g_active_splash->SetText(text + splash_dots(), progress);
 }
 } // namespace
 
@@ -3554,7 +3579,7 @@ bool GUI_App::on_init_inner()
         wxString loadingText = _L("Loading configuration");
         std::string languageCode = app_config->get_language_code();
         loadingText += languageCode == "zh-cn" || languageCode == "zh" ? dots + dots : dots;
-        scrn->SetText(loadingText);
+        scrn->SetText(loadingText, 5);
     }
     BOOST_LOG_TRIVIAL(info) << "loading systen presets...";
     preset_bundle = new PresetBundle();
@@ -3952,7 +3977,7 @@ bool GUI_App::on_init_inner()
             // with a timeout and may destroy itself part-way through this load, and the tick
             // checks the (destructor-cleared) active-splash pointer every time.
             if (scrn != nullptr) {
-                set_startup_splash_phase(_L("Loading printer & filament profiles"));
+                set_startup_splash_phase(_L("Loading printer & filament profiles"), 30);
                 preset_bundle->set_progress_callback([]() { GUI_App::tick_splash_animation(); });
             }
             init_params->preset_substitutions = preset_bundle->load_presets(*app_config, ForwardCompatibilitySubstitutionRule::EnableSystemSilent);
@@ -3986,7 +4011,7 @@ bool GUI_App::on_init_inner()
 #endif
     }
 
-    set_startup_splash_phase(_L("Creating main window"));
+    set_startup_splash_phase(_L("Creating main window"), 70);
     BOOST_LOG_TRIVIAL(info) << "create the main window";
     mainframe = new MainFrame();
     if (!m_updateDialog)
@@ -4030,7 +4055,7 @@ bool GUI_App::on_init_inner()
             plater_->set_printer_technology(ptFFF);
     }
     else {
-        set_startup_splash_phase(_L("Loading current presets"));
+        set_startup_splash_phase(_L("Loading current presets"), 85);
         load_current_presets();
     }
     profiler.mark("load_current_presets");
@@ -4045,7 +4070,7 @@ bool GUI_App::on_init_inner()
     mainframe->topbar()->SaveNormalRect();
 #endif
     if (!m_hub_managed) {
-        set_startup_splash_phase(_L("Showing main window"));
+        set_startup_splash_phase(_L("Showing main window"), 95);
         mainframe->Show(true);
         BOOST_LOG_TRIVIAL(info) << "main frame firstly shown";
     } else {
