@@ -44,6 +44,11 @@ struct RealisticRenderSettings
     // disc). Unused while min > max.
     std::array<double, 3> fit_min{ { 1., 1., 1. } };
     std::array<double, 3> fit_max{ { 0., 0., 0. } };
+    // Showcase S5, the layer build-up: nothing above this height casts a shadow (the part of the
+    // print not laid yet). Unused while not finite or above 1e9.
+    double                clip_top = 1e30;
+
+    bool has_clip_top() const { return clip_top < 1e9; }
 
     bool has_fit_box() const { return fit_min[0] <= fit_max[0] && fit_min[1] <= fit_max[1] && fit_min[2] <= fit_max[2]; }
 

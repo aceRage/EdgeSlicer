@@ -563,7 +563,6 @@ public:
     bool has_toolpaths_to_export() const;
     void export_toolpaths_to_obj() const;
     bool reslice();
-    void record_slice_preset(std::string action);
     void reslice_SLA_supports(const ModelObject &object, bool postpone_error_messages = false);
     void reslice_SLA_hollowing(const ModelObject &object, bool postpone_error_messages = false);
     void reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &object, bool postpone_error_messages = false);
@@ -744,6 +743,8 @@ public:
     std::vector<int> get_global_filament_map() const;
 
     wxString get_project_filename(const wxString& extension = wxEmptyString) const;
+    // Orca #11419: no objects on any plate.
+    bool is_empty_project() const;
     wxString get_export_gcode_filename(const wxString& extension = wxEmptyString, bool only_filename = false, bool export_all = false) const;
     void set_project_filename(const wxString& filename);
     void update_print_error_info(int code, std::string msg, std::string extra);
@@ -760,6 +761,8 @@ public:
     GLCanvas3D* get_current_canvas3D(bool exclude_preview = false);
     GLCanvas3D* get_view3D_canvas3D();
     GLCanvas3D* get_preview_canvas3D();
+    // Showcase S5: the Showcase view (the --showcase-render job drives it); null before it exists.
+    class ShowcaseView* get_showcase_view();
     // Ultra: make OpenGL usable on both canvases without any window ever being shown
     // (hub-managed instances). False = OpenGL unusable; callers must fail, not draw.
     bool        ensure_gl_ready();
@@ -888,6 +891,9 @@ public:
     void set_bed_position(Vec2d& pos);
     //BBS: is the background process slicing currently
     bool is_background_process_slicing() const;
+    // What the slicing notification's Cancel does: stop the background process (a slice-all run
+    // ends with it). False when the background process was idle (nothing to stop at this moment).
+    bool cancel_slicing();
     //BBS: update slicing context
     void update_slicing_context_to_current_partplate();
     //BBS: show object info

@@ -67,6 +67,7 @@ struct Record
 };
 Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
+void disable_spawn(); // from now on ensure_running() never spawns a hub and returns a dead Info (CLI render jobs)
 Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it, or for one
                                                                  // already starting (up to HubHandover::START_DEADLINE_MS)
 Info set_phone(bool on, const std::string& token = ""); // off and on keeps the same link; a valid
@@ -348,6 +349,13 @@ StreamSyncPlan plan_stream_sync(const std::map<std::string, std::string>& desire
 // hashes of the sources, so the two only differ on a hash collision).
 std::map<std::string, std::string> merge_desired_streams(const std::map<std::string, std::string>& stream_tab,
                                                          const std::map<std::string, std::string>& live_view);
+
+// ---- what the phone link exposes (slice_v1 and earlier) ----
+// Whether the hub proxies `method` `sub` (an /api/... path of a slicer instance, no query) through
+// /r/<token>/i/<pid>/api/...: the explicit allow-list, one entry per route of the instance manifest.
+bool instance_api_allowed(const std::string& method, const std::string& sub);
+// The `features` list /pair answers with.
+std::vector<std::string> pair_features();
 
 } // namespace Testing
 

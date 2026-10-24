@@ -1456,6 +1456,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               support_base_pattern_spacing))
     ((ConfigOptionFloat,               support_expansion))
     ((ConfigOptionFloats,               support_speed))
+    // OrcaSlicer #13459
+    ((ConfigOptionFloatsOrPercents,     small_support_perimeter_speed))
+    ((ConfigOptionFloats,               small_support_perimeter_threshold))
     ((ConfigOptionEnum<SupportMaterialStyle>, support_style))
     // BBS
     //((ConfigOptionBool,                independent_support_layer_height))
@@ -1527,6 +1530,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,            min_bead_width))
 
     // Orca
+    ((ConfigOptionFloat,              wall_maximum_resolution))
+    ((ConfigOptionFloat,              wall_maximum_deviation))
     ((ConfigOptionFloat,              make_overhang_printable_angle))
     ((ConfigOptionFloat,              make_overhang_printable_hole_size))
     ((ConfigOptionFloat,              tree_support_branch_distance_organic))
@@ -1583,6 +1588,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  bottom_color_penetration_layers))
     ((ConfigOptionFloat,                bridge_angle))
     ((ConfigOptionFloat,                internal_bridge_angle)) // ORCA: Internal bridge angle override
+    ((ConfigOptionFloat,                bridge_expansion_extra))
     ((ConfigOptionFloat,                bridge_flow))
     ((ConfigOptionFloat,                internal_bridge_flow))
     ((ConfigOptionFloats,                bridge_speed))
@@ -1619,6 +1625,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                lateral_lattice_angle_1))
     ((ConfigOptionFloat,                lateral_lattice_angle_2))
     ((ConfigOptionFloat,                infill_overhang_angle))
+    ((ConfigOptionFloat,                lightning_overhang_angle))
+    ((ConfigOptionFloat,                lightning_prune_angle))
+    ((ConfigOptionFloat,                lightning_straightening_angle))
     ((ConfigOptionBool,                 align_infill_direction_to_model))
     // FDM hollowing (FDMHollowing.hpp). Region settings, so a part can override the object.
     ((ConfigOptionBool,                 hollow_interior))
@@ -1696,6 +1705,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats, top_surface_speed))
     //BBS
     ((ConfigOptionBools,                 enable_overhang_speed))
+    ((ConfigOptionBool,                  overhang_shadow_inner_wall))
+    ((ConfigOptionPercent,               overhang_shadow_speed_ratio))
+    ((ConfigOptionPercent,               overhang_shadow_distance))
     ((ConfigOptionFloatsOrPercents,       overhang_1_4_speed))
     ((ConfigOptionFloatsOrPercents,       overhang_2_4_speed))
     ((ConfigOptionFloatsOrPercents,       overhang_3_4_speed))
@@ -1731,6 +1743,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 hole_to_polyhole))
     ((ConfigOptionFloatOrPercent,       hole_to_polyhole_threshold))
     ((ConfigOptionBool,                 hole_to_polyhole_twisted))
+    ((ConfigOptionInt,                  hole_to_polyhole_max_edges))
     ((ConfigOptionBool,                 overhang_reverse))
     ((ConfigOptionBool,                 overhang_reverse_internal_only))
     ((ConfigOptionFloatOrPercent,       overhang_reverse_threshold))
@@ -1872,6 +1885,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                gcode_add_line_number))
     ((ConfigOptionBool,                bbl_bed_temperature_gcode))
     ((ConfigOptionEnum<GCodeFlavor>,   gcode_flavor))
+    ((ConfigOptionBool,                gcode_skip_config_block))
 
     ((ConfigOptionFloat,               time_cost)) 
     ((ConfigOptionString,              layer_change_gcode))
@@ -1891,6 +1905,8 @@ PRINT_CONFIG_CLASS_DEFINE(
 
     
     ((ConfigOptionPercents,            retract_before_wipe))
+    // Orca
+    ((ConfigOptionPercents,            retract_after_wipe))
     ((ConfigOptionFloats,              retraction_length))
     ((ConfigOptionFloats,              retract_length_toolchange))
     ((ConfigOptionInt,                 enable_long_retraction_when_cut))
@@ -1911,6 +1927,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              retract_restart_extra))
     ((ConfigOptionFloats,              retract_restart_extra_toolchange))
     ((ConfigOptionFloats,              retraction_speed))
+    ((ConfigOptionString,              file_start_gcode))
     ((ConfigOptionString,              machine_start_gcode))
     ((ConfigOptionStrings,             filament_start_gcode))
     ((ConfigOptionBool,                single_extruder_multi_material))
@@ -1922,6 +1939,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
     ((ConfigOptionString,              change_filament_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
+    ((ConfigOptionString,              process_change_extrusion_role_gcode))
+    ((ConfigOptionStrings,             filament_change_extrusion_role_gcode))
     ((ConfigOptionFloats,               travel_speed))
     ((ConfigOptionFloat,               travel_speed_z))
     ((ConfigOptionBool,                silent_mode))

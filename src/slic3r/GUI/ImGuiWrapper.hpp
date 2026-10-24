@@ -157,6 +157,8 @@ public:
     void text_wrapped(const std::string &label, float wrap_width);
     void text_wrapped(const wxString &label, float wrap_width);
     void tooltip(const char *label, float wrap_width);
+    // UTF-8 text (_u8L, into_u8): without this a std::string went through wxString's locale conversion (OrcaSlicer #11078).
+    void tooltip(const std::string &label, float wrap_width);
     void tooltip(const wxString &label, float wrap_width);
 
 
