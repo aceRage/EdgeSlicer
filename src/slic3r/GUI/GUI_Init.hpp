@@ -29,6 +29,9 @@ struct GUI_InitParams
 	bool                        input_gcode { false };
     // Ultra: --hidden / SNORCA_HIDDEN: no splash, no main-frame Show; the hub owns visibility.
     bool                        start_hidden { false };
+    // --no-hub / --take-hub (RemoteHub::init_hub_mode): whether this copy may start or take over the phone hub.
+    bool                        no_hub_flag { false };
+    bool                        take_hub_flag { false };
     // Showcase S5: --showcase-render. A hidden instance that loads the project, renders and exits:
     // no single-instance hand-off, no network, no window, no dialogs (answered by the hidden policy).
     std::shared_ptr<Showcase::RenderRequest> showcase_render;
