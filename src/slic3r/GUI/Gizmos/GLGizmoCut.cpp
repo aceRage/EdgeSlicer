@@ -201,8 +201,14 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
 
     m_connector_modes = { _u8L("Auto"), _u8L("Manual") };
 
-    // NOTE: indexed by CutConnectorType, so the Undef slot has to be filled before FlexiJoint.
-    m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi") };
+    // NOTE: indexed by CutConnectorType, so the Undef slot has to be filled before FlexiJoint,
+    // and the push-fit Pin (PushFit = 5) comes after Flexi.
+    m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi"), _u8L("Pin") };
+
+    m_pushfit_presets = { _u8L("S"), _u8L("M"), _u8L("L"), _u8L("Auto"), _u8L("Custom") };
+    // NOTE: indexed by PushFitCutout / PushFitPose.
+    m_pushfit_cutouts = { _u8L("None"), _u8L("Flat"), _u8L("Slot"), _u8L("Flat + slot") };
+    m_pushfit_poses   = { _u8L("Auto (lying when it can)"), _u8L("Upright") };
 
     // NOTE: indexed by FlexiJointKind, so the order here has to follow the enum exactly.
     m_flexi_kinds = { _u8L("Double ring"), _u8L("Ball & socket"), _u8L("Chain link"), _u8L("Hinge"),
@@ -860,7 +866,11 @@ bool GLGizmoCut3D::render_connect_type_radio_button(CutConnectorType type)
 {
     ImGui::SameLine(type == CutConnectorType::Plug ? m_label_width : 0);
     ImGui::PushItemWidth(m_control_width);
-    if (ImGui::RadioButton(m_connector_types[size_t(type)].c_str(), m_connector_type == type)) {
+    const bool clicked = ImGui::RadioButton(m_connector_types[size_t(type)].c_str(), m_connector_type == type);
+    if (type == CutConnectorType::PushFit && ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Push-fit pin: printed separately, lying flat, and pushed into holes in both halves"),
+                         ImGui::GetFontSize() * 20.0f);
+    if (clicked) {
         m_connector_type = type;
 //        update_connector_shape();
         return true;
@@ -5917,7 +5927,7 @@ bool GLGizmoCut3D::on_is_activable() const
     if (const ModelObject* mo = wxGetApp().plater()->model().objects[object_idx];
         mo->is_cut() && mo->volumes.size() == 1) {
         const ModelVolume* volume = mo->volumes[0];
-        if (volume->is_cut_connector() && volume->cut_info.connector_type == CutConnectorType::Dowel)
+        if (volume->is_cut_connector() && is_separate_pin_connector_type(volume->cut_info.connector_type))
             return false;
     }
 
@@ -6779,6 +6789,7 @@ void GLGizmoCut3D::render_connectors_input_window(CutConnectors &connectors, flo
     bool type_changed = render_connect_type_radio_button(CutConnectorType::Plug);
     type_changed     |= render_connect_type_radio_button(CutConnectorType::Dowel);
     type_changed     |= render_connect_type_radio_button(CutConnectorType::Snap);
+    type_changed     |= render_connect_type_radio_button(CutConnectorType::PushFit);
     type_changed     |= render_connect_type_radio_button(CutConnectorType::FlexiJoint);
     if (type_changed)
         apply_selected_connectors([this, &connectors] (size_t idx) { connectors[idx].attribs.type = CutConnectorType(m_connector_type); });
@@ -6788,6 +6799,17 @@ void GLGizmoCut3D::render_connectors_input_window(CutConnectors &connectors, flo
         if (type_changed)
             sync_flexi_params(connectors, true);
         render_flexi_joint_inputs(connectors);
+        ImGui::Separator();
+        render_connectors_window_footer(x, y);
+        return;
+    }
+
+    // The Pin has its own block: Style, Shape and the generic Depth / Size tolerance sliders mean
+    // nothing for it (it is always round, and its fit is per-side clearances), so they never show.
+    if (is_pushfit_type()) {
+        if (type_changed)
+            sync_pushfit_params(connectors);
+        render_pushfit_inputs(connectors);
         ImGui::Separator();
         render_connectors_window_footer(x, y);
         return;
@@ -7334,6 +7356,326 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
                              "as one object."));
     } else
         m_imgui->text(_L("Both halves stay parts of one object so the joint prints in place."));
+    ImGui::PopTextWrapPos();
+}
+
+// ------------------------------------------------------------------------ Push-fit Pin UI
+
+bool GLGizmoCut3D::render_pushfit_mm_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip)
+{
+    const float k = m_imperial_units ? float(GizmoObjectManipulation::mm_to_in) : 1.f;
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(label);
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(0.55f * float(m_editing_window_width));
+    float val = in_val * k;
+    const std::string fmt = m_imperial_units ? "%.4f " + _u8L("in") : "%.2f " + _u8L("mm");
+    ImGui::BBLDragFloat(("##pin_" + label).c_str(), &val, m_imperial_units ? 0.0005f : 0.01f, min_val * k, max_val * k, fmt.c_str());
+    // One undo step per edit: the snapshot is taken when the field is first grabbed, not on
+    // every frame of the drag.
+    if (ImGui::IsItemActivated())
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), GUI::format("%1%: %2%", _u8L("Pin"), label), UndoRedo::SnapshotType::GizmoAction);
+    if (!tooltip.IsEmpty() && ImGui::IsItemHovered())
+        m_imgui->tooltip(tooltip, ImGui::GetFontSize() * 20.0f);
+    val /= k;
+    val = std::clamp(val, min_val, max_val);
+    if (is_approx(val, in_val))
+        return false;
+    in_val = val;
+    return true;
+}
+
+bool GLGizmoCut3D::render_pushfit_checkbox(const wxString& label, bool& value)
+{
+    bool v = value;
+    if (!m_imgui->bbl_checkbox(label, v) || v == value)
+        return false;
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), GUI::format("%1%: %2%", _u8L("Pin"), into_u8(label)), UndoRedo::SnapshotType::GizmoAction);
+    value = v;
+    return true;
+}
+
+void GLGizmoCut3D::sync_pushfit_params(CutConnectors& connectors)
+{
+    if (m_pushfit_same_length)
+        m_pushfit.length_lower = m_pushfit.length_upper;
+    if (m_pushfit_same_clearance)
+        m_pushfit.clearance_lower = m_pushfit.clearance_upper;
+
+    // radius / height keep the generic bbox, picking and overlap code working on a pin: radius is
+    // D/2 and height the whole pin (it straddles the cut, like a Dowel).
+    const float r = 0.5f * m_pushfit.diameter;
+    const float h = m_pushfit.length_upper + m_pushfit.length_lower;
+    m_connector_size        = 2.f * r;
+    m_connector_depth_ratio = h;
+
+    for (size_t idx = 0; idx < connectors.size() && idx < m_selected.size(); ++idx)
+        if (m_selected[idx] && connectors[idx].attribs.type == CutConnectorType::PushFit) {
+            CutConnector& c = connectors[idx];
+            c.pushfit       = m_pushfit;
+            c.radius        = r;
+            c.height        = h;
+            c.attribs.style = CutConnectorStyle::Prism;
+            c.attribs.shape = CutConnectorShape::Circle;
+        }
+
+    m_pushfit_hole_models_dirty = true;
+    update_connector_shape();
+    update_raycasters_for_picking();
+    check_and_update_connectors_state();
+}
+
+// The pin's side profile, drawn into the panel (owner D5): the outline with its lips and end
+// chamfers, the flats as dashed lines, the slits at both ends and the cut plane. It is the
+// clearest way to show what "Position" and "Slot length" mean.
+void GLGizmoCut3D::render_pushfit_profile_inset()
+{
+    const PushFitParams& p     = m_pushfit;
+    const float          w     = float(m_editing_window_width) + float(m_label_width);
+    const float          h     = 7.f * ImGui::GetFontSize();
+    const ImVec2         p0    = ImGui::GetCursorScreenPos();
+    ImDrawList*          dl    = ImGui::GetWindowDrawList();
+    const double         R     = 0.5 * double(p.diameter);
+    const double         lip   = p.lip ? double(p.lip_height) : 0.;
+    const double         zmin  = -double(p.length_lower);
+    const double         zmax  = double(p.length_upper);
+    const double         span  = std::max(1e-3, zmax - zmin);
+    const double         pad   = 0.08;
+    const double         sx    = (1. - 2. * pad) * double(w) / span;
+    const double         sy    = 0.8 * double(h) / std::max(1e-3, 2. * (R + lip));
+    const double         scale = std::min(sx, sy);
+    const float          cx    = p0.x + 0.5f * w - float(0.5 * (zmin + zmax) * scale);
+    const float          cy    = p0.y + 0.5f * h;
+    auto to_screen = [&](double z, double r) { return ImVec2(cx + float(z * scale), cy - float(r * scale)); };
+
+    const ImU32 col_body  = ImGui::GetColorU32(ImVec4(0.85f, 0.65f, 0.15f, 1.f));
+    const ImU32 col_flat  = ImGui::GetColorU32(ImVec4(0.55f, 0.75f, 1.f, 1.f));
+    const ImU32 col_slot  = ImGui::GetColorU32(ImVec4(0.9f, 0.3f, 0.3f, 1.f));
+    const ImU32 col_plane = ImGui::GetColorU32(ImVec4(0.6f, 0.6f, 0.6f, 1.f));
+
+    // Outline: the profile mirrored about the axis.
+    const std::vector<Vec2d> prof = pushfit_pin_profile(p);
+    for (int sign : { 1, -1 })
+        for (size_t i = 0; i + 1 < prof.size(); ++i) {
+            const Vec2d& a = prof[i];
+            const Vec2d& b = prof[i + 1];
+            if (a.x() <= 0. && b.x() <= 0.)
+                continue;
+            dl->AddLine(to_screen(a.y(), sign * a.x()), to_screen(b.y(), sign * b.x()), col_body, 1.5f);
+        }
+    // Flats: seen edge-on from the side, the flat is where the outline is clipped.
+    if (pushfit_cutout_has_flat(p.cutout)) {
+        const double a = R - double(p.flat_depth);
+        for (int sign : { 1, -1 }) {
+            if (sign < 0 && !p.flat_both_sides)
+                break;
+            for (double z = zmin; z < zmax; z += 1.0)
+                dl->AddLine(to_screen(z, -sign * a), to_screen(std::min(z + 0.5, zmax), -sign * a), col_flat, 1.f);
+        }
+    }
+    // Slits: from each tip, slot_width wide, round-ended.
+    if (pushfit_cutout_has_slot(p.cutout)) {
+        const double hw = 0.5 * double(p.slot_width);
+        const double ls = double(p.slot_length);
+        dl->AddRectFilled(to_screen(zmax - ls + hw, hw), to_screen(zmax, -hw), col_slot);
+        dl->AddRectFilled(to_screen(zmin, hw), to_screen(zmin + ls - hw, -hw), col_slot);
+        dl->AddCircleFilled(to_screen(zmax - ls + hw, 0.), float(hw * scale), col_slot);
+        dl->AddCircleFilled(to_screen(zmin + ls - hw, 0.), float(hw * scale), col_slot);
+    }
+    // The cut plane.
+    dl->AddLine(ImVec2(cx, p0.y + 0.05f * h), ImVec2(cx, p0.y + 0.95f * h), col_plane, 1.f);
+    dl->AddText(ImVec2(cx + 3.f, p0.y), col_plane, _u8L("upper").c_str());
+    const std::string lower = _u8L("lower");
+    dl->AddText(ImVec2(cx - 3.f - ImGui::CalcTextSize(lower.c_str()).x, p0.y), col_plane, lower.c_str());
+    ImGui::Dummy(ImVec2(w, h));
+}
+
+void GLGizmoCut3D::render_pushfit_hole_envelopes(const Transform3d& view_model_matrix)
+{
+    if (m_pushfit_hole_models_dirty) {
+        for (int side = 0; side < 2; ++side) {
+            m_pushfit_hole_models[side].reset();
+            m_pushfit_hole_models[side].init_from(pushfit_hole_mesh(m_pushfit, side == 0 ? PushFitSide::Upper : PushFitSide::Lower, 0.));
+        }
+        m_pushfit_hole_models_dirty = false;
+    }
+    ::glEnable(GL_BLEND);
+    ::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    ::glDepthMask(GL_FALSE);
+    const ColorRGBA envelope(0.3f, 0.65f, 1.f, 0.22f);
+    for (GLModel& model : m_pushfit_hole_models)
+        render_model(model, envelope, view_model_matrix);
+    ::glDepthMask(GL_TRUE);
+    ::glDisable(GL_BLEND);
+}
+
+void GLGizmoCut3D::render_pushfit_inputs(CutConnectors& connectors)
+{
+    // Show the values of the Pin the user selected, not whichever was edited last.
+    {
+        int first = -1;
+        for (size_t idx = 0; idx < connectors.size() && idx < m_selected.size(); ++idx)
+            if (m_selected[idx] && connectors[idx].attribs.type == CutConnectorType::PushFit) {
+                first = int(idx);
+                break;
+            }
+        if (first >= 0 && first != m_pushfit_shown_idx) {
+            m_pushfit                 = connectors[first].pushfit;
+            m_pushfit_preset_ui       = m_pushfit.preset == int(PushFitPreset::Custom) ? 4 : std::clamp(m_pushfit.preset, 0, 2);
+            m_pushfit_same_length     = m_pushfit.length_lower == m_pushfit.length_upper;
+            m_pushfit_same_clearance  = m_pushfit.clearance_lower == m_pushfit.clearance_upper;
+            m_pushfit_hole_models_dirty = true;
+            update_connector_shape();
+        }
+        m_pushfit_shown_idx = first;
+    }
+
+    const float nozzle  = flexi_nozzle_diameter();
+    bool        changed = false;   // a field edit: the preset becomes Custom
+    bool        resized = false;   // a preset or Auto: the preset stands
+
+    // 1. Preset.
+    {
+        int ui = m_pushfit_preset_ui;
+        if (render_combo(_u8L("Preset"), m_pushfit_presets, ui, m_label_width, m_editing_window_width) && ui != m_pushfit_preset_ui) {
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Pin preset"), UndoRedo::SnapshotType::GizmoAction);
+            m_pushfit_auto_misfit = false;
+            if (ui <= 2)
+                m_pushfit = pushfit_apply_preset(m_pushfit, PushFitPreset(ui));
+            else if (ui == 3) {
+                // Auto: the largest preset the cut section takes (thickness along the normal is not
+                // measured here yet, so only the section decides).
+                const PushFitAutoSize a = pushfit_auto_size(m_pushfit, flexi_section_inscribed_radius(), 0., 0.);
+                m_pushfit             = a.params;
+                m_pushfit_auto_misfit = !a.fits;
+            } else
+                m_pushfit.preset = int(PushFitPreset::Custom);
+            m_pushfit_preset_ui = ui;
+            m_pushfit_same_length    = true;
+            m_pushfit_same_clearance = true;
+            resized = true;
+        }
+        if (m_pushfit_auto_misfit)
+            m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _u8L("No preset fits this cut; S is used. Check the fit."));
+    }
+
+    // 2. Body.
+    changed |= render_pushfit_mm_input(_u8L("Diameter"), m_pushfit.diameter, 3.f, 50.f, _L("Nominal pin diameter."));
+    changed |= render_pushfit_checkbox(_L("Same length both sides"), m_pushfit_same_length);
+    if (m_pushfit_same_length)
+        changed |= render_pushfit_mm_input(_u8L("Length"), m_pushfit.length_upper, 2.f, 100.f,
+                                           _L("How far the pin reaches into each half, from that half's cut face."));
+    else {
+        changed |= render_pushfit_mm_input(_u8L("Upper length"), m_pushfit.length_upper, 2.f, 100.f, _L("How far the pin reaches into the upper half."));
+        changed |= render_pushfit_mm_input(_u8L("Lower length"), m_pushfit.length_lower, 2.f, 100.f, _L("How far the pin reaches into the lower half."));
+    }
+
+    // 3. Fit.
+    changed |= render_pushfit_checkbox(_L("Same clearance both sides"), m_pushfit_same_clearance);
+    if (m_pushfit_same_clearance)
+        changed |= render_pushfit_mm_input(_u8L("Clearance"), m_pushfit.clearance_upper, 0.f, 1.f,
+                                           _L("Radial gap between the pin and its hole. Printed holes come out small, so a little clearance is needed even for a tight fit."));
+    else {
+        changed |= render_pushfit_mm_input(_u8L("Upper clearance"), m_pushfit.clearance_upper, 0.f, 1.f, _L("Radial clearance of the upper hole."));
+        changed |= render_pushfit_mm_input(_u8L("Lower clearance"), m_pushfit.clearance_lower, 0.f, 1.f, _L("Radial clearance of the lower hole."));
+    }
+    changed |= render_pushfit_checkbox(_L("Groove for the lip"), m_pushfit.hole_groove);
+
+    // 4. Lip.
+    changed |= render_pushfit_checkbox(_L("Lip"), m_pushfit.lip);
+    if (m_pushfit.lip) {
+        changed |= render_pushfit_mm_input(_u8L("Lip height"), m_pushfit.lip_height, 0.05f, 0.24f * m_pushfit.diameter, _L("How far the lip stands proud of the pin."));
+        changed |= render_pushfit_mm_input(_u8L("Lip width"), m_pushfit.lip_width, 0.2f, 10.f, _L("Axial length of the lip, flanks included."));
+        float pct = 100.f * m_pushfit.lip_position;
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(_u8L("Lip position"));
+        ImGui::SameLine(m_label_width);
+        ImGui::PushItemWidth(0.55f * float(m_editing_window_width));
+        ImGui::BBLDragFloat("##pin_lip_pos", &pct, 0.5f, 10.f, 90.f, "%.0f %%");
+        if (ImGui::IsItemActivated())
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Pin: lip position"), UndoRedo::SnapshotType::GizmoAction);
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Where the lip sits along each side, from the cut face."), ImGui::GetFontSize() * 20.0f);
+        pct = std::clamp(pct, 10.f, 90.f);
+        if (!is_approx(0.01f * pct, m_pushfit.lip_position)) {
+            m_pushfit.lip_position = 0.01f * pct;
+            changed = true;
+        }
+    }
+
+    // 5. Cutout.
+    {
+        int cut = int(m_pushfit.cutout);
+        if (render_combo(_u8L("Cutout"), m_pushfit_cutouts, cut, m_label_width, m_editing_window_width) && cut != int(m_pushfit.cutout)) {
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Pin: cutout"), UndoRedo::SnapshotType::GizmoAction);
+            m_pushfit.cutout = PushFitCutout(cut);
+            changed = true;
+        }
+    }
+    if (pushfit_cutout_has_flat(m_pushfit.cutout)) {
+        changed |= render_pushfit_mm_input(_u8L("Flat depth"), m_pushfit.flat_depth, 0.1f, 0.33f * m_pushfit.diameter,
+                                           _L("How much the printing flat takes off. 0.15 x the diameter keeps every overhang at 45 degrees or less, so the pin lies on it with no supports."));
+        changed |= render_pushfit_checkbox(_L("Flats on both sides"), m_pushfit.flat_both_sides);
+    }
+    if (pushfit_cutout_has_slot(m_pushfit.cutout)) {
+        changed |= render_pushfit_mm_input(_u8L("Slot width"), m_pushfit.slot_width, 0.6f, 0.5f * m_pushfit.diameter,
+                                           _L("Width of the slit at each end. It lets the lip side flex so the pin goes in by hand."));
+        changed |= render_pushfit_mm_input(_u8L("Slot length"), m_pushfit.slot_length, 1.f, 100.f, _L("How far each slit runs in from the pin's end."));
+    }
+
+    // 6. Print pose.
+    {
+        int pose = int(m_pushfit.pose);
+        if (render_combo(_u8L("Print"), m_pushfit_poses, pose, m_label_width, m_editing_window_width) && pose != int(m_pushfit.pose)) {
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Pin: print pose"), UndoRedo::SnapshotType::GizmoAction);
+            m_pushfit.pose = PushFitPose(pose);
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Auto lays the pin on a flat when it has one flat enough to print on without supports, which puts the layer lines along the pin (strongest). Upright prints round holes and pins most accurately, but layer lines then cross the pin at the joint, where it is weakest."),
+                             ImGui::GetFontSize() * 20.0f);
+        std::string why;
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + m_label_width + m_control_width);
+        if (pushfit_resolve_pose(m_pushfit) == PushFitPrintPose::Lying)
+            m_imgui->text(_u8L("Prints lying on its flat."));
+        else if (m_pushfit.pose == PushFitPose::Upright)
+            m_imgui->text(_u8L("Prints upright."));
+        else if (!pushfit_can_lie(m_pushfit, &why))
+            m_imgui->text(_u8L("Prints upright:") + " " + why);
+        ImGui::PopTextWrapPos();
+    }
+
+    // 7. Advanced.
+    m_imgui->bbl_checkbox(_L("Advanced"), m_pushfit_advanced);
+    if (m_pushfit_advanced) {
+        changed |= render_pushfit_mm_input(_u8L("End chamfer"), m_pushfit.end_chamfer, 0.f, 0.25f * m_pushfit.diameter, _L("45 degree lead-in at each end of the pin."));
+        changed |= render_pushfit_mm_input(_u8L("Mouth chamfer"), m_pushfit.mouth_chamfer, 0.f, 0.25f * m_pushfit.diameter, _L("45 degree flare at each hole's mouth. It also takes up elephant's foot."));
+        changed |= render_pushfit_mm_input(_u8L("Depth clearance"), m_pushfit.depth_clearance, 0.f, 5.f, _L("Extra depth at the bottom of each hole, for air and squish."));
+        changed |= render_pushfit_checkbox(_L("Pointed hole end"), m_pushfit.pointed_end);
+    }
+
+    // 8. Rotation: turns the flats (and the slit) about the axis.
+    if (render_angle_input(m_labels_map["Rotation"], m_connector_angle, 0.f, 0.f, 180.f))
+        apply_selected_connectors([this, &connectors](size_t idx) { connectors[idx].z_angle = m_connector_angle; });
+
+    if (changed && !resized) {
+        m_pushfit.preset    = int(PushFitPreset::Custom);
+        m_pushfit_preset_ui = 4;
+        m_pushfit_auto_misfit = false;
+    }
+    if (changed || resized)
+        sync_pushfit_params(connectors);
+
+    render_pushfit_profile_inset();
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + m_label_width + m_control_width);
+    const std::string invalid = pushfit_validate(m_pushfit, double(nozzle));
+    if (!invalid.empty())
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, invalid);
+    for (const std::string& w : pushfit_warnings(m_pushfit, double(nozzle)))
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, w);
+    m_imgui->text(_L("Each pin becomes its own object beside the part. PETG and ABS/ASA flex better than PLA; "
+                     "for PLA prefer a groove over a slot."));
     ImGui::PopTextWrapPos();
 }
 
@@ -8608,15 +8950,15 @@ void GLGizmoCut3D::render_connectors()
         if (conflict_connector)
             render_color = CONNECTOR_ERR_COLOR;
         else // default connector color
-            render_color = connector.attribs.type == CutConnectorType::Dowel ? DOWEL_COLOR          : PLAG_COLOR;
+            render_color = is_separate_pin_connector_type(connector.attribs.type) ? DOWEL_COLOR          : PLAG_COLOR;
 
         if (!m_connectors_editing)
             render_color = CONNECTOR_ERR_COLOR;
         else if (size_t(m_hover_id - m_connectors_group_id) == i)
             render_color = conflict_connector ? HOVERED_ERR_COLOR :
-                           connector.attribs.type == CutConnectorType::Dowel ? HOVERED_DOWEL_COLOR  : HOVERED_PLAG_COLOR;
+                           is_separate_pin_connector_type(connector.attribs.type) ? HOVERED_DOWEL_COLOR  : HOVERED_PLAG_COLOR;
         else if (m_selected[i])
-            render_color = connector.attribs.type == CutConnectorType::Dowel ? SELECTED_DOWEL_COLOR : SELECTED_PLAG_COLOR;
+            render_color = is_separate_pin_connector_type(connector.attribs.type) ? SELECTED_DOWEL_COLOR : SELECTED_PLAG_COLOR;
 
         const Camera& camera = wxGetApp().plater()->get_camera();
         if (connector.attribs.type  == CutConnectorType::Dowel &&
@@ -8645,6 +8987,14 @@ void GLGizmoCut3D::render_connectors()
                                               scale_transform(Vec3f(connector.radius, connector.radius, height).cast<double>());
 
         render_model(m_shapes[connector.attribs].model, render_color, view_model_matrix);
+
+        // A Pin also shows where its holes go: a translucent envelope on each side, so the
+        // per-side lengths can be judged against the part.
+        if (connector.attribs.type == CutConnectorType::PushFit && m_connectors_editing)
+            render_pushfit_hole_envelopes(camera.get_view_matrix() *
+                                          translation_transform(connector.pos + instance_offset + sla_shift * Vec3d::UnitZ()) *
+                                          connector_rotation_m(connector.pos) *
+                                          rotation_transform(-connector.z_angle * Vec3d::UnitZ()));
     }
 }
 
@@ -8652,6 +9002,13 @@ bool GLGizmoCut3D::can_perform_cut() const
 {
     if (! m_invalid_connectors_idxs.empty() || (!m_keep_upper && !m_keep_lower) || m_connectors_editing)
         return false;
+
+    // A Pin whose parameters do not make a printable pin blocks the cut (the panel says why).
+    if (m_c->selection_info() != nullptr)
+        if (const ModelObject* mo = m_c->selection_info()->model_object())
+            for (const CutConnector& c : mo->cut_connectors)
+                if (c.attribs.type == CutConnectorType::PushFit && !pushfit_validate(c.pushfit, double(flexi_nozzle_diameter())).empty())
+                    return false;
 
     if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
         return has_valid_groove();
@@ -8761,6 +9118,12 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
             if (connector.attribs.type == CutConnectorType::FlexiJoint) {
                 // The flexi bodies straddle the cut plane by construction: no centre shift.
                 // The kerf reaches them through the joint's own gap, not here.
+            }
+            else if (connector.attribs.type == CutConnectorType::PushFit) {
+                // The pin straddles the cut by construction and the cut builds it (and its
+                // holes, each from its own face) across the kerf: no centre shift, no length
+                // change. It becomes an object of its own, like a Dowel.
+                dowels_count ++;
             }
             else if (connector.attribs.type == CutConnectorType::Dowel) {
                 if (connector.attribs.style == CutConnectorStyle::Prism)
@@ -9748,8 +10111,9 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
             for (ModelObject* o : new_objects) {
                 if (o == nullptr || o->volumes.empty())
                     continue;
+                // A Pin object is the same: one connector part.
                 const bool is_dowel = o->volumes.size() == 1 && o->volumes.front()->is_cut_connector() &&
-                                      o->volumes.front()->cut_info.connector_type == CutConnectorType::Dowel;
+                                      is_separate_pin_connector_type(o->volumes.front()->cut_info.connector_type);
                 if (!is_dowel)
                     o->cut_recipe = new_recipe;
             }
@@ -9759,6 +10123,28 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         plater->apply_cut_object_to_model(object_idx, new_objects);
 
         synchronize_model_after_cut(plater->model(), cut_id);
+
+        // PIN: say where the pins went, and whether any came out without its slit.
+        {
+            int pins = 0, lying = 0;
+            for (const ModelObject* o : new_objects)
+                if (o != nullptr && o->volumes.size() == 1 && o->volumes.front()->is_model_part() &&
+                    o->volumes.front()->cut_info.is_pushfit()) {
+                    ++pins;
+                    if (pushfit_resolve_pose(o->volumes.front()->cut_info.pushfit) == PushFitPrintPose::Lying)
+                        ++lying;
+                }
+            if (pins > 0)
+                plater->get_notification_manager()->push_notification(
+                    NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+                    pins == lying ? into_u8(format_wxstr(_L("%1% pin(s) added beside the object (print lying flat)."), pins)) :
+                    lying == 0    ? into_u8(format_wxstr(_L("%1% pin(s) added beside the object (print upright)."), pins)) :
+                                    into_u8(format_wxstr(_L("%1% pin(s) added beside the object."), pins)));
+            if (cut.pin_slot_failures() > 0)
+                plater->get_notification_manager()->push_notification(
+                    NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                    into_u8(format_wxstr(_L("%1% pin(s) could not be slit and were made without a slot."), cut.pin_slot_failures())));
+        }
 
         // RE-EDITABLE CUTS: a re-edit REPLACES the halves it was opened on. The
         // cut above consumed the stand-in (apply_cut_object_to_model deleted it by
@@ -10002,9 +10388,9 @@ void GLGizmoCut3D::init_connector_shapes()
             }
         }
 
-    // The Flexi joint has one cached shape, rebuilt whenever its parameters change.
-    {
-        const CutConnectorAttributes attribs = { CutConnectorType::FlexiJoint, CutConnectorStyle::Prism, CutConnectorShape::Circle };
+    // The Flexi joint and the Pin have one cached shape each, rebuilt whenever their parameters change.
+    for (const CutConnectorType type : { CutConnectorType::FlexiJoint, CutConnectorType::PushFit }) {
+        const CutConnectorAttributes attribs = { type, CutConnectorStyle::Prism, CutConnectorShape::Circle };
         indexed_triangle_set its = get_connector_mesh(attribs);
         m_shapes[attribs].model.init_from(its);
         m_shapes[attribs].mesh_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(std::move(its)));
@@ -10015,9 +10401,9 @@ void GLGizmoCut3D::update_connector_shape()
 {
     CutConnectorAttributes attribs = { m_connector_type, CutConnectorStyle(m_connector_style), CutConnectorShape(m_connector_shape_id) };
 
-    if (m_connector_type == CutConnectorType::FlexiJoint) {
-        // One cached shape per flexi joint; it is rebuilt on every parameter change.
-        attribs = { CutConnectorType::FlexiJoint, CutConnectorStyle::Prism, CutConnectorShape::Circle };
+    if (m_connector_type == CutConnectorType::FlexiJoint || m_connector_type == CutConnectorType::PushFit) {
+        // One cached shape per flexi joint / pin; it is rebuilt on every parameter change.
+        attribs = { m_connector_type, CutConnectorStyle::Prism, CutConnectorShape::Circle };
         indexed_triangle_set its = get_connector_mesh(attribs);
         m_shapes[attribs].reset();
         m_shapes[attribs].model.init_from(its);
@@ -10129,16 +10515,19 @@ bool GLGizmoCut3D::add_connector(CutConnectors& connectors, const Vec2d& mouse_p
         unselect_all_connectors();
 
         const bool flexi = is_flexi_joint_type();
+        const bool pin   = is_pushfit_type();
         connectors.emplace_back(pos, connector_rotation_m(pos),
-                                flexi ? flexi_outer_extent(m_flexi)      : m_connector_size * 0.5f,
-                                flexi ? flexi_protrusion_height(m_flexi) : m_connector_depth_ratio,
+                                flexi ? flexi_outer_extent(m_flexi)      : pin ? 0.5f * m_pushfit.diameter : m_connector_size * 0.5f,
+                                flexi ? flexi_protrusion_height(m_flexi) : pin ? m_pushfit.length_upper + m_pushfit.length_lower : m_connector_depth_ratio,
                                 m_connector_size_tolerance * 0.5f, m_connector_depth_ratio_tolerance,
                                 m_connector_angle,
                                 CutConnectorAttributes( CutConnectorType(m_connector_type),
-                                                        flexi ? CutConnectorStyle::Prism  : CutConnectorStyle(m_connector_style),
-                                                        flexi ? CutConnectorShape::Circle : CutConnectorShape(m_connector_shape_id)));
+                                                        (flexi || pin) ? CutConnectorStyle::Prism  : CutConnectorStyle(m_connector_style),
+                                                        (flexi || pin) ? CutConnectorShape::Circle : CutConnectorShape(m_connector_shape_id)));
         if (flexi)
             connectors.back().flexi = m_flexi;
+        if (pin)
+            connectors.back().pushfit = m_pushfit;
         m_selected.push_back(true);
         m_selected_count = 1;
         assert(m_selected.size() == connectors.size());
@@ -10344,6 +10733,16 @@ indexed_triangle_set GLGizmoCut3D::get_connector_mesh(CutConnectorAttributes con
         return connector_mesh;
     }
 
+    if (connector_attributes.type == CutConnectorType::PushFit) {
+        // The real pin, in mm, straddling the cut; normalized by the (D/2, D/2, Lu + Ll) the
+        // renderer, raycaster and bbox checks scale connectors by.
+        connector_mesh = pushfit_preview_body(m_pushfit);
+        const double r = std::max(0.001, 0.5 * double(m_pushfit.diameter));
+        const double h = std::max(0.001, double(m_pushfit.length_upper + m_pushfit.length_lower));
+        its_transform(connector_mesh, scale_transform(Vec3d(1. / r, 1. / r, 1. / h)));
+        return connector_mesh;
+    }
+
     if (connector_attributes.type == CutConnectorType::Snap)
         connector_mesh = its_make_snap(1.0, 1.0, m_snap_space_proportion, m_snap_bulge_proportion);
     else if (connector_attributes.style == CutConnectorStyle::Prism)
@@ -10367,6 +10766,10 @@ void GLGizmoCut3D::apply_cut_connectors(ModelObject* mo, const std::string& conn
     for (const CutConnector& connector : mo->cut_connectors) {
         if (connector.attribs.type == CutConnectorType::FlexiJoint) {
             add_flexi_joint_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
+        if (connector.attribs.type == CutConnectorType::PushFit) {
+            add_pushfit_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
             continue;
         }
         TriangleMesh mesh = TriangleMesh(get_connector_mesh(connector.attribs));
