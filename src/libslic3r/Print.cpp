@@ -2978,6 +2978,28 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     if (!validate_feature_width_vs_nozzle(width_role.first, filament_id, width, nozzle_diameter, err_msg))
                         return {err_msg, object, width_role.first};
                 }
+
+            // ORCA: Bridge line width. It sizes the bridges and overhang walls of every role that
+            // uses bridging_flow(), each against the nozzle of its own filament. 0 (the default)
+            // keeps the usual widths and is always valid.
+            const bool allow_thin_bridge_width = object->config().thick_bridges && object->config().thick_internal_bridges;
+            for (const PrintRegion &region : object->all_regions()) {
+                const auto &bridge_width_opt = region.config().bridge_line_width;
+                for (FlowRole bridge_role : { frPerimeter, frInfill, frSolidInfill, frTopSolidInfill }) {
+                    const double nozzle_diameter = nozzle_dmr_of_filament0(unsigned(std::max<int>(int(region.extruder(bridge_role)), 1) - 1));
+                    const double bridge_width    = bridge_width_opt.get_abs_value(nozzle_diameter);
+                    if (bridge_width <= 0.)
+                        continue;
+                    if (bridge_width > nozzle_diameter) {
+                        err_msg = L("Bridge line width must not exceed nozzle diameter");
+                        return { err_msg, object, "bridge_line_width" };
+                    }
+                    if (!allow_thin_bridge_width && bridge_width <= layer_height) {
+                        err_msg = L("Too small line width");
+                        return { err_msg, object, "bridge_line_width" };
+                    }
+                }
+            }
         }
     }
 

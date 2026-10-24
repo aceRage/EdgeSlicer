@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
 	test_model_browser_rules.cpp
 	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
+	test_arrange_seq_print.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
 	test_device_info_json.cpp
@@ -54,6 +55,7 @@ add_executable(${_TEST_NAME}_tests
 	test_draw_cut.cpp
 	test_edgegrid.cpp
 	test_cut_recipe.cpp
+	test_cut_paint.cpp
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
@@ -75,6 +77,7 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_idle_precool.cpp
 	test_export_stl_part.cpp
 	test_step_export.cpp
+	test_step_names.cpp
 	test_cad_edit.cpp
 	test_elephant_foot_compensation.cpp
 	test_fill_bed_pack.cpp
@@ -109,6 +112,7 @@ add_executable(${_TEST_NAME}_tests
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
+	test_preset_load_full_set.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
 	test_preset_detached_children.cpp

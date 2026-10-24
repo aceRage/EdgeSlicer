@@ -1390,6 +1390,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "ensure_vertical_shell_thickness"
             || opt_key == "bridge_angle"
             || opt_key == "internal_bridge_angle" // ORCA: Internal bridge angle override
+            || opt_key == "relative_bridge_angle" // ORCA: Relative bridge angle
             || opt_key == "bridge_expansion_extra"
             //BBS
             || opt_key == "bridge_density"
@@ -1476,6 +1477,14 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posSupportMaterial);
         } else if (opt_key == "bridge_flow" || opt_key == "internal_bridge_flow") {
             steps.emplace_back(posPerimeters);
+            steps.emplace_back(posInfill);
+            steps.emplace_back(posSupportMaterial);
+        } else if (opt_key == "bridge_line_width") {
+            // Edge: upstream invalidates only posPrepareInfill, but bridging_flow() also sizes the
+            // overhang walls (posPerimeters), the internal bridges (posPrepareInfill), the bridge
+            // infill (posInfill) and the support's bridge perimeters, like bridge_flow does.
+            steps.emplace_back(posPerimeters);
+            steps.emplace_back(posPrepareInfill);
             steps.emplace_back(posInfill);
             steps.emplace_back(posSupportMaterial);
         } else if (
@@ -3622,13 +3631,18 @@ void PrintObject::bridge_over_infill()
                             bridging_angle = determine_bridging_angle(area_to_be_bridge, to_lines(anchors.empty() ? boundary_plines : anchors));
                     }
 
-                    // Orca: Preserve the user's internal bridge angle override after automatic
-                    // direction selection. Ultra has no relative_bridge_angle setting.
+                    // Orca: Preserve the user's absolute or relative internal bridge angle
+                    // override after automatic direction selection.
                     if (candidate.region->region().config().internal_bridge_angle.value > 0) {
-                        bridging_angle = Geometry::deg2rad(region_config.internal_bridge_angle.value);
-                        if (region_config.align_infill_direction_to_model) {
-                            const auto &m = po->trafo().matrix();
-                            bridging_angle += std::atan2(double(m(1, 0)), double(m(0, 0)));
+                        const double custom_angle_rad = Geometry::deg2rad(region_config.internal_bridge_angle.value);
+                        if (region_config.relative_bridge_angle.value)
+                            bridging_angle += custom_angle_rad;
+                        else {
+                            bridging_angle = custom_angle_rad;
+                            if (region_config.align_infill_direction_to_model) {
+                                const auto &m = po->trafo().matrix();
+                                bridging_angle += std::atan2(double(m(1, 0)), double(m(0, 0)));
+                            }
                         }
                     }
 
