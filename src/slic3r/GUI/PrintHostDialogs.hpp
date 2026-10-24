@@ -113,7 +113,10 @@ protected:
     // wxChoice rows overrides this with false. No slots: no rows at all, as before.
     virtual bool use_third_party_map_panel() const { return true; }
     // Creality K3 holders: show the two colours, no popup.
-    virtual bool third_party_map_read_only() const { return false; }
+    // Happy Hare / AFC: the tiles show the gates or lanes and what is in them, nothing more. The
+    // probe reads them, but no gate or lane mapping is sent at start (the printer's own tool-to-gate
+    // map decides), so no picker is offered.
+    virtual bool third_party_map_read_only() const { return m_device_status.happy_hare || m_device_status.afc; }
     void rebuild_third_party_map_rows();
     // The picked QIDI printer said it is printing or paused: Upload only, no start.
     bool print_blocked() const;

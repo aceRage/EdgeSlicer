@@ -92,7 +92,7 @@ std::string bambu_style_slot_label(int unit_id, int slot_id)
     return std::to_string(unit_id + 1) + letter;
 }
 
-std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<PrintHostDevices::Slot>& slots, bool qidi_box)
+std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<PrintHostDevices::Slot>& slots, bool group_as_mmu)
 {
     std::vector<ThirdPartyDeviceSlot> out;
     out.reserve(slots.size());
@@ -114,7 +114,7 @@ std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<Print
             }
             ds.unit_id = u;
             ds.slot_id = unit_counts[u]++;
-        } else if (qidi_box && s.index >= 0) {
+        } else if (group_as_mmu && s.index >= 0) {
             ds.unit_id = s.index / 4;
             ds.slot_id = s.index % 4;
         } else {

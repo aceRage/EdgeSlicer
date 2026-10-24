@@ -22,8 +22,12 @@
 //    Snapmaker-flavoured Moonraker also carries `print_task_config`, whose parallel arrays are the
 //    loaded filaments per toolhead (the same object SnapmakerLan::toolheads_of reads,
 //    SnapmakerLan.cpp:456, and the same one SSWCP's machine filament info comes from). Where there
-//    is no `print_task_config`, the `extruder`/`extruder1`... objects still say how many tools the
-//    machine has, which is a slot list without materials in it.
+//    is no `print_task_config`, a Happy Hare `mmu` object (gates/materials/colors) or an AFC /
+//    BoxTurtle `lane_data` namespace can still name what is loaded; those are read-only for the
+//    send-dialog mapping table. Upstream's MoonrakerPrinterAgent start_print is a stub and does
+//    not send a gate/lane mapping at start, so neither does this probe. If none of those objects
+//    are present, the `extruder`/`extruder1`... objects still say how many tools the machine has,
+//    which is a slot list without materials in it.
 //  * A QIDI printer with a QIDI Box (X-Max 4, X-Plus 4, Q2) is a Moonraker box too, and its
 //    `multi_color_controller` object lists every Box slot with the material the printer read off
 //    its RFID tag or was told on the touchscreen - the same object QIDIStudio's device page reads.
@@ -38,7 +42,10 @@
 //  * Everything else (Duet, Repetier, SimplyPrint, ...) is not probed: this fork has no client for
 //    their status APIs, and guessing would cost a timeout per address.
 //
-// Blocking. Never call it from the GUI thread.
+// Blocking. PrintHostSendDialog::refresh_device_status currently runs this on the UI thread
+// with a busy cursor (PrintHostDialogs.cpp). Happy Hare rides in the first objects query, so it
+// costs no request; only an AFC / BoxTurtle box (its `AFC` object answered) adds one GET, for its
+// lane_data database namespace.
 
 namespace Slic3r {
 namespace PrintHostDevices {
@@ -53,7 +60,8 @@ struct Slot
     std::string type;          // "PLA", "" = the printer did not say
     std::string sub_type;
     std::string vendor;
-    std::string color;          // "#RRGGBB", "" = the printer did not say
+    std::string color;          // "#RRGGBB", "" = the printer did not say / unparsable name
+    std::string color_name;     // original CSS name when `color` is empty
     bool        loaded { false };
     double      nozzle { 0.0 };
     // A CANVAS tray (Elegoo Centauri Carbon 1): the raw pair the start-print slot_map names, -1 for
@@ -97,6 +105,12 @@ struct Status
     // A CANVAS: the position in `slots` of the tray in the extruder now (active_canvas_id /
     // active_tray_id), -1 when there is none or the printer did not say.
     int               active_slot { -1 };
+    // Happy Hare `mmu` gates or AFC/BoxTurtle lanes filled the slot list (not Snapmaker tools).
+    // Display only: no gate or lane mapping is sent at print start.
+    bool              happy_hare { false };
+    bool              afc { false };
+    // The slots are an MMU's (gates / lanes / Box slots), shown four to a unit as 1A-1D, 2A-2D.
+    bool              mmu_grouped() const { return qidi_box || happy_hare || afc; }
 };
 
 // A slot's tile label as the send dialog's map shows it ("1A", "1B"... for a CANVAS or QIDI Box:
@@ -321,6 +335,17 @@ Status probe(const Device& d, int timeout_s = 3);
 // into slots and a state. Exposed so the parsing is exercised by the Catch2 suite instead of
 // only by a printer on somebody's desk. `status_json` is the JSON text of that object.
 Status parse_moonraker_status(const std::string& status_json, const std::string& host_type_key);
+
+// Happy Hare: GET /printer/objects/query?mmu (full body), a status object that contains `mmu`,
+// or the `mmu` object itself. Network-free, for Catch2.
+Status parse_happy_hare_mmu(const std::string& json_text, const std::string& host_type_key);
+// AFC / BoxTurtle: GET /server/database/item?namespace=lane_data (full body), or the `value`
+// object of lane keys. Network-free, for Catch2.
+Status parse_afc_lane_data(const std::string& json_text, const std::string& host_type_key);
+
+// Slot.color contract: "#RRGGBB" or empty. Hex, 0x, and known CSS names map to hex; "#None"
+// and unparsable names are empty (the readable name is Slot::color_name, not this helper).
+std::string print_host_slot_colour(const std::string& raw);
 
 // The half of the Elegoo probe that has no network in it: a CANVAS query result as slots.
 Status status_from_canvas(const CanvasQueryResult& result);
