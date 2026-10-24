@@ -2514,13 +2514,18 @@ Sidebar::Sidebar(Plater *parent)
 
         // add printer title
         scrolled_sizer->Add(p->m_panel_printer_title, 0, wxEXPAND | wxALL, 0);
-        p->m_panel_printer_title->Bind(wxEVT_LEFT_UP, [this] (auto & e) {
+        // Fold on LEFT_DOWN (and LEFT_DCLICK), not LEFT_UP. Selection dialogs
+        // close on mouse-down, so a leftover LEFT_UP would land on this title
+        // and collapse the section.
+        auto toggle_printer_section = [this](wxMouseEvent &) {
             if (p->m_panel_printer_content->GetMaxHeight() == 0)
                 p->m_panel_printer_content->SetMaxSize({-1, -1});
             else
                 p->m_panel_printer_content->SetMaxSize({-1, 0});
             m_scrolled_sizer->Layout();
-        });
+        };
+        p->m_panel_printer_title->Bind(wxEVT_LEFT_DOWN, toggle_printer_section);
+        p->m_panel_printer_title->Bind(wxEVT_LEFT_DCLICK, toggle_printer_section);
 
         // add spliter 2
         auto spliter_2 = new ::StaticLine(p->scrolled);
@@ -2713,7 +2718,10 @@ Sidebar::Sidebar(Plater *parent)
     p->m_panel_filament_title = new StaticBox(p->scrolled, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL | wxBORDER_NONE);
     p->m_panel_filament_title->SetBackgroundColor(title_bg);
     p->m_panel_filament_title->SetBackgroundColor2(0xF1F1F1);
-    p->m_panel_filament_title->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent &e) {
+    // Fold on LEFT_DOWN (and LEFT_DCLICK), not LEFT_UP. Selection dialogs
+    // close on mouse-down, so a leftover LEFT_UP would land on this title
+    // and collapse the section.
+    auto toggle_filament_section = [this](wxMouseEvent &e) {
         if (e.GetPosition().x > (p->m_flushing_volume_btn->IsShown()
                 ? p->m_flushing_volume_btn->GetPosition().x : (p->m_bpButton_ams_filament->GetPosition().x - FromDIP(30))))
             return;
@@ -2722,7 +2730,9 @@ Sidebar::Sidebar(Plater *parent)
         else
             p->m_panel_filament_content->SetMaxSize({-1, 0});
         m_scrolled_sizer->Layout();
-    });
+    };
+    p->m_panel_filament_title->Bind(wxEVT_LEFT_DOWN, toggle_filament_section);
+    p->m_panel_filament_title->Bind(wxEVT_LEFT_DCLICK, toggle_filament_section);
 
     wxBoxSizer* bSizer39;
     bSizer39 = new wxBoxSizer( wxHORIZONTAL );
@@ -3759,8 +3769,10 @@ Sidebar::Sidebar(Plater *parent)
     // Add content panel to scrolled sizer
     scrolled_sizer->Add(p->m_panel_mixed_filaments_content, 0, wxEXPAND, 0);
 
-    // Bind collapse/expand event to title bar
-    p->m_panel_mixed_filaments_title->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& e) {
+    // Bind collapse/expand on LEFT_DOWN (and LEFT_DCLICK), not LEFT_UP.
+    // Mixed-filament dialogs close on mouse-down; a leftover LEFT_UP on this
+    // title would collapse the section. Same leftover-up as printer/filament.
+    auto toggle_mixed_filament_section = [this](wxMouseEvent &e) {
         // Exclude button areas from collapse/expand
         int button_left = p->m_panel_mixed_filaments_title->GetClientSize().x;
         auto consider_button = [&button_left](wxWindow *button) {
@@ -3772,13 +3784,15 @@ Sidebar::Sidebar(Plater *parent)
         consider_button(p->m_btn_add_color);
         if (e.GetPosition().x > button_left - FromDIP(12))
             return;
-        
+
         if (p->m_panel_mixed_filaments_content->GetMaxHeight() == 0)
             p->m_panel_mixed_filaments_content->SetMaxSize({-1, -1});
         else
             p->m_panel_mixed_filaments_content->SetMaxSize({-1, 0});
         m_scrolled_sizer->Layout();
-    });
+    };
+    p->m_panel_mixed_filaments_title->Bind(wxEVT_LEFT_DOWN, toggle_mixed_filament_section);
+    p->m_panel_mixed_filaments_title->Bind(wxEVT_LEFT_DCLICK, toggle_mixed_filament_section);
 
     // Initially hidden until 2+ filaments
     p->m_panel_mixed_filaments_title->Hide();
