@@ -817,7 +817,7 @@ TEST_CASE("Combined skirt keeps its distance from the brims", "[SkirtBrim][Orca1
             Polylines paths;
             brim.brim.collect_polylines(paths);
             for (const Polyline &path : paths)
-                append(brims, offset_ex(path, float(scale_(0.25))));
+                append(brims, union_ex(offset(path, float(scale_(0.25)))));
         }
     REQUIRE_FALSE(brims.empty());
     CHECK(intersection_pl(skirt, brims).empty());
@@ -862,7 +862,7 @@ TEST_CASE("Brims of neighboring instances do not overlap", "[SkirtBrim][Orca1499
         brim.collect_polylines(paths);
         ExPolygons area;
         for (const Polyline &path : paths)
-            append(area, offset_ex(path, float(scale_(0.1))));
+            append(area, union_ex(offset(path, float(scale_(0.1)))));
         return union_ex(area);
     };
     // Paths as 0.2 mm wide strips: two brims sharing the 4 mm gap must not cross each other.
