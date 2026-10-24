@@ -10,6 +10,7 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
 	test_untrusted_input.cpp
+	test_post_process_packed_gcode.cpp
 	test_zip_entry_path.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
@@ -109,6 +110,7 @@ add_executable(${_TEST_NAME}_tests
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
+	test_preset_load_full_set.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
 	test_preset_detached_children.cpp

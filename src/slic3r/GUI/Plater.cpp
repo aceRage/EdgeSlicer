@@ -172,6 +172,7 @@
 #include "Jobs/PlaterWorker.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "BackgroundSlicingProcess.hpp"
+#include "libslic3r/GCode/PostProcessor.hpp"
 #include "SelectMachine.hpp"
 #include "SendMultiMachinePage.hpp"
 #include "SendToPrinter.hpp"
@@ -23063,9 +23064,13 @@ void Plater::export_gcode_3mf(bool export_all)
         if (export_all)
             plate_idx = PLATE_ALL_IDX;
         const int export_result = export_3mf(output_path, SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode | SaveStrategy::SkipModel, plate_idx); // BBS: silence
+        if (export_result < 0) {
+            // No file was written (e.g. a post-processing script failed). Don't toast "export finished".
+            p->exporting_status = ExportingStatus::NOT_EXPORTING;
+            return;
+        }
         // Plate print history: a file was written. Recorded as an export, which never turns the plate icon green.
-        if (export_result >= 0)
-            PlateHistoryRecorder::record_export(plate_idx, output_path.string());
+        PlateHistoryRecorder::record_export(plate_idx, output_path.string());
 
         RemovableDriveManager& removable_drive_manager = *wxGetApp().removable_drive_manager();
 
@@ -23974,6 +23979,49 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     //BBS: add bbs 3mf logic
     PlateDataPtrs plate_data_list;
     p->partplate_list.store_to_3mf_structure(plate_data_list, (strategy & SaveStrategy::WithGcode || strategy & SaveStrategy::WithSliceInfo), export_plate_idx);
+
+    // Orca #16464: non-BBL G-code is not post-processed in place, so run the scripts on a copy
+    // before packing. The original temp file stays mapped by the G-code viewer. BBL printers
+    // already processed that mapped file after slicing. Untrusted 3MF scripts were stripped by
+    // UntrustedSettingsGuard (Edge #123) from the Print config this reads; they are not re-read
+    // from the project. Backups (SkipStatic) do not pack G-code, so they do not run user scripts.
+    std::vector<std::string> pp_tmp_files;
+    ScopeGuard remove_pp_tmp_files([&pp_tmp_files]() {
+        for (const std::string &f : pp_tmp_files) {
+            boost::system::error_code ec;
+            boost::filesystem::remove(f, ec);
+        }
+    });
+
+    const bool is_bbl = wxGetApp().preset_bundle != nullptr && wxGetApp().preset_bundle->is_bbl_vendor();
+    if (should_post_process_packed_gcode(strategy & SaveStrategy::WithGcode, strategy & SaveStrategy::SkipStatic, p->printer_technology,
+                                         is_bbl)) {
+        try {
+            std::vector<PackedGcodePlate> plates;
+            plates.reserve(plate_data_list.size());
+            for (PlateData *pd : plate_data_list) {
+                if (pd == nullptr || pd->gcode_file.empty())
+                    continue;
+                PartPlate *plate = p->partplate_list.get_plate(pd->plate_index);
+                if (plate == nullptr)
+                    continue;
+                PrintBase *print_base = nullptr;
+                plate->get_print(&print_base, nullptr, nullptr);
+                Print *fff_print = dynamic_cast<Print *>(print_base);
+                if (fff_print == nullptr)
+                    continue;
+                PackedGcodePlate item;
+                item.gcode_file = &pd->gcode_file;
+                item.config     = &fff_print->full_print_config();
+                plates.push_back(item);
+            }
+            post_process_packed_gcodes(plates, path_u8, pp_tmp_files);
+        } catch (const std::exception &ex) {
+            release_PlateData_list(plate_data_list);
+            show_error(this, ex.what(), false);
+            return -1;
+        }
+    }
 
     // BBS: backup
     PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
