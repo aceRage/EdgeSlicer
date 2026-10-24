@@ -311,19 +311,46 @@ PushFitPinResult pushfit_pin_mesh(const PushFitParams &p, const PushFitPinOption
     map_vertices(body, c_to_w);
     indexed_triangle_set mesh = body;
 
-    // 2. The flats: half-space cuts parallel to the axis. cut_mesh() caps the section, so the
-    //    result stays closed with no boolean, and the flat runs through the lips as well.
+    // 2. The flats: half-spaces parallel to the axis, through the lips as well.
+    //    They are subtracted with the boolean chain rather than cut with cut_mesh(): cut_mesh
+    //    caps the section with a triangulation of a polygon whose long sides are runs of
+    //    collinear points (one per profile ring), and that cap comes out with overlapping
+    //    coplanar triangles that CGAL reports as self-intersections. Manifold retriangulates
+    //    the cap cleanly. cut_mesh() stays as the fallback: its result is closed, which is all
+    //    slicing needs.
     if (pushfit_cutout_has_flat(p.cutout) && p.flat_depth > 0.f && double(p.flat_depth) < R) {
-        const float a = float(R - double(p.flat_depth));
-        indexed_triangle_set up;
-        cut_mesh(mesh, -a, &up, nullptr);
-        its_compactify_vertices(up);
-        mesh = std::move(up);
-        if (p.flat_both_sides) {
-            indexed_triangle_set lo;
-            cut_mesh(mesh, a, nullptr, &lo);
-            its_compactify_vertices(lo);
-            mesh = std::move(lo);
+        const double a   = R - double(p.flat_depth);
+        const double big = R + h + 1.;
+        BoundingBoxf3 bb_body;
+        for (const Vec3f &v : body.vertices)
+            bb_body.merge(v.cast<double>());
+        const std::vector<Vec2d> rect = { { bb_body.min.x() - 1., -big }, { bb_body.max.x() + 1., -big },
+                                          { bb_body.max.x() + 1., big },  { bb_body.min.x() - 1., big } };
+        indexed_triangle_set slabs = extrude_convex(rect, -big, -a);
+        if (p.flat_both_sides)
+            its_merge(slabs, extrude_convex(rect, a, big));
+        TriangleMesh out;
+        bool flats_ok = MeshBoolean::make_boolean_chain(TriangleMesh(mesh), TriangleMesh(slabs), "A_NOT_B", out,
+                                                        "Push-fit pin");
+        if (flats_ok) {
+            indexed_triangle_set flat = out.its;
+            its_compactify_vertices(flat);
+            flats_ok = mesh_is_sound(flat);
+            if (flats_ok)
+                mesh = std::move(flat);
+        }
+        if (!flats_ok) {
+            BOOST_LOG_TRIVIAL(warning) << "Push-fit pin: the flats boolean failed, cutting the flats with cut_mesh";
+            indexed_triangle_set up;
+            cut_mesh(mesh, float(-a), &up, nullptr);
+            its_compactify_vertices(up);
+            mesh = std::move(up);
+            if (p.flat_both_sides) {
+                indexed_triangle_set lo;
+                cut_mesh(mesh, float(a), nullptr, &lo);
+                its_compactify_vertices(lo);
+                mesh = std::move(lo);
+            }
         }
         if (!mesh_is_sound(mesh)) {
             BOOST_LOG_TRIVIAL(error) << "Push-fit pin: the flatted body is not closed, using the round pin";
@@ -332,7 +359,7 @@ PushFitPinResult pushfit_pin_mesh(const PushFitParams &p, const PushFitPinOption
         }
     }
 
-    // 3. The slit: the only boolean. One stadium prism per end, perpendicular to the flats, round
+    // 3. The slit: a second boolean, so a failure here costs only the slit. One stadium prism per end, perpendicular to the flats, round
     //    at its inner end so it has no crack starter.
     if (res.slot_requested) {
         const double w      = double(p.slot_width);

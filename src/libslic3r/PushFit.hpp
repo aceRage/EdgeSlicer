@@ -169,10 +169,10 @@ struct PushFitPinResult
     Transform3d          connector_to_mesh{ Transform3d::Identity() };
 };
 
-// The pin body: revolved profile with lips and end chamfers, flats cut with cut_mesh() (capped,
-// so no boolean), and the slit subtracted with one boolean (Manifold, mcut fallback). If the
-// slit boolean fails the pin comes back without a slit (slot_made == false); the cut never fails
-// because of it.
+// The pin body: revolved profile with lips and end chamfers, the flats subtracted as half-space
+// slabs (boolean chain: Manifold, mcut; cut_mesh() as the last resort), then the slit subtracted
+// with a second boolean. If the slit boolean fails the pin comes back without a slit
+// (slot_made == false); the cut never fails because of it.
 PushFitPinResult pushfit_pin_mesh(const PushFitParams &p, const PushFitPinOptions &opt = {});
 
 // The hole (negative volume) for one half, in the connector frame, in mm: round, radius
