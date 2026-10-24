@@ -28,6 +28,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp"
+#include "libslic3r/StartupProfile.hpp"
 #include "common_func/common_func.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -364,10 +365,14 @@ PresetUpdater::priv::priv()
 {
 	//BBS: refine preset updater logic
 	enabled_version_check = true;
+	Slic3r::StartupPhase profile("PresetUpdater::priv ctor");
 	set_download_prefs(GUI::wxGetApp().app_config);
+	profile.mark("set_download_prefs");
 	// Install indicies from resources. Only installs those that are either missing or older than in resources.
 	check_installed_vendor_profiles();
+	profile.mark("check_installed_vendor_profiles");
     perform_updates(get_printer_config_updates(), false);
+	profile.mark("printer config updates (resources/printers)");
 	// Load indices from the cache directory.
 	//index_db = Index::load_db();
 }
@@ -1275,9 +1280,14 @@ bool PresetUpdater::priv::install_bundles_rsrc(const std::vector<std::string>& b
         // Guard against empty / missing source: never clear target unless we do have source content to copy.
         if (source_dir_valid && source_dir_has_entries) {
             fs::path print_folder(print_in_vendors);
-            if (fs::exists(print_folder))
-                fs::remove_all(print_folder);
-            fs::create_directories(print_folder);
+            {
+                Slic3r::StartupScopedTimer t("PresetUpdater::install_bundles_rsrc step=remove_old_dir");
+                if (Slic3r::startup_profile_enabled())
+                    t.note("vendor=" + bundle);
+                if (fs::exists(print_folder))
+                    fs::remove_all(print_folder);
+                fs::create_directories(print_folder);
+            }
 		    updates.updates.emplace_back(std::move(print_in_rsrc), std::move(print_in_vendors), Version(), bundle, "", "",[](const std::string name){
             // return false if name is end with .stl, case insensitive
             return boost::iends_with(name, ".stl") || boost::iends_with(name, ".png") || boost::iends_with(name, ".svg") ||
@@ -1453,6 +1463,13 @@ void PresetUpdater::priv::check_installed_vendor_profiles() const
     }
 
     if (bundles.size() > 0) {
+        if (Slic3r::startup_profile_enabled()) {
+            std::string names;
+            for (const std::string &b : bundles)
+                names += (names.empty() ? "" : ",") + b;
+            Slic3r::startup_profile_log("PresetUpdater::check_installed_vendor_profiles bundles_to_install=" +
+                                        std::to_string(bundles.size()) + " (" + names + ")");
+        }
         install_bundles_rsrc(std::vector(bundles.begin(), bundles.end()), false);
     }
 }
@@ -1702,6 +1719,9 @@ bool PresetUpdater::priv::perform_updates(Updates &&updates, bool snapshot) cons
         for (const auto &update : updates.updates) {
             BOOST_LOG_TRIVIAL(info) << '\t' << update;
 
+            Slic3r::StartupScopedTimer t("PresetUpdater::perform_updates install");
+            if (Slic3r::startup_profile_enabled())
+                t.note("vendor=" + update.vendor + " dir=" + (update.is_directory ? "1" : "0") + " target=" + update.target.filename().string());
             if (update.can_install && !update.install()) {
                 BOOST_LOG_TRIVIAL(error) << "[Orca Updater] Update install failed: " << update;
                 return false;

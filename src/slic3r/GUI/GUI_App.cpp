@@ -1411,6 +1411,7 @@ void GUI_App::post_init()
 
     m_open_method = "double_click";
     bool switch_to_3d = false;
+    Slic3r::StartupPhase post_init_profile("GUI_App::post_init");
 
     // The data directory was copied out of the pre-rename one on this start. Say so once, after
     // the window exists rather than before it - and never on a hidden, hub-managed instance,
@@ -1506,6 +1507,7 @@ void GUI_App::post_init()
         return;
     }
 
+    post_init_profile.mark("input files/hub/migration notice");
 //#if BBL_HAS_FIRST_PAGE
     bool slow_bootup = false;
     if (app_config->get("slow_bootup") == "true") {
@@ -1528,13 +1530,17 @@ void GUI_App::post_init()
             Size canvas_size = plater_->canvas3D()->get_canvas_size();
             wxGetApp().imgui()->set_display_size(static_cast<float>(canvas_size.get_width()), static_cast<float>(canvas_size.get_height()));
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", start to init opengl";
+            post_init_profile.mark("select 3D tab/view");
             wxGetApp().init_opengl();
+            post_init_profile.mark("init_opengl");
 
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", finished init opengl";
             plater_->canvas3D()->init();
+            post_init_profile.mark("canvas3D init");
 
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", finished init canvas3D";
             wxGetApp().imgui()->new_frame();
+            post_init_profile.mark("imgui new_frame");
 
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", finished init imgui frame";
             plater_->canvas3D()->enable_render(true);
@@ -1542,6 +1548,7 @@ void GUI_App::post_init()
             if (!slow_bootup) {
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", start to render a first frame for test";
                 plater_->canvas3D()->render(false);
+                post_init_profile.mark("first test render");
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", finished rendering a first frame for test";
             }
 //#ifdef __linux__
@@ -1573,6 +1580,7 @@ void GUI_App::post_init()
         }
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", end load_gl_resources";
     }
+    post_init_profile.mark("load_gl_resources tail (thaw, restore project)");
 //#endif
 
     // BBS: to be checked
@@ -1596,6 +1604,7 @@ void GUI_App::post_init()
     // Bambu's cloud, which HMSQuery::init_hms_info enforces on the fetch itself; withholding the
     // object withheld the cached answer too, and every surface fell back to the bare code.
     hms_query = new HMSQuery();
+    post_init_profile.mark("hints/sentry/HMSQuery");
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
     // "The plug-in needs updating" means the plug-in is absent, did not load, or its version does
@@ -1634,10 +1643,13 @@ void GUI_App::post_init()
     // Neither wxShowEvent nor wxWindowCreateEvent work reliably.
     if (this->preset_updater) { // G-Code Viewer does not initialize preset_updater.
         CallAfter([this] {
-           
+            // Runs before the first idle, so it counts towards "startup settled".
+            Slic3r::StartupPhase after_profile("GUI_App::post_init CallAfter(wizard/updater)");
             bool cw_showed = this->config_wizard_startup();
+            after_profile.mark("config_wizard_startup");
 
             SSWCP_MqttAgent_Instance::m_dialog = new WebPresetDialog(this);
+            after_profile.mark("WebPresetDialog");
 
             std::string http_url = get_http_url(app_config->get_country_code());
             std::string language = GUI::into_u8(current_language_code());
@@ -1646,8 +1658,10 @@ void GUI_App::post_init()
             this->preset_updater->sync(http_url, language, network_ver, sys_preset ? preset_bundle : nullptr);
             this->preset_updater->sync_web_async(true);
             this->check_new_version_sf(false, false);
+            after_profile.mark("preset_updater sync/sync_web_async/check_new_version_sf");
             if (!cw_showed)
                 this->check_legacy_user_filament_presets(false);
+            after_profile.mark("check_legacy_user_filament_presets");
             // Bambu Lab's resources only for people with a Bambu printer or login (privacy audit
             // 2026-10); otherwise look again every 30 s, so a printer added later still gets them.
             this->maybe_start_bambu_sync("startup");
@@ -1685,7 +1699,9 @@ void GUI_App::post_init()
         });
 
 
+    post_init_profile.mark("network prompt/preset sync/discovery");
     DeviceManager::load_filaments_blacklist_config();
+    post_init_profile.mark("load_filaments_blacklist_config");
 
     // remove old log files over LOG_FILES_MAX_NUM
     std::string log_addr = data_dir();
@@ -1721,6 +1737,7 @@ void GUI_App::post_init()
            }
         }
     }
+    post_init_profile.mark("old log cleanup");
     // Snapmaker account: sign back in from the saved web session, quietly, once the window is up
     // and the first-start work above has had its turn. Never blocks: the page loads in a hidden
     // web view and the account lookup runs on a worker thread.
@@ -3562,6 +3579,7 @@ bool GUI_App::on_init_inner()
     if (!s_showcase_render_mode)
         repair_stale_associations();
 #endif // __WXMSW__
+    profiler.mark("repair_stale_associations");
 
     if (is_editor()) {
 #ifdef __WXMSW__
@@ -3585,8 +3603,12 @@ bool GUI_App::on_init_inner()
             associate_files(L"gcode");
         } // !s_showcase_render_mode
 #endif // __WXMSW__
+        profiler.mark("associate_files/associate_url");
 
         preset_updater = new PresetUpdater();
+        // Installs/refreshes vendor bundles from resources (OrcaFilamentLibrary on every start)
+        // and copies the hot-bed rules; split further inside PresetUpdater::priv::priv().
+        profiler.mark("PresetUpdater ctor");
         // filament_hot_bed_nozzles.json is copied here; FilamentHotBedNozzleRules reloads in load_current_presets() (startup, recreate_GUI, preset UI sync).
         Bind(EVT_SLIC3R_VERSION_ONLINE, [this](const wxCommandEvent& evt) {
             if (this->plater_ != nullptr) {
@@ -3697,6 +3719,7 @@ bool GUI_App::on_init_inner()
         // G-code viewer: no PresetUpdater; rules load from bundled resources path only.
         load_filament_hot_bed_nozzle_relations();
     }
+    profiler.mark("updater event binds (viewer: hot-bed rules)");
 
     // Suppress the '- default -' presets.
     preset_bundle->set_default_suppressed(true);
@@ -3712,7 +3735,9 @@ bool GUI_App::on_init_inner()
         Slic3r::StartupScopedTimer t("GUI_App deferred step=backup_user_folder");
         preset_bundle->backup_user_folder();
     });
-    profiler.mark("hot-bed rules + default suppression (backup_user_folder now deferred)");
+    // This used to be the only mark for everything since copy_older_config (associations,
+    // PresetUpdater, binds); those now have their own marks above.
+    profiler.mark("default suppression (backup_user_folder deferred)");
 
     Bind(EVT_SHOW_IP_DIALOG, &GUI_App::show_ip_address_enter_dialog_handler, this);
 
@@ -3855,8 +3880,11 @@ bool GUI_App::on_init_inner()
             }
         }
     } catch (...) {}
+    // Reads both copies of the network plug-in and BambuSource whole for a byte compare.
+    profiler.mark("http extra headers + ultranet plug-in sync (compare/copy) + camera module");
 
     refresh_ultranet_plugin_state();
+    profiler.mark("refresh_ultranet_plugin_state");
 
     // Ultra Net: the clean-room network plugin is bundled with the app. If it's present in
     // data_dir/plugins, networking is effectively "installed" - force the flag on so a reset
@@ -3909,6 +3937,7 @@ bool GUI_App::on_init_inner()
     } else {
         enable_user_preset_folder(false);
     }
+    profiler.mark("enable_user_preset_folder");
 
     // Ultra: one-way mirror the logged-in Bambu Studio user's custom print/filament presets into
     // user\default\ BEFORE load_presets, so they are usable/visible here too. BS stays authoritative;
@@ -3917,8 +3946,10 @@ bool GUI_App::on_init_inner()
         std::string bs_uid = (m_agent && m_agent->is_user_login()) ? m_agent->get_user_id() : std::string();
         // Remembered so the first printer switch can skip the re-sync when nothing has changed.
         const std::string before = mirror_change_fingerprint(bs_uid);
+        profiler.mark("bambu preset mirror: change fingerprint");
         record_bambu_preset_mirror_run(mirror_bambu_user_presets_ex(bs_uid).clean, before, bs_uid);
     }
+    profiler.mark("bambu preset mirror: run (sync_bambu_user_presets)");
 
     // BBS if load user preset failed
     //if (loaded_preset_result != 0) {
@@ -3965,8 +3996,12 @@ bool GUI_App::on_init_inner()
 #endif
     }
 
+    profiler.mark("pre-mainframe (win32 events, i18n)");
+    if (profiler.enabled())
+        profiler.note("new MainFrame begin uptime_ms=" + std::to_string(Slic3r::startup_profile_uptime_ms()));
     BOOST_LOG_TRIVIAL(info) << "create the main window";
     mainframe = new MainFrame();
+    profiler.mark("new MainFrame");
     if (!m_updateDialog)
     {
         m_updateDialog = new UpdateVersionDialog(mainframe);
@@ -3976,7 +4011,8 @@ bool GUI_App::on_init_inner()
             wxLaunchDefaultBrowser(downloadUlr);
         });
     }
-    profiler.mark("mainframe construction");
+    // Was "mainframe construction" and covered new MainFrame too; that has its own mark now.
+    profiler.mark("UpdateVersionDialog");
 
     // Preset files the loader could not parse were moved into a sibling "unloadable" directory
     // rather than deleted. Report that now the main window exists: deferred through CallAfter so
@@ -4000,6 +4036,7 @@ bool GUI_App::on_init_inner()
     plater_->init_notification_manager();
 
     m_printhost_job_queue.reset(new PrintHostJobQueue(mainframe->printhost_queue_dlg()));
+    profiler.mark("select_tab/obj_list init/notification manager/printhost queue");
 
     if (is_gcode_viewer()) {
         mainframe->update_layout();
@@ -4023,6 +4060,7 @@ bool GUI_App::on_init_inner()
     if (!m_hub_managed) {
         mainframe->Show(true);
         BOOST_LOG_TRIVIAL(info) << "main frame firstly shown";
+        Slic3r::startup_profile_log("main frame shown uptime_ms=" + std::to_string(Slic3r::startup_profile_uptime_ms()));
     } else {
         BOOST_LOG_TRIVIAL(info) << "main frame kept hidden (hub-managed instance)";
     }
@@ -4071,6 +4109,8 @@ bool GUI_App::on_init_inner()
             m_startup_settle_pending = false;
             m_startup_settled        = true;
             BOOST_LOG_TRIVIAL(info) << "startup is over: the event queue post_init() filled has drained";
+            Slic3r::startup_profile_log("startup settled (first idle after post_init) uptime_ms=" +
+                                        std::to_string(Slic3r::startup_profile_uptime_ms()));
             if (mainframe)
                 mainframe->on_startup_settled();
         }
@@ -8840,11 +8880,15 @@ void GUI_App::load_current_presets(bool active_preset_combox/*= false*/, bool ch
 {
     // check printer_presets for the containing information about "Print Host upload"
     // and create physical printer from it, if any exists
+    // ORCA_STARTUP_PROFILE: logs on every call (startup and later preset reloads) when enabled.
+    Slic3r::StartupPhase profile("GUI_App::load_current_presets");
     if (check_printer_presets_)
         check_printer_presets();
+    profile.mark("check_printer_presets");
 
     PrinterTechnology printer_technology = preset_bundle->printers.get_edited_preset().printer_technology();
 	this->plater()->set_printer_technology(printer_technology);
+    profile.mark("plater set_printer_technology");
     for (Tab *tab : tabs_list)
 		if (tab->supports_printer_technology(printer_technology)) {
 			if (tab->type() == Preset::TYPE_PRINTER) {
@@ -8856,12 +8900,15 @@ void GUI_App::load_current_presets(bool active_preset_combox/*= false*/, bool ch
 			//BBS: add preset combox re-active logic
 			if (active_preset_combox)
 				tab->reactive_preset_combo_box();
+			if (profile.enabled())
+				profile.mark(("tab " + Preset::get_type_string(tab->type()) + " update_pages/load_current_preset").c_str());
 		}
     // BBS: model config
     for (Tab *tab : model_tabs_list)
 		if (tab->supports_printer_technology(printer_technology)) {
             tab->rebuild_page_tree();
         }
+    profile.mark("model tabs rebuild_page_tree");
 
     if (printer_technology == ptFFF && preset_bundle != nullptr) {
         static const t_config_option_keys mixed_project_option_keys = {
@@ -8899,9 +8946,11 @@ void GUI_App::load_current_presets(bool active_preset_combox/*= false*/, bool ch
         if (plater_ != nullptr)
             sidebar().update_mixed_filament_panel(false);
     }
+    profile.mark("mixed filament project keys + sidebar panel");
     // Sidebar nozzle diameter combos depend on visible printer variants; rebuild after import / preset reload.
     if (plater() != nullptr)
         plater()->sidebar().update_nozzle_settings();
+    profile.mark("sidebar update_nozzle_settings");
 
     //load_filament_hot_bed_nozzle_relations();
 }
