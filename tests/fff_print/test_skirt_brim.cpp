@@ -3,6 +3,9 @@
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Geometry.hpp"
+#include "libslic3r/BrimEarsPoint.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <set>
@@ -398,4 +401,78 @@ TEST_CASE("Skirt flow and per-object skirt offset work on an empty plate", "[Ski
     const auto [width, height] = print.object_skirt_offset();
     CHECK(width == 0.f);
     CHECK(height == 0.f);
+}
+
+// Places one painted brim ear at `ear_local` (a first-layer point of object 0, in the object's
+// slice coordinates) and reslices. Returns the ear's centre in brim path (plate) coordinates.
+static Point paint_one_brim_ear(Print &print, Model &model, const DynamicPrintConfig &config, const Point &ear_local, float radius)
+{
+    const PrintObject *object = print.get_object(0);
+    Transform3d model_transform = model.objects.front()->instances.front()->get_transformation().get_matrix_no_offset();
+    const Point &center_offset = object->center_offset();
+    model_transform = model_transform.pretranslate(
+        Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
+    Vec3d model_pos = model_transform.inverse() * Vec3d(unscale<double>(ear_local.x()), unscale<double>(ear_local.y()), 0);
+    model_pos.z() = model.objects.front()->raw_mesh_bounding_box().min.z() - 0.0001;
+    model.objects.front()->brim_points = { BrimPoint(model_pos.cast<float>(), radius) };
+    print.apply(model, config);
+    print.process();
+
+    const Vec3d plate_origin = print.get_plate_origin();
+    Point center = ear_local + print.get_object(0)->instances().front().shift_without_plate_offset();
+    center += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    return center;
+}
+
+static BoundingBox brim_paths_bbox(Print &print)
+{
+    BoundingBox bbox;
+    for (const auto &kv : print.get_brimMap()) {
+        Polylines paths;
+        kv.second.collect_polylines(paths);
+        for (const Polyline &path : paths)
+            for (const Point &pt : path.points)
+                bbox.merge(pt);
+    }
+    return bbox;
+}
+
+// Orca #14606: with "Brim follows compensated outline", a painted ear in the middle of an edge was
+// moved to the nearest outline vertex (a corner). It now moves to the nearest point of the edge.
+TEST_CASE("Painted brim ear stays on its edge with the compensated outline", "[SkirtBrim][Orca14606]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_loops",                      0 },
+        { "brim_type",                        "painted" },
+        { "brim_object_gap",                  0 },
+        { "brim_use_efc_outline",             1 },
+        { "elefant_foot_compensation",        0.5 },
+        { "elefant_foot_compensation_layers", 1 },
+        { "initial_layer_line_width",         0.5 },
+    });
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    print.process();
+
+    const Polygon &contour = print.get_object(0)->layers().front()->lslices.front().contour;
+    REQUIRE(contour.points.size() >= 4);
+    // The longest contour edge, so the ear sits about 10 mm from either corner.
+    size_t edge = 0;
+    for (size_t i = 1; i < contour.points.size(); ++i)
+        if ((contour.points[(i + 1) % contour.points.size()] - contour.points[i]).cast<double>().norm() >
+            (contour.points[(edge + 1) % contour.points.size()] - contour.points[edge]).cast<double>().norm())
+            edge = i;
+    const Point a = contour.points[edge], b = contour.points[(edge + 1) % contour.points.size()];
+    const Point mid((a.x() + b.x()) / 2, (a.y() + b.y()) / 2);
+
+    const Point ear_center = paint_one_brim_ear(print, model, config, mid, 5.f);
+    const BoundingBox bbox = brim_paths_bbox(print);
+    REQUIRE(bbox.defined);
+    // Distance of the ear from the edge's midpoint, measured along the edge.
+    const Vec2d dir   = (b - a).cast<double>().normalized();
+    const double along = std::abs(dir.dot((bbox.center() - ear_center).cast<double>()));
+    INFO("Ear centre is " << unscale<double>(along) << " mm along the edge from where it was painted");
+    CHECK(unscale<double>(along) < 1.);
 }
