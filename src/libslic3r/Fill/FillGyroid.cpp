@@ -333,14 +333,11 @@ void FillGyroid::_fill_surface_single(
         const float density_factor = std::max(0.001f, float(params.density * DensityAdjust / params.multiline));
         const float period         = float(2.0 * M_PI) * float(this->spacing) / density_factor;
 
-        // EdgeSlicer: our standard path only widens bb by the multiline width (#221); the field
-        // keeps upstream's 10-line margin so the iso-contours that close along the raster edge
-        // stay well outside the surface and are clipped away.
-        BoundingBox field_bb = bb;
-        field_bb.offset(scale_(10. * this->spacing));
-        // The field is evaluated in absolute coordinates, so the waves line up across layers and
-        // regions without a translation.
-        marchsq::GyroidField sf(field_bb, this->z, period, float(omega));
+        // A cell of margin for the rings closed along the raster border, and a fixed sampling grid for every region.
+        const coord_t cell = scaled(marchsq::GyroidField::gsizef);
+        bb.offset(cell);
+        bb.merge(align_to_grid(bb.min, Point(cell, cell)));
+        marchsq::GyroidField sf(bb, this->z, period, float(omega));
         polylines = marchsq::get_gyroid_polylines(sf, SCALED_SPARSE_INFILL_RESOLUTION);
     } else {
         // When gyroid_optimized is false the standard path is unchanged.

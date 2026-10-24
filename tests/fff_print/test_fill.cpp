@@ -688,13 +688,14 @@ TEST_CASE("Undertop surface pattern fills the solid layer under a sparse top", "
 
 TEST_CASE("Gyroid infill of an object matches the infill of a larger object with the same center", "[Fill]")
 {
-    // Orca #16002 parametric half: Edge has no marching-squares / gyroid_optimized
-    // branch, so that GENERATE dimension is dropped. DensityAdjust and
-    // AABBTreeLines::LinesDistancer both exist on Edge; the test uses them as upstream does.
+    // Orca #16002: both the parametric waves and (since the #13379 port) the optimized
+    // marching-squares branch. DensityAdjust and AABBTreeLines::LinesDistancer both exist on Edge;
+    // the test uses them as upstream does.
+    const bool   optimized = GENERATE(false, true);
     const int    multiline = GENERATE(1, 2);
     const float  density   = GENERATE(0.05f, 0.2f);
     const double spacing   = 0.45;
-    CAPTURE(multiline, density);
+    CAPTURE(optimized, multiline, density);
 
     auto circle = [](double radius) {
         Polygon contour = make_circle_num_segments(scale_(radius), 120);
@@ -703,16 +704,17 @@ TEST_CASE("Gyroid infill of an object matches the infill of a larger object with
     };
     const ExPolygon object = circle(20.);
     const ExPolygon larger = circle(30.);
-    auto fill = [multiline, density, spacing](const ExPolygon &region, double z) {
+    auto fill = [optimized, multiline, density, spacing](const ExPolygon &region, double z) {
         std::unique_ptr<Fill> filler(Fill::new_from_type(ipGyroid));
         filler->spacing = spacing;
         filler->angle   = float(M_PI / 7.);
         filler->z       = z;
 
         FillParams params;
-        params.density     = density;
-        params.multiline   = multiline;
-        params.dont_adjust = true;
+        params.density          = density;
+        params.multiline        = multiline;
+        params.gyroid_optimized = optimized;
+        params.dont_adjust      = true;
         Surface surface(stInternal, region);
         return filler->fill_surface(&surface, params);
     };
@@ -733,7 +735,9 @@ TEST_CASE("Gyroid infill of an object matches the infill of a larger object with
     // little more: 12.6 um at multiline 2, density 0.05, z=17.38 on MSVC (deterministic), far below
     // the 0.45 mm line spacing. A real phase shift is a large fraction of the wave period (the
     // pinned multiline-1 test below catches that), so 20 um stays meaningful. Multiline 1 keeps 10 um.
-    const double tolerance = multiline > 1 ? 0.02 : 0.01;
+    // Marching squares (the optimized branch) simplifies rings that start elsewhere in each object,
+    // so it gets upstream's SPARSE_INFILL_RESOLUTION + 10 um.
+    const double tolerance = optimized ? SPARSE_INFILL_RESOLUTION + (multiline > 1 ? 0.02 : 0.01) : (multiline > 1 ? 0.02 : 0.01);
     // Half a z period of the waves, through both switches between horizontal and vertical waves.
     const double wave_distance = spacing * multiline / (density * FillGyroid::DensityAdjust);
     for (int step = 0; step <= 8; ++step) {
