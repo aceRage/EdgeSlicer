@@ -339,6 +339,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/IconManager.hpp
     GUI/ImageGrid.cpp
     GUI/ImageGrid.h
+    GUI/ImGuiFontRanges.cpp
+    GUI/ImGuiFontRanges.hpp
     GUI/ImGuiWrapper.cpp
     GUI/ImGuiWrapper.hpp
     GUI/IMSlider.cpp
