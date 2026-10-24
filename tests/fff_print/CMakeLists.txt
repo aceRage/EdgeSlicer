@@ -54,6 +54,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stabilizers_without_supports.cpp
 	test_fdm_hollowing.cpp
 	test_extra_bridge_layer_determinism.cpp
+	test_bridge_controls.cpp
 	test_bed_temperature.cpp
 	test_chamber_temperature.cpp
 	test_texture_displacement.cpp
