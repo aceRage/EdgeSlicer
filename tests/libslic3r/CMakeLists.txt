@@ -109,6 +109,7 @@ add_executable(${_TEST_NAME}_tests
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
+	test_preset_load_full_set.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
 	test_preset_detached_children.cpp
