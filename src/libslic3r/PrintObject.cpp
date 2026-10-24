@@ -1478,6 +1478,14 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posInfill);
             steps.emplace_back(posSupportMaterial);
+        } else if (opt_key == "bridge_line_width") {
+            // Edge: upstream invalidates only posPrepareInfill, but bridging_flow() also sizes the
+            // overhang walls (posPerimeters), the internal bridges (posPrepareInfill), the bridge
+            // infill (posInfill) and the support's bridge perimeters, like bridge_flow does.
+            steps.emplace_back(posPerimeters);
+            steps.emplace_back(posPrepareInfill);
+            steps.emplace_back(posInfill);
+            steps.emplace_back(posSupportMaterial);
         } else if (
                 opt_key == "wall_generator"
             || opt_key == "wall_transition_length"

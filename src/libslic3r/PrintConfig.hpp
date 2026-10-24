@@ -1591,6 +1591,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 relative_bridge_angle)) // ORCA: Relative bridge angle flag
     ((ConfigOptionFloat,                bridge_expansion_extra))
     ((ConfigOptionFloat,                bridge_flow))
+    ((ConfigOptionFloatOrPercent,       bridge_line_width))
     ((ConfigOptionFloat,                internal_bridge_flow))
     ((ConfigOptionFloats,                bridge_speed))
     ((ConfigOptionFloatsOrPercents,       internal_bridge_speed))

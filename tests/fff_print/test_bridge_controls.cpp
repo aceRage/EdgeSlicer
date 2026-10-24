@@ -233,3 +233,189 @@ TEST_CASE("Ironing direction follows the model rotation when infill is aligned t
     CAPTURE(off, on);
     CHECK_THAT(diff, Catch::Matchers::WithinAbs(30., 0.5));
 }
+
+// ---------------------------------------------------------------------------------------------
+// OrcaSlicer #11255: bridge line width, wider bridge density range.
+
+namespace {
+
+struct BridgeFlows
+{
+    Flow thick;
+    Flow thin;
+    Flow plain; // the region's ordinary flow for the same role
+};
+
+BridgeFlows bridge_flows(std::initializer_list<ConfigBase::SetDeserializeItem> items, FlowRole role = frSolidInfill)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "layer_height", "0.2" }, { "initial_layer_print_height", "0.2" }, { "nozzle_diameter", "0.4" } });
+    config.set_deserialize_strict(items);
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config, false);
+    print.process();
+    const LayerRegion &region = *print.objects().front()->get_layer(3)->regions().front();
+    return { region.bridging_flow(role, true), region.bridging_flow(role, false), region.flow(role) };
+}
+
+} // namespace
+
+TEST_CASE("Bridge line width 0 keeps the bridge flows of before the port", "[BridgeControls][BridgeLineWidth]")
+{
+    const FlowRole role = GENERATE(frPerimeter, frSolidInfill);
+    const double ratio = GENERATE(1.0, 0.81);
+    const int role_id = int(role);
+    CAPTURE(role_id, ratio);
+    const BridgeFlows flows = bridge_flows({ { "bridge_line_width", "0" }, { "bridge_flow", ratio } }, role);
+    // The exact expressions bridging_flow() used before #11255.
+    const Flow old_thick = Flow::bridging_flow(float(std::sqrt(ratio)) * 0.4f, 0.4f);
+    const Flow old_thin  = flows.plain.with_flow_ratio(ratio);
+    CHECK(flows.thick.width() == old_thick.width());
+    CHECK(flows.thick.height() == old_thick.height());
+    CHECK(flows.thick.spacing() == old_thick.spacing());
+    CHECK(flows.thick.mm3_per_mm() == old_thick.mm3_per_mm());
+    CHECK(flows.thin.width() == old_thin.width());
+    CHECK(flows.thin.height() == old_thin.height());
+    CHECK(flows.thin.spacing() == old_thin.spacing());
+    CHECK(flows.thin.mm3_per_mm() == old_thin.mm3_per_mm());
+}
+
+TEST_CASE("Bridge line width sets the bridge thread and the bridge line width", "[BridgeControls][BridgeLineWidth]")
+{
+    const char *width = GENERATE("0.3", "75%");
+    CAPTURE(width);
+    SECTION("bridge flow ratio 1") {
+        const BridgeFlows flows = bridge_flows({ { "bridge_line_width", width } });
+        CHECK_THAT(flows.thick.width(), Catch::Matchers::WithinAbs(0.3, 1e-6));
+        CHECK_THAT(flows.thick.height(), Catch::Matchers::WithinAbs(0.3, 1e-6));
+        CHECK(flows.thick.bridge());
+        CHECK_THAT(flows.thin.width(), Catch::Matchers::WithinAbs(0.3, 1e-6));
+        CHECK_THAT(flows.thin.height(), Catch::Matchers::WithinAbs(0.2, 1e-6));
+        CHECK(flows.plain.width() > 0.4f); // the solid infill keeps its own width
+    }
+    SECTION("bridge flow ratio scales the thick thread by its square root") {
+        const BridgeFlows flows = bridge_flows({ { "bridge_line_width", width }, { "bridge_flow", "0.81" } });
+        CHECK_THAT(flows.thick.width(), Catch::Matchers::WithinAbs(0.27, 1e-6));
+        const Flow thin_100 = bridge_flows({ { "bridge_line_width", width } }).thin;
+        CHECK_THAT(flows.thin.mm3_per_mm(), Catch::Matchers::WithinRel(0.81 * thin_100.mm3_per_mm(), 1e-6));
+    }
+}
+
+TEST_CASE("Bridge line width also sizes the overhang walls", "[BridgeControls][BridgeLineWidth]")
+{
+    const BridgeFlows flows = bridge_flows({ { "bridge_line_width", "0.3" } }, frPerimeter);
+    CHECK_THAT(flows.thin.width(), Catch::Matchers::WithinAbs(0.3, 1e-6));
+    CHECK_THAT(flows.thick.width(), Catch::Matchers::WithinAbs(0.3, 1e-6));
+}
+
+TEST_CASE("Flow::extrusion_width resolves the bridge line width", "[BridgeControls][BridgeLineWidth]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_diameter", "0.4" }, { "internal_solid_infill_line_width", "0.45" } });
+    config.set_deserialize_strict({ { "bridge_line_width", "0" } });
+    CHECK_THAT(Flow::extrusion_width("bridge_line_width", config, 0), Catch::Matchers::WithinAbs(0.45, 1e-6));
+    config.set_deserialize_strict({ { "bridge_line_width", "75%" } });
+    CHECK_THAT(Flow::extrusion_width("bridge_line_width", config, 0), Catch::Matchers::WithinAbs(0.3, 1e-6));
+    config.set_deserialize_strict({ { "bridge_line_width", "0.35" } });
+    CHECK_THAT(Flow::extrusion_width("bridge_line_width", config, 0), Catch::Matchers::WithinAbs(0.35, 1e-6));
+}
+
+namespace {
+
+StringObjectException validate_bridge(std::initializer_list<ConfigBase::SetDeserializeItem> items)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "nozzle_diameter", "0.4" }, { "layer_height", "0.2" }, { "initial_layer_print_height", "0.2" },
+                                    // full_print_config() has relative E, which validate() refuses without a per-layer reset.
+                                    { "layer_change_gcode", "G92 E0" } });
+    config.set_deserialize_strict(items);
+    Model model = Test::model("cube", Test::mesh(TestMesh::cube_20x20x20));
+    for (ModelObject *object : model.objects) {
+        object->instances.front()->set_offset(Vec3d(100., 100., 0.));
+        object->ensure_on_bed();
+    }
+    Print print;
+    for (ModelObject *object : model.objects)
+        print.auto_assign_extruders(object);
+    print.apply(model, config);
+    return print.validate();
+}
+
+} // namespace
+
+TEST_CASE("Print::validate checks the bridge line width against the nozzle and the layer height", "[BridgeControls][BridgeLineWidth][Validate]")
+{
+    SECTION("0 and widths up to the nozzle pass") {
+        for (const char *w : { "0", "0.3", "100%" }) {
+            const StringObjectException err = validate_bridge({ { "bridge_line_width", w } });
+            INFO(w << ": " << err.string << " (" << err.opt_key << ")");
+            CHECK(err.string.empty());
+        }
+    }
+    SECTION("wider than the nozzle is refused") {
+        const StringObjectException err = validate_bridge({ { "bridge_line_width", "0.5" } });
+        CHECK(err.string == "Bridge line width must not exceed nozzle diameter");
+        CHECK(err.opt_key == "bridge_line_width");
+    }
+    SECTION("not above the layer height is refused unless all bridges are thick") {
+        const StringObjectException thin = validate_bridge({ { "bridge_line_width", "0.15" }, { "thick_bridges", "0" }, { "thick_internal_bridges", "1" } });
+        CHECK(thin.string == "Too small line width");
+        CHECK(thin.opt_key == "bridge_line_width");
+        const StringObjectException thick = validate_bridge({ { "bridge_line_width", "0.15" }, { "thick_bridges", "1" }, { "thick_internal_bridges", "1" } });
+        INFO(thick.string << " (" << thick.opt_key << ")");
+        CHECK(thick.string.empty());
+    }
+}
+
+TEST_CASE("Config validation: bridge line width and internal bridge flow", "[BridgeControls][BridgeLineWidth][Validate]")
+{
+    FullPrintConfig config;
+    REQUIRE(config.bridge_line_width.value == 0.);
+    CHECK(Slic3r::validate(config).count("bridge_line_width") == 0);
+    config.bridge_line_width.value   = 0.5;
+    config.bridge_line_width.percent = false;
+    CHECK(Slic3r::validate(config).count("bridge_line_width") == 1);
+    config.bridge_line_width.value   = 100.;
+    config.bridge_line_width.percent = true;
+    CHECK(Slic3r::validate(config).count("bridge_line_width") == 0);
+
+    // Upstream's fix: the internal bridge flow ratio is checked on its own value.
+    config.internal_bridge_flow.value = 0.;
+    CHECK(Slic3r::validate(config).count("internal_bridge_flow") == 1);
+    config.internal_bridge_flow.value = 1.;
+    CHECK(Slic3r::validate(config).count("internal_bridge_flow") == 0);
+}
+
+TEST_CASE("Bridge densities accept up to 125%", "[BridgeControls][BridgeDensity]")
+{
+    for (const char *key : { "bridge_density", "internal_bridge_density" }) {
+        const ConfigOptionDef *def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->min == 10.);
+        CHECK(def->max == 125.);
+        CHECK(def->is_value_valid(125.));
+        CHECK_FALSE(def->is_value_valid(126.));
+    }
+
+    // An internal bridge denser than 100% lays more bridge line than a solid one.
+    auto internal_bridge_length = [](const char *density) {
+        DynamicPrintConfig config = bridge_config();
+        config.set_deserialize_strict({ { "internal_bridge_density", density } });
+        Print print;
+        Model model;
+        init_print({ internal_bridge_mesh() }, print, model, config, false);
+        print.process();
+        double length = 0.;
+        for (const Layer *layer : print.objects().front()->layers())
+            for (const LayerRegion *region : layer->regions())
+                for (const ExtrusionEntity *entity : region->fills.flatten().entities)
+                    if (entity->role() == erInternalBridgeInfill)
+                        length += unscale<double>(entity->length());
+        return length;
+    };
+    const double solid = internal_bridge_length("100%");
+    const double dense = internal_bridge_length("125%");
+    REQUIRE(solid > 0.);
+    CHECK(dense > 1.1 * solid);
+}

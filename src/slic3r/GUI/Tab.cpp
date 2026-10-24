@@ -2734,6 +2734,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("sparse_infill_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("internal_solid_infill_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("support_line_width","quality_settings_line_width");
+        optgroup->append_single_option_line("bridge_line_width","quality_settings_line_width");
 
         optgroup = page->new_optgroup(L("Seam"), L"param_seam");
         optgroup->append_single_option_line("seam_position", "quality_settings_seam#seam-position");
