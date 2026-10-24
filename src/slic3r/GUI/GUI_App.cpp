@@ -944,6 +944,25 @@ void GUI_App::close_startup_splash()
     }
 }
 
+namespace {
+// The "..." after a splash line; Chinese takes two, as the first "Loading configuration" line
+// always did.
+wxString splash_dots()
+{
+    const std::string lang = wxGetApp().app_config != nullptr ? wxGetApp().app_config->get_language_code() : std::string();
+    return lang == "zh-cn" || lang == "zh" ? dots + dots : dots;
+}
+
+// Name the startup phase on the splash (OrcaSlicer #13667). Through the active-splash pointer,
+// like tick_splash_animation(): the splash closes itself on user input, so the local `scrn` in
+// on_init_inner() may already be gone. No-op without a splash (switched off, or hub-managed).
+void set_startup_splash_phase(const wxString& text)
+{
+    if (g_active_splash != nullptr)
+        g_active_splash->SetText(text + splash_dots());
+}
+} // namespace
+
 #ifdef __linux__
 bool static check_old_linux_datadir(const wxString& app_name) {
     // If we are on Linux and the datadir does not exist yet, look into the old
@@ -3932,8 +3951,10 @@ bool GUI_App::on_init_inner()
             // Through tick_splash_animation() rather than capturing scrn: the splash is created
             // with a timeout and may destroy itself part-way through this load, and the tick
             // checks the (destructor-cleared) active-splash pointer every time.
-            if (scrn != nullptr)
+            if (scrn != nullptr) {
+                set_startup_splash_phase(_L("Loading printer & filament profiles"));
                 preset_bundle->set_progress_callback([]() { GUI_App::tick_splash_animation(); });
+            }
             init_params->preset_substitutions = preset_bundle->load_presets(*app_config, ForwardCompatibilitySubstitutionRule::EnableSystemSilent);
         }
         catch (const std::exception& ex) {
@@ -3965,6 +3986,7 @@ bool GUI_App::on_init_inner()
 #endif
     }
 
+    set_startup_splash_phase(_L("Creating main window"));
     BOOST_LOG_TRIVIAL(info) << "create the main window";
     mainframe = new MainFrame();
     if (!m_updateDialog)
@@ -4007,8 +4029,10 @@ bool GUI_App::on_init_inner()
             // ensure the selected technology is ptFFF
             plater_->set_printer_technology(ptFFF);
     }
-    else
+    else {
+        set_startup_splash_phase(_L("Loading current presets"));
         load_current_presets();
+    }
     profiler.mark("load_current_presets");
 
     if (plater_ != nullptr) {
@@ -4021,6 +4045,7 @@ bool GUI_App::on_init_inner()
     mainframe->topbar()->SaveNormalRect();
 #endif
     if (!m_hub_managed) {
+        set_startup_splash_phase(_L("Showing main window"));
         mainframe->Show(true);
         BOOST_LOG_TRIVIAL(info) << "main frame firstly shown";
     } else {
