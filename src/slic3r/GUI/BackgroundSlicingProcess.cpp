@@ -953,6 +953,9 @@ void BackgroundSlicingProcess::prepare_upload()
 
 	if (m_print == m_fff_print) {
         if (m_upload_job.upload_data.use_3mf) {
+            // The 3mf was packed by Plater::export_3mf / send_gcode. Non-BBL G-code inside it was
+            // post-processed there; BBL G-code was post-processed after slicing. Do not run scripts
+            // again on the archive (or they would run twice).
             source_path = m_upload_job.upload_data.source_path;
         } else {
 		    m_print->set_status(95, _utf8(L("Running post-processing scripts")));
