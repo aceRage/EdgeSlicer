@@ -785,9 +785,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool          have_multiline_infill_pattern = pattern == ipGyroid || pattern == ipGrid || pattern == ipRectilinear || pattern == ipTpmsD || pattern == ipTpmsFK || pattern == ipCrossHatch || pattern == ipHoneycomb || pattern == ipLateralLattice || pattern == ipLateralHoneycomb ||
                                                   pattern == ipCubic || pattern == ipStars || pattern == ipAlignedRectilinear || pattern == ipLightning || pattern == ip3DHoneycomb || pattern == ipAdaptiveCubic || pattern == ipSupportCubic;
 
-    // gyroid_optimized only applies when the sparse infill pattern is gyroid;
+    // The sparse infill density is the surface density of the adaptive TPMS infill; at 100% the infill is solid.
+    bool have_tpms_infill = have_infill && config->option<ConfigOptionPercent>("sparse_infill_density")->value < 100 &&
+                            is_tpms_adaptive_pattern(pattern);
+    toggle_line("tpms_adaptive", have_tpms_infill);
+    bool have_tpms_adaptive = have_tpms_infill && config->opt_enum<TpmsAdaptiveMode>("tpms_adaptive") != TpmsAdaptiveMode::Disabled;
+    toggle_line("tpms_interior_density", have_tpms_adaptive);
+    toggle_line("tpms_adaptive_gradient", have_tpms_adaptive);
+
+    // gyroid_optimized only applies when the sparse infill pattern is gyroid without adaptive density;
     // hide the whole line otherwise.
-    toggle_line("gyroid_optimized", have_infill && pattern == ipGyroid);
+    toggle_line("gyroid_optimized", have_infill && pattern == ipGyroid && !have_tpms_adaptive);
     toggle_line("sparse_infill_smooth_factor", is_smoothable_infill_pattern(pattern, config->opt_int("fill_multiline")));
 
     // If there is infill, enable/disable fill_multiline according to whether the pattern supports multiline infill.
