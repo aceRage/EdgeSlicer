@@ -9120,12 +9120,11 @@ LayerResult GCode::process_layer(const Print& print,
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
 
                 // Orca #14333: the object's skirt group and brim print right before the object.
-                // Edge: after the object's config and layer are set, so the brim keeps this object's
-                // speed and flow (as when it printed inside the island loop).
-                if (print_wipe_extrusions == (is_anything_overridden ? 1 : 0)) {
+                // Edge: after the object's config and layer are set, so the skirt and brim keep this
+                // object's speed and flow (as when the brim printed inside the island loop).
+                const bool emit_object_skirt_brim = print_wipe_extrusions == (is_anything_overridden ? 1 : 0);
+                if (emit_object_skirt_brim)
                     gcode += generate_object_skirt_group(print, instance_to_print.print_object, instance_to_print.instance_id, layer_tools, layer, extruder_id);
-                    gcode += generate_object_brim(print, instance_to_print.print_object, instance_to_print.instance_id, first_layer);
-                }
 
                 if (this->config().gcode_label_objects) {
                     gcode += std::string("; printing object ") + instance_to_print.print_object.model_object()->name +
@@ -9162,6 +9161,11 @@ LayerResult GCode::process_layer(const Print& print,
                     m_avoid_crossing_perimeters.use_external_mp_once();
                 m_last_obj_copy = this_object_copy;
                 this->set_origin(unscale(offset));
+                // Edge: the brim prints after the object's label is set up, so it stays part of the object
+                // for skip object / EXCLUDE_OBJECT (upstream prints it before the label), and before the
+                // object's support.
+                if (emit_object_skirt_brim)
+                    gcode += generate_object_brim(print, instance_to_print.print_object, instance_to_print.instance_id, first_layer);
                 if (instance_to_print.object_by_extruder.support != nullptr) {
                     m_layer                  = layers[instance_to_print.layer_id].support_layer;
                     m_object_layer_over_raft = false;
