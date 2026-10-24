@@ -131,6 +131,12 @@ class GLGizmoCut3D : public GLGizmoBase
 
     bool m_is_slider_editing_done { false };
 
+    // Multiple Dovetail cuts
+    int m_groove_count_init { 1 };
+    int m_groove_count { 1 };
+    float m_groove_gap { 10.f }; // distance between multiple dovetail cuts
+    float m_groove_gap_init { 10.f }; 
+
     // Input params for cut with snaps
     float m_snap_bulge_proportion{ 0.15f };
     float m_snap_space_proportion{ 0.3f };
@@ -1012,8 +1018,10 @@ protected:
     void add_horizontal_scaled_interval(float interval);
     void add_horizontal_shift(float shift);
     void render_color_marker(float size, const ImU32& color);
-    void render_groove_float_input(const std::string &label, float &in_val, const float &init_val, float &in_tolerance);
+    void render_groove_two_float_input(const std::string &label, float &in_val, const float &init_val, float &in_tolerance);
+    void render_groove_float_input(const std::string &label, float &in_val, const float &init_val, const bool disabled);
     void render_groove_angle_input(const std::string &label, float &in_val, const float &init_val, float min_val, float max_val);
+    void render_groove_int_input(const std::string& label, int& in_val, const int& init_val, int min_val, int max_val);
     bool render_angle_input(const std::string& label, float& in_val, const float& init_val, float min_val, float max_val);
     void render_snap_specific_input(const std::string& label, const wxString& tooltip, float& in_val, const float& init_val, const float min_val, const float max_val);
     void render_connectors_window_footer(float x, float y);
@@ -1063,7 +1071,8 @@ private:
     void switch_to_mode(size_t new_mode);
     bool render_cut_mode_combo();
     bool render_double_input(const std::string& label, double& value_in);
-    bool render_slider_double_input(const std::string& label, float& value_in, float& tolerance_in, float min_val = -0.1f, float max_tolerance = -0.1f);
+    bool render_slider_two_input(const std::string& label, float& value_in, float& tolerance_in, float min_val = -0.1f, float max_tolerance = -0.1f);
+    bool render_slider_input(const std::string& label, float& value_in, float min_val = -0.1f, float max_val = 100.f);
     void render_move_center_input(int axis);
     void render_connect_mode_radio_button(CutConnectorMode mode);
     bool render_reset_button(const std::string& label_id, const std::string& tooltip) const;
@@ -1185,6 +1194,7 @@ private:
 
     void toggle_model_objects_visibility();
 
+    std::vector<Vec3i32> offset_indices(const std::vector<Vec3i32>& base_indices, size_t vo);
     indexed_triangle_set its_make_groove_plane();
 
     indexed_triangle_set get_connector_mesh(CutConnectorAttributes connector_attributes);

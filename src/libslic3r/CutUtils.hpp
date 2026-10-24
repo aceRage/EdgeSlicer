@@ -114,7 +114,17 @@ public:
     // `src_object` is the object as it was before PartSelection split it: its painting is what the
     // halves get back with KeepPaint (the split pieces carry none). May be null.
     const ModelObjectPtrs& perform_by_contour(const ModelObject* src_object, std::vector<Part> parts, int dowels_count);
-    const ModelObjectPtrs& perform_with_groove(const Groove& groove, const Transform3d& rotation_m, bool keep_as_parts = false);
+    // OrcaSlicer #12318: `groove_count` dovetails side by side along the plane's X, `groove_gap` mm
+    // apart; `plane_radius` is the gizmo radius the dovetail's outer width (and so the spacing) is
+    // computed from - see calculate_groove_width(). Count 1 is the single dovetail of old.
+    const ModelObjectPtrs& perform_with_groove(const Groove&      groove,
+                                               const Transform3d& rotation_m,
+                                               const int          groove_count,
+                                               const float        groove_gap,
+                                               const float        plane_radius,
+                                               bool               keep_as_parts = false);
+
+    static float calculate_groove_width(const Cut::Groove& groove, const float plane_radius);
 
 }; // namespace Cut
 
