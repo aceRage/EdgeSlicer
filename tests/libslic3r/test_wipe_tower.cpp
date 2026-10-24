@@ -1010,3 +1010,13 @@ TEST_CASE("Layers above the first still reserve the extra spacing", "[WipeTower]
     REQUIRE(at_100 > 5.f);
     CHECK(at_150 > at_100 + 3.f);
 }
+
+TEST_CASE("The prime tower rotation angle is a print setting, not a project setting", "[WipeTower][Config]")
+{
+    // Orca #15227: a project copy of the angle is applied over the print preset's value, so editing the
+    // setting changed nothing. The position stays in the project config.
+    PresetBundle bundle;
+    CHECK_FALSE(bundle.project_config.has("wipe_tower_rotation_angle"));
+    CHECK(bundle.project_config.has("wipe_tower_x"));
+    CHECK(bundle.project_config.has("wipe_tower_y"));
+}
