@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -1465,4 +1467,55 @@ TEST_CASE("Spiral inset fill at a sparse density stays inside and fills less", "
     CAPTURE(unscale<double>(solid_length), unscale<double>(sparse_length));
     CHECK(sparse_length < 0.35 * solid_length);
     CHECK(sparse_length > 0.1 * solid_length);
+}
+
+TEST_CASE("Spiral inset internal solid infill uses plain loops, not Arachne walls", "[Fill][SpiralInset][Regression]")
+{
+    // OrcaSlicer #15705: Arachne's standalone thin walls could become an extra centre plug after the
+    // spiral had finished, so internal solid infill keeps the fixed width loops. Top and bottom
+    // surfaces still get the variable width walls.
+    const double      spacing = 0.45;
+    Slic3r::ExPolygon ring    = spiral_rectangle(0, 0, 24, 24);
+    Slic3r::Polygon   hole;
+    for (int i = 0; i < 64; ++i) {
+        const double angle = -2.0 * PI * i / 64.0;
+        hole.points.emplace_back(Slic3r::Point::new_scale(12 + 7.3 * std::cos(angle), 12 + 7.3 * std::sin(angle)));
+    }
+    ring.holes.emplace_back(hole);
+
+    Slic3r::PrintConfig       print_config;
+    Slic3r::PrintObjectConfig object_config;
+    auto fill = [&](Slic3r::ExtrusionRole role) {
+        std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("spiralinset"));
+        filler->spacing             = spacing;
+        filler->overlap             = 0.5 * spacing;
+        filler->print_config        = &print_config;
+        filler->print_object_config = &object_config;
+        Slic3r::FillParams params;
+        params.density        = 1.f;
+        params.dont_adjust    = false;
+        params.layer_height   = 0.2;
+        params.use_arachne    = true;
+        params.extrusion_role = role;
+        const Slic3r::Surface surface(Slic3r::stInternalSolid, ring);
+        Slic3r::ThickPolylines out = filler->fill_surface_arachne(&surface, params);
+        return std::make_pair(std::move(out), filler->spacing);
+    };
+
+    const auto internal = fill(Slic3r::erSolidInfill);
+    REQUIRE(!internal.first.empty());
+    for (const Slic3r::ThickPolyline &path : internal.first)
+        for (const coordf_t w : path.width)
+            CHECK(w == Approx(scaled<coord_t>(internal.second)).margin(1.));
+
+    // A top surface on the same shape still varies its widths.
+    const auto top = fill(Slic3r::erTopSolidInfill);
+    REQUIRE(!top.first.empty());
+    coordf_t min_w = std::numeric_limits<coordf_t>::max(), max_w = 0;
+    for (const Slic3r::ThickPolyline &path : top.first)
+        for (const coordf_t w : path.width) {
+            min_w = std::min(min_w, w);
+            max_w = std::max(max_w, w);
+        }
+    CHECK(max_w - min_w > scale_(0.01));
 }
