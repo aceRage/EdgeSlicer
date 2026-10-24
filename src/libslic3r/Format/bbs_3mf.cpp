@@ -3210,6 +3210,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 g.angle_init         = groove_tree->get<float>("<xmlattr>.angle_init", 0.f);
                 g.depth_tolerance    = groove_tree->get<float>("<xmlattr>.depth_tolerance", 0.1f);
                 g.width_tolerance    = groove_tree->get<float>("<xmlattr>.width_tolerance", 0.1f);
+                // Version 5 (multiple dovetails). Absent in <= 4: one dovetail.
+                g.count              = std::max(1, groove_tree->get<int>("<xmlattr>.count", 1));
+                g.gap                = groove_tree->get<float>("<xmlattr>.gap", 10.f);
+                g.plane_radius       = groove_tree->get<float>("<xmlattr>.plane_radius", 0.f);
             }
 
             // --- connectors ----------------------------------------------------------
@@ -9622,6 +9626,9 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 g.put("<xmlattr>.angle_init",       r.groove.angle_init);
                 g.put("<xmlattr>.depth_tolerance",  r.groove.depth_tolerance);
                 g.put("<xmlattr>.width_tolerance",  r.groove.width_tolerance);
+                g.put("<xmlattr>.count",            r.groove.count);
+                g.put("<xmlattr>.gap",              r.groove.gap);
+                g.put("<xmlattr>.plane_radius",     r.groove.plane_radius);
             }
 
             if (!r.connectors.empty()) {

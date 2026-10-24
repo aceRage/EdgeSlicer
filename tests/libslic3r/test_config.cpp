@@ -1048,10 +1048,10 @@ TEST_CASE("fill_missing_project_keys leaves mixed, flow-variant and mapping keys
     options.insert(options.end(),
                    {"mixed_filament_definitions", "filament_volume_type", "nozzle_volume_type", "filament_map",
                     "filament_map_mode", "printer_extruder_id", "enable_filament_mapping", "device_tool_count",
-                    "device_changer", "dithering_local_z_mode", "wipe_tower_rotation_angle",
+                    "device_changer", "dithering_local_z_mode",
                     "mixed_filament_pointillism_pixel_size", "inherits"});
 
-    REQUIRE(fill_missing_project_keys(project, system, options) == 1);
+    REQUIRE(fill_missing_project_keys(project, system, options) == 2); // sparse_infill_density + wipe_tower_rotation_angle (an ordinary print key since Orca #15227; already in print_options())
     REQUIRE(project.has("sparse_infill_density"));
     REQUIRE_FALSE(project.has("mixed_filament_definitions"));
     REQUIRE_FALSE(project.has("filament_volume_type"));
@@ -1063,7 +1063,7 @@ TEST_CASE("fill_missing_project_keys leaves mixed, flow-variant and mapping keys
     REQUIRE_FALSE(project.has("device_tool_count"));
     REQUIRE_FALSE(project.has("device_changer"));
     REQUIRE_FALSE(project.has("dithering_local_z_mode"));
-    REQUIRE_FALSE(project.has("wipe_tower_rotation_angle"));
+    REQUIRE(project.has("wipe_tower_rotation_angle"));
     REQUIRE_FALSE(project.has("mixed_filament_pointillism_pixel_size"));
     REQUIRE_FALSE(project.has("inherits"));
     REQUIRE(project_config_fill_skip_keys().count("mixed_filament_definitions") == 1);
