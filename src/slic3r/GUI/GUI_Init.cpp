@@ -51,6 +51,8 @@ int GUI_Run(GUI_InitParams &params)
         // Ultra: the modal-dialog policy must exist before the first dialog can appear (some fire
         // from the GUI_App constructor); it only acts while the instance is hidden or serving a request.
         GUI::RemoteAccess::install_dialog_policy();
+        // --no-hub / --take-hub / EDGESLICER_NO_HUB / the edgeslicer_no_hub marker: before any panel can ask for the hub.
+        GUI::RemoteHub::init_hub_mode(params.no_hub_flag, params.take_hub_flag);
         // Showcase S5: set before the app exists (its constructor starts the page server).
         GUI::GUI_App::set_showcase_render_mode(params.showcase_render != nullptr);
         // ...and starts no hub / go2rtc from any panel (they would outlive the job).

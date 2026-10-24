@@ -16,6 +16,7 @@
 #include <wx/webview.h>
 #include <wx/event.h>
 #include <wx/frame.h>
+#include <wx/msgdlg.h>
 #include <wx/uri.h>
 #include <wx/weakref.h>
 
@@ -196,14 +197,21 @@ void StreamPanel::OnScriptMessage(wxWebViewEvent& evt)
                 info = RemoteHub::query();
             wxGetApp().CallAfter([weak, what, info]() {
                 auto* cfg = wxGetApp().app_config;
-                if (what == "remote_on")
+                if (RemoteHub::no_hub()) {
+                    // --no-hub / marker: the hub, if any, belongs to another copy. Nothing was changed;
+                    // the page shows what that hub says, and this copy's saved phone settings stay put.
+                    if (what != "remote_info")
+                        wxMessageBox(_L("The phone hub is owned by another copy of EdgeSlicer, or this copy was started with --no-hub, "
+                                        "so phone access cannot be changed here. Change it in the copy that owns the hub, or start this copy with --take-hub."),
+                                     _L("Phone hub"), wxOK | wxICON_INFORMATION);
+                } else if (what == "remote_on")
                     cfg->set("stream_phone_access", info.alive && info.phone ? "1" : "0");
                 else if (what == "remote_off")
                     cfg->set("stream_phone_access", "0");
                 // Remember whatever link the hub is using now - after a new one, and after it was
                 // turned off too: off stops the link, it does not throw it away. This is what a
                 // later hub is seeded with if it comes up with no memory of its own.
-                if (!info.token.empty())
+                if (!info.token.empty() && !RemoteHub::no_hub())
                     cfg->set("stream_phone_token", info.token);
                 if (weak == nullptr || weak->m_browser == nullptr)
                     return;
