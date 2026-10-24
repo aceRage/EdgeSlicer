@@ -568,6 +568,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
     GUI/RemoteSend.hpp
+    GUI/RemoteSliceV1.cpp
+    GUI/RemoteSliceV1.hpp
     GUI/BambuSendMapping.cpp
     GUI/BambuSendMapping.hpp
     GUI/BambuReprint.cpp

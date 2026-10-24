@@ -889,6 +889,9 @@ public:
     void set_bed_position(Vec2d& pos);
     //BBS: is the background process slicing currently
     bool is_background_process_slicing() const;
+    // What the slicing notification's Cancel does: stop the background process (a slice-all run
+    // ends with it). False when the background process was idle (nothing to stop at this moment).
+    bool cancel_slicing();
     //BBS: update slicing context
     void update_slicing_context_to_current_partplate();
     //BBS: show object info
