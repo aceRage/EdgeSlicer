@@ -131,10 +131,12 @@ static void process_pushfit_cut(ModelVolume* volume, ModelObjectCutAttributes at
         vol->name = volume->name;
         vol->config.assign_config(volume->config);
         vol->cut_info = volume->cut_info;
-        // object frame -> pose frame -> connector frame -> the halves' frame.
+        // The pin object's frame IS the pose frame (add_volume() re-centres the mesh and puts
+        // the shift into the volume's offset, so mesh + offset lands back where it was):
+        // pose frame -> connector frame -> the halves' frame.
         CutSeparatePart part;
         part.object            = pin;
-        part.part_to_cut_frame = frame * res.connector_to_mesh.inverse() * vol->get_matrix().inverse();
+        part.part_to_cut_frame = frame * res.connector_to_mesh.inverse();
         part.is_pin            = true;
         part.pin_slot_failed   = res.slot_requested && !res.slot_made;
         separate.push_back(part);
