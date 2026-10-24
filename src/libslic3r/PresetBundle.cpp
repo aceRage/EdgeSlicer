@@ -475,6 +475,49 @@ void PresetBundle::copy_files(const std::string& from)
     }
 }
 
+namespace {
+// -1 = follow the environment, 0 = off, 1 = on. See PresetBundle::set_sequential_load_override().
+std::atomic<int> s_sequential_load_override{-1};
+std::atomic<int> s_parse_cache_override{-1};
+
+bool env_flag(const char *name, bool default_value)
+{
+    const char *v = std::getenv(name);
+    if (v == nullptr)
+        return default_value;
+    const std::string s(v);
+    if (s == "1" || s == "true")
+        return true;
+    if (s == "0" || s == "false")
+        return false;
+    return default_value;
+}
+} // namespace
+
+void PresetBundle::set_sequential_load_override(std::optional<bool> sequential)
+{
+    s_sequential_load_override.store(sequential ? int(*sequential) : -1);
+}
+
+void PresetBundle::set_parse_cache_override(std::optional<bool> enabled)
+{
+    s_parse_cache_override.store(enabled ? int(*enabled) : -1);
+}
+
+bool PresetBundle::sequential_load()
+{
+    static const bool from_env = env_flag("ORCA_PRESET_LOAD_SEQUENTIAL", false);
+    const int o = s_sequential_load_override.load();
+    return o < 0 ? from_env : o != 0;
+}
+
+bool PresetBundle::parse_cache_enabled()
+{
+    static const bool from_env = env_flag("ORCA_PRESET_CACHE", true);
+    const int o = s_parse_cache_override.load();
+    return o < 0 ? from_env : o != 0;
+}
+
 void PresetBundle::set_progress_callback(ProgressCallback cb)
 {
     // The user-preset phase does its file walking inside the collections, so they need the hook
@@ -1784,11 +1827,9 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
         // exists so the parallel and sequential loads can be measured from the same
         // binary, and as an escape hatch if a vendor tree ever turns out to misbehave
         // under concurrency in the field. The two paths produce identical results by
-        // construction - stage C is the same either way.
-        static const bool force_sequential = [] {
-            const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
-            return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
-        }();
+        // construction - stage C is the same either way. Tests switch it with
+        // set_sequential_load_override().
+        const bool force_sequential = PresetBundle::sequential_load();
 
         if (parallel_count == 1 || force_sequential) {
             for (size_t i = 0; i < parallel_count; ++i)
@@ -4405,14 +4446,8 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     // is closed inside parse_json_document - and each document is released as soon as
     // its preset has been built. A section's worth of parsed BBL filaments is a few tens
     // of MB, transient.
-    static const bool force_sequential_parse = [] {
-        const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
-        return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
-    }();
-    static const bool preset_cache_enabled = [] {
-        const char *v = std::getenv("ORCA_PRESET_CACHE");
-        return !(v != nullptr && (std::string(v) == "0" || std::string(v) == "false"));
-    }();
+    const bool force_sequential_parse = PresetBundle::sequential_load();
+    const bool preset_cache_enabled   = PresetBundle::parse_cache_enabled();
 
     // ---- per-vendor CBOR cache -------------------------------------------------
     //
