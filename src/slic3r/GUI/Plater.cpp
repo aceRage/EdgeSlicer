@@ -2721,10 +2721,23 @@ Sidebar::Sidebar(Plater *parent)
     // Fold on LEFT_DOWN (and LEFT_DCLICK), not LEFT_UP. Selection dialogs
     // close on mouse-down, so a leftover LEFT_UP would land on this title
     // and collapse the section.
+    // Orca #14406: clicks right of the first visible title button (and in the gaps between the
+    // buttons) do not fold. The old test fell back to the AMS sync button's position even when it
+    // was hidden; a never-shown button sits at x = 0, so on printers with neither it nor
+    // "Flushing volumes" (U1 and other toolchangers / IDEX, non-Bambu) nothing folded at launch.
+    // Here the title row is AMS sync, Flushing volumes, Color Mixing Match (the add/delete buttons
+    // live in the Filaments row), so the first one shown marks the limit.
     auto toggle_filament_section = [this](wxMouseEvent &e) {
-        if (e.GetPosition().x > (p->m_flushing_volume_btn->IsShown()
-                ? p->m_flushing_volume_btn->GetPosition().x : (p->m_bpButton_ams_filament->GetPosition().x - FromDIP(30))))
+        if (!p || !p->m_panel_filament_content || !m_scrolled_sizer)
             return;
+        for (wxWindow *btn : {static_cast<wxWindow *>(p->m_bpButton_ams_filament), static_cast<wxWindow *>(p->m_flushing_volume_btn),
+                              static_cast<wxWindow *>(p->m_btn_batch_match)}) {
+            if (btn != nullptr && btn->IsShown()) {
+                if (e.GetPosition().x > btn->GetPosition().x)
+                    return;
+                break;
+            }
+        }
         if (p->m_panel_filament_content->GetMaxHeight() == 0)
             p->m_panel_filament_content->SetMaxSize({-1, -1});
         else
