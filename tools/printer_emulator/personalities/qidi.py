@@ -2,14 +2,24 @@
 
 What the slicer reads and writes, and where this emulator keeps it:
 
-  multi_color_controller   box_count, boxes[b].filament_info[4] (filament_type, filament_str,
-                           vendor_str, color_rgb_str[]), boxes[b].box_inserted_<n>. Shape from
-                           QIDIStudio's QDSDevice::updateBoxDataByJson as EdgeSlicer reads it -
-                           UNVERIFIED against a firmware capture (design section 8).
-  save_variables           Klipper's [save_variables]: box_count, filament_slot<n>, color_slot<n>,
-                           vendor_slot<n> (Box slot n = box * 4 + slot, indexes into the filament
-                           list below), and the variables the start script writes: enable_box,
-                           value_t<tool> ('slot<n>'), enable_polar_cooler.
+  multi_color_controller   box_count, and the slots in one of the two shapes QIDIStudio has read
+                           (qidi.mcc_shape): "array" = boxes[b].filament_info[4] (filament_type,
+                           filament_str, vendor_str, color_rgb_str[]) + boxes[b].box_inserted_<n>
+                           (its source up to 2026-10-09); "flat" = box<b>_box_inserted_<n>,
+                           box<b>_filament_info_<n>_filament_type ... (its 2026-10-19 source).
+                           box0 is Box 1. UNVERIFIED against a firmware capture (design section 8).
+  save_variables           Klipper's [save_variables], laid out as the firmware's own
+                           saved_variables.cfg ships (QIDITECH/QIDI_MAX4 config/saved_variables
+                           .cfg.bak): filament_slot<n> / color_slot<n> / vendor_slot<n> for n = 0..16
+                           all default to 1 (a PLA, white) and are NOT cleared when a spool is
+                           pulled; slot<n> (n = 0..15) is the slot's state word, 0 empty, 1 there;
+                           runout_<n>; box_count. Box slot n = box * 4 + slot (Box 1 = slots 0-3).
+                           And the variables the start script writes: enable_box, value_t<tool>
+                           ('slot<n>'), enable_polar_cooler.
+  box_stepper slot<n>      one object per physical Box slot (box_config box0 -> slot0..3), with
+                           runout_button 0 when filament is at the slot's sensor - what QIDIStudio
+                           2.07.02.60 reads as "this slot has material". A query for a stepper the
+                           printer does not have answers {} (Klipper's webhooks do that).
   output_pin polar_cooler  present when the model has QIDIStudio's polar cooler.
   officiall_filas_list.cfg /server/files/config/officiall_filas_list.cfg: [fila<id>] type= /
                            filament=, [colordict] <id> = #RRGGBB. SYNTHETIC - generated from a
@@ -42,6 +52,7 @@ BASE_FILAS = [(1, "PLA", "PLA"), (2, "PLA", "PLA Matte"), (3, "PLA", "PLA Silk")
 BASE_COLOURS = ["#FFFFFF", "#000000", "#E03030", "#1E7A3C", "#2050C0", "#F0D020", "#F08020", "#808080",
                 "#8040A0", "#F5F5F5", "#202020", "#C0C0C0"]
 BOX_REPORTS = ("mcc+vars", "vars_only", "mcc_only")
+MCC_SHAPES = ("array", "flat")
 
 
 def norm_colour(c):
@@ -73,6 +84,28 @@ class Qidi(Moonraker):
     def box_report(self):
         r = self.qcfg.get("box_report", "mcc+vars")
         return r if r in BOX_REPORTS else "mcc+vars"
+
+    def mcc_shape(self):
+        r = self.qcfg.get("mcc_shape", "array")
+        return r if r in MCC_SHAPES else "array"
+
+    def _int_cfg(self, key, default):
+        v = self.qcfg.get(key)
+        if v is None:
+            return default
+        try:
+            return max(0, min(4, int(v)))
+        except (TypeError, ValueError):
+            return default
+
+    def vars_box_count(self):
+        """box_count as save_variables keep it: the Boxes, unless qidi.vars_box_count overrides it
+        (a stale count, the 2.4.6.3 report's shape)."""
+        return 0 if self.boxes() == 0 else self._int_cfg("vars_box_count", self.boxes())
+
+    def stepper_boxes(self):
+        """How many Boxes the firmware registered slot motors for (box_stepper slot<n>)."""
+        return 0 if self.boxes() == 0 else self._int_cfg("stepper_boxes", self.boxes())
 
     def slots(self):
         """The configured Box slots, padded to boxes * 4."""
@@ -106,6 +139,8 @@ class Qidi(Moonraker):
         for s in self.slots():
             if not s.get("loaded"):
                 continue
+            if s.get("untagged"):
+                continue
             t, sub = (s.get("type") or "").strip(), (s.get("sub") or "").strip()
             if t and self._fila_id(filas, t, sub) == 0:
                 filas.append((100 + len(filas), t, sub or t))
@@ -125,25 +160,50 @@ class Qidi(Moonraker):
                 return i
         return 0
 
+    @staticmethod
+    def _is_slot_word(k):
+        return k.startswith("slot") and k[4:].isdigit()
+
     def refresh_box_variables(self):
-        """box_count and filament_slot / color_slot / vendor_slot from the configured slots. The
-        variables the slicer writes (enable_box, value_t<n>, enable_polar_cooler) are kept."""
+        """The Box's save_variables as the firmware keeps them (see the module docstring): every
+        filament_slot / color_slot / vendor_slot 0..16 at the shipped default 1 (qidi.fw_defaults,
+        on unless set false), a loaded slot's ids from its material and colour (0 for an untagged
+        spool), an empty slot's ids left at the default (or at qidi slot's `stale_type` /
+        `stale_color`, what the last spool there was) and its state word slot<n> 0. The variables
+        the slicer writes (enable_box, value_t<n>, enable_polar_cooler) are kept."""
         for k in list(self.variables):
-            if k == "box_count" or k.startswith(("filament_slot", "color_slot", "vendor_slot")):
+            if k == "box_count" or k.startswith(("filament_slot", "color_slot", "vendor_slot", "runout_")) or \
+                    self._is_slot_word(k):
                 del self.variables[k]
         if self.box_report() == "mcc_only":
             return
         filas, colours = self.filament_list()
-        self.variables["box_count"] = self.boxes()
+        default = 1 if self.qcfg.get("fw_defaults", True) else 0
+        for n in range(17):
+            self.variables["filament_slot%d" % n] = default
+            self.variables["color_slot%d" % n] = default
+            self.variables["vendor_slot%d" % n] = default
+            if n < 16:
+                self.variables["slot%d" % n] = 0
+                self.variables["runout_%d" % n] = 0
+        self.variables["box_count"] = self.vars_box_count()
         for n, s in enumerate(self.slots()):
-            fid, cid = 0, 0
-            if s.get("loaded") and (s.get("type") or "").strip():
-                fid = self._fila_id(filas, s["type"].strip(), (s.get("sub") or "").strip())
-                c = norm_colour(s.get("color"))
+            loaded = bool(s.get("loaded"))
+            t = (s.get("type") if loaded else s.get("stale_type")) or ""
+            c = norm_colour(s.get("color") if loaded else s.get("stale_color"))
+            if loaded:
+                self.variables["slot%d" % n] = 1
+            if loaded and s.get("untagged"):
+                fid, cid = 0, 0
+            elif t.strip():
+                fid = self._fila_id(filas, t.strip(), (s.get("sub") or "").strip() if loaded else "")
                 cid = next((i for i, h in colours.items() if h == c), 0)
+            elif loaded:
+                fid, cid = 0, 0
+            else:
+                continue  # an empty slot keeps whatever the firmware had there
             self.variables["filament_slot%d" % n] = fid
             self.variables["color_slot%d" % n] = cid
-            self.variables["vendor_slot%d" % n] = 0
 
     def snapshot(self):
         s = super().snapshot()
@@ -151,6 +211,7 @@ class Qidi(Moonraker):
                                if k in ("enable_box", "enable_polar_cooler", "box_count") or k.startswith("value_t")}
         s["bedmesh_before_print"] = self.bedmesh_before_print
         s["boxes"] = self.boxes()
+        s["box_steppers"] = self.stepper_boxes() * 4
         return s
 
     def hint(self):
@@ -167,6 +228,24 @@ class Qidi(Moonraker):
         elif self.box_report() == "vars_only" or fault_on(self.faults, "box_unreadable"):
             # The controller is there and counts the Box, but names no filament.
             objs["multi_color_controller"] = {"box_count": nb}
+        elif self.mcc_shape() == "flat":
+            mcc = {"box_count": nb}
+            slots = self.slots()
+            for b in range(nb):
+                pre = "box%d_" % b
+                mcc[pre + "aht20_temp"] = 25.0
+                mcc[pre + "aht20_humidity"] = 30
+                for n in range(4):
+                    s = slots[b * 4 + n]
+                    loaded = bool(s.get("loaded"))
+                    mcc[pre + "box_inserted_%d" % n] = 1 if loaded else 0
+                    if loaded and not s.get("untagged"):
+                        fi = pre + "filament_info_%d_" % n
+                        mcc[fi + "filament_type"] = s.get("type", "")
+                        mcc[fi + "filament_str"] = s.get("sub") or s.get("type", "")
+                        mcc[fi + "vendor_str"] = s.get("vendor", "")
+                        mcc[fi + "color_rgb_str"] = [norm_colour(s.get("color"))]
+            objs["multi_color_controller"] = mcc
         else:
             boxes = []
             slots = self.slots()
@@ -176,7 +255,7 @@ class Qidi(Moonraker):
                     s = slots[b * 4 + n]
                     loaded = bool(s.get("loaded"))
                     box["box_inserted_%d" % n] = loaded
-                    if loaded:
+                    if loaded and not s.get("untagged"):
                         box["filament_info"].append({"filament_type": s.get("type", ""),
                                                      "filament_str": s.get("sub") or s.get("type", ""),
                                                      "vendor_str": s.get("vendor", ""),
@@ -185,10 +264,26 @@ class Qidi(Moonraker):
                         box["filament_info"].append({})
                 boxes.append(box)
             objs["multi_color_controller"] = {"box_count": nb, "boxes": boxes}
+        # The slot motors: one box_stepper per slot of every Box the firmware registered, with the
+        # slot's sensor (runout_button 0 = filament there).
+        slots = self.slots()
+        for n in range(self.stepper_boxes() * 4):
+            loaded = n < len(slots) and bool(slots[n].get("loaded"))
+            objs["box_stepper slot%d" % n] = {"runout_button": 0 if loaded else 1}
         objs["save_variables"] = {"variables": dict(self.variables)}
         if self.qcfg.get("polar_cooler"):
             objs["output_pin polar_cooler"] = {"value": float(self.variables.get("enable_polar_cooler", 0) or 0)}
         return objs
+
+    def query_objects(self, spec):
+        """As Moonraker's, but a box_stepper the printer does not have answers {} - Klipper's
+        webhooks answer an unknown object that way, and a reader must not count it as a slot."""
+        out = super().query_objects(spec)
+        status = out["result"]["status"]
+        for name, _attrs in spec:
+            if name.startswith("box_stepper ") and name not in status:
+                status[name] = {}
+        return out
 
     def query_kind(self, names):
         if "multi_color_controller" in names or "print_task_config" in names:

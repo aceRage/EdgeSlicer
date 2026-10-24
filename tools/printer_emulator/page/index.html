@@ -172,8 +172,8 @@ function qidiSection(p) {
   const c = p.config, q = c.qidi || {};
   const sec = el("section", {});
   const boxes = el("select", { "aria-label": "Boxes" }, [0, 1, 2, 3, 4].map(n => el("option", { value: n, selected: n === (q.boxes ?? 1) }, n + (n === 1 ? " Box" : " Boxes"))));
-  const report = el("select", { "aria-label": "Box report" }, [["mcc+vars", "multi_color_controller + save_variables"], ["vars_only", "save_variables + filament list only"], ["mcc_only", "multi_color_controller only"]]
-    .map(([v, t]) => el("option", { value: v, selected: v === (q.box_report || "mcc+vars") }, t)));
+  const report = el("select", { "aria-label": "Box report" }, [["mcc+vars", "multi_color_controller + save_variables"], ["vars_only", "save_variables + filament list only"], ["mcc_only", "multi_color_controller only"], ["mcc_flat+vars", "flat multi_color_controller (box0_...) + save_variables"]]
+    .map(([v, t]) => el("option", { value: v, selected: v === ((q.mcc_shape === "flat" && (q.box_report || "mcc+vars") === "mcc+vars") ? "mcc_flat+vars" : (q.box_report || "mcc+vars")) }, t)));
   const cooler = el("input", { type: "checkbox", checked: !!q.polar_cooler });
   const stale = el("input", { type: "text", size: 22, value: Object.entries(q.stale_value_t || {}).map(([t, s]) => t + ":" + s).join(", "), placeholder: "0:slot3, 1:slot2" });
   sec.append(el("h3", {}, "QIDI Box"),
@@ -203,7 +203,7 @@ function qidiSection(p) {
     for (const part of stale.value.split(",")) { const [t, s] = part.split(":").map(x => (x || "").trim()); if (t !== "" && s) staleObj[t] = s; }
     const newSlots = rows.map(r => r.loaded.checked ? { type: r.type.value.trim(), sub: r.sub.value.trim(), vendor: r.vendor.value.trim(), color: r.color.value.toUpperCase(), loaded: true } : { loaded: false });
     const keep = (c.slots || []).slice(nb * 4);
-    renderCard(await api(`/emu/printers/${p.id}/set`, { qidi: { boxes: +boxes.value, box_report: report.value, polar_cooler: cooler.checked, stale_value_t: staleObj }, slots: newSlots.concat(keep) }));
+    renderCard(await api(`/emu/printers/${p.id}/set`, { qidi: { boxes: +boxes.value, box_report: report.value === "mcc_flat+vars" ? "mcc+vars" : report.value, mcc_shape: report.value === "mcc_flat+vars" ? "flat" : "array", polar_cooler: cooler.checked, stale_value_t: staleObj }, slots: newSlots.concat(keep) }));
     toast("Box applied. The slicer sees it on its next probe.");
   };
   sec.append(el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "primary", onclick: apply }, "Apply Box and slots"),

@@ -88,6 +88,18 @@ macros and starts it.
 reset** is what the printer "remembers" from its last print; **Reset state** puts those values back
 and forgets uploads and prints. **Saved variables now** is what the read-back returns.
 
+The Box is laid out as the firmware keeps it: `save_variables` hold `filament_slot<n>` /
+`color_slot<n>` / `vendor_slot<n>` for every slot 0-16 at the shipped default 1 (a white PLA), and an
+empty slot keeps that id (or `stale_type` / `stale_color` on the slot: what the last spool there was);
+whether a slot holds filament is its state word `slot<n>` (0 empty, 1 there) and its
+`box_stepper slot<n>` object (`runout_button` 0 = filament at the sensor). Box 1 is slots 0-3. In
+printers.json, `qidi.mcc_shape` picks the controller's shape (`array`, or `flat` = `box0_...` keys,
+also on the page as "flat multi_color_controller"), `qidi.vars_box_count` a stale `box_count` in
+`save_variables`, `qidi.stepper_boxes` how many Boxes have slot motors, and `"untagged": true` on a
+slot a spool with no RFID tag (ids 0). Presets `qidi_xmax4_box1_asa` (all filament in Box 1, 1C ASA)
+and `qidi_stale_box_count` (the 2.4.6.3 report: `box_count` 2 saved, one Box) reproduce the
+fix/qidi-box-index cases.
+
 **CANVAS (CC1):** per tray tick **Loaded**, set the type, name, brand and colour, and pick the
 **Active** tray (the one in the toolhead, status 2). **Untagged** makes the brand the four spaced
 em dashes a CC1 reports for a spool without an RFID tag (EdgeSlicer shows it as "Generic"). Untick
@@ -164,7 +176,7 @@ port, and never touch your printers.json:
 
 - `test_emulator_selftest.py` (QIDI) and `test_emulator_e2_selftest.py` (CC1, U1, U1 MQTT): the
   emulator on its own (about 20 s each).
-- `test_send_qidi_gate.py` (Q1-Q9), `test_send_cc1_gate.py` (C1-C7) and `test_send_u1_gate.py`
+- `test_send_qidi_gate.py` (Q1-Q13), `test_send_cc1_gate.py` (C1-C7) and `test_send_u1_gate.py`
   (U1-U6): EdgeSlicer's hub send against an emulated printer (about 5 min each; need an installed
   build and a template data dir). Rows that hit a known product gap print XFAIL; when the product
   closes the gap they print XPASS and fail, so the marker gets removed.
