@@ -83,6 +83,26 @@ enum InfillPattern : int {
     ipCount,
 };
 
+// Orca: Infill patterns that round their corners by the "sparse_infill_smooth_factor" option.
+// EdgeSlicer: upstream also lists Grid, Triangles and Tri-hexagon with more than one line per infill
+// wall, which smooth in their trapezoidal form (FillRectilinear::fill_surface_trapezoidal, from the
+// Clipper2 multiline infill #11435). We do not carry that form, so they are not smoothable here.
+inline bool is_smoothable_infill_pattern(InfillPattern pattern, int /* multiline */ = 1)
+{
+    switch (pattern) {
+    case ipHilbertCurve:
+    case ipOctagramSpiral:
+    case ipLightning:
+    case ipHoneycomb:
+    case ip3DHoneycomb:
+    case ipConcentric:
+    case ipCrossHatch:
+        return true;
+    default:
+        return false;
+    }
+}
+
 enum class IroningType {
     NoIroning,
     TopSurfaces,

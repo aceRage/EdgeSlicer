@@ -1407,9 +1407,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                                                                    region_config.sparse_infill_rotate_template.value);
                     params.is_using_template_angle = !region_config.sparse_infill_rotate_template.value.empty();
 
-                    // Orca: special case; apply smoothing factor only for Hilbert Curve sparse infill.
-                    // FillHilbertCurve::generate clamps and validates the value itself.
-                    if (params.pattern == ipHilbertCurve)
+                    // Orca: the smoothing factor only applies to the sparse infill patterns that
+                    // implement it. The fills clamp and validate the value themselves.
+                    if (is_smoothable_infill_pattern(params.pattern, params.multiline))
                         params.smooth_factor = 0.01 * region_config.sparse_infill_smooth_factor.value;
                 } else {
                     params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.solid_infill_direction.value,
