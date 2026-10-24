@@ -467,6 +467,8 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
     const Case cases[] = {
         { CutRecipeKind::Plane,  "plane"  },
         { CutRecipeKind::Curved, "curved" },
+        // OD11: two dovetails, so a recipe that lost its count or gap re-cuts differently.
+        { CutRecipeKind::Groove, "groove" },
     };
 
     for (const Case &c : cases) {
@@ -485,6 +487,16 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
         in.place_on_cut_lower = false;
         in.rotate_upper       = false;
         in.rotate_lower       = false;
+        if (c.kind == CutRecipeKind::Groove) {
+            // A dovetail the panel could make, two of them fitting the 40 mm cube.
+            in.groove.depth        = 5.f;
+            in.groove.width        = 10.f;
+            in.groove.flaps_angle  = float(Geometry::deg2rad(60.));
+            in.groove.angle        = 0.f;
+            in.groove.count        = 2;
+            in.groove.gap          = 4.f;
+            in.groove.plane_radius = 30.f;
+        }
         in.mesh_hash          = cut_recipe_mesh_hash(cut_recipe_mesh_to_blob(in.mesh));
 
         // THE ORIGINAL CUT, performed from the recipe as the gizmo would.
@@ -503,7 +515,16 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
             ModelObjectPtrs res;
             if (r.kind == CutRecipeKind::Curved)
                 res = cut.perform_with_curved_sheet(r.curved_sheet(), r.thickness, r.thickness_offset);
-            else
+            else if (r.kind == CutRecipeKind::Groove) {
+                Cut::Groove g;
+                g.depth           = r.groove.depth;
+                g.width           = r.groove.width;
+                g.flaps_angle     = r.groove.flaps_angle;
+                g.angle           = r.groove.angle;
+                g.depth_tolerance = r.groove.depth_tolerance;
+                g.width_tolerance = r.groove.width_tolerance;
+                res = cut.perform_with_groove(g, r.rotation_m, r.groove.count, r.groove.gap, r.groove.plane_radius);
+            } else
                 res = cut.perform_with_plane(r.thickness, r.thickness_offset);
 
             std::vector<std::pair<double, BoundingBoxf3>> out;
