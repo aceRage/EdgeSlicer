@@ -1809,3 +1809,27 @@ TEST_CASE("A scalar option still takes a valid value", "[Config]") {
     REQUIRE(point.deserialize("3x4"));
     CHECK((point.value == Vec2d(3., 4.)));
 }
+
+TEST_CASE("support interface pattern registry includes spiral inset", "[Config][SpiralInset]")
+{
+    const auto &values = ConfigOptionEnum<SupportMaterialInterfacePattern>::get_enum_values();
+    REQUIRE(values.at("spiralinset") == SupportMaterialInterfacePattern::smipSpiralInset);
+}
+
+TEST_CASE("spiral inset is offered for the solid surface patterns and round-trips", "[Config][SpiralInset]")
+{
+    REQUIRE(ConfigOptionEnum<InfillPattern>::get_enum_values().at("spiralinset") == ipSpiralInset);
+    for (const char *key : {"top_surface_pattern", "bottom_surface_pattern", "internal_solid_infill_pattern", "support_interface_pattern"}) {
+        CAPTURE(key);
+        const ConfigOptionDef *def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->has_enum_value("spiralinset"));
+    }
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("top_surface_pattern", "spiralinset");
+    CHECK(config.opt_enum<InfillPattern>("top_surface_pattern") == ipSpiralInset);
+    CHECK(config.opt_serialize("top_surface_pattern") == "spiralinset");
+    // Opt-in: no default changed.
+    CHECK(DynamicPrintConfig::full_print_config().opt_enum<InfillPattern>("top_surface_pattern") == ipMonotonicLine);
+}

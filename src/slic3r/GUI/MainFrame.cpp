@@ -263,6 +263,11 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     , m_settings_dialog(this)
     , diff_dialog(this)
 {
+    // ORCA_STARTUP_PROFILE: the member initialisers above (PrintHostQueueDialog, the settings and
+    // diff dialogs) run before this line; GUI_App logs the uptime just before `new MainFrame`.
+    Slic3r::StartupPhase profile("MainFrame ctor");
+    if (profile.enabled())
+        Slic3r::startup_profile_log("MainFrame ctor body begin uptime_ms=" + std::to_string(Slic3r::startup_profile_uptime_ms()));
 #ifdef __WXOSX__
     set_miniaturizable(GetHandle());
 #endif
@@ -290,6 +295,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
     // Fonts were created by the DPIFrame constructor for the monitor, on which the window opened.
     wxGetApp().update_fonts(this);
+    profile.mark("config/log level/MarkdownTip/update_fonts");
 
 #ifndef __APPLE__
     m_topbar         = new BBLTopbar(this);
@@ -354,6 +360,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     SetMinSize(wxGetApp().get_min_size());
 #endif
 
+    profile.mark("topbar");
     // initialize tabpanel and menubar
     {
         Slic3r::StartupScopedTimer t("MainFrame ctor step=init_tabpanel");
@@ -366,6 +373,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         else
             init_menubar_as_editor();
     }
+    profile.mark("init_tabpanel + init_menubar (split by their own marks)");
 
     // BBS
 #if 0
@@ -513,7 +521,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     sizer->Add(m_main_sizer, 1, wxEXPAND);
     SetSizerAndFit(sizer);
     // initialize layout from config
+    profile.mark("event binds + sizer");
     update_layout();
+    profile.mark("update_layout");
     sizer->SetSizeHints(this);
 
 #ifdef WIN32
@@ -546,6 +556,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     Layout();
 
     update_title();
+    profile.mark("Fit/SetSize/Layout/update_title");
 
     // declare events
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
@@ -639,13 +650,16 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     });
 #endif
 
+    profile.mark("close/other event binds");
     update_ui_from_settings();    // FIXME (?)
+    profile.mark("update_ui_from_settings");
 
     if (m_plater != nullptr) {
         // BBS
         // Constructor-time init: bypass the teardown guard in
         // update_slice_print_status — mainframe is not registered yet.
         update_slice_print_status_impl(eEventSliceUpdate, true, true);
+        profile.mark("update_slice_print_status_impl");
 
         // BBS: backup project
         if (wxGetApp().app_config->get("backup_switch") == "true") {
