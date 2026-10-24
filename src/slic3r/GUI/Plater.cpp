@@ -27949,6 +27949,16 @@ bool Plater::is_background_process_slicing() const
     return p->m_is_slicing;
 }
 
+// EDGE (slice_v1): the phone's Cancel, the same two lines as the slicing notification's cancel
+// callback (Plater::priv::init_notification_manager).
+bool Plater::cancel_slicing()
+{
+    if (p->background_process.idle())
+        return false;
+    p->background_process.stop();
+    return true;
+}
+
 //BBS: update slicing context
 void Plater::update_slicing_context_to_current_partplate()
 {
