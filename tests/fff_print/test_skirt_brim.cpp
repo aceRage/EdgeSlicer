@@ -821,3 +821,52 @@ TEST_CASE("Combined skirt keeps its distance from the brims", "[SkirtBrim][Orca1
     REQUIRE_FALSE(brims.empty());
     CHECK(intersection_pl(skirt, brims).empty());
 }
+
+// Orca #14991: brims of touching instances no longer overlap, and without Combine brims each one still
+// prints right before its own object.
+TEST_CASE("Uncombined neighboring brims precede their respective objects", "[SkirtBrim][Orca14991]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(0, false, {
+        { "skirt_loops",   0 },
+        { "brim_type",     "outer_only" },
+        { "brim_width",    5 },
+        { "combine_brims", 0 },
+    }, print, model);
+    print.process();
+
+    REQUIRE(print.skirt_brim_groups().size() == 1);
+    REQUIRE(print.skirt_brim_groups().front().brims.size() == 2);
+    CHECK(role_sequence(gcode(print), { "brim", "perimeter" }) ==
+          std::vector<std::string>{ "brim", "perimeter", "brim", "perimeter" });
+}
+
+TEST_CASE("Brims of neighboring instances do not overlap", "[SkirtBrim][Orca14991]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(4, true, {
+        { "skirt_loops",   0 },
+        { "brim_type",     "outer_only" },
+        { "brim_width",    5 },
+        { "combine_brims", 0 },
+    }, print, model);
+    print.process();
+
+    const std::vector<Print::SkirtBrimGroup::Brim> &brims = print.skirt_brim_groups().front().brims;
+    REQUIRE(brims.size() == 2);
+    auto brim_area = [](const ExtrusionEntityCollection &brim) {
+        Polylines paths;
+        brim.collect_polylines(paths);
+        ExPolygons area;
+        for (const Polyline &path : paths)
+            append(area, offset_ex(path, float(scale_(0.1))));
+        return union_ex(area);
+    };
+    // Paths as 0.2 mm wide strips: two brims sharing the 4 mm gap must not cross each other.
+    double overlap = 0.;
+    for (const ExPolygon &ex : intersection_ex(brim_area(brims[0].brim), brim_area(brims[1].brim)))
+        overlap += ex.area() * SCALING_FACTOR * SCALING_FACTOR;
+    CHECK(overlap < 0.01);
+}
