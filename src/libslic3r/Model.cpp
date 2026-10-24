@@ -4397,6 +4397,16 @@ bool model_has_advanced_features(const Model &model)
     return false;
 }
 
+// Orca #14591: a project may store only the bare filename of a source (the default), while the file read
+// back from disk carries its full path (or the reverse), so compare the exact path first and then the
+// filename alone, case-insensitively.
+static bool same_reload_source(const std::string &new_input_file, const std::string &old_input_file)
+{
+    return new_input_file == old_input_file ||
+           boost::algorithm::iequals(boost::filesystem::path(new_input_file).filename().string(),
+                                     boost::filesystem::path(old_input_file).filename().string());
+}
+
 std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const ModelVolume &old_volume,
                                                 bool file_matches_source, bool file_named_like_volume)
 {
@@ -4405,7 +4415,7 @@ std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const Mo
     if (file_matches_source) {
         const int o = old_volume.source.object_idx, v = old_volume.source.volume_idx;
         if (o >= 0 && o < int(new_model.objects.size()) && v >= 0 && v < int(new_model.objects[o]->volumes.size()) &&
-            new_model.objects[o]->volumes[v]->source.input_file == old_volume.source.input_file) {
+            same_reload_source(new_model.objects[o]->volumes[v]->source.input_file, old_volume.source.input_file)) {
             source_object = o;
             source_volume = v;
         }
