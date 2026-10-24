@@ -479,7 +479,7 @@ recommendation is a new type**, but it is a decision (D1).
 
 - **T1 watertight.** For each preset x cutout (None/Flat/Slot/FlatAndSlot) x lip on/off x groove on/off: the
   pin mesh and both hole meshes have `its_num_open_edges() == 0` and positive volume, and have no
-  self-intersections (`its_self_intersecting` or Manifold's status).
+  self-intersections (use the valid status Manifold reports when it imports the mesh).
 - **T2 dimensions.**
   - Pin bbox: length `Lu + Ll + kerf`.
   - Diameter across the round: `D + 2 x lip_height`.
