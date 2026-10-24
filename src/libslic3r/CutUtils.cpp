@@ -36,17 +36,18 @@ static void apply_tolerance(ModelVolume* vol)
 
     vol->set_scaling_factor(sf);
 
-    // correct offset in respect to the new depth
-    Vec3d rot_norm = rotation_transform(vol->get_rotation()) * Vec3d::UnitZ();
-    if (rot_norm.norm() != 0.0)
-        rot_norm.normalize();
+    // OrcaSlicer #16020 (fixes Orca #14299): only a Plug or a Snap, which sits on ONE side of the
+    // cut, is shifted along its normal to put the extra depth into its hole. A Dowel straddles the
+    // plane at z = 0, so it is NOT shifted: the extra depth then splits evenly between the two
+    // holes, instead of all of it landing in one and none in the other.
+    if (cut_info.connector_type == CutConnectorType::Plug || cut_info.connector_type == CutConnectorType::Snap) {
+        Vec3d rot_norm = rotation_transform(vol->get_rotation()) * Vec3d::UnitZ();
+        if (rot_norm.norm() != 0.0)
+            rot_norm.normalize();
 
-    double z_offset = 0.5 * static_cast<double>(cut_info.height_tolerance);
-    if (cut_info.connector_type == CutConnectorType::Plug || 
-        cut_info.connector_type == CutConnectorType::Snap)
-        z_offset -= 0.05; // add small Z offset to better preview
-
-    vol->set_offset(vol->get_offset() + rot_norm * z_offset);
+        const double z_offset = 0.5 * static_cast<double>(cut_info.height_tolerance) - 0.05; // small Z offset for a better preview
+        vol->set_offset(vol->get_offset() + rot_norm * z_offset);
+    }
 }
 
 static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART)

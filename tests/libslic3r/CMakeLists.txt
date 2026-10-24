@@ -87,6 +87,7 @@ add_executable(${_TEST_NAME}_tests
 	test_flexi_joint.cpp
 	test_pushfit.cpp
 	test_pushfit_cut.cpp
+	test_cut_connectors.cpp
 	test_fuzzy_skin.cpp
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
