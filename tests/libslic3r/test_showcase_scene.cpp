@@ -741,3 +741,77 @@ TEST_CASE("Realistic view settings read the preferences as before", "[Showcase][
     CHECK(s.shadows);
     CHECK(s.ssao);
 }
+
+TEST_CASE("Showcase: the floor picture's orientation", "[Showcase]")
+{
+    // A floor point p in tiles (+Y is the back) maps to uv with v = 0 on the image's first (top) row.
+    auto map = [](int rot, bool flip, float x, float y) {
+        const std::array<float, 4> m = floor_uv_matrix(rot, flip);
+        return std::array<float, 2>{ m[0] * x + m[1] * y, m[2] * x + m[3] * y };
+    };
+    SECTION("unrotated, the picture's top is the back and its right is +X")
+    {
+        CHECK(map(0, false, 0.f, 1.f)[1] == -1.f);
+        CHECK(map(0, false, 1.f, 0.f)[0] == 1.f);
+        CHECK(map(0, false, 1.f, 0.f)[1] == 0.f);
+    }
+    SECTION("90 degrees counter-clockwise: the picture's top points to -X, its right to +Y")
+    {
+        CHECK(map(90, false, 0.f, 1.f)[0] == 1.f);
+        CHECK(map(90, false, 0.f, 1.f)[1] == 0.f);
+        CHECK(map(90, false, -1.f, 0.f)[1] == -1.f);   // -X is up the picture
+    }
+    SECTION("180 turns the picture round")
+    {
+        CHECK(map(180, false, 0.f, 1.f)[1] == 1.f);
+        CHECK(map(180, false, 1.f, 0.f)[0] == -1.f);
+    }
+    SECTION("270 is the opposite of 90")
+    {
+        const auto a = map(90, false, 0.3f, 0.7f), b = map(270, false, 0.3f, 0.7f);
+        CHECK(a[0] == -b[0]);
+        CHECK(a[1] == -b[1]);
+    }
+    SECTION("flip mirrors left to right before the turn")
+    {
+        CHECK(map(0, true, 1.f, 0.f)[0] == -1.f);
+        CHECK(map(0, true, 0.f, 1.f)[1] == -1.f);
+        CHECK(map(90, true, 0.f, 1.f)[0] == -1.f);
+    }
+    SECTION("angles snap to the nearest quarter turn")
+    {
+        CHECK(floor_rotation_snap(0.) == 0);
+        CHECK(floor_rotation_snap(44.) == 0);
+        CHECK(floor_rotation_snap(50.) == 90);
+        CHECK(floor_rotation_snap(-90.) == 270);
+        CHECK(floor_rotation_snap(450.) == 90);
+        CHECK(floor_rotation_snap(std::nan("")) == 0);
+    }
+    SECTION("rotation and flip survive JSON, and old scenes read as 0 / off")
+    {
+        Project p;
+        Scene  &s     = p.ensure_scene_for_plate(0, PresetId::DeskWood);
+        s.floor.type     = FloorType::Texture;
+        s.floor.rotation = 270;
+        s.floor.flip     = true;
+        Project back;
+        REQUIRE(scenes_from_json(scenes_to_json(p), back));
+        REQUIRE(back.scenes.size() == 1);
+        CHECK(back.scenes[0].floor.rotation == 270);
+        CHECK(back.scenes[0].floor.flip);
+        CHECK(back.scenes[0] == s);
+
+        json j = json::parse(scenes_to_json(p));
+        j["scenes"][0]["floor"].erase("rotation");
+        j["scenes"][0]["floor"].erase("flip");
+        Project old;
+        REQUIRE(scenes_from_json(j.dump(), old));
+        CHECK(old.scenes[0].floor.rotation == 0);
+        CHECK_FALSE(old.scenes[0].floor.flip);
+
+        j["scenes"][0]["floor"]["rotation"] = 100;   // not a quarter turn: snapped
+        Project odd;
+        REQUIRE(scenes_from_json(j.dump(), odd));
+        CHECK(odd.scenes[0].floor.rotation == 90);
+    }
+}

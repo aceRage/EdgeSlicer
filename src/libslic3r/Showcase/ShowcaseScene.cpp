@@ -186,11 +186,35 @@ bool Background::operator==(const Background &o) const
     return type == o.type && color1 == o.color1 && color2 == o.color2 && image == o.image && fit == o.fit && blur == o.blur;
 }
 
+int floor_rotation_snap(double degrees)
+{
+    if (!std::isfinite(degrees))
+        return 0;
+    const long q = std::lround(degrees / 90.);
+    return int(((q % 4) + 4) % 4) * 90;
+}
+
+std::array<float, 4> floor_uv_matrix(int rotation, bool flip)
+{
+    // Exact for the four angles. The picture-space point is q = R(-rotation) * p; u = +-q.x, v = -q.y
+    // (image rows run top to bottom, v = 0 on the first row).
+    float c = 1.f, s = 0.f;
+    switch (floor_rotation_snap(double(rotation))) {
+    case 90:  c = 0.f;  s = 1.f;  break;
+    case 180: c = -1.f; s = 0.f;  break;
+    case 270: c = 0.f;  s = -1.f; break;
+    default: break;
+    }
+    const float f = flip ? -1.f : 1.f;
+    return { f * c, f * s, s, -c };
+}
+
 bool Floor::operator==(const Floor &o) const
 {
     return type == o.type && color == o.color && shadow_strength == o.shadow_strength && grid_spacing == o.grid_spacing &&
            hide_plate == o.hide_plate && hide_wipe_tower == o.hide_wipe_tower && texture == o.texture && image == o.image &&
-           texture_scale == o.texture_scale && texture_size == o.texture_size && reflection == o.reflection &&
+           texture_scale == o.texture_scale && texture_size == o.texture_size && rotation == o.rotation && flip == o.flip &&
+           reflection == o.reflection &&
            contact_shadow == o.contact_shadow;
 }
 
@@ -730,6 +754,8 @@ json scene_to_json_object(const Scene &s)
     fl["image"]           = s.floor.image;
     fl["texture_scale"]   = s.floor.texture_scale;
     fl["texture_size"]    = s.floor.texture_size;
+    fl["rotation"]        = s.floor.rotation;
+    fl["flip"]            = s.floor.flip;
     fl["reflection"]      = s.floor.reflection;
     fl["contact_shadow"]  = s.floor.contact_shadow;
     j["floor"] = merged(raw, "floor", fl);
@@ -828,6 +854,8 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.floor.image             = get_or<std::string>(fl, "image", "");
     s.floor.texture_scale     = clamp_or(get_or<float>(fl, "texture_scale", s.floor.texture_scale), 0.1f, 10.f, 1.f);
     s.floor.texture_size      = clamp_or(get_or<float>(fl, "texture_size", s.floor.texture_size), 10.f, 5000.f, 300.f);
+    s.floor.rotation          = floor_rotation_snap(get_or<double>(fl, "rotation", double(s.floor.rotation)));
+    s.floor.flip              = get_or<bool>(fl, "flip", s.floor.flip);
     s.floor.reflection        = clamp_or(get_or<float>(fl, "reflection", s.floor.reflection), 0.f, 1.f, 0.f);
     s.floor.contact_shadow    = clamp_or(get_or<float>(fl, "contact_shadow", s.floor.contact_shadow), 0.f, 1.f, 0.6f);
 
@@ -1047,10 +1075,14 @@ void apply_preset(Scene &scene, PresetId preset)
     Lighting   &li = scene.lighting;
     // The look only: the floor picture, the materials, the camera and the export stay the user's.
     const std::string floor_image = fl.image;
+    const int         floor_rot   = fl.rotation;
+    const bool        floor_flip  = fl.flip;
     bg = Background();
     fl = Floor();
     li = Lighting();
     fl.image = floor_image;
+    fl.rotation = floor_rot;
+    fl.flip     = floor_flip;
     switch (preset) {
     default:
     case PresetId::StudioWhite:
