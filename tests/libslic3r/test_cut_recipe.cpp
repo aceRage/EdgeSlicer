@@ -189,6 +189,10 @@ static CutRecipe recipe_make(CutRecipeKind kind)
         r.groove.angle_init       = 0.1f;
         r.groove.depth_tolerance  = 0.15f;
         r.groove.width_tolerance  = 0.2f;
+        // Version 5: three dovetails, so the round trip has a count, a gap and a radius to lose.
+        r.groove.count            = 3;
+        r.groove.gap              = 7.5f;
+        r.groove.plane_radius     = 33.25f;
     }
 
     // One connector of each kind the panel can place, so the connector list is
@@ -463,6 +467,8 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
     const Case cases[] = {
         { CutRecipeKind::Plane,  "plane"  },
         { CutRecipeKind::Curved, "curved" },
+        // OD11: two dovetails, so a recipe that lost its count or gap re-cuts differently.
+        { CutRecipeKind::Groove, "groove" },
     };
 
     for (const Case &c : cases) {
@@ -481,6 +487,16 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
         in.place_on_cut_lower = false;
         in.rotate_upper       = false;
         in.rotate_lower       = false;
+        if (c.kind == CutRecipeKind::Groove) {
+            // A dovetail the panel could make, two of them fitting the 40 mm cube.
+            in.groove.depth        = 5.f;
+            in.groove.width        = 10.f;
+            in.groove.flaps_angle  = float(Geometry::deg2rad(60.));
+            in.groove.angle        = 0.f;
+            in.groove.count        = 2;
+            in.groove.gap          = 4.f;
+            in.groove.plane_radius = 30.f;
+        }
         in.mesh_hash          = cut_recipe_mesh_hash(cut_recipe_mesh_to_blob(in.mesh));
 
         // THE ORIGINAL CUT, performed from the recipe as the gizmo would.
@@ -499,7 +515,16 @@ TEST_CASE("Deft: a cut re-performed from a loaded recipe reproduces the same hal
             ModelObjectPtrs res;
             if (r.kind == CutRecipeKind::Curved)
                 res = cut.perform_with_curved_sheet(r.curved_sheet(), r.thickness, r.thickness_offset);
-            else
+            else if (r.kind == CutRecipeKind::Groove) {
+                Cut::Groove g;
+                g.depth           = r.groove.depth;
+                g.width           = r.groove.width;
+                g.flaps_angle     = r.groove.flaps_angle;
+                g.angle           = r.groove.angle;
+                g.depth_tolerance = r.groove.depth_tolerance;
+                g.width_tolerance = r.groove.width_tolerance;
+                res = cut.perform_with_groove(g, r.rotation_m, r.groove.count, r.groove.gap, r.groove.plane_radius);
+            } else
                 res = cut.perform_with_plane(r.thickness, r.thickness_offset);
 
             std::vector<std::pair<double, BoundingBoxf3>> out;
@@ -843,12 +868,14 @@ TEST_CASE("Cut recipe: an old recipe's extension angle is unset, not zero", "[Cu
     REQUIRE(r != unset);
 }
 
-TEST_CASE("Cut recipe: version 4 is current and a version 3 recipe still loads", "[CutRecipe]")
+TEST_CASE("Cut recipe: version 5 is current and a version 3 recipe still loads", "[CutRecipe]")
 {
-    REQUIRE(CutRecipeVersion == 4);
+    // Version 5 (OD11, multiple dovetails) added groove fields only.
+    REQUIRE(CutRecipeVersion == 5);
     REQUIRE(cut_recipe_version_supported(3));
     REQUIRE(cut_recipe_version_supported(4));
-    REQUIRE_FALSE(cut_recipe_version_supported(5));
+    REQUIRE(cut_recipe_version_supported(5));
+    REQUIRE_FALSE(cut_recipe_version_supported(6));
 
     // migrate_draw_v2() stamps a version 3 recipe forward WITHOUT touching its
     // numbers: version 4 changed no meanings, only added a field, so the angle, the
@@ -859,7 +886,7 @@ TEST_CASE("Cut recipe: version 4 is current and a version 3 recipe still loads",
     r.draw_depth       = 4.5;
     r.draw_through_all = true;
     r.migrate_draw_v2();
-    REQUIRE(r.version == 4);
+    REQUIRE(r.version == CutRecipeVersion);
     REQUIRE(r.draw_angle_deg == Approx(35.0));
     REQUIRE(r.draw_depth == Approx(4.5));
     REQUIRE(r.draw_through_all);

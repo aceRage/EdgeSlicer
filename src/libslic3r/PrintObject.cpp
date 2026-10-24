@@ -1413,7 +1413,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "small_area_infill_flow_compensation"
             || opt_key == "lateral_lattice_angle_1"
             || opt_key == "lateral_lattice_angle_2"
-            || opt_key == "infill_overhang_angle") {
+            || opt_key == "infill_overhang_angle"
+            || opt_key == "gyroid_optimized") {
             steps.emplace_back(posInfill);
         } else if (opt_key == "sparse_infill_pattern"
                    || opt_key == "symmetric_infill_y_axis"
