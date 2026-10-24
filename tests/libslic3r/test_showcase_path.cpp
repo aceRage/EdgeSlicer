@@ -1085,15 +1085,25 @@ TEST_CASE("S5c: static camera paths and the video's callout options", "[Showcase
         CHECK(ev[0].build_follow);
         CHECK(evaluate_timeline(ev, s, 1.).build_follow);
     }
-    SECTION("a floor event turns and mirrors the picture, snapped to quarter turns")
-    {
-        Scene s       = base;
-        s.floor.type  = FloorType::Image;
-        const auto ev = events_of("[{\"type\": \"floor\", \"at\": 1, \"rotation\": 200, \"flip\": true}]");
-        CHECK(evaluate_timeline(ev, s, 0.).scene.floor.rotation == 0);
-        const Floor f = evaluate_timeline(ev, s, 2.).scene.floor;
-        CHECK(f.rotation == 180);
-        CHECK(f.flip);
-        CHECK(path_events_to_json(ev).find("\"rotation\"") != std::string::npos);
-    }
+}
+
+TEST_CASE("Path timeline: a floor event turns and mirrors the picture", "[Showcase][Path]")
+{
+    const Scene base = sample_scene();
+    auto events_of = [](const std::string &arr) {
+        std::vector<PathEvent> ev;
+        PathIssues             issues;
+        const bool             ok = parse_path_events(arr, ev, issues);
+        INFO(issues.text());
+        REQUIRE(ok);
+        return ev;
+    };
+    Scene s       = base;
+    s.floor.type  = FloorType::Image;
+    const auto ev = events_of("[{\"type\": \"floor\", \"at\": 1, \"rotation\": 200, \"flip\": true}]");
+    CHECK(evaluate_timeline(ev, s, 0.).scene.floor.rotation == 0);
+    const Floor f = evaluate_timeline(ev, s, 2.).scene.floor;
+    CHECK(f.rotation == 180);
+    CHECK(f.flip);
+    CHECK(path_events_to_json(ev).find("\"rotation\"") != std::string::npos);
 }
