@@ -4,6 +4,7 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Geometry.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/BrimEarsPoint.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -869,4 +870,148 @@ TEST_CASE("Brims of neighboring instances do not overlap", "[SkirtBrim][Orca1499
     for (const ExPolygon &ex : intersection_ex(brim_area(brims[0].brim), brim_area(brims[1].brim)))
         overlap += ex.area() * SCALING_FACTOR * SCALING_FACTOR;
     CHECK(overlap < 0.01);
+}
+
+// Total brim loops across all objects.
+static size_t brim_loop_count(Print &print)
+{
+    size_t n = 0;
+    for (const auto &kv : print.get_brimMap())
+        n += kv.second.items_count();
+    return n;
+}
+
+static bool brim_enters_first_layer_hole(Print &print)
+{
+    const PrintObject *object = print.get_object(0);
+    Polygons holes;
+    for (const ExPolygon &slice : object->layers().front()->lslices)
+        holes.insert(holes.end(), slice.holes.begin(), slice.holes.end());
+
+    const Vec3d plate_origin = print.get_plate_origin();
+    Point shift = object->instances().front().shift_without_plate_offset();
+    shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    for (Polygon &hole : holes)
+        hole.translate(shift);
+
+    for (const auto &kv : print.get_brimMap()) {
+        Polylines brim_paths;
+        kv.second.collect_polylines(brim_paths);
+        for (const Polyline &path : brim_paths)
+            for (const Point &point : path.points)
+                if (contains(holes, point, false))
+                    return true;
+    }
+    return false;
+}
+
+// Orca #15015: Brim ears outer only keeps automatic mouse ears out of the model's holes.
+TEST_CASE("Outer-only brim ears stay out of model holes", "[SkirtBrim][Orca15015]")
+{
+    const bool outer_only = GENERATE(false, true);
+    DYNAMIC_SECTION("brim_ears_outer_only=" << outer_only) {
+        Print print;
+        init_and_process_print({ TestMesh::cube_with_concave_hole }, print, {
+            { "skirt_loops",                0 },
+            { "brim_type",                  "brim_ears" },
+            { "brim_width",                 2 },
+            { "brim_ears_max_angle",        125 },
+            { "brim_ears_detection_length", 0 },
+            { "brim_ears_outer_only",       outer_only },
+            { "initial_layer_line_width",   0.5 },
+        });
+
+        REQUIRE(brim_loop_count(print) > 0);
+        CHECK(brim_enters_first_layer_hole(print) != outer_only);
+    }
+}
+
+// Orca #15015: a painted ear's radius is the radius of the sliced ear (it used to lose the brim gap
+// and one line spacing).
+TEST_CASE("Painted brim ear radius controls sliced size", "[SkirtBrim][Orca15015]")
+{
+    constexpr double ear_radius = 10.0;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_loops",                0 },
+        { "brim_type",                  "painted" },
+        { "brim_width",                 15 },
+        { "brim_object_gap",            0.1 },
+        { "brim_ears_outer_only",       true },
+        { "initial_layer_line_width",   0.5 },
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    print.process();
+
+    REQUIRE(!print.get_object(0)->layers().front()->lslices.empty());
+    const Point ear_local   = print.get_object(0)->layers().front()->lslices.front().contour.points.front();
+    const Point path_center = paint_one_brim_ear(print, model, config, ear_local, float(ear_radius));
+
+    double max_path_radius = 0.0;
+    for (const auto &kv : print.get_brimMap()) {
+        Polylines brim_paths;
+        kv.second.collect_polylines(brim_paths);
+        for (const Polyline &path : brim_paths)
+            for (const Point &point : path.points)
+                max_path_radius = std::max(max_path_radius, unscale<double>((point - path_center).cast<double>().norm()));
+    }
+
+    REQUIRE(max_path_radius > 0.0);
+    INFO("Outermost painted-ear path radius: " << max_path_radius << " mm");
+    CHECK(max_path_radius > ear_radius - 0.5);
+    CHECK(max_path_radius < ear_radius);
+}
+
+// Orca #15015: with Brim ears outer only, an ear painted inside a hole adds no brim there.
+TEST_CASE("Outer-only painted brim ears stay out of model holes", "[SkirtBrim][Orca15015]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_loops",                0 },
+        { "brim_type",                  "painted" },
+        { "brim_ears_outer_only",       true },
+        { "initial_layer_line_width",   0.5 },
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_with_concave_hole }, print, model, config);
+
+    // Slice once to obtain exact outer and inner contour points in print
+    // coordinates, then express them in the model coordinates painted ears store.
+    print.process();
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(!object->layers().front()->lslices.empty());
+    REQUIRE(!object->layers().front()->lslices.front().holes.empty());
+
+    Transform3d model_transform = model.objects.front()->instances.front()->get_transformation().get_matrix_no_offset();
+    const Point &center_offset = object->center_offset();
+    model_transform = model_transform.pretranslate(
+        Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
+    const double bottom_z = model.objects.front()->raw_mesh_bounding_box().min.z() - 0.0001;
+    auto painted_point = [&model_transform, bottom_z](const Point &point) {
+        Vec3d model_pos = model_transform.inverse() *
+            Vec3d(unscale<double>(point.x()), unscale<double>(point.y()), 0);
+        model_pos.z() = bottom_z;
+        return BrimPoint(model_pos.cast<float>(), 3.f);
+    };
+
+    const ExPolygon &first_slice = object->layers().front()->lslices.front();
+    Polygon inner_contour = first_slice.holes.front();
+    inner_contour.reverse();
+    const Points inner_ear_points = inner_contour.concave_points(55. * PI / 180.);
+    REQUIRE(!inner_ear_points.empty());
+    model.objects.front()->brim_points = {
+        painted_point(first_slice.contour.points.front()),
+        painted_point(inner_ear_points.front()),
+    };
+    print.apply(model, config);
+    print.process();
+
+    REQUIRE(brim_loop_count(print) > 0);
+    CHECK_FALSE(brim_enters_first_layer_hole(print));
 }
