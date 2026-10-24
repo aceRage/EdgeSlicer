@@ -7941,6 +7941,9 @@ int run_server(const std::string& token_hint, bool phone_on)
 // --------------------------------------------------------------- client ----
 
 static std::mutex  s_state_mutex;
+// --no-hub / marker file (init_hub_mode): this copy is a client of the running hub only.
+static std::atomic<bool> s_no_hub { false };
+static std::atomic<bool> s_no_hub_logged { false };
 static std::string s_last_state;
 // ensure_running() one caller at a time within this process: the startup call
 // (GUI_App::start_remote_access), the Stream tab and the Home tab can all ask at once, and two
@@ -8071,12 +8074,13 @@ std::pair<int, std::string> onvif_discover()
 
 Info set_phone(bool on, const std::string& token)
 {
+    if (s_no_hub) return query(); // the hub belongs to another copy: report it, change nothing
     return hub_call("POST", std::string("/hub/phone?on=") + (on ? "1" : "0") + (valid_token(token) ? "&token=" + token : ""), "", 5);
 }
 
-Info new_link() { return hub_call("POST", "/hub/newlink", "", 5); }
+Info new_link() { return s_no_hub ? query() : hub_call("POST", "/hub/newlink", "", 5); }
 
-void quit() { hub_call("POST", "/hub/quit", "", 3); }
+void quit() { if (s_no_hub) return; hub_call("POST", "/hub/quit", "", 3); }
 
 std::string saved_state()
 {
@@ -8105,6 +8109,7 @@ bool post_state(const std::string& state_json)
         std::lock_guard<std::mutex> lock(s_state_mutex);
         s_last_state = state_json;
     }
+    if (s_no_hub) return false; // this copy's camera list never overwrites the hub owner's
     const HubFile hf = hub_file();
     if (hf.admin_port == 0) return false;
     bool ok = false;
@@ -8250,8 +8255,36 @@ static std::atomic<bool> s_spawn_disabled { false };
 
 void disable_spawn() { s_spawn_disabled = true; }
 
+bool no_hub() { return s_no_hub.load(); }
+
+void init_hub_mode(bool no_hub_flag, bool take_hub_flag)
+{
+    HubHandover::HubModeInputs in;
+    in.take_hub_flag = take_hub_flag;
+    in.no_hub_flag   = no_hub_flag;
+    in.take_hub_env  = HubHandover::env_switch_on(std::getenv("EDGESLICER_TAKE_HUB"));
+    in.no_hub_env    = HubHandover::env_switch_on(std::getenv("EDGESLICER_NO_HUB"));
+    boost::system::error_code ec;
+    const fs::path            exe = fs::path(current_exe());
+    in.marker_file                = !exe.empty() && fs::exists(exe.parent_path() / "edgeslicer_no_hub", ec);
+    const HubHandover::HubModeDecision d = HubHandover::decide_hub_mode(in);
+    s_no_hub = !HubHandover::should_spawn_or_take_over(d.mode);
+    if (s_no_hub)
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: no-hub mode (" << HubHandover::hub_mode_rule_name(d.rule)
+                                << "): this copy never starts, restarts or takes over the hub or go2rtc, and uses a running hub as a client only";
+    else if (d.rule != HubHandover::HubModeRule::Default)
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: normal hub mode (" << HubHandover::hub_mode_rule_name(d.rule) << ")";
+}
+
 Info ensure_running(const std::string& token_hint, bool phone_on)
 {
+    // --no-hub / marker: a client of whatever hub runs. No spawn, no handover, no phone switch, no
+    // state push, no kill; a dead Info (alive == false) when there is none.
+    if (s_no_hub) {
+        if (!s_no_hub_logged.exchange(true))
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: no-hub mode, not starting or taking over a hub; using the running one if there is one";
+        return query();
+    }
     // Showcase S5: a --showcase-render job never starts a hub (nor, through it, go2rtc), whichever
     // caller asks - the Stream page's hub_start included. A hub would outlive the job.
     if (s_spawn_disabled) {
