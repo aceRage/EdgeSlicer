@@ -5,12 +5,15 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCodeReader.hpp"
-#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include "test_data.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -661,4 +664,164 @@ TEST_CASE("Inward wipe remains valid after wipe on loops moves the nozzle", "[Wi
                      Catch::Matchers::WithinAbs(trajectory_length(inward_trajectories[i]), 0.01));
     }
     REQUIRE(start_changed);
+}
+
+namespace {
+
+// Non-Bambu (WipeTower2) two-filament plate. Cone angle stays in the config for every
+// wall type, but only a cone wall prints or reserves the cone.
+DynamicPrintConfig cone_reservation_config(const char *wall_type, const char *cone_angle)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values           = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values            = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values             = {0.4, 0.4};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = true;
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
+    config.set_deserialize_strict({
+        {"wipe_tower_wall_type",       wall_type},
+        {"wipe_tower_cone_angle",      cone_angle},
+        {"wipe_tower_x",               "30"},
+        {"wipe_tower_y",               "80"},
+        {"prime_tower_width",          "35"},
+        {"prime_tower_brim_width",     "3"},
+        {"layer_height",               "0.3"},
+        {"initial_layer_print_height", "0.3"},
+        {"skirt_loops",                "1"},
+        {"brim_type",                  "no_brim"},
+        {"enable_support",             "0"},
+        {"gcode_comments",             "1"},
+        {"machine_end_gcode",          ""},
+        {"machine_start_gcode",
+         "MIN={first_layer_print_min[0]},{first_layer_print_min[1]}\n"
+         "MAX={first_layer_print_max[0]},{first_layer_print_max[1]}\n"},
+    });
+    return config;
+}
+
+// A 120 mm object makes the tower tall enough that a 30 degree cone reaches the
+// thin plate in front of it. Positions are instance offsets so arrange_objects
+// is not used (Edge's init_print would move them).
+void load_tall_and_plate(Print &print, Model &model, const DynamicPrintConfig &config)
+{
+    ModelObject *tall = model.add_object();
+    tall->name        = "tall.stl";
+    tall->add_volume(make_cube(20., 20., 120.));
+    tall->add_instance()->set_offset(Vec3d(150., 150., 0.));
+    tall->ensure_on_bed();
+
+    ModelObject *plate = model.add_object();
+    plate->name        = "plate.stl";
+    plate->add_volume(make_cube(30., 32., 2.));
+    plate->add_instance()->set_offset(Vec3d(40., 30., 0.));
+    plate->ensure_on_bed();
+    plate->volumes.front()->config.set("extruder", 2);
+
+    // The wipe tower only rises as far as the last layer with a tool change, so a tall
+    // second-extruder pillar keeps changing tools up to the top of the tall object.
+    ModelObject *pillar = model.add_object();
+    pillar->name        = "pillar.stl";
+    pillar->add_volume(make_cube(6., 6., 120.));
+    pillar->add_instance()->set_offset(Vec3d(150., 185., 0.));
+    pillar->ensure_on_bed();
+    pillar->volumes.front()->config.set("extruder", 2);
+
+    print.apply(model, config);
+    print.set_status_silent();
+}
+
+std::string gcode_line_starting(const std::string &gcode, const char *prefix)
+{
+    const size_t pos = gcode.find(prefix);
+    REQUIRE(pos != std::string::npos);
+    const size_t end = gcode.find('\n', pos);
+    return gcode.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+}
+
+} // namespace
+
+TEST_CASE("Only a cone wall gives the wipe tower a stabilization cone", "[Wipe][WipeTower]")
+{
+    const char *wall_type = GENERATE("rectangle", "rib", "cone");
+    INFO("wall type " << wall_type);
+
+    DynamicPrintConfig config = cone_reservation_config(wall_type, "30");
+    Print              print;
+    Model              model;
+    load_tall_and_plate(print, model, config);
+    print.process();
+    REQUIRE(print.has_wipe_tower());
+    REQUIRE_FALSE(print.is_BBL_printer());
+
+    const BoundingBox footprint(print.first_layer_wipe_tower_corners());
+    REQUIRE(footprint.defined);
+    const double plate_max_y = 30. + 32.;
+    INFO("tower depth " << print.wipe_tower_data().depth << ", footprint min y " << unscaled(footprint.min.y())
+                        << ", max y " << unscaled(footprint.max.y()));
+    if (std::string(wall_type) == "cone") {
+        CHECK(unscaled(footprint.min.y()) < plate_max_y);
+        CHECK(print.get_conflict_result().has_value());
+    } else {
+        CHECK(unscaled(footprint.min.y()) > plate_max_y);
+        CHECK_FALSE(print.get_conflict_result().has_value());
+    }
+}
+
+TEST_CASE("A non-cone wall ignores wipe_tower_cone_angle in the first-layer footprint and G-code", "[Wipe][WipeTower]")
+{
+    const char *wall_type = GENERATE("rectangle", "rib");
+    INFO("wall type " << wall_type);
+
+    auto slice_case = [](const char *wall, const char *cone_angle) {
+        DynamicPrintConfig config = cone_reservation_config(wall, cone_angle);
+        Print              print;
+        Model              model;
+        load_tall_and_plate(print, model, config);
+        const std::string gcode = Test::gcode(print);
+        REQUIRE(print.has_wipe_tower());
+        return std::make_tuple(BoundingBox(print.first_layer_wipe_tower_corners()),
+                               gcode_line_starting(gcode, "MIN="),
+                               gcode_line_starting(gcode, "MAX="),
+                               print.get_conflict_result().has_value());
+    };
+
+    const auto [box_30, min_30, max_30, conflict_30] = slice_case(wall_type, "30");
+    const auto [box_0, min_0, max_0, conflict_0]     = slice_case(wall_type, "0");
+    REQUIRE(box_30.defined);
+    REQUIRE(box_0.defined);
+    CHECK(box_30.min == box_0.min);
+    CHECK(box_30.max == box_0.max);
+    CHECK(min_30 == min_0);
+    CHECK(max_30 == max_0);
+    CHECK_FALSE(conflict_30);
+    CHECK_FALSE(conflict_0);
+}
+
+TEST_CASE("A cone wall's first-layer footprint grows with the cone angle", "[Wipe][WipeTower]")
+{
+    auto slice_case = [](const char *cone_angle) {
+        DynamicPrintConfig config = cone_reservation_config("cone", cone_angle);
+        Print              print;
+        Model              model;
+        load_tall_and_plate(print, model, config);
+        const std::string gcode = Test::gcode(print);
+        REQUIRE(print.has_wipe_tower());
+        return std::make_tuple(BoundingBox(print.first_layer_wipe_tower_corners()),
+                               gcode_line_starting(gcode, "MIN="),
+                               gcode_line_starting(gcode, "MAX="));
+    };
+
+    const auto [box_30, min_30, max_30] = slice_case("30");
+    const auto [box_0, min_0, max_0]    = slice_case("0");
+    REQUIRE(box_30.defined);
+    REQUIRE(box_0.defined);
+    CHECK(unscaled(box_30.min.y()) < unscaled(box_0.min.y()));
+    // The plate and the tower's own corners still set the -X / -Y corner of the print hull, and the objects at
+    // Y 150-190 set +Y / +X, so the cone (which grows toward the plate inside that hull) leaves both G-code
+    // lines unchanged here; the footprint above is what the cone changes.
+    CHECK(min_30 == min_0);
+    CHECK(max_30 == max_0);
 }

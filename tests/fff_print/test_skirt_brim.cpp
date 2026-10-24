@@ -5,6 +5,7 @@
 #include "libslic3r/Geometry.hpp"
 
 #include <boost/algorithm/string.hpp>
+#include <set>
 
 #include "test_data.hpp" // get access to init_print, etc
 
@@ -124,6 +125,46 @@ TEST_CASE("Brim uses first layer speed", "[SkirtBrim]") {
     const double bottom_surface_feedrate = first_extrusion_feedrate_for_feature(gcode, "Bottom surface");
     REQUIRE(bottom_surface_feedrate > 0.0);
     REQUIRE_THAT(bottom_surface_feedrate, Catch::Matchers::WithinAbs(1200.0, 1e-3));
+}
+
+TEST_CASE("Brim groups the parts of an object by contact", "[SkirtBrim]")
+{
+    // 10 mm cubes along X as the parts of one object: A and B overlap, C and D touch, and E stands 0.5 mm clear of D.
+    // static constexpr: MSVC needs a constant-expression local if a later edit captures it in a lambda.
+    static constexpr double part_x[] = { 0., 8., 30., 40., 50.5 };
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "skirt_loops", 0 }, { "brim_type", "outer_only" }, { "brim_width", 3 }, { "layer_height", 0.2 } });
+    Print print;
+    Model model;
+    // Edge's init_print() centres the first mesh and arranges the object. Build the five parts
+    // ourselves so every volume keeps its translated mesh (add_volume(..., false)).
+    ModelObject *model_object = model.add_object();
+    model_object->name = "object.stl";
+    model_object->add_instance();
+    for (double x : part_x) {
+        TriangleMesh part = make_cube(10., 10., 10.);
+        part.translate(float(x), 0.f, 0.f);
+        model_object->add_volume(std::move(part), ModelVolumeType::MODEL_PART, false);
+    }
+    model_object->ensure_on_bed();
+    print.auto_assign_extruders(model_object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+
+    REQUIRE_FALSE(print.objects().empty());
+    const PrintObject &object = *print.objects().front();
+    std::set<std::set<size_t>> groups;
+    for (const groupedVolumeSlices &group : object.firstLayerObjGroups()) {
+        std::set<size_t> parts;
+        for (const ObjectID &volume_id : group.volume_ids)
+            for (size_t i = 0; i < object.model_object()->volumes.size(); ++i)
+                if (object.model_object()->volumes[i]->id() == volume_id)
+                    parts.insert(i);
+        groups.insert(parts);
+    }
+    CHECK(groups == std::set<std::set<size_t>>{ { 0, 1 }, { 2, 3 }, { 4 } });
 }
 
 SCENARIO("Original Slic3r Skirt/Brim tests", "[SkirtBrim]") {
