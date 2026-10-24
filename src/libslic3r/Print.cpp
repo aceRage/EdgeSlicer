@@ -6310,9 +6310,16 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
                                    Vec2d(pt0.x(),pt0.y()+depth)
                                  };
 
-        // Now the stabilization cone.
+        // Now the stabilization cone, which only a cone wall prints. The configured
+        // cone angle stays in the config for rectangle and rib walls (the setting is
+        // hidden unless the wall is Cone), so using it here reserved a phantom
+        // first-layer footprint. The Bambu rib path above already uses the generated
+        // outline; this fallback is the non-Bambu WipeTower2 path.
         Vec2d center = (pts[0] + pts[2])/2.;
-        const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width, m_wipe_tower_data.height, m_wipe_tower_data.depth, m_config.wipe_tower_cone_angle);
+        const bool   has_cone   = !is_BBL_printer() && m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone;
+        const double cone_angle = has_cone ? m_config.wipe_tower_cone_angle.value : 0.;
+        const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width, m_wipe_tower_data.height,
+                                                                                m_wipe_tower_data.depth, cone_angle);
         double r = cone_R + m_wipe_tower_data.brim_width;
         for (double alpha = 0.; alpha<2*M_PI; alpha += M_PI/20.)
             pts.emplace_back(center + r*Vec2d(std::cos(alpha)/cone_x_scale, std::sin(alpha)));
@@ -6784,11 +6791,13 @@ void Print::_make_wipe_tower()
         m_wipe_tower_data.local_z_reserve_boxes = wipe_tower.get_local_z_reserve_boxes();
         m_wipe_tower_data.brim_width        = wipe_tower.get_brim_width();
         m_wipe_tower_data.height            = wipe_tower.get_wipe_tower_height();
+        // Only a cone wall prints the stabilization cone, whatever cone angle the config holds.
+        const float cone_angle = m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone ?
+                                     float(m_config.wipe_tower_cone_angle) : 0.f;
         m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_wipe_tower_height(),
                                          wipe_tower.get_brim_width(), m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
                                          float(m_config.wipe_tower_rib_width), float(m_config.wipe_tower_extra_rib_length),
-                                         m_config.wipe_tower_fillet_wall,
-                                         m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone ? float(m_config.wipe_tower_cone_angle) : 0.f);
+                                         m_config.wipe_tower_fillet_wall, cone_angle);
 
         // Unload the current filament over the purge tower when the printer is SEMM, or when the
         // current tool rams on a multi-tool. A toolchanger with ramming off (U1) has nothing to
@@ -6857,7 +6866,7 @@ void Print::_make_wipe_tower()
         m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), wipe_tower.width(), wipe_tower.get_wipe_tower_height(),
                                                   config().initial_layer_print_height, m_wipe_tower_data.depth,
                                                   m_wipe_tower_data.z_and_depth_pairs, m_wipe_tower_data.brim_width,
-                                                  config().wipe_tower_rotation_angle, config().wipe_tower_cone_angle,
+                                                  config().wipe_tower_rotation_angle, cone_angle,
                                                   {scale_(origin.x()), scale_(origin.y())});
         m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
     }
