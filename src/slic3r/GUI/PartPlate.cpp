@@ -1872,6 +1872,18 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
     return estimate_wipe_tower_polygon(config, plate_index, wt_pos, wt_size, plate_extruder_size, use_global_objects);
 }
 
+bool wipe_tower_rotation_supported()
+{
+    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), which picks the generator.
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    return bundle != nullptr && !bundle->is_bbl_vendor();
+}
+
+double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config)
+{
+    return wipe_tower_rotation_supported() ? wipe_tower_rotation_deg(config) : 0.;
+}
+
 // Plate-local box the prime tower may occupy: the whole plate, or on a dual-nozzle printer (H2D / H2C / X2D)
 // the part both nozzles reach, since every nozzle purges into the tower. Bambu Studio limits the tower to that
 // shared part as well, which is why its default tower sits at X 40 and not in the strip one nozzle owns.
@@ -1918,16 +1930,30 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 		const BoundingBoxf box = prime_tower_placement_box(config, plate_width, plate_depth);
 		const float bx0 = (float) box.min.x(), bx1 = (float) box.max.x();
 		const float by0 = (float) box.min.y(), by1 = (float) box.max.y();
-		const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%") % wp_brim_width;
-		const float x_lo   = bx0 + margin;
-		const float y_lo   = by0 + margin;
-		const float x_hi   = std::max(x_lo, bx1 - w - margin);
-		const float y_hi   = std::max(y_lo, by1 - depth - margin);
-		const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
-		float x_lo_c = bx0 + margin_c, x_hi_c = bx1 - w - margin_c;
+		const double angle = gui_wipe_tower_rotation_deg(config);
+		float x_lo, y_lo, x_hi, y_hi, x_lo_c, x_hi_c, y_lo_c, y_hi_c;
+		if (std::abs(angle) <= EPSILON) {
+			const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
+			x_lo   = bx0 + margin;
+			y_lo   = by0 + margin;
+			x_hi   = std::max(x_lo, bx1 - w - margin);
+			y_hi   = std::max(y_lo, by1 - depth - margin);
+			const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
+			x_lo_c = bx0 + margin_c; x_hi_c = bx1 - w - margin_c;
+			y_lo_c = by0 + margin_c; y_hi_c = by1 - depth - margin_c;
+		} else {
+			// The tower turns about its anchor (x, y), so the room it needs on each side is the
+			// turned box's extent around the anchor, not the width/depth box.
+			const BoundingBoxf ext = wipe_tower_rotated_extents(w, depth, wp_brim_width, angle);
+			x_lo   = bx0 + float(WIPE_TOWER_MARGIN - ext.min.x());
+			y_lo   = by0 + float(WIPE_TOWER_MARGIN - ext.min.y());
+			x_hi   = std::max(x_lo, bx1 - float(WIPE_TOWER_MARGIN + ext.max.x()));
+			y_hi   = std::max(y_lo, by1 - float(WIPE_TOWER_MARGIN + ext.max.y()));
+			x_lo_c = bx0 + float(WIPE_TOWER_AUTO_MARGIN - ext.min.x()); x_hi_c = bx1 - float(WIPE_TOWER_AUTO_MARGIN + ext.max.x());
+			y_lo_c = by0 + float(WIPE_TOWER_AUTO_MARGIN - ext.min.y()); y_hi_c = by1 - float(WIPE_TOWER_AUTO_MARGIN + ext.max.y());
+		}
 		if (x_lo_c > x_hi_c) { x_lo_c = x_lo; x_hi_c = x_hi; }
-		float y_lo_c = by0 + margin_c, y_hi_c = by1 - depth - margin_c;
 		if (y_lo_c > y_hi_c) { y_lo_c = y_lo; y_hi_c = y_hi; }
 		// Drag clamps reach this limit through the volume's bounding box (post-slice: the real
 		// mesh, a couple of mm inside this reserved estimate), so a drop can land slightly out
@@ -1948,6 +1974,9 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 		{scaled(x + w + wp_brim_width), scaled(y + depth + wp_brim_width)},
 		{scaled(x - wp_brim_width), scaled(y + depth + wp_brim_width)}
 		});
+	// Arrange and the object/tower overlap checks see the turned footprint, as Print::validate does.
+	if (std::abs(angle) > EPSILON)
+		ap.rotate(Geometry::deg2rad(angle), Point(scaled(x), scaled(y)));
 	wipe_tower_ap.bed_idx = plate_index;
 	wipe_tower_ap.setter = NULL; // do not move wipe tower
 

@@ -8361,8 +8361,12 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("wipe_tower_rotation_angle", coFloat);
     def->label = L("Wipe tower rotation angle");
-    def->tooltip = L("Wipe tower rotation angle with respect to X axis.");
+    def->tooltip = L("Wipe tower rotation angle with respect to X axis. The tower turns about its front left corner; "
+                     "the Rotate tool (R) on the tower in the 3D view sets this angle too, turning the tower about its centre.\n"
+                     "Not available for the Bambu Lab prime tower used on Bambu Lab printers, which is always printed unrotated.");
     def->sidetext = "°";	// degrees, don't need translation
+    def->min = -360.;
+    def->max = 360.;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
