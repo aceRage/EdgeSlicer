@@ -554,8 +554,15 @@ TEST_CASE("Spread: painted colour survives a 3MF save and load unchanged", "[Tri
     volume->name              = "cube";
     object->add_instance();
 
+    // add_volume() recentres the mesh, so seed on a top facet of the volume's own mesh.
+    const indexed_triangle_set &vits    = volume->mesh().its;
+    const std::vector<Vec3f>    normals = its_face_normals(vits);
+    int                         top     = 0;
+    for (int f = 1; f < int(normals.size()); ++f)
+        if (normals[f].z() > normals[top].z())
+            top = f;
     TriangleSelector sel(volume->mesh());
-    SpreadParams     p = params_at(volume->mesh().its, Vec3f(6.f, 7.f, 20.f), EnforcerBlockerType(2));
+    SpreadParams     p = params_at(vits, centroid(vits, top), EnforcerBlockerType(2));
     p.angle_deg        = 95.f; // over the edges onto the sides
     p.edge_limit       = 0.2f;
     SpreadSession(sel, p).grow_to(9.f);
