@@ -350,6 +350,13 @@ StreamSyncPlan plan_stream_sync(const std::map<std::string, std::string>& desire
 std::map<std::string, std::string> merge_desired_streams(const std::map<std::string, std::string>& stream_tab,
                                                          const std::map<std::string, std::string>& live_view);
 
+// ---- what the phone link exposes (slice_v1 and earlier) ----
+// Whether the hub proxies `method` `sub` (an /api/... path of a slicer instance, no query) through
+// /r/<token>/i/<pid>/api/...: the explicit allow-list, one entry per route of the instance manifest.
+bool instance_api_allowed(const std::string& method, const std::string& sub);
+// The `features` list /pair answers with.
+std::vector<std::string> pair_features();
+
 } // namespace Testing
 
 // ---- signing with the hub identity (the push forwarder's X-Hub-Sig) ----

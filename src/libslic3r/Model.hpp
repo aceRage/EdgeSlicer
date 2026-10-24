@@ -2084,6 +2084,16 @@ bool model_has_multi_part_objects(const Model &model);
 // If the model has advanced features, then it cannot be processed in simple mode.
 bool model_has_advanced_features(const Model &model);
 
+// Reload from disk: finds the volume of `new_model` (freshly read from the source file) that replaces `old_volume`.
+// Returns {object index, volume index}; the volume index is -1 when only an object (a STEP model loaded as one volume)
+// matched, and both are -1 when nothing matched.
+// The indices stored in old_volume.source are those of the file the volume was first imported from. A 3MF project
+// records them for every volume and keeps them after objects were deleted, merged or reordered, so they only count
+// when the volume found there still has the old volume's name; otherwise the volume is looked up by name.
+// `file_matches_source` / `file_named_like_volume`: the reloaded file has the volume's source file name / the volume's name.
+std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const ModelVolume &old_volume,
+                                                bool file_matches_source, bool file_named_like_volume);
+
 #ifndef NDEBUG
 // Verify whether the IDs of Model / ModelObject / ModelVolume / ModelInstance / ModelMaterial are valid and unique.
 void check_model_ids_validity(const Model &model);

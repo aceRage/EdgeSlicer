@@ -243,7 +243,7 @@ void change_opt_value(DynamicPrintConfig& config, const t_config_option_key& opt
 	}
 }
 
-void show_error(wxWindow* parent, const wxString& message, bool monospaced_font)
+void show_error(wxWindow* parent, const wxString& message, bool has_code_excerpts)
 {
     // Ultra: an error raised while a phone/agent request runs must not pop a modal nobody can
     // click (it would block every later request); hand it back to that request instead.
@@ -254,15 +254,15 @@ void show_error(wxWindow* parent, const wxString& message, bool monospaced_font)
         return;
     }
     wxGetApp().CallAfter([=] {
-        ErrorDialog msg(parent, message, monospaced_font);
+        ErrorDialog msg(parent, message, has_code_excerpts);
         msg.ShowModal();
     });
 }
 
-void show_error(wxWindow* parent, const char* message, bool monospaced_font)
+void show_error(wxWindow* parent, const char* message, bool has_code_excerpts)
 {
 	assert(message);
-	show_error(parent, wxString::FromUTF8(message), monospaced_font);
+	show_error(parent, wxString::FromUTF8(message), has_code_excerpts);
 }
 
 void show_error_id(int id, const std::string& message)

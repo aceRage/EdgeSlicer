@@ -4114,7 +4114,7 @@ void StatusPanel::on_ams_refresh_rfid(wxCommandEvent &event)
                 nullptr,
                 _L("Cannot read filament info: the filament is loaded to the tool head,please unload the filament and try again."),
                 wxEmptyString,
-                wxICON_WARNING | wxYES);
+                wxICON_WARNING | wxOK);
             msg_dlg.ShowModal();
             return;
         }

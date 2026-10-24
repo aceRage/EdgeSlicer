@@ -6,6 +6,7 @@
 #include "BambuCamRelay.hpp"
 #include "ElegooCamRelay.hpp"
 #include "RemoteNotify.hpp"
+#include "RemoteSliceV1.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
 #include "HubEventDedupe.hpp"
@@ -2502,6 +2503,16 @@ Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_r
 
 // The pairing document's origins and identity, pure so the shape can be tested without a hub.
 // Three named origins, one of them always empty today, and the public half of the hub identity.
+// "slice_v1" (+ "slice_result", "slice_cancel"): the companion app's native Slice tab
+// (EdgeSlicerApp docs/design_native_slice.md); the app shows it only on a hub that lists slice_v1.
+std::vector<std::string> Testing::pair_features()
+{
+    std::vector<std::string> f = { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" };
+    for (const std::string& s : SliceV1::pair_features())
+        f.push_back(s);
+    return f;
+}
+
 std::string Testing::pair_identity_json(const std::string& lan_url, const std::string& remote_url,
                                         const std::string& relay_url, const std::string& hubid,
                                         const std::string& public_key_hex)
@@ -3448,6 +3459,9 @@ struct Instance
     long long   started { 0 };
     std::string title, path;
     bool        slicing { false };
+    int         slicing_plate { -1 };   // slice_v1: the plate being sliced, -1 while idle
+    int         slicing_percent { 0 };  // and how far
+    int         current_plate { 0 };    // slice_v1: the plate the PC shows
     bool        hidden { false };
     bool        needs_attention { false };
     std::string attention_reason;
@@ -4679,7 +4693,7 @@ json HubServer::pair_json(bool via_serve_https)
     }
     // "push_levels": /push/device takes priority_kinds / all_events / level_hint, and /push/test exists.
     // "live_activity": /push/activity and the live_activity field on /push/device (hub-driven updates).
-    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" });
+    j["features"] = Testing::pair_features();
     j["capabilities"] = j["features"];
     return j;
 }
@@ -5911,6 +5925,9 @@ Instance HubServer::probe_instance(Instance inst)
                 inst.title    = j.value("title", "");
                 inst.path     = j.value("path", "");
                 inst.slicing  = j.value("slicing", false);
+                inst.slicing_plate   = j.value("slicing_plate", -1);
+                inst.slicing_percent = j.value("slicing_percent", 0);
+                inst.current_plate   = j.value("current_plate", 0);
                 inst.hidden   = j.value("hidden", inst.hidden);
                 inst.needs_attention  = j.value("needs_attention", false);
                 inst.attention_reason = j.value("attention_reason", "");
@@ -5992,6 +6009,9 @@ json HubServer::instances_json()
         ji["title"]   = inst.title;
         ji["path"]    = inst.path;
         ji["slicing"] = inst.slicing;
+        ji["slicing_plate"]   = inst.slicing ? inst.slicing_plate : -1; // slice_v1
+        ji["slicing_percent"] = inst.slicing ? inst.slicing_percent : 0;
+        ji["current_plate"]   = inst.current_plate;
         ji["hidden"]  = inst.hidden;
         ji["needs_attention"]  = inst.needs_attention;
         ji["attention_reason"] = inst.attention_reason;
@@ -6599,10 +6619,18 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (slash == std::string::npos || !is_index(rest.substr(0, slash))) return false;
         const std::string what = rest.substr(slash);
         if (what == "/send") return post; // send the sliced plate to a printer (RemoteSend)
+        if (what == "/send/preview") return post; // slice_v1: that send's mapping sheet, nothing sent
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
-                       what == "/preview.png" || what == "/preview/status");
+                       what == "/preview.png" || what == "/preview/status" ||
+                       what == "/result"); // slice_v1: results detail and warnings
     }
-    if (sub.compare(0, 10, "/api/jobs/") == 0) return get && is_index(sub.substr(10));
+    if (sub.compare(0, 10, "/api/jobs/") == 0) {
+        const std::string rest  = sub.substr(10);
+        const size_t      slash = rest.find('/');
+        if (slash == std::string::npos) return get && is_index(rest);
+        // slice_v1: cancel a running slice job
+        return post && is_index(rest.substr(0, slash)) && rest.substr(slash) == "/cancel";
+    }
     // /api/printers/<id>/control - <id> is a Bambu dev_id, the literal "host" / "connect" or a LAN
     // Snapmaker's sm:<id> (hence the colon and the percent escape the page makes of it), so this
     // segment is a name, not an index; keep it to what a printer id can hold and nothing else. The
@@ -6670,6 +6698,11 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/settings/process/save")         return post;
     if (sub == "/api/archive")                       return get;
     return false;
+}
+
+bool Testing::instance_api_allowed(const std::string& method, const std::string& sub)
+{
+    return RemoteHub::instance_api_allowed(method, sub);
 }
 
 void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string& rest)

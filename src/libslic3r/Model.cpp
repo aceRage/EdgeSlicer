@@ -4397,6 +4397,38 @@ bool model_has_advanced_features(const Model &model)
     return false;
 }
 
+std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const ModelVolume &old_volume,
+                                                bool file_matches_source, bool file_named_like_volume)
+{
+    // The volume at the indices the old volume remembers, when it still comes from the same file.
+    int source_object = -1, source_volume = -1;
+    if (file_matches_source) {
+        const int o = old_volume.source.object_idx, v = old_volume.source.volume_idx;
+        if (o >= 0 && o < int(new_model.objects.size()) && v >= 0 && v < int(new_model.objects[o]->volumes.size()) &&
+            new_model.objects[o]->volumes[v]->source.input_file == old_volume.source.input_file) {
+            source_object = o;
+            source_volume = v;
+        }
+    }
+    // Trust the remembered indices only while they still point at a volume of that name.
+    if (source_object >= 0 && (old_volume.name.empty() || new_model.objects[source_object]->volumes[source_volume]->name == old_volume.name))
+        return {source_object, source_volume};
+
+    if ((file_matches_source || file_named_like_volume) && !old_volume.name.empty()) {
+        for (int o = 0; o < int(new_model.objects.size()); ++o) {
+            const ModelObject *obj = new_model.objects[o];
+            for (int v = 0; v < int(obj->volumes.size()); ++v)
+                if (obj->volumes[v]->name == old_volume.name)
+                    return {o, v};
+            // A STEP model loaded as one volume: the object carries the name.
+            if (obj->name == old_volume.name)
+                return {o, -1};
+        }
+    }
+    // Nothing of that name: the volume was renamed, so the remembered indices are all there is.
+    return {source_object, source_volume};
+}
+
 #ifndef NDEBUG
 // Verify whether the IDs of Model / ModelObject / ModelVolume / ModelInstance / ModelMaterial are valid and unique.
 void check_model_ids_validity(const Model &model)
