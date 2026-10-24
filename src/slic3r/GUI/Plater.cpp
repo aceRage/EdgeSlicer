@@ -4149,13 +4149,13 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             p_mainframe->load_printer_url(url, apikey);
             if (p_mainframe->m_printer_view) {
                 p_mainframe->m_printer_view->set_devices(ph_model_key, ph_devices, ph_pick);
+                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
                 // The Storage tab shows the files of the printer the page is on (Orca #16156 part A).
                 if (ph_picked && !ph_picked->address.empty())
-                    p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id);
+                    p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id, preset_model);
                 else
-                    p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host");
+                    p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host", preset_model);
                 // The CANVAS card (a Centauri Carbon 1 on Elegoo Link) is for the same printer.
-                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
                 p_mainframe->m_printer_view->set_canvas_device((ph_picked && !ph_picked->address.empty()) ?
                                                                    *ph_picked :
                                                                    PrintHostDevices::from_config(cfg),
