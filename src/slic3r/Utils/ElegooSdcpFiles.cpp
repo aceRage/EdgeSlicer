@@ -430,14 +430,23 @@ public:
             out.error = "this printer has no address";
             return out;
         }
-        // A fresh Cmd 0: its Ack comes back first, the status object as its own frame after it.
-        const long long                  asked = sf_steady_ms();
-        const SdcpMonitor::CommandResult c     = SdcpMonitor::command(m_host, Sdcp::CMD_STATUS, json::object(), 8000);
-        if (!c.sent) {
-            out.error = c.error;
+        // The shared connection (opened on demand; it asks Cmd 1 and Cmd 0 itself when it opens).
+        Sdcp::Snapshot s = SdcpMonitor::demand(m_host);
+        for (const long long until = sf_steady_ms() + 8000; !s.connected && !s.other_window && sf_steady_ms() < until;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            s = SdcpMonitor::touch(m_host);
+        }
+        if (!s.connected) {
+            out.error = s.other_window ? "another EdgeSlicer window is connected to this printer" :
+                                         (s.error.empty() ? std::string("the printer did not connect in time") : s.error);
             return out;
         }
-        Sdcp::Snapshot s = SdcpMonitor::touch(m_host);
+        // Then a fresh Cmd 0. Some firmware answers it with an Ack and the status as its own frame,
+        // some with the status alone, so the command's own answer is not waited for long: the
+        // status frame that arrives after the ask is what counts.
+        const long long asked = sf_steady_ms();
+        SdcpMonitor::command_if_connected(m_host, Sdcp::CMD_STATUS, json::object(), 2500);
+        s = SdcpMonitor::touch(m_host);
         for (const long long until = sf_steady_ms() + 2500; s.status_at_ms < asked && sf_steady_ms() < until && s.connected;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             s = SdcpMonitor::touch(m_host);
@@ -446,6 +455,8 @@ public:
             out.error = "the printer did not report its status";
             return out;
         }
+        if (s.status_at_ms < asked)
+            BOOST_LOG_TRIVIAL(info) << "[Storage][CC1] no fresh status after Cmd 0; using the connection's last one";
         out.reached  = true;
         out.state    = Sdcp::hub_state(s.status);
         out.filename = s.status.filename;
