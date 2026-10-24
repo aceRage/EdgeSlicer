@@ -983,6 +983,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/ElegooLink.hpp
     Utils/ElegooSdcp.cpp
     Utils/ElegooSdcp.hpp
+    Utils/ElegooSdcpFiles.cpp
+    Utils/ElegooSdcpFiles.hpp
     Utils/ElegooSdcpMonitor.cpp
     Utils/ElegooSdcpMonitor.hpp
     Utils/EmbossStyleManager.cpp

@@ -126,6 +126,7 @@ add_executable(${_TEST_NAME}_tests
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
     printer_storage_tests.cpp
+    elegoo_sdcp_files_tests.cpp
     u1_local_first_tests.cpp
     u1_moonraker_probe_tests.cpp
     u1_ws_route_tests.cpp

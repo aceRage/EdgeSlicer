@@ -291,7 +291,7 @@ void PrinterWebView::load_picked_device()
     wxString apikey = from_u8(d.apikey);
     load_url(wurl, apikey);
     // The Storage tab and the CANVAS card follow the picker.
-    set_storage_device(d, "ph:" + d.id);
+    set_storage_device(d, "ph:" + d.id, m_canvas_model);
     set_canvas_device(d, m_canvas_model);
 }
 
@@ -307,10 +307,22 @@ void PrinterWebView::set_canvas_device(const PrintHostDevices::Device& device, c
         Layout();
 }
 
-void PrinterWebView::set_storage_device(const PrintHostDevices::Device& device, const std::string& key)
+void PrinterWebView::set_storage_device(const PrintHostDevices::Device& device, const std::string& key, const std::string& preset_model)
 {
+    const std::string model = device.printer_model.empty() ? preset_model : device.printer_model;
+    // An Elegoo CC1 starts a stored file with the Elegoo send dialog's remembered choices
+    // (ElegooPrintHostSendDialog's "recent" keys; the plate side falls back to the project's bed).
+    std::map<std::string, std::string> start_options;
+    if (device.host_type == "elegoolink") {
+        if (const AppConfig* cfg = wxGetApp().app_config) {
+            start_options["timeLapse"]         = cfg->get("recent", "elegoolink_timelapse");
+            start_options["heatedBedLeveling"] = cfg->get("recent", "elegoolink_heated_bed_leveling");
+            std::string bed                    = cfg->get("recent", "elegoolink_bed_type");
+            start_options["bedType"]           = bed.empty() ? cfg->get("curr_bed_type") : bed;
+        }
+    }
     const PrinterStorage::Target t = PrinterStorage::target_for_host(device.host_type, device.address, device.apikey,
-                                                                     device.display_name(), key);
+                                                                     device.display_name(), key, model, start_options);
     set_storage_source(t.kind == PrinterStorage::Target::Kind::None ? PrinterStoragePanel::Source() :
                                                                      PrinterStoragePanel::fixed_source(t));
 }
