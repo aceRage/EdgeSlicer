@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Printer Emulator</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6676; --line: #dde1e8;
+  --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e;
+  --chip: #eef1f5; --code: #f3f4f6; --row-hover: #f0f4fa;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1218; --panel: #171b23; --text: #e6e9ef; --muted: #9aa3b2; --line: #2a303b;
+    --accent: #4c8dff; --accent-text: #0b0e13; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+    --chip: #222834; --code: #11151c; --row-hover: #1d2430;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1218; --panel: #171b23; --text: #e6e9ef; --muted: #9aa3b2; --line: #2a303b;
+  --accent: #4c8dff; --accent-text: #0b0e13; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+  --chip: #222834; --code: #11151c; --row-hover: #1d2430;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+header .meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+header .spacer { flex: 1; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 16px; }
+@media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+.card h2 { margin: 0; font-size: 15px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.muted { color: var(--muted); }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--chip); }
+.pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); } .pill.warn { color: var(--warn); }
+.lan { color: var(--bad); font-weight: 600; }
+button, select, input, textarea { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.danger { color: var(--bad); }
+input[type=color] { padding: 0; width: 34px; height: 28px; }
+input[type=checkbox] { width: 16px; height: 16px; }
+.hint { background: var(--code); border-radius: 8px; padding: 8px 10px; margin: 10px 0; font-size: 13px; }
+.hint b { font-weight: 600; }
+code, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+section h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+table { border-collapse: collapse; width: 100%; }
+td, th { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.slots input[type=text] { width: 100%; min-width: 60px; }
+.vars td { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.faults label { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
+.faults .help { color: var(--muted); font-size: 12px; margin-left: 24px; }
+.err { color: var(--bad); font-size: 13px; overflow-wrap: anywhere; }
+#log { max-height: calc(100vh - 170px); overflow: auto; }
+.logrow { border-bottom: 1px solid var(--line); padding: 4px 2px; cursor: pointer; font-family: ui-monospace, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.logrow:hover { background: var(--row-hover); }
+.kind { display: inline-block; min-width: 92px; padding: 0 6px; border-radius: 4px; background: var(--chip); }
+.kind.save_variable { color: var(--accent); } .kind.upload, .kind.start { color: var(--ok); } .kind.fault { color: var(--bad); }
+.logrow.refused .kind, .logrow.status4 .st, .logrow.status5 .st { color: var(--bad); }
+.detail { white-space: pre-wrap; background: var(--code); border-radius: 6px; padding: 8px; margin: 4px 0; cursor: auto; }
+.toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>EdgeSlicer printer emulator</h1>
+  <span class="meta" id="meta"></span>
+  <span class="spacer"></span>
+  <select id="preset" aria-label="Preset"></select>
+  <button id="add">Add printer</button>
+  <a href="/emu/bundle"><button type="button" id="bundle">Save bundle</button></a>
+</header>
+<main>
+  <div id="printers"></div>
+  <div>
+    <div class="card">
+      <div class="row">
+        <h2>Command log</h2><span class="spacer" style="flex:1"></span>
+        <select id="fprinter" aria-label="Printer filter"><option value="">all printers</option></select>
+        <input id="fkind" placeholder="kind filter" size="10" aria-label="Kind filter">
+        <label class="row"><input type="checkbox" id="hidepoll" checked> hide polls</label>
+        <button id="pause">Pause</button>
+        <button id="clear">Clear view</button>
+      </div>
+      <p class="muted" style="margin:6px 0 0;font-size:12px">Click a line for the decoded payload and the printer's state after it. Saved as JSONL under the emulator's logs folder.</p>
+      <div id="log"></div>
+    </div>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (v === true) e.setAttribute(k, "");
+    else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return e;
+};
+const STATES = ["standby", "printing", "paused", "complete", "cancelled", "error"];
+const TYPES = ["PLA", "PETG", "ABS", "ASA", "TPU", "PA", "PC", "PET", "PLA-CF", "PETG-CF", "PA-CF", "HIPS", "PVA"];
+const POLL_KINDS = new Set(["query", "info", "files", "status_query", "attributes", "upload_chunk"]);
+let printers = {}, paused = false, logEntries = [], lastSeq = 0;
+
+function toast(msg, bad) {
+  const t = $("#toast"); t.textContent = msg; t.style.display = "block"; t.style.color = bad ? "var(--bad)" : "";
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = "none", 3500);
+}
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(j.error || ("HTTP " + r.status), true); throw new Error(j.error); }
+  return j;
+}
+
+// ---- printer cards --------------------------------------------------------------------------
+function renderCard(p) {
+  printers[p.id] = p;
+  const c = p.config, isQidi = p.personality === "qidi";
+  const card = el("div", { class: "card", id: "card-" + p.id });
+  const status = el("span", { class: "pill " + (p.error ? "bad" : p.running ? "ok" : "warn"), "data-k": "status" },
+    p.error ? "error" : p.running ? "running" : "stopped");
+  card.append(el("div", { class: "row" }, el("h2", {}, c.name || p.id), status,
+    el("span", { class: "muted mono" }, p.id + " · " + p.label),
+    c.lan ? el("span", { class: "lan" }, "LAN bind: reachable from your network") : null));
+  card.append(el("div", { class: "err", "data-k": "error" }, p.error || ""));
+  card.append(el("div", { class: "hint" },
+    el("div", {}, el("b", {}, "Add in EdgeSlicer: "), "printer preset ", el("code", {}, p.hint.printer_preset),
+      ", host type ", el("code", {}, p.hint.host_type), ", hostname ", el("code", {}, p.hint.address), "."),
+    p.hint.camera ? el("div", {}, el("b", {}, "Camera: "), el("a", { href: p.hint.camera, target: "_blank" }, p.hint.camera),
+      " (the Stream tab finds it through Cmd 386)") : null,
+    p.hint.mac_alias ? el("div", { class: "muted" }, "Mac: ", el("code", {}, p.hint.mac_alias)) : null,
+    el("div", { class: "muted", "data-k": "addr" }, "Listening on " + (p.addresses.join(", ") || "nothing (stopped)"))));
+
+  // state + lifecycle
+  const stateSel = el("select", { "data-k": "statesel", onchange: async e => update(await api(`/emu/printers/${p.id}/state`, { state: e.target.value })) },
+    STATES.map(s => el("option", { value: s, selected: s === p.state.print_state }, s)));
+  card.append(el("div", { class: "row" }, el("span", {}, "Print state"), stateSel,
+    el("span", { class: "muted", "data-k": "file" }, p.state.current_file ? "file " + p.state.current_file : ""),
+    el("span", { style: "flex:1" }),
+    el("button", { onclick: async () => { const r = await api(`/emu/printers/${p.id}/reset`, {}); renderCard(r.printer); toast("state reset: files, prints and saved variables"); } }, "Reset state"),
+    el("button", { onclick: async () => update(await api(`/emu/printers/${p.id}/${p.running ? "stop" : "start"}`, {})) }, p.running ? "Stop" : "Start"),
+    el("button", { onclick: async () => update(await api(`/emu/printers/${p.id}/restart`, {})) }, "Restart"),
+    el("button", { class: "danger", onclick: async () => { if (confirm("Remove " + p.id + "?")) { await api(`/emu/printers/${p.id}/remove`, {}); $("#card-" + p.id).remove(); delete printers[p.id]; } } }, "Remove")));
+
+  // address
+  const bind = el("input", { type: "text", value: c.bind, size: 13, "aria-label": "Bind address" });
+  const port = el("input", { type: "number", value: c.port, style: "width:90px", "aria-label": "Port" });
+  const name = el("input", { type: "text", value: c.name || "", size: 26, "aria-label": "Name" });
+  card.append(el("section", {}, el("h3", {}, "Identity and address"),
+    el("div", { class: "row" }, name, bind, el("span", {}, ":"), port,
+      el("button", { onclick: async () => renderCard(await api(`/emu/printers/${p.id}/set`, { name: name.value, bind: bind.value, port: +port.value })) }, "Apply"))));
+
+  if (isQidi) card.append(qidiSection(p));
+  if (p.personality === "elegoo_cc1") card.append(canvasSection(p));
+  if (p.personality === "u1") card.append(u1Section(p));
+  card.append(faultSection(p));
+  const old = $("#card-" + p.id);
+  if (old) old.replaceWith(card); else $("#printers").append(card);
+  refreshFilter();
+}
+
+function qidiSection(p) {
+  const c = p.config, q = c.qidi || {};
+  const sec = el("section", {});
+  const boxes = el("select", { "aria-label": "Boxes" }, [0, 1, 2, 3, 4].map(n => el("option", { value: n, selected: n === (q.boxes ?? 1) }, n + (n === 1 ? " Box" : " Boxes"))));
+  const report = el("select", { "aria-label": "Box report" }, [["mcc+vars", "multi_color_controller + save_variables"], ["vars_only", "save_variables + filament list only"], ["mcc_only", "multi_color_controller only"], ["mcc_flat+vars", "flat multi_color_controller (box0_...) + save_variables"]]
+    .map(([v, t]) => el("option", { value: v, selected: v === ((q.mcc_shape === "flat" && (q.box_report || "mcc+vars") === "mcc+vars") ? "mcc_flat+vars" : (q.box_report || "mcc+vars")) }, t)));
+  const cooler = el("input", { type: "checkbox", checked: !!q.polar_cooler });
+  const stale = el("input", { type: "text", size: 22, value: Object.entries(q.stale_value_t || {}).map(([t, s]) => t + ":" + s).join(", "), placeholder: "0:slot3, 1:slot2" });
+  sec.append(el("h3", {}, "QIDI Box"),
+    el("div", { class: "row" }, boxes, report, el("label", { class: "row" }, cooler, "polar cooler")),
+    el("div", { class: "row", style: "margin-top:6px" }, el("span", {}, "Stale value_t after a reset"), stale));
+
+  // slots
+  const nb = Math.max(0, Math.min(4, +(q.boxes ?? 1)));
+  const slots = (c.slots || []).slice(0, nb * 4);
+  while (slots.length < nb * 4) slots.push({ loaded: false });
+  const rows = slots.map((s, i) => {
+    const r = {
+      loaded: el("input", { type: "checkbox", checked: !!s.loaded, "aria-label": "loaded" }),
+      type: el("input", { type: "text", list: "types", value: s.type || "", "aria-label": "type" }),
+      sub: el("input", { type: "text", value: s.sub || "", "aria-label": "sub-type" }),
+      vendor: el("input", { type: "text", value: s.vendor || "", "aria-label": "vendor" }),
+      color: el("input", { type: "color", value: /^#[0-9a-f]{6}$/i.test(s.color || "") ? s.color : "#ffffff", "aria-label": "colour" }),
+    };
+    r.tr = el("tr", {}, el("td", { class: "mono" }, `Box ${Math.floor(i / 4) + 1} · slot ${i % 4 + 1} (slot${i})`), el("td", {}, r.loaded), el("td", {}, r.type), el("td", {}, r.sub), el("td", {}, r.vendor), el("td", {}, r.color));
+    return r;
+  });
+  if (nb) sec.append(el("table", { class: "slots" }, el("tr", {}, ["Slot", "Loaded", "Type", "Sub-type", "Vendor", "Colour"].map(h => el("th", {}, h))), rows.map(r => r.tr)));
+  else sec.append(el("p", { class: "muted" }, "No Box: the extruder's own spool feeds every tool."));
+
+  const apply = async () => {
+    const staleObj = {};
+    for (const part of stale.value.split(",")) { const [t, s] = part.split(":").map(x => (x || "").trim()); if (t !== "" && s) staleObj[t] = s; }
+    const newSlots = rows.map(r => r.loaded.checked ? { type: r.type.value.trim(), sub: r.sub.value.trim(), vendor: r.vendor.value.trim(), color: r.color.value.toUpperCase(), loaded: true } : { loaded: false });
+    const keep = (c.slots || []).slice(nb * 4);
+    renderCard(await api(`/emu/printers/${p.id}/set`, { qidi: { boxes: +boxes.value, box_report: report.value === "mcc_flat+vars" ? "mcc+vars" : report.value, mcc_shape: report.value === "mcc_flat+vars" ? "flat" : "array", polar_cooler: cooler.checked, stale_value_t: staleObj }, slots: newSlots.concat(keep) }));
+    toast("Box applied. The slicer sees it on its next probe.");
+  };
+  sec.append(el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "primary", onclick: apply }, "Apply Box and slots"),
+    el("a", { href: `/emu/filas?printer=${encodeURIComponent(p.id)}`, target: "_blank" }, "officiall_filas_list.cfg (synthetic)")));
+
+  sec.append(el("h3", {}, "Saved variables now (what the read-back returns)"));
+  sec.append(el("div", { "data-k": "vars" }, varsTable(p.state)));
+  return sec;
+}
+
+// Elegoo CC1: the CANVAS trays (type, colour, brand, untagged, loaded, active), attach / detach.
+function canvasSection(p) {
+  const c = p.config, cv = c.canvas || {};
+  const sec = el("section", {});
+  const attached = el("input", { type: "checkbox", checked: cv.attached !== false });
+  sec.append(el("h3", {}, "CANVAS"),
+    el("div", { class: "row" }, el("label", { class: "row" }, attached, "CANVAS attached (untick: \"CANVAS detached\", Cmd 324 answers Ack 1)")));
+  const slots = (c.slots || []).slice(0, 4);
+  while (slots.length < 4) slots.push({ loaded: false });
+  const rows = slots.map((s, i) => {
+    const r = {
+      loaded: el("input", { type: "checkbox", checked: !!s.loaded, "aria-label": "loaded" }),
+      active: el("input", { type: "radio", name: "active-" + p.id, checked: cv.active_tray === i, "aria-label": "active" }),
+      type: el("input", { type: "text", list: "types", value: s.type || "", "aria-label": "type" }),
+      name: el("input", { type: "text", value: s.name || "", placeholder: "ELEGOO PLA", "aria-label": "filament name" }),
+      brand: el("input", { type: "text", value: s.brand || "", placeholder: "ELEGOO", "aria-label": "brand" }),
+      untagged: el("input", { type: "checkbox", checked: !!s.untagged, "aria-label": "untagged" }),
+      color: el("input", { type: "color", value: /^#[0-9a-f]{6}$/i.test(s.color || "") ? s.color : "#ffffff", "aria-label": "colour" }),
+    };
+    r.tr = el("tr", {}, el("td", { class: "mono" }, "tray " + i), el("td", {}, r.loaded), el("td", {}, r.active), el("td", {}, r.type),
+      el("td", {}, r.name), el("td", {}, r.brand), el("td", {}, r.untagged), el("td", {}, r.color));
+    return r;
+  });
+  sec.append(el("table", { class: "slots" }, el("tr", {}, ["Tray", "Loaded", "Active", "Type", "Name", "Brand", "Untagged (— — — —)", "Colour"].map(h => el("th", {}, h))), rows.map(r => r.tr)));
+  const apply = async () => {
+    const newSlots = rows.map(r => r.loaded.checked ? { type: r.type.value.trim(), name: r.name.value.trim(), brand: r.brand.value.trim(),
+      untagged: r.untagged.checked, color: r.color.value.toUpperCase(), loaded: true } : { loaded: false });
+    const active = rows.findIndex(r => r.active.checked);
+    renderCard(await api(`/emu/printers/${p.id}/set`, { canvas: { attached: attached.checked, active_tray: active }, slots: newSlots }));
+    toast("CANVAS applied. EdgeSlicer reads it on its next Cmd 324.");
+  };
+  sec.append(el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "primary", onclick: apply }, "Apply CANVAS and trays")));
+  const ls = p.state.last_start;
+  sec.append(el("h3", {}, "Last start (Cmd 128)"), el("div", { class: "mono", "data-k": "laststart" }, ls ? JSON.stringify(ls) : "none yet"));
+  return sec;
+}
+
+// Snapmaker U1: the four toolheads and what the mapping macros set.
+function u1Section(p) {
+  const c = p.config;
+  const sec = el("section", {});
+  const slots = (c.slots || []).slice(0, 4);
+  while (slots.length < 4) slots.push({ loaded: false });
+  const rows = slots.map((s, i) => {
+    const r = {
+      loaded: el("input", { type: "checkbox", checked: !!s.loaded, "aria-label": "loaded" }),
+      type: el("input", { type: "text", list: "types", value: s.type || "", "aria-label": "type" }),
+      sub: el("input", { type: "text", value: s.sub || "", "aria-label": "sub-type" }),
+      vendor: el("input", { type: "text", value: s.vendor || "", "aria-label": "vendor" }),
+      color: el("input", { type: "color", value: /^#[0-9a-f]{6}$/i.test(s.color || "") ? s.color : "#ffffff", "aria-label": "colour" }),
+    };
+    r.tr = el("tr", {}, el("td", { class: "mono" }, "toolhead " + (i + 1) + " (T" + i + ")"), el("td", {}, r.loaded), el("td", {}, r.type),
+      el("td", {}, r.sub), el("td", {}, r.vendor), el("td", {}, r.color));
+    return r;
+  });
+  sec.append(el("h3", {}, "Toolheads (print_task_config)"),
+    el("table", { class: "slots" }, el("tr", {}, ["Toolhead", "Loaded", "Type", "Sub-type", "Vendor", "Colour"].map(h => el("th", {}, h))), rows.map(r => r.tr)));
+  const apply = async () => {
+    const newSlots = rows.map(r => ({ type: r.type.value.trim(), sub: r.sub.value.trim(), vendor: r.vendor.value.trim(), color: r.color.value.toUpperCase(), loaded: r.loaded.checked }));
+    renderCard(await api(`/emu/printers/${p.id}/set`, { slots: newSlots }));
+    toast("Toolheads applied.");
+  };
+  sec.append(el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "primary", onclick: apply }, "Apply toolheads")));
+  sec.append(el("h3", {}, "Mapping now (what SET_PRINT_* set)"), el("div", { class: "mono", "data-k": "u1map" }, u1Map(p.state)));
+  return sec;
+}
+function u1Map(st) {
+  return "extruder_map " + JSON.stringify(st.extruder_map || []) + "  used " + JSON.stringify(st.extruders_used || []) +
+    "  preferences " + JSON.stringify(st.preferences || {});
+}
+
+function varsTable(st) {
+  const v = st.save_variables || {};
+  const keys = Object.keys(v);
+  if (!keys.length) return el("p", { class: "muted" }, "none");
+  return el("table", { class: "vars" }, keys.map(k => el("tr", {}, el("td", {}, k), el("td", {}, JSON.stringify(v[k])))),
+    el("tr", {}, el("td", {}, "bed mesh"), el("td", {}, st.bedmesh_before_print == null ? "not sent" : st.bedmesh_before_print ? "G31: fresh mesh" : "G32: saved mesh")),
+    el("tr", {}, el("td", {}, "timelapse"), el("td", {}, JSON.stringify(st.timelapse || {}))));
+}
+
+function faultSection(p) {
+  const f = p.config.faults || {};
+  const sec = el("section", { class: "faults" }, el("h3", {}, "Faults"));
+  const set = async patch => renderCard(await api(`/emu/printers/${p.id}/set`, { faults: patch }));
+  for (const d of p.faults) {
+    if (d.type === "bool") {
+      sec.append(el("label", {}, el("input", { type: "checkbox", checked: !!f[d.key], onchange: e => set({ [d.key]: e.target.checked }) }), d.label));
+    } else if (d.type === "number") {
+      sec.append(el("label", {}, d.label, el("input", { type: "number", min: 0, step: 1, value: f[d.key] || 0, style: "width:80px", onchange: e => set({ [d.key]: +e.target.value }) })));
+    } else if (d.type === "map") {
+      const ta = el("textarea", { rows: 2, cols: 36, placeholder: "/server/files/upload=500" }, Object.entries(f[d.key] || {}).map(([k, v]) => k + "=" + v).join("\n"));
+      sec.append(el("label", {}, d.label), el("div", { class: "row" }, ta, el("button", {
+        onclick: () => { const m = {}; for (const ln of ta.value.split("\n")) { const [k, v] = ln.split("="); if (k && v) m[k.trim()] = +v.trim(); } set({ [d.key]: m }); }
+      }, "Apply")));
+    }
+    if (d.help) sec.append(el("div", { class: "help" }, d.help));
+  }
+  return sec;
+}
+
+function update(p) { renderCard(p); }
+
+async function poll() {
+  try {
+    const r = await api("/emu/printers");
+    $("#meta").textContent = "home " + r.home;
+    for (const p of r.printers) {
+      const card = $("#card-" + p.id);
+      if (!card) { renderCard(p); continue; }
+      printers[p.id] = p;
+      const sel = $('[data-k="statesel"]', card);
+      if (sel && document.activeElement !== sel) sel.value = p.state.print_state;
+      const vars = $('[data-k="vars"]', card);
+      if (vars) vars.replaceChildren(varsTable(p.state));
+      const ls = $('[data-k="laststart"]', card);
+      if (ls) ls.textContent = p.state.last_start ? JSON.stringify(p.state.last_start) : "none yet";
+      const um = $('[data-k="u1map"]', card);
+      if (um) um.textContent = u1Map(p.state);
+      $('[data-k="file"]', card).textContent = p.state.current_file ? "file " + p.state.current_file : "";
+      const st = $('[data-k="status"]', card);
+      st.className = "pill " + (p.error ? "bad" : p.running ? "ok" : "warn");
+      st.textContent = p.error ? "error" : p.running ? "running" : "stopped";
+      $('[data-k="error"]', card).textContent = p.error || "";
+      $('[data-k="addr"]', card).textContent = "Listening on " + (p.addresses.join(", ") || "nothing (stopped)");
+    }
+    for (const id of Object.keys(printers)) if (!r.printers.find(p => p.id === id)) { $("#card-" + id)?.remove(); delete printers[id]; }
+  } catch (e) { /* the emulator stopped; keep trying */ }
+}
+
+function refreshFilter() {
+  const sel = $("#fprinter"), cur = sel.value;
+  sel.replaceChildren(el("option", { value: "" }, "all printers"), ...Object.keys(printers).map(id => el("option", { value: id, selected: id === cur }, id)));
+}
+
+// ---- log ----------------------------------------------------------------------------------
+function summary(e) {
+  const p = e.payload || {};
+  const bits = [];
+  for (const k of ["var", "value", "cmd", "name", "file", "size", "sha256", "md5", "objects", "action", "state", "slot_map_form", "slot_map",
+                   "ack", "config", "map", "extruders", "end_unload_filament", "url", "open", "streams", "warnings", "fault", "error", "why"]) {
+    if (k in p) bits.push(k + "=" + (typeof p[k] === "string" ? (k === "sha256" ? p[k].slice(0, 12) + "…" : p[k]) : JSON.stringify(p[k])));
+  }
+  if (p.refused) bits.push("REFUSED");
+  if (p.stored === false) bits.push("NOT STORED");
+  return bits.join("  ");
+}
+function assertion(e) {
+  const p = e.payload || {};
+  const f = [];
+  for (const k of ["var", "value", "cmd", "name", "file"]) if (k in p) f.push(`${k}=${JSON.stringify(p[k])}`);
+  return `emu.expect("${e.printer}", kind="${e.kind}"${f.length ? ", " + f.join(", ") : ""}, since=mark)`;
+}
+function visible(e) {
+  const fp = $("#fprinter").value, fk = $("#fkind").value.trim();
+  if (fp && e.printer !== fp) return false;
+  if (fk && !e.kind.includes(fk)) return false;
+  if ($("#hidepoll").checked && POLL_KINDS.has(e.kind)) return false;
+  return true;
+}
+function logRow(e) {
+  const p = e.payload || {};
+  const row = el("div", { class: "logrow" + (p.refused ? " refused" : "") + (e.status ? " status" + String(e.status)[0] : "") },
+    el("span", { class: "muted" }, String(e.seq).padStart(4, " "), " ", (e.ts || "").slice(11, 23), " "),
+    el("span", {}, e.printer, " "), el("span", { class: "kind " + e.kind }, e.kind), " ",
+    el("span", {}, e.method || "", " ", e.path || "", " "), el("span", { class: "st" }, e.status ?? ""), " ",
+    el("span", {}, summary(e)));
+  row.addEventListener("click", ev => {
+    if (ev.target.closest(".detail")) return;
+    const d = row.querySelector(".detail");
+    if (d) { d.remove(); return; }
+    const copy = el("button", { onclick: () => { navigator.clipboard?.writeText(assertion(e)); toast("copied: " + assertion(e)); } }, "copy as test assertion");
+    row.append(el("div", { class: "detail" }, copy, "\n", JSON.stringify({ query: e.query, port: e.port, ms: e.ms, payload: e.payload, state_after: e.state_after }, null, 1)));
+  });
+  return row;
+}
+function addEntry(e) {
+  if (e.seq <= lastSeq) return;
+  lastSeq = e.seq;
+  logEntries.push(e);
+  if (logEntries.length > 3000) logEntries.shift();
+  if (!paused && visible(e)) {
+    const box = $("#log");
+    const atTop = box.scrollTop < 20;
+    box.prepend(logRow(e));
+    while (box.childElementCount > 1500) box.lastChild.remove();
+    if (!atTop) box.scrollTop += 0;
+  }
+}
+function redrawLog() {
+  const box = $("#log");
+  box.replaceChildren(...logEntries.filter(visible).slice(-1500).reverse().map(logRow));
+}
+function connect() {
+  const es = new EventSource("/emu/events?since=" + lastSeq);
+  es.onmessage = m => { try { addEntry(JSON.parse(m.data)); } catch (_) {} };
+  es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+}
+
+// ---- header -------------------------------------------------------------------------------
+async function init() {
+  const pr = await api("/emu/presets");
+  $("#preset").replaceChildren(...Object.entries(pr.presets).map(([n, e]) => el("option", { value: n }, e.name || n)));
+  $("#add").onclick = async () => { const p = await api("/emu/printers/add", { preset: $("#preset").value }); renderCard(p); toast("added " + p.id + " on " + (p.addresses.join(", ") || p.error)); };
+  $("#pause").onclick = () => { paused = !paused; $("#pause").textContent = paused ? "Resume" : "Pause"; if (!paused) redrawLog(); };
+  $("#clear").onclick = () => { logEntries = []; $("#log").replaceChildren(); };
+  for (const id of ["#fprinter", "#fkind", "#hidepoll"]) $(id).addEventListener("input", redrawLog);
+  document.body.append(el("datalist", { id: "types" }, TYPES.map(t => el("option", { value: t }))));
+  const r = await api("/emu/printers");
+  $("#meta").textContent = "home " + r.home;
+  r.printers.forEach(renderCard);
+  connect();
+  setInterval(poll, 2000);
+}
+init();
+</script>
+</body>
+</html>

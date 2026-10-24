@@ -743,6 +743,8 @@ public:
     std::vector<int> get_global_filament_map() const;
 
     wxString get_project_filename(const wxString& extension = wxEmptyString) const;
+    // Orca #11419: no objects on any plate.
+    bool is_empty_project() const;
     wxString get_export_gcode_filename(const wxString& extension = wxEmptyString, bool only_filename = false, bool export_all = false) const;
     void set_project_filename(const wxString& filename);
     void update_print_error_info(int code, std::string msg, std::string extra);

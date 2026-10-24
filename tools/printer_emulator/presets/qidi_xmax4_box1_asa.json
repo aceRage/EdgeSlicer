@@ -1,0 +1,47 @@
+{
+  "id": "qidi-box1-asa",
+  "personality": "qidi",
+  "name": "EMU QIDI X-Max 4 (Box 1 only, 1C ASA, firmware layout)",
+  "edgeslicer_preset": "Qidi X-Max 4 0.4 nozzle",
+  "bind": "127.0.0.14",
+  "port": 7125,
+  "lan": false,
+  "state": "standby",
+  "qidi": {
+    "box_report": "mcc+vars",
+    "mcc_shape": "flat",
+    "boxes": 1,
+    "polar_cooler": true,
+    "stale_value_t": {
+      "0": "slot1",
+      "1": "slot7"
+    }
+  },
+  "slots": [
+    {
+      "type": "PLA",
+      "sub": "PLA",
+      "vendor": "Generic",
+      "color": "#E03030",
+      "loaded": true
+    },
+    {
+      "loaded": false
+    },
+    {
+      "type": "ASA",
+      "sub": "ASA",
+      "vendor": "Generic",
+      "color": "#202020",
+      "loaded": true
+    },
+    {
+      "type": "PLA",
+      "sub": "PLA Matte",
+      "vendor": "Generic",
+      "color": "#F5F5F5",
+      "loaded": true
+    }
+  ],
+  "faults": {}
+}

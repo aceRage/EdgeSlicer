@@ -6,7 +6,9 @@
 #include "Model.hpp"
 #include "CurvedCut.hpp"
 #include "DrawCut.hpp"
+#include "TriangleSelector.hpp"
 
+#include <optional>
 #include <vector>
 
 namespace Slic3r {
@@ -22,7 +24,11 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
 // True when this object carries at least one unprocessed flexi joint connector.
 bool has_flexi_joint(const ModelObject* mo);
 
-enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo };
+enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo,
+    // OrcaSlicer #13472: carry the support / seam / colour / fuzzy-skin painting of every model part
+    // onto the halves (spatial remap, ModelVolume::restore_painting()). The gizmo always sets it
+    // (owner, 2026-10-24: no preference); the contour / groove preview cuts leave it off.
+    KeepPaint };
 using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
 ENABLE_ENUM_BITMASK_OPERATORS(ModelObjectCutAttribute);
 
@@ -41,7 +47,11 @@ class Cut {
 
     void post_process(ModelObject* object, ModelObjectPtrs& objects, bool keep, bool place_on_cut, bool flip);
     void post_process(ModelObject* upper_object, ModelObject* lower_object, ModelObjectPtrs& objects);
-    void finalize(const ModelObjectPtrs& objects);
+    using SavedPaintings = std::vector<std::optional<TriangleSelector::SavedPainting>>;
+    // The painting of every model part of `object`, its mesh taken into the frame the halves' meshes
+    // are built in (instance without offset, times the volume matrix). Empty without KeepPaint.
+    SavedPaintings save_paintings(const ModelObject* object) const;
+    void finalize(const ModelObjectPtrs& objects, const SavedPaintings& saved_paintings = {});
 
 public:
 
@@ -101,7 +111,9 @@ public:
     // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
     // perform_with_plane() dispatches here automatically when a flexi connector is present.
     const ModelObjectPtrs& perform_with_flexi_joints();
-    const ModelObjectPtrs& perform_by_contour(std::vector<Part> parts, int dowels_count);
+    // `src_object` is the object as it was before PartSelection split it: its painting is what the
+    // halves get back with KeepPaint (the split pieces carry none). May be null.
+    const ModelObjectPtrs& perform_by_contour(const ModelObject* src_object, std::vector<Part> parts, int dowels_count);
     const ModelObjectPtrs& perform_with_groove(const Groove& groove, const Transform3d& rotation_m, bool keep_as_parts = false);
 
 }; // namespace Cut

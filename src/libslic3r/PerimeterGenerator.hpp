@@ -162,6 +162,7 @@ public:
         const PrintObjectConfig*    object_config,
         const PrintConfig*          print_config,
         const bool                  spiral_mode,
+        const double                model_rotation_rad,
         // Output:
         // Loops with the external thin walls
         ExtrusionEntityCollection*  loops,
@@ -178,6 +179,7 @@ public:
             config(config), object_config(object_config), print_config(print_config),
             m_spiral_vase(spiral_mode),
             m_scaled_resolution(scaled<double>(print_config->resolution.value > EPSILON ? print_config->resolution.value : EPSILON)),
+            m_model_rotation_rad(model_rotation_rad),
             loops(loops), gap_fill(gap_fill), fill_surfaces(fill_surfaces), fill_no_overlap(fill_no_overlap),
             m_ext_mm3_per_mm(-1), m_mm3_per_mm(-1), m_mm3_per_mm_overhang(-1), m_ext_mm3_per_mm_smaller_width(-1),
             number_of_layers(layer_count)
@@ -208,6 +210,7 @@ private:
 private:
     bool        m_spiral_vase;
     double      m_scaled_resolution;
+    double      m_model_rotation_rad;
     double      m_ext_mm3_per_mm;
     double      m_mm3_per_mm;
     double      m_mm3_per_mm_overhang;

@@ -3,6 +3,7 @@
 #include "Config.hpp"
 #include "Exception.hpp"
 #include "Preset.hpp"
+#include "StartupProfile.hpp"
 #include "BambuFlowSupport.hpp"
 #include "PresetQuarantine.hpp"
 #include "PresetBundle.hpp"
@@ -1202,7 +1203,7 @@ static std::vector<std::string> s_Preset_print_options {
     "ooze_prevention", "standby_temperature_delta", "preheat_time","delta_temperature","preheat_steps", "interface_shells", "line_width", "initial_layer_line_width", "inner_wall_line_width",
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
     "skin_infill_line_width","skeleton_infill_line_width", "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces",
-    "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "bridge_expansion_extra", "internal_bridge_flow",
+    "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "bridge_line_width", "bridge_expansion_extra", "internal_bridge_flow",
     "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "resolution", "enable_prime_tower", "preload_all_filaments",
     "prime_tower_width", "prime_tower_brim_width", "prime_volume", "prime_tower_brim_chamfer", "prime_tower_brim_chamfer_max_width",
     "wipe_tower_no_sparse_layers", "compatible_printers", "compatible_printers_condition", "inherits",
@@ -1220,7 +1221,7 @@ static std::vector<std::string> s_Preset_print_options {
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "process_change_extrusion_role_gcode", "min_length_factor", "wall_maximum_resolution", "wall_maximum_deviation",
-     "small_perimeter_speed", "small_perimeter_threshold", "small_support_perimeter_speed", "small_support_perimeter_threshold","bridge_angle","internal_bridge_angle", "filter_out_gap_fill", "travel_acceleration","first_layer_travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
+     "small_perimeter_speed", "small_perimeter_threshold", "small_support_perimeter_speed", "small_support_perimeter_threshold","bridge_angle","internal_bridge_angle", "relative_bridge_angle", "filter_out_gap_fill", "travel_acceleration","first_layer_travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","first_layer_travel_jerk","default_junction_deviation",
      "top_solid_infill_flow_ratio","bottom_solid_infill_flow_ratio","only_one_wall_first_layer", "print_flow_ratio", "seam_gap",
      "role_based_wipe_speed", "wipe_speed", "accel_to_decel_enable", "accel_to_decel_factor", "wipe_on_loops", "wipe_inward", "wipe_inward_distance", "wipe_before_external_loop",
@@ -1544,6 +1545,12 @@ void PresetCollection::load_presets(
     }
 
     std::string errors_cummulative;
+    // ORCA_STARTUP_PROFILE: one summary line per folder (user presets; this loader is not used for
+    // system vendors). Accumulators cost nothing when profiling is off.
+    const bool profile = startup_profile_enabled();
+    const auto profile_start = std::chrono::steady_clock::now();
+    StartupAccumulator acc_info(profile), acc_parse(profile), acc_lookup(profile), acc_apply(profile), acc_store(profile);
+    size_t     prof_json_files = 0, prof_parses = 0, prof_rounds = 0, prof_deferred = 0, prof_info_files = 0;
     // Store the loaded presets into a new vector, otherwise the binary search for already existing presets would be broken.
     // (see the "Preset already present, not loading" message).
     std::deque<Preset> presets_loaded;
@@ -1559,6 +1566,7 @@ void PresetCollection::load_presets(
     bool final_round = false;
     for (;;) {
     deferred_files.clear();
+    ++prof_rounds;
     const size_t loaded_before_round = presets_loaded.size();
     //BBS: change to json format
     for (const boost::filesystem::path &entry_path : pending_files)
@@ -1568,6 +1576,7 @@ void PresetCollection::load_presets(
         if (Slic3r::is_json_file(file_name)) {
             // One tick per user preset file, so a splash animation keeps moving here too.
             notify_progress();
+            ++prof_json_files;
             // Remove the .ini suffix.
             std::string name = file_name.erase(file_name.size() - 5);
             try {
@@ -1576,17 +1585,23 @@ void PresetCollection::load_presets(
                 const size_t substitutions_before = substitutions.size();
                 // Load the preset file, apply preset values on top of defaults.
                 try {
+                    acc_info.start();
                     fs::path idx_path(preset.file);
                     idx_path.replace_extension(".info");
                     if (fs::exists(idx_path)) {
                         preset.load_info(idx_path.string());
+                        ++prof_info_files;
                     }
+                    acc_info.stop();
                     DynamicPrintConfig config;
                     //BBS: change to json format
                     //ConfigSubstitutions config_substitutions = config.load_from_ini(preset.file, substitution_rule);
                     std::map<std::string, std::string> key_values;
                     std::string reason;
+                    acc_parse.start();
+                    ++prof_parses;
                     ConfigSubstitutions config_substitutions = config.load_from_json(preset.file, substitution_rule, key_values, reason);
+                    acc_parse.stop();
                     if (! config_substitutions.empty())
                         substitutions.push_back({ preset.name, m_type, PresetConfigSubstitutions::Source::UserFile, preset.file, std::move(config_substitutions) });
                     if (!reason.empty()) {
@@ -1637,6 +1652,7 @@ void PresetCollection::load_presets(
                         preset.is_visible = key_values["instantiation"] != "false";
 
                     //Orca: find and use the inherit config as the base
+                    acc_lookup.start();
                     Preset* inherit_preset = nullptr;
                     ConfigOption* inherits_config = config.option(BBL_JSON_KEY_INHERITS);
 
@@ -1659,6 +1675,8 @@ void PresetCollection::load_presets(
                         ;
                     }
                     const Preset& default_preset = this->default_preset_for(config);
+                    acc_lookup.stop();
+                    acc_apply.start();
                     if (inherit_preset) {
                         preset.config = inherit_preset->config;
                         preset.filament_id = inherit_preset->filament_id;
@@ -1667,10 +1685,12 @@ void PresetCollection::load_presets(
                         // We support custom root preset now
                         auto inherits_config2 = dynamic_cast<ConfigOptionString *>(inherits_config);
                         if ((inherits_config2 && !inherits_config2->value.empty()) && !preset.is_custom_defined()) {
+                            acc_apply.stop();
                             if (!final_round) {
                                 // Maybe its parent is a user preset of this folder that is not loaded yet.
                                 substitutions.erase(substitutions.begin() + substitutions_before, substitutions.end());
                                 deferred_files.push_back(entry_path);
+                                ++prof_deferred;
                                 continue;
                             }
                             BOOST_LOG_TRIVIAL(error) << boost::format("can not find parent for config %1%!")%preset.file;
@@ -1700,6 +1720,7 @@ void PresetCollection::load_presets(
                     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", preset type %1%, name %2%, path %3%, is_system %4%, is_default %5% is_visible %6%")%Preset::get_type_string(m_type) %preset.name %preset.file %preset.is_system %preset.is_default %preset.is_visible;
                     // add alias for custom filament preset
                     set_custom_preset_alias(preset);
+                    acc_apply.stop();
                 } catch (const std::ifstream::failure &err) {
                     ++m_errors;
                     BOOST_LOG_TRIVIAL(error) << boost::format("The user-config cannot be loaded: %1%. Reason: %2%")%preset.file %err.what();
@@ -1714,7 +1735,9 @@ void PresetCollection::load_presets(
                     PresetQuarantine::record(PresetQuarantine::quarantine(preset.file, err.what()));
                     continue;
                 }
+                acc_store.start();
                 presets_loaded.emplace_back(preset);
+                acc_store.stop();
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " load config successful and preset name is:" << preset.name;
             } catch (const std::runtime_error &err) {
                 errors_cummulative += err.what();
@@ -1728,9 +1751,27 @@ void PresetCollection::load_presets(
         final_round = true;
     pending_files = deferred_files;
     }
+    const auto profile_merge_start = profile ? std::chrono::steady_clock::now() : profile_start;
     if (presets_loaded.size() > 0)
         m_presets.insert(m_presets.end(), std::make_move_iterator(presets_loaded.begin()), std::make_move_iterator(presets_loaded.end()));
     sort_presets();
+    if (profile) {
+        // The folder is named by its type and last component only ("base" or the type folder):
+        // the full path carries the user's name.
+        const auto now = std::chrono::steady_clock::now();
+        auto       ms  = [](std::chrono::steady_clock::duration d) {
+            return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(d).count());
+        };
+        startup_profile_log("PresetCollection::load_presets type=" + Preset::get_type_string(m_type) + " folder=" + subdir +
+                            " json_files=" + std::to_string(prof_json_files) + " parses=" + std::to_string(prof_parses) +
+                            " loaded=" + std::to_string(presets_loaded.size()) + " rounds=" + std::to_string(prof_rounds) +
+                            " deferred=" + std::to_string(prof_deferred) + " info_files=" + std::to_string(prof_info_files) +
+                            " collection_size=" + std::to_string(m_presets.size()) +
+                            " info_ms=" + std::to_string(acc_info.ms()) + " parse_ms=" + std::to_string(acc_parse.ms()) +
+                            " lookup_ms=" + std::to_string(acc_lookup.ms()) + " apply_ms=" + std::to_string(acc_apply.ms()) +
+                            " store_ms=" + std::to_string(acc_store.ms()) + " merge_sort_ms=" + ms(now - profile_merge_start) +
+                            " ms=" + ms(now - profile_start));
+    }
     //BBS: add config related logs
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": loaded %1% presets from %2%, type %3%")%presets_loaded.size() %dir %Preset::get_type_string(m_type);
     //this->select_preset(first_visible_idx());

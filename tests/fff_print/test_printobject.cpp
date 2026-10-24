@@ -357,8 +357,8 @@ TEST_CASE("Internal bridge areas keep holes so they are not re-bridged on the ne
 }
 
 // Orca #16570: sloping walls shift adjacent infill contours so the solid anchor strip can
-// collapse below a printable width. Edge has no Spiral Inset pattern and no relative_bridge_angle
-// setting, so those GENERATE keys from upstream are dropped.
+// collapse below a printable width. Edge has no Spiral Inset pattern, so that GENERATE key from
+// upstream is dropped. (relative_bridge_angle came with the OrcaSlicer #12055 port.)
 TEST_CASE("Internal bridge ends have support along sloping infill boundaries", "[PrintObject][InternalBridge][Regression]")
 {
     const std::string solid_pattern  = GENERATE("rectilinear", "concentric");
@@ -374,6 +374,7 @@ TEST_CASE("Internal bridge ends have support along sloping infill boundaries", "
                                    {"sparse_infill_line_width", 0.23},
                                    {"wall_loops", 3},
                                    {"internal_bridge_angle", 90},
+                                   {"relative_bridge_angle", false},
                                    {"layer_height", 0.02},
                                    {"initial_layer_print_height", 0.1},
                                    {"nozzle_diameter", 0.2},

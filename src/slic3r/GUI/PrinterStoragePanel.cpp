@@ -598,6 +598,8 @@ void PrinterStoragePanel::update_details()
     line(_L("Print time"), card->print_time_text());
     line(_L("Filament"), card->filament_text());
     line(_L("Filament type"), storage_types_text(m.filament_type));
+    if (m.layer_count > 0)
+        line(_L("Layers"), std::to_string(m.layer_count));
     if (m.layer_height > 0) {
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%.2f mm", m.layer_height);
@@ -688,11 +690,17 @@ void PrinterStoragePanel::on_print()
     show_note(_L("Asking the printer whether it is free..."));
     // First what the printer is doing: a print never goes over a running or paused job, and the
     // person decides with that in front of them. StartPrint asks again just before it starts.
-    m_model->QueryPrinter([this, id](const pstore::Result& r, const std::string& state, const std::string& current) {
+    // `advice` is what this printer adds (an Elegoo CC1: the send choices it starts with, a CANVAS
+    // that picks its own trays).
+    m_model->CheckStart(id, [this, id](const pstore::Result& r, const std::string& state, const std::string& current,
+                                       const std::string& advice) {
         set_busy(false);
         show_note(wxEmptyString);
         if (!r.ok()) {
-            MessageDialog(this, _L("The printer could not be asked whether it is free.") + "\n\n" + from_u8(r.message), _L("Print"),
+            const wxString head = (r.status == pstore::Status::Offline || r.status == pstore::Status::Unauthorized) ?
+                                      _L("The printer could not be asked whether it is free.") :
+                                      _L("This file cannot be started from here now.");
+            MessageDialog(this, head + "\n\n" + from_u8(r.message), _L("Print"),
                           wxOK | wxICON_ERROR)
                 .ShowModal();
             return;
@@ -715,6 +723,9 @@ void PrinterStoragePanel::on_print()
         if (!c->filament_text().empty())
             details += _L("Filament") + ": " + from_u8(c->filament_text()) +
                        (c->meta.filament_type.empty() ? wxString() : " (" + from_u8(storage_types_text(c->meta.filament_type)) + ")") + "\n";
+        // What this printer adds before a start (English, like every printer message on this tab).
+        if (!advice.empty())
+            details += (details.IsEmpty() ? wxString() : wxString("\n")) + from_u8(advice) + "\n\n";
         MessageDialog confirm(this,
                               wxString::Format(_L("Start printing \"%s\" on %s?"), from_u8(c->id), from_u8(m_target.name)) + "\n\n" +
                                   details +

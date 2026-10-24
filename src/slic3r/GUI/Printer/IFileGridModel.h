@@ -10,7 +10,7 @@
 // unit-testable without a display (tests/slic3rutils/printer_storage_tests.cpp) and lets any
 // view - the Device page's Storage tab today, a hub route or a dialog later - sit on it.
 //
-// Implemented by RemoteFileGridModel over PrinterStorage::IPrinterFiles (Moonraker). Bambu's
+// Implemented by RemoteFileGridModel over PrinterStorage::IPrinterFiles (Moonraker, Elegoo CC1 SDCP). Bambu's
 // storage page (MediaFilePanel / ImageGrid over PrinterFileSystem, the UltraNet storage module)
 // keeps its own model: wrapping it as a BambuFileGridModel would mean rebuilding ImageGrid on this
 // interface, which upstream did and this fork deliberately has not (it would touch the Bambu
@@ -111,6 +111,11 @@ public:
     // What the printer is doing ("standby", "printing", ...), for the confirmation before a print.
     virtual void QueryPrinter(std::function<void(const PrinterStorage::Result&, const std::string& state,
                                                  const std::string& current_file)> done) = 0;
+    // QueryPrinter for the start of one file, plus what the person must read before it starts
+    // (IPrinterFiles::start_check: the choices it starts with, a CANVAS that picks its own trays).
+    virtual void CheckStart(const std::string& id,
+                            std::function<void(const PrinterStorage::Result&, const std::string& state, const std::string& current_file,
+                                               const std::string& advice)> done) = 0;
     // Start one file as it was sliced. Refused (Busy) while the printer prints or is paused.
     virtual void StartPrint(const std::string& id, std::function<void(const PrinterStorage::Result&)> done) = 0;
 
