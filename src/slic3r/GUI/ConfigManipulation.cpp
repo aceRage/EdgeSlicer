@@ -1007,6 +1007,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     (config->opt_int("skirt_height") > 1 || config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
     toggle_line("support_speed", have_support_material || have_skirt_height || stab_on);
     toggle_line("support_interface_speed", have_support_material && have_support_interface);
+    // Orca #13459
+    for (auto el : {"small_support_perimeter_speed", "small_support_perimeter_threshold"})
+        toggle_line(el, have_support_material);
 
     // BBS
     //toggle_field("support_material_synchronize_layers", have_support_soluble);
@@ -1172,7 +1175,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
-        "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width"})
+        "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width",
+        "wall_maximum_resolution", "wall_maximum_deviation"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
 
@@ -1194,7 +1198,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("min_width_top_surface", config->opt_bool("only_one_wall_top") || ((config->opt_float("min_length_factor") > 0.5f) && have_arachne)); // 0.5 is default value
 
-    for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted" })
+    for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges" })
         toggle_line(el, config->opt_bool("hole_to_polyhole"));
 
     bool has_detect_overhang_wall = config->opt_bool("detect_overhang_wall");
@@ -1268,6 +1272,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
 
     toggle_line("infill_overhang_angle", config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLateralHoneycomb);
+
+    bool lightning_options = config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLightning;
+    for (auto el : { "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle" })
+        toggle_line(el, lightning_options);
 }
 
 void ConfigManipulation::update_print_sla_config(DynamicPrintConfig* config, const bool is_global_config/* = false*/)

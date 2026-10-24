@@ -3771,6 +3771,8 @@ double Model::findMaxSpeed(const ModelObject* object) {
     double topSolidInfillSpeedObj = Model::printSpeedMap.topSolidInfillSpeed;
     double supportSpeedObj = Model::printSpeedMap.supportSpeed;
     double smallPerimeterSpeedObj = Model::printSpeedMap.smallPerimeterSpeed;
+    double smallSupportPerimeterSpeedObj = Model::printSpeedMap.smallSupportPerimeterSpeed;
+    std::optional<FloatOrPercent> smallSupportPerimeterSpeedOpt;
     for (std::string objectKey : objectKeys) {
         if (objectKey == "inner_wall_speed"){
             perimeterSpeedObj = object->config.get().opt_float(objectKey, 0);
@@ -3792,8 +3794,18 @@ double Model::findMaxSpeed(const ModelObject* object) {
                 smallPerimeterSpeedObj = v.percent ? v.value / 100.0 * perimeterSpeedObj : v.value;
             }
         }
+        // OrcaSlicer #13459 / #15232: a FloatOrPercent; a percentage is of the support speed, which is
+        // resolved after the loop (the keys come sorted, "small_support..." before "support_speed").
+        if (objectKey == "small_support_perimeter_speed") {
+            if (const auto *opt = object->config.get().option<ConfigOptionFloatsOrPercents>(objectKey))
+                smallSupportPerimeterSpeedOpt = opt->get_at(0);
+        }
     }
-    objMaxSpeed = std::max(perimeterSpeedObj, std::max(externalPerimeterSpeedObj, std::max(infillSpeedObj, std::max(solidInfillSpeedObj, std::max(topSolidInfillSpeedObj, std::max(supportSpeedObj, std::max(smallPerimeterSpeedObj, objMaxSpeed)))))));
+    if (smallSupportPerimeterSpeedOpt)
+        smallSupportPerimeterSpeedObj = smallSupportPerimeterSpeedOpt->percent ?
+                                            smallSupportPerimeterSpeedOpt->value / 100.0 * supportSpeedObj :
+                                            smallSupportPerimeterSpeedOpt->value;
+    objMaxSpeed = std::max(perimeterSpeedObj, std::max(externalPerimeterSpeedObj, std::max(infillSpeedObj, std::max(solidInfillSpeedObj, std::max(topSolidInfillSpeedObj, std::max(supportSpeedObj, std::max(smallPerimeterSpeedObj, std::max(smallSupportPerimeterSpeedObj, objMaxSpeed))))))));
     if (objMaxSpeed <= 0) objMaxSpeed = 250.;
     return objMaxSpeed;
 }
