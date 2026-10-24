@@ -157,7 +157,8 @@ bool GeodesicCursor::is_edge_inside_cursor(const TriangleSelector::Triangle &tr,
 SpreadSession::SpreadSession(TriangleSelector &selector, const SpreadParams &params) : m_sel(selector), m_params(params)
 {
     m_L             = params.trafo_no_translate.matrix().block<3, 3>(0, 0).cast<float>();
-    m_normal_matrix = params.trafo_no_translate.matrix().block<3, 3>(0, 0).inverse().transpose().cast<float>();
+    // Same expression as Smart fill's overhang filter, so both see the same normals.
+    m_normal_matrix = static_cast<Matrix3f>(params.trafo_no_translate.matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>());
     {
         const Vec3d sf = Geometry::Transformation(params.trafo_no_translate).get_scaling_factor();
         if (is_approx(sf(0), sf(1)) && is_approx(sf(1), sf(2)))
