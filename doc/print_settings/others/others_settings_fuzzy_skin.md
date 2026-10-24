@@ -108,6 +108,22 @@ Creates sharp, jagged features and high-contrast detail. Useful for stone- or ma
 
 ![Fuzzy-skin-voronoi](https://github.com/SoftFever/OrcaSlicer/blob/main/doc/images/Fuzzy-skin/Fuzzy-skin-voronoi.png?raw=true)
 
+## Ripples per layer
+
+Used with the Ripple noise type: how many full cycles of ripples are added per layer.
+
+## Ripple offset
+
+Shifts the ripple phase forward along the print path by this percentage of a wavelength, once every [Layers between ripple offset](#layers-between-ripple-offset) layers.
+
+- 0% keeps every layer identical.
+- 50% shifts the pattern by half a wavelength, inverting the phase.
+- 100% shifts the pattern by a full wavelength, back to the original phase.
+
+## Layers between ripple offset
+
+How many consecutive layers share the same ripple phase before the [offset](#ripple-offset) is applied. With 1, layer 1 has the base pattern, layer 2 is shifted, layer 3 returns to the base pattern, and so on. With 3, layers 1 to 3 use the base pattern, layers 4 to 6 are shifted, layers 7 to 9 return to the base pattern.
+
 ## Point distance
 
 Average distance between random sample points along each line segment.  
