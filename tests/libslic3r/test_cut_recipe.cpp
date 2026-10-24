@@ -152,6 +152,10 @@ static CutRecipe recipe_make(CutRecipeKind kind)
     r.thickness        = 0.8;
     r.thickness_offset = CutThicknessOffset::Above;
 
+    // Version 5 (OD11 PR D): the cut instance's linear transform, rotated and scaled.
+    r.instance_linear = Transform3d(Eigen::AngleAxisd(0.7, Vec3d::UnitZ())) * Eigen::Scaling(1.25, 1.25, 1.25);
+    r.instance_linear_set = true;
+
     r.keep_upper         = true;
     r.keep_lower         = true;
     r.keep_as_parts      = false;
