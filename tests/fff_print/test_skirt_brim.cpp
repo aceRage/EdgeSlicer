@@ -1015,3 +1015,60 @@ TEST_CASE("Outer-only painted brim ears stay out of model holes", "[SkirtBrim][O
     REQUIRE(brim_loop_count(print) > 0);
     CHECK_FALSE(brim_enters_first_layer_hole(print));
 }
+
+// Orca #11760: with "Brim follows compensated outline", the brim hugs the first layer after Elephant
+// foot compensation, so it moves in by the compensation on every side.
+TEST_CASE("Brim follows the elephant foot compensated outline", "[SkirtBrim][Orca11760]")
+{
+    auto brim_box = [](bool follow_efc) {
+        Print print;
+        init_and_process_print({ TestMesh::cube_20x20x20 }, print, {
+            { "skirt_loops",                      0 },
+            { "brim_type",                        "outer_only" },
+            { "brim_width",                       3 },
+            { "brim_object_gap",                  0 },
+            { "elefant_foot_compensation",        1 },
+            { "elefant_foot_compensation_layers", 1 },
+            { "brim_use_efc_outline",             follow_efc },
+        });
+        return brim_paths_bbox(print);
+    };
+    const BoundingBox raw = brim_box(false);
+    const BoundingBox efc = brim_box(true);
+    REQUIRE(raw.defined);
+    REQUIRE(efc.defined);
+    const double shrink = unscale<double>(raw.size().x() - efc.size().x());
+    INFO("Brim width over X shrinks by " << shrink << " mm");
+    CHECK(shrink == Approx(2.).margin(0.6));
+}
+
+// Orca #11876: Brim flow ratio scales the brim's extrusion only.
+TEST_CASE("Brim flow ratio scales the brim extrusion", "[SkirtBrim][Orca11876]")
+{
+    auto e_per_mm = [](double ratio, const char *role) {
+        const std::string g = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, {
+            { "skirt_loops",          0 },
+            { "brim_type",            "outer_only" },
+            { "brim_width",           3 },
+            { "brim_flow_ratio",      ratio },
+            { "use_relative_e_distances", 0 },
+            { "gcode_comments",       1 },
+            { "machine_start_gcode",  "" },
+        }, true);
+        double e = 0., len = 0.;
+        GCodeReader reader;
+        reader.parse_buffer(g, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0 && line.comment().find(role) != std::string_view::npos) {
+                e += line.dist_E(self);
+                len += line.dist_XY(self);
+            }
+        });
+        return len > 0. ? e / len : 0.;
+    };
+    const double brim_full = e_per_mm(1., "brim");
+    const double brim_half = e_per_mm(0.5, "brim");
+    REQUIRE(brim_full > 0.);
+    CHECK(brim_half / brim_full == Approx(0.5).epsilon(0.02));
+    // The walls are not touched.
+    CHECK(e_per_mm(0.5, "perimeter") == Approx(e_per_mm(1., "perimeter")).epsilon(0.001));
+}
