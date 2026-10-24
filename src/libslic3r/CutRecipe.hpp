@@ -111,6 +111,12 @@ class ModelObject;
 //                      another size, space the dovetails exactly as the cut did.
 //                      0 means "not recorded", which only a count-1 recipe can be,
 //                      and a single dovetail does not depend on it.
+//     instance_linear (OD11 PR D, also new in 5): the cut instance's transform
+//                    without its offset, at the moment of the cut. The halves'
+//                    meshes sit in instance_linear x object frame, the recipe's mesh
+//                    in the object frame; Edit cut needs the pair to carry the
+//                    halves' painting back onto the uncut stand-in.
+//                    instance_linear_set false = not recorded (<= 4).
 //     New fields, no changed meanings: a version <= 4 recipe loads as count 1 and
 //     re-cuts identically. The bump is so an OLDER build refuses a version 5 recipe
 //     rather than silently re-cutting a three-dovetail joint as one.
@@ -313,6 +319,10 @@ struct CutRecipe
     // the object frame.
     Vec3d       plane_center{ Vec3d::Zero() };
     Transform3d rotation_m{ Transform3d::Identity() };
+    // VERSION 5. The cut instance's matrix without offset when the cut was made: the
+    // frame the halves' meshes are in, relative to `mesh`. See CutRecipeVersion.
+    Transform3d instance_linear{ Transform3d::Identity() };
+    bool        instance_linear_set{ false };
 
     // --- the surface ------------------------------------------------------
     CutRecipeSheet  sheet;   // kind == Curved
@@ -420,6 +430,8 @@ struct CutRecipe
         ar(upper_visibility, lower_visibility);
         ar(connectors);
         ar(mesh, mesh_hash);
+        // VERSION 5 (OD11 PR D).
+        ar(instance_linear, instance_linear_set);
     }
 };
 

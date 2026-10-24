@@ -9,6 +9,7 @@
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
 #include "ObjectID.hpp"
+#include "AABBMesh.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -351,6 +352,96 @@ static bool is_unprocessed_flexi_volume(const ModelVolume* v)
 {
     return !v->is_model_part() && v->cut_info.is_connector && !v->cut_info.is_processed &&
            is_flexi_connector_type(v->cut_info.connector_type);
+}
+
+CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>& halves, const Transform3d& instance_linear,
+                                          ModelVolume& uncut)
+{
+    CutPaintCarry out;
+    if (uncut.mesh().empty())
+        return out;
+
+    // Every painted model part of every half, its mesh taken into the object frame.
+    const Transform3d to_object = instance_linear.inverse();
+    std::vector<TriangleSelector::SavedPainting> saved;
+    for (const ModelObject* half : halves) {
+        if (half == nullptr)
+            continue;
+        for (const ModelVolume* v : half->volumes) {
+            if (!v->is_model_part() || v->is_cut_connector())
+                continue;
+            std::optional<TriangleSelector::SavedPainting> sp = v->save_painting();
+            if (!sp)
+                continue;
+            sp->mesh.transform(to_object * v->get_matrix(), true);
+            saved.emplace_back(std::move(*sp));
+        }
+    }
+    out.had_paint = !saved.empty();
+    if (!out.had_paint)
+        return out;
+
+    // The uncut mesh in the object frame, for the check.
+    TriangleMesh uncut_object(uncut.mesh());
+    uncut_object.transform(uncut.get_matrix(), true);
+    const AABBMesh surface(uncut_object.its);
+    const double   tol = std::max(0.05, 1e-4 * uncut_object.bounding_box().size().norm());
+
+    // THE CHECK. In the right frame every point of a half is on the uncut part's surface or inside
+    // it (a cut only takes material away; a flexi joint's bodies, a dovetail and a kerf all stay
+    // within the original). In a wrong one - a scale or a rotation missing - a large share of them
+    // falls outside. Whole-mesh vertices rather than painted ones, so paint the user put on a CUT
+    // face after the cut (which is inside the uncut part, and simply has nowhere to go) does not
+    // make the frame look wrong.
+    size_t tested = 0, outside = 0;
+    for (const ModelObject* half : halves) {
+        if (half == nullptr)
+            continue;
+        for (const ModelVolume* v : half->volumes) {
+            if (!v->is_model_part() || v->is_cut_connector())
+                continue;
+            const Transform3d          t   = to_object * v->get_matrix();
+            const std::vector<Vec3f>&  pts = v->mesh().its.vertices;
+            const size_t               stride = std::max<size_t>(1, pts.size() / 2000);
+            for (size_t k = 0; k < pts.size(); k += stride) {
+                const Vec3d p = t * pts[k].cast<double>();
+                int         face = -1;
+                Vec3d       closest;
+                const double d2 = surface.squared_distance(p, face, closest);
+                ++tested;
+                if (d2 <= tol * tol || face < 0)
+                    continue;
+                const Vec3d n = its_face_normal(uncut_object.its, face).cast<double>();
+                if ((p - closest).dot(n) > 0.)
+                    ++outside;
+            }
+        }
+    }
+    if (tested == 0 || double(outside) > 0.05 * double(tested)) {
+        BOOST_LOG_TRIVIAL(warning) << "Edit cut: the halves do not fit the uncut part (" << outside << " of " << tested
+                                   << " points outside), so their painting is not carried";
+        return out;
+    }
+
+    // The remap. The target transform takes the uncut mesh into the frame the sources are in.
+    const Transform3d target = uncut.get_matrix();
+    auto remap = [&](const TriangleSelector::SavedPainting& sp, const TriangleSelector::TriangleSplittingData& src, FacetsAnnotation& dst) {
+        if (src.bitstream.empty())
+            return;
+        TriangleSelector::TriangleSplittingData result = TriangleSelector::remap_painting(
+            sp.mesh.its, src, uncut.mesh().its, target,
+            std::optional<std::reference_wrapper<const TriangleSelector::TriangleSplittingData>>{ std::cref(dst.get_data()) });
+        if (!result.bitstream.empty())
+            dst.set_data(std::move(result));
+    };
+    for (const TriangleSelector::SavedPainting& sp : saved) {
+        remap(sp, sp.supported, uncut.supported_facets);
+        remap(sp, sp.seam, uncut.seam_facets);
+        remap(sp, sp.mmu, uncut.mmu_segmentation_facets);
+        remap(sp, sp.fuzzy, uncut.fuzzy_skin_facets);
+    }
+    out.carried = true;
+    return out;
 }
 
 bool has_flexi_joint(const ModelObject* mo)
