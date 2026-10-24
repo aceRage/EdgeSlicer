@@ -698,6 +698,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "filename_format",
         "retraction_minimum_travel",
         "retract_before_wipe",
+        // Orca:
+        "retract_after_wipe",
         "retract_when_changing_layer",
         "retraction_length",
         "retract_length_toolchange",
@@ -715,8 +717,15 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "preheat_time",
         "delta_temperature",
         "preheat_steps",
+        // Edge: the file header and the config-block switch only affect G-code export
+        // (upstream falls through to invalidate_all_steps).
+        "file_start_gcode",
+        "gcode_skip_config_block",
         "machine_start_gcode",
         "filament_start_gcode",
+        // Edge: OrcaSlicer #11784's process / filament role-change templates only affect G-code export.
+        "process_change_extrusion_role_gcode",
+        "filament_change_extrusion_role_gcode",
         "change_filament_gcode",
         "wipe",
         // BBS

@@ -1697,14 +1697,21 @@ void PrintConfigDef::init_fff_params()
                      "For example, additional slowdown will be applied when printing overhangs on sharp corners like the "
                      "front of the Benchy hull, reducing curling which compounds over multiple layers.\n\n"
                      "It is generally recommended to have this option switched on unless your printer cooling is powerful enough or the "
-                     "print speed slow enough that perimeter curling does not happen. If printing with a high external perimeter speed, "
-                     "this parameter may introduce slight artifacts when slowing down due to the large variance in print speeds. "
-                     "If you notice artifacts, ensure your pressure advance is tuned correctly.\n\n"
+                     "print speed is slow enough that perimeter curling does not happen. \n"
+                     "If printing with a high external perimeter speed, this parameter may introduce wall artifacts when slowing down, "
+                     "due to the potentially large variance in print speeds causing the extruder to be unable to keep up with the requested flow change.\n"
+                     "Root cause of these artefacts is most likely PA tuning being slightly off, especially when combined "
+                     "with a high PA smooth time.\n\n"
+                     "Recommendations when enabling this option:\n"
+                     "1. Reduce Pressure Advance smooth time to 0.015 - 0.02 so the extruder reacts quickly to the speed changes.\n"
+                     "2. Increase the minimum print speeds to limit the magnitude of the slowdown and reduce the variance between fast and slow segments.\n"
+                     "3. If artifacts still appear, enable Extrusion Rate Smoothing (ERS) to further smooth the flow transitions.\n\n"
                      "Note: When this option is enabled, overhang perimeters are treated like overhangs, meaning the overhang speed is "
                      "applied even if the overhanging perimeter is part of a bridge. For example, when the perimeters are 100% overhanging"
                      ", with no wall supporting them from underneath, the 100% overhang speed will be applied.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBools { true });
+    // OrcaSlicer #13870: off by default (owner accepted the default change, 2026-10-15).
+    def->set_default_value(new ConfigOptionBools { false });
 
     def = this->add("overhang_1_4_speed", coFloatsOrPercents);
     def->label = "(10%, 25%)";
@@ -2895,7 +2902,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Number of cooling moves");
     def->tooltip = L("Filament is cooled by being moved back and forth in the "
                    "cooling tubes. Specify desired number of these moves.");
-    def->max = 0;
+    def->min = 0;
     def->max = 20;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInts { 4 });
@@ -3232,6 +3239,36 @@ void PrintConfigDef::init_fff_params()
     def->max      = 75;
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(60));
+
+    def           = this->add("lightning_overhang_angle", coFloat);
+    def->label    = L("Lightning overhang angle");
+    def->category = L("Strength");
+    def->tooltip  = L("Maximum overhang angle for Lightning infill support propagation.");
+    def->sidetext = u8"°";
+    def->min      = 5;
+    def->max      = 85;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionFloat(45));
+
+    def           = this->add("lightning_prune_angle", coFloat);
+    def->label    = L("Prune angle");
+    def->category = L("Strength");
+    def->tooltip  = L("Controls how aggressively short or unsupported Lightning branches are pruned. This angle is converted internally to a per-layer distance.");
+    def->sidetext = u8"°";
+    def->min      = 5;
+    def->max      = 85;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionFloat(45));
+
+    def           = this->add("lightning_straightening_angle", coFloat);
+    def->label    = L("Straightening angle");
+    def->category = L("Strength");
+    def->tooltip  = L("Maximum straightening angle used to simplify Lightning branches.");
+    def->sidetext = u8"°";
+    def->min      = 5;
+    def->max      = 85;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionFloat(45));
 
     auto def_infill_anchor_min = def = this->add("infill_anchor", coFloatOrPercent);
     def->label = L("Sparse infill anchor length");
@@ -4259,6 +4296,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->readonly = false;
     def->set_default_value(new ConfigOptionEnum<GCodeFlavor>(gcfMarlinLegacy));
+
+    def = this->add("gcode_skip_config_block", coBool);
+    def->label = L("Skip G-code config block");
+    def->tooltip = L("Do not write the CONFIG_BLOCK (slicer configuration key/value pairs) into the G-code file. "
+                   "This can help with printers whose firmware crashes when parsing these comment lines "
+                   "(e.g. Anycubic go-klipper). Note: the G-code file will no longer contain slicer settings, "
+                   "so importing it back into OrcaSlicer will not restore the configuration.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def          = this->add("pellet_modded_printer", coBool);
     def->label   = L("Pellet Modded Printer");
@@ -6197,6 +6243,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercents { 100 });
 
+    // Orca:
+    def = this->add("retract_after_wipe", coPercents);
+    def->label = L("Retract amount after wipe");
+    def->tooltip = L("The length of fast retraction after wipe, relative to retraction length.\n"
+                     "The value will be clamped by 100% minus the retract amount before the wipe value.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionPercents { 0 });
+
     def = this->add("retract_when_changing_layer", coBools);
     def->label = L("Retract when change layer");
     def->tooltip = L("Force a retraction when changes layer.");
@@ -6883,6 +6940,18 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInt(1));
 
 
+    def = this->add("file_start_gcode", coString);
+    def->label = L("File header G-code");
+    def->tooltip = L("G-code written at the very top of the output file, before any other content. "
+                     "Useful for adding metadata that printer firmware reads from the first lines of the file "
+                     "(e.g. estimated print time, filament usage). "
+                     "Supports placeholders like {print_time_total_sec}, {print_time_day}, {print_time_hour}, {print_time_minute}, {print_time_sec} and {used_filament_length}.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 8;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("machine_start_gcode", coString);
     def->label = L("Start G-code");
     def->tooltip = L("Start G-code when starting the entire print.");
@@ -7376,6 +7445,30 @@ void PrintConfigDef::init_fff_params()
     def->min = 1;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 80 });
+
+    // OrcaSlicer #13459. Edge: per flow variant like support_speed / small_perimeter_speed (not nullable),
+    // min 0 because 0 = auto, and the percentage is taken over the support (interface) speed.
+    def = this->add("small_support_perimeter_speed", coFloatsOrPercents);
+    def->label = L("Small support perimeters");
+    def->category = L("Speed");
+    def->tooltip = L("Same as \"Small perimeters\", but for supports. "
+                    "This separate setting will affect the speed of support for areas <= `small_support_perimeter_threshold`. "
+                    "If expressed as a percentage (for example: 80%), it will be calculated on the support or support interface speed setting above. "
+                    "Set to zero for auto.");
+    def->sidetext = L("mm/s or %");
+    def->ratio_over = "support_speed";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatsOrPercents { FloatOrPercent{50, true} });
+
+    def = this->add("small_support_perimeter_threshold", coFloats);
+    def->label = L("Small support perimeters threshold");
+    def->category = L("Speed");
+    def->tooltip = L("This sets the threshold for small support perimeter length. The default threshold is 0mm.");
+    def->sidetext = L("mm");	// millimeters, CIS languages need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0 });
 
     def = this->add("support_style", coEnum);
     def->label = L("Style");
@@ -8024,6 +8117,24 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString());
 
+    def = this->add("process_change_extrusion_role_gcode", coString);
+    def->label = L("Change extrusion role G-code (process)");
+    def->tooltip = L("This G-code is inserted when the extrusion role is changed. It runs after the machine and filament extrusion role G-code.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 5;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("filament_change_extrusion_role_gcode", coStrings);
+    def->label = L("Change extrusion role G-code (filament)");
+    def->tooltip = L("This G-code is inserted when the extrusion role is changed for the active filament.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 5;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
     def = this->add("top_surface_line_width", coFloatOrPercent);
     def->label = L("Top surface");
     def->category = L("Quality");
@@ -8604,6 +8715,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("hole_to_polyhole_max_edges", coInt);
+    def->label = L("Maximum Polyhole edge count");
+    def->category = L("Quality");
+    def->tooltip = L("Maximum number of polyhole edges"
+            "\nThis setting limits the amount of edges a polyhole can have");
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->min = 3;
+    def->set_default_value(new ConfigOptionInt(50));
+
     def = this->add("thumbnails", coString);
     def->label = L("G-code thumbnails");
     def->tooltip = L("Picture sizes to be stored into a .gcode and .sl1 / .sl1s files, in the following format: \"XxY, XxY, ...\"");
@@ -8724,6 +8844,29 @@ void PrintConfigDef::init_fff_params()
     def->max = 25.0;
     def->set_default_value(new ConfigOptionFloat(0.5));
 
+    def = this->add("wall_maximum_resolution", coFloat);
+    def->label = L("Maximum wall resolution");
+    def->category = L("Quality");
+    def->tooltip  = L("This value determines the smallest wall line segment length in mm. "
+        "The smaller you set this value, the more accurate and precise the walls will be.");
+    def->sidetext = L("mm");	// millimeters, CIS languages need translation
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->min = 0.005;
+    def->max = 0.5f;
+    def->set_default_value(new ConfigOptionFloat(0.5f));
+
+    def = this->add("wall_maximum_deviation", coFloat);
+    def->label = L("Maximum wall deviation");
+    def->category = L("Quality");
+    def->tooltip = L("The maximum deviation allowed when reducing the resolution for the 'Maximum wall resolution' setting. If you increase this, "
+        "the print will be less accurate, but the G-Code will be smaller. 'Maximum wall deviation' limits 'Maximum wall resolution', "
+        "so if the two conflict, 'Maximum wall deviation' takes precedence.");
+    def->sidetext = L("mm");	// millimeters, CIS languages need translation
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->min = 0.005f;
+    def->max = 0.05f;
+    def->set_default_value(new ConfigOptionFloat(0.025f));
+
     def = this->add("initial_layer_min_bead_width", coPercent);
     def->label = L("First layer minimum wall width");
     def->category = L("Quality");
@@ -8756,6 +8899,8 @@ void PrintConfigDef::init_fff_params()
         "retract_when_changing_layer", "wipe",
         // percents
         "retract_before_wipe",
+        // Orca
+        "retract_after_wipe",
         "long_retractions_when_cut",
         "retraction_distances_when_cut",
         "retract_length_toolchange",
@@ -8806,7 +8951,7 @@ void PrintConfigDef::init_extruder_option_keys()
     m_extruder_option_keys = {
         "nozzle_diameter", "min_layer_height", "max_layer_height", "extruder_offset",
         "retraction_length", "z_hop", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed",
-        "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
+        "retract_before_wipe", "retract_after_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
         "retract_when_changing_layer", "retract_length_toolchange", "retract_restart_extra_toolchange", "extruder_colour",
         "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut",
         // Snapmaker: flow-variant (already defined; resized with nozzle_diameter)
@@ -8816,6 +8961,7 @@ void PrintConfigDef::init_extruder_option_keys()
     m_extruder_retract_keys = {
         "deretraction_speed",
         "long_retractions_when_cut",
+        "retract_after_wipe",
         "retract_before_wipe",
         "retract_lift_above",
         "retract_lift_below",
@@ -8843,7 +8989,7 @@ void PrintConfigDef::init_filament_option_keys()
     m_filament_option_keys = {
         "filament_diameter", "min_layer_height", "max_layer_height",
         "retraction_length", "z_hop", "z_hop_types", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed",
-        "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
+        "retract_before_wipe", "retract_after_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
         "retract_when_changing_layer", "retract_length_toolchange", "retract_restart_extra_toolchange", "filament_colour",
         "filament_multi_colors", "filament_colour_mode",
         "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut",
@@ -8857,6 +9003,7 @@ void PrintConfigDef::init_filament_option_keys()
     m_filament_retract_keys = {
         "deretraction_speed",
         "long_retractions_when_cut",
+        "retract_after_wipe",
         "retract_before_wipe",
         "retract_lift_above",
         "retract_lift_below",
@@ -9635,6 +9782,8 @@ const std::vector<std::string>& process_flow_variant_options()
         "small_perimeter_speed",
         "small_perimeter_threshold",
         "support_speed",
+        "small_support_perimeter_speed",
+        "small_support_perimeter_threshold",
         "support_interface_speed",
         "initial_layer_speed",
         "initial_layer_infill_speed",
@@ -9697,7 +9846,7 @@ bool is_printer_extruder_variant_option(const std::string &key)
     static const std::set<std::string> options {
         "retraction_length", "z_hop", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce",
         "z_hop_types", "retraction_speed", "deretraction_speed", "retraction_minimum_travel", "retract_when_changing_layer",
-        "wipe", "wipe_distance", "retract_before_wipe", "retract_length_toolchange", "retract_restart_extra",
+        "wipe", "wipe_distance", "retract_before_wipe", "retract_after_wipe", "retract_length_toolchange", "retract_restart_extra",
         "retract_restart_extra_toolchange", "long_retractions_when_cut", "retraction_distances_when_cut",
     };
     return options.count(key) > 0;
@@ -11896,6 +12045,30 @@ PrintStatisticsConfigDef::PrintStatisticsConfigDef()
     def = this->add("used_filament", coFloat);
     def->label = L("Used filament");
     def->tooltip = L("Total length of filament used in the print.");*/
+
+    def = this->add("print_time_total_sec", coString);
+    def->label = L("Print time (total seconds)");
+    def->tooltip = L("Total estimated print time in seconds. Replaced with actual value during post-processing.");
+
+    def = this->add("print_time_day", coString);
+    def->label = L("Print time (days component)");
+    def->tooltip = L("Estimated print time day component (normal mode). Replaced with actual value during post-processing.");
+
+    def = this->add("print_time_hour", coString);
+    def->label = L("Print time (hours component)");
+    def->tooltip = L("Estimated print time hour component (normal mode). Replaced with actual value during post-processing.");
+
+    def = this->add("print_time_minute", coString);
+    def->label = L("Print time (minutes component)");
+    def->tooltip = L("Estimated print time minute component (normal mode). Replaced with actual value during post-processing.");
+
+    def = this->add("print_time_sec", coString);
+    def->label = L("Print time (seconds component)");
+    def->tooltip = L("Estimated print time second component (normal mode). Replaced with actual value during post-processing.");
+
+    def = this->add("used_filament_length", coString);
+    def->label = L("Filament length (meters)");
+    def->tooltip = L("Total filament length used in meters. Replaced with actual value during post-processing.");
 }
 
 ObjectsInfoConfigDef::ObjectsInfoConfigDef()
@@ -12034,6 +12207,7 @@ OtherPresetsConfigDef::OtherPresetsConfigDef()
 
 static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificPlaceholders{
     // Machine G-code
+    {"file_start_gcode",            {}},
     {"machine_start_gcode",         {}},
     {"machine_end_gcode",           {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id"}},
     {"before_layer_change_gcode",   {"layer_num", "layer_z", "max_layer_z"}},
@@ -12047,6 +12221,8 @@ static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificP
                                "travel_point_1_x", "travel_point_1_y", "travel_point_2_x", "travel_point_2_y", "travel_point_3_x",
                                "travel_point_3_y", "x_after_toolchange", "y_after_toolchange", "z_after_toolchange", "next_wipe_x", "next_wipe_y"}},
     {"change_extrusion_role_gcode", {"layer_num", "layer_z", "extrusion_role", "last_extrusion_role"}},
+    {"filament_change_extrusion_role_gcode", {"layer_num", "layer_z", "extrusion_role", "last_extrusion_role"}},
+    {"process_change_extrusion_role_gcode", {"layer_num", "layer_z", "extrusion_role", "last_extrusion_role"}},
     {"printing_by_object_gcode",    {}},
     {"machine_pause_gcode",         {}},
     {"template_custom_gcode",       {}},
