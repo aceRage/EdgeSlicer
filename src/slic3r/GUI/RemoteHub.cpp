@@ -6619,6 +6619,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (slash == std::string::npos || !is_index(rest.substr(0, slash))) return false;
         const std::string what = rest.substr(slash);
         if (what == "/send") return post; // send the sliced plate to a printer (RemoteSend)
+        if (what == "/send/preview") return post; // slice_v1: that send's mapping sheet, nothing sent
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
                        what == "/preview.png" || what == "/preview/status" ||
                        what == "/result"); // slice_v1: results detail and warnings

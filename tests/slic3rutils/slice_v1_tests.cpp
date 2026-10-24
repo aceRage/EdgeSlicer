@@ -282,3 +282,171 @@ TEST_CASE("slice_v1 /pair features: the native Slice tab's flags are listed", "[
     for (const char* s : { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" })
         CHECK(has(s));
 }
+
+// ---- PR B: the send preview sheet ----------------------------------------------------------
+
+namespace {
+
+SliceV1::Sheet u1_sheet()
+{
+    SliceV1::Sheet s;
+    s.mapping_kind = "toolheads";
+    s.editable     = true;
+    s.filaments    = { { 0, "PLA", "#FFFFFF", 20.5 }, { 1, "PLA", "#101010", 3.25 }, { 3, "PLA", "#FF0000", 1.0 } };
+    s.targets      = { { "T1", "T1", "PLA", "#FFFFFF", true, "" },
+                       { "T2", "T2", "PETG", "#000000", true, "" },
+                       { "T3", "T3", "", "", false, "" },
+                       { "T4", "T4", "PLA", "#FF0000", true, "" } };
+    s.choice       = { { 0, 0 }, { 1, 1 }, { 3, 2 } };
+    s.automatic    = { { 0, 0 }, { 1, 3 }, { 3, 3 } };
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("slice_v1 send preview: a U1 sheet with an empty toolhead and a material warning", "[SliceV1]")
+{
+    SliceV1::Sheet s = u1_sheet();
+    SliceV1::check_toolheads(s, false);
+    require_same(SliceV1::sheet_json(s), read_fixture("send_preview_u1.json"));
+}
+
+TEST_CASE("slice_v1 send preview: force lets an empty toolhead through, as the send does", "[SliceV1]")
+{
+    SliceV1::Sheet s = u1_sheet();
+    SliceV1::check_toolheads(s, true);
+    CHECK(s.can_send);
+    CHECK(s.problems.empty());
+}
+
+TEST_CASE("slice_v1 send preview: a filament with no toolhead or one past the last is refused", "[SliceV1]")
+{
+    SliceV1::Sheet s = u1_sheet();
+    s.choice[0] = -1;
+    s.choice[1] = 7;
+    SliceV1::check_toolheads(s, true);
+    CHECK_FALSE(s.can_send);
+    REQUIRE(s.problems.count(0) == 1);
+    REQUIRE(s.problems.count(1) == 1);
+    CHECK(s.problems[0].front().find("has no toolhead") != std::string::npos);
+    CHECK(s.problems[1].front().find("no toolhead 8") != std::string::npos);
+    CHECK(s.mapping == "1:7,3:2"); // filament 0 has none, so it is left out of the wire form
+}
+
+TEST_CASE("slice_v1 send preview: positions_wire is what /send takes as mapping", "[SliceV1]")
+{
+    CHECK(SliceV1::positions_wire({}) == "");
+    CHECK(SliceV1::positions_wire({ { 0, 1 }, { 1, -1 }, { 2, 0 } }) == "0:1,2:0");
+}
+
+TEST_CASE("slice_v1 send preview: a plate-level problem (slot policy) is listed but on no filament", "[SliceV1]")
+{
+    SliceV1::Sheet s;
+    s.mapping_kind = "canvas";
+    s.filaments    = { { 0, "PLA", "#FFFFFF", 5. } };
+    s.targets      = { { "1A", "1A", "PETG", "#000000", true, "" } };
+    s.choice       = { { 0, 0 } };
+    s.problems[-1] = { "Filament 1 (PLA) is on tray 1A, which holds PETG." };
+    s.policy       = "type_mismatch";
+    s.can_send     = false;
+    const json j   = SliceV1::sheet_json(s);
+    REQUIRE(j["problems"].size() == 1);
+    CHECK(j["problems"][0]["filament"] == -1);
+    CHECK(j["problems"][0]["code"] == "policy");
+    CHECK(j["filaments"][0]["problems"].empty());
+    CHECK(j["policy"] == "type_mismatch");
+    CHECK(j["can_send"] == false);
+}
+
+TEST_CASE("slice_v1 send preview: the Bambu reprint sheet gains the plate sheet's fields", "[SliceV1]")
+{
+    json p = json::parse(R"({
+        "printer": {"id": "X", "name": "X1C", "model": "BL-P001"},
+        "filaments": [
+            {"index": 0, "type": "PLA", "colour": "#E6EBE3", "grams": 58.3, "side": "", "tray": "0-0", "auto": true, "problems": []},
+            {"index": 2, "type": "PETG", "colour": "#000000", "grams": 2.0, "side": "", "tray": null, "auto": false, "problems": ["no tray"]}
+        ],
+        "trays": [
+            {"ams_id": 0, "slot_id": 0, "id": "0-0", "name": "A1", "side": "", "exists": true, "ready": true, "type": "PLA", "match_type": "PLA", "colour": "#E6EBE3"}
+        ],
+        "mapping": "0:0-0", "problems": [], "options": {}, "warnings": [], "can_send": false
+    })");
+    SliceV1::decorate_ams_preview(p);
+    CHECK(p["mapping_kind"] == "ams");
+    CHECK(p["editable"] == true);
+    REQUIRE(p["targets"].size() == 1);
+    CHECK(p["targets"][0] == json::parse(R"({"id": "A1", "label": "A1", "type": "PLA", "color": "#E6EBE3", "ready": true, "side": "", "wire": "0-0"})"));
+    CHECK(p["filaments"][0]["color"] == "#E6EBE3");
+    CHECK(p["filaments"][0]["target"] == "A1");
+    CHECK(p["filaments"][1]["target"].is_null());
+    // the reprint's own fields are still there for the app's BambuMapping model
+    CHECK(p["filaments"][0]["colour"] == "#E6EBE3");
+    CHECK(p["filaments"][0]["tray"] == "0-0");
+    CHECK(p["mapping"] == "0:0-0");
+    CHECK(p["policy"] == "");
+}
+
+TEST_CASE("slice_v1 send preview: the hub proxies the preview route and /pair says so", "[SliceV1][RemoteHub]")
+{
+    using RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("POST", "/api/plates/0/send/preview"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/send/preview"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/x/send/preview"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/send/preview/x"));
+    const auto f = RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "slice_send_preview") != f.end());
+    // the hub understands live=1 and never connects a Bambu printer for a preview without it
+    CHECK(std::find(f.begin(), f.end(), "slice_preview_live") != f.end());
+}
+
+TEST_CASE("slice_v1 send preview: target ids are unique; a repeated label goes by its wire form", "[SliceV1]")
+{
+    SliceV1::Sheet s;
+    s.filaments = { { 0, "PLA", "#FFFFFF", 1. } };
+    s.targets   = { { "Ext", "Ext", "PLA", "#FFFFFF", true, "L", "254-0" }, { "Ext", "Ext", "PLA", "#FFFFFF", true, "R", "255-0" } };
+    s.choice    = { { 0, 1 } };
+    const json j = SliceV1::sheet_json(s);
+    CHECK(j["targets"][0]["id"] == "254-0");
+    CHECK(j["targets"][1]["id"] == "255-0");
+    CHECK(j["filaments"][0]["target"] == "255-0");
+}
+
+// ---- a Bambu preview without connecting --------------------------------------------------------
+
+TEST_CASE("slice_v1 send preview: the PC's current state of a Bambu printer is used only when it is current", "[SliceV1]")
+{
+    SliceV1::CachedPrinter c;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_unknown");
+    c.known = true;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_offline");
+    c.online = true;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_not_connected");
+    c.connected = true;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_state_stale"); // no push time known
+    c.age_s = 3.;
+    CHECK(SliceV1::cached_state_problem(c) == ""); // the cached path: no selection, no connection
+    c.age_s = SliceV1::CACHED_AMS_MAX_AGE_S + 1.;
+    CHECK(SliceV1::cached_state_problem(c) == "printer_state_stale");
+}
+
+TEST_CASE("slice_v1 send preview: with no usable state the sheet says so instead of connecting", "[SliceV1]")
+{
+    const std::vector<SliceV1::SheetFilament> fils = { { 0, "PLA", "#E6EBE3", 58.3 }, { 1, "PETG", "#F5822F", 12.1 } };
+    require_same(SliceV1::no_state_sheet(fils, "printer_not_connected", 3600.2), read_fixture("send_preview_no_state.json"));
+    const json unknown = SliceV1::no_state_sheet(fils, "printer_unknown", -1.);
+    CHECK(unknown["ams_age_s"].is_null());
+    CHECK(unknown["problems"][0]["code"] == "printer_unknown");
+    CHECK(unknown["needs_live"] == true);
+    CHECK(unknown["can_send"] == false);
+}
+
+TEST_CASE("slice_v1 send preview: send refusals read as what would happen", "[SliceV1]")
+{
+    CHECK(SliceV1::preview_tense("The QIDI printer is busy with another print, so this plate was not sent or started.") ==
+          "The QIDI printer is busy with another print, so this plate would not be sent or started.");
+    CHECK(SliceV1::preview_tense("Filament 1 is PLA but tray 1A holds PETG - remap in EdgeSlicer or upload only. Nothing was sent and the print was not started.") ==
+          "Filament 1 is PLA but tray 1A holds PETG - remap in EdgeSlicer or upload only. Nothing would be sent and the print would not be started.");
+    CHECK(SliceV1::preview_tense("The QIDI Box's answer did not add up, so no slot was picked and the print was not started.") ==
+          "The QIDI Box's answer did not add up, so no slot would be picked and the print would not be started.");
+    CHECK(SliceV1::preview_tense("unchanged text") == "unchanged text");
+}

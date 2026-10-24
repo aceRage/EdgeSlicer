@@ -160,6 +160,7 @@ private:
     ApiResponse api_snapmaker_disconnect();
     ApiResponse api_slice(int plate, bool all);
     ApiResponse api_send(int plate, const std::string& form_body);
+    ApiResponse api_send_preview(int plate, const std::string& form_body); // slice_v1 PR B
     ApiResponse api_printer_control(const std::string& printer, const std::string& form_body);
     ApiResponse api_jobs(int id);
     // Ultra: the G-code archive (GcodeArchive). Local paths never leave the instance.

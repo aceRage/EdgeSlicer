@@ -1644,6 +1644,56 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive_preview(const std::string& i
     return r;
 }
 
+// slice_v1: a plate send's mapping sheet, nothing sent (RemoteSend::preview_plate). Form
+// printer={id}[&mode=print|upload][&live=1][&ams_mapping=][&mapping=][&use_ams=&bed_leveling=&flow_cali=
+// &timelapse=&nozzle_offset_cali=][&force=1]. One preview or send at a time. A Bambu preview
+// selects (connects) the printer only with live=1; otherwise it uses the PC's current state of it.
+RemoteAccess::ApiResponse RemoteAccess::api_send_preview(int plate, const std::string& form_body)
+{
+    ApiResponse r;
+    auto get = [&](const char* k) { return query_param(form_body, k); };
+    auto tri = [&](const char* k) { const std::string v = get(k); return v.empty() ? -1 : ((v == "1" || v == "true") ? 1 : 0); };
+    RemoteSend::Request req;
+    req.plate              = plate;
+    req.printer            = get("printer");
+    req.mode               = get("mode");
+    req.force              = get("force") == "1";
+    req.ams_mapping        = get("ams_mapping");
+    req.mapping            = get("mapping");
+    req.unload_at_end      = get("unload_at_end");
+    req.bed_leveling       = tri("bed_leveling");
+    req.flow_cali          = tri("flow_cali");
+    req.timelapse          = tri("timelapse");
+    req.use_ams            = tri("use_ams");
+    req.nozzle_offset_cali = tri("nozzle_offset_cali");
+    // Only live=1 selects and connects a Bambu printer; otherwise the PC's current state of it is used.
+    req.live               = get("live") == "1" || get("live") == "true";
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_send_running) { r.status = 409; r.body = json_error("a send is already running; wait for it to finish"); return r; }
+        m_send_running = true;
+    }
+    nlohmann::json              out;
+    std::pair<int, std::string> result(500, "not run");
+    take_error();
+    try {
+        result = RemoteSend::preview_plate(req, out);
+    } catch (const std::exception& e) {
+        result = { 500, std::string("preparing the preview failed: ") + e.what() };
+    } catch (...) {
+        result = { 500, "preparing the preview failed" };
+    }
+    { std::lock_guard<std::mutex> lock(m_mutex); m_send_running = false; }
+    if (result.first != 200) {
+        const std::string shown = take_error();
+        r.status = result.first;
+        r.body   = json_error(result.second + (shown.empty() ? "" : ": " + shown));
+        return r;
+    }
+    r.body = out.dump();
+    return r;
+}
+
 // Send the sliced plate to a printer the way the desktop's Print / Send dialogs would, without
 // showing them (RemoteSend). Form: printer=<id>&mode=upload|print[&confirm=1][&force=1][&dry_run=1]
 // [&bed_leveling=&flow_cali=&timelapse=&vibration_cali=&use_ams=][&name=][&mapping=0:1,1:2]
@@ -1670,6 +1720,10 @@ RemoteAccess::ApiResponse RemoteAccess::api_send(int plate, const std::string& f
     req.name           = get("name");
     req.mapping        = get("mapping");
     req.unload_at_end  = get("unload_at_end");
+    // slice_v1: a Bambu plate print with the trays the phone picked on /send/preview
+    // ("<filament>:<ams_id>-<slot_id>,..."); empty = the automatic mapping, as before.
+    req.ams_mapping        = get("ams_mapping");
+    req.nozzle_offset_cali = tri("nozzle_offset_cali");
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_send_running) { r.status = 409; r.body = json_error("a send is already running; wait for it to finish"); return r; }
@@ -2716,7 +2770,8 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/printers/{id}/timelapses/thumbnail?name={file}"}, {"description", "one video's preview picture (image/jpeg or image/png); 404 no_thumbnail when it has none"} },
             { {"method", "GET"},  {"path", "/api/printers/{id}/timelapses/video?name={file}[&download=1]"}, {"description", "the video itself. A single-range Range header is honoured (206 + Content-Range; 416 when it is not in the file), Accept-Ranges: bytes is always sent, Content-Type follows the extension, download=1 adds Content-Disposition: attachment. A Moonraker printer's file is proxied with the Range passed on; a Bambu printer's is copied to this PC's temp folder on the first request (that request is answered from the part that has arrived, so playback starts at once) and every later request for it is answered from that copy. Errors before the first byte are JSON as for the list"} },
             { {"method", "POST"}, {"path", "/api/slice?plate={index}|all"}, {"description", "start slicing one plate (selects it) or all; returns a job id; 409 while slicing"} },
-            { {"method", "POST"}, {"path", "/api/plates/{index}/send"},    {"description", "form printer={id}&mode=upload|print[&confirm=1][&force=1][&dry_run=1][&bed_leveling=0|1&flow_cali=0|1&timelapse=0|1&vibration_cali=0|1&use_ams=0|1][&name=][&mapping=0:1,1:2]: send the sliced plate to a printer exactly like the desktop's Send / Print dialogs (upload = to the printer's storage, print = start it; print needs confirm=1). A Snapmaker over the LAN (printer sm:{id}) takes `mapping` = which toolhead prints each of the file's filaments, defaulting to the colour match its own app makes; returns a job id; 409 unless the plate is sliced and no other send is running"} },
+            { {"method", "POST"}, {"path", "/api/plates/{index}/send"},    {"description", "form printer={id}&mode=upload|print[&confirm=1][&force=1][&dry_run=1][&bed_leveling=0|1&flow_cali=0|1&timelapse=0|1&vibration_cali=0|1&use_ams=0|1][&name=][&mapping=0:1,1:2]: send the sliced plate to a printer exactly like the desktop's Send / Print dialogs (upload = to the printer's storage, print = start it; print needs confirm=1). A Snapmaker over the LAN (printer sm:{id}) takes `mapping` = which toolhead prints each of the file's filaments, defaulting to the colour match its own app makes; an Elegoo CANVAS takes `mapping` = filament:tray position (or as_sliced); a Bambu print takes `ams_mapping` = the AMS slot per filament (<filament>:<ams_id>-<slot_id>, what /send/preview proposes; empty = the automatic mapping) and is then refused (409) when a picked tray cannot print that filament; returns a job id; 409 unless the plate is sliced and no other send is running"} },
+            { {"method", "POST"}, {"path", "/api/plates/{index}/send/preview"}, {"description", "form printer={id}[&mode=print|upload][&live=1][&ams_mapping=][&mapping=][&use_ams=&bed_leveling=&flow_cali=&timelapse=&nozzle_offset_cali=][&force=1]: the send's mapping sheet, nothing sent: {plate, mode, printer {id, name, kind, ...}, mapping_kind ams|toolheads|canvas|none, editable, filaments [{index, type, color, grams, target (a targets id or null), auto, problems []}], targets [{id (the label, A1 / T1 / 1A), label, type|null, color|null, ready, side, wire (the target in the mapping's wire form: <ams>-<slot>, or the toolhead / tray position)}], mapping (the wire form to send back: ams_mapping for ams, mapping for toolheads / canvas), policy (the slot send policy for a CANVAS or a QIDI Box; a QIDI Box is mapping_kind none, editable false: the send always maps it material-first), problems [{filament, code, text}], options, unload_at_end {supported, value} | null, warnings [], can_send}. Every sheet has source live|cached|none, needs_live and ams_age_s (seconds since the printer's last push, null unknown). A Bambu printer adds the reprint sheet's fields (job, trays, colour / tray / side per filament; nozzle_mapping with live=1). Without live=1 a Bambu printer is never selected or connected: the sheet comes from what the PC already holds for it (source cached, when it is online, connected and pushed within 120 s), or is source none with needs_live true, editable false, no targets, can_send false and a plate-level problem printer_unknown|printer_offline|printer_not_connected|printer_state_stale; live=1 selects (connects) it on the PC as a send does. The plate's file is exported either way; a CANVAS or QIDI Box printer is read (never written). 4xx with the reason when the printer cannot take the plate at all"} },
             { {"method", "GET"},  {"path", "/api/events?since={id}"},      {"description", "what this instance's printer watcher has seen, newest last: {events, last_id, watcher}. Each event is {local_id, time, instance, printer {id, name, kind}, kind started|finished|failed|cancelled|paused|resumed|runout|error, severity info|warning|error, title, text, code?, job?}. The hub keeps the merged history of every instance at /events on the phone link. `watcher` says what the live poll has seen: {poll_ms, last_poll, last_poll_ms, printers[{id, kind, online, watched, state, seen_at?}]}, where seen_at is the poll that seeded that printer - until it has one, and until last_poll has moved past it, a change on that printer seeds the watcher instead of making an event"} },
             { {"method", "GET"},  {"path", "/api/jobs"},                   {"description", "recent jobs"} },
             { {"method", "GET"},  {"path", "/api/jobs/{id}"},              {"description", "job state: kind slice|send, running | done | error | cancelled, percent, text; send jobs add printer, mode and result (what was sent, or the composed parameters of a dry run)"} },
@@ -2818,6 +2873,8 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         const size_t      slash = rest.find('/');
         if (slash != std::string::npos && rest.substr(slash) == "/send")
             return api_send(num(rest.substr(0, slash), -1), body.empty() ? query : body);
+        if (slash != std::string::npos && rest.substr(slash) == "/send/preview")
+            return api_send_preview(num(rest.substr(0, slash), -1), body.empty() ? query : body);
     }
     if (path == "/objects/transform" && method == "POST")
         return api_object_transform(body.empty() ? query : body);

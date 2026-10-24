@@ -7,9 +7,12 @@
 
 #include <boost/format.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace Slic3r {
 namespace GUI {
@@ -18,8 +21,10 @@ namespace SliceV1 {
 const std::vector<std::string>& pair_features()
 {
     // slice_v1: the contract (result + cancel + presets type + instances progress + cache headers);
-    // slice_result / slice_cancel: the two sub-features the app checks one by one.
-    static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel" };
+    // slice_result / slice_cancel: the two sub-features the app checks one by one;
+    // slice_send_preview: POST /plates/{i}/send/preview and ams_mapping on a plate send;
+    // slice_preview_live: that preview never selects / connects a Bambu printer without live=1.
+    static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live" };
     return f;
 }
 
@@ -242,6 +247,193 @@ std::string image_cache_headers(const std::string& version, const std::string& e
 std::string result_cache_headers(const std::string& etag)
 {
     return "Cache-Control: private, no-cache\r\nETag: " + etag + "\r\n";
+}
+
+// ---- send preview ----
+
+std::string positions_wire(const std::map<int, int>& choice)
+{
+    std::string out;
+    for (const auto& [filament, pos] : choice) {
+        if (pos < 0) continue;
+        if (!out.empty()) out += ",";
+        out += std::to_string(filament) + ":" + std::to_string(pos);
+    }
+    return out;
+}
+
+nlohmann::json sheet_json(const Sheet& s)
+{
+    nlohmann::json j;
+    j["mapping_kind"] = s.mapping_kind;
+    j["editable"]     = s.editable;
+    // ids must be unique: a target whose id is empty or repeats goes by its wire form instead.
+    std::vector<std::string> ids, wires;
+    for (size_t i = 0; i < s.targets.size(); ++i) {
+        const SheetTarget& t = s.targets[i];
+        wires.push_back(t.wire.empty() ? std::to_string(i) : t.wire);
+        size_t same = 0;
+        for (const SheetTarget& u : s.targets) same += (u.id == t.id) ? 1 : 0;
+        ids.push_back(t.id.empty() || same > 1 ? wires.back() : t.id);
+    }
+    auto or_null = [](const std::string& v) { return v.empty() ? nlohmann::json(nullptr) : nlohmann::json(v); };
+    nlohmann::json tj = nlohmann::json::array();
+    for (size_t i = 0; i < s.targets.size(); ++i) {
+        const SheetTarget& t = s.targets[i];
+        tj.push_back({ { "id", ids[i] }, { "label", t.label }, { "type", or_null(t.type) }, { "color", or_null(t.color) },
+                       { "ready", t.ready }, { "side", t.side }, { "wire", wires[i] } });
+    }
+    j["targets"] = tj;
+    nlohmann::json fj = nlohmann::json::array();
+    for (const SheetFilament& f : s.filaments) {
+        nlohmann::json o;
+        o["index"]    = f.index;
+        o["type"]     = f.type;
+        o["color"]    = f.color;
+        o["grams"]    = round2(f.grams);
+        const auto c   = s.choice.find(f.index);
+        const int  pos = c == s.choice.end() ? -1 : c->second;
+        o["target"]   = pos >= 0 && pos < (int) s.targets.size() ? nlohmann::json(ids[size_t(pos)]) : nlohmann::json(nullptr);
+        const auto a   = s.automatic.find(f.index);
+        o["auto"]     = pos >= 0 && a != s.automatic.end() && a->second == pos;
+        nlohmann::json pj = nlohmann::json::array();
+        const auto p   = s.problems.find(f.index);
+        if (p != s.problems.end())
+            for (const std::string& t : p->second) pj.push_back(t);
+        o["problems"] = pj;
+        fj.push_back(o);
+    }
+    j["filaments"] = fj;
+    // The reprint sheet's top-level list as well: {filament, code, text}.
+    nlohmann::json all = nlohmann::json::array();
+    for (const auto& [filament, texts] : s.problems)
+        for (const std::string& t : texts)
+            // filament -1 is the plate as a whole: the slot send policy's verdict (CANVAS, QIDI Box).
+            all.push_back({ { "filament", filament }, { "code", filament < 0 ? "policy" : "mapping" }, { "text", t } });
+    j["problems"]  = all;
+    j["mapping"]   = s.mapping;
+    j["policy"]    = s.policy;
+    j["warnings"]  = s.warnings;
+    j["can_send"]  = s.can_send;
+    return j;
+}
+
+static std::string upper(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char) std::toupper(c); });
+    return s;
+}
+
+void check_toolheads(Sheet& s, bool force)
+{
+    const int heads = (int) s.targets.size();
+    for (const SheetFilament& f : s.filaments) {
+        const auto c   = s.choice.find(f.index);
+        const int  pos = c == s.choice.end() ? -1 : c->second;
+        std::vector<std::string> probs;
+        // RemoteSend::prepare_snapmaker's refusals, in its words.
+        if (pos < 0)
+            probs.push_back("filament " + std::to_string(f.index + 1) + " has no toolhead; every filament the file uses needs one");
+        else if (heads > 0 && pos >= heads)
+            probs.push_back("the printer has " + std::to_string(heads) + " toolheads, so there is no toolhead " + std::to_string(pos + 1));
+        else if (heads > 0 && !s.targets[size_t(pos)].ready && !force)
+            probs.push_back("toolhead " + std::to_string(pos + 1) + " is empty; load it, pick another, or send anyway");
+        else if (heads > 0 && !f.type.empty() && !s.targets[size_t(pos)].type.empty() && upper(f.type) != upper(s.targets[size_t(pos)].type))
+            s.warnings.push_back("Filament " + std::to_string(f.index + 1) + " (" + f.type + ") prints from toolhead " + std::to_string(pos + 1) +
+                                 ", which holds " + s.targets[size_t(pos)].type + ".");
+        if (!probs.empty()) s.problems[f.index] = probs;
+    }
+    s.can_send = s.problems.empty();
+    s.mapping  = positions_wire(s.choice);
+}
+
+void decorate_ams_preview(nlohmann::json& p)
+{
+    p["mapping_kind"] = "ams";
+    p["editable"]     = true;
+    // The trays as plate-sheet targets: id = the tray's name ("A1", "HT-A"), wire = its "<ams>-<slot>".
+    std::vector<SheetTarget> trays;
+    if (p.contains("trays") && p["trays"].is_array())
+        for (const auto& t : p["trays"]) {
+            SheetTarget st;
+            st.id    = t.value("name", std::string());
+            st.label = st.id;
+            st.type  = t.value("type", std::string());
+            st.color = t.value("colour", std::string());
+            st.ready = t.value("ready", false);
+            st.side  = t.value("side", std::string());
+            st.wire  = t.value("id", std::string());
+            trays.push_back(st);
+        }
+    Sheet only_targets;
+    only_targets.targets = trays;
+    p["targets"]         = sheet_json(only_targets)["targets"];
+    std::map<std::string, std::string> id_of_wire;
+    for (const auto& t : p["targets"]) id_of_wire[t.value("wire", std::string())] = t.value("id", std::string());
+    if (p.contains("filaments") && p["filaments"].is_array())
+        for (auto& f : p["filaments"]) {
+            f["color"] = f.value("colour", std::string());
+            const auto tray = f.find("tray");
+            if (tray != f.end() && tray->is_string()) {
+                const auto it = id_of_wire.find(tray->get<std::string>());
+                f["target"]   = it != id_of_wire.end() ? nlohmann::json(it->second) : nlohmann::json(tray->get<std::string>());
+            } else
+                f["target"] = nullptr;
+        }
+    if (!p.contains("policy")) p["policy"] = "";
+}
+
+std::string preview_tense(std::string text)
+{
+    // The send refusals (qidi_send_refusal, ElegooCanvasMapping's plan.refusal) report what happened;
+    // a preview says what would happen. Longest phrases first.
+    static const std::pair<const char*, const char*> swaps[] = {
+        { "so this plate was not sent or started", "so this plate would not be sent or started" },
+        { "Nothing was sent and the print was not started", "Nothing would be sent and the print would not be started" },
+        { "nothing was sent and the print was not started", "nothing would be sent and the print would not be started" },
+        { "the print was not started", "the print would not be started" },
+        { "no slot was picked", "no slot would be picked" },
+        { "was not sent", "would not be sent" },
+    };
+    for (const auto& [from, to] : swaps)
+        for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + std::strlen(to)))
+            text.replace(at, std::strlen(from), to);
+    return text;
+}
+
+std::string cached_state_problem(const CachedPrinter& c, double max_age_s)
+{
+    if (!c.known) return "printer_unknown";
+    if (!c.online) return "printer_offline";
+    if (!c.connected) return "printer_not_connected";
+    if (c.age_s < 0. || c.age_s > max_age_s) return "printer_state_stale";
+    return "";
+}
+
+static std::string no_state_text(const std::string& reason)
+{
+    if (reason == "printer_unknown") return "The PC does not know this printer.";
+    if (reason == "printer_offline") return "The printer is offline.";
+    if (reason == "printer_state_stale") return "The PC has not heard from this printer recently, so its AMS may have changed.";
+    return "The PC is not connected to this printer, so its AMS is not known.";
+}
+
+nlohmann::json no_state_sheet(const std::vector<SheetFilament>& filaments, const std::string& reason, double age_s)
+{
+    Sheet s;
+    s.mapping_kind = "ams";
+    s.editable     = false;
+    s.filaments    = filaments;
+    s.can_send     = false;
+    s.warnings.push_back("Check the printer to read its AMS (the PC connects to it), or send with the automatic mapping.");
+    nlohmann::json j = sheet_json(s);
+    j["problems"]    = nlohmann::json::array({ { { "filament", -1 }, { "code", reason }, { "text", no_state_text(reason) } } });
+    j["source"]      = "none";
+    j["needs_live"]  = true;
+    j["ams_age_s"]   = age_s >= 0. ? nlohmann::json(std::round(age_s)) : nlohmann::json(nullptr);
+    j["options"]     = nlohmann::json::object();
+    j["unload_at_end"] = nullptr;
+    return j;
 }
 
 } // namespace SliceV1
