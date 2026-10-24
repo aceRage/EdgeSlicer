@@ -730,7 +730,8 @@ bool GLGizmoCut3D::render_slider_two_input(const std::string& label, float& valu
 
     double left_width = m_label_width + slider_with + item_in_gap;
 
-    bool m_imperial_units = false;
+    // EDGE: no local `m_imperial_units = false` shadowing the member here - the slider follows the
+    // "use inches" preference like the rest of the panel (see render_double_input()).
 
     float value = value_in;
     if (m_imperial_units)
@@ -798,7 +799,8 @@ bool GLGizmoCut3D::render_slider_input(const std::string& label, float& value_in
 
     double left_width = m_label_width + slider_with + item_in_gap;
 
-    bool m_imperial_units = false;
+    // EDGE: no local `m_imperial_units = false` shadowing the member here - the slider follows the
+    // "use inches" preference like the rest of the panel (see render_double_input()).
 
     float value = value_in;
     float max_value = max_val;
@@ -942,7 +944,10 @@ indexed_triangle_set GLGizmoCut3D::its_make_groove_plane()
 
     float slot_mouth_outer_x = slot_neck_half_width + flap_taper_offset; // upper_x extension
     float slot_neck_outer_x = slot_mouth_half_width + flap_taper_offset; // lower_x extension
-    float slot_outer_x_max   = Max(slot_neck_outer_x, slot_mouth_outer_x);  // max x extension
+    // EDGE: upstream wrote Max(slot_neck_outer_x, slot_mouth_outer_x), a helper neither tree defines.
+    // It is half the width Cut::calculate_groove_width() gives, which is also what the cut spaces the
+    // dovetails by, so take it from there and the preview cannot drift from the cut.
+    const float slot_outer_x_max = 0.5f * Cut::calculate_groove_width(m_groove, float(m_radius));
 
     float slot_neck_inner_x = slot_neck_half_width - flap_taper_offset; // upper_x narrowing
     float slot_mouth_inner_x = slot_mouth_half_width - flap_taper_offset; // lower_x narrowing
@@ -5512,6 +5517,10 @@ void GLGizmoCut3D::on_load(cereal::BinaryInputArchive& ar)
     ar( m_keep_upper, m_keep_lower, m_rotate_lower, m_rotate_upper, m_hide_cut_plane, mode, m_connectors_editing,
         m_ar_plane_center, m_rotation_m,
         groove_depth, groove_width, groove_flaps_angle, groove_angle, groove_depth_tolerance, groove_width_tolerance);
+    // EDGE (OrcaSlicer #12318 left these out): the dovetail count and gap ride the undo stack too.
+    int   groove_count = m_groove_count;
+    float groove_gap   = m_groove_gap;
+    ar(groove_count, groove_gap);
 
     m_start_dragging_m = m_rotation_m;
 
@@ -5526,8 +5535,12 @@ void GLGizmoCut3D::on_load(cereal::BinaryInputArchive& ar)
             !is_approx(m_groove.flaps_angle    , groove_flaps_angle) ||
             !is_approx(m_groove.angle          , groove_angle) ||
             !is_approx(m_groove.depth_tolerance, groove_depth_tolerance) ||
-            !is_approx(m_groove.width_tolerance, groove_width_tolerance) ) 
+            !is_approx(m_groove.width_tolerance, groove_width_tolerance) ||
+            m_groove_count != groove_count ||
+            !is_approx(m_groove_gap, groove_gap) )
         {
+            m_groove_count          = groove_count;
+            m_groove_gap            = groove_gap;
             m_groove.depth          = groove_depth;
             m_groove.width          = groove_width;
             m_groove.flaps_angle    = groove_flaps_angle;
@@ -5547,6 +5560,7 @@ void GLGizmoCut3D::on_save(cereal::BinaryOutputArchive& ar) const
     ar( m_keep_upper, m_keep_lower, m_rotate_lower, m_rotate_upper, m_hide_cut_plane, m_mode, m_connectors_editing,
         m_ar_plane_center, m_start_dragging_m,
         m_groove.depth, m_groove.width, m_groove.flaps_angle, m_groove.angle, m_groove.depth_tolerance, m_groove.width_tolerance);
+    ar(m_groove_count, m_groove_gap);
 }
 
 std::string GLGizmoCut3D::on_get_name() const
@@ -7786,10 +7800,16 @@ void GLGizmoCut3D::render_groove_int_input(const std::string& label, int& in_val
     ImGui::AlignTextToFramePadding();
     ImGui::SameLine(m_label_width);
     ImGui::PushItemWidth(m_control_width);
-    if (ImGui::InputInt("##int_input", &in_val, 1, 5)) {
-        in_val = std::clamp(in_val, min_val, max_val);
-
-        is_changed = true;
+    // EDGE: edit a copy and snapshot BEFORE writing it back, so Ctrl+Z returns to the old count
+    // (upstream changed it in place with no snapshot, and on_save() did not carry it).
+    int val = in_val;
+    if (ImGui::InputInt("##int_input", &val, 1, 5)) {
+        val = std::clamp(val, min_val, max_val);
+        if (val != in_val) {
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), GUI::format("%1%: %2%", _u8L("Groove change"), label), UndoRedo::SnapshotType::GizmoAction);
+            in_val     = val;
+            is_changed = true;
+        }
     }
     
     ImGui::SameLine();
@@ -8030,7 +8050,7 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
 
             ImGui::Spacing();
             m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, m_labels_map["Multiple"] + ": ");
-            render_groove_int_input(m_labels_map["Count"], m_groove_count, m_groove_count_init , 1, 100);
+            render_groove_int_input(m_labels_map["Count"], m_groove_count, m_groove_count_init, 1, GrooveCountMax);
             render_groove_float_input(m_labels_map["Gap"], m_groove_gap, m_groove_gap_init, m_groove_count == 1);
 
             m_imgui->disabled_begin(true);
@@ -8038,8 +8058,9 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
             m_imgui->text(m_labels_map["Spacing"]);
             ImGui::SameLine(m_label_width);
             std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2) << (m_groove_gap + groove_width);
-            m_imgui->text(oss.str() + "mm");        
+            const double spacing = double(m_groove_gap + groove_width) * (m_imperial_units ? GizmoObjectManipulation::mm_to_in : 1.0);
+            oss << std::fixed << std::setprecision(m_imperial_units ? 4 : 2) << spacing;
+            m_imgui->text(oss.str() + " " + (m_imperial_units ? _u8L("in") : _u8L("mm")));
             m_imgui->disabled_end();
         }
 

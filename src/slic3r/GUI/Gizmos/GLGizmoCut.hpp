@@ -132,6 +132,9 @@ class GLGizmoCut3D : public GLGizmoBase
     bool m_is_slider_editing_done { false };
 
     // Multiple Dovetail cuts
+    // EDGE (owner, 2026-10-24): at most 20 dovetails. Every Count / Gap change re-runs the whole
+    // groove cut for the part preview (process_contours()), about seven plane cuts per dovetail.
+    static constexpr int GrooveCountMax { 20 };
     int m_groove_count_init { 1 };
     int m_groove_count { 1 };
     float m_groove_gap { 10.f }; // distance between multiple dovetail cuts
