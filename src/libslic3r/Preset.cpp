@@ -1581,6 +1581,13 @@ void PresetCollection::load_presets(
         std::string                        reason;
         ConfigSubstitutions                substitutions;
         std::exception_ptr                 error;
+
+        // Move-only (ConfigSubstitutions cannot be copied), so vector growth moves the slots.
+        ParsedUserFile()                                  = default;
+        ParsedUserFile(ParsedUserFile &&)                 = default;
+        ParsedUserFile &operator=(ParsedUserFile &&)      = default;
+        ParsedUserFile(const ParsedUserFile &)            = delete;
+        ParsedUserFile &operator=(const ParsedUserFile &) = delete;
     };
     const bool                  prefetch_first_round = !PresetBundle::sequential_load();
     std::vector<ParsedUserFile> prefetched;
