@@ -219,7 +219,6 @@ static std::vector<std::string> s_project_options {
     "filament_colour_mode",
     "wipe_tower_x",
     "wipe_tower_y",
-    "wipe_tower_rotation_angle",
     "curr_bed_type",
     // Bambu two-extruder printers: the printer state synced before slicing (BambuStudio keeps it
     // outside the presets too, PresetBundle::extruder_ams_counts / extruder_nozzle_stat).
@@ -1071,24 +1070,31 @@ PresetsConfigSubstitutions PresetBundle::load_user_presets(std::string user, For
 
     // BBS do not load sla_print
     // BBS: change directoties by design
+    StartupPhase profile("PresetBundle::load_user_presets");
     try {
         std::string print_selected_preset_name = prints.get_selected_preset().name;
         this->prints.load_presets(dir_user_presets, PRESET_PRINT_NAME, substitutions, substitution_rule);
+        profile.mark("process load_presets");
         prints.select_preset_by_name(print_selected_preset_name, false);
+        profile.mark("process select_preset_by_name");
     } catch (const std::runtime_error &err) {
         errors_cummulative += err.what();
     }
     try {
         std::string filament_selected_preset_name = filaments.get_selected_preset().name;
         this->filaments.load_presets(dir_user_presets, PRESET_FILAMENT_NAME, substitutions, substitution_rule);
+        profile.mark("filament load_presets");
         filaments.select_preset_by_name(filament_selected_preset_name, false);
+        profile.mark("filament select_preset_by_name");
     } catch (const std::runtime_error &err) {
         errors_cummulative += err.what();
     }
     try {
         std::string printer_selected_preset_name = printers.get_selected_preset().name;
         this->printers.load_presets(dir_user_presets, PRESET_PRINTER_NAME, substitutions, substitution_rule);
+        profile.mark("machine load_presets");
         printers.select_preset_by_name(printer_selected_preset_name, false);
+        profile.mark("machine select_preset_by_name");
     } catch (const std::runtime_error &err) {
         errors_cummulative += err.what();
     }

@@ -328,6 +328,11 @@ private:
 
     bool is_first_layer() const { return size_t(m_layer_info - m_plan.begin()) == m_first_layer_idx; }
 
+    // Orca #12491: row spacing the wipe-depth planning must assume. toolchange_Wipe() advances the purge
+    // rows by m_extra_flow * m_perimeter_width on the first layer and by m_extra_spacing_wipe * m_perimeter_width
+    // on every later one, so the reserved depth has to use the same factor or the first-layer rows leave gaps.
+    float wipe_planning_spacing(bool first_layer) const { return first_layer ? m_extra_flow : m_extra_spacing_wipe; }
+
 	// Calculates extrusion flow needed to produce required line width for given layer height
 	float extrusion_flow(float layer_height = -1.f) const	// negative layer_height - return current m_extrusion_flow
 	{
@@ -456,7 +461,7 @@ private:
 
     Polygon generate_rib_polygon(const WipeTower::box_coordinates& wt_box);
 
-    WipeTowerInfo::ToolChange set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume);
+    WipeTowerInfo::ToolChange set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume, bool first_layer = false);
 
     void copy_assign_from(const WipeTower2 &other);
     friend void reseat_wipe_tower2_iterators(WipeTower2 &dst, const WipeTower2 &src);
