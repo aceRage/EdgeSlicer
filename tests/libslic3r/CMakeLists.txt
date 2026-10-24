@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
 	test_zip_entry_path.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
+	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
