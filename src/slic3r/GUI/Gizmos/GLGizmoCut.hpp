@@ -135,6 +135,10 @@ class GLGizmoCut3D : public GLGizmoBase
     // EDGE (owner, 2026-10-24): at most 20 dovetails. Every Count / Gap change re-runs the whole
     // groove cut for the part preview (process_contours()), about seven plane cuts per dovetail.
     static constexpr int GrooveCountMax { 20 };
+    // The radius the dovetails are spaced by (Cut::calculate_groove_width()): 0 = this object's own
+    // m_radius; a recipe sets it so a re-edit or a Copy cut keeps the spacing in mm (D5).
+    float m_groove_plane_radius { 0.f };
+    float groove_radius() const { return m_groove_plane_radius > 0.f ? m_groove_plane_radius : float(m_radius); }
     int m_groove_count_init { 1 };
     int m_groove_count { 1 };
     float m_groove_gap { 10.f }; // distance between multiple dovetail cuts

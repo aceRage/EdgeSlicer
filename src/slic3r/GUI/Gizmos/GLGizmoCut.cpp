@@ -947,7 +947,7 @@ indexed_triangle_set GLGizmoCut3D::its_make_groove_plane()
     // EDGE: upstream wrote Max(slot_neck_outer_x, slot_mouth_outer_x), a helper neither tree defines.
     // It is half the width Cut::calculate_groove_width() gives, which is also what the cut spaces the
     // dovetails by, so take it from there and the preview cannot drift from the cut.
-    const float slot_outer_x_max = 0.5f * Cut::calculate_groove_width(m_groove, float(m_radius));
+    const float slot_outer_x_max = 0.5f * Cut::calculate_groove_width(m_groove, groove_radius());
 
     float slot_neck_inner_x = slot_neck_half_width - flap_taper_offset; // upper_x narrowing
     float slot_mouth_inner_x = slot_mouth_half_width - flap_taper_offset; // lower_x narrowing
@@ -5579,6 +5579,9 @@ void GLGizmoCut3D::apply_color_clip_plane_colors()
 void GLGizmoCut3D::on_set_state()
 {
     m_facet_picker.set_active(false); // never leave pick-face armed across open/close
+    // A recipe's dovetail radius belongs to the cut it came with (apply_recipe_to_gizmo(), which
+    // runs after this on a re-edit or a copy); a fresh session spaces by its own object.
+    m_groove_plane_radius = 0.f;
     // The control grid AND the drawn stroke are session state, never persisted
     // (the cut is baked, as a plane cut is), so opening or closing the gizmo
     // starts from the flat surface.
@@ -7549,7 +7552,7 @@ void GLGizmoCut3D::process_contours()
     if (CutMode(m_mode) == CutMode::cutTongueAndGroove) {
         if (has_valid_groove()) {
             Cut cut(model_objects[object_idx], instance_idx, get_cut_matrix(selection));
-            const ModelObjectPtrs& new_objects = cut.perform_with_groove(m_groove, m_rotation_m, m_groove_count, m_groove_gap, m_radius,  true);
+            const ModelObjectPtrs& new_objects = cut.perform_with_groove(m_groove, m_rotation_m, m_groove_count, m_groove_gap, groove_radius(), true);
             if (!new_objects.empty())
                 m_part_selection = PartSelection(new_objects.front(), instance_idx);
         }
@@ -8054,7 +8057,7 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
             render_groove_float_input(m_labels_map["Gap"], m_groove_gap, m_groove_gap_init, m_groove_count == 1);
 
             m_imgui->disabled_begin(true);
-            const float groove_width = Cut::calculate_groove_width(m_groove, m_radius);
+            const float groove_width = Cut::calculate_groove_width(m_groove, groove_radius());
             m_imgui->text(m_labels_map["Spacing"]);
             ImGui::SameLine(m_label_width);
             std::ostringstream oss;
@@ -8946,6 +8949,10 @@ CutRecipe GLGizmoCut3D::build_recipe_from_gizmo(const ModelObject* mo, const Tri
         r.groove.angle_init       = m_groove.angle_init;
         r.groove.depth_tolerance  = m_groove.depth_tolerance;
         r.groove.width_tolerance  = m_groove.width_tolerance;
+        // Version 5: multiple dovetails, and the radius their spacing was computed with.
+        r.groove.count            = m_groove_count;
+        r.groove.gap              = m_groove_gap;
+        r.groove.plane_radius     = groove_radius();
     }
 
     // Shared parameters.
@@ -9103,6 +9110,13 @@ void GLGizmoCut3D::apply_recipe_to_gizmo(const CutRecipe& recipe)
         m_groove.angle_init       = recipe.groove.angle_init;
         m_groove.depth_tolerance  = recipe.groove.depth_tolerance;
         m_groove.width_tolerance  = recipe.groove.width_tolerance;
+        // Version 5 (a <= 4 recipe reads as count 1, gap 10, radius 0 = this object's own).
+        m_groove_count            = std::clamp(recipe.groove.count, 1, GrooveCountMax);
+        m_groove_gap              = recipe.groove.gap;
+        // D5 (owner, 2026-10-24): the dovetails keep the spacing they were cut with, in mm -
+        // on a re-edit, and on Copy cut onto an object of another size, whose own radius
+        // would space them differently. Cleared again in on_set_state().
+        m_groove_plane_radius     = recipe.groove.plane_radius;
         update_plane_model();
         break;
     }
@@ -9665,7 +9679,7 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
 
         Cut cut(cut_mo, instance_idx, get_cut_matrix(selection), attributes);
         const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(mo, m_part_selection.get_cut_parts(), dowels_count):
-                                             cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m, m_groove_count, m_groove_gap, float(m_radius)) :
+                                             cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m, m_groove_count, m_groove_gap, groove_radius()) :
                                              cut_drawn         ? cut.perform_with_draw_stroke(draw_stroke, draw_params) :
                                              cut_curved        ? cut.perform_with_curved_sheet(curved_sheet, cut_thickness, thickness_offset) :
                                                                  cut.perform_with_plane(cut_thickness, thickness_offset);

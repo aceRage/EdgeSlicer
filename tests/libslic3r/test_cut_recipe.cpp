@@ -189,6 +189,10 @@ static CutRecipe recipe_make(CutRecipeKind kind)
         r.groove.angle_init       = 0.1f;
         r.groove.depth_tolerance  = 0.15f;
         r.groove.width_tolerance  = 0.2f;
+        // Version 5: three dovetails, so the round trip has a count, a gap and a radius to lose.
+        r.groove.count            = 3;
+        r.groove.gap              = 7.5f;
+        r.groove.plane_radius     = 33.25f;
     }
 
     // One connector of each kind the panel can place, so the connector list is
@@ -843,12 +847,14 @@ TEST_CASE("Cut recipe: an old recipe's extension angle is unset, not zero", "[Cu
     REQUIRE(r != unset);
 }
 
-TEST_CASE("Cut recipe: version 4 is current and a version 3 recipe still loads", "[CutRecipe]")
+TEST_CASE("Cut recipe: version 5 is current and a version 3 recipe still loads", "[CutRecipe]")
 {
-    REQUIRE(CutRecipeVersion == 4);
+    // Version 5 (OD11, multiple dovetails) added groove fields only.
+    REQUIRE(CutRecipeVersion == 5);
     REQUIRE(cut_recipe_version_supported(3));
     REQUIRE(cut_recipe_version_supported(4));
-    REQUIRE_FALSE(cut_recipe_version_supported(5));
+    REQUIRE(cut_recipe_version_supported(5));
+    REQUIRE_FALSE(cut_recipe_version_supported(6));
 
     // migrate_draw_v2() stamps a version 3 recipe forward WITHOUT touching its
     // numbers: version 4 changed no meanings, only added a field, so the angle, the
@@ -859,7 +865,7 @@ TEST_CASE("Cut recipe: version 4 is current and a version 3 recipe still loads",
     r.draw_depth       = 4.5;
     r.draw_through_all = true;
     r.migrate_draw_v2();
-    REQUIRE(r.version == 4);
+    REQUIRE(r.version == CutRecipeVersion);
     REQUIRE(r.draw_angle_deg == Approx(35.0));
     REQUIRE(r.draw_depth == Approx(4.5));
     REQUIRE(r.draw_through_all);
