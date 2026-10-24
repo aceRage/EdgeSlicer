@@ -1355,6 +1355,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                print_extruder_id))
     ((ConfigOptionStrings,             print_extruder_variant))
     ((ConfigOptionFloat,               brim_object_gap))
+    ((ConfigOptionFloat,               brim_flow_ratio))
     ((ConfigOptionBool,                brim_use_efc_outline))
     ((ConfigOptionEnum<BrimType>,      brim_type))
     ((ConfigOptionFloat,               brim_width))

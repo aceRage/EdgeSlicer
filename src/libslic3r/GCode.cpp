@@ -10435,6 +10435,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         _mm3_per_mm *= m_config.over_support_flow;
     else if (path.role() == erInternalBridgeInfill)
         _mm3_per_mm *= m_config.internal_bridge_flow;
+    else if (path.role() == erBrim)
+        _mm3_per_mm *= m_config.brim_flow_ratio;
     else if (sloped)
         _mm3_per_mm *= m_config.scarf_joint_flow_ratio;
     // Effective extrusion length per distance unit = (filament_flow_ratio/cross_section) * mm3_per_mm / print flow ratio
