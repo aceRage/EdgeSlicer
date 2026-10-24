@@ -1069,6 +1069,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/OctoPrint.hpp
     Utils/PresetUpdater.cpp
     Utils/PresetUpdater.hpp
+    Utils/VendorInstallStamp.cpp
+    Utils/VendorInstallStamp.hpp
     Utils/PrintHost.cpp
     Utils/PrintHost.hpp
     Utils/PrintHostDevices.cpp

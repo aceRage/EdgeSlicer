@@ -1,6 +1,7 @@
 #include "PresetUpdater.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <set>
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -29,6 +30,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp"
 #include "libslic3r/StartupProfile.hpp"
+#include "slic3r/Utils/VendorInstallStamp.hpp"
 #include "common_func/common_func.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -350,6 +352,10 @@ struct PresetUpdater::priv
 	//BBS: refine preset update logic
 	bool install_bundles_rsrc(const std::vector<std::string>& bundles, bool snapshot) const;
 	void check_installed_vendor_profiles() const;
+	// OrcaFilamentLibrary install-on-start decision and its stamp (VendorInstallStamp.hpp).
+	fs::path                     library_install_stamp_path() const;
+	Utils::VendorInstallDecision decide_library_install() const;
+	void                         write_library_install_stamp(bool install_ok) const;
     Updates get_printer_config_updates(bool update = false) const;
 	Updates get_config_updates(const Semver& old_slic3r_version) const;
 	bool perform_updates(Updates &&updates, bool snapshot = true) const;
@@ -1413,8 +1419,16 @@ void PresetUpdater::priv::check_installed_vendor_profiles() const
     const auto enabled_vendors = app_config->vendors();
 
     std::set<std::string> bundles;
-    // Orca: always install filament library
-    bundles.insert(PresetBundle::ORCA_FILAMENT_LIBRARY);
+    // Orca installed the filament library on every start. It is now reinstalled only when it is
+    // missing, older, or differs from what the last install left behind (VendorInstallStamp.hpp).
+    const std::string library = PresetBundle::ORCA_FILAMENT_LIBRARY;
+    {
+        const Utils::VendorInstallDecision d = decide_library_install();
+        BOOST_LOG_TRIVIAL(info) << "[Orca Updater]: " << library << (d.install ? " install: " : " up to date: ") << d.reason;
+        Slic3r::startup_profile_log("PresetUpdater library_install=" + std::string(d.install ? "1" : "0") + " reason=" + d.reason);
+        if (d.install)
+            bundles.insert(library);
+    }
     for (auto &dir_entry : boost::filesystem::directory_iterator(rsrc_path)) {
         const auto &path = dir_entry.path();
         std::string file_path = path.string();
@@ -1424,6 +1438,9 @@ void PresetUpdater::priv::check_installed_vendor_profiles() const
             // Remove the .json suffix.
             vendor_name.erase(vendor_name.size() - 5);
             if (bundles.find(vendor_name) != bundles.end())continue;
+            // The library was decided above. It is not an "enabled vendor", so falling through
+            // would remove the installed copy as "not installed".
+            if (vendor_name == library) continue;
 
             const auto is_vendor_enabled = (vendor_name == PresetBundle::SM_BUNDLE) // always update configs from resource to vendor for ORCA_DEFAULT_BUNDLE
                                            || (enabled_vendors.find(vendor_name) != enabled_vendors.end());
@@ -1470,8 +1487,70 @@ void PresetUpdater::priv::check_installed_vendor_profiles() const
             Slic3r::startup_profile_log("PresetUpdater::check_installed_vendor_profiles bundles_to_install=" +
                                         std::to_string(bundles.size()) + " (" + names + ")");
         }
-        install_bundles_rsrc(std::vector(bundles.begin(), bundles.end()), false);
+        const bool ok = install_bundles_rsrc(std::vector(bundles.begin(), bundles.end()), false);
+        if (bundles.count(library) != 0)
+            write_library_install_stamp(ok);
     }
+}
+
+fs::path PresetUpdater::priv::library_install_stamp_path() const
+{
+    return fs::path(Slic3r::data_dir()) / "cache" / "vendor_install" / (std::string(PresetBundle::ORCA_FILAMENT_LIBRARY) + ".stamp");
+}
+
+Utils::VendorInstallDecision PresetUpdater::priv::decide_library_install() const
+{
+    const std::string library = PresetBundle::ORCA_FILAMENT_LIBRARY;
+    if (const char *always = std::getenv("ORCA_LIBRARY_ALWAYS_INSTALL"); always && *always && std::string(always) != "0")
+        return {true, "ORCA_LIBRARY_ALWAYS_INSTALL is set"};
+
+    boost::system::error_code ec;
+    const fs::path rsrc_json      = rsrc_path / (library + ".json");
+    const fs::path installed_json = vendor_path / (library + ".json");
+    const fs::path installed_dir  = vendor_path / library;
+
+    Utils::VendorInstallInputs in;
+    in.installed_json_exists   = fs::exists(installed_json, ec);
+    in.installed_dir_has_files = fs::is_directory(installed_dir, ec) && fs::directory_iterator(installed_dir, ec) != fs::directory_iterator();
+    in.resource_version        = read_bundle_version_string(rsrc_json.string());
+    in.installed_version       = in.installed_json_exists ? read_bundle_version_string(installed_json.string()) : std::string();
+    // The digests stat every file on both sides; only take them when the cheap checks pass.
+    if (in.installed_json_exists && in.installed_dir_has_files &&
+        !(!in.resource_version.empty() && Utils::compare_dotted_versions(in.resource_version, in.installed_version) > 0)) {
+        Slic3r::StartupScopedTimer t("PresetUpdater::decide_library_install step=digests");
+        const fs::path stamp = library_install_stamp_path();
+        if (fs::exists(stamp, ec)) {
+            try {
+                Slic3r::load_string_file(stamp, in.stamp_record);
+            } catch (...) {
+                in.stamp_record.clear();
+            }
+        }
+        in.resource_digest  = Utils::tree_stamp_digest((rsrc_path / library).string(), rsrc_json.string());
+        in.installed_digest = Utils::tree_stamp_digest(installed_dir.string(), installed_json.string());
+    }
+    return Utils::decide_vendor_install(in);
+}
+
+void PresetUpdater::priv::write_library_install_stamp(bool install_ok) const
+{
+    const std::string library = PresetBundle::ORCA_FILAMENT_LIBRARY;
+    const fs::path    stamp   = library_install_stamp_path();
+    boost::system::error_code ec;
+    std::string text;
+    if (install_ok)
+        text = Utils::make_vendor_install_stamp(Utils::tree_stamp_digest((rsrc_path / library).string(), (rsrc_path / (library + ".json")).string()),
+                                                Utils::tree_stamp_digest((vendor_path / library).string(), (vendor_path / (library + ".json")).string()));
+    if (text.empty()) {
+        // A failed install, or one whose result could not be listed: forget the old stamp, so the
+        // next start installs again.
+        fs::remove(stamp, ec);
+        return;
+    }
+    fs::create_directories(stamp.parent_path(), ec);
+    std::string err;
+    if (!Slic3r::write_file_atomically(stamp.string(), text, &err))
+        BOOST_LOG_TRIVIAL(warning) << "[Orca Updater]: could not write the library install stamp: " << err;
 }
 
 Updates PresetUpdater::priv::get_printer_config_updates(bool update) const
