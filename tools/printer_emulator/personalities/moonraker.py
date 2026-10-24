@@ -8,10 +8,11 @@ Answers what EdgeSlicer's Moonraker-speaking hosts ask: OctoPrint compatibility 
 Routing, the upload handling and the failure modes are lifted from tests/slic3rutils/
 fake_moonraker.py and tests/phone/mock_u1_controls.py; the command interpreter is in klipper.py.
 """
+import re
 import time
 
 from core.http import Response, moonraker_error
-from core import multipart
+from core import multipart, safety
 from . import klipper
 
 MOONRAKER_VERSION = "v0.9.3-emu"
@@ -36,6 +37,31 @@ FAULTS = [
     {"key": "refuse_start", "label": "Refuse print start", "type": "bool", "help": ""},
     {"key": "timelapse_404", "label": "Timelapse settings 404", "type": "bool", "help": ""},
 ]
+
+
+TIME_RE = re.compile(rb"^;\s*(?:estimated printing time \(normal mode\)|total estimated time|estimated printing time)\s*[=:]\s*(.+?)\s*$",
+                     re.M | re.I)
+
+
+def gcode_meta(data):
+    """What Moonraker's metadata scanner reports and EdgeSlicer reads for percent and time left
+    (MoonrakerProgress): the G-code body's byte range and the slicer's estimate."""
+    meta = {"gcode_start_byte": 0, "gcode_end_byte": len(data)}
+    a = data.find(b"; EXECUTABLE_BLOCK_START")
+    if a >= 0:
+        nl = data.find(b"\n", a)
+        meta["gcode_start_byte"] = nl + 1 if nl >= 0 else a
+    b = data.find(b"; EXECUTABLE_BLOCK_END")
+    if b >= 0:
+        meta["gcode_end_byte"] = b
+    m = TIME_RE.search(data)
+    if m:
+        secs = 0
+        for num, unit in re.findall(rb"(\d+)\s*([dhms])", m.group(1)):
+            secs += int(num) * {b"d": 86400, b"h": 3600, b"m": 60, b"s": 1}[unit]
+        if secs:
+            meta["estimated_time"] = secs
+    return meta
 
 
 def fault_on(faults, key):
@@ -99,7 +125,8 @@ class Moonraker:
 
     def hint(self):
         return {"host_type": self.host_type_hint, "address": "%s:%s" % (self.cfg.get("bind"), self.cfg.get("port")),
-                "printer_preset": self.cfg.get("edgeslicer_preset", "any Klipper printer preset")}
+                "printer_preset": self.cfg.get("edgeslicer_preset", "any Klipper printer preset"),
+                "mac_alias": safety.mac_alias_command(self.cfg.get("bind", ""))}
 
     # ---- objects ----------------------------------------------------------------------------
     def objects(self):
@@ -195,8 +222,9 @@ class Moonraker:
                 f = self.files.get(name)
                 if not f:
                     return moonraker_error(404, "Metadata not available for " + name, kind="files")
-                return Response(200, {"result": {"filename": name, "size": f["size"], "modified": f["stored_at"],
-                                                 "slicer": "EdgeSlicer"}}, kind="files")
+                res = {"filename": name, "size": f["size"], "modified": f["stored_at"], "slicer": "EdgeSlicer"}
+                res.update({k: f[k] for k in ("gcode_start_byte", "gcode_end_byte", "estimated_time") if k in f})
+                return Response(200, {"result": res}, kind="files")
             if p.startswith("/server/files/config/"):
                 return self.config_file(p[len("/server/files/config/"):])
             if p == "/machine/timelapse/settings":
@@ -307,6 +335,7 @@ class Moonraker:
             return moonraker_error(500, "Upload refused on this port (emulator fault upload_8080_only); retry on 8080",
                                    kind="upload", payload={"name": name, "refused": True, "fault": "upload_8080_only"})
         info = self.printer.store.put(self.printer.id, name, data)
+        info.update(gcode_meta(data))
         info["print"] = want_print
         info["root"] = fields.get("root", "gcodes")
         info["api"] = "octoprint" if octoprint else "moonraker"

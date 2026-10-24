@@ -39,6 +39,7 @@ add_executable(${_TEST_NAME}_tests
     elegoo_canvas_mapping_tests.cpp
     third_party_filament_map_tests.cpp
     elegoo_sdcp_tests.cpp
+    emulator_e2e_tests.cpp
     elegoo_camera_tests.cpp
     splash_animation_tests.cpp
     remote_events_tests.cpp
