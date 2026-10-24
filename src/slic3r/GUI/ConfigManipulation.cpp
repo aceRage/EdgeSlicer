@@ -764,8 +764,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool have_infill = config->option<ConfigOptionPercent>("sparse_infill_density")->value > 0;
     // sparse_infill_filament uses the same logic as in Print::extruders()
     for (auto el : { "sparse_infill_pattern", "infill_combination", "fill_multiline","infill_direction",
-        "minimum_sparse_infill_area", "infill_anchor", "infill_anchor_max","infill_shift_step","sparse_infill_rotate_template","symmetric_infill_y_axis"})
+        "minimum_sparse_infill_area", "infill_shift_step","sparse_infill_rotate_template","symmetric_infill_y_axis"})
         toggle_line(el, have_infill);
+
+    // Orca: the concentric patterns follow the surface outline instead of crossing it, so there is
+    // nothing for an infill anchor to attach to. Hide the anchor settings for them.
+    {
+        const InfillPattern anchor_pattern = config->opt_enum<InfillPattern>("sparse_infill_pattern");
+        const bool have_infill_anchor = have_infill && anchor_pattern != ipConcentric && anchor_pattern != ipSpiralInset;
+        toggle_line("infill_anchor", have_infill_anchor);
+        toggle_line("infill_anchor_max", have_infill_anchor);
+    }
 
     bool have_combined_infill = config->opt_bool("infill_combination") && have_infill;
     toggle_line("infill_combination_max_layer_height", have_combined_infill);
