@@ -8029,7 +8029,7 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
     }
 
     // update preset comboboxes in DiffPresetDlg (once it has been built: it reads the bundle when it is)
-    if (DiffPresetDialog* diff_dlg = wxGetApp().mainframe->diff_dialog_if_built())
+    if (DiffPresetDialog* diff_dlg = wxGetApp().mainframe != nullptr ? wxGetApp().mainframe->diff_dialog_if_built() : nullptr)
         diff_dlg->update_presets(m_type);
 }
 
