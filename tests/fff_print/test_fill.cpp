@@ -1898,3 +1898,59 @@ TEST_CASE("Smoothing multiline lightning infill keeps its outlines connected", "
     REQUIRE(smooth.point_count > sharp.point_count);
     REQUIRE(smooth.sharp_turns < sharp.sharp_turns);
 }
+
+// OrcaSlicer #12541: 3D Honeycomb rewrite with optional filled octahedron tops (infill_complete_top).
+TEST_CASE("3D honeycomb fills its octahedron tops only when asked", "[Fill][3DHoneycomb]")
+{
+    CHECK_FALSE(DynamicPrintConfig::full_print_config().opt_bool("infill_complete_top"));
+    CHECK_FALSE(FillParams{}.infill_complete_top);
+
+    auto shape_for = [](bool tops) {
+        Print print;
+        Slic3r::Test::init_and_process_print({Slic3r::make_cube(20, 20, 20)}, print,
+                                            {{"sparse_infill_pattern", "3dhoneycomb"},
+                                             {"sparse_infill_density", "15%"},
+                                             {"infill_complete_top", tops},
+                                             {"layer_height", 0.2}});
+        return sparse_infill_shape(print);
+    };
+    const SparseInfillShape open   = shape_for(false);
+    const SparseInfillShape closed = shape_for(true);
+    const SparseInfillShape again  = shape_for(true);
+    REQUIRE(open.point_count > 0);
+    CAPTURE(open.length, closed.length);
+    // The tops add dense fill on the layers where the pattern turns over, and nothing else changes.
+    CHECK(closed.length > open.length);
+    CHECK(closed.length < 3. * open.length);
+    // Deterministic.
+    CHECK(again.point_count == closed.point_count);
+    CHECK(again.length == closed.length);
+}
+
+TEST_CASE("3D honeycomb fills every layer inside the surface", "[Fill][3DHoneycomb]")
+{
+    const Slic3r::ExPolygon square({Slic3r::Point::new_scale(0, 0), Slic3r::Point::new_scale(30, 0),
+                                    Slic3r::Point::new_scale(30, 30), Slic3r::Point::new_scale(0, 30)});
+    const Slic3r::ExPolygons within = Slic3r::offset_ex(square, float(SCALED_EPSILON));
+    REQUIRE(within.size() == 1);
+    for (const bool tops : {false, true})
+        for (const int multiline : {1, 2})
+            for (int layer = 1; layer <= 60; ++layer) {
+                std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("3dhoneycomb"));
+                filler->spacing = 0.45;
+                filler->z       = 0.2 * layer;
+                filler->layer_id = layer;
+                Slic3r::FillParams params;
+                params.density             = 0.15f;
+                params.dont_adjust         = true;
+                params.layer_height        = 0.2;
+                params.multiline           = multiline;
+                params.infill_complete_top = tops;
+                Slic3r::Surface surface(Slic3r::stInternal, square);
+                const Slic3r::Polylines paths = filler->fill_surface(&surface, params);
+                CAPTURE(tops, multiline, layer);
+                REQUIRE_FALSE(paths.empty());
+                for (const Slic3r::Polyline &path : paths)
+                    CHECK(within.front().contains(path));
+            }
+}
