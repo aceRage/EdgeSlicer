@@ -2722,10 +2722,23 @@ Sidebar::Sidebar(Plater *parent)
     // Fold on LEFT_DOWN (and LEFT_DCLICK), not LEFT_UP. Selection dialogs
     // close on mouse-down, so a leftover LEFT_UP would land on this title
     // and collapse the section.
+    // Orca #14406: clicks right of the first visible title button (and in the gaps between the
+    // buttons) do not fold. The old test fell back to the AMS sync button's position even when it
+    // was hidden; a never-shown button sits at x = 0, so on printers with neither it nor
+    // "Flushing volumes" (U1 and other toolchangers / IDEX, non-Bambu) nothing folded at launch.
+    // Here the title row is AMS sync, Flushing volumes, Color Mixing Match (the add/delete buttons
+    // live in the Filaments row), so the first one shown marks the limit.
     auto toggle_filament_section = [this](wxMouseEvent &e) {
-        if (e.GetPosition().x > (p->m_flushing_volume_btn->IsShown()
-                ? p->m_flushing_volume_btn->GetPosition().x : (p->m_bpButton_ams_filament->GetPosition().x - FromDIP(30))))
+        if (!p || !p->m_panel_filament_content || !m_scrolled_sizer)
             return;
+        for (wxWindow *btn : {static_cast<wxWindow *>(p->m_bpButton_ams_filament), static_cast<wxWindow *>(p->m_flushing_volume_btn),
+                              static_cast<wxWindow *>(p->m_btn_batch_match)}) {
+            if (btn != nullptr && btn->IsShown()) {
+                if (e.GetPosition().x > btn->GetPosition().x)
+                    return;
+                break;
+            }
+        }
         if (p->m_panel_filament_content->GetMaxHeight() == 0)
             p->m_panel_filament_content->SetMaxSize({-1, -1});
         else
@@ -4149,13 +4162,13 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             p_mainframe->load_printer_url(url, apikey);
             if (p_mainframe->m_printer_view) {
                 p_mainframe->m_printer_view->set_devices(ph_model_key, ph_devices, ph_pick);
+                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
                 // The Storage tab shows the files of the printer the page is on (Orca #16156 part A).
                 if (ph_picked && !ph_picked->address.empty())
-                    p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id);
+                    p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id, preset_model);
                 else
-                    p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host");
+                    p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host", preset_model);
                 // The CANVAS card (a Centauri Carbon 1 on Elegoo Link) is for the same printer.
-                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
                 p_mainframe->m_printer_view->set_canvas_device((ph_picked && !ph_picked->address.empty()) ?
                                                                    *ph_picked :
                                                                    PrintHostDevices::from_config(cfg),
@@ -12137,13 +12150,20 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         this->q->Bind(EVT_RESTORE_PROJECT, [this, last = last_backup](wxCommandEvent& e) {
             std::string last_backup = last;
             std::string originfile;
+            // Orca #11419: this event is queued at startup, so a file opened in the meantime (macOS
+            // "Open with" after post_init, another instance handing over a file, the hub) may already
+            // be on the plate. Only start a blank project when nothing has been loaded.
+            auto start_blank_project = [this](int skip_confirm) {
+                if (this->q->get_project_filename().IsEmpty() && this->q->is_empty_project())
+                    // Skips the preset reload; trigger_restore_project()'s callers load the presets first.
+                    this->q->new_project(skip_confirm, true, wxString(), false);
+            };
             // Ultra: a hidden instance must neither prompt nor delete the backup; a person decides later.
             // It still starts from a named, empty project like a visible one (the title bar and the
             // hub list read "Untitled" instead of nothing).
             if (wxGetApp().is_hub_managed() && RemoteAccess::get().hidden() && Slic3r::has_restore_data(last_backup, originfile)) {
                 RemoteAccess::get().raise_attention("an unsaved project from a previous session is waiting to be restored", "manual");
-                // Skips the preset reload; trigger_restore_project()'s callers load the presets first.
-                this->q->new_project(e.GetInt(), true, wxString(), false);
+                start_blank_project(e.GetInt());
                 return;
             }
             if (Slic3r::has_restore_data(last_backup, originfile)) {
@@ -12159,9 +12179,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
                     boost::filesystem::remove_all(last);
             }
             catch (...) {}
-            int skip_confirm = e.GetInt();
-            // Skips the preset reload; trigger_restore_project()'s callers load the presets first.
-            this->q->new_project(skip_confirm, true, wxString(), false);
+            start_blank_project(e.GetInt());
             });
         //wxPostEvent(this->q, wxCommandEvent{EVT_RESTORE_PROJECT});
     }
@@ -26700,6 +26718,11 @@ void Plater::update_print_error_info(int code, std::string msg, std::string extr
 wxString Plater::get_project_filename(const wxString& extension) const
 {
     return p->get_project_filename(extension);
+}
+
+bool Plater::is_empty_project() const
+{
+    return p->model.objects.empty();
 }
 
 wxString Plater::get_export_gcode_filename(const wxString & extension, bool only_filename, bool export_all) const
