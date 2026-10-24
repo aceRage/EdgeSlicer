@@ -1,4 +1,5 @@
 #include "Plater.hpp"
+#include "libslic3r/StartupProfile.hpp"
 #include "AccountStatus.hpp"
 #include "MixedFilamentDialog.hpp"
 #include "MixedFilamentBatchDialog.hpp"
@@ -2271,6 +2272,7 @@ static FilamentSyncTarget filament_sync_target_for_current_preset()
 Sidebar::Sidebar(Plater *parent)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(42 * wxGetApp().em_unit(), -1)), p(new priv(parent))
 {
+    Slic3r::StartupPhase profile("Sidebar ctor");
     Choice::register_dynamic_list("support_filament", &dynamic_filament_list);
     Choice::register_dynamic_list("support_interface_filament", &dynamic_filament_list);
     Choice::register_dynamic_list("wall_filament", &dynamic_filament_list_1_based);
@@ -2308,6 +2310,7 @@ Sidebar::Sidebar(Plater *parent)
     p->scrolled->SetDoubleBuffered(true);
 #endif //__WINDOWS__
 
+    profile.mark("dynamic lists/scrolled panel");
     // add printer
     {
         /***************** 1. create printer title bar    **************/
@@ -2713,6 +2716,7 @@ Sidebar::Sidebar(Plater *parent)
         // Initialize nozzle settings
         update_nozzle_settings();
     }
+    profile.mark("printer section (incl. update_nozzle_settings)");
 
     {
     // add filament title
@@ -2722,10 +2726,23 @@ Sidebar::Sidebar(Plater *parent)
     // Fold on LEFT_DOWN (and LEFT_DCLICK), not LEFT_UP. Selection dialogs
     // close on mouse-down, so a leftover LEFT_UP would land on this title
     // and collapse the section.
+    // Orca #14406: clicks right of the first visible title button (and in the gaps between the
+    // buttons) do not fold. The old test fell back to the AMS sync button's position even when it
+    // was hidden; a never-shown button sits at x = 0, so on printers with neither it nor
+    // "Flushing volumes" (U1 and other toolchangers / IDEX, non-Bambu) nothing folded at launch.
+    // Here the title row is AMS sync, Flushing volumes, Color Mixing Match (the add/delete buttons
+    // live in the Filaments row), so the first one shown marks the limit.
     auto toggle_filament_section = [this](wxMouseEvent &e) {
-        if (e.GetPosition().x > (p->m_flushing_volume_btn->IsShown()
-                ? p->m_flushing_volume_btn->GetPosition().x : (p->m_bpButton_ams_filament->GetPosition().x - FromDIP(30))))
+        if (!p || !p->m_panel_filament_content || !m_scrolled_sizer)
             return;
+        for (wxWindow *btn : {static_cast<wxWindow *>(p->m_bpButton_ams_filament), static_cast<wxWindow *>(p->m_flushing_volume_btn),
+                              static_cast<wxWindow *>(p->m_btn_batch_match)}) {
+            if (btn != nullptr && btn->IsShown()) {
+                if (e.GetPosition().x > btn->GetPosition().x)
+                    return;
+                break;
+            }
+        }
         if (p->m_panel_filament_content->GetMaxHeight() == 0)
             p->m_panel_filament_content->SetMaxSize({-1, -1});
         else
@@ -3623,6 +3640,7 @@ Sidebar::Sidebar(Plater *parent)
     p->m_panel_filament_content->Layout();
     scrolled_sizer->Add(p->m_panel_filament_content, 0, wxEXPAND, 0);
     }
+    profile.mark("filament section (incl. color mix panel)");
 
     // --- Mixed Filaments Panel (Collapsible) ---
     {
@@ -3799,6 +3817,7 @@ Sidebar::Sidebar(Plater *parent)
     p->m_panel_mixed_filaments_title->Hide();
     p->m_panel_mixed_filaments_content->Hide();
     }
+    profile.mark("mixed filaments section");
 
     {
     //add project title
@@ -3855,7 +3874,9 @@ Sidebar::Sidebar(Plater *parent)
     p->m_search_bar->Layout();
     search_sizer->Fit(p->m_search_bar);
 
+    profile.mark("search bar");
     p->m_object_list = new ObjectList(p->scrolled);
+    profile.mark("ObjectList");
     p->m_object_list->Bind(wxCUSTOMEVT_EXIT_SEARCH, [this](wxCommandEvent&) {
 #ifdef __WXGTK__
         this->p->m_search_item->Enable(true);
@@ -3884,6 +3905,7 @@ Sidebar::Sidebar(Plater *parent)
 #endif
     }
 
+    profile.mark("ObjectSettings/SearchObjectDialog");
     p->object_layers = new ObjectLayers(p->scrolled);
     p->object_layers->Hide();
     p->sizer_params->Add(p->object_layers->get_sizer(), 0, wxEXPAND | wxTOP, 0);
@@ -4149,13 +4171,13 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             p_mainframe->load_printer_url(url, apikey);
             if (p_mainframe->m_printer_view) {
                 p_mainframe->m_printer_view->set_devices(ph_model_key, ph_devices, ph_pick);
+                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
                 // The Storage tab shows the files of the printer the page is on (Orca #16156 part A).
                 if (ph_picked && !ph_picked->address.empty())
-                    p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id);
+                    p_mainframe->m_printer_view->set_storage_device(*ph_picked, "ph:" + ph_picked->id, preset_model);
                 else
-                    p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host");
+                    p_mainframe->m_printer_view->set_storage_device(PrintHostDevices::from_config(cfg), "host", preset_model);
                 // The CANVAS card (a Centauri Carbon 1 on Elegoo Link) is for the same printer.
-                const std::string preset_model = printer_model_opt ? printer_model_opt->value : std::string();
                 p_mainframe->m_printer_view->set_canvas_device((ph_picked && !ph_picked->address.empty()) ?
                                                                    *ph_picked :
                                                                    PrintHostDevices::from_config(cfg),
@@ -11639,6 +11661,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     //BBS :partplatelist construction
     , partplate_list(this->q, &model)
 {
+    // Member initialisers above: Sidebar (own marks), NotificationManager, SLAImportDialog,
+    // PartPlateList. Their total is MainFrame::init_tabpanel step=Plater minus this phase.
+    Slic3r::StartupPhase profile("Plater::priv ctor");
     // dark_mode(), not the app setting: a UI theme built on the dark look makes the whole UI dark
     // whatever the setting says, the GL toolbar and ImGui included.
     m_is_dark = wxGetApp().dark_mode();
@@ -11699,13 +11724,18 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     });
     main_frame->m_tabpanel->Bind(wxEVT_NOTEBOOK_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
 
+    profile.mark("aui/background process/binds");
     auto* panel_3d = new wxPanel(q);
     view3D = new View3D(panel_3d, bed, &model, config, &background_process);
+    profile.mark("View3D");
     //BBS: use partplater's gcode
     preview = new Preview(panel_3d, bed, &model, config, &background_process, partplate_list.get_current_slice_result(), [this]() { schedule_background_process(); });
+    profile.mark("Preview");
 
     assemble_view = new AssembleView(panel_3d, bed, &model, config, &background_process);
+    profile.mark("AssembleView");
     showcase_view = new ShowcaseView(panel_3d, bed, &model, config, &background_process);
+    profile.mark("ShowcaseView");
 
 #ifdef __APPLE__
     // BBS
@@ -11744,6 +11774,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     });
 
     update();
+    profile.mark("timers + update()");
 
     // Orca: Make sidebar dockable
     m_aui_mgr.AddPane(sidebar, wxAuiPaneInfo()
@@ -11760,8 +11791,10 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     // change to the view3D/preview/assemble_view sizer above. Hidden by default: only relevant
     // while that gizmo is active with a layer using the "Unwrap (LSCM)" projection method (see
     // Plater::show_uv_editor()), so it stays out of the way of everyone else's window layout.
+    profile.mark("sidebar aui pane");
     uv_editor_panel  = new UVEditorPanel(q);
     uv_editor_canvas = uv_editor_panel->canvas();
+    profile.mark("UVEditorPanel");
     m_aui_mgr.AddPane(uv_editor_panel, wxAuiPaneInfo()
                                             .Name("uv_editor")
                                             .Caption(_L("UV Editor"))
@@ -11818,7 +11851,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         m_aui_mgr.Update();
     }
 
+    profile.mark("3D panel sizer/aui main pane/SavePerspective");
     menus.init(main_frame);
+    profile.mark("menus.init");
 
 
     // Events:
@@ -11839,6 +11874,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         );
     }
 
+    profile.mark("editor block after menus");
     wxGLCanvas* view3D_canvas = view3D->get_wxglcanvas();
     //BBS: GUI refactor
     wxGLCanvas* preview_canvas = preview->get_wxglcanvas();
@@ -12045,12 +12081,16 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     }
 
     // Drop target:
+    profile.mark("canvas event binds");
     q->SetDropTarget(new PlaterDropTarget(*main_frame, *q));   // if my understanding is right, wxWindow takes the owenership
     q->Layout();
+    profile.mark("drop target + q->Layout()");
 
     apply_color_mode();
+    profile.mark("apply_color_mode");
 
     set_current_panel(wxGetApp().is_editor() ? static_cast<wxPanel*>(view3D) : static_cast<wxPanel*>(preview));
+    profile.mark("set_current_panel");
 
     // updates camera type from .ini file
     camera.enable_update_config_on_type_change(true);
@@ -12123,6 +12163,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     // Initialize the Undo / Redo stack with a first snapshot.
     //this->take_snapshot("New Project", UndoRedo::SnapshotType::ProjectSeparator);
     // Reset the "dirty project" flag.
+    profile.mark("camera/mouse3d/hid/drive binds");
     m_undo_redo_stack_main.mark_current_as_saved();
     dirty_state.update_from_undo_redo_stack(false);
     //this->take_snapshot("New Project");
@@ -12137,13 +12178,20 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         this->q->Bind(EVT_RESTORE_PROJECT, [this, last = last_backup](wxCommandEvent& e) {
             std::string last_backup = last;
             std::string originfile;
+            // Orca #11419: this event is queued at startup, so a file opened in the meantime (macOS
+            // "Open with" after post_init, another instance handing over a file, the hub) may already
+            // be on the plate. Only start a blank project when nothing has been loaded.
+            auto start_blank_project = [this](int skip_confirm) {
+                if (this->q->get_project_filename().IsEmpty() && this->q->is_empty_project())
+                    // Skips the preset reload; trigger_restore_project()'s callers load the presets first.
+                    this->q->new_project(skip_confirm, true, wxString(), false);
+            };
             // Ultra: a hidden instance must neither prompt nor delete the backup; a person decides later.
             // It still starts from a named, empty project like a visible one (the title bar and the
             // hub list read "Untitled" instead of nothing).
             if (wxGetApp().is_hub_managed() && RemoteAccess::get().hidden() && Slic3r::has_restore_data(last_backup, originfile)) {
                 RemoteAccess::get().raise_attention("an unsaved project from a previous session is waiting to be restored", "manual");
-                // Skips the preset reload; trigger_restore_project()'s callers load the presets first.
-                this->q->new_project(e.GetInt(), true, wxString(), false);
+                start_blank_project(e.GetInt());
                 return;
             }
             if (Slic3r::has_restore_data(last_backup, originfile)) {
@@ -12159,9 +12207,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
                     boost::filesystem::remove_all(last);
             }
             catch (...) {}
-            int skip_confirm = e.GetInt();
-            // Skips the preset reload; trigger_restore_project()'s callers load the presets first.
-            this->q->new_project(skip_confirm, true, wxString(), false);
+            start_blank_project(e.GetInt());
             });
         //wxPostEvent(this->q, wxCommandEvent{EVT_RESTORE_PROJECT});
     }
@@ -12204,7 +12250,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     //    bool is_collapsed = wxGetApp().app_config->get("collapsed_sidebar") == "1";
     //    sidebar->collapse(is_collapsed);
     //}
+    profile.mark("undo stack/backup/instance binds");
     update_sidebar(true);
+    profile.mark("update_sidebar(true)");
 }
 
 Plater::priv::~priv()
@@ -19152,6 +19200,7 @@ void Plater::priv::sync_model_wipe_tower_from_config()
     // This is a workaround until we refactor the Wipe Tower position / orientation to live solely inside the Model, not in the Print config.
     // BBS: add partplate logic
     if (this->printer_technology == ptFFF) {
+        const DynamicPrintConfig& print_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
         const DynamicPrintConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
         const ConfigOptionFloats* tower_x_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_x");
         const ConfigOptionFloats* tower_y_opt = proj_cfg.option<ConfigOptionFloats>("wipe_tower_y");
@@ -19162,7 +19211,7 @@ void Plater::priv::sync_model_wipe_tower_from_config()
             ModelWipeTower& tower = model.wipe_tower;
 
             tower.positions[plate_idx] = Vec2d(tower_x_opt->get_at(plate_idx), tower_y_opt->get_at(plate_idx));
-            tower.rotation = proj_cfg.opt_float("wipe_tower_rotation_angle");
+            tower.rotation = print_cfg.opt_float("wipe_tower_rotation_angle");
         }
     }
 }
@@ -19331,7 +19380,7 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
             ModelWipeTower& tower = model.wipe_tower;
 
             tower.positions[plate_idx] = Vec2d(tower_x_opt->get_at(plate_idx), tower_y_opt->get_at(plate_idx));
-            tower.rotation = proj_cfg.opt_float("wipe_tower_rotation_angle");
+            tower.rotation = config.opt_float("wipe_tower_rotation_angle");
         }
     }
     const int layer_range_idx = it_snapshot->snapshot_data.layer_range_idx;
@@ -26700,6 +26749,11 @@ void Plater::update_print_error_info(int code, std::string msg, std::string extr
 wxString Plater::get_project_filename(const wxString& extension) const
 {
     return p->get_project_filename(extension);
+}
+
+bool Plater::is_empty_project() const
+{
+    return p->model.objects.empty();
 }
 
 wxString Plater::get_export_gcode_filename(const wxString & extension, bool only_filename, bool export_all) const

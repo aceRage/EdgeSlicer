@@ -410,6 +410,12 @@ Mathematical, isotropic surface providing equal strength in all directions. Exce
 
 ![infill-top-gyroid](https://github.com/SoftFever/OrcaSlicer/blob/main/doc/images/fill/infill-top-gyroid.png?raw=true)
 
+<a name="gyroid-optimized"></a>
+
+### Z-buckling bias optimization
+
+Experimental option for the Gyroid sparse infill (off by default). It draws the gyroid from its implicit surface and tightens the wave along the Z (vertical) axis at low infill densities, so the vertical columns of the pattern are shorter and resist buckling better under Z-axis compression. Filament use stays about the same as plain Gyroid at the same density. The effect fades out as the density rises and stops at about 30% sparse infill density and above.
+
 ## Concentric
 
 Fills the area with progressively smaller versions of the outer contour, creating a concentric pattern. Ideal for 100% infill or flexible prints.

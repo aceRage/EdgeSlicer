@@ -67,6 +67,12 @@ struct Record
 };
 Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
+// Decide, once at start-up, whether this copy may start or take over the hub (HubHandover::decide_hub_mode:
+// --take-hub > --no-hub > env > marker file next to the exe > normal) and log which rule applied.
+void init_hub_mode(bool no_hub_flag, bool take_hub_flag);
+// True when this copy is a client only: ensure_running() just asks for the running hub, set_phone() /
+// new_link() / post_state() / quit() leave it alone. The GUI says so instead of starting one.
+bool no_hub();
 void disable_spawn(); // from now on ensure_running() never spawns a hub and returns a dead Info (CLI render jobs)
 Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it, or for one
                                                                  // already starting (up to HubHandover::START_DEADLINE_MS)

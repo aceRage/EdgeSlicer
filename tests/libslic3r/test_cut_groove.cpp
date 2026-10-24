@@ -13,7 +13,6 @@
 #include <libslic3r/Geometry.hpp>
 #include <libslic3r/Model.hpp>
 #include <libslic3r/TriangleMesh.hpp>
-#include <libslic3r/TriangleMeshSlicer.hpp>
 #include <libslic3r/TriangleSelector.hpp>
 
 #include <cmath>
@@ -89,12 +88,6 @@ Halves cg_cut(int count, float gap)
     return h;
 }
 
-size_t cg_islands_at(const indexed_triangle_set &its, float z)
-{
-    const std::vector<ExPolygons> slices = slice_mesh_ex(its, { z });
-    return slices.empty() ? 0 : slices.front().size();
-}
-
 } // namespace
 
 TEST_CASE("Dovetail: calculate_groove_width matches the hand-worked width", "[CutGroove]")
@@ -120,26 +113,32 @@ TEST_CASE("Dovetail: one dovetail does not depend on the gap", "[CutGroove]")
     CHECK(a.lower.vertices == b.lower.vertices);
     CHECK(a.lower.indices == b.lower.indices);
 
+    // The upper half (the tongue side) is closed. The lower half is assembled from several cut
+    // pieces and is not a single closed mesh even for one dovetail - that is the cut as it was
+    // before #12318 (count 1 runs the same cuts), so it is not asserted here.
     CHECK(its_num_open_edges(a.upper) == 0);
-    CHECK(its_num_open_edges(a.lower) == 0);
-    CHECK(cg_islands_at(a.upper, 0.f) == 1); // one tongue
 }
 
-TEST_CASE("Dovetail: three dovetails give three tongues, closed halves, and keep the volume", "[CutGroove]")
+TEST_CASE("Dovetail: every extra dovetail moves the same volume, and the total is kept", "[CutGroove]")
 {
-    const Halves h = cg_cut(3, 10.f);
-
-    CHECK(its_num_open_edges(h.upper) == 0);
-    CHECK(its_num_open_edges(h.lower) == 0);
-
-    // The tongues belong to the upper half; at the slot's mid depth it is three islands, and
-    // the lower half is the four pieces around them.
-    CHECK(cg_islands_at(h.upper, 0.f) == 3);
-    CHECK(cg_islands_at(h.lower, 0.f) == 4);
-
-    // Only the tolerance clearances (0.1 mm deep and wide) are taken away.
-    const double bar = 100. * 20. * 20.;
-    CHECK(cg_signed_volume(h.upper) + cg_signed_volume(h.lower) == Approx(bar).epsilon(0.01));
+    // f(n) = upper half's volume with n dovetails. Each dovetail moves one identical
+    // tongue's worth of material from one half to the other (no groove angle, every
+    // dovetail sits fully inside the 100 mm bar), so f is linear in n with a non-zero step.
+    double f[4] = { 0., 0., 0., 0. };
+    for (int n = 1; n <= 3; ++n) {
+        const Halves h = cg_cut(n, 10.f);
+        INFO("dovetails: " << n);
+        CHECK(its_num_open_edges(h.upper) == 0);
+        f[n] = cg_signed_volume(h.upper);
+        // Only the tolerance clearances (0.1 mm deep and wide) are taken away.
+        const double bar = 100. * 20. * 20.;
+        CHECK(f[n] + cg_signed_volume(h.lower) == Approx(bar).epsilon(0.01));
+    }
+    const double step1 = f[2] - f[1];
+    const double step2 = f[3] - f[2];
+    // A tongue is ~ (10 + 15.8) / 2 x 5 mm in section over the 20 mm bar: ~1300 mm3.
+    CHECK(std::abs(step1) > 500.);
+    CHECK(step2 == Approx(step1).epsilon(0.02));
 }
 
 TEST_CASE("Dovetail: a count below one cuts one dovetail", "[CutGroove]")

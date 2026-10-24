@@ -39,6 +39,7 @@ add_executable(${_TEST_NAME}_tests
     elegoo_canvas_mapping_tests.cpp
     third_party_filament_map_tests.cpp
     elegoo_sdcp_tests.cpp
+    emulator_e2e_tests.cpp
     elegoo_camera_tests.cpp
     splash_animation_tests.cpp
     remote_events_tests.cpp
@@ -77,6 +78,7 @@ add_executable(${_TEST_NAME}_tests
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
+    vendor_install_stamp_tests.cpp
     plate_recentre_tests.cpp
     bed_texture_pool_tests.cpp
     bambu_config_compat_tests.cpp
@@ -126,6 +128,7 @@ add_executable(${_TEST_NAME}_tests
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
     printer_storage_tests.cpp
+    elegoo_sdcp_files_tests.cpp
     u1_local_first_tests.cpp
     u1_moonraker_probe_tests.cpp
     u1_ws_route_tests.cpp
