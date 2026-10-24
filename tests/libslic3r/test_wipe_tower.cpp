@@ -8,6 +8,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "libslic3r/BoundingBox.hpp"
@@ -956,3 +957,56 @@ TEST_CASE("Stagger off is a no-op against the #184 path, including near-edge SEM
     check_tower_extrusions(g_edge, print_edge, 215., 10.);
 }
 
+
+// Orca #12491: toolchange_Wipe() advances the first-layer purge rows by the extra flow alone, and every
+// later layer by the extra spacing. The depth reserved for a first-layer wipe has to use the same factor.
+namespace {
+
+// Depth of a tower planned from the given (z, old tool, new tool, wipe volume) steps at a wipe_tower_extra_spacing.
+// Ramming is off: its depth scales with the spacing on every layer, which is not what is under test.
+float planned_tower_depth(double extra_spacing, const std::vector<std::tuple<float, unsigned, unsigned, float>> &steps)
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 3.));
+    object->config.set("extruder", 1);
+    object->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    object->ensure_on_bed();
+
+    DynamicPrintConfig config = stagger_slice_config(false);
+    config.set_deserialize_strict({ { "wipe_tower_extra_spacing", extra_spacing }, { "wipe_tower_extra_flow", 100 },
+                                    { "enable_filament_ramming", "0" } });
+    Print print;
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+
+    const std::vector<std::vector<float>> flush{ { 0.f, 150.f }, { 150.f, 0.f } };
+    WipeTower2 tower(print.config(), print.default_region_config(), 0, Vec3d::Zero(), flush, 0);
+    tower.set_extruder(0, print.config());
+    tower.set_extruder(1, print.config());
+    for (const auto &[z, from, to, volume] : steps)
+        tower.plan_toolchange(z, 0.3f, from, to, volume);
+    std::vector<std::vector<WipeTower::ToolChangeResult>> result, local_z_result;
+    tower.generate(result, local_z_result);
+    return tower.get_depth();
+}
+
+} // namespace
+
+TEST_CASE("A first-layer wipe reserves the depth it consumes, whatever the extra spacing", "[WipeTower][FirstLayerSpacing]")
+{
+    const std::vector<std::tuple<float, unsigned, unsigned, float>> first_layer_only{ { 0.3f, 0, 1, 150.f } };
+    const float at_100 = planned_tower_depth(100., first_layer_only);
+    const float at_150 = planned_tower_depth(150., first_layer_only);
+    REQUIRE(at_100 > 5.f);
+    CHECK_THAT(at_150, WithinAbs(at_100, 1e-3f));
+}
+
+TEST_CASE("Layers above the first still reserve the extra spacing", "[WipeTower][FirstLayerSpacing]")
+{
+    const std::vector<std::tuple<float, unsigned, unsigned, float>> two_layers{ { 0.3f, 0, 1, 150.f }, { 0.6f, 1, 0, 150.f } };
+    const float at_100 = planned_tower_depth(100., two_layers);
+    const float at_150 = planned_tower_depth(150., two_layers);
+    REQUIRE(at_100 > 5.f);
+    CHECK(at_150 > at_100 + 3.f);
+}
