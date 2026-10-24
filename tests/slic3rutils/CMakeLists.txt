@@ -77,6 +77,7 @@ add_executable(${_TEST_NAME}_tests
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
+    vendor_install_stamp_tests.cpp
     plate_recentre_tests.cpp
     bed_texture_pool_tests.cpp
     bambu_config_compat_tests.cpp
