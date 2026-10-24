@@ -380,3 +380,22 @@ SCENARIO("Original Slic3r Skirt/Brim tests", "[SkirtBrim]") {
     }
 }
 
+// Orca #14403: skirt flow and the per-object skirt offset of a plate without objects must not
+// read m_objects.front().
+TEST_CASE("Skirt flow and per-object skirt offset work on an empty plate", "[SkirtBrim][Orca14403]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_type",               "perobject" },
+        { "skirt_loops",              2 },
+        { "initial_layer_line_width", 0 },
+    });
+    Print print;
+    Model model;
+    print.apply(model, config);
+    REQUIRE(print.objects().empty());
+    CHECK(print.skirt_flow().width() > 0.f);
+    const auto [width, height] = print.object_skirt_offset();
+    CHECK(width == 0.f);
+    CHECK(height == 0.f);
+}
