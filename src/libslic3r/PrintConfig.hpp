@@ -2251,6 +2251,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,             thumbnails))
     // BBS: move from PrintObjectConfig
     ((ConfigOptionBool, independent_support_layer_height))
+    ((ConfigOptionBool,               combine_brims))
     // BBS port: Z overrides X/Y support distance
     ((ConfigOptionBool, top_z_overrides_xy_distance))
     // SoftFever
