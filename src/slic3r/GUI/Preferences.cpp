@@ -1617,7 +1617,6 @@ wxBoxSizer* PreferencesDialog::create_item_link_association(wxWindow* parent, wx
     auto checkbox = new ::CheckBox(parent);
     checkbox->SetToolTip(tooltip);
     checkbox->SetValue(reg_to_current_instance); // If registered to the current instance, checkbox should be checked
-    checkbox->Enable(!reg_to_current_instance); // Since unregistering isn't supported, checkbox is disabled when checked
 
     h_sizer->Add(checkbox, 0, wxALIGN_CENTER, 0);
     h_sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 8);
@@ -1670,8 +1669,11 @@ wxBoxSizer* PreferencesDialog::create_item_link_association(wxWindow* parent, wx
     v_sizer->Add(registered_instance_title, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 60);
 
     checkbox->Bind(wxEVT_TOGGLEBUTTON, [=](wxCommandEvent& e) {
-        wxGetApp().associate_url(url_prefix.ToStdWstring());
-        checkbox->Disable();
+        // ORCA: allow unchecking to remove the association
+        if (checkbox->GetValue())
+            wxGetApp().associate_url(url_prefix.ToStdWstring());
+        else
+            wxGetApp().disassociate_url(url_prefix.ToStdWstring());
         update_current_association_str();
         e.Skip();
     });

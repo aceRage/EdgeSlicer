@@ -511,6 +511,25 @@ SCENARIO("The CANVAS query over a scripted printer", "[ElegooCanvas]")
         }
     }
 
+    GIVEN("a CC1 that is printing (CurrentStatus 1, PrintInfo.Status 13)")
+    {
+        MockSdcp printer;
+        printer.sessions = { { R"({"Status":{"CurrentStatus":[1],"AmsConnectStatus":0,"PrintInfo":{"Status":13}}})" } };
+        const CanvasQueryResult r = canvas_query_over(printer);
+        THEN("the status says so, for the unattended send's busy check")
+        {
+            CHECK(r.no_canvas);
+            CHECK(r.print_state == "printing");
+        }
+    }
+
+    GIVEN("an idle CC1")
+    {
+        MockSdcp printer;
+        printer.sessions = { { status_frame(0) } };
+        CHECK(canvas_query_over(printer).print_state == "standby");
+    }
+
     GIVEN("a status reply without AmsConnectStatus (unknown firmware)")
     {
         MockSdcp printer;

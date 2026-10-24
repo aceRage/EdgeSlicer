@@ -3,6 +3,7 @@ add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     printhost_devices_tests.cpp
     qidi_send_policy_tests.cpp
+    slot_send_policy_tests.cpp
     printhost_error_tests.cpp
     snapmaker_unload_tests.cpp
     snapmaker_probe_tests.cpp
@@ -13,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
     device_model_code_tests.cpp
     login_useragent_tests.cpp
     hub_home_tests.cpp
+    hub_mosaic_tests.cpp
     hub_handover_tests.cpp
     hub_quit_tests.cpp
     web_load_retry_tests.cpp
@@ -119,6 +121,9 @@ add_executable(${_TEST_NAME}_tests
     ff_printer_sources_tests.cpp
     ff_device_pid_tests.cpp
     emboss_font_search_tests.cpp
+    imgui_font_ranges_tests.cpp
+    imgui_tooltip_utf8_tests.cpp
+    emboss_style_preview_tests.cpp
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
     printer_storage_tests.cpp
@@ -134,6 +139,7 @@ add_executable(${_TEST_NAME}_tests
     ams_filament_order_tests.cpp
     favorite_filaments_tests.cpp
     teardown_join_tests.cpp
+    slice_v1_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
@@ -184,6 +190,8 @@ if (wxWidgets_FOUND)
 endif ()
 # chamber_lights_tests.cpp reads the shipped resources/printers/*.json for each model's printer_series.
 target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLIC3R_TEST_RESOURCES_DIR="${PROJECT_SOURCE_DIR}/resources")
+# slice_v1_tests.cpp compares the /result producer with the JSON fixtures next to it.
+target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLICE_V1_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/slice_v1")
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 if (WIN32)

@@ -66,9 +66,11 @@ class Wipe {
 public:
     bool enable;
     Polyline path;
+    // Orca:
     struct RetractionValues{
-        double retractLengthBeforeWipe;
-        double retractLengthDuringWipe;
+        double retraction_length_before_wipe = 0.;
+        double retraction_length_during_wipe = 0.;
+        double retraction_length_after_wipe  = 0.;
     };
 
     Wipe() : enable(false) {}

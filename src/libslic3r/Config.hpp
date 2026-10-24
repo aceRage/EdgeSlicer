@@ -618,7 +618,11 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        return deserialize_float_value(str, this->value);
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value = value;
+        return true;
     }
 
     bool operator==(const ConfigOption &rhs) const override
@@ -804,8 +808,12 @@ public:
     {
         UNUSED(append);
         std::istringstream iss(str);
-        iss >> this->value;
-        return !iss.fail();
+        int value;
+        iss >> value;
+        if (iss.fail())
+            return false;
+        this->value = value;
+        return true;
     }
 
     ConfigOptionInt& operator=(const ConfigOption *opt)
@@ -1013,7 +1021,11 @@ public:
     {
         UNUSED(append);
         // don't try to parse the trailing % since it's optional
-        return deserialize_float_value(str, this->value);
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:
@@ -1124,8 +1136,12 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
+        double value;
+        if (! deserialize_float_value(str, value))
+            return false;
+        this->value   = value;
         this->percent = str.find_first_of("%") != std::string::npos;
-        return deserialize_float_value(str, this->value);
+        return true;
     }
 
 private:
@@ -1288,9 +1304,13 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        char dummy;
-        return sscanf(str.data(), " %lf , %lf %c", &this->value(0), &this->value(1), &dummy) == 2 ||
-               sscanf(str.data(), " %lf x %lf %c", &this->value(0), &this->value(1), &dummy) == 2;
+        char  dummy;
+        Vec2d value = Vec2d::Zero();
+        if (sscanf(str.data(), " %lf , %lf %c", &value(0), &value(1), &dummy) != 2 &&
+            sscanf(str.data(), " %lf x %lf %c", &value(0), &value(1), &dummy) != 2)
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:
@@ -1519,9 +1539,13 @@ public:
     bool deserialize(const std::string &str, bool append = false) override
     {
         UNUSED(append);
-        char dummy;
-        return sscanf(str.data(), " %lf , %lf , %lf %c", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3 ||
-               sscanf(str.data(), " %lf x %lf x %lf %c", &this->value(0), &this->value(1), &this->value(2), &dummy) == 3;
+        char  dummy;
+        Vec3d value = Vec3d::Zero();
+        if (sscanf(str.data(), " %lf , %lf , %lf %c", &value(0), &value(1), &value(2), &dummy) != 3 &&
+            sscanf(str.data(), " %lf x %lf x %lf %c", &value(0), &value(1), &value(2), &dummy) != 3)
+            return false;
+        this->value = value;
+        return true;
     }
 
 private:

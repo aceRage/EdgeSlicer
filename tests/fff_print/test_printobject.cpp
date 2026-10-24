@@ -1,17 +1,21 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Line.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/Print.hpp"
@@ -349,5 +353,210 @@ TEST_CASE("Internal bridge areas keep holes so they are not re-bridged on the ne
             continue;
         CAPTURE(i);
         CHECK(area(intersection(this_bridge, next_bridge)) < max_overlap);
+    }
+}
+
+// Orca #16570: sloping walls shift adjacent infill contours so the solid anchor strip can
+// collapse below a printable width. Edge has no Spiral Inset pattern and no relative_bridge_angle
+// setting, so those GENERATE keys from upstream are dropped.
+TEST_CASE("Internal bridge ends have support along sloping infill boundaries", "[PrintObject][InternalBridge][Regression]")
+{
+    const std::string solid_pattern  = GENERATE("rectilinear", "concentric");
+    const std::string wall_generator = GENERATE("classic", "arachne");
+    const std::string overlap        = GENERATE("-55%", "15%");
+    const double      taper          = GENERATE(0., 0.1);
+    CAPTURE(solid_pattern, wall_generator, overlap, taper);
+    auto config = internal_bridge_config("hilbertcurve");
+    config.set_deserialize_strict({{"infill_wall_overlap", overlap},
+                                   {"internal_solid_infill_pattern", solid_pattern},
+                                   {"wall_generator", wall_generator},
+                                   {"internal_solid_infill_line_width", 0.22},
+                                   {"sparse_infill_line_width", 0.23},
+                                   {"wall_loops", 3},
+                                   {"internal_bridge_angle", 90},
+                                   {"layer_height", 0.02},
+                                   {"initial_layer_print_height", 0.1},
+                                   {"nozzle_diameter", 0.2},
+                                   {"top_shell_layers", 10},
+                                   {"detect_narrow_internal_solid_infill", false},
+                                   {"ensure_vertical_shell_thickness", "none"},
+                                   {"only_one_wall_top", false}});
+    TriangleMesh mesh = make_cylinder(15., 3.);
+    for (Vec3f &vertex : mesh.its.vertices) {
+        const float factor = 1.f - float(taper) * vertex.z() / 3.f;
+        vertex.x() *= factor;
+        vertex.y() *= factor;
+    }
+    Print print;
+    Model model;
+    init_print({mesh}, print, model, config, false);
+    print.process();
+    const PrintObject &object = *print.objects().front();
+    size_t checked = 0;
+    for (size_t i = 1; i < object.layer_count(); ++i) {
+        const auto &regions = object.get_layer(i)->regions();
+        if (std::none_of(regions.begin(), regions.end(), [](const LayerRegion *region) {
+                return !region->fill_surfaces.filter_by_type(stInternalBridge).empty();
+            }))
+            continue;
+        Polygons support;
+        for (const LayerRegion *region : object.get_layer(i - 1)->regions()) {
+            region->perimeters.polygons_covered_by_width(support, 0.f);
+            region->fills.polygons_covered_by_width(support, 0.f);
+        }
+        REQUIRE_FALSE(support.empty());
+        const AABBTreeLines::LinesDistancer<Line> support_tree(to_lines(union_(support)));
+        for (const LayerRegion *region : object.get_layer(i)->regions())
+            for (const ExtrusionEntity *entity : region->fills.flatten().entities) {
+                if (entity->role() != erInternalBridgeInfill)
+                    continue;
+                const auto *path = dynamic_cast<const ExtrusionPath *>(entity);
+                REQUIRE(path != nullptr);
+                // Edge's ExtrusionPath::polyline is already a Polyline (upstream wraps it).
+                for (const Line &line : path->polyline.lines()) {
+                    if (line.length() < scale_(3. * path->width))
+                        continue;
+                    for (const Point &point : {line.a, line.b}) {
+                        CAPTURE(i, point.x(), point.y());
+                        const double gap = unscale<double>(support_tree.distance_from_lines<true>(point)) - 0.5 * path->width;
+                        CHECK(gap <= 0.01);
+                        ++checked;
+                    }
+                }
+            }
+    }
+    REQUIRE(checked > 0);
+}
+
+// Orca #16461: a PrintObject groups copies that share their transformation but the XY shift.
+// Contouring used to skip (or, upstream, throw) when the ModelObject had more than one instance.
+
+static void place_two_cube_instances_apart(Print &print, Model &model)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "zaa_enabled", "1" } });
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(20., 20., 20.));
+    object->add_instance()->set_offset(Vec3d(50., 100., 0.));
+    object->add_instance()->set_offset(Vec3d(80., 100., 0.));
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+}
+
+TEST_CASE("Z contouring slices an object that has several instances", "[PrintObject]")
+{
+    Print print;
+    Model model;
+    place_two_cube_instances_apart(print, model);
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.objects().front()->instances().size() == 2);
+
+    CHECK_NOTHROW(print.process());
+    CHECK(print.objects().front()->is_step_done(posContouring));
+}
+
+TEST_CASE("Z contouring slices instances of one object that are turned differently", "[PrintObject]")
+{
+    Print print;
+    Model model;
+    place_two_cube_instances_apart(print, model);
+    model.objects.front()->instances.back()->set_rotation(Z, PI / 4.);
+    print.apply(model, DynamicPrintConfig(print.full_print_config()));
+    REQUIRE(print.objects().size() == 2);
+
+    CHECK_NOTHROW(print.process());
+    for (const PrintObject *object : print.objects())
+        CHECK(object->is_step_done(posContouring));
+}
+
+static void slice_tilted_box_instances(const std::vector<double> &z_rotations, Print &print, Model &model)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "zaa_enabled", "1" } });
+
+    TriangleMesh box = make_cube(20., 20., 10.);
+    box.rotate_x(float(PI / 12.));
+    ModelObject *object = model.add_object();
+    object->add_volume(std::move(box));
+    for (size_t idx = 0; idx < z_rotations.size(); ++idx) {
+        ModelInstance *instance = object->add_instance();
+        instance->set_offset(Vec3d(50. + 50. * double(idx), 100., 0.));
+        instance->set_rotation(Z, z_rotations[idx]);
+    }
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+}
+
+// Z delta contouring stored on each extrusion point, keyed by XY in the PrintObject frame.
+static std::vector<std::map<std::pair<coord_t, coord_t>, float>> contoured_heights(const PrintObject &object)
+{
+    std::vector<std::map<std::pair<coord_t, coord_t>, float>> heights(object.layer_count());
+    for (size_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx) {
+        auto &layer_heights = heights[layer_idx];
+        std::function<void(const ExtrusionEntity &)> visit = [&](const ExtrusionEntity &entity) {
+            if (const auto *path = dynamic_cast<const ExtrusionPath *>(&entity)) {
+                if (path->z_contoured())
+                    for (const Point &pt : path->polyline.points)
+                        layer_heights[{ pt.x(), pt.y() }] = path->z_contour->z_at(pt);
+            } else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath *>(&entity)) {
+                for (const ExtrusionPath &path : multipath->paths)
+                    visit(path);
+            } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
+                for (const ExtrusionPath &path : loop->paths)
+                    visit(path);
+            } else if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+                for (const ExtrusionEntity *child : collection->entities)
+                    visit(*child);
+            }
+        };
+        for (const LayerRegion *region : object.get_layer(int(layer_idx))->regions()) {
+            visit(region->perimeters);
+            visit(region->fills);
+        }
+    }
+    return heights;
+}
+
+TEST_CASE("Z contouring follows the surface of each instance as it is turned", "[PrintObject]")
+{
+    Print print;
+    Model model;
+    slice_tilted_box_instances({ 0., PI / 2. }, print, model);
+    REQUIRE(print.objects().size() == 2);
+
+    for (const PrintObject *object : print.objects()) {
+        const double z_rotation = object->instances().front().model_instance->get_rotation().z();
+        Print reference;
+        Model reference_model;
+        slice_tilted_box_instances({ z_rotation }, reference, reference_model);
+        REQUIRE(reference.objects().size() == 1);
+
+        const auto heights           = contoured_heights(*object);
+        const auto reference_heights = contoured_heights(*reference.objects().front());
+        REQUIRE(heights.size() == reference_heights.size());
+
+        size_t matched = 0, lifted = 0;
+        for (size_t layer_idx = 0; layer_idx < heights.size(); ++layer_idx) {
+            for (const auto &[xy, z] : heights[layer_idx]) {
+                const auto it = reference_heights[layer_idx].find(xy);
+                if (it == reference_heights[layer_idx].end())
+                    continue;
+                INFO("layer " << layer_idx << ", rotation " << z_rotation);
+                CHECK(std::abs(z - it->second) <= 0.001f);
+                ++matched;
+                if (std::abs(z) > 0.01f)
+                    ++lifted;
+            }
+        }
+        INFO("rotation " << z_rotation);
+        CHECK(matched > 100);
+        CHECK(lifted > 0);
     }
 }

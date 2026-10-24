@@ -1430,3 +1430,31 @@ TEST_CASE("vendors: smart quotes are corrected only when the JSON does not parse
         CHECK(normalize_smart_quotes("\xE2\x80") == "\xE2\x80");                                 // truncated sequence
     }
 }
+
+TEST_CASE("vendors: a mapping starting with = is a fixed value", "[Vendors]")
+{
+    json j = cpl3d_spec_json();
+    j["license"] = "Commercial";
+    j["fields"]["designer"]    = "=N3D";
+    j["fields"]["license"]     = "=";
+    j["fields"]["tags"]        = "= a, b ,a";
+    j["fields"]["description"] = "==x";
+    j["fields"]["id"]          = "=same"; // never a literal: every item would collapse into one
+    const Spec s = spec_from_json(j);
+    json m1 = FakeVendor::model(1, "2026-09-01T00:00:00Z"), m2 = FakeVendor::model(2, "2026-09-02T00:00:00Z");
+    m1["designer"] = "ignored";
+    const std::vector<Item> items = map_items(s, {{"models", {m1, m2}}});
+    REQUIRE(items.size() == 2);
+    for (const Item& i : items) {
+        CHECK(i.designer == "N3D");
+        CHECK(i.license == "Commercial"); // "=" alone is empty, so the connector's default applies
+        CHECK(i.tags == std::vector<std::string>{"a", "b"});
+        CHECK(i.description == "=x");
+    }
+    CHECK(items[0].id != items[1].id);
+    CHECK(to_csv("CPL3D", "CPL3D", items).find(",N3D,Commercial,a; b,") != std::string::npos);
+
+    j["fields"]["designer"] = "author"; // no "=": still a path
+    m1["author"] = "Ann";
+    CHECK(map_items(spec_from_json(j), {{"models", {m1}}})[0].designer == "Ann");
+}

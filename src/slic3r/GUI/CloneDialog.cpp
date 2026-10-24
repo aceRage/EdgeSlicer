@@ -113,6 +113,18 @@ CloneDialog::CloneDialog(wxWindow *parent)
     this->Layout();
     v_sizer->Fit(this);
     wxGetApp().UpdateDlgDarkUI(this);
+
+    // ORCA: Enter inside the copies spinbox behaves exactly like clicking OK.
+    Button *ok_btn = dlg_btns->GetOK();
+    Bind(wxEVT_CHAR_HOOK, [this, ok_btn](wxKeyEvent &e) {
+        const int key = e.GetKeyCode();
+        if ((key == WXK_RETURN || key == WXK_NUMPAD_ENTER) && m_count_spin->GetTextCtrl()->HasFocus() && ok_btn->IsShown()) {
+            wxCommandEvent evt(wxEVT_BUTTON, ok_btn->GetId());
+            ok_btn->GetEventHandler()->ProcessEvent(evt);
+        } else {
+            e.Skip();
+        }
+    });
 }
 
 CloneDialog::~CloneDialog() {}
