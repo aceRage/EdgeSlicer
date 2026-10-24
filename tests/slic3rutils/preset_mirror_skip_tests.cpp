@@ -295,3 +295,164 @@ TEST_CASE("with no Bambu Studio folder the run is clean and stays skipped until 
     write_text(root.path / "BambuStudio" / "user" / "123" / "filament" / "My PLA.json", filament_json("My PLA", "215"));
     CHECK_FALSE(gate.can_skip(mirror_change_fingerprint("")));
 }
+
+// ---- the gate across restarts (startup fast path) ----------------------------------------------
+
+TEST_CASE("the kept gate record matches only its own fingerprint, version and format", "[PresetMirror][MirrorSkip][MirrorGatePersist]")
+{
+    const std::string fp     = "uid=\nsrc=X\nfilament/a.json|10|1\nmanifest=7|2\ndest=\nfilament/a.json|10|3\n";
+    const std::string record = mirror_gate_record("2.4.7.0", fp);
+    REQUIRE_FALSE(record.empty());
+
+    CHECK(mirror_gate_record_allows_skip(record, "2.4.7.0", fp));
+    SECTION("another fingerprint") { CHECK_FALSE(mirror_gate_record_allows_skip(record, "2.4.7.0", fp + "process/b.json|1|1\n")); }
+    SECTION("another app version") { CHECK_FALSE(mirror_gate_record_allows_skip(record, "2.4.8.0", fp)); }
+    SECTION("an empty fingerprint (unlistable) never skips")
+    {
+        CHECK(mirror_gate_record("2.4.7.0", "").empty());
+        CHECK_FALSE(mirror_gate_record_allows_skip(record, "2.4.7.0", ""));
+    }
+    SECTION("an empty or damaged record never skips")
+    {
+        CHECK_FALSE(mirror_gate_record_allows_skip("", "2.4.7.0", fp));
+        CHECK_FALSE(mirror_gate_record_allows_skip("garbage", "2.4.7.0", fp));
+        CHECK_FALSE(mirror_gate_record_allows_skip(record.substr(0, record.size() / 2), "2.4.7.0", fp));
+    }
+    SECTION("another format number")
+    {
+        std::string other = record;
+        const size_t pos  = other.find(" " + std::to_string(kMirrorGateFormat) + "\n");
+        REQUIRE(pos != std::string::npos);
+        other.replace(pos, 1 + std::to_string(kMirrorGateFormat).size(), " " + std::to_string(kMirrorGateFormat + 1));
+        CHECK_FALSE(mirror_gate_record_allows_skip(other, "2.4.7.0", fp));
+    }
+    SECTION("CRLF line ends (a hand-opened file) still match")
+    {
+        std::string crlf;
+        for (char c : record) {
+            if (c == '\n')
+                crlf += '\r';
+            crlf += c;
+        }
+        CHECK(mirror_gate_record_allows_skip(crlf, "2.4.7.0", fp));
+    }
+}
+
+TEST_CASE("the output-folder listing after the manifest line is not part of the source", "[PresetMirror][MirrorSkip][MirrorGatePersist]")
+{
+    const std::string source = "uid=\nsrc=X\nfilament/a.json|10|1\n";
+    // A copy whose file name contains "manifest=" must not move the cut.
+    const std::string a = source + "manifest=7|2\ndest=\nfilament/manifest=odd.json|1|1\n";
+    const std::string b = source + "manifest=9|4\ndest=\nfilament/other.json|5|5\n";
+    CHECK(fingerprint_source_part(a) == source);
+    CHECK(fingerprint_source_part(a) == fingerprint_source_part(b));
+}
+
+TEST_CASE("a start after a clean run skips the mirror until something it reads changes", "[PresetMirror][MirrorSkip][MirrorGatePersist]")
+{
+    TempDir         root;
+    const bfs::path data = root.path / "EdgeSlicer";
+    const bfs::path src  = root.path / "BambuStudio" / "user" / "123" / "filament";
+    bfs::create_directories(data);
+    ScopedDataDir scoped(data.string());
+
+    write_text(src / "My PLA.json", filament_json("My PLA", "215"));
+    write_text(src / "My PLA.info", info_text(100));
+    write_text(src / "My PETG.json", filament_json("My PETG", "240"));
+    write_text(src / "My PETG.info", info_text(100));
+    const bfs::path dst_pla  = data / "user" / "default" / "filament" / "My PLA.json";
+    const bfs::path dst_petg = data / "user" / "default" / "filament" / "My PETG.json";
+    const bfs::path record   = data / "cache" / "preset_mirror_gate.txt";
+
+    // What startup does: no record yet, so it runs; the clean run is kept on disk.
+    std::string before = mirror_change_fingerprint("");
+    CHECK_FALSE(mirror_startup_can_skip(before));
+    MirrorRunResult r = mirror_bambu_user_presets_ex("");
+    REQUIRE(r.clean);
+    CHECK(r.copied == 2);
+    MirrorSkipGate gate;
+    gate.record_run(r.clean, before, mirror_change_fingerprint(""));
+    REQUIRE_FALSE(gate.last().empty());
+    mirror_persist_gate(gate.last());
+    REQUIRE(bfs::exists(record));
+
+    // The next start: nothing changed, so it is skipped, and a run would indeed copy nothing.
+    CHECK(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    {
+        // (Run it anyway to prove the point, then put the record back as a real start would.)
+        const std::string b2 = mirror_change_fingerprint("");
+        MirrorRunResult   r2 = mirror_bambu_user_presets_ex("");
+        CHECK(r2.copied == 0);
+        gate.record_run(r2.clean, b2, mirror_change_fingerprint(""));
+        mirror_persist_gate(gate.last());
+        CHECK(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    }
+
+    SECTION("a preset edited in Bambu Studio while EdgeSlicer was closed")
+    {
+        write_text(src / "My PLA.json", filament_json("My PLA", "225"));
+        write_text(src / "My PLA.info", info_text(200));
+        touch(src / "My PLA.json", 10);
+        touch(src / "My PLA.info", 10);
+        before = mirror_change_fingerprint("");
+        CHECK_FALSE(mirror_startup_can_skip(before));
+        r = mirror_bambu_user_presets_ex("");
+        CHECK(r.copied == 1);
+        CHECK(read_text(dst_pla) == filament_json("My PLA", "225"));
+    }
+    SECTION("a preset added in Bambu Studio")
+    {
+        write_text(src / "My ABS.json", filament_json("My ABS", "260"));
+        CHECK_FALSE(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    }
+    SECTION("a mirrored copy deleted here (the mirror's output changed)")
+    {
+        bfs::remove(dst_petg);
+        CHECK_FALSE(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    }
+    SECTION("a mirrored copy edited here")
+    {
+        write_text(dst_petg, filament_json("My PETG", "250"));
+        touch(dst_petg, 10);
+        CHECK_FALSE(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    }
+    SECTION("the manifest changed (Re-pull all)")
+    {
+        repull_mirrored_presets();
+        touch(data / "user" / "default" / ".bs_mirror_manifest.json", 10);
+        CHECK_FALSE(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    }
+    SECTION("another login")
+    {
+        CHECK_FALSE(mirror_startup_can_skip(mirror_change_fingerprint("123")));
+    }
+    SECTION("a run that was not clean removes the record")
+    {
+        gate.record_run(false, before, std::string());
+        CHECK(gate.last().empty());
+        mirror_persist_gate(gate.last());
+        CHECK_FALSE(bfs::exists(record));
+        CHECK_FALSE(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    }
+    SECTION("a record written by another app version")
+    {
+        write_text(record, mirror_gate_record("0.0.0.1", mirror_change_fingerprint("")));
+        CHECK_FALSE(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    }
+    SECTION("the record was deleted (cache folder cleared)")
+    {
+        bfs::remove(record);
+        CHECK_FALSE(mirror_startup_can_skip(mirror_change_fingerprint("")));
+    }
+    SECTION("a seeded gate lets a later printer switch skip, and still sees an edit")
+    {
+        MirrorSkipGate after_start;
+        const std::string now = mirror_change_fingerprint("");
+        REQUIRE(mirror_startup_can_skip(now));
+        after_start.seed(now);
+        CHECK(after_start.can_skip(mirror_change_fingerprint("")));
+        write_text(src / "My PETG.json", filament_json("My PETG", "245"));
+        touch(src / "My PETG.json", 10);
+        CHECK_FALSE(after_start.can_skip(mirror_change_fingerprint("")));
+    }
+}
