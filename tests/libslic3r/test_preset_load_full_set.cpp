@@ -9,6 +9,8 @@
 //    against the same system parents (including a child of a detached user preset, #653); and
 //    the same selection afterwards. test_preset_load_determinism.cpp guards the same property on
 //    a small synthetic tree; this one runs the real 50+ vendors, aliases and inherits chains.
+//    Hidden ([.]): copying the 13k-file set and loading it five times takes about 2.5 min, too
+//    long for every test run. Run it with: libslic3r_tests "[PresetLoadFullSet]"
 //
 // 2. Benchmark (hidden, [.][Benchmark]): times load_presets() on the full set in each load mode,
 //    N runs each (ORCA_BENCH_RUNS, default 5), and prints median / min. Run it explicitly:
@@ -261,7 +263,7 @@ const std::string *find_line(const LoadSnapshot &snap, const std::string &prefix
 
 } // namespace
 
-TEST_CASE("The full shipped profile set loads identically in parallel and sequentially", "[Preset][PresetLoadDeterminism][PresetLoadFullSet]")
+TEST_CASE("The full shipped profile set loads identically in parallel and sequentially", "[.][Preset][PresetLoadFullSet]")
 {
     REQUIRE(fs::exists(shipped_profiles_dir()));
     LoadModeGuard  mode_guard;
