@@ -28095,7 +28095,9 @@ void Plater::show_object_info()
 
     #ifndef __WINDOWS__
     if (non_manifold_edges > 0) {
-        info_manifold += into_u8("\n" + _L("Tips:") + "\n" +_L("\"Fix Model\" feature is currently only on Windows. Please repair the model on EdgeSlicer(windows) or CAD softwares."));
+        // info_manifold is a wxString: append the translated text as is, not converted to UTF-8 and back
+        // through the locale's charset (non-Latin translations came out as '?' or garbage, OrcaSlicer #15419).
+        info_manifold += "\n" + _L("Tips:") + "\n" + _L("\"Fix Model\" feature is currently only on Windows. Please repair the model on EdgeSlicer(windows) or CAD softwares.");
     }
     #endif //APPLE & LINUX
 
