@@ -83,6 +83,7 @@ add_executable(${_TEST_NAME}_tests
 	test_elegoo_cc2_profiles.cpp
 	test_elegoo_cc2_toolchange.cpp
 	test_flexi_joint.cpp
+	test_pushfit.cpp
 	test_fuzzy_skin.cpp
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
