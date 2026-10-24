@@ -9384,7 +9384,9 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
                                               only_if(m_rotate_upper, ModelObjectCutAttribute::FlipUpper) |
                                               only_if(m_rotate_lower, ModelObjectCutAttribute::FlipLower) |
                                               only_if(dowels_count > 0, ModelObjectCutAttribute::CreateDowels) |
-                                              only_if(!has_connectors && !cut_with_groove && cut_mo->cut_id.id().invalid(), ModelObjectCutAttribute::InvalidateCutInfo);
+                                              only_if(!has_connectors && !cut_with_groove && cut_mo->cut_id.id().invalid(), ModelObjectCutAttribute::InvalidateCutInfo) |
+                                              // OrcaSlicer #13472: painting survives a cut, always (owner, 2026-10-24).
+                                              ModelObjectCutAttribute::KeepPaint;
 
         // update cut_id for the cut object in respect to the attributes
         update_object_cut_id(cut_mo->cut_id, attributes, dowels_count);
@@ -9423,7 +9425,7 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         }
 
         Cut cut(cut_mo, instance_idx, get_cut_matrix(selection), attributes);
-        const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(m_part_selection.get_cut_parts(), dowels_count):
+        const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(mo, m_part_selection.get_cut_parts(), dowels_count):
                                              cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m) :
                                              cut_drawn         ? cut.perform_with_draw_stroke(draw_stroke, draw_params) :
                                              cut_curved        ? cut.perform_with_curved_sheet(curved_sheet, cut_thickness, thickness_offset) :
