@@ -124,6 +124,13 @@ bool make_boolean(const TriangleMesh &src_mesh, const TriangleMesh &cut_mesh, st
 bool union_all(const std::vector<indexed_triangle_set> &meshes, indexed_triangle_set &out);
 } // namespace mfd
 
+// The boolean chain the Cut tool's generated geometry uses (Flexi joints, push-fit pins):
+// Manifold first, mcut as the fallback - the same order as the Mesh Boolean gizmo. The pieces of
+// the result are merged into `out`. False, with `out` untouched, when both backends fail or the
+// result is empty. `log_tag` names the caller in the log.
+bool make_boolean_chain(const TriangleMesh &a, const TriangleMesh &b, const std::string &op, TriangleMesh &out,
+                        const char *log_tag = "MeshBoolean");
+
 } // namespace MeshBoolean
 } // namespace Slic3r
 #endif // libslic3r_MeshBoolean_hpp_

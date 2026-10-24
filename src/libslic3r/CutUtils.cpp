@@ -352,27 +352,12 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
     return vol;
 }
 
-// Manifold first, mcut as the fallback - the same chain the Mesh Boolean gizmo uses.
+// Manifold first, mcut as the fallback - the same chain the Mesh Boolean gizmo uses. The chain
+// itself lives in MeshBoolean so the push-fit pin's slit shares it.
 static bool flexi_boolean(TriangleMesh& a, const TriangleMesh& b, const std::string& op)
 {
-    std::vector<TriangleMesh> dst;
-    bool ok = MeshBoolean::mfd::make_boolean(a, b, dst, op);
-    if (!ok) {
-        BOOST_LOG_TRIVIAL(warning) << "Flexi joint: Manifold boolean " << op << " failed, falling back to mcut";
-        dst.clear();
-        try {
-            MeshBoolean::mcut::make_boolean(a, b, dst, op);
-        } catch (const std::exception& ex) {
-            BOOST_LOG_TRIVIAL(error) << "Flexi joint: mcut boolean " << op << " failed: " << ex.what();
-            return false;
-        }
-    }
-    if (dst.empty())
-        return false;
-    TriangleMesh out = dst.front();
-    for (size_t i = 1; i < dst.size(); ++ i)
-        out.merge(dst[i]);
-    if (out.empty())
+    TriangleMesh out;
+    if (!MeshBoolean::make_boolean_chain(a, b, op, out, "Flexi joint"))
         return false;
     a = std::move(out);
     return true;
