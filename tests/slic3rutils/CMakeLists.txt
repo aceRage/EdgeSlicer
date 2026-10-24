@@ -39,6 +39,7 @@ add_executable(${_TEST_NAME}_tests
     elegoo_canvas_mapping_tests.cpp
     third_party_filament_map_tests.cpp
     elegoo_sdcp_tests.cpp
+    emulator_e2e_tests.cpp
     elegoo_camera_tests.cpp
     splash_animation_tests.cpp
     remote_events_tests.cpp
@@ -126,6 +127,7 @@ add_executable(${_TEST_NAME}_tests
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
     printer_storage_tests.cpp
+    elegoo_sdcp_files_tests.cpp
     u1_local_first_tests.cpp
     u1_moonraker_probe_tests.cpp
     u1_ws_route_tests.cpp
