@@ -22868,7 +22868,21 @@ void Plater::apply_cut_object_to_model(size_t obj_idx, const ModelObjectPtrs& ne
     sidebar().obj_list()->delete_object_from_list(obj_idx);
 
     // suppress to call selection update for Object List to avoid call of early Gizmos on/off update
-    p->load_model_objects(new_objects, false, false);
+    const std::vector<size_t> loaded = p->load_model_objects(new_objects, false, false);
+
+    // C1: the cut set every result's assembled pose (halves, dowels, pins back where they were
+    // in the uncut object). Loading copies the objects, and a copied instance forgets that its
+    // assembled pose was set, so load_model_objects() just reset it to the plate pose; put the
+    // cut's back.
+    for (size_t i = 0; i < new_objects.size() && i < loaded.size(); ++i) {
+        const ModelObject* src = new_objects[i];
+        if (src == nullptr || loaded[i] >= p->model.objects.size())
+            continue;
+        ModelObject* dst = p->model.objects[loaded[i]];
+        for (size_t k = 0; k < src->instances.size() && k < dst->instances.size(); ++k)
+            if (src->instances[k]->is_assemble_initialized())
+                dst->instances[k]->set_assemble_transformation(src->instances[k]->get_assemble_transformation());
+    }
 
     // now process all updates of the 3d scene
     update();

@@ -510,4 +510,105 @@ std::vector<std::string> pushfit_warnings(const PushFitParams &p, double nozzle_
     return out;
 }
 
+// ------------------------------------------------------------------ storage
+
+namespace {
+
+// The float fields, by attribute name. One table so the writer, the reader and the sanitizer
+// cannot drift apart.
+template<class P, class F> void for_each_float(P &p, F &&f)
+{
+    f("pushfit_diameter",        p.diameter);
+    f("pushfit_length_upper",    p.length_upper);
+    f("pushfit_length_lower",    p.length_lower);
+    f("pushfit_end_chamfer",     p.end_chamfer);
+    f("pushfit_lip_height",      p.lip_height);
+    f("pushfit_lip_width",       p.lip_width);
+    f("pushfit_lip_position",    p.lip_position);
+    f("pushfit_flat_depth",      p.flat_depth);
+    f("pushfit_slot_width",      p.slot_width);
+    f("pushfit_slot_length",     p.slot_length);
+    f("pushfit_clearance_upper", p.clearance_upper);
+    f("pushfit_clearance_lower", p.clearance_lower);
+    f("pushfit_depth_clearance", p.depth_clearance);
+    f("pushfit_mouth_chamfer",   p.mouth_chamfer);
+}
+
+template<class P, class F> void for_each_bool(P &p, F &&f)
+{
+    f("pushfit_lip",             p.lip);
+    f("pushfit_flat_both_sides", p.flat_both_sides);
+    f("pushfit_hole_groove",     p.hole_groove);
+    f("pushfit_pointed_end",     p.pointed_end);
+}
+
+float clampf(float v, float lo, float hi, float def)
+{
+    if (!std::isfinite(v))
+        return def;
+    return std::clamp(v, lo, std::max(lo, hi));
+}
+
+} // namespace
+
+PushFitParams pushfit_sanitize(PushFitParams p)
+{
+    const PushFitParams def;
+    p.diameter        = clampf(p.diameter, 3.f, 50.f, def.diameter);
+    const float D     = p.diameter;
+    p.length_upper    = clampf(p.length_upper, 2.f, 200.f, def.length_upper);
+    p.length_lower    = clampf(p.length_lower, 2.f, 200.f, def.length_lower);
+    p.end_chamfer     = clampf(p.end_chamfer, 0.f, 0.25f * D, def.end_chamfer);
+    p.lip_height      = clampf(p.lip_height, 0.f, 0.249f * D, def.lip_height);
+    p.lip_width       = clampf(p.lip_width, 0.f, 50.f, def.lip_width);
+    p.lip_position    = clampf(p.lip_position, 0.f, 1.f, def.lip_position);
+    p.flat_depth      = clampf(p.flat_depth, 0.f, 0.333f * D, def.flat_depth);
+    p.slot_width      = clampf(p.slot_width, 0.f, D, def.slot_width);
+    p.slot_length     = clampf(p.slot_length, 0.f, 200.f, def.slot_length);
+    p.clearance_upper = clampf(p.clearance_upper, 0.f, 1.f, def.clearance_upper);
+    p.clearance_lower = clampf(p.clearance_lower, 0.f, 1.f, def.clearance_lower);
+    p.depth_clearance = clampf(p.depth_clearance, 0.f, 5.f, def.depth_clearance);
+    p.mouth_chamfer   = clampf(p.mouth_chamfer, 0.f, 0.25f * D, def.mouth_chamfer);
+    if (int(p.cutout) < int(PushFitCutout::None) || int(p.cutout) > int(PushFitCutout::FlatAndSlot))
+        p.cutout = def.cutout;
+    if (int(p.pose) < int(PushFitPose::Auto) || int(p.pose) > int(PushFitPose::Upright))
+        p.pose = def.pose;
+    if (p.preset < int(PushFitPreset::S) || p.preset > int(PushFitPreset::Custom))
+        p.preset = def.preset;
+    return p;
+}
+
+std::vector<std::pair<std::string, double>> pushfit_attributes(const PushFitParams &p)
+{
+    std::vector<std::pair<std::string, double>> out;
+    for_each_float(p, [&out](const char *name, const float &v) { out.emplace_back(name, double(v)); });
+    for_each_bool(p, [&out](const char *name, const bool &v) { out.emplace_back(name, v ? 1. : 0.); });
+    out.emplace_back("pushfit_cutout", double(int(p.cutout)));
+    out.emplace_back("pushfit_pose", double(int(p.pose)));
+    out.emplace_back("pushfit_preset", double(p.preset));
+    return out;
+}
+
+PushFitParams pushfit_from_attributes(const std::function<std::optional<double>(const std::string &)> &get)
+{
+    PushFitParams p;
+    for_each_float(p, [&get](const char *name, float &v) {
+        if (std::optional<double> x = get(name))
+            v = float(*x);
+    });
+    for_each_bool(p, [&get](const char *name, bool &v) {
+        if (std::optional<double> x = get(name); x && std::isfinite(*x))
+            v = *x != 0.;
+    });
+    // Enums: read as numbers and range-checked by pushfit_sanitize() before anything uses them.
+    auto get_int = [&get](const char *name, int def) {
+        std::optional<double> x = get(name);
+        return (x && std::isfinite(*x) && std::abs(*x) < 1e6) ? int(std::lround(*x)) : def;
+    };
+    p.cutout = PushFitCutout(get_int("pushfit_cutout", int(p.cutout)));
+    p.pose   = PushFitPose(get_int("pushfit_pose", int(p.pose)));
+    p.preset = get_int("pushfit_preset", p.preset);
+    return pushfit_sanitize(p);
+}
+
 } // namespace Slic3r

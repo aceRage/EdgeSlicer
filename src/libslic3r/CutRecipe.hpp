@@ -44,6 +44,7 @@
 // FlexiJointParams, carried per connector. Neither CurvedCut.hpp nor DrawCut.hpp
 // pulls it in, so it has to be named here.
 #include <libslic3r/FlexiJoint.hpp>
+#include <libslic3r/PushFit.hpp>
 
 namespace Slic3r {
 
@@ -114,7 +115,14 @@ class ModelObject;
 //     New fields, no changed meanings: a version <= 4 recipe loads as count 1 and
 //     re-cuts identically. The bump is so an OLDER build refuses a version 5 recipe
 //     rather than silently re-cutting a three-dovetail joint as one.
-static constexpr int CutRecipeVersion = 5;
+//  6  the push-fit Pin connector (tests/design_pushfit_connector.md, 2026-10-24):
+//       CutRecipeConnector grew `pushfit` (PushFitParams), meaningful only for the new
+//       connector type PushFit = 5. New fields, no changed meanings: a version <= 5 recipe
+//       has no pins and re-cuts identically. The bump is MANDATORY rather than cosmetic: an
+//       older reader clamps an unknown connector type to 0 (Plug), so a v5 build reading a
+//       pin recipe would silently re-cut every pin as a plug. With 6 it refuses the recipe -
+//       the halves load, "Edit cut" is not offered.
+static constexpr int CutRecipeVersion = 6;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.
@@ -191,13 +199,15 @@ struct CutRecipeConnector
     int         shape{ 0 };  // CutConnectorShape
     // Only meaningful for CutConnectorType::FlexiJoint.
     FlexiJointParams flexi;
+    // Only meaningful for CutConnectorType::PushFit (recipe version 6).
+    PushFitParams    pushfit;
 
     bool operator==(const CutRecipeConnector& o) const;
     bool operator!=(const CutRecipeConnector& o) const { return !(*this == o); }
 
     template<class Archive> void serialize(Archive& ar) {
         ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle,
-           type, style, shape, flexi);
+           type, style, shape, flexi, pushfit);
     }
 };
 
@@ -514,7 +524,8 @@ CutRecipeStroke cut_recipe_stroke_from_chain(const DrawCutChain& chain, double s
 // goes through the identical R' construction, so a connector's own frame stays a
 // proper rotation too. z_angle is negated for a non-Circle shape - a mirrored
 // triangle presents the same polygon turned the other way - and left alone for a
-// Circle, where it means nothing. type (Plug / Dowel / Snap / FlexiJoint) is a
+// Circle, where it means nothing - except for a Pin, whose flats give the round pin an
+// orientation, so its z_angle negates too. type (Plug / Dowel / Snap / FlexiJoint / Pin) is a
 // mating ROLE, not a chirality, and is NEVER touched: a mirrored assembly still
 // needs one plug and one dowel to mate, which is the entire reason the owner
 // wants a mirrored connector layout in the first place.
