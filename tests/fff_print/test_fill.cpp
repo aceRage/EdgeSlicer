@@ -1519,3 +1519,87 @@ TEST_CASE("Spiral inset internal solid infill uses plain loops, not Arachne wall
         }
     CHECK(max_w - min_w > scale_(0.01));
 }
+
+// OrcaSlicer #13379: the optional "Z-buckling bias" gyroid. Our FillGyroid is our own grid-anchored
+// version (#221); the optimized wave is a separate branch and must leave plain gyroid alone.
+namespace {
+
+Slic3r::Polylines gyroid_fill(const Slic3r::ExPolygon &shape, double z, float density, bool optimized)
+{
+    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("gyroid"));
+    filler->spacing = 0.45;
+    filler->angle   = 0.f;
+    filler->z       = z;
+
+    Slic3r::FillParams params;
+    params.density          = density;
+    params.dont_adjust      = true;
+    params.layer_height     = 0.2;
+    params.gyroid_optimized = optimized;
+
+    Slic3r::Surface surface(Slic3r::stInternal, shape);
+    return filler->fill_surface(&surface, params);
+}
+
+double total_length_mm(const Slic3r::Polylines &paths)
+{
+    double length = 0;
+    for (const Slic3r::Polyline &path : paths)
+        length += unscale<double>(path.length());
+    return length;
+}
+
+Slic3r::ExPolygon gyroid_square(double size)
+{
+    return Slic3r::ExPolygon({Slic3r::Point::new_scale(0, 0), Slic3r::Point::new_scale(size, 0),
+                              Slic3r::Point::new_scale(size, size), Slic3r::Point::new_scale(0, size)});
+}
+
+} // namespace
+
+TEST_CASE("Gyroid optimized flag defaults off and leaves plain gyroid unchanged", "[Fill][Gyroid]")
+{
+    CHECK_FALSE(Slic3r::FillParams{}.gyroid_optimized);
+    CHECK_FALSE(Slic3r::DynamicPrintConfig::full_print_config().opt_bool("gyroid_optimized"));
+
+    const Slic3r::ExPolygon square = gyroid_square(30);
+    for (const double z : {0.4, 3.0, 7.2}) {
+        CAPTURE(z);
+        const Slic3r::Polylines a = gyroid_fill(square, z, 0.15f, false);
+        const Slic3r::Polylines b = gyroid_fill(square, z, 0.15f, false);
+        REQUIRE(!a.empty());
+        REQUIRE(a.size() == b.size());
+        for (size_t i = 0; i < a.size(); ++i)
+            CHECK(a[i].points == b[i].points);
+    }
+}
+
+TEST_CASE("Optimized gyroid fills the surface with about the same line length", "[Fill][Gyroid]")
+{
+    const Slic3r::ExPolygon  square = gyroid_square(30);
+    const Slic3r::ExPolygons within = Slic3r::offset_ex(square, float(SCALED_EPSILON));
+    REQUIRE(within.size() == 1);
+
+    for (const float density : {0.1f, 0.15f, 0.3f}) {
+        for (const double z : {0.4, 3.0, 7.2}) {
+            CAPTURE(density, z);
+            const Slic3r::Polylines standard  = gyroid_fill(square, z, density, false);
+            const Slic3r::Polylines optimized = gyroid_fill(square, z, density, true);
+            REQUIRE(!optimized.empty());
+            for (const Slic3r::Polyline &path : optimized)
+                CHECK(within.front().contains(path));
+
+            // "Filament use is preserved": the per-slice line length stays close to plain gyroid.
+            const double l_std = total_length_mm(standard), l_opt = total_length_mm(optimized);
+            CAPTURE(l_std, l_opt);
+            CHECK(l_opt > 0.75 * l_std);
+            CHECK(l_opt < 1.25 * l_std);
+
+            // Deterministic.
+            const Slic3r::Polylines again = gyroid_fill(square, z, density, true);
+            REQUIRE(again.size() == optimized.size());
+            for (size_t i = 0; i < again.size(); ++i)
+                CHECK(again[i].points == optimized[i].points);
+        }
+    }
+}
