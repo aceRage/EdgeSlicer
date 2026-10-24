@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/BrimEarsPoint.hpp"
@@ -18,7 +19,7 @@ using namespace Slic3r;
 // Two 20 mm cubes `gap` mm apart edge to edge, as two objects (`as_instances` false) or as two
 // instances of one object. Edge's init_print() arranges the objects, so these are placed by hand.
 static void place_two_cubes(double gap, bool as_instances, std::initializer_list<ConfigBase::SetDeserializeItem> config_items,
-                            Print &print, Model &model)
+                            Print &print, Model &model, bool validate = true)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(config_items);
@@ -40,7 +41,8 @@ static void place_two_cubes(double gap, bool as_instances, std::initializer_list
         print.auto_assign_extruders(mo);
     }
     print.apply(model, config);
-    print.validate();
+    if (validate)
+        print.validate();
     print.set_status_silent();
 }
 
@@ -658,4 +660,164 @@ TEST_CASE("Nearest-wall brim is not printed twice by the instance brims", "[Skir
     const double nearest_brim = brim_length("nearest_wall");
     REQUIRE(object_brim > 0.);
     CHECK(nearest_brim == Approx(object_brim).epsilon(0.15));
+}
+
+// Orca #14333: the skirt / draft shield prints once per layer it spans (skirt_height layers, or every
+// layer with a draft shield, even at height 0), and per-object skirts print with their own object.
+// Upstream arranges the cubes; Edge places them: 5 mm apart by layer (per-object skirts join), and
+// 60 mm apart by object, past the extruder clearance, where each object keeps its own skirt.
+TEST_CASE("Skirt is emitted once per layer it spans", "[SkirtBrim][Orca14333]")
+{
+    const int object_layers = 100; // 20mm cube at 0.2mm layers
+    const char *skirt_type   = GENERATE("combined", "perobject");
+    const char *print_seq    = GENERATE("by layer", "by object");
+    const char *draft_shield = GENERATE("disabled", "enabled");
+    const int   skirt_height = GENERATE(0, 1, 3);
+
+    DYNAMIC_SECTION(skirt_type << " | " << print_seq << " | draft=" << draft_shield << " | height=" << skirt_height) {
+        const bool by_object  = std::string(print_seq) == "by object";
+        const bool per_object = std::string(skirt_type) == "perobject";
+        const bool draft      = std::string(draft_shield) == "enabled";
+        Print print;
+        Model model;
+        place_two_cubes(by_object ? 60. : 5., false, {
+            { "skirt_loops",    1 },
+            { "skirt_height",   skirt_height },
+            { "skirt_distance", 3 },
+            { "skirt_type",     skirt_type },
+            { "draft_shield",   draft_shield },
+            { "print_sequence", print_seq },
+            { "layer_height",   0.2 },
+            { "brim_type",      "no_brim" },
+        }, print, model);
+        const int layers = draft ? object_layers : skirt_height;
+        // By object, every object prints its own per-object skirt; the combined skirt prints with the first one.
+        CHECK(role_passes(gcode(print), "skirt") == (by_object && per_object ? 2 * layers : layers));
+    }
+}
+
+// Orca #14333: per-object skirts that would overlap become one skirt; far apart objects keep their own.
+TEST_CASE("Per-object skirts group when objects are close", "[SkirtBrim][Orca14333]")
+{
+    const double gap = GENERATE(5., 60.);
+    DYNAMIC_SECTION("gap=" << gap) {
+        Print print;
+        Model model;
+        place_two_cubes(gap, false, {
+            { "skirt_loops",    1 },
+            { "skirt_height",   1 },
+            { "skirt_distance", 3 },
+            { "skirt_type",     "perobject" },
+            { "print_sequence", "by layer" },
+            { "layer_height",   0.2 },
+            { "brim_type",      "no_brim" },
+        }, print, model);
+        CHECK(role_passes(gcode(print), "skirt") == (gap < 10. ? 1 : 2));
+    }
+}
+
+// Orca #14333: by object, a per-object skirt shared by two objects cannot be printed; slicing says so.
+TEST_CASE("By object rejects a per-object skirt shared by two objects", "[SkirtBrim][Orca14333]")
+{
+    Print print;
+    Model model;
+    // Too close for the extruder clearance as well, so skip validate() and slice directly.
+    place_two_cubes(5., false, {
+        { "skirt_loops",    1 },
+        { "skirt_height",   1 },
+        { "skirt_distance", 3 },
+        { "skirt_type",     "perobject" },
+        { "print_sequence", "by object" },
+        { "brim_type",      "no_brim" },
+    }, print, model, false);
+    CHECK_THROWS_AS(print.process(), Slic3r::SlicingError);
+}
+
+// Edge: skirt_loops 0 keeps the default skirt_height 1, which is not a skirt to share.
+TEST_CASE("By object accepts close objects when per-object skirts have no loops", "[SkirtBrim][Orca14333]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(5., false, {
+        { "skirt_loops",    0 },
+        { "skirt_height",   1 },
+        { "skirt_type",     "perobject" },
+        { "print_sequence", "by object" },
+        { "brim_type",      "no_brim" },
+    }, print, model, false);
+    CHECK_NOTHROW(print.process());
+    CHECK_FALSE(print.has_shared_per_object_skirt());
+}
+
+// Orca #14333: Combine brims joins touching brims; separate or far apart brims stay separate.
+TEST_CASE("Combine brims merges touching brims", "[SkirtBrim][Orca14333]")
+{
+    const double gap     = GENERATE(5., 60.);
+    const int    combine = GENERATE(0, 1);
+    DYNAMIC_SECTION("gap=" << gap << " combine_brims=" << combine) {
+        Print print;
+        Model model;
+        place_two_cubes(gap, false, {
+            { "skirt_loops",    1 },
+            { "skirt_height",   1 },
+            { "skirt_distance", 3 },
+            { "skirt_type",     "perobject" },
+            { "print_sequence", "by layer" },
+            { "brim_type",      "outer_only" },
+            { "brim_width",     5 },
+            { "combine_brims",  combine },
+            { "layer_height",   0.2 },
+        }, print, model);
+        print.process();
+        CHECK(brim_count(print) == (gap < 10. && combine ? 1 : 2));
+    }
+}
+
+// Orca #14333: each object's skirt and brim come right before that object, not all skirts then all brims.
+TEST_CASE("By-layer per-object skirt and brim precede each object", "[SkirtBrim][Orca14333]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(60, false, { // far apart: a skirt+brim per object
+        { "skirt_loops",    1 },
+        { "skirt_height",   1 },
+        { "skirt_distance", 3 },
+        { "skirt_type",     "perobject" },
+        { "print_sequence", "by layer" },
+        { "brim_type",      "outer_only" },
+        { "brim_width",     5 },
+        { "layer_height",   0.2 },
+    }, print, model);
+    const std::vector<std::string> expected{ "skirt", "brim", "perimeter", "skirt", "brim", "perimeter" };
+    CHECK(role_sequence(gcode(print), { "skirt", "brim", "perimeter" }) == expected);
+}
+
+// Orca #14333: a combined skirt goes around the brims (they are part of its hull), so it never
+// crosses a brim.
+TEST_CASE("Combined skirt keeps its distance from the brims", "[SkirtBrim][Orca14333]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(30, false, {
+        { "skirt_loops",    1 },
+        { "skirt_height",   1 },
+        { "skirt_distance", 2 },
+        { "skirt_type",     "combined" },
+        { "brim_type",      "outer_only" },
+        { "brim_width",     8 },
+    }, print, model);
+    print.process();
+    REQUIRE(print.skirt().items_count() == 1);
+    Polylines skirt;
+    print.skirt().collect_polylines(skirt);
+    ExPolygons brims;
+    for (const Print::SkirtBrimGroup &group : print.skirt_brim_groups())
+        for (const Print::SkirtBrimGroup::Brim &brim : group.brims) {
+            Polylines paths;
+            brim.brim.collect_polylines(paths);
+            for (const Polyline &path : paths)
+                append(brims, offset_ex(path, float(scale_(0.25))));
+        }
+    REQUIRE_FALSE(brims.empty());
+    CHECK(intersection_pl(skirt, brims).empty());
 }
