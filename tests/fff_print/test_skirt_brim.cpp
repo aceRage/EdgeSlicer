@@ -15,6 +15,83 @@
 using namespace Slic3r::Test;
 using namespace Slic3r;
 
+// Two 20 mm cubes `gap` mm apart edge to edge, as two objects (`as_instances` false) or as two
+// instances of one object. Edge's init_print() arranges the objects, so these are placed by hand.
+static void place_two_cubes(double gap, bool as_instances, std::initializer_list<ConfigBase::SetDeserializeItem> config_items,
+                            Print &print, Model &model)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(config_items);
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    config.set_key_value("machine_start_gcode", new ConfigOptionString(""));
+
+    const Vec3d offsets[] = { Vec3d(80., 80., 0.), Vec3d(80. + 20. + gap, 80., 0.) };
+    ModelObject *object = nullptr;
+    for (const Vec3d &offset : offsets) {
+        if (object == nullptr || !as_instances) {
+            object = model.add_object();
+            object->name = "cube.stl";
+            object->add_volume(make_cube(20., 20., 20.));
+        }
+        object->add_instance()->set_offset(offset);
+    }
+    for (ModelObject *mo : model.objects) {
+        mo->ensure_on_bed();
+        print.auto_assign_extruders(mo);
+    }
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+}
+
+// Number of separate passes of extrusions whose G-code comment names `role` (needs gcode_comments).
+static int role_passes(const std::string &gcode, const std::string &role)
+{
+    int  passes  = 0;
+    bool in_role = false;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self))
+            return;
+        const bool is_role = line.comment().find(role) != std::string_view::npos;
+        if (is_role && !in_role)
+            ++passes;
+        in_role = is_role;
+    });
+    return passes;
+}
+
+// The order in which the given extrusion roles start, consecutive repeats collapsed.
+static std::vector<std::string> role_sequence(const std::string &gcode, const std::vector<std::string> &roles)
+{
+    std::vector<std::string> seq;
+    std::string              current;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self))
+            return;
+        const std::string_view comment = line.comment();
+        for (const std::string &role : roles)
+            if (comment.find(role) != std::string_view::npos) {
+                if (current != role) {
+                    seq.push_back(role);
+                    current = role;
+                }
+                break;
+            }
+    });
+    return seq;
+}
+
+// Distinct brims over all skirt/brim groups (a combined brim covers more than one object or instance).
+static int brim_count(const Print &print)
+{
+    int n = 0;
+    for (const Print::SkirtBrimGroup &group : print.skirt_brim_groups())
+        n += int(group.brims.size());
+    return n;
+}
+
 /// Helper method to find the tool used for the brim (always the first extrusion)
 static int get_brim_tool(const std::string &gcode)
 {
@@ -475,4 +552,110 @@ TEST_CASE("Painted brim ear stays on its edge with the compensated outline", "[S
     const double along = std::abs(dir.dot((bbox.center() - ear_center).cast<double>()));
     INFO("Ear centre is " << unscale<double>(along) << " mm along the edge from where it was painted");
     CHECK(unscale<double>(along) < 1.);
+}
+
+// Orca #14683: two instances of one object get a per-object skirt and a brim each, and touching
+// instance brims combine like the brims of separate objects.
+TEST_CASE("Per-object skirt is generated per instance", "[SkirtBrim][Orca14683]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(60, true, {
+        { "skirt_type",     "perobject" },
+        { "skirt_height",   1 },
+        { "skirt_distance", 2 },
+        { "skirt_loops",    1 },
+        { "brim_type",      "no_brim" },
+    }, print, model);
+    print.process();
+
+    REQUIRE(print.skirt_brim_groups().size() == 2);
+    REQUIRE(print.skirt().items_count() == 2);
+    for (const Print::SkirtBrimGroup &group : print.skirt_brim_groups()) {
+        REQUIRE(group.instances.size() == 1);
+        REQUIRE(group.instances.front().object_id == print.get_object(0)->id());
+    }
+    CHECK(role_passes(gcode(print), "skirt") == 2);
+}
+
+TEST_CASE("Object brims are generated per instance", "[SkirtBrim][Orca14683]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(60, true, {
+        { "skirt_loops",   0 },
+        { "brim_type",     "outer_only" },
+        { "brim_width",    5 },
+        { "combine_brims", 0 },
+    }, print, model);
+    print.process();
+
+    REQUIRE(print.skirt_brim_groups().size() == 1);
+    REQUIRE(print.skirt_brim_groups().front().brims.size() == 2);
+    for (const Print::SkirtBrimGroup::Brim &brim : print.skirt_brim_groups().front().brims) {
+        REQUIRE(brim.instances.size() == 1);
+        REQUIRE(brim.instances.front().object_id == print.get_object(0)->id());
+    }
+    // Each instance's brim prints right before that instance.
+    CHECK(role_sequence(gcode(print), { "brim", "perimeter" }) ==
+          std::vector<std::string>{ "brim", "perimeter", "brim", "perimeter" });
+}
+
+TEST_CASE("Combine brims merges neighboring object instances", "[SkirtBrim][Orca14683]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(5, true, {
+        { "skirt_loops",   0 },
+        { "brim_type",     "outer_only" },
+        { "brim_width",    5 },
+        { "combine_brims", 1 },
+    }, print, model);
+    print.process();
+
+    REQUIRE(print.skirt_brim_groups().size() == 1);
+    REQUIRE(print.skirt_brim_groups().front().brims.size() == 1);
+    REQUIRE(print.skirt_brim_groups().front().brims.front().instances.size() == 2);
+    CHECK(role_sequence(gcode(print), { "brim", "perimeter" }) == std::vector<std::string>{ "brim", "perimeter" });
+}
+
+// Edge: with Brim filament "Nearest wall", the partitioned brim prints only through the
+// per-extruder runs; the per-instance group brims must not print it a second time.
+TEST_CASE("Nearest-wall brim is not printed twice by the instance brims", "[SkirtBrim][Orca14683]")
+{
+    auto brim_length = [](const char *source) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_num_extruders(2);
+        config.set_num_filaments(2);
+        config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+        config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF" };
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+        config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+        config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+        config.set_deserialize_strict({
+            { "skirt_loops",          0 },
+            { "brim_type",            "outer_only" },
+            { "brim_width",           3 },
+            { "brim_filament_source", source },
+            { "gcode_comments",       1 },
+            { "machine_start_gcode",  "" },
+        });
+        Print print;
+        Model model;
+        init_print({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, print, model, config);
+        REQUIRE(model.objects.size() == 2);
+        model.objects[1]->volumes.front()->config.set("extruder", 2);
+        print.apply(model, config);
+        double len = 0.;
+        GCodeReader reader;
+        reader.parse_buffer(gcode(print), [&len](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.extruding(self) && line.comment().find("brim") != std::string_view::npos)
+                len += line.dist_XY(self);
+        });
+        return len;
+    };
+    const double object_brim  = brim_length("object");
+    const double nearest_brim = brim_length("nearest_wall");
+    REQUIRE(object_brim > 0.);
+    CHECK(nearest_brim == Approx(object_brim).epsilon(0.15));
 }

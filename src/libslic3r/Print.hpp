@@ -19,6 +19,7 @@
 #include "GCode/ThumbnailData.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "MultiMaterialSegmentation.hpp"
+#include "ObjectID.hpp"
 #include "MixedFilament.hpp"
 #include "ExtruderAreas.hpp"
 #include "libslic3r.h"
@@ -1284,7 +1285,7 @@ public:
             [object_id](const PrintObject *obj) { return obj->id() == object_id; });
         return (it == m_objects.end()) ? nullptr : *it;
     }
-    //BBS: Function to get m_brimMap;
+    // Orca: Old callers still expect object-keyed brim paths.
     std::map<ObjectID, ExtrusionEntityCollection>&
         get_brimMap() { return m_brimMap; }
     // Chameleon brim: brim runs whose nearest wall belongs to a different
@@ -1304,11 +1305,11 @@ public:
     struct SkirtBrimGroup {
         struct Brim {
             ExtrusionEntityCollection brim;
-            std::vector<ObjectID>     object_ids;
+            std::vector<ObjectInstanceID> instances;
         };
 
         ExtrusionEntityCollection skirt;
-        std::vector<ObjectID>     object_ids;
+        std::vector<ObjectInstanceID> instances;
         // Brims stay separate unless Combine brims merges colliding brims inside this group.
         std::vector<Brim>         brims;
     };
@@ -1493,12 +1494,12 @@ private:
     ExtrusionEntityCollection               m_skirt;
     std::vector<SkirtBrimGroup>             m_skirt_brim_groups;
     bool                                    m_has_shared_per_object_skirt { false };
-    // BBS: collecting extrusion paths to build brim by objs
+    // Orca: Object-keyed brim paths kept for existing code.
     std::map<ObjectID, ExtrusionEntityCollection>         m_brimMap;
-    std::map<ObjectID, ExtrusionEntityCollection>         m_supportBrimMap;
-    // Orca: cached occupied brim footprints used when grouping per-object skirts.
-    std::map<ObjectID, ExPolygons>                        m_objectBrimAreas;
-    std::map<ObjectID, ExPolygons>                        m_supportBrimAreas;
+    // Orca: Actual brim paths keyed by object instance.
+    std::map<ObjectInstanceID, ExtrusionEntityCollection> m_brimMapByInstance;
+    // Orca: Translated brim areas keyed by instance, used to find touching brims.
+    std::map<ObjectInstanceID, ExPolygons>                m_objectBrimAreasByInstance;
     // Chameleon brim: foreign-extruder brim runs partitioned out of m_brimMap,
     // keyed by object then by the extruder that should print them.
     std::map<ObjectID, std::map<unsigned int, ExtrusionEntityCollection>> m_brimMapByExtruder;
