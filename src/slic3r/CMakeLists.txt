@@ -1314,6 +1314,8 @@ if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD)
     # (the linker's /OPT:REF drops them from the binaries anyway). Together they keep this /Z7
     # library under the 4 GB static-library limit, so it stays cacheable: 4.3 GB without /Zc:inline,
     # 3.9 GB with it at 8 sources per batch, 3.4 GB at -DSLIC3R_UNITY_BUILD_BATCH_SIZE=16 (use that).
+    # By 2026-10-24 the code had grown it back to 4.09 GB (LNK1248), so the end of this file also
+    # splits the library in two (libslic3r_gui_part2) for this configuration.
     target_compile_options(libslic3r_gui PRIVATE /Zc:inline)
 elseif (MSVC AND SLIC3R_MSVC_Z7)
     # With /Z7 the debug info embedded in this library pushes it past the 4 GB static-library limit
@@ -1454,3 +1456,53 @@ if (SLIC3R_SENTRY)
     target_compile_definitions(libslic3r_gui PUBLIC SLIC3R_SENTRY)
     target_link_libraries(libslic3r_gui sentry::sentry)
 endif()
+
+# /Z7 unity builds without the PCH (the compiler-cache configuration of the agent build VM; CI,
+# release and Visual Studio builds use /Zi and never take this branch): the debug info embedded in
+# every object put libslic3r_gui.lib over the 4 GB static-library limit (LNK1248, 4.09 GB on
+# 2026-10-24). Move the second half of the C++ sources into a second static library. The split
+# point is a whole number of unity batches, so every batch keeps exactly the neighbours it has in
+# the one-library build. The part copies libslic3r_gui's include directories, definitions and
+# options, and the two link each other (a static-library cycle, which CMake repeats on the link
+# line), so consumers still link only libslic3r_gui. This must stay the last libslic3r_gui setting.
+if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD AND NOT SLIC3R_PCH)
+    get_target_property(_gui_all libslic3r_gui SOURCES)
+    set(_gui_batched 0)
+    foreach (_s IN LISTS _gui_all)
+        if (_s MATCHES "\\.cpp$")
+            get_source_file_property(_skip "${_s}" SKIP_UNITY_BUILD_INCLUSION)
+            if (NOT _skip)
+                math(EXPR _gui_batched "${_gui_batched} + 1")
+            endif ()
+        endif ()
+    endforeach ()
+    math(EXPR _gui_split "(${_gui_batched} / 2 / ${SLIC3R_UNITY_BUILD_BATCH_SIZE}) * ${SLIC3R_UNITY_BUILD_BATCH_SIZE}")
+    set(_gui_keep "")
+    set(_gui_part2 "")
+    set(_gui_seen 0)
+    foreach (_s IN LISTS _gui_all)
+        if (NOT _s MATCHES "\\.cpp$")
+            list(APPEND _gui_keep "${_s}")
+            continue ()
+        endif ()
+        if (_gui_seen LESS _gui_split)
+            list(APPEND _gui_keep "${_s}")
+        else ()
+            list(APPEND _gui_part2 "${_s}")
+        endif ()
+        get_source_file_property(_skip "${_s}" SKIP_UNITY_BUILD_INCLUSION)
+        if (NOT _skip)
+            math(EXPR _gui_seen "${_gui_seen} + 1")
+        endif ()
+    endforeach ()
+    list(LENGTH _gui_part2 _gui_part2_n)
+    message(STATUS "libslic3r_gui: /Z7 unity build, ${_gui_part2_n} sources moved to libslic3r_gui_part2 (4 GB .lib limit)")
+    set_property(TARGET libslic3r_gui PROPERTY SOURCES ${_gui_keep})
+    add_library(libslic3r_gui_part2 STATIC ${_gui_part2})
+    slic3r_unity_build(libslic3r_gui_part2)
+    target_include_directories(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,COMPILE_DEFINITIONS>)
+    target_compile_options(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,COMPILE_OPTIONS>)
+    target_link_libraries(libslic3r_gui_part2 libslic3r_gui)
+    target_link_libraries(libslic3r_gui libslic3r_gui_part2)
+endif ()
