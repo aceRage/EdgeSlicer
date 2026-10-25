@@ -472,7 +472,7 @@ TEST_CASE("Cut paint: a dovetail cut keeps paint on both halves", "[CutPaint]")
     g.angle       = 0.f;
 
     Cut cut(mo, 0, Transform3d::Identity(), CP_HALVES | ModelObjectCutAttribute::KeepPaint);
-    const ModelObjectPtrs &res = cut.perform_with_groove(g, Transform3d::Identity());
+    const ModelObjectPtrs &res = cut.perform_with_groove(g, Transform3d::Identity(), 1, 10.f, 30.f);
     REQUIRE(res.size() == 2);
 
     // The dovetail's profile shows on the +X face, but the halves still partition it.
