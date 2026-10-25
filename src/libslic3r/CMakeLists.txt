@@ -240,6 +240,8 @@ set(lisbslic3r_sources
     Fill/FillSpiralInset.hpp
     Fill/FillConcentricInternal.cpp
     Fill/FillConcentricInternal.hpp
+    Fill/FillCornerSmoothing.cpp
+    Fill/FillCornerSmoothing.hpp
     FDMHollowing.cpp
     FDMHollowing.hpp
     Fill/Fill.cpp
@@ -258,6 +260,8 @@ set(lisbslic3r_sources
     Fill/FillPlanePath.hpp
     Fill/FillRectilinear.cpp
     Fill/FillRectilinear.hpp
+    Fill/AdaptiveInfillField.cpp
+    Fill/AdaptiveInfillField.hpp
     Fill/FillTpmsD.cpp
     Fill/FillTpmsD.hpp
     Fill/FillTpmsFK.cpp
@@ -689,6 +693,8 @@ set(lisbslic3r_sources
     TriangleMeshSlicer.hpp
     TriangleSelector.cpp
     TriangleSelector.hpp
+    SpreadPaint.cpp
+    SpreadPaint.hpp
     TriangleSetSampling.cpp
     TriangleSetSampling.hpp
     TriangulateWall.cpp

@@ -26,6 +26,7 @@
 #include "Fill/Fill.hpp"
 #include "Fill/FillLightning.hpp"
 #include "Format/STL.hpp"
+#include "Fill/AdaptiveInfillField.hpp"
 #include "format.hpp"
 
 #include <algorithm>
@@ -1024,6 +1025,38 @@ FillLightning::GeneratorPtr PrintObject::prepare_lightning_infill_data()
     return has_lightning_infill ? FillLightning::build_generator(std::as_const(*this), [this]() -> void { this->throw_if_canceled(); }) : FillLightning::GeneratorPtr();
 }
 
+AdaptiveInfillFields PrintObject::prepare_adaptive_infill_fields() const
+{
+    AdaptiveInfillFields fields;
+    std::array<bool, size_t(AdaptiveInfillMode::Count)> modes{};
+    for (size_t region_id = 0; region_id < this->num_printing_regions(); ++region_id)
+        if (const PrintRegionConfig &config = this->printing_region(region_id).config();
+            config.sparse_infill_density > 0 && config.sparse_infill_density < 100 && is_adaptive_infill_pattern(config.sparse_infill_pattern))
+            modes[size_t(config.adaptive_infill_mode.value)] = true;
+    modes[size_t(AdaptiveInfillMode::Disabled)] = false;
+    if (std::find(modes.begin(), modes.end(), true) == modes.end() || m_layers.empty())
+        return fields;
+
+    std::vector<AdaptiveInfillField::Slice> slices;
+    slices.reserve(m_layers.size());
+    BoundingBox bbox;
+    for (const Layer *layer : m_layers) {
+        slices.push_back({layer->bottom_z(), layer->print_z, &layer->lslices});
+        bbox.merge(get_extents(layer->lslices));
+    }
+    if (!bbox.defined)
+        return fields;
+    for (size_t mode = 0; mode < modes.size(); ++mode) {
+        if (!modes[mode])
+            continue;
+        // Without a field, the infill falls back to the regular pattern.
+        auto field = std::make_unique<AdaptiveInfillField>(slices, bbox, AdaptiveInfillMode(mode), [this]() { m_print->throw_if_canceled(); });
+        if (!field->empty())
+            fields[mode] = std::move(field);
+    }
+    return fields;
+}
+
 void PrintObject::clear_layers()
 {
     this->clear_local_z_plan();
@@ -1108,9 +1141,11 @@ bool PrintObject::invalidate_state_by_config_options(
     for (const t_config_option_key &opt_key : opt_keys) {
         if (   opt_key == "brim_width"
             || opt_key == "brim_object_gap"
+            || opt_key == "brim_use_efc_outline"
             || opt_key == "brim_type"
             || opt_key == "brim_ears_max_angle"
             || opt_key == "brim_ears_detection_length"
+            || opt_key == "brim_ears_outer_only"
             // BBS: brim generation depends on printing speed
             || opt_key == "outer_wall_speed"
             || opt_key == "small_perimeter_speed"
@@ -1412,9 +1447,14 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "lateral_lattice_angle_1"
             || opt_key == "lateral_lattice_angle_2"
             || opt_key == "infill_overhang_angle"
-            || opt_key == "gyroid_optimized") {
+            || opt_key == "gyroid_optimized"
+            || opt_key == "infill_complete_top") {
             steps.emplace_back(posInfill);
         } else if (opt_key == "sparse_infill_pattern"
+                   || opt_key == "adaptive_infill_mode"
+                   || opt_key == "adaptive_infill_interior_density"
+                   || opt_key == "adaptive_infill_gradient"
+                   || opt_key == "sparse_infill_smooth_factor"
                    || opt_key == "symmetric_infill_y_axis"
                    || opt_key == "infill_shift_step"
                    || opt_key == "sparse_infill_rotate_template"
@@ -1539,7 +1579,14 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "bed_mesh_min"
             || opt_key == "bed_mesh_max"
             || opt_key == "adaptive_bed_mesh_margin"
-            || opt_key == "bed_mesh_probe_distance") {
+            || opt_key == "bed_mesh_probe_distance"
+            // Orca #11876: flow ratios are applied in GCode::_extrude only.
+            || opt_key == "print_flow_ratio"
+            || opt_key == "top_solid_infill_flow_ratio"
+            || opt_key == "bottom_solid_infill_flow_ratio"
+            || opt_key == "brim_flow_ratio"
+            || opt_key == "spiral_starting_flow_ratio"
+            || opt_key == "spiral_finishing_flow_ratio") {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"
@@ -3089,6 +3136,7 @@ void PrintObject::bridge_over_infill()
         }
 
         this->m_adaptive_fill_octrees = this->prepare_adaptive_infill_data(surfaces_w_bottom_z);
+        this->m_adaptive_infill_fields    = this->prepare_adaptive_infill_fields();
 
         std::vector<size_t> layers_to_generate_infill;
         for (const auto &pair : surfaces_by_layer) {

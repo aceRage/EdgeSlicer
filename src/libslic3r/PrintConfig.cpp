@@ -185,6 +185,26 @@ static t_config_enum_values s_keys_map_InfillPattern {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
+//Orca
+static t_config_enum_values s_keys_map_AdaptiveInfillMode{
+    { "disabled",       int(AdaptiveInfillMode::Disabled) },
+    { "distance_warp",  int(AdaptiveInfillMode::DistanceWarp) },
+    { "smooth_blend",   int(AdaptiveInfillMode::SmoothBlend) },
+    { "stepped_shells", int(AdaptiveInfillMode::SteppedShells) },
+    { "lobes",          int(AdaptiveInfillMode::Lobes) },
+    { "normal_z",       int(AdaptiveInfillMode::NormalZ) },
+    { "normal_y",       int(AdaptiveInfillMode::NormalY) },
+    { "normal_x",       int(AdaptiveInfillMode::NormalX) },
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(AdaptiveInfillMode)
+
+static t_config_enum_values s_keys_map_AdaptiveInfillGradient{
+    { "linear",      int(AdaptiveInfillGradient::Linear) },
+    { "quadratic",   int(AdaptiveInfillGradient::Quadratic) },
+    { "exponential", int(AdaptiveInfillGradient::Exponential) },
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(AdaptiveInfillGradient)
+
 static t_config_enum_values s_keys_map_IroningType {
     { "no ironing",     int(IroningType::NoIroning) },
     { "top",            int(IroningType::TopSurfaces) },
@@ -1890,6 +1910,33 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    def = this->add("brim_flow_ratio", coFloat);
+    def->label = L("Brim flow ratio");
+    def->category = L("Support");
+    def->tooltip = L("This factor affects the amount of material for brims.\n\n"
+                     "The actual brim flow used is calculated by multiplying this value by the filament flow ratio, and if set, the object's flow ratio.");
+    def->min = 0;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1));
+
+    def = this->add("brim_use_efc_outline", coBool);
+    def->label = L("Brim follows compensated outline");
+    def->category = L("Support");
+    def->tooltip = L("When enabled, the brim is aligned with the first-layer perimeter geometry after Elephant Foot Compensation is applied.\n"
+                    "This option is intended for cases where Elephant Foot Compensation significantly alters the first-layer footprint.\n"
+                    "\n"
+                    "If your current setup already works well, enabling it may be unnecessary and can cause the brim to fuse with upper layers." );
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("combine_brims", coBool);
+    def->label = L("Combine brims");
+    def->category = L("Support");
+    def->tooltip  = L("Combine multiple brims into one when they are close to each other. This can improve brim adhesion.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("brim_ears", coBool);
     def->label = L("Brim ears");
     def->category = L("Support");
@@ -1919,6 +1966,13 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(1));
+
+    def = this->add("brim_ears_outer_only", coBool);
+    def->label = L("Brim ears outer only");
+    def->category = L("Support");
+    def->tooltip = L("Generate mouse ears only on the outer contour of the model, excluding holes and enclosed sections.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("compatible_printers", coStrings);
     def->label = L("Select printers");
@@ -3205,6 +3259,73 @@ void PrintConfigDef::init_fff_params()
     def->max = 5; // Maximum number of lines for infill pattern
     def->set_default_value(new ConfigOptionInt(1));
 
+    def             = this->add("adaptive_infill_mode", coEnum);
+    def->label      = L("Adaptive density (experimental)");
+    def->category   = L("Strength");
+    def->tooltip    = L("Grades the Gyroid and TPMS infill inside the object: its cells grow from the surface of the "
+                        "object towards its center. The sparse infill density is used at the surface and the interior "
+                        "density at the center.\n"
+                        "Distance warp, Smooth blend and Stepped shells follow the distance to the nearest surface, "
+                        "including the top and bottom, with the interior density at the point farthest from it:\n"
+                        " - Distance warp: one continuous pattern, stretched and sheared where the distance changes "
+                        "across directions, as in plates and long parts.\n"
+                        " - Smooth blend: the patterns of neighbouring densities blended into each other, with small "
+                        "loops where they meet.\n"
+                        " - Stepped shells: shells of the regular pattern at densities about 1.5 times apart, their "
+                        "lines joined along the shell boundaries.\n"
+                        " - Lobes: follows the 3D shape of the object, including its top and bottom. Every lobe, a part "
+                        "joined to the rest by a narrower neck, is graded towards its own center.\n"
+                        " - Normal Z, Y or X: follows the sections of the object normal to that axis, so the density "
+                        "does not change along it.");
+    def->enum_keys_map = &ConfigOptionEnum<AdaptiveInfillMode>::get_enum_values();
+    def->enum_values.push_back("disabled");
+    def->enum_values.push_back("distance_warp");
+    def->enum_values.push_back("smooth_blend");
+    def->enum_values.push_back("stepped_shells");
+    def->enum_values.push_back("lobes");
+    def->enum_values.push_back("normal_z");
+    def->enum_values.push_back("normal_y");
+    def->enum_values.push_back("normal_x");
+    def->enum_labels.push_back(L("Disabled"));
+    def->enum_labels.push_back(L("Distance warp"));
+    def->enum_labels.push_back(L("Smooth blend"));
+    def->enum_labels.push_back(L("Stepped shells"));
+    def->enum_labels.push_back(L("Lobes"));
+    def->enum_labels.push_back(L("Normal Z"));
+    def->enum_labels.push_back(L("Normal Y"));
+    def->enum_labels.push_back(L("Normal X"));
+    def->mode       = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<AdaptiveInfillMode>(AdaptiveInfillMode::Disabled));
+
+    def             = this->add("adaptive_infill_interior_density", coPercent);
+    def->label      = L("Interior density");
+    def->category   = L("Strength");
+    def->tooltip    = L("Density of the adaptive infill at the center of the object.");
+    def->sidetext   = "%";
+    def->min        = 1;
+    def->max        = 100;
+    def->mode       = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(5));
+
+    def             = this->add("adaptive_infill_gradient", coEnum);
+    def->label      = L("Adaptive gradient");
+    def->category   = L("Strength");
+    def->tooltip    = L("How the density changes from the surface to the center of the object.\n"
+                        "Linear: the density changes at a constant rate.\n"
+                        "Quadratic: the density stays close to the sparse infill density near the surface and "
+                        "changes faster towards the center.\n"
+                        "Exponential: the density changes quickly just below the surface and levels off towards "
+                        "the center.");
+    def->enum_keys_map = &ConfigOptionEnum<AdaptiveInfillGradient>::get_enum_values();
+    def->enum_values.push_back("linear");
+    def->enum_values.push_back("quadratic");
+    def->enum_values.push_back("exponential");
+    def->enum_labels.push_back(L("Linear"));
+    def->enum_labels.push_back(L("Quadratic"));
+    def->enum_labels.push_back(L("Exponential"));
+    def->mode       = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<AdaptiveInfillGradient>(AdaptiveInfillGradient::Linear));
+
     // Z-buckling bias optimization (experimental). Tightens the gyroid wave along the Z
     // (vertical) axis at low infill density to shorten the effective column length under
     // Z-axis compression. Filament use at the same `sparse_infill_density` setting is
@@ -3276,6 +3397,17 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Archimedean Chords"));
     def->enum_labels.push_back(L("Octagram Spiral"));
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipCrossHatch));
+
+    def = this->add("sparse_infill_smooth_factor", coPercent);
+    def->label = L("Sparse infill smooth factor");
+    def->category = L("Strength");
+    def->tooltip = L("Controls how strongly sparse infill corners are rounded. 0% keeps the original sharp path, "
+                     "while 100% produces the largest possible curves between adjacent infill lines.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
 
     def           = this->add("lateral_lattice_angle_1", coFloat);
     def->label    = L("Lateral lattice angle 1");
@@ -4674,6 +4806,13 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Strength");
     def->tooltip  = L("If the model has two parts that are symmetric about the Y axis,"
                       " and you want these parts to have symmetric textures, please click this option on one of the parts.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def           = this->add("infill_complete_top", coBool);
+    def->label    = L("Fill pattern tops");
+    def->category = L("Strength");
+    def->tooltip  = L("Choose this option if you want to completely fill in the tops of the infill pattern");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -8430,8 +8569,12 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("wipe_tower_rotation_angle", coFloat);
     def->label = L("Wipe tower rotation angle");
-    def->tooltip = L("Wipe tower rotation angle with respect to X axis.");
+    def->tooltip = L("Wipe tower rotation angle with respect to X axis. The tower turns about its front left corner; "
+                     "the Rotate tool (R) on the tower in the 3D view sets this angle too, turning the tower about its centre.\n"
+                     "Not available for the Bambu Lab prime tower used on Bambu Lab printers, which is always printed unrotated.");
     def->sidetext = "°";	// degrees, don't need translation
+    def->min = -360.;
+    def->max = 360.;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.));
 
@@ -10219,6 +10362,12 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         opt_key = "change_filament_gcode";
     } else if (opt_key == "bridge_fan_speed") {
         opt_key = "overhang_fan_speed";
+    } else if (opt_key == "tpms_adaptive") {
+        opt_key = "adaptive_infill_mode";
+    } else if (opt_key == "tpms_interior_density") {
+        opt_key = "adaptive_infill_interior_density";
+    } else if (opt_key == "tpms_adaptive_gradient") {
+        opt_key = "adaptive_infill_gradient";
     } else if (opt_key == "infill_extruder") {
         opt_key = "sparse_infill_filament";
     }else if (opt_key == "solid_infill_extruder") {

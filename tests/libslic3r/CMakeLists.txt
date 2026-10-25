@@ -33,6 +33,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth_clamp.cpp
 	test_paint_penetration.cpp
 	test_paint_remap.cpp
+	test_spread_paint.cpp
 	test_color_mix_solver.cpp
 	test_color_split.cpp
 	test_code_emboss.cpp
@@ -82,6 +83,9 @@ add_executable(${_TEST_NAME}_tests
 	test_cad_edit.cpp
 	test_elephant_foot_compensation.cpp
 	test_fill_bed_pack.cpp
+	test_fill_plane_path.cpp
+	test_fill_corner_smoothing.cpp
+	test_adaptive_infill_field.cpp
 	test_elegoo_cc2_profiles.cpp
 	test_elegoo_cc2_toolchange.cpp
 	test_flexi_joint.cpp
@@ -118,6 +122,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
 	test_preset_detached_children.cpp
+	test_preset_user_load_prefetch.cpp
 	test_filament_remap.cpp
 	test_calib_settings.cpp
 	test_preset_printer_type.cpp

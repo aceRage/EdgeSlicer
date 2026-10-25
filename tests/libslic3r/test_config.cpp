@@ -1833,3 +1833,18 @@ TEST_CASE("spiral inset is offered for the solid surface patterns and round-trip
     // Opt-in: no default changed.
     CHECK(DynamicPrintConfig::full_print_config().opt_enum<InfillPattern>("top_surface_pattern") == ipMonotonicLine);
 }
+
+TEST_CASE("handle_legacy migrates the adaptive TPMS keys", "[Config][TpmsAdaptive]") {
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::Enable);
+    DynamicPrintConfig config;
+    config.set_deserialize("tpms_adaptive", "stepped_shells", ctxt);
+    config.set_deserialize("tpms_interior_density", "12%", ctxt);
+    config.set_deserialize("tpms_adaptive_gradient", "quadratic", ctxt);
+
+    CHECK(config.opt_enum<AdaptiveInfillMode>("adaptive_infill_mode") == AdaptiveInfillMode::SteppedShells);
+    CHECK(config.option<ConfigOptionPercent>("adaptive_infill_interior_density")->value == Approx(12.));
+    CHECK(config.opt_enum<AdaptiveInfillGradient>("adaptive_infill_gradient") == AdaptiveInfillGradient::Quadratic);
+    CHECK(ctxt.substitutions.empty());
+    // Opt-in: off by default.
+    CHECK(DynamicPrintConfig::full_print_config().opt_enum<AdaptiveInfillMode>("adaptive_infill_mode") == AdaptiveInfillMode::Disabled);
+}

@@ -211,6 +211,16 @@ Specify exact layer numbers (1-based) using comma-separated values. Each entry m
 > [!TIP]
 > See [Infill Patterns Wiki List](strength_settings_patterns) with **detailed specifications**, including their strengths and weaknesses.
 
+<a name="infill-complete-top"></a>
+
+## Fill pattern tops
+
+For the [3D Honeycomb](strength_settings_patterns#3d-honeycomb) sparse infill: fills in the square tops of the truncated octahedra on the layers where the pattern turns over, so the cells are closed instead of open. Off by default.
+
+## Sparse infill smooth factor
+
+Rounds the corners of the sparse infill so the toolhead does not have to stop in every turn. 0% (the default) keeps the original sharp path; 100% gives the largest curves that fit between adjacent infill lines. It applies to Hilbert Curve, Octagram Spiral, Lightning, Honeycomb, 3D Honeycomb, Concentric and Cross Hatch; the row is hidden for the other patterns.
+
 ## Credits
 
 - **[Fill Multiline](#fill-multiline) implementation** - [@RF47](https://github.com/RF47)
