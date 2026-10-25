@@ -33,6 +33,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth_clamp.cpp
 	test_paint_penetration.cpp
 	test_paint_remap.cpp
+	test_spread_paint.cpp
 	test_color_mix_solver.cpp
 	test_color_split.cpp
 	test_code_emboss.cpp
