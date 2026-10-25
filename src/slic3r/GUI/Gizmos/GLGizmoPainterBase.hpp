@@ -14,6 +14,8 @@
 
 #include <memory>
 
+class wxTimer;
+
 
 namespace Slic3r::GUI {
 
@@ -218,11 +220,17 @@ public:
     /// propagate it otherwise False.</returns>
     bool on_mouse(const wxMouseEvent &mouse_event) override;
 
+    // Edge (Spread paint): Esc while a spread is held. Restores the paint from before the press
+    // and returns true; returns false when no spread is held.
+    bool on_spread_escape();
+
 protected:
     virtual void render_triangles(const Selection& selection) const;
     void render_cursor();
-    void render_cursor_circle();
-    void render_cursor_sphere(const Transform3d& trafo) const;
+    // radius_px > 0: a fixed screen radius instead of the brush size (the Spread seed ring).
+    void render_cursor_circle(float radius_px = -1.f);
+    // center/radius (mesh coordinates / world mm) default to the hit point and the brush size.
+    void render_cursor_sphere(const Transform3d& trafo, const Vec3f *center = nullptr, float radius = -1.f, float alpha = -1.f) const;
     // BBS
     void render_cursor_height_range(const Transform3d& trafo) const;
     //BBS: add logic to distinguish the first_time_update and later_update
@@ -258,6 +266,8 @@ protected:
         SMART_FILL,
         // BBS
         GAP_FILL,
+        // Edge: press and hold, the paint grows over the surface (libslic3r/SpreadPaint.hpp)
+        SPREAD,
     };
 
     struct ProjectedMousePosition
@@ -292,6 +302,22 @@ protected:
     // Orca: paint behavior enchancement
     bool m_vertical_only = false;
     bool m_horizontal_only = false;
+
+    // Edge: Spread tool options, kept in the app config (see load_spread_settings()).
+    static constexpr int SpreadSpeedStops = 5;      // Slowest, Slower, Normal, Faster, Fastest
+    static constexpr int SpreadSpeedDefault = 2;    // Normal
+    int   m_spread_speed            = SpreadSpeedDefault;
+    float m_spread_max_radius       = 0.f;          // world mm over the surface, 0 = unlimited
+    bool  m_spread_relative_to_seed = false;        // angle limit against the seed facet, not the neighbour
+    bool  m_spread_keep_existing    = false;        // leave other states alone; fully painted facets stop it
+    // Growth speed of a stop, in screen pixels per second at the seed's depth.
+    static float spread_speed_px_per_s(int stop);
+    void load_spread_settings();
+    void save_spread_settings() const;
+    // Radius (world mm) of the spread being held, or a negative number when none is.
+    float spread_radius() const;
+    // The "12.4 mm" label next to the cursor while a spread is held (call inside the ImGui frame).
+    void render_spread_label() const;
 
     // It stores the value of the previous mesh_id to which the seed fill was applied.
     // It is used to detect when the mouse has moved from one volume to another one.
@@ -330,6 +356,14 @@ private:
     Vec2d m_last_mouse_click = Vec2d::Zero();
 
     Button m_button_down = Button::None;
+
+    // Edge: the spread being held (one press, one undo step).
+    struct SpreadPress;
+    std::unique_ptr<SpreadPress> m_spread;
+    std::unique_ptr<wxTimer>     m_spread_timer;
+    bool spread_press(Button button, EnforcerBlockerType new_state, bool erase, const Vec2d &mouse_position);
+    void spread_tick();
+    void spread_stop_timer();
     EState m_old_state = Off; // to be able to see that the gizmo has just been closed (see on_set_state)
 
     // Following cache holds result of a raycast query. The queries are asked

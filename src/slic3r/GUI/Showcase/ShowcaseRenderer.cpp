@@ -804,6 +804,7 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
     shader->set_uniform("light_tint", tint);
     shader->set_uniform("floor_tex", SHOWCASE_FLOOR_TEX_UNIT);
     shader->set_uniform("tile_mm", tile_mm);
+    shader->set_uniform("floor_uv", Showcase::floor_uv_matrix(fl.rotation, fl.flip));
     shader->set_uniform("contact_tex", SHOWCASE_CONTACT_UNIT);
     shader->set_uniform("use_contact", m_contact_valid);
     shader->set_uniform("contact_rect", std::array<float, 4>{ m_contact_rect[0], m_contact_rect[1], m_contact_rect[2], m_contact_rect[3] });

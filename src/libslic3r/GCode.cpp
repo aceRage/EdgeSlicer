@@ -1521,6 +1521,20 @@ std::string WipeTowerIntegration::prime(GCode& gcodegen)
     return gcode;
 }
 
+// The G-code export needs one more tool change on this wipe tower layer than the tower planned.
+// Says what actually went wrong, so a planning/export disagreement is not mistaken for an empty
+// first layer (the message this guard used to carry).
+static Slic3r::RuntimeError wipe_tower_toolchange_overrun(int layer_idx, int tool_change_idx, int extruder_id,
+                                                          const std::vector<WipeTower::ToolChangeResult> &planned)
+{
+    return Slic3r::RuntimeError(Slic3r::format(
+        "Wipe tower generation failed: tool-change count mismatch at wipe tower layer %1%%2%. "
+        "G-code export needs tool change %3% (to filament %4%) but the wipe tower planned %5% for that layer.",
+        layer_idx,
+        planned.empty() ? std::string() : Slic3r::format(" (Z %1$.2f)", planned.front().print_z),
+        tool_change_idx + 1, extruder_id + 1, planned.size()));
+}
+
 std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, bool finish_layer,
                                               bool local_z_unplanned, double local_z_nominal_layer_z)
 {
@@ -1796,7 +1810,7 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
         if (gcodegen.writer().need_toolchange(extruder_id) || finish_layer) {
             if (m_layer_idx < (int) m_tool_changes.size()) {
                 if (!(size_t(m_tool_change_idx) < m_tool_changes[m_layer_idx].size()))
-                    throw Slic3r::RuntimeError("Wipe tower generation failed, possibly due to empty first layer.");
+                    throw wipe_tower_toolchange_overrun(m_layer_idx, m_tool_change_idx, extruder_id, m_tool_changes[m_layer_idx]);
 
                 // Calculate where the wipe tower layer will be printed. -1 means that print z will not change,
                 // resulting in a wipe tower with sparse layers.
@@ -1835,7 +1849,7 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
 
         if (gcodegen.writer().need_toolchange(extruder_id) || finish_layer) {
             if (!(size_t(m_tool_change_idx) < m_tool_changes[m_layer_idx].size()))
-                throw Slic3r::RuntimeError("Wipe tower generation failed, possibly due to empty first layer.");
+                throw wipe_tower_toolchange_overrun(m_layer_idx, m_tool_change_idx, extruder_id, m_tool_changes[m_layer_idx]);
 
             if (!ignore_sparse) {
                 realign_nominal_toolchange_idx(extruder_id);
@@ -1865,7 +1879,7 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
 
     if (gcodegen.writer().need_toolchange(extruder_id) || finish_layer) {
         if (!(size_t(m_tool_change_idx) < m_tool_changes[m_layer_idx].size()))
-            throw Slic3r::RuntimeError("Wipe tower generation failed, possibly due to empty first layer.");
+            throw wipe_tower_toolchange_overrun(m_layer_idx, m_tool_change_idx, extruder_id, m_tool_changes[m_layer_idx]);
 
         if (!ignore_sparse) {
             return false;
@@ -8827,7 +8841,10 @@ LayerResult GCode::process_layer(const Print& print,
         gcode += "; local-z phase-b path passes end\n";
     }
 
-    if (nominal_layer_start_extruder >= 0) {
+    // Start with the extruder already loaded, as LayerTools::nominal_extruder_order() does for both
+    // wipe tower plans; a layer whose order was fixed (Cyclic ordering, per-plate custom sequence)
+    // is printed as given, or the export would ask for tool changes the tower never planned.
+    if (nominal_layer_start_extruder >= 0 && !layer_tools.fixed_extruder_order) {
         auto it = std::find(layer_extruders.begin(), layer_extruders.end(), unsigned(nominal_layer_start_extruder));
         if (it != layer_extruders.end())
             std::rotate(layer_extruders.begin(), it, layer_extruders.end());

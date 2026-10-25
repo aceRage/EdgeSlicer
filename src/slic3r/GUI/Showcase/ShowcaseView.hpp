@@ -362,6 +362,8 @@ private:
     wxChoice                *m_floor_texture = nullptr;
     wxButton                *m_floor_image = nullptr;
     wxSpinCtrl              *m_floor_tile = nullptr;
+    wxChoice                *m_floor_rotation = nullptr;
+    wxCheckBox              *m_floor_flip = nullptr;
     wxSlider                *m_floor_reflection = nullptr;
     wxSlider                *m_floor_contact = nullptr;
     wxCheckBox              *m_light_fixed = nullptr;
