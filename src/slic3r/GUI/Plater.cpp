@@ -11070,8 +11070,13 @@ struct Plater::priv
     GLToolbar collapse_toolbar;
     Preview *preview;
     AssembleView* assemble_view { nullptr };
-    // The Showcase tab (after Preview): presentation renders of the current plate.
+    // The Showcase tab (after Preview): presentation renders of the current plate. Built the first
+    // time the tab is opened (ensure_showcase_view()), not at startup: its side panel is ~1-2 s of
+    // the main window's construction. Null until then, so every use checks it.
     ShowcaseView* showcase_view { nullptr };
+    // The panel hosting View3D, Preview, AssembleView and (once built) ShowcaseView.
+    wxPanel* panel_3d { nullptr };
+    ShowcaseView* ensure_showcase_view();
     // Docked/resizable 2D pane showing GLGizmoTextureDisplacement's LSCM unwrap of a painted
     // patch; a sibling AUI pane alongside "sidebar"/"main", not part of the view3D/preview/
     // assemble_view sizer - see its registration below and Plater::get_uv_editor_canvas(). The
@@ -11725,7 +11730,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     main_frame->m_tabpanel->Bind(wxEVT_NOTEBOOK_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
 
     profile.mark("aui/background process/binds");
-    auto* panel_3d = new wxPanel(q);
+    panel_3d = new wxPanel(q);
     view3D = new View3D(panel_3d, bed, &model, config, &background_process);
     profile.mark("View3D");
     //BBS: use partplater's gcode
@@ -11734,8 +11739,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
 
     assemble_view = new AssembleView(panel_3d, bed, &model, config, &background_process);
     profile.mark("AssembleView");
-    showcase_view = new ShowcaseView(panel_3d, bed, &model, config, &background_process);
-    profile.mark("ShowcaseView");
+    // ShowcaseView: built on first use, see ensure_showcase_view().
 
 #ifdef __APPLE__
     // BBS
@@ -11746,7 +11750,6 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panels.push_back(view3D);
     panels.push_back(preview);
     panels.push_back(assemble_view);
-    panels.push_back(showcase_view);
 
     this->background_process_timer.SetOwner(this->q, 0);
     this->auto_reslice_timer.SetOwner(this->q, 0);
@@ -11812,7 +11815,6 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panel_sizer->Add(view3D, 1, wxEXPAND | wxALL, 0);
     panel_sizer->Add(preview, 1, wxEXPAND | wxALL, 0);
     panel_sizer->Add(assemble_view, 1, wxEXPAND | wxALL, 0);
-    panel_sizer->Add(showcase_view, 1, wxEXPAND | wxALL, 0);
     panel_3d->SetSizer(panel_sizer);
     m_aui_mgr.AddPane(panel_3d, wxAuiPaneInfo().Name("main").CenterPane().PaneBorder(false));
 
@@ -12411,7 +12413,7 @@ void Plater::priv::select_view_3D(const std::string& name, bool no_slice)
         set_current_panel(assemble_view, no_slice);
         wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
     }
-    else if (name == "Showcase" && showcase_view != nullptr) {
+    else if (name == "Showcase" && ensure_showcase_view() != nullptr) {
         BOOST_LOG_TRIVIAL(info) << "select showcase view";
         set_current_panel(showcase_view, no_slice);
         wxGetApp().mainframe->select_tab(size_t(MainFrame::tpShowcase));
@@ -16419,6 +16421,27 @@ void Plater::priv::reload_all_from_disk()
     }
 }
 
+// Startup round 2: the Showcase view is built the first time it is needed (the Showcase tab, or a
+// --showcase-render job), not in the Plater constructor. It joins the 3D panel's sizer hidden, as it
+// was before when it sat there from the start; set_current_panel() then shows it.
+ShowcaseView* Plater::priv::ensure_showcase_view()
+{
+    if (showcase_view != nullptr || panel_3d == nullptr)
+        return showcase_view;
+    const auto started = std::chrono::steady_clock::now();
+    wxBusyCursor busy;
+    panel_3d->Freeze();
+    showcase_view = new ShowcaseView(panel_3d, bed, &model, config, &background_process);
+    showcase_view->Hide();
+    panels.push_back(showcase_view);
+    if (wxSizer* sizer = panel_3d->GetSizer(); sizer != nullptr)
+        sizer->Add(showcase_view, 1, wxEXPAND | wxALL, 0);
+    panel_3d->Thaw();
+    BOOST_LOG_TRIVIAL(info) << "ShowcaseView built on first use in "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() << " ms";
+    return showcase_view;
+}
+
 //BBS: add no_slice logic
 void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
 {
@@ -19779,14 +19802,19 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
     if (!silent)
         wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
 
+    // ORCA_STARTUP_PROFILE (startup round 2): the blank project post_init queues is ~0.7 s of the time
+    // between the window showing and startup settling; these marks split it.
+    Slic3r::StartupPhase profile("Plater::new_project");
     //get_partplate_list().reinit();
     //get_partplate_list().update_slice_context_to_current_plate(p->background_process);
     //p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
     reset(transfer_preset_changes, reload_presets);
+    profile.mark("reset");
     reset_project_dirty_after_save();
     reset_project_dirty_initial_presets();
     wxGetApp().update_saved_preset_from_current_preset();
     update_project_dirty_from_presets();
+    profile.mark("dirty state + saved presets");
 
     //reset project
     p->project.reset();
@@ -19797,6 +19825,7 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
         p->set_project_name(project_name);
 
     Plater::TakeSnapshot snapshot(this, "New Project", UndoRedo::SnapshotType::ProjectSeparator);
+    profile.mark("snapshot");
 
     Model m;
     model().load_from(m); // new id avoid same path name
@@ -19805,9 +19834,11 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
     get_partplate_list().select_plate(0);
     SimpleEvent event(EVT_GLCANVAS_PLATE_SELECT);
     p->on_plate_selected(event);
+    profile.mark("model + plate select");
 
     p->load_auxiliary_files();
     wxGetApp().app_config->update_last_backup_dir(model().get_backup_path());
+    profile.mark("auxiliary files + backup dir");
 
     // BBS set default view and zoom
     p->select_view_3D("3D");
