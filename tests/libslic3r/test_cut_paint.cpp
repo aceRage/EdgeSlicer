@@ -17,6 +17,7 @@
 #include <catch2/catch.hpp>
 
 #include <libslic3r/CutUtils.hpp>
+#include <libslic3r/CutRecipe.hpp>
 #include <libslic3r/CurvedCut.hpp>
 #include <libslic3r/DrawCut.hpp>
 #include <libslic3r/FlexiJoint.hpp>
@@ -624,4 +625,239 @@ TEST_CASE("Cut paint: texture-displacement masks are still dropped by a cut", "[
         }
     // ... while the colour came through.
     cp_check_colour(res, CP_CUBE * CP_CUBE);
+}
+
+// ---------------------------------------------------------------------------
+// OD11 PR D: Edit cut carries the halves' painting back onto the uncut stand-in
+// (owner D2 = a), or drops it when the frames do not match (fallback c).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct ReeditFixture
+{
+    Model                            halves_model; // the halves, as the project holds them
+    std::vector<const ModelObject *> halves;
+    Transform3d                      linear{ Transform3d::Identity() };
+
+    // Cut a painted cube with a rotated, scaled instance (optionally Flip upper), then move and
+    // turn the halves on the bed the way a user would.
+    explicit ReeditFixture(bool flip = true)
+    {
+        Geometry::Transformation inst;
+        inst.set_rotation(Vec3d(0., 0., Geometry::deg2rad(30.)));
+        inst.set_scaling_factor(Vec3d(1.5, 1.5, 1.5));
+        Model        model;
+        ModelObject *mo = cp_make_cube(model, inst);
+        cp_paint_colour(mo->volumes.front());
+        linear = mo->instances.front()->get_transformation().get_matrix_no_offset();
+
+        ModelObjectCutAttributes attrs = CP_HALVES | ModelObjectCutAttribute::KeepPaint;
+        if (flip)
+            attrs = attrs | ModelObjectCutAttribute::FlipUpper;
+        Cut                    cut(mo, 0, Transform3d::Identity(), attrs);
+        const ModelObjectPtrs &res = cut.perform_with_plane();
+        REQUIRE(res.size() == 2);
+        for (const ModelObject *o : res)
+            halves_model.add_object(*o);
+        // What perform_cut() writes onto each half: the recipe (its mesh is the uncut part in the
+        // object frame) with the instance transform, and this half's own cut frame.
+        CutRecipe recipe;
+        recipe.kind                = CutRecipeKind::Plane;
+        recipe.mesh                = TriangleMesh(cp_centred_cube());
+        recipe.mesh_hash           = cut_recipe_mesh_hash(cut_recipe_mesh_to_blob(recipe.mesh));
+        recipe.instance_linear     = linear;
+        recipe.instance_linear_set = true;
+        double x = 0.;
+        for (ModelObject *o : halves_model.objects) {
+            o->cut_recipe = recipe;
+            cut_recipe_record_half_frame(*o);
+            x += 60.;
+            o->instances.front()->set_offset(Vec3d(x, 25., 0.));
+            o->instances.front()->set_rotation(Z, Geometry::deg2rad(77.));
+            halves.push_back(o);
+        }
+    }
+};
+
+// The stand-in begin_reedit() builds: the recipe's mesh (the pre-cut part in the object frame),
+// identity volume matrix.
+ModelVolume *cp_standin(Model &model)
+{
+    ModelObject *proxy = model.add_object();
+    ModelVolume *v     = proxy->add_volume(TriangleMesh(cp_centred_cube()), ModelVolumeType::MODEL_PART, false);
+    proxy->add_instance();
+    return v;
+}
+
+} // namespace
+
+TEST_CASE("Edit cut paint: the halves' painting comes back onto the uncut part", "[CutPaint][CutReeditPaint]")
+{
+    ReeditFixture f;
+    Model         m;
+    ModelVolume  *standin = cp_standin(m);
+
+    const CutPaintCarry carry = carry_cut_painting_to_uncut(f.halves, f.linear, *standin);
+    CHECK(carry.had_paint);
+    REQUIRE(carry.carried);
+
+    const indexed_triangle_set side = standin->mmu_segmentation_facets.get_facets(*standin, EnforcerBlockerType::Extruder2);
+    CHECK(cp_area(side) == Approx(CP_CUBE * CP_CUBE).epsilon(0.02));
+    for (const Vec3f &p : side.vertices)
+        CHECK(std::abs(p.x() - float(CP_H)) < 1e-2f);
+    const indexed_triangle_set top = standin->mmu_segmentation_facets.get_facets(*standin, EnforcerBlockerType::Extruder3);
+    CHECK(cp_area(top) == Approx(CP_CUBE * CP_CUBE).epsilon(0.02));
+    for (const Vec3f &p : top.vertices)
+        CHECK(std::abs(p.z() - float(CP_H)) < 1e-2f);
+}
+
+TEST_CASE("Edit cut paint: paint added to a half after the cut comes back too", "[CutPaint][CutReeditPaint]")
+{
+    ReeditFixture f(false);
+    // The halves' meshes are in the cut frame: the instance's 30 degrees are baked in.
+    const Vec3f minus_y = (f.linear.linear() * -Vec3d::UnitY()).normalized().cast<float>();
+    // Paint the -Y face of every half with colour 4, after the cut.
+    for (const ModelObject *o : f.halves)
+        for (ModelVolume *v : const_cast<ModelObject *>(o)->volumes) {
+            if (!v->is_model_part())
+                continue;
+            TriangleSelector sel(v->mesh());
+            sel.deserialize(v->mmu_segmentation_facets.get_data(), false);
+            for (int i = 0; i < int(v->mesh().its.indices.size()); ++i)
+                if (its_face_normal(v->mesh().its, i).dot(minus_y) > 0.9f)
+                    sel.set_facet(i, EnforcerBlockerType::Extruder4);
+            v->mmu_segmentation_facets.set_data(sel.serialize());
+        }
+
+    Model        m;
+    ModelVolume *standin = cp_standin(m);
+    REQUIRE(carry_cut_painting_to_uncut(f.halves, f.linear, *standin).carried);
+    const indexed_triangle_set later = standin->mmu_segmentation_facets.get_facets(*standin, EnforcerBlockerType::Extruder4);
+    CHECK(cp_area(later) == Approx(CP_CUBE * CP_CUBE).epsilon(0.02));
+    for (const Vec3f &p : later.vertices)
+        CHECK(std::abs(p.y() + float(CP_H)) < 1e-2f);
+}
+
+TEST_CASE("Edit cut paint: it still works after the project is saved and reopened", "[CutPaint][CutReeditPaint]")
+{
+    ReeditFixture f;
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string file = (tmp_root / "cut_reedit_paint.3mf").string();
+
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    StoreParams        store_params;
+    store_params.path     = file.c_str();
+    store_params.model    = &f.halves_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model                     back;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    REQUIRE(load_bbs_3mf(file.c_str(), &dst_config, &ctxt, &back, &plate_data, &project_presets, &is_bbl_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    release_PlateData_list(plate_data);
+    REQUIRE(back.objects.size() == 2);
+
+    // The halves come back with the same painting. Their volume matrices do NOT: the loader moves a
+    // one-volume object's volume offset into its instance (job 547 measured each half recentred
+    // on z), which is why each half's recipe copy keeps its cut frame - and that must survive.
+    for (size_t i = 0; i < 2; ++i) {
+        INFO("half " << i);
+        const ModelObject *before = f.halves[i];
+        const ModelObject *after  = back.objects[i];
+        for (EnforcerBlockerType state : { EnforcerBlockerType::Extruder2, EnforcerBlockerType::Extruder3 }) {
+            INFO("state " << int(state));
+            const PaintedOn a = cp_painted({ const_cast<ModelObject *>(before) }, &ModelVolume::mmu_segmentation_facets, state);
+            const PaintedOn b = cp_painted({ const_cast<ModelObject *>(after) }, &ModelVolume::mmu_segmentation_facets, state);
+            CHECK(b.area == Approx(a.area).margin(1.));
+        }
+        REQUIRE(after->cut_recipe.has_value());
+        REQUIRE(after->cut_recipe->half_part_matrices.size() == before->cut_recipe->half_part_matrices.size());
+        for (size_t k = 0; k < after->cut_recipe->half_part_matrices.size(); ++k)
+            CHECK(after->cut_recipe->half_part_matrices[k].matrix().isApprox(before->cut_recipe->half_part_matrices[k].matrix(), 1e-12));
+        CHECK(after->cut_recipe->instance_linear_set);
+    }
+
+    std::vector<const ModelObject *> halves(back.objects.begin(), back.objects.end());
+    Model                            m;
+    ModelVolume                     *standin = cp_standin(m);
+    REQUIRE(carry_cut_painting_to_uncut(halves, f.linear, *standin).carried);
+    CHECK(cp_area(standin->mmu_segmentation_facets.get_facets(*standin, EnforcerBlockerType::Extruder2)) ==
+          Approx(CP_CUBE * CP_CUBE).epsilon(0.02));
+    CHECK(cp_area(standin->mmu_segmentation_facets.get_facets(*standin, EnforcerBlockerType::Extruder3)) ==
+          Approx(CP_CUBE * CP_CUBE).epsilon(0.02));
+    // ... and in the same place as a carry from the halves before the save: an in-plane slide
+    // would keep the area and still be wrong.
+    Model        m0;
+    ModelVolume *standin0 = cp_standin(m0);
+    REQUIRE(carry_cut_painting_to_uncut(f.halves, f.linear, *standin0).carried);
+    for (EnforcerBlockerType state : { EnforcerBlockerType::Extruder2, EnforcerBlockerType::Extruder3 }) {
+        INFO("state " << int(state));
+        const BoundingBoxf3 a = bounding_box(standin0->mmu_segmentation_facets.get_facets(*standin0, state));
+        const BoundingBoxf3 b = bounding_box(standin->mmu_segmentation_facets.get_facets(*standin, state));
+        CHECK(b.min.isApprox(a.min, 1e-3));
+        CHECK(b.max.isApprox(a.max, 1e-3));
+        CHECK(a.size().norm() > 10.);
+    }
+    boost::filesystem::remove(file);
+}
+
+TEST_CASE("Edit cut paint: a frame that does not fit drops the painting instead of misplacing it", "[CutPaint][CutReeditPaint]")
+{
+    SECTION("no instance transform recorded on a scaled cut") {
+        ReeditFixture       f;
+        Model               m;
+        ModelVolume        *standin = cp_standin(m);
+        const CutPaintCarry carry   = carry_cut_painting_to_uncut(f.halves, Transform3d::Identity(), *standin);
+        CHECK(carry.had_paint);
+        CHECK_FALSE(carry.carried);
+        CHECK_FALSE(standin->is_any_painted());
+    }
+    SECTION("a part moved inside a half that has no recorded cut frame") {
+        ReeditFixture f;
+        ModelObject  *half = const_cast<ModelObject *>(f.halves.front());
+        half->cut_recipe->half_part_matrices.clear();
+        ModelVolume *v = half->volumes.front();
+        v->set_offset(v->get_offset() + Vec3d(12., 0., 0.));
+        Model        m;
+        ModelVolume *standin = cp_standin(m);
+        CHECK_FALSE(carry_cut_painting_to_uncut(f.halves, f.linear, *standin).carried);
+        CHECK_FALSE(standin->is_any_painted());
+    }
+    SECTION("with the cut frame recorded, a part moved inside a half still comes back where it was cut") {
+        ReeditFixture f;
+        ModelVolume  *v = const_cast<ModelObject *>(f.halves.front())->volumes.front();
+        v->set_offset(v->get_offset() + Vec3d(12., 0., 0.));
+        Model        m;
+        ModelVolume *standin = cp_standin(m);
+        REQUIRE(carry_cut_painting_to_uncut(f.halves, f.linear, *standin).carried);
+        const indexed_triangle_set side = standin->mmu_segmentation_facets.get_facets(*standin, EnforcerBlockerType::Extruder2);
+        CHECK(cp_area(side) == Approx(CP_CUBE * CP_CUBE).epsilon(0.02));
+        for (const Vec3f &p : side.vertices)
+            CHECK(std::abs(p.x() - float(CP_H)) < 1e-2f);
+    }
+}
+
+TEST_CASE("Edit cut paint: unpainted halves have nothing to carry", "[CutPaint][CutReeditPaint]")
+{
+    Model                            model;
+    ModelObject                     *mo = cp_make_cube(model);
+    Cut                              cut(mo, 0, Transform3d::Identity(), CP_HALVES | ModelObjectCutAttribute::KeepPaint);
+    const ModelObjectPtrs           &res = cut.perform_with_plane();
+    std::vector<const ModelObject *> halves(res.begin(), res.end());
+    Model                            m;
+    ModelVolume                     *standin = cp_standin(m);
+    const CutPaintCarry              carry   = carry_cut_painting_to_uncut(halves, Transform3d::Identity(), *standin);
+    CHECK_FALSE(carry.had_paint);
+    CHECK_FALSE(standin->is_any_painted());
 }
