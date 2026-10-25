@@ -311,6 +311,11 @@ struct SurfaceFillParams
     // For Gyroid: when true, use the parameterized "optimized" wave.
     bool gyroid_optimized = false;
 
+    // For TPMS: grade the density from the surface to the interior of the object.
+    AdaptiveInfillMode     adaptive_infill_mode          = AdaptiveInfillMode::Disabled;
+    float                adaptive_infill_interior_density  = 0.f;
+    AdaptiveInfillGradient adaptive_infill_gradient = AdaptiveInfillGradient::Linear;
+
     // Orca: corner smoothing factor in the range [0, 1].
     double      smooth_factor { 0. };
 
@@ -369,6 +374,9 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(infill_overhang_angle);
 		RETURN_COMPARE_NON_EQUAL(image_row_filament_id);
 		RETURN_COMPARE_NON_EQUAL(gyroid_optimized);
+		RETURN_COMPARE_NON_EQUAL(adaptive_infill_mode);
+		RETURN_COMPARE_NON_EQUAL(adaptive_infill_interior_density);
+		RETURN_COMPARE_NON_EQUAL(adaptive_infill_gradient);
         RETURN_COMPARE_NON_EQUAL(smooth_factor);
 
 		return false;
@@ -403,6 +411,9 @@ struct SurfaceFillParams
                 this->image_row_filament_id == rhs.image_row_filament_id &&
                 this->gyroid_optimized      == rhs.gyroid_optimized &&
                 this->infill_complete_top   == rhs.infill_complete_top &&
+                this->adaptive_infill_mode         == rhs.adaptive_infill_mode           &&
+                this->adaptive_infill_interior_density == rhs.adaptive_infill_interior_density   &&
+                this->adaptive_infill_gradient == rhs.adaptive_infill_gradient &&
                 this->smooth_factor         == rhs.smooth_factor;
 	}
 };
@@ -1403,11 +1414,18 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 // Orca: apply fill multiline only for sparse infill
                 params.multiline = params.extrusion_role == erInternalInfill ? int(region_config.fill_multiline) : 1;
 
+                // Orca: only the TPMS sparse infill is graded; reset otherwise, as params is reused.
+                params.adaptive_infill_mode = is_adaptive_infill_pattern(params.pattern) && params.extrusion_role == erInternalInfill ?
+                                           region_config.adaptive_infill_mode.value : AdaptiveInfillMode::Disabled;
+                const bool adaptive_infill_mode      = params.adaptive_infill_mode != AdaptiveInfillMode::Disabled;
+                params.adaptive_infill_interior_density  = adaptive_infill_mode ? std::max(1.f, float(region_config.adaptive_infill_interior_density)) : 0.f;
+                params.adaptive_infill_gradient = adaptive_infill_mode ? region_config.adaptive_infill_gradient.value : AdaptiveInfillGradient::Linear;
+
                 // Pass through gyroid_optimized only when the effective pattern is Gyroid,
                 // so non-Gyroid fills do not differ in SurfaceFillParams by an irrelevant flag
-                // (which would unnecessarily split fill batching).
+                // (which would unnecessarily split fill batching). Adaptive density replaces it.
                 // Stored on SurfaceFillParams; copied to FillParams during conversion.
-                params.gyroid_optimized = (params.pattern == ipGyroid) && region_config.gyroid_optimized;
+                params.gyroid_optimized = (params.pattern == ipGyroid) && region_config.gyroid_optimized && !adaptive_infill_mode;
 
                 if (params.extrusion_role == erInternalInfill) {
                     params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.infill_direction.value,
@@ -1823,6 +1841,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             f->dont_alternate_fill_direction = zaa_rcfg.zaa_enabled && zaa_rcfg.zaa_dont_alternate_fill_direction;
         }
         f->adapt_fill_octree   = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
+        f->adaptive_infill_field   = this->object()->adaptive_infill_field(surface_fill.params.adaptive_infill_mode);
         f->print_config        = &this->object()->print()->config();
         f->print_object_config = &this->object()->config();
 		if (surface_fill.params.pattern == ipConcentricInternal) {
@@ -1872,6 +1891,9 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         params.lateral_lattice_angle_2   = surface_fill.params.lateral_lattice_angle_2;
         params.infill_overhang_angle   = surface_fill.params.infill_overhang_angle;
         params.gyroid_optimized          = surface_fill.params.gyroid_optimized;
+        params.adaptive_infill_mode             = surface_fill.params.adaptive_infill_mode;
+        params.adaptive_infill_interior_density     = float(0.01 * surface_fill.params.adaptive_infill_interior_density);
+        params.adaptive_infill_gradient    = surface_fill.params.adaptive_infill_gradient;
         params.smooth_factor             = surface_fill.params.smooth_factor;
 
 		// BBS
@@ -2080,6 +2102,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
             f->dont_alternate_fill_direction = zaa_rcfg.zaa_enabled && zaa_rcfg.zaa_dont_alternate_fill_direction;
         }
         f->adapt_fill_octree   = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
+        f->adaptive_infill_field   = this->object()->adaptive_infill_field(surface_fill.params.adaptive_infill_mode);
         f->print_config        = &this->object()->print()->config();
         f->print_object_config = &this->object()->config();
 
@@ -2119,6 +2142,9 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         params.infill_overhang_angle   = surface_fill.params.infill_overhang_angle;
         params.multiline         = surface_fill.params.multiline;
         params.gyroid_optimized          = surface_fill.params.gyroid_optimized;
+        params.adaptive_infill_mode             = surface_fill.params.adaptive_infill_mode;
+        params.adaptive_infill_interior_density     = float(0.01 * surface_fill.params.adaptive_infill_interior_density);
+        params.adaptive_infill_gradient    = surface_fill.params.adaptive_infill_gradient;
         params.smooth_factor             = surface_fill.params.smooth_factor;
         // Orca: Match make_fills() when choosing the origin of plane-path patterns.
         // Without the sparse extrusion role, the filler uses each surface's bounds
