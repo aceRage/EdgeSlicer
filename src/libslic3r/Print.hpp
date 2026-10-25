@@ -1498,6 +1498,8 @@ private:
     std::map<ObjectID, ExtrusionEntityCollection>         m_brimMap;
     // Orca: Actual brim paths keyed by object instance.
     std::map<ObjectInstanceID, ExtrusionEntityCollection> m_brimMapByInstance;
+    // Edge: objects whose brim was merged onto instance 0 (nearest-wall fallback), shared by all their instances.
+    std::set<ObjectID>                                    m_brimMergedObjects;
     // Orca: Translated brim areas keyed by instance, used to find touching brims.
     std::map<ObjectInstanceID, ExPolygons>                m_objectBrimAreasByInstance;
     // Chameleon brim: foreign-extruder brim runs partitioned out of m_brimMap,

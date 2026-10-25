@@ -413,7 +413,8 @@ private:
     std::string generate_object_brim(const Print &print,
         const PrintObject &object,
         size_t instance_id,
-        bool first_layer);
+        bool first_layer,
+        bool shared_brims);
 
     LayerResult process_layer(
         const Print                     &print,

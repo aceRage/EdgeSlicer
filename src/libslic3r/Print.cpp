@@ -5813,6 +5813,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         // maps used by skirt/brim groups.
         m_brimMap.clear();
         m_brimMapByInstance.clear();
+        m_brimMergedObjects.clear();
         m_brimMapByExtruder.clear();
         m_first_layer_convex_hull.points.clear();
         if (this->has_brim()) {
@@ -5962,6 +5963,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                         // Edge (Orca #14683 port): groups print per-instance brims; the first
                         // instance carries the merged brim of the whole object.
                         m_brimMapByInstance[ObjectInstanceID{ brimEntry.first, 0 }] = own;
+                        m_brimMergedObjects.insert(brimEntry.first);
                     }
                     BOOST_LOG_TRIVIAL(warning) << "Chameleon brim: ToolOrdering unavailable after brim "
                         "partitioning; merged all foreign-extruder brim runs back into their "
@@ -6359,7 +6361,18 @@ void Print::_make_skirt()
             }
         }
 
-        auto make_brims_for_skirt_brim_group = [this](const std::vector<ObjectInstanceID>& group_instances) {
+        // Edge: a brim merged for a whole object (nearest-wall fallback, kept on instance 0) is
+        // shared by all of that object's instances.
+        auto brim_owners = [this](const ObjectInstanceID& instance) {
+            std::vector<ObjectInstanceID> owners;
+            const PrintObject* object = m_brimMergedObjects.count(instance.object_id) ? this->get_object(instance.object_id) : nullptr;
+            if (object == nullptr)
+                return std::vector<ObjectInstanceID>{ instance };
+            for (size_t i = 0; i < object->instances().size(); ++i)
+                owners.push_back({ instance.object_id, i });
+            return owners;
+        };
+        auto make_brims_for_skirt_brim_group = [this, &brim_owners](const std::vector<ObjectInstanceID>& group_instances) {
             std::vector<SkirtBrimGroup::Brim> brims;
             std::vector<ObjectInstanceID> brim_instances;
             for (const ObjectInstanceID& instance : group_instances) {
@@ -6371,7 +6384,7 @@ void Print::_make_skirt()
             const bool combine_group_brims = m_config.combine_brims && brim_instances.size() > 1;
             if (!combine_group_brims) {
                 for (const ObjectInstanceID& instance : brim_instances)
-                    brims.push_back({ m_brimMapByInstance.at(instance), { instance } });
+                    brims.push_back({ m_brimMapByInstance.at(instance), brim_owners(instance) });
                 return brims;
             }
 
@@ -6411,7 +6424,7 @@ void Print::_make_skirt()
             for (const auto& [_, instances] : combined_brim_ids) {
                 if (instances.size() == 1) {
                     const ObjectInstanceID& instance = instances.front();
-                    brims.push_back({ m_brimMapByInstance.at(instance), { instance } });
+                    brims.push_back({ m_brimMapByInstance.at(instance), brim_owners(instance) });
                     continue;
                 }
 
