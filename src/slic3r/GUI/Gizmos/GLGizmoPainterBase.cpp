@@ -6,13 +6,24 @@
 
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Camera.hpp"
+#include "slic3r/GUI/ImGuiWrapper.hpp"
+#include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/AppConfig.hpp"
+#include "libslic3r/SpreadPaint.hpp"
 
+#include <imgui/imgui.h>
+#include <wx/timer.h>
+
+#include <chrono>
+#include <locale>
+#include <sstream>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -27,8 +38,58 @@ GLGizmoPainterBase::GLGizmoPainterBase(GLCanvas3D& parent, const std::string& ic
     m_horizontal_only = false;
 }
 
+// Edge (Spread paint): one held press.
+struct GLGizmoPainterBase::SpreadPress
+{
+    int                                     mesh_idx { -1 };
+    TriangleSelectorGUI                    *selector { nullptr }; // checked against m_triangle_selectors on every tick
+    std::unique_ptr<SpreadSession>          session;
+    TriangleSelector::TriangleSplittingData saved;                // the paint before the press, for Esc
+    std::chrono::steady_clock::time_point   start;
+    Vec3f                                   seed_mesh { Vec3f::Zero() };
+    float                                   r0 { 0.f };           // world mm, the visible start circle
+    float                                   speed { 1.f };        // world mm per second
+    float                                   max_radius { 0.f };   // 0 = unlimited
+    float                                   radius { 0.f };       // last radius grown to
+    bool                                    erase { false };
+    bool                                    done { false };       // exhausted or at the max radius
+};
+
+namespace {
+// A one-shot timer that calls back on the GUI thread; the painter gizmo is not a wxEvtHandler.
+class SpreadTimer : public wxTimer
+{
+public:
+    explicit SpreadTimer(std::function<void()> cb) : m_cb(std::move(cb)) {}
+    void Notify() override { m_cb(); }
+
+private:
+    std::function<void()> m_cb;
+};
+
+// The ease-in of a press: the speed ramps up linearly over this time (seconds).
+constexpr double SpreadEaseIn = 0.15;
+// Radius of the start circle and of the hover ring, in screen pixels.
+constexpr float SpreadSeedRingPx = 6.f;
+
+// World millimetres per screen pixel at a world point, for perspective and orthographic cameras.
+double world_mm_per_pixel(const Camera &camera, const Vec3d &world_point)
+{
+    const std::array<int, 4> &viewport = camera.get_viewport();
+    const Matrix4d            m        = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
+    auto ndc = [&m](const Vec3d &p) {
+        const Vec4d c = m * Vec4d(p.x(), p.y(), p.z(), 1.);
+        return Vec2d(c.x() / c.w(), c.y() / c.w());
+    };
+    const double px_per_mm = (ndc(world_point + camera.get_dir_right()) - ndc(world_point)).norm() * 0.5 * double(viewport[2]);
+    return px_per_mm > 1e-9 ? 1. / px_per_mm : 1.;
+}
+} // namespace
+
 GLGizmoPainterBase::~GLGizmoPainterBase()
 {
+    spread_stop_timer();
+    m_spread.reset();
     if (s_sphere != nullptr)
         s_sphere.reset();
 }
@@ -159,6 +220,15 @@ void GLGizmoPainterBase::render_cursor()
     if (m_rr.mesh_id == -1)
         return;
 
+    if (m_tool_type == ToolType::SPREAD) {
+        // Edge: the seed ring while hovering; while held, a faint ball at the max radius (if set).
+        if (m_spread == nullptr)
+            render_cursor_circle(SpreadSeedRingPx);
+        else if (m_spread->max_radius > 0.f && m_spread->mesh_idx < int(trafo_matrices.size()))
+            render_cursor_sphere(trafo_matrices[m_spread->mesh_idx], &m_spread->seed_mesh, m_spread->max_radius, 0.12f);
+        return;
+    }
+
     if (m_tool_type == ToolType::BRUSH) {
         if (m_cursor_type == TriangleSelector::SPHERE)
             render_cursor_sphere(trafo_matrices[m_rr.mesh_id]);
@@ -169,7 +239,7 @@ void GLGizmoPainterBase::render_cursor()
     }
 }
 
-void GLGizmoPainterBase::render_cursor_circle()
+void GLGizmoPainterBase::render_cursor_circle(float radius_px)
 {
     const Size cnv_size = m_parent.get_canvas_size();
     const float cnv_width  = float(cnv_size.get_width());
@@ -182,7 +252,7 @@ void GLGizmoPainterBase::render_cursor_circle()
 
     const Vec2d center = m_parent.get_local_mouse_position();
     const float zoom = float(wxGetApp().plater()->get_camera().get_zoom());
-    const float radius = m_cursor_radius * float(wxGetApp().plater()->get_camera().get_zoom());
+    const float radius = radius_px > 0.f ? radius_px : m_cursor_radius * float(wxGetApp().plater()->get_camera().get_zoom());
 
 #if !SLIC3R_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
@@ -303,7 +373,7 @@ void GLGizmoPainterBase::render_cursor_circle()
 }
 
 
-void GLGizmoPainterBase::render_cursor_sphere(const Transform3d& trafo) const
+void GLGizmoPainterBase::render_cursor_sphere(const Transform3d& trafo, const Vec3f *center, float radius, float alpha) const
 {
     if (s_sphere == nullptr) {
         s_sphere = std::make_shared<GLModel>();
@@ -322,13 +392,15 @@ void GLGizmoPainterBase::render_cursor_sphere(const Transform3d& trafo) const
         render_color = this->get_cursor_sphere_left_button_color();
     else if (m_button_down == Button::Right)
         render_color = this->get_cursor_sphere_right_button_color();
+    if (alpha >= 0.f)
+        render_color.a(alpha);
 
     shader->start_using();
 
     const Camera& camera = wxGetApp().plater()->get_camera();
     Transform3d view_model_matrix = camera.get_view_matrix() * trafo *
-        Geometry::assemble_transform(m_rr.hit.cast<double>()) * complete_scaling_matrix_inverse *
-        Geometry::assemble_transform(Vec3d::Zero(), Vec3d::Zero(), m_cursor_radius * Vec3d::Ones());
+        Geometry::assemble_transform((center != nullptr ? *center : m_rr.hit).cast<double>()) * complete_scaling_matrix_inverse *
+        Geometry::assemble_transform(Vec3d::Zero(), Vec3d::Zero(), double(radius > 0.f ? radius : m_cursor_radius) * Vec3d::Ones());
 
     shader->set_uniform("view_model_matrix", view_model_matrix);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
@@ -660,6 +732,17 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
     Vec2d _mouse_position = mouse_position;
     if (action == SLAGizmoEventType::MouseWheelUp
      || action == SLAGizmoEventType::MouseWheelDown) {
+        // Edge (Spread): the wheel changes nothing while a spread is held, so it stays free for zoom.
+        if (m_spread != nullptr)
+            return false;
+        if (control_down && m_tool_type == ToolType::SPREAD) {
+            if (m_smart_fill_angle >= 0.f) {
+                m_smart_fill_angle = action == SLAGizmoEventType::MouseWheelDown ? std::max(m_smart_fill_angle - SmartFillAngleStep, SmartFillAngleMin)
+                                                                                : std::min(m_smart_fill_angle + SmartFillAngleStep, SmartFillAngleMax);
+                m_parent.set_as_dirty();
+            }
+            return true;
+        }
         if (control_down) {
             //BBS
             if (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::HEIGHT_RANGE) {
@@ -745,6 +828,14 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                 new_state = m_button_down == Button::Left ? this->get_left_button_state_type() : this->get_right_button_state_type();
             else
                 new_state = action == SLAGizmoEventType::LeftDown ? this->get_left_button_state_type() : this->get_right_button_state_type();
+        }
+
+        // Edge (Spread): the press drops the seed; the timer grows the patch until the release.
+        // Moving the mouse while held changes nothing: the seed stays where it was pressed.
+        if (m_tool_type == ToolType::SPREAD || m_spread != nullptr) {
+            if (action == SLAGizmoEventType::Dragging || m_spread != nullptr)
+                return m_button_down != Button::None;
+            return spread_press(action == SLAGizmoEventType::LeftDown ? Button::Left : Button::Right, new_state, shift_down, _mouse_position);
         }
 
         const Camera        &camera                      = wxGetApp().plater()->get_camera();
@@ -967,6 +1058,12 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
     if ((action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::RightUp)
       && m_button_down != Button::None) {
+        // Edge (Spread): the release ends the press; erasing was decided at the press.
+        if (m_spread != nullptr) {
+            spread_stop_timer();
+            shift_down = m_spread->erase;
+            m_spread.reset();
+        }
         // Take snapshot and update ModelVolume data.
         wxString action_name = this->handle_snapshot_action_name(shift_down, m_button_down);
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), std::string(action_name.ToUTF8().data()), UndoRedo::SnapshotType::GizmoAction);
@@ -1144,6 +1241,7 @@ void GLGizmoPainterBase::on_set_state()
 
     if (m_state == On && m_old_state != On) { // the gizmo was just turned on
         m_parent.enable_picking(false);
+        load_spread_settings();
         on_opening();
 
         const Selection& selection = m_parent.get_selection();
@@ -1160,6 +1258,9 @@ void GLGizmoPainterBase::on_set_state()
         on_shutdown();
         m_old_mo_id = -1;
         //m_iva.release_geometry();
+        // A held spread refers to its selector: drop it first.
+        spread_stop_timer();
+        m_spread.reset();
         m_triangle_selectors.clear();
         // A stroke still open goes with the selectors. Its state must not carry into the next session, where the
         // first move would end it as if released and the first press would paint a line from its last position.
@@ -1184,6 +1285,201 @@ void GLGizmoPainterBase::on_load(cereal::BinaryInputArchive&)
     // a flag to do the update in set_painter_gizmo_data, which will be called
     // soon after.
     m_schedule_update = true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Edge: Spread paint (design: tests/design_spread_paint_tool.md)
+
+float GLGizmoPainterBase::spread_speed_px_per_s(int stop)
+{
+    // A geometric series round Normal = 120 px/s (the design's k): each stop halves or doubles the
+    // speed. Speed is judged by ratio, so equal ratios read as equal steps. Slowest (30 px/s, about
+    // one seed ring per 0.2 s) is for touching up small areas when zoomed in; Fastest (480 px/s)
+    // crosses a full-HD view in about two seconds.
+    static constexpr float speeds[SpreadSpeedStops] = { 30.f, 60.f, 120.f, 240.f, 480.f };
+    return speeds[std::clamp(stop, 0, SpreadSpeedStops - 1)];
+}
+
+void GLGizmoPainterBase::load_spread_settings()
+{
+    const AppConfig *cfg = wxGetApp().app_config;
+    if (cfg == nullptr)
+        return;
+    const std::string speed = cfg->get("spread_paint_speed");
+    m_spread_speed          = speed.empty() ? SpreadSpeedDefault : std::clamp(std::atoi(speed.c_str()), 0, SpreadSpeedStops - 1);
+    // Written with the classic locale, so read it the same way.
+    m_spread_max_radius = 0.f;
+    if (const std::string max_r = cfg->get("spread_paint_max_radius"); ! max_r.empty()) {
+        std::istringstream in(max_r);
+        in.imbue(std::locale::classic());
+        float v = 0.f;
+        if (in >> v)
+            m_spread_max_radius = std::max(0.f, v);
+    }
+    m_spread_relative_to_seed = cfg->get_bool("spread_paint_relative_to_seed");
+    m_spread_keep_existing    = cfg->get_bool("spread_paint_keep_existing");
+}
+
+void GLGizmoPainterBase::save_spread_settings() const
+{
+    AppConfig *cfg = wxGetApp().app_config;
+    if (cfg == nullptr)
+        return;
+    cfg->set("spread_paint_speed", std::to_string(std::clamp(m_spread_speed, 0, SpreadSpeedStops - 1)));
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::max(0.f, m_spread_max_radius);
+    cfg->set("spread_paint_max_radius", out.str());
+    cfg->set_bool("spread_paint_relative_to_seed", m_spread_relative_to_seed);
+    cfg->set_bool("spread_paint_keep_existing", m_spread_keep_existing);
+}
+
+float GLGizmoPainterBase::spread_radius() const { return m_spread != nullptr ? m_spread->radius : -1.f; }
+
+void GLGizmoPainterBase::render_spread_label() const
+{
+    if (m_spread == nullptr)
+        return;
+    const std::string text = into_u8(wxString::Format("%.1f ", double(m_spread->radius)) + _L("mm"));
+    const ImVec2      mouse = ImGui::GetIO().MousePos;
+    const ImVec2      pos(mouse.x + 18.f, mouse.y + 18.f);
+    const ImVec2      size = ImGui::CalcTextSize(text.c_str());
+    ImDrawList       *dl   = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(ImVec2(pos.x - 4.f, pos.y - 2.f), ImVec2(pos.x + size.x + 4.f, pos.y + size.y + 2.f), IM_COL32(0, 0, 0, 170), 3.f);
+    dl->AddText(pos, IM_COL32(255, 255, 255, 255), text.c_str());
+}
+
+void GLGizmoPainterBase::spread_stop_timer()
+{
+    if (m_spread_timer)
+        m_spread_timer->Stop();
+}
+
+bool GLGizmoPainterBase::spread_press(Button button, EnforcerBlockerType new_state, bool erase, const Vec2d &mouse_position)
+{
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr)
+        return false;
+    const Camera        &camera    = wxGetApp().plater()->get_camera();
+    const Selection     &selection = m_parent.get_selection();
+    const ModelInstance *mi        = mo->instances[selection.get_instance_idx()];
+    const bool           assemble  = m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView;
+    const Transform3d    instance_trafo = assemble ? mi->get_assemble_transformation().get_matrix() : mi->get_transformation().get_matrix();
+    const Transform3d    instance_trafo_not_translate = assemble ? mi->get_assemble_transformation().get_matrix_no_offset() :
+                                                                   mi->get_transformation().get_matrix_no_offset();
+    std::vector<Transform3d> trafo_matrices;
+    std::vector<Transform3d> trafo_matrices_not_translate;
+    for (const ModelVolume *mv : mo->volumes)
+        if (mv->is_model_part()) {
+            Transform3d t = instance_trafo * mv->get_matrix();
+            if (assemble)
+                t.translate(mv->get_transformation().get_offset() * (GLVolume::explosion_ratio - 1.0) +
+                            mi->get_offset_to_assembly() * (GLVolume::explosion_ratio - 1.0));
+            trafo_matrices.emplace_back(t);
+            trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate * mv->get_matrix_no_offset());
+        }
+
+    update_raycast_cache(mouse_position, camera, trafo_matrices);
+    const int mesh_idx = m_rr.mesh_id;
+    if (mesh_idx < 0 || mesh_idx >= int(m_triangle_selectors.size()) || mesh_idx >= int(trafo_matrices.size()))
+        return false; // missed the object: the canvas may rotate the view
+
+    TriangleSelectorGUI *selector = m_triangle_selectors[mesh_idx].get();
+    const Transform3d   &trafo    = trafo_matrices[mesh_idx];
+
+    auto press       = std::make_unique<SpreadPress>();
+    press->mesh_idx  = mesh_idx;
+    press->selector  = selector;
+    press->saved     = selector->serialize();
+    press->seed_mesh = m_rr.hit;
+    press->erase     = erase;
+
+    // Speed and sizes are fixed for the press, from the zoom at the seed's depth: zoomed in the
+    // spread is slow and fine, zoomed out it covers a lot quickly, whatever the model's size.
+    const double mm_per_px = world_mm_per_pixel(camera, trafo * m_rr.hit.cast<double>());
+    press->r0              = float(SpreadSeedRingPx * mm_per_px);
+    press->speed           = float(spread_speed_px_per_s(m_spread_speed) * mm_per_px);
+    press->max_radius      = std::max(0.f, m_spread_max_radius);
+
+    SpreadParams params;
+    params.hit                = m_rr.hit;
+    params.facet              = int(m_rr.facet);
+    params.trafo_no_translate = trafo_matrices_not_translate[mesh_idx];
+    params.clp                = this->get_clipping_plane_in_volume_coordinates(trafo);
+    params.state              = new_state;
+    params.angle_deg          = m_smart_fill_angle; // negative (the colour gizmo's "Edge detection" off): no limit
+    params.angle_mode         = m_spread_relative_to_seed ? SpreadParams::AngleMode::Seed : SpreadParams::AngleMode::Neighbour;
+    params.overhang_deg       = m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f;
+    params.keep_existing      = m_spread_keep_existing;
+    // Split the boundary down to about a pixel, never finer than the brush's 0.05 mm.
+    params.edge_limit         = std::max(0.05f, float(mm_per_px));
+    press->session            = std::make_unique<SpreadSession>(*selector, params);
+
+    m_button_down      = button;
+    m_last_mouse_click = Vec2d::Zero();
+    press->start       = std::chrono::steady_clock::now();
+    m_spread           = std::move(press);
+
+    if (! m_spread_timer)
+        m_spread_timer = std::make_unique<SpreadTimer>([this]() { this->spread_tick(); });
+    // The start circle shows at once.
+    spread_tick();
+    return true;
+}
+
+void GLGizmoPainterBase::spread_tick()
+{
+    if (m_spread == nullptr || m_spread->done)
+        return;
+    SpreadPress &p = *m_spread;
+    if (p.mesh_idx >= int(m_triangle_selectors.size()) || m_triangle_selectors[p.mesh_idx].get() != p.selector) {
+        // The selectors were rebuilt under the press (the model changed): drop it untouched.
+        spread_stop_timer();
+        m_spread.reset();
+        m_button_down = Button::None;
+        return;
+    }
+
+    const auto   t0 = std::chrono::steady_clock::now();
+    const double t  = std::chrono::duration<double>(t0 - p.start).count();
+    // Constant radial speed after a short linear ease-in. The radius comes from the wall clock, so
+    // a slow machine gets coarser steps, not a slower spread.
+    const double grown = t < SpreadEaseIn ? 0.5 * t * t / SpreadEaseIn : t - 0.5 * SpreadEaseIn;
+    float        r     = p.r0 + float(double(p.speed) * grown);
+    if (p.max_radius > 0.f)
+        r = std::min(r, p.max_radius);
+    p.session->grow_to(r);
+    const bool exhausted = p.session->exhausted();
+    p.radius             = exhausted ? std::min(r, p.session->max_reached()) : r;
+    p.done               = exhausted || (p.max_radius > 0.f && r >= p.max_radius);
+    p.selector->request_update_render_data(true);
+    m_parent.set_as_dirty();
+    m_parent.request_extra_frame();
+
+    if (! p.done) {
+        // Adaptive interval: a slow tick (a big mesh) gets more time before the next one.
+        const double cost_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        m_spread_timer->StartOnce(int(std::clamp(1.5 * cost_ms, 16., 100.)));
+    }
+}
+
+bool GLGizmoPainterBase::on_spread_escape()
+{
+    if (m_spread == nullptr)
+        return false;
+    spread_stop_timer();
+    SpreadPress &p = *m_spread;
+    if (p.mesh_idx < int(m_triangle_selectors.size()) && m_triangle_selectors[p.mesh_idx].get() == p.selector) {
+        p.session.reset(); // it refers to the selector about to be restored
+        p.selector->deserialize(p.saved, true);
+        p.selector->request_update_render_data(true);
+    }
+    m_spread.reset();
+    // No snapshot and no model update: the model never saw this press.
+    m_button_down      = Button::None;
+    m_last_mouse_click = Vec2d::Zero();
+    m_parent.set_as_dirty();
+    return true;
 }
 
 TriangleSelector::ClippingPlane GLGizmoPainterBase::get_clipping_plane_in_volume_coordinates(const Transform3d &trafo) const {

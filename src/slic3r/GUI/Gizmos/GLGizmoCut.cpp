@@ -9755,6 +9755,22 @@ void GLGizmoCut3D::begin_reedit()
     // cut_id. It does carry the recipe, which is what the re-cut writes forward.
     proxy->cut_recipe = m_reedit_pending_recipe;
 
+    // OD11 PR D (owner D2 = a): the stand-in is the recipe's bare mesh, so give it the halves'
+    // painting back - from the stashed copies, which are the halves as they are now. If their
+    // frame cannot be matched to the stand-in (a part moved inside a half, or an old recipe with
+    // no instance transform on a rotated or scaled cut) the painting is dropped, and said so.
+    {
+        std::vector<const ModelObject*> halves(m_reedit_stash.objects.begin(), m_reedit_stash.objects.end());
+        const CutRecipe& rc = m_reedit_pending_recipe;
+        const CutPaintCarry carry = carry_cut_painting_to_uncut(
+            halves, rc.instance_linear_set ? rc.instance_linear : Transform3d::Identity(), *proxy->volumes.front());
+        if (carry.had_paint && !carry.carried)
+            plater->get_notification_manager()->push_notification(
+                NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                _u8L("Edit cut: the painting on the cut parts could not be matched to the uncut part, so it was dropped. "
+                     "Cancel keeps the painted parts."));
+    }
+
     m_reedit_proxy_id = proxy->id();
 
     // ... and into the LIST, which model.add_object() knows nothing about. Without
@@ -9940,8 +9956,15 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
     // stand-in carries it), so both paths take it from the same place.
     const bool  write_recipe = m_keep_cut_editable;
     CutRecipe   new_recipe;
-    if (write_recipe)
+    if (write_recipe) {
         new_recipe = build_recipe_from_gizmo(mo, object_part_mesh(mo));
+        // OD11 PR D: the frame the halves' meshes will be in, relative to the recipe's mesh, so
+        // Edit cut can carry their painting back (carry_cut_painting_to_uncut()).
+        if (instance_idx >= 0 && size_t(instance_idx) < mo->instances.size()) {
+            new_recipe.instance_linear     = mo->instances[size_t(instance_idx)]->get_transformation().get_matrix_no_offset();
+            new_recipe.instance_linear_set = true;
+        }
+    }
 
     // A re-edit replaces the halves it was opened on. Take their ids before
     // reset_all_gizmos() clears the session, and keep the stand-in's id so the
@@ -10119,8 +10142,11 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
                 // A Pin object is the same: one connector part.
                 const bool is_dowel = o->volumes.size() == 1 && o->volumes.front()->is_cut_connector() &&
                                       is_separate_pin_connector_type(o->volumes.front()->cut_info.connector_type);
-                if (!is_dowel)
+                if (!is_dowel) {
                     o->cut_recipe = new_recipe;
+                    // OD11 PR D: this half's cut frame, for Edit cut's painting carry.
+                    cut_recipe_record_half_frame(*o);
+                }
             }
         }
 

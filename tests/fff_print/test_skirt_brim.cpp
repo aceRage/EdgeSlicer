@@ -1,8 +1,13 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Geometry.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/BrimEarsPoint.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <set>
@@ -11,6 +16,84 @@
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
+
+// Two 20 mm cubes `gap` mm apart edge to edge, as two objects (`as_instances` false) or as two
+// instances of one object. Edge's init_print() arranges the objects, so these are placed by hand.
+static void place_two_cubes(double gap, bool as_instances, std::initializer_list<ConfigBase::SetDeserializeItem> config_items,
+                            Print &print, Model &model, bool validate = true)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(config_items);
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    config.set_key_value("machine_start_gcode", new ConfigOptionString(""));
+
+    const Vec3d offsets[] = { Vec3d(80., 80., 0.), Vec3d(80. + 20. + gap, 80., 0.) };
+    ModelObject *object = nullptr;
+    for (const Vec3d &offset : offsets) {
+        if (object == nullptr || !as_instances) {
+            object = model.add_object();
+            object->name = "cube.stl";
+            object->add_volume(make_cube(20., 20., 20.));
+        }
+        object->add_instance()->set_offset(offset);
+    }
+    for (ModelObject *mo : model.objects) {
+        mo->ensure_on_bed();
+        print.auto_assign_extruders(mo);
+    }
+    print.apply(model, config);
+    if (validate)
+        print.validate();
+    print.set_status_silent();
+}
+
+// Number of separate passes of extrusions whose G-code comment names `role` (needs gcode_comments).
+static int role_passes(const std::string &gcode, const std::string &role)
+{
+    int  passes  = 0;
+    bool in_role = false;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self))
+            return;
+        const bool is_role = line.comment().find(role) != std::string_view::npos;
+        if (is_role && !in_role)
+            ++passes;
+        in_role = is_role;
+    });
+    return passes;
+}
+
+// The order in which the given extrusion roles start, consecutive repeats collapsed.
+static std::vector<std::string> role_sequence(const std::string &gcode, const std::vector<std::string> &roles)
+{
+    std::vector<std::string> seq;
+    std::string              current;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.extruding(self))
+            return;
+        const std::string_view comment = line.comment();
+        for (const std::string &role : roles)
+            if (comment.find(role) != std::string_view::npos) {
+                if (current != role) {
+                    seq.push_back(role);
+                    current = role;
+                }
+                break;
+            }
+    });
+    return seq;
+}
+
+// Distinct brims over all skirt/brim groups (a combined brim covers more than one object or instance).
+static int brim_count(const Print &print)
+{
+    int n = 0;
+    for (const Print::SkirtBrimGroup &group : print.skirt_brim_groups())
+        n += int(group.brims.size());
+    return n;
+}
 
 /// Helper method to find the tool used for the brim (always the first extrusion)
 static int get_brim_tool(const std::string &gcode)
@@ -380,3 +463,654 @@ SCENARIO("Original Slic3r Skirt/Brim tests", "[SkirtBrim]") {
     }
 }
 
+// Orca #14403: skirt flow and the per-object skirt offset of a plate without objects must not
+// read m_objects.front().
+TEST_CASE("Skirt flow and per-object skirt offset work on an empty plate", "[SkirtBrim][Orca14403]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_type",               "perobject" },
+        { "skirt_loops",              2 },
+        { "initial_layer_line_width", 0 },
+    });
+    Print print;
+    Model model;
+    print.apply(model, config);
+    REQUIRE(print.objects().empty());
+    CHECK(print.skirt_flow().width() > 0.f);
+    const auto [width, height] = print.object_skirt_offset();
+    CHECK(width == 0.f);
+    CHECK(height == 0.f);
+}
+
+// Places one painted brim ear at `ear_local` (a first-layer point of object 0, in the object's
+// slice coordinates) and reslices. Returns the ear's centre in brim path (plate) coordinates.
+static Point paint_one_brim_ear(Print &print, Model &model, const DynamicPrintConfig &config, const Point &ear_local, float radius)
+{
+    const PrintObject *object = print.get_object(0);
+    Transform3d model_transform = model.objects.front()->instances.front()->get_transformation().get_matrix_no_offset();
+    const Point &center_offset = object->center_offset();
+    model_transform = model_transform.pretranslate(
+        Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
+    Vec3d model_pos = model_transform.inverse() * Vec3d(unscale<double>(ear_local.x()), unscale<double>(ear_local.y()), 0);
+    model_pos.z() = model.objects.front()->raw_mesh_bounding_box().min.z() - 0.0001;
+    model.objects.front()->brim_points = { BrimPoint(model_pos.cast<float>(), radius) };
+    print.apply(model, config);
+    print.process();
+
+    const Vec3d plate_origin = print.get_plate_origin();
+    Point center = ear_local + print.get_object(0)->instances().front().shift_without_plate_offset();
+    center += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    return center;
+}
+
+static BoundingBox brim_paths_bbox(Print &print)
+{
+    BoundingBox bbox;
+    for (const auto &kv : print.get_brimMap()) {
+        Polylines paths;
+        kv.second.collect_polylines(paths);
+        for (const Polyline &path : paths)
+            for (const Point &pt : path.points)
+                bbox.merge(pt);
+    }
+    return bbox;
+}
+
+// Orca #14606: with "Brim follows compensated outline", a painted ear in the middle of an edge was
+// moved to the nearest outline vertex (a corner). It now moves to the nearest point of the edge.
+TEST_CASE("Painted brim ear stays on its edge with the compensated outline", "[SkirtBrim][Orca14606]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_loops",                      0 },
+        { "brim_type",                        "painted" },
+        { "brim_object_gap",                  0 },
+        { "brim_use_efc_outline",             1 },
+        { "elefant_foot_compensation",        0.5 },
+        { "elefant_foot_compensation_layers", 1 },
+        { "initial_layer_line_width",         0.5 },
+    });
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    print.process();
+
+    const Polygon &contour = print.get_object(0)->layers().front()->lslices.front().contour;
+    REQUIRE(contour.points.size() >= 4);
+    // The longest contour edge, so the ear sits about 10 mm from either corner.
+    size_t edge = 0;
+    for (size_t i = 1; i < contour.points.size(); ++i)
+        if ((contour.points[(i + 1) % contour.points.size()] - contour.points[i]).cast<double>().norm() >
+            (contour.points[(edge + 1) % contour.points.size()] - contour.points[edge]).cast<double>().norm())
+            edge = i;
+    const Point a = contour.points[edge], b = contour.points[(edge + 1) % contour.points.size()];
+    const Point mid((a.x() + b.x()) / 2, (a.y() + b.y()) / 2);
+
+    const Point ear_center = paint_one_brim_ear(print, model, config, mid, 5.f);
+    const BoundingBox bbox = brim_paths_bbox(print);
+    REQUIRE(bbox.defined);
+    // Distance of the ear from the edge's midpoint, measured along the edge.
+    const Vec2d dir   = (b - a).cast<double>().normalized();
+    const double along = std::abs(dir.dot((bbox.center() - ear_center).cast<double>()));
+    INFO("Ear centre is " << unscale<double>(along) << " mm along the edge from where it was painted");
+    CHECK(unscale<double>(along) < 1.);
+}
+
+// Orca #14683: two instances of one object get a per-object skirt and a brim each, and touching
+// instance brims combine like the brims of separate objects.
+TEST_CASE("Per-object skirt is generated per instance", "[SkirtBrim][Orca14683]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(60, true, {
+        { "skirt_type",     "perobject" },
+        { "skirt_height",   1 },
+        { "skirt_distance", 2 },
+        { "skirt_loops",    1 },
+        { "brim_type",      "no_brim" },
+    }, print, model);
+    print.process();
+
+    REQUIRE(print.skirt_brim_groups().size() == 2);
+    REQUIRE(print.skirt().items_count() == 2);
+    for (const Print::SkirtBrimGroup &group : print.skirt_brim_groups()) {
+        REQUIRE(group.instances.size() == 1);
+        REQUIRE(group.instances.front().object_id == print.get_object(0)->id());
+    }
+    CHECK(role_passes(gcode(print), "skirt") == 2);
+}
+
+TEST_CASE("Object brims are generated per instance", "[SkirtBrim][Orca14683]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(60, true, {
+        { "skirt_loops",   0 },
+        { "brim_type",     "outer_only" },
+        { "brim_width",    5 },
+        { "combine_brims", 0 },
+    }, print, model);
+    print.process();
+
+    REQUIRE(print.skirt_brim_groups().size() == 1);
+    REQUIRE(print.skirt_brim_groups().front().brims.size() == 2);
+    for (const Print::SkirtBrimGroup::Brim &brim : print.skirt_brim_groups().front().brims) {
+        REQUIRE(brim.instances.size() == 1);
+        REQUIRE(brim.instances.front().object_id == print.get_object(0)->id());
+    }
+    // Each instance's brim prints right before that instance.
+    CHECK(role_sequence(gcode(print), { "brim", "perimeter" }) ==
+          std::vector<std::string>{ "brim", "perimeter", "brim", "perimeter" });
+}
+
+TEST_CASE("Combine brims merges neighboring object instances", "[SkirtBrim][Orca14683]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(5, true, {
+        { "skirt_loops",   0 },
+        { "brim_type",     "outer_only" },
+        { "brim_width",    5 },
+        { "combine_brims", 1 },
+    }, print, model);
+    print.process();
+
+    REQUIRE(print.skirt_brim_groups().size() == 1);
+    REQUIRE(print.skirt_brim_groups().front().brims.size() == 1);
+    REQUIRE(print.skirt_brim_groups().front().brims.front().instances.size() == 2);
+    CHECK(role_sequence(gcode(print), { "brim", "perimeter" }) == std::vector<std::string>{ "brim", "perimeter" });
+}
+
+// Edge: with Brim filament "Nearest wall", the partitioned brim prints only through the
+// per-extruder runs; the per-instance group brims must not print it a second time.
+TEST_CASE("Nearest-wall brim is not printed twice by the instance brims", "[SkirtBrim][Orca14683]")
+{
+    auto brim_length = [](const char *source) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_num_extruders(2);
+        config.set_num_filaments(2);
+        config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+        config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF" };
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+        config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+        config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+        config.set_deserialize_strict({
+            { "skirt_loops",          0 },
+            { "brim_type",            "outer_only" },
+            { "brim_width",           3 },
+            { "brim_filament_source", source },
+            { "gcode_comments",       1 },
+            { "machine_start_gcode",  "" },
+        });
+        Print print;
+        Model model;
+        init_print({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, print, model, config);
+        REQUIRE(model.objects.size() == 2);
+        model.objects[1]->volumes.front()->config.set("extruder", 2);
+        print.apply(model, config);
+        double len = 0.;
+        GCodeReader reader;
+        reader.parse_buffer(gcode(print), [&len](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.extruding(self) && line.comment().find("brim") != std::string_view::npos)
+                len += line.dist_XY(self);
+        });
+        return len;
+    };
+    const double object_brim  = brim_length("object");
+    const double nearest_brim = brim_length("nearest_wall");
+    REQUIRE(object_brim > 0.);
+    CHECK(nearest_brim == Approx(object_brim).epsilon(0.15));
+}
+
+// Orca #14333: the skirt / draft shield prints once per layer it spans (skirt_height layers, or every
+// layer with a draft shield, even at height 0), and per-object skirts print with their own object.
+// Upstream arranges the cubes; Edge places them: 5 mm apart by layer (per-object skirts join), and
+// 60 mm apart by object, past the extruder clearance, where each object keeps its own skirt.
+TEST_CASE("Skirt is emitted once per layer it spans", "[SkirtBrim][Orca14333]")
+{
+    const int object_layers = 100; // 20mm cube at 0.2mm layers
+    const char *skirt_type   = GENERATE("combined", "perobject");
+    const char *print_seq    = GENERATE("by layer", "by object");
+    const char *draft_shield = GENERATE("disabled", "enabled");
+    const int   skirt_height = GENERATE(0, 1, 3);
+
+    DYNAMIC_SECTION(skirt_type << " | " << print_seq << " | draft=" << draft_shield << " | height=" << skirt_height) {
+        const bool by_object  = std::string(print_seq) == "by object";
+        const bool per_object = std::string(skirt_type) == "perobject";
+        const bool draft      = std::string(draft_shield) == "enabled";
+        Print print;
+        Model model;
+        place_two_cubes(by_object ? 60. : 5., false, {
+            { "skirt_loops",    1 },
+            { "skirt_height",   skirt_height },
+            { "skirt_distance", 3 },
+            { "skirt_type",     skirt_type },
+            { "draft_shield",   draft_shield },
+            { "print_sequence", print_seq },
+            { "layer_height",   0.2 },
+            { "brim_type",      "no_brim" },
+        }, print, model);
+        const int layers = draft ? object_layers : skirt_height;
+        // By object, every object prints its own per-object skirt; the combined skirt prints with the first one.
+        CHECK(role_passes(gcode(print), "skirt") == (by_object && per_object ? 2 * layers : layers));
+    }
+}
+
+// Orca #14333: per-object skirts that would overlap become one skirt; far apart objects keep their own.
+TEST_CASE("Per-object skirts group when objects are close", "[SkirtBrim][Orca14333]")
+{
+    const double gap = GENERATE(5., 60.);
+    DYNAMIC_SECTION("gap=" << gap) {
+        Print print;
+        Model model;
+        place_two_cubes(gap, false, {
+            { "skirt_loops",    1 },
+            { "skirt_height",   1 },
+            { "skirt_distance", 3 },
+            { "skirt_type",     "perobject" },
+            { "print_sequence", "by layer" },
+            { "layer_height",   0.2 },
+            { "brim_type",      "no_brim" },
+        }, print, model);
+        CHECK(role_passes(gcode(print), "skirt") == (gap < 10. ? 1 : 2));
+    }
+}
+
+// Orca #14333: by object, a per-object skirt shared by two objects cannot be printed; slicing says so.
+TEST_CASE("By object rejects a per-object skirt shared by two objects", "[SkirtBrim][Orca14333]")
+{
+    Print print;
+    Model model;
+    // Too close for the extruder clearance as well, so skip validate() and slice directly.
+    place_two_cubes(5., false, {
+        { "skirt_loops",    1 },
+        { "skirt_height",   1 },
+        { "skirt_distance", 3 },
+        { "skirt_type",     "perobject" },
+        { "print_sequence", "by object" },
+        { "brim_type",      "no_brim" },
+    }, print, model, false);
+    CHECK_THROWS_AS(print.process(), Slic3r::SlicingError);
+}
+
+// Edge: skirt_loops 0 keeps the default skirt_height 1, which is not a skirt to share.
+TEST_CASE("By object accepts close objects when per-object skirts have no loops", "[SkirtBrim][Orca14333]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(5., false, {
+        { "skirt_loops",    0 },
+        { "skirt_height",   1 },
+        { "skirt_type",     "perobject" },
+        { "print_sequence", "by object" },
+        { "brim_type",      "no_brim" },
+    }, print, model, false);
+    CHECK_NOTHROW(print.process());
+    CHECK_FALSE(print.has_shared_per_object_skirt());
+}
+
+// Orca #14333: Combine brims joins touching brims; separate or far apart brims stay separate.
+TEST_CASE("Combine brims merges touching brims", "[SkirtBrim][Orca14333]")
+{
+    const double gap     = GENERATE(5., 60.);
+    const int    combine = GENERATE(0, 1);
+    DYNAMIC_SECTION("gap=" << gap << " combine_brims=" << combine) {
+        Print print;
+        Model model;
+        place_two_cubes(gap, false, {
+            { "skirt_loops",    1 },
+            { "skirt_height",   1 },
+            { "skirt_distance", 3 },
+            { "skirt_type",     "perobject" },
+            { "print_sequence", "by layer" },
+            { "brim_type",      "outer_only" },
+            { "brim_width",     5 },
+            { "combine_brims",  combine },
+            { "layer_height",   0.2 },
+        }, print, model);
+        print.process();
+        CHECK(brim_count(print) == (gap < 10. && combine ? 1 : 2));
+    }
+}
+
+// Orca #14333: each object's skirt and brim come right before that object, not all skirts then all brims.
+TEST_CASE("By-layer per-object skirt and brim precede each object", "[SkirtBrim][Orca14333]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(60, false, { // far apart: a skirt+brim per object
+        { "skirt_loops",    1 },
+        { "skirt_height",   1 },
+        { "skirt_distance", 3 },
+        { "skirt_type",     "perobject" },
+        { "print_sequence", "by layer" },
+        { "brim_type",      "outer_only" },
+        { "brim_width",     5 },
+        { "layer_height",   0.2 },
+    }, print, model);
+    const std::vector<std::string> expected{ "skirt", "brim", "perimeter", "skirt", "brim", "perimeter" };
+    CHECK(role_sequence(gcode(print), { "skirt", "brim", "perimeter" }) == expected);
+}
+
+// Orca #14333: a combined skirt goes around the brims (they are part of its hull), so it never
+// crosses a brim.
+TEST_CASE("Combined skirt keeps its distance from the brims", "[SkirtBrim][Orca14333]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(30, false, {
+        { "skirt_loops",    1 },
+        { "skirt_height",   1 },
+        { "skirt_distance", 2 },
+        { "skirt_type",     "combined" },
+        { "brim_type",      "outer_only" },
+        { "brim_width",     8 },
+    }, print, model);
+    print.process();
+    REQUIRE(print.skirt().items_count() == 1);
+    Polylines skirt;
+    print.skirt().collect_polylines(skirt);
+    ExPolygons brims;
+    for (const Print::SkirtBrimGroup &group : print.skirt_brim_groups())
+        for (const Print::SkirtBrimGroup::Brim &brim : group.brims) {
+            Polylines paths;
+            brim.brim.collect_polylines(paths);
+            for (const Polyline &path : paths)
+                append(brims, union_ex(offset(path, float(scale_(0.25)))));
+        }
+    REQUIRE_FALSE(brims.empty());
+    CHECK(intersection_pl(skirt, brims).empty());
+}
+
+// Orca #14991: brims of touching instances no longer overlap, and without Combine brims each one still
+// prints right before its own object.
+TEST_CASE("Uncombined neighboring brims precede their respective objects", "[SkirtBrim][Orca14991]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(0, false, {
+        { "skirt_loops",   0 },
+        { "brim_type",     "outer_only" },
+        { "brim_width",    5 },
+        { "combine_brims", 0 },
+    }, print, model);
+    print.process();
+
+    REQUIRE(print.skirt_brim_groups().size() == 1);
+    REQUIRE(print.skirt_brim_groups().front().brims.size() == 2);
+    CHECK(role_sequence(gcode(print), { "brim", "perimeter" }) ==
+          std::vector<std::string>{ "brim", "perimeter", "brim", "perimeter" });
+}
+
+TEST_CASE("Brims of neighboring instances do not overlap", "[SkirtBrim][Orca14991]")
+{
+    Print print;
+    Model model;
+    place_two_cubes(4, true, {
+        { "skirt_loops",   0 },
+        { "brim_type",     "outer_only" },
+        { "brim_width",    5 },
+        { "combine_brims", 0 },
+    }, print, model);
+    print.process();
+
+    const std::vector<Print::SkirtBrimGroup::Brim> &brims = print.skirt_brim_groups().front().brims;
+    REQUIRE(brims.size() == 2);
+    auto brim_area = [](const ExtrusionEntityCollection &brim) {
+        Polylines paths;
+        brim.collect_polylines(paths);
+        ExPolygons area;
+        for (const Polyline &path : paths)
+            append(area, union_ex(offset(path, float(scale_(0.1)))));
+        return union_ex(area);
+    };
+    // Paths as 0.2 mm wide strips: two brims sharing the 4 mm gap must not cross each other.
+    double overlap = 0.;
+    for (const ExPolygon &ex : intersection_ex(brim_area(brims[0].brim), brim_area(brims[1].brim)))
+        overlap += ex.area() * SCALING_FACTOR * SCALING_FACTOR;
+    CHECK(overlap < 0.01);
+}
+
+// Total brim loops across all objects.
+static size_t brim_loop_count(Print &print)
+{
+    size_t n = 0;
+    for (const auto &kv : print.get_brimMap())
+        n += kv.second.items_count();
+    return n;
+}
+
+static bool brim_enters_first_layer_hole(Print &print)
+{
+    const PrintObject *object = print.get_object(0);
+    Polygons holes;
+    for (const ExPolygon &slice : object->layers().front()->lslices)
+        holes.insert(holes.end(), slice.holes.begin(), slice.holes.end());
+
+    const Vec3d plate_origin = print.get_plate_origin();
+    Point shift = object->instances().front().shift_without_plate_offset();
+    shift += Point(scaled(plate_origin.x()), scaled(plate_origin.y()));
+    for (Polygon &hole : holes)
+        hole.translate(shift);
+
+    for (const auto &kv : print.get_brimMap()) {
+        Polylines brim_paths;
+        kv.second.collect_polylines(brim_paths);
+        for (const Polyline &path : brim_paths)
+            for (const Point &point : path.points)
+                if (contains(holes, point, false))
+                    return true;
+    }
+    return false;
+}
+
+// Orca #15015: Brim ears outer only keeps automatic mouse ears out of the model's holes.
+TEST_CASE("Outer-only brim ears stay out of model holes", "[SkirtBrim][Orca15015]")
+{
+    const bool outer_only = GENERATE(false, true);
+    DYNAMIC_SECTION("brim_ears_outer_only=" << outer_only) {
+        Print print;
+        init_and_process_print({ TestMesh::cube_with_concave_hole }, print, {
+            { "skirt_loops",                0 },
+            { "brim_type",                  "brim_ears" },
+            { "brim_width",                 2 },
+            { "brim_ears_max_angle",        125 },
+            { "brim_ears_detection_length", 0 },
+            { "brim_ears_outer_only",       outer_only },
+            { "initial_layer_line_width",   0.5 },
+        });
+
+        REQUIRE(brim_loop_count(print) > 0);
+        CHECK(brim_enters_first_layer_hole(print) != outer_only);
+    }
+}
+
+// Orca #15015: a painted ear's radius is the radius of the sliced ear (it used to lose the brim gap
+// and one line spacing).
+TEST_CASE("Painted brim ear radius controls sliced size", "[SkirtBrim][Orca15015]")
+{
+    constexpr double ear_radius = 10.0;
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_loops",                0 },
+        { "brim_type",                  "painted" },
+        { "brim_width",                 15 },
+        { "brim_object_gap",            0.1 },
+        { "brim_ears_outer_only",       true },
+        { "initial_layer_line_width",   0.5 },
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    print.process();
+
+    REQUIRE(!print.get_object(0)->layers().front()->lslices.empty());
+    const Point ear_local   = print.get_object(0)->layers().front()->lslices.front().contour.points.front();
+    const Point path_center = paint_one_brim_ear(print, model, config, ear_local, float(ear_radius));
+
+    double max_path_radius = 0.0;
+    for (const auto &kv : print.get_brimMap()) {
+        Polylines brim_paths;
+        kv.second.collect_polylines(brim_paths);
+        for (const Polyline &path : brim_paths)
+            for (const Point &point : path.points)
+                max_path_radius = std::max(max_path_radius, unscale<double>((point - path_center).cast<double>().norm()));
+    }
+
+    REQUIRE(max_path_radius > 0.0);
+    INFO("Outermost painted-ear path radius: " << max_path_radius << " mm");
+    CHECK(max_path_radius > ear_radius - 0.5);
+    CHECK(max_path_radius < ear_radius);
+}
+
+// Orca #15015: with Brim ears outer only, an ear painted inside a hole adds no brim there.
+TEST_CASE("Outer-only painted brim ears stay out of model holes", "[SkirtBrim][Orca15015]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "skirt_loops",                0 },
+        { "brim_type",                  "painted" },
+        { "brim_ears_outer_only",       true },
+        { "initial_layer_line_width",   0.5 },
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_with_concave_hole }, print, model, config);
+
+    // Slice once to obtain exact outer and inner contour points in print
+    // coordinates, then express them in the model coordinates painted ears store.
+    print.process();
+    const PrintObject *object = print.get_object(0);
+    REQUIRE(!object->layers().front()->lslices.empty());
+    REQUIRE(!object->layers().front()->lslices.front().holes.empty());
+
+    Transform3d model_transform = model.objects.front()->instances.front()->get_transformation().get_matrix_no_offset();
+    const Point &center_offset = object->center_offset();
+    model_transform = model_transform.pretranslate(
+        Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
+    const double bottom_z = model.objects.front()->raw_mesh_bounding_box().min.z() - 0.0001;
+    auto painted_point = [&model_transform, bottom_z](const Point &point) {
+        Vec3d model_pos = model_transform.inverse() *
+            Vec3d(unscale<double>(point.x()), unscale<double>(point.y()), 0);
+        model_pos.z() = bottom_z;
+        return BrimPoint(model_pos.cast<float>(), 3.f);
+    };
+
+    const ExPolygon &first_slice = object->layers().front()->lslices.front();
+    Polygon inner_contour = first_slice.holes.front();
+    inner_contour.reverse();
+    const Points inner_ear_points = inner_contour.concave_points(55. * PI / 180.);
+    REQUIRE(!inner_ear_points.empty());
+    model.objects.front()->brim_points = {
+        painted_point(first_slice.contour.points.front()),
+        painted_point(inner_ear_points.front()),
+    };
+    print.apply(model, config);
+    print.process();
+
+    REQUIRE(brim_loop_count(print) > 0);
+    CHECK_FALSE(brim_enters_first_layer_hole(print));
+}
+
+// Orca #11760: with "Brim follows compensated outline", the brim hugs the first layer after Elephant
+// foot compensation, so it moves in by the compensation on every side.
+TEST_CASE("Brim follows the elephant foot compensated outline", "[SkirtBrim][Orca11760]")
+{
+    auto brim_box = [](bool follow_efc) {
+        Print print;
+        init_and_process_print({ TestMesh::cube_20x20x20 }, print, {
+            { "skirt_loops",                      0 },
+            { "brim_type",                        "outer_only" },
+            { "brim_width",                       3 },
+            { "brim_object_gap",                  0 },
+            { "elefant_foot_compensation",        1 },
+            { "elefant_foot_compensation_layers", 1 },
+            { "brim_use_efc_outline",             follow_efc },
+        });
+        return brim_paths_bbox(print);
+    };
+    const BoundingBox raw = brim_box(false);
+    const BoundingBox efc = brim_box(true);
+    REQUIRE(raw.defined);
+    REQUIRE(efc.defined);
+    const double shrink = unscale<double>(raw.size().x() - efc.size().x());
+    INFO("Brim width over X shrinks by " << shrink << " mm");
+    CHECK(shrink == Approx(2.).margin(0.6));
+}
+
+// Orca #11876: Brim flow ratio scales the brim's extrusion only.
+TEST_CASE("Brim flow ratio scales the brim extrusion", "[SkirtBrim][Orca11876]")
+{
+    auto e_per_mm = [](double ratio, const char *role) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "skirt_loops",          0 },
+            { "brim_type",            "outer_only" },
+            { "brim_width",           3 },
+            { "brim_flow_ratio",      ratio },
+            { "gcode_comments",       1 },
+            { "machine_start_gcode",  "" },
+        });
+        const std::string g = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, config, true);
+        double e = 0., len = 0.;
+        GCodeReader reader;
+        // Read E the way the G-code was written (relative or absolute).
+        reader.apply_config(config);
+        reader.parse_buffer(g, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0 && line.comment().find(role) != std::string_view::npos) {
+                e += line.dist_E(self);
+                len += line.dist_XY(self);
+            }
+        });
+        return len > 0. ? e / len : 0.;
+    };
+    const double brim_full = e_per_mm(1., "brim");
+    const double brim_half = e_per_mm(0.5, "brim");
+    REQUIRE(brim_full > 0.);
+    CHECK(brim_half / brim_full == Approx(0.5).epsilon(0.01));
+    // The walls are not touched.
+    CHECK(e_per_mm(0.5, "perimeter") == Approx(e_per_mm(1., "perimeter")).epsilon(0.001));
+}
+
+// Edge: an instance's own brim prints inside its EXCLUDE_OBJECT label, so it belongs to that copy; a
+// brim shared by several copies (Combine brims) prints outside every label, so skipping one copy keeps it.
+TEST_CASE("Shared brims print outside the object labels, own brims inside", "[SkirtBrim][Orca14683]")
+{
+    const int combine = GENERATE(0, 1);
+    DYNAMIC_SECTION("combine_brims=" << combine) {
+        Print print;
+        Model model;
+        place_two_cubes(5, true, {
+            { "skirt_loops",    0 },
+            { "brim_type",      "outer_only" },
+            { "brim_width",     5 },
+            { "combine_brims",  combine },
+            { "gcode_flavor",   "klipper" },
+            { "exclude_object", 1 },
+        }, print, model);
+        const std::string g = gcode(print);
+        REQUIRE(g.find("EXCLUDE_OBJECT_START") != std::string::npos);
+        size_t inside = 0, outside = 0;
+        bool   in_label = false;
+        GCodeReader reader;
+        reader.parse_buffer(g, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.raw().rfind("EXCLUDE_OBJECT_START", 0) == 0)
+                in_label = true;
+            else if (line.raw().rfind("EXCLUDE_OBJECT_END", 0) == 0)
+                in_label = false;
+            else if (line.extruding(self) && line.dist_XY(self) > 0 && line.comment().find("brim") != std::string_view::npos)
+                ++(in_label ? inside : outside);
+        });
+        if (combine) {
+            CHECK(inside == 0);
+            CHECK(outside > 0);
+        } else {
+            CHECK(inside > 0);
+            CHECK(outside == 0);
+        }
+    }
+}

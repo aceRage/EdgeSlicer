@@ -52,6 +52,9 @@
 #include <boost/locale.hpp>
 #include <boost/log/trivial.hpp>
 
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+
 #include "libslic3r.h"
 #include "InstanceLock.hpp"
 #include "Utils.hpp"
@@ -1176,8 +1179,8 @@ static std::vector<std::string> s_Preset_print_options {
     "top_shell_layers", "top_shell_thickness", "top_surface_density", "bottom_surface_density", "bottom_shell_layers", "bottom_shell_thickness",
     "top_color_penetration_layers", "bottom_color_penetration_layers",
     "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness", "reduce_crossing_wall", "detect_thin_wall", "offset_layers", "detect_overhang_wall", "unsupported_wall_last", "overhang_reverse", "overhang_reverse_threshold","overhang_reverse_internal_only", "wall_direction",
-    "seam_position", "staggered_inner_seams", "seam_prefer_part_joints", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "gyroid_optimized", "sparse_infill_pattern", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle", "top_surface_pattern", "undertop_surface_pattern", "bottom_surface_pattern",
-    "infill_direction", "solid_infill_direction", "counterbore_hole_bridging","infill_shift_step", "sparse_infill_rotate_template", "solid_infill_rotate_template", "symmetric_infill_y_axis","skeleton_infill_density", "infill_lock_depth", "skin_infill_depth", "skin_infill_density",
+    "seam_position", "staggered_inner_seams", "seam_prefer_part_joints", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "adaptive_infill_mode", "adaptive_infill_interior_density", "adaptive_infill_gradient", "gyroid_optimized", "sparse_infill_pattern", "sparse_infill_smooth_factor", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle", "top_surface_pattern", "undertop_surface_pattern", "bottom_surface_pattern",
+    "infill_direction", "solid_infill_direction", "counterbore_hole_bridging","infill_shift_step", "sparse_infill_rotate_template", "solid_infill_rotate_template", "symmetric_infill_y_axis", "infill_complete_top","skeleton_infill_density", "infill_lock_depth", "skin_infill_depth", "skin_infill_density",
     "align_infill_direction_to_model", "extra_solid_infills",
     "minimum_sparse_infill_area", "reduce_infill_retraction","internal_solid_infill_pattern","gap_fill_target",
     "ironing_type", "ironing_pattern", "ironing_flow", "ironing_speed", "ironing_spacing", "ironing_angle", "ironing_inset",
@@ -1191,7 +1194,7 @@ static std::vector<std::string> s_Preset_print_options {
     "top_surface_speed", "support_speed", "support_object_xy_distance", "support_object_first_layer_gap", "support_interface_speed",
     "bridge_speed", "internal_bridge_speed", "gap_infill_speed", "travel_speed", "travel_speed_z", "initial_layer_speed",
     "outer_wall_acceleration", "initial_layer_acceleration", "top_surface_acceleration", "default_acceleration", "skirt_type", "skirt_loops", "skirt_speed","min_skirt_length", "skirt_distance", "skirt_start_angle", "skirt_height","single_loop_draft_shield", "draft_shield",
-    "brim_width", "brim_object_gap", "brim_type", "brim_filament_source", "brim_ears_max_angle", "brim_ears_detection_length", "enable_support", "support_type", "support_threshold_angle", "support_threshold_overlap","enforce_support_layers",
+    "brim_width", "brim_object_gap", "brim_flow_ratio", "brim_use_efc_outline", "combine_brims", "brim_type", "brim_filament_source", "brim_ears_max_angle", "brim_ears_detection_length", "brim_ears_outer_only", "enable_support", "support_type", "support_threshold_angle", "support_threshold_overlap","enforce_support_layers",
     "raft_layers", "raft_first_layer_density", "raft_first_layer_expansion", "raft_contact_distance", "raft_expansion",
     "support_base_pattern", "support_base_pattern_spacing", "support_expansion", "support_style",
     "independent_support_layer_height", "top_z_overrides_xy_distance",
@@ -1564,13 +1567,68 @@ void PresetCollection::load_presets(
         pending_files.push_back(dir_entry.path());
     std::vector<boost::filesystem::path> deferred_files;
     bool final_round = false;
+    // Startup round 2 (F3): the first pass parses its JSON files ahead, a chunk at a time on TBB
+    // workers, into slots in directory order; the loop below then takes each file's parse result in
+    // that same order instead of parsing it there. Everything that depends on order or on what is
+    // already loaded (inherits, defaults, duplicates, quarantine, substitutions) stays sequential, so
+    // the result is the same as parsing in the loop. Deferred files are parsed again in their rounds,
+    // as before. ORCA_PRESET_LOAD_SEQUENTIAL=1 (PresetBundle::sequential_load()) turns it off.
+    struct ParsedUserFile
+    {
+        bool                               ready = false;
+        DynamicPrintConfig                 config;
+        std::map<std::string, std::string> key_values;
+        std::string                        reason;
+        ConfigSubstitutions                substitutions;
+        std::exception_ptr                 error;
+
+        // Move-only (ConfigSubstitutions cannot be copied), so vector growth moves the slots.
+        ParsedUserFile()                                  = default;
+        ParsedUserFile(ParsedUserFile &&)                 = default;
+        ParsedUserFile &operator=(ParsedUserFile &&)      = default;
+        ParsedUserFile(const ParsedUserFile &)            = delete;
+        ParsedUserFile &operator=(const ParsedUserFile &) = delete;
+    };
+    const bool                  prefetch_first_round = !PresetBundle::sequential_load();
+    std::vector<ParsedUserFile> prefetched;
+    size_t                      prefetched_upto = 0;
+    size_t                      prof_prefetched = 0;
+    auto prefetch_from = [&](size_t begin) {
+        // Chunks bound the parsed configs held at once and how long the calling thread (which may be
+        // animating a splash between files) is lent to the workers.
+        constexpr size_t chunk = 64;
+        const size_t     end   = std::min(pending_files.size(), begin + chunk);
+        if (prefetched.size() < pending_files.size())
+            prefetched.resize(pending_files.size());
+        acc_parse.start();
+        tbb::parallel_for(tbb::blocked_range<size_t>(begin, end), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i != range.end(); ++i) {
+                if (!Slic3r::is_json_file(pending_files[i].filename().string()))
+                    continue;
+                ParsedUserFile &slot = prefetched[i];
+                try {
+                    slot.substitutions = slot.config.load_from_json(pending_files[i].string(), substitution_rule, slot.key_values, slot.reason);
+                } catch (...) {
+                    slot.error = std::current_exception();
+                }
+                slot.ready = true;
+            }
+        });
+        acc_parse.stop();
+        prefetched_upto = end;
+    };
     for (;;) {
     deferred_files.clear();
     ++prof_rounds;
     const size_t loaded_before_round = presets_loaded.size();
+    const bool   use_prefetch        = prefetch_first_round && prof_rounds == 1;
+    size_t       file_index          = 0;
     //BBS: change to json format
     for (const boost::filesystem::path &entry_path : pending_files)
     {
+        const size_t this_file_index = file_index++;
+        if (use_prefetch && this_file_index >= prefetched_upto)
+            prefetch_from(this_file_index);
         std::string file_name = entry_path.filename().string();
         //if (Slic3r::is_ini_file(dir_entry)) {
         if (Slic3r::is_json_file(file_name)) {
@@ -1598,10 +1656,24 @@ void PresetCollection::load_presets(
                     //ConfigSubstitutions config_substitutions = config.load_from_ini(preset.file, substitution_rule);
                     std::map<std::string, std::string> key_values;
                     std::string reason;
-                    acc_parse.start();
                     ++prof_parses;
-                    ConfigSubstitutions config_substitutions = config.load_from_json(preset.file, substitution_rule, key_values, reason);
-                    acc_parse.stop();
+                    ConfigSubstitutions config_substitutions;
+                    if (use_prefetch && this_file_index < prefetched.size() && prefetched[this_file_index].ready) {
+                        // Parsed ahead (see prefetch_from): take the result, or throw what the parse threw.
+                        ParsedUserFile parsed = std::move(prefetched[this_file_index]);
+                        prefetched[this_file_index] = ParsedUserFile();
+                        ++prof_prefetched;
+                        if (parsed.error)
+                            std::rethrow_exception(parsed.error);
+                        config               = std::move(parsed.config);
+                        key_values           = std::move(parsed.key_values);
+                        reason               = std::move(parsed.reason);
+                        config_substitutions = std::move(parsed.substitutions);
+                    } else {
+                        acc_parse.start();
+                        config_substitutions = config.load_from_json(preset.file, substitution_rule, key_values, reason);
+                        acc_parse.stop();
+                    }
                     if (! config_substitutions.empty())
                         substitutions.push_back({ preset.name, m_type, PresetConfigSubstitutions::Source::UserFile, preset.file, std::move(config_substitutions) });
                     if (!reason.empty()) {
@@ -1764,6 +1836,7 @@ void PresetCollection::load_presets(
         };
         startup_profile_log("PresetCollection::load_presets type=" + Preset::get_type_string(m_type) + " folder=" + subdir +
                             " json_files=" + std::to_string(prof_json_files) + " parses=" + std::to_string(prof_parses) +
+                            " prefetched=" + std::to_string(prof_prefetched) +
                             " loaded=" + std::to_string(presets_loaded.size()) + " rounds=" + std::to_string(prof_rounds) +
                             " deferred=" + std::to_string(prof_deferred) + " info_files=" + std::to_string(prof_info_files) +
                             " collection_size=" + std::to_string(m_presets.size()) +

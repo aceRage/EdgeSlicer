@@ -2845,3 +2845,117 @@ TEST_CASE("First layer travel acceleration reaches Klipper's SET_VELOCITY_LIMIT"
     CHECK(base.find("SET_VELOCITY_LIMIT ACCEL=1500") == std::string::npos);
     CHECK(override_.find("SET_VELOCITY_LIMIT ACCEL=1500") != std::string::npos);
 }
+
+// H2C "Wipe tower generation failed" (zephyra_wt_fail.3mf, 2026-10-25): Cyclic tool-change ordering
+// gives every layer the same filament order, which need not start with the filament still loaded
+// from the layer below. GCode::process_layer() rotated each layer's order to start with the loaded
+// filament anyway, while the Bambu (Type1) tower plan used the order as given: the export then asked
+// for tool changes in another order, and more of them, than the tower had planned, and threw.
+// Both now follow LayerTools::nominal_extruder_order(): a Cyclic layer is printed as given.
+// Three cubes in three filaments, Cyclic ordering, 10 layers.
+namespace {
+
+DynamicPrintConfig cyclic_three_filament_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00", "#0000FF"};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = true;
+    config.option<ConfigOptionBool>("enable_support")->value       = false;
+    config.option<ConfigOptionBool>("spiral_mode")->value          = false;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value   = 35.;
+    config.set_deserialize_strict({{"brim_type", "no_brim"},
+                                   {"skirt_loops", "0"},
+                                   {"wipe_tower_wall_type", "rectangle"},
+                                   {"gcode_flavor", "marlin"},
+                                   {"layer_height", "0.2"},
+                                   {"initial_layer_print_height", "0.2"},
+                                   {"toolchange_ordering", "cyclic"}});
+    return config;
+}
+
+void add_three_filament_cubes(Model &model)
+{
+    for (int filament = 1; filament <= 3; ++filament) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube-" + std::to_string(filament) + ".stl";
+        object->add_volume(mesh(TestMesh::cube_20x20x20));
+        object->add_instance()->set_offset(Vec3d(60. + 30. * filament, 60., 0.));
+        // 2 mm tall: 10 layers are plenty and keep the slice fast.
+        object->scale(Vec3d(1., 1., 0.1));
+        object->ensure_on_bed();
+        object->volumes.front()->config.set("extruder", filament);
+    }
+}
+
+size_t cyclic_wt_count(const std::string &haystack, const std::string &needle)
+{
+    size_t n = 0;
+    for (size_t pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + needle.size()))
+        ++n;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("Cyclic tool-change ordering: wipe tower plan and G-code export agree", "[PrintGCode][WipeTower][ToolOrdering][Cyclic]")
+{
+    const std::string marker = "; CP TOOLCHANGE START";
+
+    SECTION("Bambu tower: every planned tool change is printed exactly once") {
+        Print print;
+        Model model;
+        add_three_filament_cubes(model);
+        print.apply(model, cyclic_three_filament_config());
+        print.is_BBL_printer() = true;
+        REQUIRE(print.has_wipe_tower());
+
+        std::string gcode;
+        // Before the fix this threw "Wipe tower generation failed, possibly due to empty first layer."
+        REQUIRE_NOTHROW(gcode = Test::gcode(print));
+
+        size_t planned = 0;
+        for (const std::vector<WipeTower::ToolChangeResult> &layer : print.wipe_tower_data().tool_changes)
+            for (const WipeTower::ToolChangeResult &tcr : layer)
+                planned += cyclic_wt_count(tcr.gcode, marker);
+
+        // Layers 2..9 print 1,2,3 in that order after ending the layer below on 3: three tool changes
+        // each, not the two a "start with the loaded filament" rotation gives (layer 1 follows the
+        // flush-optimised first layer, so it may have two).
+        CHECK(planned >= 3 * 8 + 2);
+        CHECK(cyclic_wt_count(gcode, marker) == planned);
+    }
+
+    SECTION("WipeTower2 (non-Bambu): the fixed order is kept, three tool changes per layer") {
+        Print print;
+        Model model;
+        add_three_filament_cubes(model);
+        print.apply(model, cyclic_three_filament_config());
+        REQUIRE_FALSE(print.is_BBL_printer());
+        REQUIRE(print.has_wipe_tower());
+
+        std::string gcode;
+        REQUIRE_NOTHROW(gcode = Test::gcode(print));
+
+        static const std::regex tool_cmd(R"(^T(\d+)\b)");
+        std::istringstream      in(gcode);
+        std::string             line;
+        std::smatch             m;
+        int                     current = -1;
+        size_t                  changes = 0;
+        while (std::getline(in, line)) {
+            if (!std::regex_search(line, m, tool_cmd))
+                continue;
+            const int tool = std::stoi(m[1].str());
+            if (current >= 0 && tool != current)
+                ++changes;
+            current = tool;
+        }
+        CHECK(changes >= 3 * 8 + 2);
+    }
+}

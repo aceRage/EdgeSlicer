@@ -638,7 +638,7 @@ void read_event(const json &ej, const std::string &where, PathEvent &e, PathIssu
         r.color("color2", e.color2);
         break;
     case PathEventType::Floor:
-        r.allow({ "kind", "color", "shadow_strength", "reflection", "contact_shadow" });
+        r.allow({ "kind", "color", "shadow_strength", "reflection", "contact_shadow", "rotation", "flip" });
         r.scene_enum("kind", e.floor,
                      std::vector<FloorType>{ FloorType::None, FloorType::ShadowCatcher, FloorType::Solid, FloorType::Grid, FloorType::Texture,
                                              FloorType::Image });
@@ -646,6 +646,8 @@ void read_event(const json &ej, const std::string &where, PathEvent &e, PathIssu
         r.number("shadow_strength", e.shadow_strength, 0., 1.);
         r.number("reflection", e.reflection, 0., 1.);
         r.number("contact_shadow", e.contact_shadow, 0., 1.);
+        r.number("rotation", e.floor_rotation, -3600., 3600.);
+        r.boolean("flip", e.floor_flip);
         break;
     case PathEventType::Look:
         r.allow({ "preset" });
@@ -898,6 +900,8 @@ json event_json(const PathEvent &e)
         opt("shadow_strength", e.shadow_strength);
         opt("reflection", e.reflection);
         opt("contact_shadow", e.contact_shadow);
+        opt("rotation", e.floor_rotation);
+        opt("flip", e.floor_flip);
         break;
     case PathEventType::Look:
         if (e.look)
@@ -1717,6 +1721,10 @@ void blend(Floor &cur, const Floor &to, double w)
     cur.shadow_strength = lerpf(cur.shadow_strength, to.shadow_strength, w);
     cur.reflection      = lerpf(cur.reflection, to.reflection, w);
     cur.contact_shadow  = lerpf(cur.contact_shadow, to.contact_shadow, w);
+    if (w >= 0.5) {   // a turn or a mirror switches half way
+        cur.rotation = to.rotation;
+        cur.flip     = to.flip;
+    }
 }
 
 double event_start(const PathEvent &e) { return e.range ? e.from : e.at; }
@@ -1862,6 +1870,10 @@ TimelineState evaluate_timeline(const std::vector<PathEvent> &events, const Scen
                 to.reflection = float(*e.reflection);
             if (e.contact_shadow)
                 to.contact_shadow = float(*e.contact_shadow);
+            if (e.floor_rotation)
+                to.rotation = floor_rotation_snap(*e.floor_rotation);
+            if (e.floor_flip)
+                to.flip = *e.floor_flip;
             blend(s.floor, to, w);
             break;
         }

@@ -3093,6 +3093,43 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     continue;
                 }
             }
+            {
+                // Version 5 (OD11 PR D): the cut instance's linear transform, the same
+                // 16-number row-major form. Absent = not recorded.
+                const std::string m = rt.get<std::string>("<xmlattr>.instance_linear", "");
+                std::vector<double> v;
+                if (!m.empty()) {
+                    std::istringstream iss(m);
+                    double x;
+                    while (iss >> x)
+                        v.push_back(x);
+                }
+                if (v.size() == 16) {
+                    Transform3d t = Transform3d::Identity();
+                    for (int row = 0; row < 4; ++row)
+                        for (int col = 0; col < 4; ++col)
+                            t(row, col) = v[size_t(row) * 4 + size_t(col)];
+                    r.instance_linear     = t;
+                    r.instance_linear_set = true;
+                }
+                // Per half: 16 numbers per model part.
+                const std::string hp = rt.get<std::string>("<xmlattr>.half_part_matrices", "");
+                std::vector<double> hv;
+                if (!hp.empty()) {
+                    std::istringstream iss(hp);
+                    double x;
+                    while (iss >> x)
+                        hv.push_back(x);
+                }
+                if (!hv.empty() && hv.size() % 16 == 0)
+                    for (size_t k = 0; k < hv.size(); k += 16) {
+                        Transform3d t = Transform3d::Identity();
+                        for (int row = 0; row < 4; ++row)
+                            for (int col = 0; col < 4; ++col)
+                                t(row, col) = hv[k + size_t(row) * 4 + size_t(col)];
+                        r.half_part_matrices.push_back(t);
+                    }
+            }
 
             // --- shared parameters ---------------------------------------------------
             r.thickness = rt.get<double>("<xmlattr>.thickness", 0.);
@@ -9580,6 +9617,26 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                     for (int col = 0; col < 4; ++col)
                         oss << (row == 0 && col == 0 ? "" : " ") << r.rotation_m(row, col);
                 rt.put("<xmlattr>.rotation", oss.str());
+            }
+            if (r.instance_linear_set) {
+                std::ostringstream oss;
+                oss << std::setprecision(17);
+                for (int row = 0; row < 4; ++row)
+                    for (int col = 0; col < 4; ++col)
+                        oss << (row == 0 && col == 0 ? "" : " ") << r.instance_linear(row, col);
+                rt.put("<xmlattr>.instance_linear", oss.str());
+            }
+            if (!r.half_part_matrices.empty()) {
+                std::ostringstream oss;
+                oss << std::setprecision(17);
+                bool first = true;
+                for (const Transform3d &t : r.half_part_matrices)
+                    for (int row = 0; row < 4; ++row)
+                        for (int col = 0; col < 4; ++col) {
+                            oss << (first ? "" : " ") << t(row, col);
+                            first = false;
+                        }
+                rt.put("<xmlattr>.half_part_matrices", oss.str());
             }
 
             rt.put("<xmlattr>.thickness",          r.thickness);
