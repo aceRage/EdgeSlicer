@@ -3095,7 +3095,10 @@ void MainFrame::open_mobile_hub()
                 // route that does not need it, and the page sends it as a header afterwards.
                 wxLaunchDefaultBrowser(wxString::Format("http://127.0.0.1:%d/hub/", info.admin_port));
             } else {
-                MessageDialog(nullptr, _L("The Mobile Hub did not start. Please try again in a moment."),
+                MessageDialog(nullptr,
+                              RemoteHub::no_hub() ? _L("No phone hub is running. This copy was started with --no-hub (or has an edgeslicer_no_hub marker file), "
+                                                       "so it does not start or take over the hub. Start the hub from the main EdgeSlicer, or start this copy with --take-hub.") :
+                                                    _L("The Mobile Hub did not start. Please try again in a moment."),
                               _L("Mobile Hub"), wxOK | wxICON_INFORMATION)
                     .ShowModal();
             }
