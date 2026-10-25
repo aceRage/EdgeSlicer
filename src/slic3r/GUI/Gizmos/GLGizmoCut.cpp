@@ -7525,7 +7525,12 @@ void GLGizmoCut3D::render_pushfit_inputs(CutConnectors& connectors)
             m_pushfit_same_length     = m_pushfit.length_lower == m_pushfit.length_upper;
             m_pushfit_same_clearance  = m_pushfit.clearance_lower == m_pushfit.clearance_upper;
             m_pushfit_hole_models_dirty = true;
+            // update_connector_shape() replaces the Pin's MeshRaycaster, so the scene's picking
+            // items must be re-registered with the new one. Without this, placing a Pin (which
+            // selects it, so this block runs on the next frame) left a picking item pointing at
+            // the freed raycaster and the next hover over the canvas crashed in the picking pass.
             update_connector_shape();
+            update_raycasters_for_picking();
         }
         m_pushfit_shown_idx = first;
     }
@@ -10397,6 +10402,8 @@ void GLGizmoCut3D::init_connector_shapes()
     }
 }
 
+// Replaces the cached shape's MeshRaycaster: every caller must re-register the picking raycasters
+// (update_raycasters_for_picking()) afterwards, or the scene keeps a pointer to the freed one.
 void GLGizmoCut3D::update_connector_shape()
 {
     CutConnectorAttributes attribs = { m_connector_type, CutConnectorStyle(m_connector_style), CutConnectorShape(m_connector_shape_id) };
