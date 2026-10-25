@@ -1046,17 +1046,20 @@ TEST_CASE("Brim follows the elephant foot compensated outline", "[SkirtBrim][Orc
 TEST_CASE("Brim flow ratio scales the brim extrusion", "[SkirtBrim][Orca11876]")
 {
     auto e_per_mm = [](double ratio, const char *role) {
-        const std::string g = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
             { "skirt_loops",          0 },
             { "brim_type",            "outer_only" },
             { "brim_width",           3 },
             { "brim_flow_ratio",      ratio },
-            { "use_relative_e_distances", 0 },
             { "gcode_comments",       1 },
             { "machine_start_gcode",  "" },
-        }, true);
+        });
+        const std::string g = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, config, true);
         double e = 0., len = 0.;
         GCodeReader reader;
+        // Read E the way the G-code was written (relative or absolute).
+        reader.apply_config(config);
         reader.parse_buffer(g, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
             if (line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0 && line.comment().find(role) != std::string_view::npos) {
                 e += line.dist_E(self);
@@ -1068,10 +1071,46 @@ TEST_CASE("Brim flow ratio scales the brim extrusion", "[SkirtBrim][Orca11876]")
     const double brim_full = e_per_mm(1., "brim");
     const double brim_half = e_per_mm(0.5, "brim");
     REQUIRE(brim_full > 0.);
-    // Measured 0.546 for 0.5 on the Mac run (cause not pinned down; the walls are exact).
-    INFO("brim E/mm ratio " << brim_half / brim_full);
-    CHECK(brim_half / brim_full > 0.45);
-    CHECK(brim_half / brim_full < 0.6);
+    CHECK(brim_half / brim_full == Approx(0.5).epsilon(0.01));
     // The walls are not touched.
     CHECK(e_per_mm(0.5, "perimeter") == Approx(e_per_mm(1., "perimeter")).epsilon(0.001));
+}
+
+// Edge: an instance's own brim prints inside its EXCLUDE_OBJECT label, so it belongs to that copy; a
+// brim shared by several copies (Combine brims) prints outside every label, so skipping one copy keeps it.
+TEST_CASE("Shared brims print outside the object labels, own brims inside", "[SkirtBrim][Orca14683]")
+{
+    const int combine = GENERATE(0, 1);
+    DYNAMIC_SECTION("combine_brims=" << combine) {
+        Print print;
+        Model model;
+        place_two_cubes(5, true, {
+            { "skirt_loops",    0 },
+            { "brim_type",      "outer_only" },
+            { "brim_width",     5 },
+            { "combine_brims",  combine },
+            { "gcode_flavor",   "klipper" },
+            { "exclude_object", 1 },
+        }, print, model);
+        const std::string g = gcode(print);
+        REQUIRE(g.find("EXCLUDE_OBJECT_START") != std::string::npos);
+        size_t inside = 0, outside = 0;
+        bool   in_label = false;
+        GCodeReader reader;
+        reader.parse_buffer(g, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (line.raw().rfind("EXCLUDE_OBJECT_START", 0) == 0)
+                in_label = true;
+            else if (line.raw().rfind("EXCLUDE_OBJECT_END", 0) == 0)
+                in_label = false;
+            else if (line.extruding(self) && line.dist_XY(self) > 0 && line.comment().find("brim") != std::string_view::npos)
+                ++(in_label ? inside : outside);
+        });
+        if (combine) {
+            CHECK(inside == 0);
+            CHECK(outside > 0);
+        } else {
+            CHECK(inside > 0);
+            CHECK(outside == 0);
+        }
+    }
 }
