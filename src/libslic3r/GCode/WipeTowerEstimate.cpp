@@ -40,6 +40,26 @@ WipeTowerType resolve_wipe_tower_type(const ConfigBase &config)
     return type != nullptr ? WipeTowerType(type->getInt()) : WipeTowerType::Type2;
 }
 
+double wipe_tower_rotation_deg(const ConfigBase &config)
+{
+    if (resolve_wipe_tower_type(config) == WipeTowerType::Type1)
+        return 0.;
+    const ConfigOption *angle = option_of(config, "wipe_tower_rotation_angle");
+    return angle != nullptr ? angle->getFloat() : 0.;
+}
+
+BoundingBoxf wipe_tower_rotated_extents(double width, double depth, double margin, double angle_deg)
+{
+    const Vec2d corners[] = { { -margin, -margin }, { width + margin, -margin }, { width + margin, depth + margin }, { -margin, depth + margin } };
+    if (std::abs(angle_deg) <= EPSILON)
+        return BoundingBoxf(corners[0], corners[2]);
+    const Eigen::Rotation2Dd rot(angle_deg * PI / 180.);
+    BoundingBoxf             box;
+    for (const Vec2d &corner : corners)
+        box.merge(Vec2d(rot * corner));
+    return box;
+}
+
 Polygon estimate_wipe_tower_first_layer_outline(const ConfigBase &config, WipeTowerType tower_type, double width, double depth, double height)
 {
     // Type1 ignores the cone option. The wall type is read by value: a preset-shaped config
@@ -218,9 +238,8 @@ Polygon placed_wipe_tower_footprint(const ConfigBase &config, const WipeTowerFoo
         if (!brimmed.empty())
             outline = brimmed.front();
     }
-    const ConfigOption *angle = option_of(config, "wipe_tower_rotation_angle");
-    if (angle != nullptr && std::abs(angle->getFloat()) > EPSILON)
-        outline.rotate(angle->getFloat() * PI / 180.);
+    if (const double angle = wipe_tower_rotation_deg(config); std::abs(angle) > EPSILON)
+        outline.rotate(angle * PI / 180.);
     outline.translate(Point(scale_(pos.x()), scale_(pos.y())));
     return outline;
 }

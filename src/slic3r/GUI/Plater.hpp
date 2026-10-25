@@ -628,6 +628,10 @@ public:
     void on_bed_type_change(BedType bed_type);
     bool update_filament_colors_in_full_config();
     void on_config_change(const DynamicPrintConfig &config);
+    // The prime tower was turned with the Rotate tool, or an undo/redo restored its angle: write
+    // wipe_tower_rotation_angle (degrees, any turn - stored in (-180, 180]) into the edited print
+    // preset, refresh the Process tab field and propagate the change like a field edit.
+    void set_wipe_tower_rotation_angle(double angle_deg);
     /// @brief Check whether high-temperature and low-temperature filaments are mixed on the current plate.
     /// @return True if compatible; false if high/low temperature materials are mixed.
     bool check_filament_temp_mixing();
