@@ -76,11 +76,11 @@ std::string bambu_style_slot_label(int unit_id, int slot_id);
 // printer's own numbering (0- or 1-based tray ids) never shows:
 //  * grouped trays (Elegoo CANVAS, Slot::unit >= 0): units numbered in order of appearance,
 //    trays lettered by their position inside the unit: "1A".."1D", "2A"...;
-//  * a QIDI Box (qidi_box): Box slot b * 4 + n is "<b+1><A+n>", the same "1A".."4D";
+//  * an MMU (group_as_mmu: a QIDI Box, Happy Hare gates, AFC lanes): slot b * 4 + n is "<b+1><A+n>", the same "1A".."4D";
 //  * tool slots (Snapmaker U1, Moonraker toolheads, Slot::unit < 0): "T1".."T4", as Slot::label()
 //    and the Device card name them.
 // `index` keeps Slot::index, which is what the mapping string and the remembered mapping use.
-std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<PrintHostDevices::Slot>& slots, bool qidi_box);
+std::vector<ThirdPartyDeviceSlot> third_party_slots_from(const std::vector<PrintHostDevices::Slot>& slots, bool group_as_mmu);
 
 // The slot a filament row starts on, as a position in `slots` (-1 = "As sliced"): the dialog's
 // remembered slot (`remembered_pos`, Elegoo preselect_slot; -1 = none) when it is a position in
