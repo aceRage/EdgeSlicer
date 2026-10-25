@@ -3205,6 +3205,19 @@ void PrintConfigDef::init_fff_params()
     def->max = 5; // Maximum number of lines for infill pattern
     def->set_default_value(new ConfigOptionInt(1));
 
+    // Z-buckling bias optimization (experimental). Tightens the gyroid wave along the Z
+    // (vertical) axis at low infill density to shorten the effective column length under
+    // Z-axis compression. Filament use at the same `sparse_infill_density` setting is
+    // preserved. No effect above ~30% density (formula clamps to no-op).
+    def             = this->add("gyroid_optimized", coBool);
+    def->label      = L("Z-buckling bias optimization (experimental)");
+    def->category   = L("Strength");
+    def->tooltip    = L("Tightens the gyroid wave along the Z (vertical) axis at low infill density "
+                        "to shorten the effective vertical column length and improve Z-axis compression "
+                        "buckling resistance. Filament use is preserved. No effect at ~30% sparse infill "
+                        "density and above. Only applies when Sparse infill pattern is set to Gyroid.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("sparse_infill_pattern", coEnum);
     def->label = L("Sparse infill pattern");
     def->category = L("Strength");
@@ -11936,6 +11949,19 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def = this->add("hub_phone", coBool);
     def->label = L("Hub phone access on");
     def->tooltip = L("With --hub: start with phone access (the LAN listener) enabled.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Test copies: leave the phone hub to the copy that already serves it (see HubHandover.hpp).
+    def = this->add("no_hub", coBool);
+    def->label = L("Never start or take over the hub");
+    def->tooltip = L("Use a hub that is already running as a client, but never start, restart or take over the hub or its camera relay, and never ask a running hub to quit. Also set by EDGESLICER_NO_HUB=1 or by a file named edgeslicer_no_hub next to the executable.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("take_hub", coBool);
+    def->label = L("Start or take over the hub");
+    def->tooltip = L("Normal hub behaviour even when EDGESLICER_NO_HUB or an edgeslicer_no_hub marker file asks for none. Also set by EDGESLICER_TAKE_HUB=1.");
     def->cli_params = "option";
     def->set_default_value(new ConfigOptionBool(false));
 

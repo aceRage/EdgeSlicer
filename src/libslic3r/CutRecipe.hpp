@@ -102,7 +102,19 @@ class ModelObject;
 //
 // A version <= 3 recipe therefore loads and re-cuts identically; no migration is
 // needed for 4 and cut_recipe_migrate_draw_v2() is untouched by it.
-static constexpr int CutRecipeVersion = 4;
+//  5  multiple dovetails (OrcaSlicer #12318, OD11, 2026-10-24): CutRecipeGroove grew
+//       count          how many dovetails side by side (1 = the single one of old);
+//       gap            the distance between neighbours, mm;
+//       plane_radius   the gizmo radius the dovetail's outer width - and so the
+//                      spacing - was computed with (Cut::calculate_groove_width()).
+//                      Stored so that a re-edit, and a Copy cut onto an object of
+//                      another size, space the dovetails exactly as the cut did.
+//                      0 means "not recorded", which only a count-1 recipe can be,
+//                      and a single dovetail does not depend on it.
+//     New fields, no changed meanings: a version <= 4 recipe loads as count 1 and
+//     re-cuts identically. The bump is so an OLDER build refuses a version 5 recipe
+//     rather than silently re-cutting a three-dovetail joint as one.
+static constexpr int CutRecipeVersion = 5;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.
@@ -141,6 +153,10 @@ struct CutRecipeGroove
     float angle_init{ 0.f };
     float depth_tolerance{ 0.1f };
     float width_tolerance{ 0.1f };
+    // Version 5: multiple dovetails. See CutRecipeVersion.
+    int   count{ 1 };
+    float gap{ 10.f };
+    float plane_radius{ 0.f };
 
     bool operator==(const CutRecipeGroove& o) const;
     bool operator!=(const CutRecipeGroove& o) const { return !(*this == o); }
@@ -148,6 +164,9 @@ struct CutRecipeGroove
     template<class Archive> void serialize(Archive& ar) {
         ar(depth, width, flaps_angle, angle, depth_init, width_init, flaps_angle_init, angle_init,
            depth_tolerance, width_tolerance);
+        // VERSION 5. Cereal is the undo stack and the project backup, never another
+        // build's file, so appending is safe.
+        ar(count, gap, plane_radius);
     }
 };
 
