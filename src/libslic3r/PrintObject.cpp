@@ -1417,6 +1417,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "gyroid_optimized") {
             steps.emplace_back(posInfill);
         } else if (opt_key == "sparse_infill_pattern"
+                   || opt_key == "sparse_infill_smooth_factor"
                    || opt_key == "symmetric_infill_y_axis"
                    || opt_key == "infill_shift_step"
                    || opt_key == "sparse_infill_rotate_template"

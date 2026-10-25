@@ -3311,6 +3311,17 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Octagram Spiral"));
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipCrossHatch));
 
+    def = this->add("sparse_infill_smooth_factor", coPercent);
+    def->label = L("Sparse infill smooth factor");
+    def->category = L("Strength");
+    def->tooltip = L("Controls how strongly sparse infill corners are rounded. 0% keeps the original sharp path, "
+                     "while 100% produces the largest possible curves between adjacent infill lines.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
     def           = this->add("lateral_lattice_angle_1", coFloat);
     def->label    = L("Lateral lattice angle 1");
     def->category = L("Strength");

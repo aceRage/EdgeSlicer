@@ -308,6 +308,9 @@ struct SurfaceFillParams
     // For Gyroid: when true, use the parameterized "optimized" wave.
     bool gyroid_optimized = false;
 
+    // Orca: corner smoothing factor in the range [0, 1].
+    double      smooth_factor { 0. };
+
     // Phase 3 (image row, sub-triangle resolution): the CONFIGURED 1-based virtual filament id
     // (region_config.solid_infill_filament.value, before mixed-filament resolution) when this is
     // an erTopSolidInfill fill whose row is an enabled ImageWeighted MixedFilament with a
@@ -362,6 +365,7 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(infill_overhang_angle);
 		RETURN_COMPARE_NON_EQUAL(image_row_filament_id);
 		RETURN_COMPARE_NON_EQUAL(gyroid_optimized);
+        RETURN_COMPARE_NON_EQUAL(smooth_factor);
 
 		return false;
 	}
@@ -393,7 +397,8 @@ struct SurfaceFillParams
 				this->locked_skeleton_infill_pattern == rhs.locked_skeleton_infill_pattern &&
                 this->infill_overhang_angle == rhs.infill_overhang_angle &&
                 this->image_row_filament_id == rhs.image_row_filament_id &&
-                this->gyroid_optimized      == rhs.gyroid_optimized;
+                this->gyroid_optimized      == rhs.gyroid_optimized &&
+                this->smooth_factor         == rhs.smooth_factor;
 	}
 };
 
@@ -1401,6 +1406,11 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                     params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.infill_direction.value,
                                                                    region_config.sparse_infill_rotate_template.value);
                     params.is_using_template_angle = !region_config.sparse_infill_rotate_template.value.empty();
+
+                    // Orca: the smoothing factor only applies to the sparse infill patterns that
+                    // implement it. The fills clamp and validate the value themselves.
+                    if (is_smoothable_infill_pattern(params.pattern, params.multiline))
+                        params.smooth_factor = 0.01 * region_config.sparse_infill_smooth_factor.value;
                 } else {
                     params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.solid_infill_direction.value,
                                                                    region_config.solid_infill_rotate_template.value);
@@ -1855,6 +1865,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         params.lateral_lattice_angle_2   = surface_fill.params.lateral_lattice_angle_2;
         params.infill_overhang_angle   = surface_fill.params.infill_overhang_angle;
         params.gyroid_optimized          = surface_fill.params.gyroid_optimized;
+        params.smooth_factor             = surface_fill.params.smooth_factor;
 
 		// BBS
 		params.flow = surface_fill.params.flow;
@@ -2099,6 +2110,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         params.infill_overhang_angle   = surface_fill.params.infill_overhang_angle;
         params.multiline         = surface_fill.params.multiline;
         params.gyroid_optimized          = surface_fill.params.gyroid_optimized;
+        params.smooth_factor             = surface_fill.params.smooth_factor;
         // Orca: Match make_fills() when choosing the origin of plane-path patterns.
         // Without the sparse extrusion role, the filler uses each surface's bounds
         // instead of the object's bounds, so bridge anchors shift away from printed infill.
