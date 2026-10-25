@@ -16,7 +16,10 @@
 //
 // All lengths are in mm.
 
+#include <functional>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "libslic3r.h"
@@ -194,6 +197,22 @@ std::string pushfit_validate(const PushFitParams &p, double nozzle_diameter = 0.
 // Non-blocking warnings. A thickness <= 0 is "unknown" and not checked.
 std::vector<std::string> pushfit_warnings(const PushFitParams &p, double nozzle_diameter = 0.4,
                                           double thickness_upper = 0., double thickness_lower = 0.);
+
+// ------------------------------------------------------------------ storage
+
+// Every field clamped to a range the geometry accepts, a non-finite value replaced by its
+// default and the enums range-checked. For values read from a file (untrusted). Does not make
+// an invalid combination valid - pushfit_validate() still decides that - it only bounds each
+// value so nothing downstream sees a NaN, a negative length or an out-of-range enum.
+PushFitParams pushfit_sanitize(PushFitParams p);
+
+// The 3MF attributes of a pin: every field as ("pushfit_<field>", value), in a fixed order.
+// Booleans and enums are written as integers. cut_information.xml and cut_recipe.xml share it.
+std::vector<std::pair<std::string, double>> pushfit_attributes(const PushFitParams &p);
+
+// The inverse: `get(name)` returns the attribute's value or nothing. A missing attribute keeps
+// its default and the result goes through pushfit_sanitize().
+PushFitParams pushfit_from_attributes(const std::function<std::optional<double>(const std::string &)> &get);
 
 } // namespace Slic3r
 

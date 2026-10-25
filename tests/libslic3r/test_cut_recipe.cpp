@@ -872,14 +872,16 @@ TEST_CASE("Cut recipe: an old recipe's extension angle is unset, not zero", "[Cu
     REQUIRE(r != unset);
 }
 
-TEST_CASE("Cut recipe: version 5 is current and a version 3 recipe still loads", "[CutRecipe]")
+TEST_CASE("Cut recipe: version 6 is current and a version 3 recipe still loads", "[CutRecipe]")
 {
-    // Version 5 (OD11, multiple dovetails) added groove fields only.
-    REQUIRE(CutRecipeVersion == 5);
+    // Version 5 (OD11, multiple dovetails) added groove fields only; version 6 (the push-fit
+    // Pin) added the connector's pushfit block only.
+    REQUIRE(CutRecipeVersion == 6);
     REQUIRE(cut_recipe_version_supported(3));
     REQUIRE(cut_recipe_version_supported(4));
     REQUIRE(cut_recipe_version_supported(5));
-    REQUIRE_FALSE(cut_recipe_version_supported(6));
+    REQUIRE(cut_recipe_version_supported(6));
+    REQUIRE_FALSE(cut_recipe_version_supported(7));
 
     // migrate_draw_v2() stamps a version 3 recipe forward WITHOUT touching its
     // numbers: version 4 changed no meanings, only added a field, so the angle, the

@@ -8,6 +8,7 @@
 #include "DrawCut.hpp"
 #include "TriangleSelector.hpp"
 
+#include <map>
 #include <optional>
 #include <vector>
 
@@ -23,6 +24,24 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
 
 // True when this object carries at least one unprocessed flexi joint connector.
 bool has_flexi_joint(const ModelObject* mo);
+
+// Append the NEGATIVE_VOLUME that carries a push-fit Pin into `mo` before the cut runs. Its mesh
+// is the pin itself in mm (pushfit_preview_body), its transform the connector frame (pos,
+// rotation_m, z_angle; no scale). The cut builds the pin object and both holes from
+// cut_info.pushfit, so the mesh is only for previews and overlap checks.
+ModelVolume* add_pushfit_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
+
+// A connector that leaves the cut as an object of its own (a Dowel or a Pin), with the transform
+// from its object frame to the frame the halves' meshes are built in (the source object's frame
+// with the instance's rotation and scale applied, no offset). The assembled pose (C1) and the pin
+// row are made from it.
+struct CutSeparatePart
+{
+    ModelObject* object{ nullptr };
+    Transform3d  part_to_cut_frame{ Transform3d::Identity() };
+    bool         is_pin{ false };
+    bool         pin_slot_failed{ false };
+};
 
 // OD11 PR D (owner D2 = a, 2026-10-24): "Edit cut" rebuilds the uncut part from the recipe's bare
 // mesh, so without this a re-cut painted part came back unpainted. Carries the support / seam /
@@ -69,6 +88,28 @@ class Cut {
     // point, which is the no-kerf behaviour.
     double                      m_kerf{ 0.0 };
 
+    // C1, ASSEMBLED POSES (owner D8, tests/design_showcase_assembly_buildup.md). Taken from the
+    // source object when the Cut is made: per instance, its assembled pose (or its plain
+    // transformation when the assembled pose was never set - which is what the plater would
+    // have initialised it to), and the inverse of the cut instance's offset-free matrix, which
+    // takes the halves' mesh frame back to the source object's frame.
+    std::vector<Transform3d>    m_src_assembly;
+    Transform3d                 m_src_frame_inv{ Transform3d::Identity() };
+    // Per instance, the source object's bounding box: the pin row starts beside it.
+    std::vector<BoundingBoxf3>  m_src_bboxes;
+    // The frame map of the objects that are not halves (dowels, pins), and the one used for the
+    // halves (Identity, except perform_by_contour whose halves are not baked with the instance).
+    std::map<const ModelObject*, Transform3d> m_part_to_cut_frame;
+    Transform3d                 m_halves_to_cut_frame{ Transform3d::Identity() };
+    int                         m_pin_slot_failures{ 0 };
+
+    // Appends the dowels and pins to `objects`: dowels as before (instance reset), pins laid out
+    // in a row beside the source object, lying in their print pose.
+    void add_separate_parts(std::vector<CutSeparatePart>& parts, ModelObjectPtrs& objects);
+    // Sets every instance's assembled pose so the part sits where it was in the source object's
+    // assembled pose.
+    void set_assembled_pose(ModelObject* object, const Transform3d& part_to_cut_frame) const;
+
     void post_process(ModelObject* object, ModelObjectPtrs& objects, bool keep, bool place_on_cut, bool flip);
     void post_process(ModelObject* upper_object, ModelObject* lower_object, ModelObjectPtrs& objects);
     using SavedPaintings = std::vector<std::optional<TriangleSelector::SavedPainting>>;
@@ -84,6 +125,17 @@ public:
                                               ModelObjectCutAttribute::KeepLower |
                                               ModelObjectCutAttribute::KeepAsParts );
     ~Cut() { m_model.clear_objects(); }
+
+    // perform_by_contour runs a second Cut on a working copy of the object; it takes the
+    // source's assembled poses and boxes from the outer one, since the copy has lost both.
+    void inherit_source(const Cut& outer)
+    {
+        m_src_assembly  = outer.m_src_assembly;
+        m_src_frame_inv = outer.m_src_frame_inv;
+        m_src_bboxes    = outer.m_src_bboxes;
+    }
+    // How many pins came out without their slit because the boolean failed (the panel says so).
+    int pin_slot_failures() const { return m_pin_slot_failures; }
 
     struct Groove
     {
