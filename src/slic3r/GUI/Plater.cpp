@@ -19478,6 +19478,12 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
                 this->preview->update_gcode_result(this->partplate_list.get_current_slice_result());
                 this->update();
             }
+
+            // The tower's angle (a Rotate tool turn) is a print setting: put the snapshot's back
+            // in the Process tab, which reloads the scene and re-slices. EdgeSlicer: Orca still
+            // leaves this out ("BBS: don't support wipe tower rotation").
+            if (config.opt_float("wipe_tower_rotation_angle") != model.wipe_tower.rotation)
+                q->set_wipe_tower_rotation_angle(model.wipe_tower.rotation);
         }
         // set selection mode for ObjectList on sidebar
         this->sidebar->obj_list()->set_selection_mode(new_selected_settings_on_sidebar  ? ObjectList::SELECTION_MODE::smSettings :
@@ -19666,6 +19672,32 @@ bool Plater::is_project_dirty() const { return p->is_project_dirty(); }
 bool Plater::is_presets_dirty() const { return p->is_presets_dirty(); }
 void Plater::set_plater_dirty(bool is_dirty) { p->set_plater_dirty(is_dirty); }
 void Plater::update_project_dirty_from_presets() { p->update_project_dirty_from_presets(); }
+
+void Plater::set_wipe_tower_rotation_angle(double angle_deg)
+{
+    // Fold into (-180, 180] and drop sub-0.01 degree noise from the gizmo's float maths, so a
+    // full turn back reads 0 and the field shows what the user dialled.
+    double angle = std::fmod(angle_deg, 360.);
+    if (angle > 180.)
+        angle -= 360.;
+    else if (angle <= -180.)
+        angle += 360.;
+    angle = std::round(angle * 100.) / 100.;
+    if (angle == 0.)
+        angle = 0.; // no -0 in the preset
+
+    Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
+    if (tab == nullptr || tab->get_config() == nullptr)
+        return;
+    const ConfigOptionFloat *current = tab->get_config()->option<ConfigOptionFloat>("wipe_tower_rotation_angle");
+    if (current != nullptr && current->value == angle)
+        return;
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("wipe_tower_rotation_angle", new ConfigOptionFloat(angle));
+    tab->load_config(cfg); // marks the print preset modified and reloads the field
+    update_project_dirty_from_presets();
+    on_config_change(*tab->get_config());
+}
 int  Plater::save_project_if_dirty(const wxString& reason) { return p->save_project_if_dirty(reason); }
 void Plater::reset_project_dirty_after_save() { p->reset_project_dirty_after_save(); }
 void Plater::reset_project_dirty_initial_presets() { p->reset_project_dirty_initial_presets(); }
