@@ -15,6 +15,8 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTower2.hpp"
+#include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -1019,4 +1021,156 @@ TEST_CASE("The prime tower rotation angle is a print setting, not a project sett
     CHECK_FALSE(bundle.project_config.has("wipe_tower_rotation_angle"));
     CHECK(bundle.project_config.has("wipe_tower_x"));
     CHECK(bundle.project_config.has("wipe_tower_y"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Prime tower rotation (Process field + Rotate tool): config, footprint and generated geometry.
+
+TEST_CASE("The prime tower rotation angle round-trips through the config text form", "[WipeTower][WipeTowerRotation][Config]")
+{
+    DynamicPrintConfig src = DynamicPrintConfig::full_print_config();
+    src.set_deserialize_strict({ { "wipe_tower_rotation_angle", "-37.25" } });
+    const std::string text = src.opt_serialize("wipe_tower_rotation_angle");
+    DynamicPrintConfig dst = DynamicPrintConfig::full_print_config();
+    dst.set_deserialize_strict({ { "wipe_tower_rotation_angle", text } });
+    CHECK(dst.opt_float("wipe_tower_rotation_angle") == Approx(-37.25));
+    // The Process field accepts a full turn either way.
+    const ConfigOptionDef *def = print_config_def.get("wipe_tower_rotation_angle");
+    REQUIRE(def != nullptr);
+    CHECK(def->min == Approx(-360.));
+    CHECK(def->max == Approx(360.));
+}
+
+TEST_CASE("Only WipeTower2 towers rotate", "[WipeTower][WipeTowerRotation]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_deserialize_strict({ { "wipe_tower_rotation_angle", 45 } });
+    cfg.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
+    CHECK(wipe_tower_rotation_deg(cfg) == Approx(45.));
+    cfg.set_key_value("printer_model", new ConfigOptionString("Bambu Lab X1 Carbon"));
+    CHECK(wipe_tower_rotation_deg(cfg) == 0.);
+}
+
+TEST_CASE("The rotated tower extents turn about the anchor corner", "[WipeTower][WipeTowerRotation]")
+{
+    const double w = 40., d = 20., m = 2.;
+    SECTION("0 degrees is the plain box")
+    {
+        const BoundingBoxf box = wipe_tower_rotated_extents(w, d, m, 0.);
+        CHECK(box.min.x() == -m);
+        CHECK(box.min.y() == -m);
+        CHECK(box.max.x() == w + m);
+        CHECK(box.max.y() == d + m);
+    }
+    SECTION("90 degrees swings the width onto +Y and the depth onto -X")
+    {
+        const BoundingBoxf box = wipe_tower_rotated_extents(w, d, m, 90.);
+        CHECK_THAT(box.min.x(), WithinAbs(-(d + m), 1e-9));
+        CHECK_THAT(box.max.x(), WithinAbs(m, 1e-9));
+        CHECK_THAT(box.min.y(), WithinAbs(-m, 1e-9));
+        CHECK_THAT(box.max.y(), WithinAbs(w + m, 1e-9));
+    }
+    SECTION("45 degrees spans the diagonals")
+    {
+        const BoundingBoxf box = wipe_tower_rotated_extents(w, d, m, 45.);
+        const double       s   = std::sqrt(0.5);
+        CHECK_THAT(box.max.x(), WithinAbs(s * ((w + m) - (-m)), 1e-9));    // corner (w+m, -m)
+        CHECK_THAT(box.min.x(), WithinAbs(s * ((-m) - (d + m)), 1e-9));    // corner (-m, d+m)
+        CHECK_THAT(box.max.y(), WithinAbs(s * ((w + m) + (d + m)), 1e-9)); // corner (w+m, d+m)
+        CHECK_THAT(box.min.y(), WithinAbs(s * ((-m) + (-m)), 1e-9));       // corner (-m, -m)
+    }
+}
+
+TEST_CASE("The placed footprint Print::validate checks follows the rotation", "[WipeTower][WipeTowerRotation]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_deserialize_strict({ { "wipe_tower_wall_type", "rectangle" }, { "wipe_tower_rotation_angle", 90 } });
+    WipeTowerFootprint fp;
+    fp.width      = 40.;
+    fp.depth      = 20.;
+    fp.height     = 10.;
+    fp.brim_width = 2.;
+    const BoundingBox  placed = get_extents(placed_wipe_tower_footprint(cfg, fp, Vec2d(100., 100.)));
+    const BoundingBoxf ext    = wipe_tower_rotated_extents(fp.width, fp.depth, fp.brim_width, 90.);
+    CHECK_THAT(unscale<double>(placed.min.x()), WithinAbs(100. + ext.min.x(), 0.05));
+    CHECK_THAT(unscale<double>(placed.max.x()), WithinAbs(100. + ext.max.x(), 0.05));
+    CHECK_THAT(unscale<double>(placed.min.y()), WithinAbs(100. + ext.min.y(), 0.05));
+    CHECK_THAT(unscale<double>(placed.max.y()), WithinAbs(100. + ext.max.y(), 0.05));
+
+    // A Bambu Lab printer's tower stays unrotated whatever the setting says.
+    cfg.set_key_value("printer_model", new ConfigOptionString("Bambu Lab X1 Carbon"));
+    const BoundingBox bbl = get_extents(placed_wipe_tower_footprint(cfg, fp, Vec2d(100., 100.)));
+    CHECK_THAT(unscale<double>(bbl.min.x()), WithinAbs(98., 0.05));
+    CHECK_THAT(unscale<double>(bbl.max.x()), WithinAbs(142., 0.05));
+}
+
+namespace {
+
+// Every extruding move between WIPE_TOWER_START and WIPE_TOWER_END.
+std::vector<Vec2d> tower_extrusion_points(const std::string &gcode)
+{
+    std::vector<Vec2d> out;
+    std::istringstream in(gcode);
+    std::string        line;
+    bool               in_tower = false;
+    double             x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        // Track the position everywhere, so an extrusion that starts a block where the move
+        // into the tower happened outside it is placed right.
+        const std::string code = line.substr(0, line.find(';'));
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
+            continue;
+        bool has_e = false;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            if (axis == 'X') x = v;
+            else if (axis == 'Y') y = v;
+            else if (axis == 'E' && v > 0.) has_e = true;
+        }
+        if (in_tower && has_e)
+            out.emplace_back(x, y);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("A rotated WipeTower2 tower prints inside its rotated footprint", "[WipeTower][WipeTowerRotation][GCode]")
+{
+    const double angle = GENERATE(0., 45., 90.);
+    CAPTURE(angle);
+    Print              print;
+    DynamicPrintConfig cfg = stagger_slice_config(false);
+    cfg.set_deserialize_strict({ { "wipe_tower_rotation_angle", angle } });
+    const std::string gcode = slice_stagger_project(cfg, print);
+    CHECK(print.config().wipe_tower_rotation_angle.value == Approx(angle));
+
+    const auto              &wtd   = print.wipe_tower_data();
+    const double             slack = wtd.brim_width + 2.; // as check_tower_extrusions()
+    const Vec2d              anchor(140., 140.);
+    const Eigen::Rotation2Dd unturn(-Geometry::deg2rad(angle));
+    const std::vector<Vec2d> pts = tower_extrusion_points(gcode);
+    REQUIRE(pts.size() > 20);
+    BoundingBoxf local;
+    for (const Vec2d &p : pts)
+        local.merge(Vec2d(unturn * (p - anchor)));
+    // Turned back about the anchor, every tower extrusion lies in the unrotated box, which it fills.
+    CHECK(local.min.x() > -slack);
+    CHECK(local.min.y() > -slack);
+    CHECK(local.max.x() < wtd.width + slack);
+    CHECK(local.max.y() < wtd.depth + slack);
+    CHECK(local.size().x() > wtd.width - 2.);
+
+    // The first-layer corners (skirt, arrange and the post-slice bed check use them) turn too.
+    BoundingBoxf corners;
+    for (const Point &c : print.first_layer_wipe_tower_corners())
+        corners.merge(Vec2d(unscale<double>(c.x()), unscale<double>(c.y())));
+    const BoundingBoxf ext = wipe_tower_rotated_extents(print.config().prime_tower_width.value, wtd.depth, wtd.brim_width, angle);
+    CHECK_THAT(corners.min.x(), WithinAbs(anchor.x() + ext.min.x(), 0.1));
+    CHECK_THAT(corners.max.x(), WithinAbs(anchor.x() + ext.max.x(), 0.1));
+    CHECK_THAT(corners.min.y(), WithinAbs(anchor.y() + ext.min.y(), 0.1));
+    CHECK_THAT(corners.max.y(), WithinAbs(anchor.y() + ext.max.y(), 0.1));
 }

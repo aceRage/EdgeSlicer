@@ -17,6 +17,8 @@
 
 #include <glad/gl.h>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <boost/log/trivial.hpp>
 
 namespace Slic3r::GUI {
@@ -229,6 +231,28 @@ bool GLGizmoMmuSegmentation::on_init()
     m_desc["toggle_wireframe_caption"]        = alt + shift + _L("Enter");
     m_desc["toggle_wireframe"]                = _L("Toggle Wireframe");
 
+    // Edge: Spread tool
+    m_desc["tool_spread"]                     = _L("Spread");
+    m_desc["tool_spread_tip"]                 = _L("Spread: press and hold on the model. The colour grows over the surface from that point "
+                                                   "until you let go, and stops at edges sharper than the angle limit. "
+                                                   "Shift erases; Esc while holding cancels.");
+    m_desc["spread_paint_caption"]            = _L("Hold left mouse button");
+    m_desc["spread_paint"]                    = _L("Spread");
+    m_desc["spread_cancel_caption"]           = _L("Esc");
+    m_desc["spread_cancel"]                   = _L("Cancel the spread");
+    m_desc["spread_speed"]                    = _L("Spread speed");
+    m_desc["spread_max_radius"]               = _L("Max radius");
+    m_desc["spread_max_radius_tip"]           = _L("How far the colour can spread from where you pressed, measured over the surface. "
+                                                   "0 means no limit.");
+    m_desc["spread_unlimited"]                = _L("Unlimited");
+    m_desc["spread_relative_to_seed"]         = _L("Relative to seed");
+    m_desc["spread_relative_to_seed_tip"]     = _L("Measure the angle limit against the face you pressed on instead of against each "
+                                                   "neighbouring face, so the colour stays on surfaces that face about the same way.");
+    m_desc["spread_keep_existing"]            = _L("Keep existing paint");
+    m_desc["spread_keep_existing_tip"]        = _L("Only paint unpainted areas and leave other colours as they are. Faces painted "
+                                                   "completely in another colour stop the spread; a painted line thinner than one "
+                                                   "mesh triangle does not.");
+
     // Filament remapping descriptions
     m_desc["perform_remap"]                   = _L("Remap filaments");
     m_desc["remap"]                           = _L("Remap");
@@ -430,6 +454,9 @@ void GLGizmoMmuSegmentation::show_tooltip_information(float caption_max, float x
             case ToolType::GAP_FILL:
                 tip_items = {"gap_area", "toggle_wireframe"};
                 break;
+            case ToolType::SPREAD:
+                tip_items = {"spread_paint", "erase", "spread_cancel", "smart_fill_angle", "clipping_of_view", "toggle_wireframe"};
+                break;
             default:
                 break;
         }
@@ -465,6 +492,8 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     const float edge_detect_slider_left = m_imgui->calc_text_size(m_desc.at("edge_detection")).x + m_imgui->scaled(1.f);
     const float gap_area_slider_left = m_imgui->calc_text_size(m_desc.at("gap_area")).x + m_imgui->scaled(1.5f) + space_size;
     const float height_range_slider_left = m_imgui->calc_text_size(m_desc.at("height_range")).x + m_imgui->scaled(2.f);
+    const float spread_slider_left = std::max(m_imgui->calc_text_size(m_desc.at("spread_speed")).x,
+                                              m_imgui->calc_text_size(m_desc.at("spread_max_radius")).x) + m_imgui->scaled(1.5f);
 
     const float remove_btn_width = m_imgui->calc_text_size(m_desc.at("remove_all")).x + m_imgui->scaled(1.f);
     const float filter_btn_width = m_imgui->calc_text_size(m_desc.at("perform")).x + m_imgui->scaled(1.f);
@@ -478,7 +507,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     float caption_max = 0.f;
     float total_text_max = 0.f;
-    for (const auto &t : std::array<std::string, 6>{"paint", "erase", "cursor_size", "smart_fill_angle", "height_range", "clipping_of_view"}) {
+    for (const auto &t : std::array<std::string, 8>{"paint", "erase", "cursor_size", "smart_fill_angle", "height_range", "clipping_of_view", "spread_paint", "spread_cancel"}) {
         caption_max = std::max(caption_max, m_imgui->calc_text_size(m_desc[t + "_caption"]).x);
         total_text_max = std::max(total_text_max, m_imgui->calc_text_size(m_desc[t]).x);
     }
@@ -487,9 +516,8 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     const float circle_max_width = std::max(clipping_slider_left,cursor_slider_left);
     const float height_max_width = std::max(clipping_slider_left,height_range_slider_left);
-    const float sliders_left_width = std::max(smart_fill_slider_left,
-                                         std::max(cursor_slider_left, std::max(edge_detect_slider_left, std::max(gap_area_slider_left, std::max(height_range_slider_left,
-                                                                                                                                              clipping_slider_left))))) + space_size;
+    const float sliders_left_width = std::max({ smart_fill_slider_left, cursor_slider_left, edge_detect_slider_left, gap_area_slider_left,
+                                                height_range_slider_left, clipping_slider_left, spread_slider_left }) + space_size;
     const float slider_icon_width = m_imgui->get_slider_icon_size().x;
     float window_width = minimal_slider_width + sliders_left_width + slider_icon_width;
     const int max_filament_items_per_line = 8;
@@ -682,14 +710,15 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     m_imgui->text(m_desc.at("tool_type"));
 
-    std::array<wchar_t, 6> tool_ids;
-    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon };
-    std::array<wchar_t, 6> icons;
+    // Edge: Spread sits after Fill.
+    std::array<wchar_t, 7> tool_ids;
+    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::SpreadPaintIcon, ImGui::GapFillIcon };
+    std::array<wchar_t, 7> icons;
     if (m_is_dark_mode)
-        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon };
+        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::SpreadPaintDarkIcon, ImGui::GapFillDarkIcon };
     else
-        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon };
-    std::array<wxString, 6> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), _L("Gap Fill") };
+        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::SpreadPaintIcon, ImGui::GapFillIcon };
+    std::array<wxString, 7> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), m_desc.at("tool_spread_tip"), _L("Gap Fill") };
     for (int i = 0; i < tool_ids.size(); i++) {
         std::string  str_label = std::string("");
         std::wstring btn_name  = icons[i] + boost::nowide::widen(str_label);
@@ -881,6 +910,107 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
         if (slider_clp_dist || b_clp_dist_input) { m_c->object_clipper()->set_position_by_ratio(clp_dist, true); }
     }
+    else if (m_current_tool == ImGui::SpreadPaintIcon) {
+        // Edge: Spread. Press and hold; the colour grows over the surface until the release.
+        m_tool_type   = ToolType::SPREAD;
+        m_cursor_type = TriangleSelector::CursorType::POINTER;
+        bool spread_changed = false;
+        // Labels are shown through a printf format: keep a translated '%' literal.
+        auto as_format = [](const wxString &label) {
+            std::string out;
+            for (char c : into_u8(label)) {
+                out += c;
+                if (c == '%')
+                    out += '%';
+            }
+            return out;
+        };
+
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc.at("spread_speed"));
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        const std::array<wxString, SpreadSpeedStops> stop_names = { _L("Slowest"), _L("Slower"), _L("Normal"), _L("Faster"), _L("Fastest") };
+        const std::string speed_format = as_format(stop_names[std::clamp(m_spread_speed, 0, SpreadSpeedStops - 1)]);
+        float             speed_f      = float(m_spread_speed);
+        if (m_imgui->bbl_slider_float_style("##spread_speed", &speed_f, 0.f, float(SpreadSpeedStops - 1), speed_format.c_str(), 1.0f, true)) {
+            const int stop = std::clamp(int(std::lround(speed_f)), 0, SpreadSpeedStops - 1);
+            if (stop != m_spread_speed) {
+                m_spread_speed = stop;
+                spread_changed = true;
+            }
+        }
+
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc.at("spread_max_radius"));
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        const std::string radius_format = m_spread_max_radius > 0.f ? "%.1f " + as_format(_L("mm")) : as_format(m_desc.at("spread_unlimited"));
+        if (ImGui::BBLDragFloat("##spread_max_radius", &m_spread_max_radius, 0.1f, 0.f, 1000.f, radius_format.c_str())) {
+            m_spread_max_radius = std::clamp(m_spread_max_radius, 0.f, 1000.f);
+            spread_changed      = true;
+        }
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(m_desc.at("spread_max_radius_tip"), max_tooltip_width);
+
+        m_imgui->bbl_checkbox(m_desc["edge_detection"], m_detect_geometry_edge);
+        if (m_detect_geometry_edge) {
+            // Fill leaves -1 ("no limit") behind when its edge detection is off.
+            if (m_smart_fill_angle < 0.f)
+                m_smart_fill_angle = 30.f;
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc["smart_fill_angle"]);
+            std::string format_str = std::string("%.f") + I18N::translate_utf8("°", "Face angle threshold,"
+                                                                                    "placed after the number with no whitespace in between.");
+            ImGui::SameLine(sliders_left_width);
+            ImGui::PushItemWidth(sliders_width);
+            m_imgui->bbl_slider_float_style("##spread_angle", &m_smart_fill_angle, SmartFillAngleMin, SmartFillAngleMax, format_str.data(), 1.0f, true);
+            ImGui::SameLine(drag_left_width + sliders_left_width);
+            ImGui::PushItemWidth(1.5 * slider_icon_width);
+            ImGui::BBLDragFloat("##spread_angle_input", &m_smart_fill_angle, 0.05f, 0.0f, 0.0f, "%.2f");
+
+            if (m_imgui->bbl_checkbox(m_desc.at("spread_relative_to_seed"), m_spread_relative_to_seed))
+                spread_changed = true;
+            if (ImGui::IsItemHovered())
+                m_imgui->tooltip(m_desc.at("spread_relative_to_seed_tip"), max_tooltip_width);
+        } else {
+            // set to negative value to disable the angle limit
+            m_smart_fill_angle = -1.f;
+        }
+        if (m_imgui->bbl_checkbox(m_desc.at("spread_keep_existing"), m_spread_keep_existing))
+            spread_changed = true;
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(m_desc.at("spread_keep_existing_tip"), max_tooltip_width);
+
+        if (spread_changed)
+            save_spread_settings();
+
+        ImGui::Separator();
+        if (m_c->object_clipper()->get_position() == 0.f) {
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc.at("clipping_of_view"));
+        }
+        else {
+            if (m_imgui->button(m_desc.at("reset_direction"))) {
+                wxGetApp().CallAfter([this]() {
+                    m_c->object_clipper()->set_position_by_ratio(-1., false);
+                    });
+            }
+        }
+
+        auto clp_dist = float(m_c->object_clipper()->get_position());
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        bool slider_clp_dist = m_imgui->bbl_slider_float_style("##clp_dist", &clp_dist, 0.f, 1.f, "%.2f", 1.0f, true);
+        ImGui::SameLine(drag_left_width + sliders_left_width);
+        ImGui::PushItemWidth(1.5 * slider_icon_width);
+        bool b_clp_dist_input = ImGui::BBLDragFloat("##clp_dist_input", &clp_dist, 0.05f, 0.0f, 0.0f, "%.2f");
+
+        if (slider_clp_dist || b_clp_dist_input) { m_c->object_clipper()->set_position_by_ratio(clp_dist, true); }
+
+        // The radius label next to the cursor while a spread is held.
+        render_spread_label();
+    }
     else if (m_current_tool == ImGui::GapFillIcon) {
         m_tool_type = ToolType::GAP_FILL;
         m_cursor_type = TriangleSelector::CursorType::POINTER;
@@ -895,15 +1025,18 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::BBLDragFloat("##gap_area_input", &TriangleSelectorPatch::gap_area, 0.05f, 0.0f, 0.0f, "%.2f");
     }
 
-    ImGui::Separator();
-    if(m_imgui->bbl_checkbox(_L("Vertical"), m_vertical_only)){
-        if(m_vertical_only){
-            m_horizontal_only = false;
+    // The axis locks act on brush drags; Spread has no drag, so they are hidden for it.
+    if (m_tool_type != ToolType::SPREAD) {
+        ImGui::Separator();
+        if(m_imgui->bbl_checkbox(_L("Vertical"), m_vertical_only)){
+            if(m_vertical_only){
+                m_horizontal_only = false;
+            }
         }
-    }
-    if(m_imgui->bbl_checkbox(_L("Horizontal"), m_horizontal_only)){
-        if(m_horizontal_only){
-            m_vertical_only = false;
+        if(m_imgui->bbl_checkbox(_L("Horizontal"), m_horizontal_only)){
+            if(m_horizontal_only){
+                m_vertical_only = false;
+            }
         }
     }
 

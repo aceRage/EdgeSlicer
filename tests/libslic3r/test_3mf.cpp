@@ -325,6 +325,56 @@ SCENARIO("A project built from the static default config survives a project 3MF 
     }
 }
 
+// The prime tower angle set on the Process tab or with the Rotate tool is an ordinary print
+// setting (Orca #15227): a project saves and reopens with it, next to the per-plate position.
+TEST_CASE("A project 3MF keeps the prime tower rotation angle and position", "[3mf][Config][WipeTowerRotation]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    store_config.set_key_value("wipe_tower_rotation_angle", new ConfigOptionFloat(37.5));
+    store_config.set_key_value("wipe_tower_x", new ConfigOptionFloats({ 120.25 }));
+    store_config.set_key_value("wipe_tower_y", new ConfigOptionFloats({ 80.5 }));
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "wipe_tower_rotation_project.3mf").string();
+
+    StoreParams store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored = store_bbs_3mf(store_params);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                               &is_bbl_3mf, &file_version, nullptr,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                                   LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file);
+
+    REQUIRE(stored);
+    REQUIRE(loaded);
+    REQUIRE(dst_config.has("wipe_tower_rotation_angle"));
+    CHECK(dst_config.opt_float("wipe_tower_rotation_angle") == Approx(37.5));
+    REQUIRE(dst_config.option<ConfigOptionFloats>("wipe_tower_x") != nullptr);
+    CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_x")->get_at(0) == Approx(120.25));
+    CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_y")->get_at(0) == Approx(80.5));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Ultra (support groups) - Stage 2 / T5: per-part support data through a project 3MF.
 //
