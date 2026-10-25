@@ -361,19 +361,33 @@ CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>&
     if (uncut.mesh().empty())
         return out;
 
-    // Every painted model part of every half, its mesh taken into the object frame.
+    // Every painted model part of every half, its mesh taken into the object frame. A half's own
+    // recipe copy keeps the volume matrices it had right after the cut (a project load moves a
+    // one-volume object's volume offset into the instance); otherwise the current ones are used.
     const Transform3d to_object = instance_linear.inverse();
+    auto part_matrices = [](const ModelObject* half) {
+        std::vector<Transform3d> m;
+        for (const ModelVolume* v : half->volumes)
+            if (v->is_model_part() && !v->is_cut_connector())
+                m.push_back(v->get_matrix());
+        if (half->cut_recipe && half->cut_recipe->half_part_matrices.size() == m.size())
+            m = half->cut_recipe->half_part_matrices;
+        return m;
+    };
     std::vector<TriangleSelector::SavedPainting> saved;
     for (const ModelObject* half : halves) {
         if (half == nullptr)
             continue;
+        const std::vector<Transform3d> frames = part_matrices(half);
+        size_t                         part   = 0;
         for (const ModelVolume* v : half->volumes) {
             if (!v->is_model_part() || v->is_cut_connector())
                 continue;
+            const Transform3d frame = frames[part++];
             std::optional<TriangleSelector::SavedPainting> sp = v->save_painting();
             if (!sp)
                 continue;
-            sp->mesh.transform(to_object * v->get_matrix(), true);
+            sp->mesh.transform(to_object * frame, true);
             saved.emplace_back(std::move(*sp));
         }
     }
@@ -397,10 +411,12 @@ CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>&
     for (const ModelObject* half : halves) {
         if (half == nullptr)
             continue;
+        const std::vector<Transform3d> frames = part_matrices(half);
+        size_t                         part   = 0;
         for (const ModelVolume* v : half->volumes) {
             if (!v->is_model_part() || v->is_cut_connector())
                 continue;
-            const Transform3d          t   = to_object * v->get_matrix();
+            const Transform3d          t   = to_object * frames[part++];
             const std::vector<Vec3f>&  pts = v->mesh().its.vertices;
             const size_t               stride = std::max<size_t>(1, pts.size() / 2000);
             for (size_t k = 0; k < pts.size(); k += stride) {
@@ -442,6 +458,16 @@ CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>&
     }
     out.carried = true;
     return out;
+}
+
+void cut_recipe_record_half_frame(ModelObject& half)
+{
+    if (!half.cut_recipe)
+        return;
+    half.cut_recipe->half_part_matrices.clear();
+    for (const ModelVolume* v : half.volumes)
+        if (v->is_model_part() && !v->is_cut_connector())
+            half.cut_recipe->half_part_matrices.push_back(v->get_matrix());
 }
 
 bool has_flexi_joint(const ModelObject* mo)

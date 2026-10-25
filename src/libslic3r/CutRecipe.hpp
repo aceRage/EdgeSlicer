@@ -117,6 +117,12 @@ class ModelObject;
 //                    in the object frame; Edit cut needs the pair to carry the
 //                    halves' painting back onto the uncut stand-in.
 //                    instance_linear_set false = not recorded (<= 4).
+//     half_part_matrices (OD11 PR D, also new in 5): PER HALF - each object's own
+//                    recipe copy - the volume matrices of its model parts (cut
+//                    connectors left out, volume order) right after the cut. A
+//                    project load zeroes the offset of a one-volume object's volume
+//                    and moves it into the instance, which loses the cut frame the
+//                    painting carry needs; these keep it. Empty = not recorded.
 //     New fields, no changed meanings: a version <= 4 recipe loads as count 1 and
 //     re-cuts identically. The bump is so an OLDER build refuses a version 5 recipe
 //     rather than silently re-cutting a three-dovetail joint as one.
@@ -323,6 +329,9 @@ struct CutRecipe
     // frame the halves' meshes are in, relative to `mesh`. See CutRecipeVersion.
     Transform3d instance_linear{ Transform3d::Identity() };
     bool        instance_linear_set{ false };
+    // VERSION 5, per half: see CutRecipeVersion. Not part of operator== - the two halves of
+    // one cut carry the same recipe with different frames.
+    std::vector<Transform3d> half_part_matrices;
 
     // --- the surface ------------------------------------------------------
     CutRecipeSheet  sheet;   // kind == Curved
@@ -431,7 +440,7 @@ struct CutRecipe
         ar(connectors);
         ar(mesh, mesh_hash);
         // VERSION 5 (OD11 PR D).
-        ar(instance_linear, instance_linear_set);
+        ar(instance_linear, instance_linear_set, half_part_matrices);
     }
 };
 

@@ -9773,8 +9773,11 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
                     continue;
                 const bool is_dowel = o->volumes.size() == 1 && o->volumes.front()->is_cut_connector() &&
                                       o->volumes.front()->cut_info.connector_type == CutConnectorType::Dowel;
-                if (!is_dowel)
+                if (!is_dowel) {
                     o->cut_recipe = new_recipe;
+                    // OD11 PR D: this half's cut frame, for Edit cut's painting carry.
+                    cut_recipe_record_half_frame(*o);
+                }
             }
         }
 

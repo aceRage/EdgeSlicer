@@ -44,6 +44,9 @@ struct CutPaintCarry
 };
 CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>& halves, const Transform3d& instance_linear,
                                           ModelVolume& uncut);
+// Records `half`'s model-part volume matrices into its own cut recipe (CutRecipe::half_part_matrices),
+// right after the cut, while they still ARE the cut frame. No-op without a recipe.
+void cut_recipe_record_half_frame(ModelObject& half);
 
 enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo,
     // OrcaSlicer #13472: carry the support / seam / colour / fuzzy-skin painting of every model part
