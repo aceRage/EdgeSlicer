@@ -4820,7 +4820,8 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
                 DynamicPrintConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
                 float x = dynamic_cast<const ConfigOptionFloats*>(proj_cfg.option("wipe_tower_x"))->get_at(plate_id);
                 float y = dynamic_cast<const ConfigOptionFloats*>(proj_cfg.option("wipe_tower_y"))->get_at(plate_id);
-                float a = dynamic_cast<const ConfigOptionFloat*>(m_config->option("wipe_tower_rotation_angle"))->value;
+                // 0 where the tower cannot turn (Bambu Lab Type1), matching Print::apply and the clamp below.
+                float a = float(gui_wipe_tower_rotation_deg(full_config));
                 Vec3d plate_origin = ppl.get_plate(plate_id)->get_origin();
 
                 if (part_plate->get_objects_on_this_plate().empty()) continue;
@@ -5799,6 +5800,9 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
                     m_dirty = true;
                 else if (m_gizmos.is_enabled() && !m_selection.is_empty() && m_canvas_type != CanvasAssembleView) {
                     auto _do_rotate = [this](double angle_z_rad) {
+                        // A Bambu Lab (Type1) prime tower never turns: keep the keys inert on it.
+                        if (m_selection.is_wipe_tower() && !wipe_tower_rotation_supported())
+                            return;
                         m_selection.setup_cache();
                         m_selection.rotate(Vec3d(0.0, 0.0, angle_z_rad), TransformationType(TransformationType::World_Relative_Joint));
                         m_dirty = true;
@@ -7162,6 +7166,29 @@ void GLCanvas3D::do_rotate(const std::string& snapshot_type)
         }
     }
 
+    // Prime tower (WipeTower2 only): the Rotate tool turns its proxy about Z around its centre,
+    // which moves the anchor corner. Write the corner back per plate like do_move() does, and the
+    // angle - one print setting shared by every plate's tower - into the Process tab.
+    std::optional<double> wipe_tower_angle_deg;
+    if (m_selection.is_wipe_tower() && m_canvas_type != CanvasAssembleView && wipe_tower_rotation_supported()) {
+        PartPlateList& ppl      = wxGetApp().plater()->get_partplate_list();
+        const int      n_plates = ppl.get_plate_count();
+        for (unsigned int idx : m_selection.get_volume_idxs()) {
+            const GLVolume* v        = m_volumes.volumes[idx];
+            const int       plate_id = v->object_idx() - 1000;
+            if (!v->is_wipe_tower || plate_id < 0 || plate_id >= n_plates)
+                continue;
+            DynamicConfig&    proj_cfg     = wxGetApp().preset_bundle->project_config;
+            const Vec3d       plate_origin = ppl.get_plate(plate_id)->get_origin();
+            const Vec3d       offset       = v->get_volume_offset();
+            ConfigOptionFloat wipe_tower_x(offset.x() - plate_origin.x());
+            ConfigOptionFloat wipe_tower_y(offset.y() - plate_origin.y());
+            proj_cfg.option<ConfigOptionFloats>("wipe_tower_x", true)->set_at(&wipe_tower_x, plate_id, 0);
+            proj_cfg.option<ConfigOptionFloats>("wipe_tower_y", true)->set_at(&wipe_tower_y, plate_id, 0);
+            wipe_tower_angle_deg = Geometry::rad2deg(v->get_volume_rotation().z());
+        }
+    }
+
     //BBS: notify instance updates to part plater list
     m_selection.notify_instance_update(-1, -1);
     if (m_canvas_type != CanvasAssembleView) {
@@ -7209,6 +7236,11 @@ void GLCanvas3D::do_rotate(const std::string& snapshot_type)
 
     if (!done.empty())
         post_event(SimpleEvent(EVT_GLCANVAS_INSTANCE_ROTATED));
+
+    // After the plates were told: this reloads the scene, which re-clamps the turned tower
+    // onto the bed (PartPlate::estimate_wipe_tower_polygon) and re-slices.
+    if (wipe_tower_angle_deg)
+        wxGetApp().plater()->set_wipe_tower_rotation_angle(*wipe_tower_angle_deg);
 
     m_dirty = true;
 }
@@ -9508,6 +9540,19 @@ void GLCanvas3D::_resize(unsigned int w, unsigned int h)
     m_last_w = w;
     m_last_h = h;
 
+    apply_imgui_scaling();
+
+    this->request_extra_frame();
+
+    // ensures that this canvas is current
+    _set_current();
+}
+
+void GLCanvas3D::apply_imgui_scaling()
+{
+    if (m_canvas == nullptr)
+        return;
+
     float font_size = wxGetApp().em_unit();
 
 #ifdef _WIN32
@@ -9519,16 +9564,12 @@ void GLCanvas3D::_resize(unsigned int w, unsigned int h)
     font_size *= 1.5f;
 #endif
 
+    auto* imgui = wxGetApp().imgui();
 #if ENABLE_RETINA_GL
     imgui->set_scaling(font_size, 1.0f, m_retina_helper->get_scale_factor());
 #else
     imgui->set_scaling(font_size, m_canvas->GetContentScaleFactor(), 1.0f);
 #endif
-
-    this->request_extra_frame();
-
-    // ensures that this canvas is current
-    _set_current();
 }
 
 BoundingBoxf3 GLCanvas3D::_max_bounding_box(bool include_gizmos, bool include_bed_model, bool include_plates) const

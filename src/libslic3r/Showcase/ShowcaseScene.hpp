@@ -105,6 +105,10 @@ struct Floor
     std::string image;
     float       texture_scale   = 1.f;     // Texture: times the tile size the texture was shot at
     float       texture_size    = 300.f;   // Image: mm the picture spans on the floor
+    // Texture and Image: the picture turned counter-clockwise (seen from above) by 0 / 90 / 180 / 270
+    // degrees, and mirrored left to right (before the turn). The picture's top points to the back (+Y).
+    int         rotation        = 0;
+    bool        flip            = false;
     // Glossy floor: strength of the mirrored objects in it (0 = none, a planar reflection pass).
     float       reflection      = 0.f;
     // The soft "sitting on the table" darkening right under the objects (design 2.3). Also what
@@ -353,6 +357,15 @@ bool        parse_image_archive_path(const std::string &path, std::string &sha, 
 Scene make_scene(PresetId preset, int plate_index);
 // Applies the preset's look (background, floor, lighting) and keeps camera, views and export.
 void  apply_preset(Scene &scene, PresetId preset);
+
+// The floor picture's orientation. Snaps any angle to the nearest of 0 / 90 / 180 / 270.
+int floor_rotation_snap(double degrees);
+// Rows {m00, m01, m10, m11} of the 2x2 matrix taking a floor point in tiles (world x, y divided by
+// the tile size; +Y is the back of the plate) to the texture coordinate of a picture uploaded with
+// its first row (the top of the image) at v = 0. Unrotated, the picture's top points to +Y and its
+// right to +X; `rotation` turns it counter-clockwise seen from above; `flip` mirrors it left to
+// right first.
+std::array<float, 4> floor_uv_matrix(int rotation, bool flip);
 std::vector<PresetId> builtin_presets();
 
 // --- export planning ------------------------------------------------------------------------

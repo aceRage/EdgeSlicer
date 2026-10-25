@@ -1100,6 +1100,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
       toggle_line(el, have_prime_tower);
     for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
       toggle_line(el, have_prime_tower && !is_BBL_Printer);
+    // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab
+    // tower is always printed unrotated (Print::apply clears the angle), so the line stays
+    // visible but greyed out there; its tooltip says why.
+    toggle_line("wipe_tower_rotation_angle", have_prime_tower);
+    toggle_field("wipe_tower_rotation_angle", have_prime_tower && !is_BBL_Printer);
 
     // Orca: both tower generators skip sparse layers, so this is not a wipe tower 2 exclusive.
     toggle_line("wipe_tower_no_sparse_layers", have_prime_tower);

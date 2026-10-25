@@ -52,6 +52,9 @@
 #include <boost/locale.hpp>
 #include <boost/log/trivial.hpp>
 
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+
 #include "libslic3r.h"
 #include "InstanceLock.hpp"
 #include "Utils.hpp"
@@ -1564,13 +1567,68 @@ void PresetCollection::load_presets(
         pending_files.push_back(dir_entry.path());
     std::vector<boost::filesystem::path> deferred_files;
     bool final_round = false;
+    // Startup round 2 (F3): the first pass parses its JSON files ahead, a chunk at a time on TBB
+    // workers, into slots in directory order; the loop below then takes each file's parse result in
+    // that same order instead of parsing it there. Everything that depends on order or on what is
+    // already loaded (inherits, defaults, duplicates, quarantine, substitutions) stays sequential, so
+    // the result is the same as parsing in the loop. Deferred files are parsed again in their rounds,
+    // as before. ORCA_PRESET_LOAD_SEQUENTIAL=1 (PresetBundle::sequential_load()) turns it off.
+    struct ParsedUserFile
+    {
+        bool                               ready = false;
+        DynamicPrintConfig                 config;
+        std::map<std::string, std::string> key_values;
+        std::string                        reason;
+        ConfigSubstitutions                substitutions;
+        std::exception_ptr                 error;
+
+        // Move-only (ConfigSubstitutions cannot be copied), so vector growth moves the slots.
+        ParsedUserFile()                                  = default;
+        ParsedUserFile(ParsedUserFile &&)                 = default;
+        ParsedUserFile &operator=(ParsedUserFile &&)      = default;
+        ParsedUserFile(const ParsedUserFile &)            = delete;
+        ParsedUserFile &operator=(const ParsedUserFile &) = delete;
+    };
+    const bool                  prefetch_first_round = !PresetBundle::sequential_load();
+    std::vector<ParsedUserFile> prefetched;
+    size_t                      prefetched_upto = 0;
+    size_t                      prof_prefetched = 0;
+    auto prefetch_from = [&](size_t begin) {
+        // Chunks bound the parsed configs held at once and how long the calling thread (which may be
+        // animating a splash between files) is lent to the workers.
+        constexpr size_t chunk = 64;
+        const size_t     end   = std::min(pending_files.size(), begin + chunk);
+        if (prefetched.size() < pending_files.size())
+            prefetched.resize(pending_files.size());
+        acc_parse.start();
+        tbb::parallel_for(tbb::blocked_range<size_t>(begin, end), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i != range.end(); ++i) {
+                if (!Slic3r::is_json_file(pending_files[i].filename().string()))
+                    continue;
+                ParsedUserFile &slot = prefetched[i];
+                try {
+                    slot.substitutions = slot.config.load_from_json(pending_files[i].string(), substitution_rule, slot.key_values, slot.reason);
+                } catch (...) {
+                    slot.error = std::current_exception();
+                }
+                slot.ready = true;
+            }
+        });
+        acc_parse.stop();
+        prefetched_upto = end;
+    };
     for (;;) {
     deferred_files.clear();
     ++prof_rounds;
     const size_t loaded_before_round = presets_loaded.size();
+    const bool   use_prefetch        = prefetch_first_round && prof_rounds == 1;
+    size_t       file_index          = 0;
     //BBS: change to json format
     for (const boost::filesystem::path &entry_path : pending_files)
     {
+        const size_t this_file_index = file_index++;
+        if (use_prefetch && this_file_index >= prefetched_upto)
+            prefetch_from(this_file_index);
         std::string file_name = entry_path.filename().string();
         //if (Slic3r::is_ini_file(dir_entry)) {
         if (Slic3r::is_json_file(file_name)) {
@@ -1598,10 +1656,24 @@ void PresetCollection::load_presets(
                     //ConfigSubstitutions config_substitutions = config.load_from_ini(preset.file, substitution_rule);
                     std::map<std::string, std::string> key_values;
                     std::string reason;
-                    acc_parse.start();
                     ++prof_parses;
-                    ConfigSubstitutions config_substitutions = config.load_from_json(preset.file, substitution_rule, key_values, reason);
-                    acc_parse.stop();
+                    ConfigSubstitutions config_substitutions;
+                    if (use_prefetch && this_file_index < prefetched.size() && prefetched[this_file_index].ready) {
+                        // Parsed ahead (see prefetch_from): take the result, or throw what the parse threw.
+                        ParsedUserFile parsed = std::move(prefetched[this_file_index]);
+                        prefetched[this_file_index] = ParsedUserFile();
+                        ++prof_prefetched;
+                        if (parsed.error)
+                            std::rethrow_exception(parsed.error);
+                        config               = std::move(parsed.config);
+                        key_values           = std::move(parsed.key_values);
+                        reason               = std::move(parsed.reason);
+                        config_substitutions = std::move(parsed.substitutions);
+                    } else {
+                        acc_parse.start();
+                        config_substitutions = config.load_from_json(preset.file, substitution_rule, key_values, reason);
+                        acc_parse.stop();
+                    }
                     if (! config_substitutions.empty())
                         substitutions.push_back({ preset.name, m_type, PresetConfigSubstitutions::Source::UserFile, preset.file, std::move(config_substitutions) });
                     if (!reason.empty()) {
@@ -1764,6 +1836,7 @@ void PresetCollection::load_presets(
         };
         startup_profile_log("PresetCollection::load_presets type=" + Preset::get_type_string(m_type) + " folder=" + subdir +
                             " json_files=" + std::to_string(prof_json_files) + " parses=" + std::to_string(prof_parses) +
+                            " prefetched=" + std::to_string(prof_prefetched) +
                             " loaded=" + std::to_string(presets_loaded.size()) + " rounds=" + std::to_string(prof_rounds) +
                             " deferred=" + std::to_string(prof_deferred) + " info_files=" + std::to_string(prof_info_files) +
                             " collection_size=" + std::to_string(m_presets.size()) +
