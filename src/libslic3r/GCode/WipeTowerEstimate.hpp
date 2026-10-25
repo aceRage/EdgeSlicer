@@ -3,6 +3,7 @@
 #include <optional>
 #include <vector>
 
+#include "../BoundingBox.hpp"
 #include "../Point.hpp"
 #include "../Polygon.hpp"
 
@@ -33,6 +34,16 @@ struct WipeTowerFootprint
 // wipe_tower_type. The rule Print::wipe_tower_type() and the CLI apply, read off the config so
 // the GUI and CLI placement can resolve it without a Print.
 WipeTowerType resolve_wipe_tower_type(const ConfigBase &config);
+
+// wipe_tower_rotation_angle as the tower is generated, in degrees: 0 for Type1. Only WipeTower2
+// rotates (as in OrcaSlicer, which shows the option for it alone); Print::apply clears the angle
+// for the Bambu Lab tower, and the GUI preview, clamp and Rotate tool read it from here.
+double wipe_tower_rotation_deg(const ConfigBase &config);
+
+// Extents, relative to the tower's anchor (its front left body corner, wipe_tower_x / wipe_tower_y),
+// of the box [-margin, width + margin] x [-margin, depth + margin] turned by angle_deg about that
+// anchor: the room a rotated tower and its brim need around the anchor. Exact box at angle 0.
+BoundingBoxf wipe_tower_rotated_extents(double width, double depth, double margin, double angle_deg);
 
 // First-layer outline of an estimated tower in tower-local scaled coordinates, brim excluded:
 // the body box, or for a Type2 cone wall the box unioned with the cone's base. The preview,
