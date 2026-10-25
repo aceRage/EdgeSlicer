@@ -1,11 +1,13 @@
 #include "ImGuiWrapper.hpp"
 #include "ImGuiFontRanges.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <vector>
 #include <cmath>
 #include <stdexcept>
 #include <set>
+#include <sstream>
 #include <string>
 
 #include <boost/format.hpp>
@@ -32,6 +34,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/Shape/TextShape.hpp"
+#include "libslic3r/StartupProfile.hpp"
 
 #include "3DScene.hpp"
 #include "GUI.hpp"
@@ -72,6 +75,7 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::HeightRangeIcon        , "height_range"                  },
     {ImGui::ConfirmIcon            , "confirm"                       },
     {ImGui::GapFillIcon            , "gap_fill"                      },
+    {ImGui::SpreadPaintIcon        , "spread_paint"                  }, // Edge
     {ImGui::FoldButtonIcon         , "im_fold"                       },
     {ImGui::UnfoldButtonIcon       , "im_unfold"                     },
     {ImGui::gCodeButtonIcon        , "im_code"                       }, //ORCA
@@ -93,6 +97,7 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::HeightRangeDarkIcon        , "height_range_dark"                  },
     {ImGui::ConfirmDarkIcon            , "confirm_dark"                       },
     {ImGui::GapFillDarkIcon            , "gap_fill_dark"                      },
+    {ImGui::SpreadPaintDarkIcon        , "spread_paint_dark"                  }, // Edge
     {ImGui::SphereButtonDarkIcon       , "toolbar_modifier_sphere_dark"       },
 
     {ImGui::TextSearchIcon             , "im_text_search"             },
@@ -2727,6 +2732,13 @@ void ImGuiWrapper::pop_radio_style()
 void ImGuiWrapper::init_font(bool compress)
 {
     destroy_font();
+    // Startup round 2: one line per atlas build (they are rare: start-up, language or display scale
+    // changes), split into rasterising the fonts, the icons and the upload.
+    using build_clock = std::chrono::steady_clock;
+    const auto build_t0 = build_clock::now();
+    auto build_ms = [](build_clock::time_point a, build_clock::time_point b) {
+        return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
 
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
@@ -2798,6 +2810,7 @@ void ImGuiWrapper::init_font(bool compress)
     int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);   // Load as RGBA 32-bits (75% of the memory is wasted, but default font is so small) because it is more likely to be compatible with user's existing shaders. If your ImTextureId represent a higher-level concept than just a GL texture id, consider calling GetTexDataAsAlpha8() instead to save on GPU memory.
     BOOST_LOG_TRIVIAL(trace) << "Build default font texture done. width: " << width << ", height: " << height;
+    const auto build_t1 = build_clock::now();
 
     auto load_icon_from_svg = [this, &io, pixels, width, &rect_id](const std::pair<const wchar_t, std::string> icon, int icon_sz) {
         if (const ImFontAtlas::CustomRect* rect = io.Fonts->GetCustomRectByIndex(rect_id)) {
@@ -2832,6 +2845,8 @@ void ImGuiWrapper::init_font(bool compress)
         load_icon_from_svg(icon, icon_sz);
     }
 
+    const auto build_t2 = build_clock::now();
+
     // Upload texture to graphics system
     GLint last_texture;
     glsafe(::glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture));
@@ -2850,6 +2865,16 @@ void ImGuiWrapper::init_font(bool compress)
 
     // Restore state
     glsafe(::glBindTexture(GL_TEXTURE_2D, last_texture));
+
+    const auto build_t3 = build_clock::now();
+    std::ostringstream msg;
+    msg << "ImGui font atlas built: size=" << m_font_size << " atlas=" << width << "x" << height
+        << " glyphs=" << (default_font != nullptr ? default_font->Glyphs.Size : 0) << "+" << (bold_font != nullptr ? bold_font->Glyphs.Size : 0)
+        << " fonts_ms=" << build_ms(build_t0, build_t1) << " icons_ms=" << build_ms(build_t1, build_t2)
+        << " upload_ms=" << build_ms(build_t2, build_t3) << " ms=" << build_ms(build_t0, build_t3);
+    BOOST_LOG_TRIVIAL(info) << msg.str();
+    if (Slic3r::startup_profile_enabled())
+        Slic3r::startup_profile_log(msg.str());
 }
 
 void ImGuiWrapper::load_fonts_texture()

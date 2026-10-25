@@ -911,6 +911,16 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
         }
     }
 
+    // Edge (Spread paint): Esc while a spread is held cancels it and restores the paint, instead of
+    // closing the painting gizmo.
+    if (keyCode == WXK_ESCAPE && !evt.HasModifiers() && m_current != Undefined) {
+        if (auto *painter = dynamic_cast<GLGizmoPainterBase *>(m_gizmos[m_current].get());
+            painter != nullptr && painter->on_spread_escape()) {
+            m_parent.set_as_dirty();
+            return true;
+        }
+    }
+
     if ((evt.GetModifiers() & ctrlMask) != 0) {
         switch (keyCode)
         {

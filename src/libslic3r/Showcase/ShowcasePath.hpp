@@ -157,6 +157,8 @@ struct PathEvent
     std::optional<FloorType>      floor;
     std::optional<std::string>    color1, color2, color;
     std::optional<double>         shadow_strength, reflection, contact_shadow;
+    std::optional<double>         floor_rotation;   // texture / image floors: 0, 90, 180 or 270 degrees
+    std::optional<bool>           floor_flip;
     // look: a built-in preset's backdrop, floor and lights
     std::optional<PresetId>       look;
     // callouts: which ones (none named = all of them)
