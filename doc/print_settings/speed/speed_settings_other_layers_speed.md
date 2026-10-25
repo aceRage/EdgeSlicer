@@ -87,6 +87,14 @@ Speed of [gap infill](strength_settings_infill#apply-gap-fill), which is used to
 
 Speed at which [support](support_settings_support) material is printed. Slower speeds help ensure that supports are stable and effective during the print process.
 
+### Small tree support perimeters
+
+Same as [Small perimeters](#small-perimeters), but for supports: the speed of support perimeters whose length is at most the [threshold](#small-tree-support-perimeters-threshold) below. If expressed as a percentage (for example 80%), it is calculated on the support or support interface speed. Set to zero for auto.
+
+#### Small tree support perimeters threshold
+
+The length threshold for small support perimeters, in mm. The default is 0 mm.
+
 ## Support interface
 
 Speed for the support interface layers, which are the layers directly contacting the model. This is usually set even slower than the main [support speed](#support) to maximize surface quality where the support meets the model and to make support removal easier.

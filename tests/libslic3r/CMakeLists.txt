@@ -56,6 +56,8 @@ add_executable(${_TEST_NAME}_tests
 	test_draw_cut.cpp
 	test_edgegrid.cpp
 	test_cut_recipe.cpp
+	test_cut_paint.cpp
+	test_cut_groove.cpp
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
