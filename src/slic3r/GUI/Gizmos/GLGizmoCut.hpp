@@ -161,6 +161,24 @@ class GLGizmoCut3D : public GLGizmoBase
     bool             m_flexi_forced_after_cut{ false };
     std::vector<std::string> m_flexi_kinds;
 
+    // Push-fit Pin connector (tests/design_pushfit_connector.md): the panel's working values,
+    // copied into every selected Pin connector on each edit.
+    PushFitParams    m_pushfit;
+    // The preset selector: 0 S, 1 M, 2 L, 3 Auto, 4 Custom (Auto is a one-shot sizing).
+    int              m_pushfit_preset_ui{ 1 };
+    bool             m_pushfit_auto_misfit{ false };
+    bool             m_pushfit_same_length{ true };
+    bool             m_pushfit_same_clearance{ true };
+    bool             m_pushfit_advanced{ false };
+    // The connector the panel last loaded its values from, so selecting another Pin shows its own.
+    int              m_pushfit_shown_idx{ -1 };
+    std::vector<std::string> m_pushfit_presets;
+    std::vector<std::string> m_pushfit_cutouts;
+    std::vector<std::string> m_pushfit_poses;
+    // The translucent hole envelopes drawn on each side of a placed Pin (upper, lower).
+    GLModel          m_pushfit_hole_models[2];
+    bool             m_pushfit_hole_models_dirty{ true };
+
     // --- Curved cut (phase 1) ---------------------------------------------
     // Surface: Flat | Curved | Draw. Curved replaces the flat cut plane with a
     // height field z = f(u,v) defined over it by a coarse control grid, upsampled
@@ -1045,6 +1063,14 @@ protected:
     double flexi_section_inscribed_radius() const;
     float  flexi_nozzle_diameter() const;
     double flexi_slice_closing_radius() const;
+    // Push-fit Pin
+    bool   is_pushfit_type() const { return m_connector_type == CutConnectorType::PushFit; }
+    bool   render_pushfit_mm_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip);
+    bool   render_pushfit_checkbox(const wxString& label, bool& value);
+    void   render_pushfit_inputs(CutConnectors& connectors);
+    void   render_pushfit_profile_inset();
+    void   render_pushfit_hole_envelopes(const Transform3d& view_model_matrix);
+    void   sync_pushfit_params(CutConnectors& connectors);
     void render_cut_plane_input_window(CutConnectors &connectors, float x, float y, float bottom_limit);
     void init_input_window_data(CutConnectors &connectors);
     void render_input_window_warning() const;
