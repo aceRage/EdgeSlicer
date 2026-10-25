@@ -22,7 +22,8 @@ bool CutRecipeGroove::operator==(const CutRecipeGroove& o) const
     return depth == o.depth && width == o.width && flaps_angle == o.flaps_angle && angle == o.angle &&
            depth_init == o.depth_init && width_init == o.width_init &&
            flaps_angle_init == o.flaps_angle_init && angle_init == o.angle_init &&
-           depth_tolerance == o.depth_tolerance && width_tolerance == o.width_tolerance;
+           depth_tolerance == o.depth_tolerance && width_tolerance == o.width_tolerance &&
+           count == o.count && gap == o.gap && plane_radius == o.plane_radius;
 }
 
 bool CutRecipeConnector::operator==(const CutRecipeConnector& o) const
@@ -585,6 +586,9 @@ CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Ve
     // and their _init / _tolerance partners). None of them encodes a direction in
     // the plane, so a mirror passes through them unchanged and only the frame they
     // sit on moves. Nothing to do - r.groove is already the copy.
+    // Version 5's count, gap and plane_radius are scalars too, and the dovetails are
+    // laid out symmetrically about the plane centre along its X, so a mirrored set is
+    // the same set.
 
     // --- connectors -------------------------------------------------------
     for (size_t i = 0; i < r.connectors.size(); ++ i) {

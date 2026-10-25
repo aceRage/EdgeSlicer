@@ -102,7 +102,6 @@ inline const std::set<std::string> &project_config_fill_skip_keys()
         "dithering_local_z_mode",
         "dithering_local_z_whole_objects",
         "dithering_local_z_infill",
-        "wipe_tower_rotation_angle",
         "extruder_ams_count",
         "extruder_nozzle_stats",
     };
