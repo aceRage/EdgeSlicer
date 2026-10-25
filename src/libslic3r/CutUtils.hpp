@@ -24,6 +24,30 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
 // True when this object carries at least one unprocessed flexi joint connector.
 bool has_flexi_joint(const ModelObject* mo);
 
+// OD11 PR D (owner D2 = a, 2026-10-24): "Edit cut" rebuilds the uncut part from the recipe's bare
+// mesh, so without this a re-cut painted part came back unpainted. Carries the support / seam /
+// colour / fuzzy-skin painting of the halves - as they are now, so paint added after the cut
+// comes too - back onto `uncut`.
+//
+// THE FRAMES. A half's model part, through its own volume matrix, is in the cut frame: the cut
+// instance's linear transform (`instance_linear`, recorded in the recipe) times the object frame
+// the recipe's mesh is in. That survives a project save and reload (the volume matrix is stored),
+// moving or turning the half on the bed (that is the instance), Flip and Place on cut (also the
+// instance). It does not survive moving a part inside a half, or an unrecorded instance_linear
+// on a cut made from a rotated or scaled instance - so the carry checks before it paints: the
+// painted points must land on the uncut surface. If they do not, nothing is painted and
+// `carried` is false (the caller says so: fallback (c), "dropped").
+struct CutPaintCarry
+{
+    bool had_paint{ false }; // some half had painting to carry
+    bool carried{ false };   // ... and it was put on `uncut`
+};
+CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>& halves, const Transform3d& instance_linear,
+                                          ModelVolume& uncut);
+// Records `half`'s model-part volume matrices into its own cut recipe (CutRecipe::half_part_matrices),
+// right after the cut, while they still ARE the cut frame. No-op without a recipe.
+void cut_recipe_record_half_frame(ModelObject& half);
+
 enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo,
     // OrcaSlicer #13472: carry the support / seam / colour / fuzzy-skin painting of every model part
     // onto the halves (spatial remap, ModelVolume::restore_painting()). The gizmo always sets it
