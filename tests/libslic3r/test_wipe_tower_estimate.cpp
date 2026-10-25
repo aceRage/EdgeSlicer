@@ -286,6 +286,43 @@ TEST_CASE("The shipped defaults size the tower from the flush matrix", "[WipeTow
     CHECK_THAT(estimate(config, 1, 0.2, 5.).depth, WithinAbs(0., 1e-9));
 }
 
+// Orca #15149: a multi-nozzle flush matrix holds one filaments x filaments block per nozzle. The estimate
+// folds them with max instead of reading the whole option as one (misshapen) square.
+TEST_CASE("The flush estimate folds one flush block per nozzle", "[WipeTowerEstimate][FlushFold]") {
+    DynamicPrintConfig config = preset_shaped_defaults();
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"#FF0000", "#00FF00"}));
+    config.set_key_value("filament_minimal_purge_on_wipe_tower", new ConfigOptionFloats({0., 0.}));
+    config.set_key_value("flush_multiplier", new ConfigOptionFloat(1.));
+    config.set_key_value("purge_in_prime_tower", new ConfigOptionBool(true));
+    config.set_key_value("single_extruder_multi_material", new ConfigOptionBool(true));
+
+    SECTION("two nozzles, two blocks: the worst nozzle wins per pair") {
+        config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.4, 0.4}));
+        const std::vector<double> raw{0., 100., 300., 0.,   // nozzle 1
+                                      0., 200., 50., 0.};   // nozzle 2
+        const std::vector<float> folded = WipeTower2::fold_flush_volumes_matrix(config, raw);
+        REQUIRE(folded.size() == 4);
+        CHECK(folded[1] == 200.f);
+        CHECK(folded[2] == 300.f);
+        config.set_key_value("flush_volumes_matrix", new ConfigOptionFloats(raw));
+        // Row maxima 200 + 300, scaled to two filaments over two rows, times the 0.6 overshoot factor.
+        CHECK_THAT(WipeTower2::estimate_semm_flush_volume(config, 2), WithinAbs(500. * 0.6, 1e-3));
+    }
+    SECTION("one block on a multi-nozzle printer is read as it is") {
+        // Edge's PresetBundle writes one block whatever the nozzle count (a four-toolhead U1 with two
+        // filaments has a 2 x 2 matrix, which must not read as four 1 x 1 blocks).
+        config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.4, 0.4, 0.4, 0.4}));
+        const std::vector<double> raw{0., 100., 300., 0.};
+        const std::vector<float> folded = WipeTower2::fold_flush_volumes_matrix(config, raw);
+        CHECK(folded == std::vector<float>{0.f, 100.f, 300.f, 0.f});
+    }
+    SECTION("a single nozzle is unchanged") {
+        config.set_key_value("nozzle_diameter", new ConfigOptionFloats({0.4}));
+        const std::vector<double> raw{0., 100., 300., 0.};
+        CHECK(WipeTower2::fold_flush_volumes_matrix(config, raw) == std::vector<float>{0.f, 100.f, 300.f, 0.f});
+    }
+}
+
 TEST_CASE("Type2 cone first-layer outline matches the cone base", "[WipeTowerEstimate]") {
     DynamicPrintConfig config = make_config("cone");
     config.set_key_value("wipe_tower_cone_angle", new ConfigOptionFloat(25.));

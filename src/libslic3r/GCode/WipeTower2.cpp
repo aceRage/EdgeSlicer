@@ -2886,13 +2886,39 @@ std::vector<std::vector<float>> WipeTower2::extract_wipe_volumes(const PrintConf
     return wipe_volumes;
 }
 
+// Orca #15149: on a multi-nozzle printer flush_volumes_matrix can hold one filaments x filaments block per
+// nozzle (ToolOrdering's prepare_flush_matrices reads it that way). Read as one square it gives a matrix of the
+// wrong shape. One tower serves every nozzle and the filament-to-nozzle assignment is only decided later by
+// ToolOrdering, so fold the blocks with std::max: the depth reserved has to cover the worst nozzle.
+// Edge: the block size comes from the filament count, not from sqrt(size / nozzles) as upstream does - Edge's
+// PresetBundle writes a single block whatever the nozzle count, and on a four-toolhead U1 with two filaments
+// that single 2 x 2 block would read as four 1 x 1 blocks. Anything that is neither one block nor one per
+// nozzle is returned as it is, as before.
+std::vector<float> WipeTower2::fold_flush_volumes_matrix(const ConfigBase &config, const std::vector<double> &raw)
+{
+    const auto  *nozzles   = dynamic_cast<const ConfigOptionFloats *>(config.option("nozzle_diameter"));
+    const auto  *colours   = dynamic_cast<const ConfigOptionStrings *>(config.option("filament_colour"));
+    const size_t nozzle_nums = (nozzles == nullptr || nozzles->values.empty()) ? 1 : nozzles->values.size();
+    const size_t filaments   = colours == nullptr ? 0 : colours->values.size();
+    const size_t block       = filaments * filaments;
+    if (nozzle_nums < 2 || block == 0 || raw.size() != block * nozzle_nums)
+        return cast<float>(raw);
+    std::vector<float> folded(block, 0.f);
+    for (size_t nozzle_id = 0; nozzle_id < nozzle_nums; ++nozzle_id) {
+        const std::vector<double> part = get_flush_volumes_matrix(raw, nozzle_id, nozzle_nums);
+        for (size_t k = 0; k < block; ++k)
+            folded[k] = std::max(folded[k], float(part[k]));
+    }
+    return folded;
+}
+
 float WipeTower2::estimate_semm_flush_volume(const ConfigBase& config, size_t filaments_cnt)
 {
     const auto *matrix_opt = dynamic_cast<const ConfigOptionFloats *>(config.option("flush_volumes_matrix"));
     if (matrix_opt == nullptr || matrix_opt->values.empty())
         return 0.f;
 
-    std::vector<float> wiping_matrix(cast<float>(matrix_opt->values));
+    std::vector<float> wiping_matrix = fold_flush_volumes_matrix(config, matrix_opt->values);
     float              scale = 1.f;
     if (const auto *mult = dynamic_cast<const ConfigOptionFloats *>(config.option("flush_multiplier"));
         mult != nullptr && !mult->values.empty())

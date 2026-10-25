@@ -33,6 +33,9 @@ public:
 	// Estimated total flush volume of a SEMM print with the given number of filaments,
 	// used to reserve wipe tower space before the tower is generated.
 	static float estimate_semm_flush_volume(const ConfigBase& config, size_t filaments_cnt);
+	// Orca #15149: flush_volumes_matrix with one block per nozzle folded (std::max) into one
+	// filaments x filaments block; a single block, or any other shape, comes back as it is.
+	static std::vector<float> fold_flush_volumes_matrix(const ConfigBase& config, const std::vector<double>& raw);
 
     // Wipe-tower entry stagger (Snap #934). Slot is (layer*7 + tc*5) % 17 when enabled.
     // The Edge-safe offset is 0 on the first printed tower layer, on local-Z changes
