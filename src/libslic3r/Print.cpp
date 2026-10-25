@@ -171,16 +171,6 @@ static inline int shared_local_z_extruder_for_wipe_tower(const std::vector<unsig
     return -1;
 }
 
-static std::vector<unsigned int> rotate_extruders_to_start_with(const std::vector<unsigned int> &extruders,
-                                                                unsigned int                      start_extruder)
-{
-    std::vector<unsigned int> rotated = extruders;
-    auto it = std::find(rotated.begin(), rotated.end(), start_extruder);
-    if (it != rotated.end())
-        std::rotate(rotated.begin(), it, rotated.end());
-    return rotated;
-}
-
 static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolchanges(
     const Print                              &print,
     const std::vector<GCode::LayerToPrint>   &layers,
@@ -6614,7 +6604,13 @@ void Print::_make_wipe_tower()
                 wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
                                            current_extruder_id);
 
-                for (const auto extruder_id : layer_tools.extruders) {
+                // The order GCode::process_layer() prints the layer in: rotated to start with the loaded
+                // extruder, unless Cyclic ordering or a custom sequence fixed it. Planning the plain
+                // layer_tools.extruders here let a fixed order (which need not start with the loaded
+                // extruder) disagree with the export, which then asked for tool changes in another
+                // order, and more of them, than the tower had (H2C "Wipe tower generation failed").
+                const std::vector<unsigned int> nominal_layer_extruders = layer_tools.nominal_extruder_order(int(current_extruder_id));
+                for (const auto extruder_id : nominal_layer_extruders) {
                     // BBS: priming logic is removed, so no need to do toolchange for first extruder
                     if (/*(first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || */ extruder_id !=
                         current_extruder_id) {
@@ -6774,7 +6770,7 @@ void Print::_make_wipe_tower()
                 }
 
                 const std::vector<unsigned int> nominal_layer_extruders =
-                    rotate_extruders_to_start_with(layer_tools.extruders, current_extruder_id);
+                    layer_tools.nominal_extruder_order(int(current_extruder_id));
 
                 wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
                                            current_extruder_id, false);
