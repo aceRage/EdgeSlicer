@@ -2070,8 +2070,8 @@ void Print::validate_compacted_wipe_tower_clearance() const
 // Estimated outline of the prime tower's first layer, brim included, in bed coordinates (the plate origin
 // is added, like for the objects). Empty when the plate prints no tower. Before the tower is generated this
 // is the same estimate the plater draws, so a check built on it can run while the plate is still being laid
-// out.
-static Polygons estimated_prime_tower_outline(const Print &print)
+// out. with_brim = false leaves the brim (and the interface run-in reserve folded into it) out.
+static Polygons estimated_prime_tower_outline(const Print &print, bool with_brim = true)
 {
     const PrintConfig &config = print.config();
     // Custom G-code tool changes (MultiAsSingle) build a real tower on a plate whose objects
@@ -2095,7 +2095,7 @@ static Polygons estimated_prime_tower_outline(const Print &print)
     // no tool change to purge for (smooth timelapse / wrapping detection).
     if (width > EPSILON && depth > EPSILON) {
         Polygon wipe_tower_convex_hull = estimate_wipe_tower_first_layer_outline(config, resolve_wipe_tower_type(config), width, depth, wipe_tower_estimate.height);
-        if (brim_width > EPSILON) {
+        if (with_brim && brim_width > EPSILON) {
             Polygons brimmed = offset(wipe_tower_convex_hull, float(scale_(brim_width)));
             if (!brimmed.empty())
                 wipe_tower_convex_hull = brimmed.front();
@@ -2105,6 +2105,31 @@ static Polygons estimated_prime_tower_outline(const Print &print)
         outline.push_back(wipe_tower_convex_hull);
     }
     return outline;
+}
+
+// Orca #15146: a tower placed where the bed has no corner (delta, circular or custom beds) is reported
+// before slicing instead of only once the tower is generated (the exact check in _make_wipe_tower()).
+// Only the body is tested here: the brim estimate can overshoot the generated brim and must not
+// hard-fail a print that physically fits. Edge: tested against the whole bed, not the part every
+// nozzle reaches (dual-nozzle reach keeps its own warning and prime_tower_reach_error()), and run
+// last in Print::validate() so every other configuration error is still reported first.
+std::string Print::prime_tower_off_bed_error() const
+{
+    const Print &print = *this;
+    if (!print.has_wipe_tower())
+        return {};
+    const Polygons body = estimated_prime_tower_outline(print, /*with_brim=*/false);
+    if (body.empty())
+        return {};
+    Polygon bed;
+    bed.points = get_bed_shape(print.config());
+    if (bed.size() < 3)
+        return {};
+    const Vec3d plate_origin = print.get_plate_origin();
+    bed.translate(Point(scale_(plate_origin.x()), scale_(plate_origin.y())));
+    if (diff(body, Polygons{bed}).empty())
+        return {};
+    return L("Prime Tower") + L(" is partially outside the printable area, and it cannot be printed.\n");
 }
 
 // Dual-nozzle (H2D / H2C / X2D): every nozzle that prints on the prime tower must reach it. Which nozzles
@@ -2270,7 +2295,6 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
         }*/
         return {L("Prime Tower") + L(" is too close to exclusion area, and collisions will be caused.\n")};
     }
-
     return {};
 }
 
@@ -3257,6 +3281,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     }
     if (!this->has_same_shrinkage_compensations())
         warn(L("Filament shrinkage will not be used because filament shrinkage for the used filaments differs significantly."));
+    if (std::string off_bed = this->prime_tower_off_bed_error(); !off_bed.empty())
+        return {off_bed};
     return {};
 }
 

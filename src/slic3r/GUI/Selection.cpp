@@ -1244,6 +1244,15 @@ void Selection::translate(const Vec3d &displacement, TransformationType transfor
                 } else if (tower_origin(1) + actual_displacement(1) + tower_size(1) + margin > plate_bbox.max(1)) {
                     actual_displacement(1) = plate_bbox.max(1) - tower_origin(1) - tower_size(1) - margin;
                 }
+                // Orca #15146: on a delta, circular or custom bed the box above still has corners the bed
+                // does not; slide the tower onto the real outline (zero on rectangular beds).
+                {
+                    const Vec3d  lo = tower_origin + actual_displacement;
+                    const Vec2d  move = wxGetApp().plater()->get_partplate_list().get_plate(plate_idx)->wipe_tower_move_onto_bed(
+                        BoundingBoxf(Vec2d(lo.x(), lo.y()), Vec2d(lo.x() + tower_size.x(), lo.y() + tower_size.y())), margin);
+                    actual_displacement(0) += move.x();
+                    actual_displacement(1) += move.y();
+                }
 
                 v.set_volume_offset(m_cache.volumes_data[i].get_volume_position() + actual_displacement);
             }
