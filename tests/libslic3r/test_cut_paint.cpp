@@ -757,6 +757,31 @@ TEST_CASE("Edit cut paint: it still works after the project is saved and reopene
     release_PlateData_list(plate_data);
     REQUIRE(back.objects.size() == 2);
 
+    // The halves themselves come back as they were saved: the same painting, and each model part
+    // in the same place through its volume matrix (the frame the carry relies on).
+    for (size_t i = 0; i < 2; ++i) {
+        INFO("half " << i);
+        const ModelObject *before = f.halves[i];
+        const ModelObject *after  = back.objects[i];
+        for (EnforcerBlockerType state : { EnforcerBlockerType::Extruder2, EnforcerBlockerType::Extruder3 }) {
+            INFO("state " << int(state));
+            const PaintedOn a = cp_painted({ const_cast<ModelObject *>(before) }, &ModelVolume::mmu_segmentation_facets, state);
+            const PaintedOn b = cp_painted({ const_cast<ModelObject *>(after) }, &ModelVolume::mmu_segmentation_facets, state);
+            CHECK(b.area == Approx(a.area).margin(1.));
+        }
+        BoundingBoxf3 bb_before, bb_after;
+        for (const ModelVolume *v : before->volumes)
+            if (v->is_model_part())
+                bb_before.merge(v->mesh().transformed_bounding_box(v->get_matrix()));
+        for (const ModelVolume *v : after->volumes)
+            if (v->is_model_part())
+                bb_after.merge(v->mesh().transformed_bounding_box(v->get_matrix()));
+        INFO("before " << bb_before.min.transpose() << " / " << bb_before.max.transpose());
+        INFO("after  " << bb_after.min.transpose() << " / " << bb_after.max.transpose());
+        CHECK(bb_after.min.isApprox(bb_before.min, 1e-3));
+        CHECK(bb_after.max.isApprox(bb_before.max, 1e-3));
+    }
+
     std::vector<const ModelObject *> halves(back.objects.begin(), back.objects.end());
     Model                            m;
     ModelVolume                     *standin = cp_standin(m);
