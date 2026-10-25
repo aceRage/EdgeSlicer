@@ -127,7 +127,7 @@ short way round, and other values switch half way.
 |---|---|
 | `lighting` | `rig` (`soft`, `classic`, `dramatic`, `key_only`, `sun`), `azimuth`, `elevation` (degrees), `key_intensity` (0-3), `temperature` (2000-10000 K), `fill`, `rim` (0-3, 0 = off), `environment` (an environment id), `env_intensity`, `env_rotation`, `exposure` (EV, -3 to 3), `shadows`, `shadow_intensity`, `shadow_softness` (0.5-4), `ssao` |
 | `background` | `kind` (`solid`, `vertical_gradient`, `radial_gradient`, `image`, `transparent`, `environment`), `color1`, `color2` (`"#RRGGBB"`) |
-| `floor` | `kind` (`none`, `shadow_catcher`, `solid`, `grid`, `texture`, `image`), `color`, `shadow_strength`, `reflection`, `contact_shadow` (0-1) |
+| `floor` | `kind` (`none`, `shadow_catcher`, `solid`, `grid`, `texture`, `image`), `color`, `shadow_strength`, `reflection`, `contact_shadow` (0-1), `rotation` (0, 90, 180 or 270 degrees, counter-clockwise from above; other angles snap to the nearest; the `texture` and `image` floors), `flip` (`true` mirrors the picture left to right) |
 | `look` | `preset`: a whole built-in look (`studio_white`, `dark_gradient`, `build_plate`, `desk_wood`, `outdoor`) for the backdrop, floor and lights |
 | `callouts` | `action` (`show`, `hide`, `highlight`), and which callouts: `filaments` (slots) and/or `labels` (callout keys such as `"f2"` or `"f2@12.40"`, or a callout's title). Naming neither means all of them. A highlight draws an accent ring round the label and its dots, and dims the others. |
 | `watermark` | `enabled`, `text`, `anchor` (`top_left` ... `bottom_right`), `opacity` (0-1), `size` (% of the height). A range shows the mark inside it. |

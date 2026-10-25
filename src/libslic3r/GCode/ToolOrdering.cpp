@@ -284,6 +284,17 @@ bool LayerTools::is_extruder_order(unsigned int a, unsigned int b) const
     return false;
 }
 
+std::vector<unsigned int> LayerTools::nominal_extruder_order(int start_extruder) const
+{
+    std::vector<unsigned int> order = this->extruders;
+    if (this->fixed_extruder_order || start_extruder < 0)
+        return order;
+    auto it = std::find(order.begin(), order.end(), unsigned(start_extruder));
+    if (it != order.end())
+        std::rotate(order.begin(), it, order.end());
+    return order;
+}
+
 unsigned int LayerTools::resolve_mixed_1based_at(unsigned int       filament_id,
                                                  float              layer_print_z,
                                                  float              layer_height,
@@ -2077,6 +2088,8 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     std::optional<unsigned int> current_extruder_id;
     for (int i = 0; i < m_layer_tools.size(); ++i) {
         LayerTools& lt = m_layer_tools[i];
+        // This pass runs more than once per slice; only the custom-sequence branch below sets it.
+        lt.fixed_extruder_order = false;
         if (lt.extruders.empty())
             continue;
         if (lt.preserve_extruder_order) {
@@ -2086,6 +2099,9 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
 
         std::vector<int> custom_extruder_seq;
         if (get_custom_seq(i, custom_extruder_seq) && !custom_extruder_seq.empty()) {
+            // Cyclic ordering or a per-plate custom sequence: the layer keeps this order in the
+            // G-code and on the wipe tower (LayerTools::nominal_extruder_order does not rotate it).
+            lt.fixed_extruder_order = true;
             std::vector<unsigned int> unsign_custom_extruder_seq;
             for (int extruder : custom_extruder_seq) {
                 unsigned int unsign_extruder = static_cast<unsigned int>(extruder) - 1;

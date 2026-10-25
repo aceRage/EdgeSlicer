@@ -1583,6 +1583,9 @@ void GUI_App::post_init()
             post_init_profile.mark("canvas3D init");
 
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", finished init canvas3D";
+            // Startup round 2: the font size the first render's resize would set, applied before the
+            // atlas is built, so it is built once and not again at the first resize.
+            plater_->canvas3D()->apply_imgui_scaling();
             wxGetApp().imgui()->new_frame();
             post_init_profile.mark("imgui new_frame");
 
@@ -4125,8 +4128,10 @@ bool GUI_App::on_init_inner()
     profiler.mark("mainframe->Show");
 
     obj_list()->set_min_height();
+    profiler.mark("obj_list set_min_height");
 
     update_mode(); // update view mode after fix of the object_list size
+    profiler.mark("update_mode");
 
 #ifdef __APPLE__
    other_instance_message_handler()->bring_instance_forward();
@@ -4215,6 +4220,7 @@ bool GUI_App::on_init_inner()
     // Showcase S5: never for a render job.
     if (!s_showcase_render_mode)
         start_remote_access();
+    profiler.mark("idle bind + start_remote_access");
 
     flush_logs();
 

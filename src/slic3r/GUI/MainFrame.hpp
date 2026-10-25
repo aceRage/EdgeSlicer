@@ -522,7 +522,11 @@ public:
     ParamsDialog*         m_param_dialog{ nullptr };
     //BBS
     SettingsDialog        m_settings_dialog;
-    DiffPresetDialog      diff_dialog;
+    // "Compare presets": built on first use (startup round 2). Its constructor copies the whole
+    // preset bundle twice, ~1 s of the main window's construction with a large preset library.
+    DiffPresetDialog&     diff_dialog();
+    // The dialog when it has been built, else null (nothing to keep up to date yet).
+    DiffPresetDialog*     diff_dialog_if_built() { return m_diff_dialog.get(); }
     wxWindow*             m_plater_page{ nullptr };
     PrintHostQueueDialog* m_printhost_queue_dlg;
 
@@ -559,6 +563,9 @@ private:
     // teardown guard in update_slice_print_status (wxGetApp().mainframe does
     // not point at this frame yet during construction).
     void update_slice_print_status_impl(SlicePrintEventType event, bool can_slice, bool can_print);
+    // See diff_dialog(). Destroyed with the frame's members, before wx destroys the frame's children,
+    // as the by-value member it replaces was.
+    std::unique_ptr<DiffPresetDialog> m_diff_dialog;
 };
 
 wxDECLARE_EVENT(EVT_HTTP_ERROR, wxCommandEvent);

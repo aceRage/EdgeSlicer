@@ -78,6 +78,9 @@ bool CutRecipe::operator==(const CutRecipe& o) const
         return false;
     if (connectors != o.connectors)
         return false;
+    if (instance_linear_set != o.instance_linear_set ||
+        (instance_linear_set && instance_linear.matrix() != o.instance_linear.matrix()))
+        return false;
     // The mesh is compared by its content hash, which is what the 3MF stores and
     // what makes two halves share one blob.
     return mesh_hash == o.mesh_hash;

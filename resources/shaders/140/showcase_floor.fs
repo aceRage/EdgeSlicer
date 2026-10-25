@@ -26,6 +26,7 @@ uniform vec3  light_tint;      // the key's colour (S2; black means white)
 
 uniform sampler2D floor_tex;   // mode 4, sRGB, tiled
 uniform float     tile_mm;
+uniform vec4      floor_uv;   // rows of the 2x2 matrix from the floor point in tiles to the picture's uv
 
 uniform sampler2D contact_tex;     // the blurred footprint, 1 = touching
 uniform bool      use_contact;
@@ -130,7 +131,9 @@ void main()
         vec3 ink = lum > 0.5 ? base * 0.72 : base + vec3(0.18);
         base = mix(base, ink, max(line * 0.55, major * 0.9));
     } else if (mode == 4) {
-        base = texture(floor_tex, world_pos.xy / max(tile_mm, 1.0)).rgb;
+        // Image rows are uploaded top first (v = 0), so v runs against +Y: the picture's top is the back.
+        vec2 p = world_pos.xy / max(tile_mm, 1.0);
+        base = texture(floor_tex, vec2(dot(floor_uv.xy, p), dot(floor_uv.zw, p))).rgb;
     }
     vec3 tint = dot(light_tint, vec3(1.0)) > 0.0 ? mix(vec3(1.0), light_tint, 0.35) : vec3(1.0);
     float lambert = 0.80 + 0.20 * clamp(light_dir.z, 0.0, 1.0);

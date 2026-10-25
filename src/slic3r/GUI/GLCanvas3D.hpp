@@ -1384,6 +1384,11 @@ public:
     Vec3d _mouse_to_3d(const Point& mouse_pos, float* z = nullptr);
 
     bool make_current_for_postinit();
+    // The ImGui font size and style scale this canvas uses (em unit, display scale). _resize() applies
+    // it; post_init applies it before the first new_frame(), so the font atlas is built once at the
+    // size the first render keeps, not at the default size and again at the first resize (startup
+    // round 2: each build is 0.5-1.2 s).
+    void apply_imgui_scaling();
     // Ultra: make a usable GL context current and finish the one-time GL init, with no
     // dependency on this canvas ever having been shown on screen. Prefers the visible
     // canvas's context (GTK hidden-canvas SetCurrent fails) and falls back to this.

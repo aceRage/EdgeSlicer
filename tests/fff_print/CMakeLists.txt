@@ -60,6 +60,7 @@ add_executable(${_TEST_NAME}_tests
 	test_texture_displacement.cpp
 	test_trianglemesh.cpp
 	test_wipe.cpp
+	test_wipe_tower.cpp
 	test_adaptive_pa.cpp
 	test_extruder_variant_arrays.cpp
 	test_filament_map_roundtrip.cpp
