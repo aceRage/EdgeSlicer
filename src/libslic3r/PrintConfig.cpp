@@ -8553,7 +8553,7 @@ void PrintConfigDef::init_fff_params()
                        "Useful when an assembly groups several objects that should each keep a consistent, self-centered infill.\n"
                        "Adaptive Cubic and Support Cubic always center each part on itself, and Lightning infill is generated for "
                        "the whole object and is unaffected.");
-    def->mode     = comExpert;
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionBool(false));
 
     def                = this->add("center_of_surface_pattern", coEnum);
@@ -8572,7 +8572,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Each Surface"));
     def->enum_labels.push_back(L("Each Model"));
     def->enum_labels.push_back(L("Each Assembly"));
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionEnum<CenterOfSurfacePattern>(CenterOfSurfacePattern::Each_Surface));
 
     def = this->add("travel_speed", coFloats);
