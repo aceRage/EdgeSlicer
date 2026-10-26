@@ -722,3 +722,94 @@ TEST_CASE("The temperature-wait park clears the shifted rib tower", "[WipeTower]
     }
     REQUIRE(checked_parks > 0); // the feature under test is active
 }
+
+// Orca #15035 (9292db2f9f, 36bd453ac8): on a multi-tool printer that does not ram (the U1), every purge
+// block is planned as whole wipe rows that continue the previous block's row lattice, and the wipe fills
+// its box. Before, the planner reserved one wipe line too few (it counted on a ramming row that is never
+// printed) and the wipe started a pitch inside the box, so adjacent blocks were two row pitches apart
+// (a blank band in the tower) and the last block of a layer was cut short at the box edge.
+static std::vector<double> wipe_rows_of(const std::string &tcr_gcode)
+{
+    std::vector<double> ys;
+    bool   in_wipe = false;
+    double x = 0., y = 0.;
+    for (const std::string &line : split_lines(tcr_gcode)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) { in_wipe = true; continue; }
+        if (line.find("; CP TOOLCHANGE END") != std::string::npos) { in_wipe = false; continue; }
+        if (line.rfind("G1 ", 0) != 0)
+            continue;
+        double nx = x, ny = y;
+        bool   extrudes = false;
+        std::istringstream words(line.substr(3, line.find(';') == std::string::npos ? std::string::npos : line.find(';') - 3));
+        for (std::string w; words >> w;) {
+            if (w.size() < 2) continue;
+            const double v = std::atof(w.c_str() + 1);
+            if (w[0] == 'X') nx = v;
+            else if (w[0] == 'Y') ny = v;
+            else if (w[0] == 'E' && v > 0.) extrudes = true;
+        }
+        if (in_wipe && extrudes && std::abs(ny - y) < 1e-6 && std::abs(nx - x) > 1e-6)
+            ys.push_back(std::round(ny * 1000.) / 1000.);
+        x = nx;
+        y = ny;
+    }
+    std::sort(ys.begin(), ys.end());
+    ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+    return ys;
+}
+
+TEST_CASE("Purge blocks of a non-ramming toolchanger tile the tower without blank bands", "[WipeTower][WholeRowWipe]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00", "#0000FF"};
+    config.set_deserialize_strict({
+        { "enable_prime_tower", "1" },
+        { "enable_support", "0" },
+        { "single_extruder_multi_material", "0" },
+        { "purge_in_prime_tower", "0" },
+        { "filament_multitool_ramming", "0,0,0" },
+        { "wipe_tower_wall_type", "rectangle" },
+        { "wipe_tower_stagger_toolchange_start", "0" },
+        { "prime_tower_width", "35" },
+        { "prime_tower_brim_width", "0" },
+        { "wipe_tower_x", "15" },
+        { "wipe_tower_y", "120" },
+        { "wall_filament", "1" },
+        { "outer_wall_filament", "2" },
+        { "sparse_infill_filament", "3" },
+        { "solid_infill_filament", "3" },
+        { "gcode_comments", "1" },
+    });
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(print.has_wipe_tower());
+    Test::gcode(print);
+
+    int checked_joints = 0;
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : print.wipe_tower_data().tool_changes) {
+        std::vector<std::vector<double>> blocks;
+        for (const WipeTower::ToolChangeResult &tcr : layer)
+            if (std::vector<double> rows = wipe_rows_of(tcr.gcode); rows.size() >= 2)
+                blocks.emplace_back(std::move(rows));
+        if (blocks.size() < 2)
+            continue;
+        const double dy = blocks.front()[1] - blocks.front()[0];
+        REQUIRE(dy > 0.1);
+        std::sort(blocks.begin(), blocks.end(), [](const auto &a, const auto &b) { return a.front() < b.front(); });
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            for (size_t k = 1; k < blocks[i].size(); ++k)
+                CHECK(blocks[i][k] - blocks[i][k - 1] == Approx(dy).margin(0.011));
+            if (i + 1 < blocks.size()) {
+                INFO("block " << i << " ends at " << blocks[i].back() << ", the next starts at " << blocks[i + 1].front() << ", pitch " << dy);
+                CHECK(blocks[i + 1].front() - blocks[i].back() == Approx(dy).margin(0.011));
+                ++checked_joints;
+            }
+        }
+    }
+    REQUIRE(checked_joints > 0);
+}

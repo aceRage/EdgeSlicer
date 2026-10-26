@@ -310,6 +310,9 @@ private:
     Vec2f  m_rib_offset                   = Vec2f::Zero(); // see get_rib_offset()
     Vec2f  m_rib_footprint                = Vec2f::Zero(); // size of the rib wall's first-layer bounding box
     Polygon m_first_layer_wall;                            // see get_first_layer_wall()
+    // Orca #15035: the current toolchange prints no ram, so its box was planned as whole wipe rows that
+    // continue the previous block's row lattice, and the wipe fills the box (set by emit_planned_tool_change()).
+    bool   m_whole_row_wipe               = false;
 
     bool   m_enable_arc_fitting           = false;
     std::map<float, Polylines> m_outer_wall; // for wipe tower out wall and brim
@@ -360,6 +363,9 @@ private:
     float           m_local_z_wipe_tower_purge_lines = 3.f;
 
     bool is_first_layer() const { return size_t(m_layer_info - m_plan.begin()) == m_first_layer_idx; }
+    // Whether toolchange_Unload() rams this (old) tool out (Orca #15035: the planner reserves ramming
+    // rows on exactly this condition).
+    bool tool_ramming_enabled(size_t tool) const { return (m_semm && m_enable_filament_ramming) || m_filpar[tool].multitool_ramming; }
 
     // Orca #12491: row spacing the wipe-depth planning must assume. toolchange_Wipe() advances the purge
     // rows by m_extra_flow * m_perimeter_width on the first layer and by m_extra_spacing_wipe * m_perimeter_width

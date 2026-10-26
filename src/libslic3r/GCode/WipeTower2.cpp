@@ -1670,6 +1670,7 @@ void WipeTower2::copy_assign_from(const WipeTower2 &o)
     m_rib_offset                         = o.m_rib_offset;
     m_rib_footprint                      = o.m_rib_footprint;
     m_first_layer_wall                   = o.m_first_layer_wall;
+    m_whole_row_wipe                     = o.m_whole_row_wipe;
     m_enable_arc_fitting                 = o.m_enable_arc_fitting;
     m_outer_wall                         = o.m_outer_wall;
     m_cooling_tube_retraction            = o.m_cooling_tube_retraction;
@@ -1970,6 +1971,8 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
         writer.set_extruder_trimpot(750);
 
     m_active_tool_change = tool_change;
+    // Orca #15035: m_current_tool is still the old tool here.
+    m_whole_row_wipe = !is_no_tool_sentinel(tool) && !tool_ramming_enabled(m_current_tool);
 
     // Ram the hot material out of the melt zone, retract the filament into the cooling tubes and let it cool.
     if (!is_no_tool_sentinel(tool)) { // This is not the last change.
@@ -2004,6 +2007,7 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
                           m_filpar[m_current_tool].temperature);
 
     m_active_tool_change = nullptr;
+    m_whole_row_wipe     = false;
     m_depth_traversed += wipe_area;
 
     if (m_set_extruder_trimpot)
@@ -2373,7 +2377,17 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
         end_of_ramming.y() + (y_step / m_extra_spacing_ramming - m_perimeter_width) / 2.f + m_perimeter_width);
     if (do_ramming)
         writer.travel(pos, 2400.f);
-    else
+    else if (m_whole_row_wipe) {
+        // Orca #15035: with no ram printed there is no ramming geometry to align with. Start the first
+        // wipe row so the purge row lattice continues across the block boundary (the previous box's
+        // last row ends at its box top): with the planned depth of whole rows, this box's last row then
+        // ends at this box's top and no blank band is left between adjacent purge blocks. The
+        // perimeter width is taken off again before the wipe (emit_planned_tool_change()).
+        const float wipe_dy         = (is_first_layer() ? m_extra_flow : m_extra_spacing_wipe) * m_perimeter_width;
+        const float wipe_line_width = m_perimeter_width * m_extra_flow;
+        writer.set_position(Vec2f(end_of_ramming.x(), cleaning_box.ld.y() + m_depth_traversed + wipe_dy -
+                                                          (m_perimeter_width + wipe_line_width) / 2.f + m_perimeter_width));
+    } else
         writer.set_position(pos);
 
     writer.resume_preview().flush_planner_queue();
@@ -2708,7 +2722,9 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
 
         traversed_x -= writer.x();
         x_to_wipe -= std::abs(traversed_x);
-        if (x_to_wipe < WT_EPSILON) {
+        // Orca #15035: with no ram printed the box was planned as whole wipe rows; fill it completely
+        // (the purge is rounded up to the planned rows) so the next block starts right above it.
+        if (!m_whole_row_wipe && x_to_wipe < WT_EPSILON) {
             break;
         }
         // stepping to the next line:
@@ -2720,7 +2736,8 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
     // Y. The box is sized exactly to required_depth, so stopping at the top would drop that
     // volume and leave an empty band for the next layer. Travel back to the unstaggered
     // start and spend the rest of x_to_wipe there. Tower depth and gap positions stay put.
-    if (stagger_off > WT_EPSILON && x_to_wipe > WT_EPSILON) {
+    // Orca #15035: a whole-row box is filled completely, the strip below the staggered start as well.
+    if (stagger_off > WT_EPSILON && (x_to_wipe > WT_EPSILON || m_whole_row_wipe)) {
         writer.travel(wipe_start_x, wipe_start_y);
         m_left_to_right      = wipe_start_ltr;
         const float wrap_top = wipe_start_y + stagger_off;
@@ -2734,7 +2751,7 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
                 writer.extrude(xl + m_perimeter_width / 2.f, writer.y(), wipe_speed);
             traversed_x -= writer.x();
             x_to_wipe -= std::abs(traversed_x);
-            if (x_to_wipe < WT_EPSILON)
+            if (!m_whole_row_wipe && x_to_wipe < WT_EPSILON)
                 break;
             if (writer.y() + dy + float(EPSILON) >= wrap_top)
                 break;
@@ -3144,11 +3161,13 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
         ? 0.25f * std::accumulate(m_filpar[old_tool].ramming_speed.begin(), m_filpar[old_tool].ramming_speed.end(), 0.f)
         : m_filpar[old_tool].multitool_ramming_volume;
     float length_to_extrude = volume_to_length(ramming_volume, ramming_lw, layer_height_par);
-    bool  has_ramming       = m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming;
+    bool  has_ramming       = tool_ramming_enabled(old_tool); // Orca #15035: what toolchange_Unload() rams on
     float num_lines         = has_ramming ? std::max(1.0f, std::ceil(length_to_extrude / width)) : 0.f;
     float ramming_depth     = num_lines * ramming_lw * m_filpar[old_tool].ramming_step_multiplicator *
                               m_extra_spacing_ramming;
-    float first_wipe_line   = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
+    // Orca #15035: the first wipe line rides on the last (partly used) ramming row; without a ram that
+    // row does not exist, so the whole wipe volume needs reserved wiping depth.
+    float first_wipe_line   = has_ramming ? -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width) : 0.f;
 
     float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, layer_height_par);
     // Orca #12491: plan with the spacing toolchange_Wipe() will use on this layer.
@@ -3845,11 +3864,13 @@ WipeTower2::WipeTowerInfo::ToolChange WipeTower2::set_toolchange(int old_tool, i
     }
     float length_to_extrude = volume_to_length(ramming_volume, line_width, layer_height);
 
-    bool  has_ramming     = m_enable_filament_ramming || m_filpar[old_tool].multitool_ramming;
+    bool  has_ramming     = tool_ramming_enabled(old_tool); // Orca #15035: what toolchange_Unload() rams on
     float num_lines     = has_ramming ? std::max(1.0f, std::ceil(length_to_extrude / width)) : 0.f;
     float ramming_depth = num_lines * line_width * m_filpar[old_tool].ramming_step_multiplicator *
                           m_extra_spacing_ramming;
-    float first_wipe_line = -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width);
+    // Orca #15035: the first wipe line rides on the last (partly used) ramming row; without a ram that
+    // row does not exist, so the whole wipe volume needs reserved wiping depth.
+    float first_wipe_line = has_ramming ? -(width * ((length_to_extrude / width) - int(length_to_extrude / width)) - width) : 0.f;
     float first_wipe_volume = length_to_volume(first_wipe_line, m_perimeter_width * m_extra_flow, layer_height);
     float wiping_depth = get_wipe_depth(wipe_volume - first_wipe_volume, layer_height,
         m_perimeter_width, m_extra_flow, wipe_planning_spacing(first_layer), width);
