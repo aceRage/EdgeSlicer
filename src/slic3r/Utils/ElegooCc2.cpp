@@ -91,6 +91,14 @@ bool is_cc2_model(const std::string& printer_model)
     return boost::iequals(m, "Elegoo Centauri Carbon 2") || boost::iequals(m, "Elegoo Centauri 2");
 }
 
+bool wants_shared_device_page(const std::string& host_type, const std::string& address, const std::string& device_model,
+                              const std::string& preset_model)
+{
+    if (trimmed(host_type) != "elegoolink" || host_of(address).empty())
+        return false;
+    return is_cc2_model(trimmed(device_model).empty() ? preset_model : device_model);
+}
+
 std::string token_or_default(const std::string& apikey)
 {
     const std::string t = trimmed(apikey);

@@ -633,8 +633,7 @@ void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
 wxString PrinterWebView::shared_device_page_url(const PrintHostDevices::Device& device, const std::string& preset_model,
                                                const std::string& row_id)
 {
-    const std::string model = device.printer_model.empty() ? preset_model : device.printer_model;
-    if (device.host_type != "elegoolink" || !ElegooCc2::is_cc2_model(model) || device.address.empty())
+    if (!ElegooCc2::wants_shared_device_page(device.host_type, device.address, device.printer_model, preset_model))
         return wxString();
     return shared_device_page_url(row_id);
 }
