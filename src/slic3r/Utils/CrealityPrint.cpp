@@ -557,92 +557,35 @@ std::string CrealityPrint::query_boxes_info(const std::string &host, int timeout
 
 std::string CrealityPrint::query_boxes_info(int timeout_s) const { return query_boxes_info(m_host, timeout_s); }
 
-static int enable_self_test_of(const std::map<std::string, std::string> &extended_info)
-{
-    const auto it = extended_info.find("enableSelfTest");
-    if (it == extended_info.end() || it->second.empty())
-        return 0;
-    try {
-        const int n = std::stoi(it->second);
-        return n == 0 ? 0 : 1;
-    } catch (...) {
-        return 0;
-    }
-}
-
-static bool use_cfs_of(const std::map<std::string, std::string> &extended_info)
-{
-    const auto it = extended_info.find("useCFS");
-    return it != extended_info.end() && it->second == "1";
-}
-
-static bool send_op_gcode(CrealityWsClient &ws, const std::string &gcode_path, int enable_self_test, std::string &err)
-{
-    const json cmd = CrealityPrintModel::op_gcode_file_cmd(gcode_path, enable_self_test);
-    if (!ws.write(to_string(cmd), err))
-        return false;
-    std::string unused;
-    ws.read_once(unused, err);
-    return true;
-}
-
 bool CrealityPrint::start_print(wxString &msg, const std::string &filename, const std::map<std::string, std::string> &extended_info) const
 {
     try {
-        const std::string gcode_path       = CrealityPrintModel::gcode_path(effective_model(), filename);
-        const int         enable_self_test = enable_self_test_of(extended_info);
-        const bool        use_cfs          = use_cfs_of(extended_info);
+        const std::string              gcode_path = CrealityPrintModel::gcode_path(effective_model(), filename);
+        const std::vector<std::string> commands   = CrealityPrintModel::start_print_commands(gcode_path, extended_info);
 
-        json color_list = json::array();
-        if (use_cfs) {
-            for (int i = 0;; ++i) {
-                const auto it = extended_info.find("colorMatch_" + std::to_string(i));
-                if (it == extended_info.end())
-                    break;
-                json item = CrealityPrintModel::color_match_item_from_value(it->second);
-                if (!item.empty())
-                    color_list.push_back(std::move(item));
-            }
-        }
-
-        std::string err;
-        // Empty match list: fall back to opGcodeFile + enableSelfTest (do not send colorMatch).
-        if (use_cfs && !color_list.empty()) {
-            const json color_match = CrealityPrintModel::color_match_cmd(gcode_path, color_list);
-            const json multi       = CrealityPrintModel::multi_color_print_cmd(gcode_path, enable_self_test);
-            // Upstream Orca / Creality Print: one socket, write colorMatch then
-            // multiColorPrint, fire-and-forget. Do not wait for a colorMatch reply —
-            // a timed read would cancel the Beast stream. Write failure is an error.
-            CrealityWsClient ws(5000);
-            if (!ws.open(m_host, "9999", err)) {
-                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch open failed: " << err;
-                msg = wxString::FromUTF8(err);
-                return false;
-            }
-            if (!ws.write(to_string(color_match), err)) {
-                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: colorMatch write failed: " << err;
-                msg = wxString::FromUTF8(err);
-                return false;
-            }
-            if (!ws.write(to_string(multi), err)) {
-                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: multiColorPrint write failed: " << err;
-                msg = wxString::FromUTF8(err);
-                return false;
-            }
-            ws.close();
-            return true;
-        }
-
+        std::string      err;
         CrealityWsClient ws(5000);
         if (!ws.open(m_host, "9999", err)) {
             BOOST_LOG_TRIVIAL(error) << "CrealityPrint: start_print open failed: " << err;
             msg = wxString::FromUTF8(err);
             return false;
         }
-        if (!send_op_gcode(ws, gcode_path, enable_self_test, err)) {
-            BOOST_LOG_TRIVIAL(error) << "CrealityPrint: start_print write failed: " << err;
-            msg = wxString::FromUTF8(err);
-            return false;
+
+        // Two commands: colorMatch then multiColorPrint, fire-and-forget on one
+        // socket (Orca / Creality Print). Do not wait for a colorMatch reply —
+        // a timed read would cancel the Beast stream. Write failure is an error.
+        // One command: plain opGcodeFile. Read the answer best-effort before
+        // close, as the non-CFS start already did (OrcaSlicer #16794).
+        for (const std::string &cmd : commands) {
+            if (!ws.write(cmd, err)) {
+                BOOST_LOG_TRIVIAL(error) << "CrealityPrint: start_print write failed: " << err;
+                msg = wxString::FromUTF8(err);
+                return false;
+            }
+        }
+        if (commands.size() == 1) {
+            std::string unused;
+            ws.read_once(unused, err);
         }
         ws.close();
         return true;

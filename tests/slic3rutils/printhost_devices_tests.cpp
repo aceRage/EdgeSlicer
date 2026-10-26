@@ -1273,6 +1273,99 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
     }
 }
 
+namespace {
+
+const std::string k_start_gcode_path = "/usr/data/printer_data/gcodes/part.gcode";
+
+// A colorMatch_n value as the send dialog writes it: "toolId\ttype\tcolor\tboxId\tmaterialId"
+std::string start_slot(const std::string &tool, int box_id, int material_id)
+{
+    return tool + "\tPLA\t#FF0000\t" + std::to_string(box_id) + "\t" + std::to_string(material_id);
+}
+
+std::vector<nlohmann::json> start_commands(const std::map<std::string, std::string> &extended_info)
+{
+    std::vector<nlohmann::json> parsed;
+    for (const std::string &cmd : CrealityPrintModel::start_print_commands(k_start_gcode_path, extended_info))
+        parsed.push_back(nlohmann::json::parse(cmd));
+    return parsed;
+}
+
+} // namespace
+
+// Port of OrcaSlicer #16794's start_print_commands cases. #616 gates CFS on the
+// Use CFS checkbox (useCFS=1) rather than Orca's model-id multi_color flag, and
+// always carries enableSelfTest on the plain start (Calibrate before printing).
+
+TEST_CASE("A CFS-capable printer that listed no slots starts from the spool holder", "[CrealityPrint]")
+{
+    // The dialog maps filaments only onto slots the printer listed in boxsInfo;
+    // a K1-family printer without a CFS (or any CFS-capable model whose boxsInfo
+    // failed) lists none. Never send an empty colorMatch.
+    auto cmds = start_commands({{"useCFS", "1"}, {"enableSelfTest", "1"}});
+    REQUIRE(cmds.size() == 1);
+    const nlohmann::json &params = cmds[0]["params"];
+    CHECK(params["opGcodeFile"] == "printprt:" + k_start_gcode_path);
+    CHECK(params["enableSelfTest"] == 1);
+    CHECK_FALSE(params.contains("colorMatch"));
+}
+
+TEST_CASE("A filament mapped onto the spool holder starts a plain print", "[CrealityPrint]")
+{
+    auto cmds = start_commands({{"useCFS", "1"}, {"enableSelfTest", "0"}, {"colorMatch_0", start_slot("T1A", 0, 0)}});
+    REQUIRE(cmds.size() == 1);
+    const nlohmann::json &params = cmds[0]["params"];
+    CHECK(params["opGcodeFile"] == "printprt:" + k_start_gcode_path);
+    CHECK(params["enableSelfTest"] == 0);
+    CHECK_FALSE(params.contains("colorMatch"));
+}
+
+TEST_CASE("A mapping that includes the spool holder starts a plain print even when other filaments map to CFS slots",
+          "[CrealityPrint]")
+{
+    auto cmds = start_commands({{"useCFS", "1"},
+                                {"enableSelfTest", "0"},
+                                {"colorMatch_0", start_slot("T1A", 1, 2)},
+                                {"colorMatch_1", start_slot("T1B", 0, 0)}});
+    REQUIRE(cmds.size() == 1);
+    CHECK(cmds[0]["params"]["opGcodeFile"] == "printprt:" + k_start_gcode_path);
+    CHECK_FALSE(cmds[0]["params"].contains("colorMatch"));
+}
+
+TEST_CASE("Filaments mapped onto CFS slots send the colour match before the multi-colour start", "[CrealityPrint]")
+{
+    auto cmds = start_commands({{"useCFS", "1"},
+                                {"enableSelfTest", "1"},
+                                {"colorMatch_0", start_slot("T1A", 1, 0)},
+                                {"colorMatch_1", start_slot("T1B", 1, 3)}});
+    REQUIRE(cmds.size() == 2);
+
+    const nlohmann::json &match = cmds[0]["params"]["colorMatch"];
+    CHECK(match["path"] == k_start_gcode_path);
+    REQUIRE(match["list"].size() == 2);
+    CHECK(match["list"][0]["id"] == "T1A");
+    CHECK(match["list"][0]["boxId"] == 1);
+    CHECK(match["list"][0]["materialId"] == 0);
+    CHECK(match["list"][1]["id"] == "T1B");
+    CHECK(match["list"][1]["materialId"] == 3);
+    CHECK(match["list"][1]["type"] == "PLA");
+    CHECK(match["list"][1]["color"] == "#FF0000");
+
+    const nlohmann::json &start = cmds[1]["params"]["multiColorPrint"];
+    CHECK(start["gcode"] == k_start_gcode_path);
+    CHECK(start["enableSelfTest"] == 1);
+}
+
+TEST_CASE("Use CFS off gets the plain start command", "[CrealityPrint]")
+{
+    auto cmds = start_commands({{"useCFS", "0"}, {"enableSelfTest", "1"}});
+    REQUIRE(cmds.size() == 1);
+    const nlohmann::json &params = cmds[0]["params"];
+    CHECK(params["opGcodeFile"] == "printprt:" + k_start_gcode_path);
+    CHECK(params["enableSelfTest"] == 1);
+    CHECK_FALSE(params.contains("colorMatch"));
+}
+
 TEST_CASE("CrealityPrint: WebSocket budget 0 does not start and does not UAF", "[CrealityPrint]")
 {
     SECTION("expired total budget fails before any I/O") {

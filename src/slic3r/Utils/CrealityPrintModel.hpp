@@ -484,6 +484,63 @@ inline nlohmann::json color_match_item_from_value(const std::string &val)
     return nlohmann::json{{"id", parts[0]}, {"type", parts[1]}, {"color", parts[2]}, {"boxId", box_id}, {"materialId", material_id}};
 }
 
+inline int enable_self_test_of(const std::map<std::string, std::string> &extended_info)
+{
+    const auto it = extended_info.find("enableSelfTest");
+    if (it == extended_info.end() || it->second.empty())
+        return 0;
+    try {
+        const int n = std::stoi(it->second);
+        return n == 0 ? 0 : 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+inline bool use_cfs_of(const std::map<std::string, std::string> &extended_info)
+{
+    const auto it = extended_info.find("useCFS");
+    return it != extended_info.end() && it->second == "1";
+}
+
+// WebSocket start frames for gcode_path, from the send dialog's extended_info
+// (useCFS, enableSelfTest, colorMatch_n). OrcaSlicer #16794: only a mapping onto
+// CFS slots (boxId != 0) sends colorMatch + multiColorPrint. An empty mapping
+// (failed / unanswered boxsInfo on a K1-family or other CFS-capable printer) or
+// a mapping onto the spool holder is a plain opGcodeFile start. Never an empty
+// colorMatch: firmware then flags materialStatus 1 for the whole job.
+inline std::vector<std::string> start_print_commands(const std::string &                       gcode_path,
+                                                     const std::map<std::string, std::string> &extended_info)
+{
+    const bool use_cfs          = use_cfs_of(extended_info);
+    const int  enable_self_test = enable_self_test_of(extended_info);
+
+    nlohmann::json color_list       = nlohmann::json::array();
+    bool           use_spool_holder = false;
+    if (use_cfs) {
+        for (int i = 0;; ++i) {
+            const auto it = extended_info.find("colorMatch_" + std::to_string(i));
+            if (it == extended_info.end())
+                break;
+            nlohmann::json item = color_match_item_from_value(it->second);
+            if (item.empty())
+                continue;
+            if (item.value("boxId", -1) == 0)
+                use_spool_holder = true;
+            color_list.push_back(std::move(item));
+        }
+    }
+
+    std::vector<std::string> commands;
+    if (use_cfs && !use_spool_holder && !color_list.empty()) {
+        commands.push_back(color_match_cmd(gcode_path, color_list).dump());
+        commands.push_back(multi_color_print_cmd(gcode_path, enable_self_test).dump());
+    } else {
+        commands.push_back(op_gcode_file_cmd(gcode_path, enable_self_test).dump());
+    }
+    return commands;
+}
+
 // Auto-match rank used by the send dialog (X3 + Creality Print ordering):
 // CFS type+colour > CFS type > ext type+colour > ext type, then colour among leftovers.
 // Lower rank wins; colour_dist breaks ties. Returns -1 when nothing is usable.
