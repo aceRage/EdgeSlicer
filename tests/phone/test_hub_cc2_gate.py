@@ -241,16 +241,23 @@ def run(emu):
     check(len(edgeslicer_clients(emu)) == 1, "still one MQTT client for everything (%s)" % edgeslicer_clients(emu))
 
     print("-- the event watcher --", flush=True)
-    st, ev = api("/events?limit=50")
+    # The watcher polls on its own cadence (RemoteEvents): give it a while to report the print.
+    seen, st, t0 = [], 0, time.time()
+    while time.time() - t0 < 60 and not seen:
+        st, ev = api("/events?limit=50")
+        seen = [e for e in ev.get("events", []) if PID_ID in json.dumps(e)]
+        if not seen:
+            time.sleep(3)
     check(st == 200, "GET /api/events answers (%d)" % st)
-    seen = [e for e in ev.get("events", []) if PID_ID in json.dumps(e)]
-    check(bool(seen), "the event watcher saw the CC2's print (%d events)" % len(seen))
+    check(bool(seen), "the event watcher saw the CC2's print (%d events: %s)" % (len(seen), [e.get("type") for e in seen]))
 
     print("-- nobody asking: the connection closes after KEEP --", flush=True)
+    # The hub's own poll counts as somebody looking for 45 s after the last /summary or proxied
+    # /api/printers (RemoteHub m_watch_ms), then KEEP (10 s here) runs out.
     t0 = time.time()
-    while time.time() - t0 < 45 and edgeslicer_clients(emu):
+    while time.time() - t0 < 100 and edgeslicer_clients(emu):
         time.sleep(2)
-    check(not edgeslicer_clients(emu), "no MQTT client left after KEEP with nobody looking")
+    check(not edgeslicer_clients(emu), "no MQTT client left after KEEP with nobody looking (%d s)" % (time.time() - t0))
 
     print("-- the printer goes off, and comes back --", flush=True)
     emu._call("/emu/printers/%s/stop" % EMU_ID, {})
