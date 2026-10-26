@@ -1453,8 +1453,20 @@ public:
         double s     = sin(angle);
         Vec2f  result(float(pt.x() * c - pt.y() * s) + m_wipe_tower_width / 2.f, float(pt.x() * s + pt.y() * c) + m_wipe_tower_depth / 2.f);
 
-        return result;
+        // Orca #15035: the rib offset shifts the whole output after the internal rotation (zero unless rib).
+        return result + m_origin_offset;
     }
+
+    // Orca #15035: shift every point the writer emits (G-code, extrusions, wipe path, start position).
+    // Set before set_initial_position(), like WipeTowerWriter::set_origin_offset() on the Type1 tower.
+    WipeTowerWriter2& set_origin_offset(const Vec2f& offset)
+    {
+        m_origin_offset = offset;
+        return *this;
+    }
+
+private:
+    Vec2f m_origin_offset = Vec2f::Zero();
 
 }; // class WipeTowerWriter2
 
@@ -1655,6 +1667,9 @@ void WipeTower2::copy_assign_from(const WipeTower2 &o)
     m_bed_polygon                        = o.m_bed_polygon;
     m_run_in_reserve                     = o.m_run_in_reserve;
     m_rib_length                         = o.m_rib_length;
+    m_rib_offset                         = o.m_rib_offset;
+    m_rib_footprint                      = o.m_rib_footprint;
+    m_first_layer_wall                   = o.m_first_layer_wall;
     m_enable_arc_fitting                 = o.m_enable_arc_fitting;
     m_outer_wall                         = o.m_outer_wall;
     m_cooling_tube_retraction            = o.m_cooling_tube_retraction;
@@ -1925,7 +1940,8 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
                                                                           m_wipe_tower_depth - m_perimeter_width));
 
     WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
-    writer.set_extrusion_flow(m_extrusion_flow)
+    writer.set_origin_offset(m_rib_offset) // Orca #15035
+        .set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
         .set_y_shift(m_y_shift + (!is_no_tool_sentinel(tool) && (m_current_shape == SHAPE_REVERSED) ?
@@ -2053,7 +2069,8 @@ WipeTower::ToolChangeResult WipeTower2::local_z_tool_change(size_t new_tool,
     const size_t old_tool = m_current_tool;
 
     WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
-    writer.set_extrusion_flow(m_extrusion_flow)
+    writer.set_origin_offset(m_rib_offset) // Orca #15035
+        .set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
         .append(";--------------------\n"
@@ -2402,6 +2419,8 @@ std::optional<float> WipeTower2::wait_for_temp_park_x(const WipeTowerWriter2& wr
     const float     far_x   = on_left ? max_x + gap : min_x - gap;
     const float     alpha   = m_wipe_tower_rotation_angle * float(M_PI / 180.);
     // Tower-local -> plate coordinates, as the run-in clamp (interface_before_wipe) and append_tcr2 map them.
+    // Orca #15035: writer.rotate() adds the rib offset (set_origin_offset), the same shift the printed wall
+    // and the envelope measured above get, so the park keeps clearing the real (shifted) tower.
     auto park_pt_on_bed = [this, &writer, alpha](float side_x) {
         const Vec2f bed_pt = Vec2f(Eigen::Rotation2Df(alpha) * writer.rotate(Vec2f(side_x, writer.y()))) + m_wipe_tower_pos;
         if (!m_bed_polygon.empty() && !m_bed_polygon.contains(Point::new_scale(bed_pt.x(), bed_pt.y())))
@@ -2753,7 +2772,8 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
     size_t old_tool = m_current_tool;
 
     WipeTowerWriter2 writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_printer_model);
-    writer.set_extrusion_flow(m_extrusion_flow)
+    writer.set_origin_offset(m_rib_offset) // Orca #15035
+        .set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
         .set_y_shift(m_y_shift - (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f));
@@ -2898,6 +2918,8 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
         for (int i = 0; i < loops_num; ++i) {
             poly   = offset(poly, scale_(spacing)).front();
             m_outer_wall[m_z_pos].push_back(to_polyline(poly));
+            // Orca #15035: the brim and conflict checks read it at the tower position, like the G-code.
+            m_outer_wall[m_z_pos].back().translate(Point::new_scale(m_rib_offset.x(), m_rib_offset.y()));
             if (! loop_gaps.empty()) {
                 Polygon   inserted;
                 Polylines pieces = TowerInterface::cut_wall_gaps(poly, loop_gaps, 2.5f * m_perimeter_width, inserted);
@@ -3538,6 +3560,13 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
             }
         }
         plan_tower(); // need Re-calculate depth
+
+        // Orca #15035: like WipeTower::plan_tower_new(), extend the ribs instead of the tower when the
+        // tower is smaller than the height-based stability minimum (what WipeTower::rib_footprint_side()
+        // and so the pre-slice footprint estimate already assume).
+        const float min_depth = WipeTower::get_limit_depth_by_height(m_wipe_tower_height);
+        if (m_wipe_tower_depth + EPSILON < min_depth)
+            m_rib_length = std::max(m_rib_length, min_depth * float(std::sqrt(2.f)));
     }
 
     float diagonal = sqrt(m_wipe_tower_depth * m_wipe_tower_depth + m_wipe_tower_width * m_wipe_tower_width);
@@ -3545,6 +3574,9 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
     m_rib_length += m_extra_rib_length;
     m_rib_length = std::max(diagonal, m_rib_length);
     m_rib_width  = std::min(m_rib_width, std::min(m_wipe_tower_depth, m_wipe_tower_width) / 2.f); // Ensure that the rib wall of the wipetower are attached to the infill.
+
+    // Orca #15035: before any writer runs, so every layer (and the first layer's parks) gets the shift.
+    set_rib_offset();
 
     plan_interfaces();
     if (m_use_gap_wall)
@@ -3687,7 +3719,8 @@ std::vector<std::vector<WipeTower::box_coordinates>> WipeTower2::get_local_z_res
                 const float max_x = std::max({ld.x(), rd.x(), ru.x(), lu.x()});
                 const float min_y = std::min({ld.y(), rd.y(), ru.y(), lu.y()});
                 const float max_y = std::max({ld.y(), rd.y(), ru.y(), lu.y()});
-                layer_boxes.emplace_back(Vec2f(min_x, min_y), max_x - min_x, max_y - min_y);
+                // Orca #15035: in the same shifted frame as everything the writer emits.
+                layer_boxes.emplace_back(Vec2f(min_x, min_y) + m_rib_offset, max_x - min_x, max_y - min_y);
             }
         }
 
@@ -3731,6 +3764,73 @@ Polygon WipeTower2::generate_rib_polygon(const WipeTower::box_coordinates& wt_bo
     return p_1_2.front();
 }
 
+Polygon WipeTower2::support_rib_wall_polygon(const WipeTower::box_coordinates& wt_box, bool rib_wall)
+{
+    Polygon wall_polygon = rib_wall ? generate_rib_polygon(wt_box) : generate_rectange_polygon(wt_box.ld, wt_box.ru);
+    if (m_used_fillet) {
+        if (!rib_wall && m_y_shift > EPSILON) // do nothing because the fillet will cause it to be suspended.
+        {
+        } else {
+            wall_polygon           = rib_wall ? rounding_polygon(wall_polygon) : wall_polygon; // rectangle_wall do nothing
+            Polygon wt_box_polygon = generate_rectange_polygon(wt_box.ld, wt_box.ru);
+            wall_polygon           = union_({wall_polygon, wt_box_polygon}).front();
+        }
+    }
+    return wall_polygon;
+}
+
+bool WipeTower2::is_rib_wall() const { return m_wall_type == int(WipeTowerWallType::wtwRib); }
+
+Vec2f WipeTower2::get_footprint_size() const
+{
+    return is_rib_wall() && m_rib_footprint.x() > EPSILON ? m_rib_footprint : Vec2f(m_wipe_tower_width, m_wipe_tower_depth);
+}
+
+void WipeTower2::set_rib_offset()
+{
+    // Orca #15035 measures the first layer's rib wall as generate_support_rib_wall() extrudes it and
+    // shifts every tower move by the result in GCode.cpp. Edge measures it up front instead, as the
+    // Type1 tower does (WipeTower::set_rib_offset()), and the writers emit the shifted coordinates
+    // directly: so the temperature-wait park (Orca #15144), the tower interface run-in, the Local-Z
+    // reserve boxes and the final purge all live in the same frame as the printed tower without any
+    // per-consumer transform.
+    m_rib_offset    = Vec2f::Zero();
+    m_rib_footprint = Vec2f::Zero();
+    m_first_layer_wall.clear();
+    if (! is_rib_wall() || m_plan.empty())
+        return;
+
+    // The state generate() sets for its first layer: that layer's z (the ribs are longest there), its
+    // y shift (kept from before unless the layer is shallower than the tower) and its internal rotation.
+    const WipeTowerInfo &first         = m_plan.front();
+    const float          saved_z       = m_z_pos;
+    const float          saved_y_shift = m_y_shift;
+    m_z_pos = first.z;
+    if (first.depth < m_wipe_tower_depth - m_perimeter_width)
+        m_y_shift = (m_wipe_tower_depth - first.depth - m_perimeter_width) / 2.f;
+    const WipeTower::box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, first.depth + m_perimeter_width);
+    Polygon wall = support_rib_wall_polygon(wt_box, true);
+
+    // What WipeTowerWriter2::rotate() does to the wall on that layer (before the offset, which is what
+    // is being measured): the y shift, then the internal rotation about the tower centre.
+    const double angle = double(m_internal_rotation + 180.f) * M_PI / 180.;
+    const double c = std::cos(angle), s = std::sin(angle);
+    const double half_w = 0.5 * double(m_wipe_tower_width), half_d = 0.5 * double(m_wipe_tower_depth);
+    for (Point &p : wall.points) {
+        const double x = unscaled(p.x()) - half_w;
+        const double y = unscaled(p.y()) + double(m_y_shift) - half_d;
+        p = Point(coord_t(std::round(scale_(x * c - y * s + half_w))), coord_t(std::round(scale_(x * s + y * c + half_d))));
+    }
+    m_z_pos   = saved_z;
+    m_y_shift = saved_y_shift;
+
+    const BoundingBox bbox = get_extents(wall);
+    m_rib_offset    = Vec2f(-unscaled<float>(bbox.min.x()), -unscaled<float>(bbox.min.y()));
+    m_rib_footprint = unscaled<float>(bbox.size());
+    wall.translate(-bbox.min.x(), -bbox.min.y());
+    m_first_layer_wall = std::move(wall);
+}
+
 // from plan_toolchange
 WipeTower2::WipeTowerInfo::ToolChange WipeTower2::set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume, bool first_layer)
 {
@@ -3768,18 +3868,9 @@ Polygon WipeTower2::generate_support_rib_wall(WipeTowerWriter2&                 
 {
     float     retract_length = m_filpar[m_current_tool].retract_length;
     float     retract_speed  = m_filpar[m_current_tool].retract_speed * 60;
-    Polygon   wall_polygon   = rib_wall ? generate_rib_polygon(wt_box) : generate_rectange_polygon(wt_box.ld, wt_box.ru);
+    Polygon   wall_polygon   = support_rib_wall_polygon(wt_box, rib_wall);
     Polylines result_wall;
     Polygon   insert_skip_polygon;
-    if (m_used_fillet) {
-        if (!rib_wall && m_y_shift > EPSILON) // do nothing because the fillet will cause it to be suspended.
-        {
-        } else {
-            wall_polygon           = rib_wall ? rounding_polygon(wall_polygon) : wall_polygon; // rectangle_wall do nothing
-            Polygon wt_box_polygon = generate_rectange_polygon(wt_box.ld, wt_box.ru);
-            wall_polygon           = union_({wall_polygon, wt_box_polygon}).front();
-        }
-    }
     if (!extrude_perimeter)
         return wall_polygon;
 
