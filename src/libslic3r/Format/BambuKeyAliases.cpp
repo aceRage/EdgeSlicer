@@ -64,8 +64,10 @@ bool tower_wall_from_bambu(std::string &v)
 // SystemPresetTowerKeysScope.
 bool wall_gap_from_bambu(std::string &) { return ! SystemPresetTowerKeysScope::active(); }
 
-// ironing_angle: ours uses a negative angle for "use the default method". Bambu has no such value;
-// leaving the key out gives Bambu its own default, which is the same intent.
+// ironing_angle: since Orca #10841 ours is, like Bambu's ironing_direction, an offset from the
+// infill direction (ours: the top surface direction), 0..359. Older files may still carry a
+// negative "use the default method" value (handle_legacy reads it as 0); Bambu has no such
+// value, so leaving the key out gives Bambu its own default, which is the same intent.
 bool ironing_angle_to_bambu(std::string &v)
 {
     const std::string s   = boost::algorithm::trim_copy(v);

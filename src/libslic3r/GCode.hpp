@@ -740,6 +740,9 @@ private:
     // time_lapse_gcode hands the firmware (M9711 U/V), so both nozzles of a dual-nozzle machine
     // are photographed the same way. Initialised at the start of every export.
     TimelapsePosPicker m_timelapse_pos_picker;
+    // Whether time_lapse_gcode names the picker's results (set once per export).
+    bool               m_timelapse_uses_pos{ false };
+    bool               m_timelapse_uses_clear_to_x0{ false };
     // Objects printed so far in a print-by-object export, the current one last (BambuStudio's
     // m_printed_objects); the picker keeps clear of the finished ones.
     std::vector<const PrintObject*> m_printed_objects;
@@ -773,6 +776,10 @@ private:
     // BambuStudio's generate_timelapse_gcode: expands time_lapse_gcode for the active filament, with
     // the picked safe position (none when skip_pos_pick: the inline farthest-point photo).
     TimelapseGCodeResult generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick = false);
+    // Orca #16680: the time_lapse_gcode placeholders (layer, extruders, safe spot) for every printer.
+    // The picker runs when always_pick or when the template names its results. Requires an active filament.
+    DynamicConfig timelapse_gcode_config(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick,
+                                         bool always_pick, Point *safe_pos = nullptr);
     // Inline farthest-point photo: called with the end point of every extrusion move.
     void check_and_insert_inline_timelapse(std::string &gcode, const Point &endpoint_scaled);
 

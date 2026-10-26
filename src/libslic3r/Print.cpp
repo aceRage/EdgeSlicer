@@ -732,6 +732,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "chamber_minimal_temperature",
         "thumbnails",
         "thumbnails_format",
+        "center_of_surface_pattern",
+        "separated_infills",
         "seam_gap",
         "role_based_wipe_speed",
         "wipe_speed",
@@ -744,6 +746,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "gcode_comments",
         "gcode_label_objects", 
         "exclude_object",
+        "exclude_object_tolerance",
         "support_material_interface_fan_speed",
         "internal_bridge_fan_speed", // ORCA: Add support for separate internal bridge fan speed control
         "ironing_fan_speed",
@@ -8630,8 +8633,9 @@ BoundingBoxf3 PrintInstance::get_bounding_box() {
 
 Polygon PrintInstance::get_convex_hull_2d() {
     Polygon poly = print_object->model_object()->convex_hull_2d(model_instance->get_matrix());
-    // Change the distance threshold of the Douglas-Peucker algorithm to 0.5 millimeter and reduce the number of points
-    poly.douglas_peucker(scale_(0.5));
+    // Douglas-Peucker with the user's exclude_object_tolerance (Orca #16503; 0.5 mm by default, the former
+    // fixed value) to reduce the number of points.
+    poly.douglas_peucker(scale_(print_object->print()->config().exclude_object_tolerance.value));
     // Round coordinates to 0.1mm grid to limit decimal places
     poly.round_to_grid(scale_(0.1));
     return poly;
