@@ -2790,6 +2790,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("ironing_spacing", "quality_settings_ironing#line-spacing");
         optgroup->append_single_option_line("ironing_inset", "quality_settings_ironing#inset");
         optgroup->append_single_option_line("ironing_angle", "quality_settings_ironing#angle-offset");
+        optgroup->append_single_option_line("ironing_angle_fixed", "quality_settings_ironing#fixed-angle");
 
         optgroup = page->new_optgroup(L("Z contouring"), L"param_z_contouring");
         optgroup->append_single_option_line("zaa_enabled", "quality_settings_z_contouring");

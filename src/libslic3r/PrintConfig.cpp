@@ -5319,6 +5319,14 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    // Orca #11195
+    def           = this->add("ironing_angle_fixed", coBool);
+    def->label    = L("Fixed ironing angle");
+    def->category = L("Quality");
+    def->tooltip  = L("Use a fixed absolute angle for ironing.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("zaa_enabled", coBool);
     def->label    = L("Z contouring enabled");
     def->category = L("Quality");

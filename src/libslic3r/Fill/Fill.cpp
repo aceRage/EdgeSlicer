@@ -2183,7 +2183,7 @@ void Layer::make_ironing()
 		double 		height;
 		double 		speed;
 		double 		angle;
-        // Orca #10841: the angle follows solid_infill_rotate_template, so don't alternate it per layer.
+        // Orca #10841/#11195: the angle follows solid_infill_rotate_template or is fixed, so don't alternate it per layer.
         bool        is_using_template_angle = false;
         double 		inset;
 
@@ -2286,8 +2286,10 @@ void Layer::make_ironing()
 				ironing_params.speed 		= ironing_filament_override(config.filament_ironing_speed, iron_filament, config.ironing_speed.values.front());
                 // Orca #10841: ironing_angle is an offset from the top surface (solid infill) direction,
                 // including its rotation template, instead of an absolute angle / the sparse infill direction.
-                double ironing_angle = calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
-                                                                       config.solid_infill_rotate_template.value) +
+                // Orca #11195: ironing_angle_fixed makes ironing_angle an absolute angle that does not alternate.
+                double ironing_angle = (config.ironing_angle_fixed ? 0. :
+                                            calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
+                                                                            config.solid_infill_rotate_template.value)) +
                                        config.ironing_angle * M_PI / 180.;
                 // ORCA: Align ironing angle with model
                 if (config.align_infill_direction_to_model) {
@@ -2295,7 +2297,7 @@ void Layer::make_ironing()
                     ironing_angle += atan2((double)m(1, 0), (double)m(0, 0));
                 }
                 ironing_params.angle        = ironing_angle;
-                ironing_params.is_using_template_angle = !config.solid_infill_rotate_template.value.empty();
+                ironing_params.is_using_template_angle = config.ironing_angle_fixed || !config.solid_infill_rotate_template.value.empty();
 				ironing_params.pattern      = config.ironing_pattern;
 				ironing_params.layerm 		= layerm;
 				by_extruder.emplace_back(ironing_params);

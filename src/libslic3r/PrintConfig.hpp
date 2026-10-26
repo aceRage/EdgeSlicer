@@ -1747,6 +1747,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, ironing_direction))
     ((ConfigOptionFloats, ironing_speed))
     ((ConfigOptionFloat, ironing_angle))
+    ((ConfigOptionBool, ironing_angle_fixed))
     // Orca #11194: filament ironing overrides (per filament, nil = use the process value)
     ((ConfigOptionPercentsNullable, filament_ironing_flow))
     ((ConfigOptionFloatsNullable, filament_ironing_spacing))
