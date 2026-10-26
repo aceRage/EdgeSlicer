@@ -1359,9 +1359,10 @@ TEST_CASE("Elegoo CC2 device with no serial and an empty API key gets the shared
     const std::string key    = "Elegoo Centauri Carbon 2";
     const std::string preset = "Elegoo Centauri Carbon 2";
     Device            d      = make_device("CC2-Combo", "127.0.0.22", "elegoolink");
-    d.auth_type = "key";
-    d.apikey    = "";
-    d.serial    = "";
+    d.auth_type     = "key";
+    d.apikey        = "";
+    d.serial        = "";
+    d.printer_model = preset; // the devices dialog seeds a new device with the preset's model
     std::string error;
     REQUIRE(add(key, d, error));
     const std::vector<Device> listed = devices(key);
@@ -1369,8 +1370,10 @@ TEST_CASE("Elegoo CC2 device with no serial and an empty API key gets the shared
     const Device& got = listed.front();
     CHECK(got.apikey.empty());
     CHECK(got.serial.empty());
-    // Neither the empty key nor the missing serial (nor a model the dialog did not store) keeps it off.
+    // Neither the empty key nor the missing serial keeps it off; a device with no model of its own
+    // (hand-edited store) takes the preset's.
     CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, got.printer_model, preset));
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, "", preset));
     CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, "Elegoo Centauri Carbon 2", ""));
     CHECK(ElegooCc2::wants_shared_device_page(got.host_type, "http://127.0.0.22:80/", "", preset));
 
