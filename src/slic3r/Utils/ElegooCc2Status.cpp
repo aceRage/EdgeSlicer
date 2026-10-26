@@ -15,7 +15,7 @@ namespace {
 
 using json = nlohmann::json;
 
-const json& obj_at(const json& j, const char* key)
+const json& cs_obj_at(const json& j, const char* key)
 {
     static const json empty = json::object();
     if (!j.is_object()) return empty;
@@ -23,7 +23,7 @@ const json& obj_at(const json& j, const char* key)
     return (it != j.end() && it->is_object()) ? *it : empty;
 }
 
-bool num_at(const json& j, const char* key, double& out)
+bool cs_num_at(const json& j, const char* key, double& out)
 {
     if (!j.is_object()) return false;
     auto it = j.find(key);
@@ -43,13 +43,13 @@ bool num_at(const json& j, const char* key, double& out)
     return false;
 }
 
-int int_at(const json& j, const char* key, int def)
+int cs_int_at(const json& j, const char* key, int def)
 {
     double v = 0;
-    return num_at(j, key, v) ? static_cast<int>(std::lround(v)) : def;
+    return cs_num_at(j, key, v) ? static_cast<int>(std::lround(v)) : def;
 }
 
-std::string str_at(const json& j, const char* key)
+std::string cs_str_at(const json& j, const char* key)
 {
     if (!j.is_object()) return std::string();
     auto it = j.find(key);
@@ -79,14 +79,14 @@ bool is_paused_sub(int sub) { return sub == SUB_PAUSED || sub == SUB_PAUSED_2; }
 
 int Status::machine() const
 {
-    const json& ms = obj_at(raw, "machine_status");
-    return valid ? int_at(ms, "status", -1) : -1;
+    const json& ms = cs_obj_at(raw, "machine_status");
+    return valid ? cs_int_at(ms, "status", -1) : -1;
 }
 
 int Status::sub() const
 {
-    const json& ms = obj_at(raw, "machine_status");
-    return valid ? int_at(ms, "sub_status", -1) : -1;
+    const json& ms = cs_obj_at(raw, "machine_status");
+    return valid ? cs_int_at(ms, "sub_status", -1) : -1;
 }
 
 void merge_full(Status& s, const json& result)
@@ -102,8 +102,8 @@ void merge_full(Status& s, const json& result)
 
 PushResult merge_push(Status& s, const json& message)
 {
-    if (!message.is_object() || int_at(message, "method", -1) != METHOD_STATUS_PUSH) return PushResult::Ignored;
-    const int id = int_at(message, "id", -1);
+    if (!message.is_object() || cs_int_at(message, "method", -1) != METHOD_STATUS_PUSH) return PushResult::Ignored;
+    const int id = cs_int_at(message, "id", -1);
     if (!s.valid) {
         if (id >= 0) s.last_push_id = id;
         return PushResult::NeedFull;
@@ -134,33 +134,33 @@ PushResult merge_push(Status& s, const std::string& payload)
 double progress(const Status& s)
 {
     double v = -1;
-    const json& ms = obj_at(s.raw, "machine_status");
-    return s.valid && num_at(ms, "progress", v) ? v : -1;
+    const json& ms = cs_obj_at(s.raw, "machine_status");
+    return s.valid && cs_num_at(ms, "progress", v) ? v : -1;
 }
 
 std::string filename(const Status& s)
 {
-    const json& ps = obj_at(s.raw, "print_status");
-    return s.valid ? str_at(ps, "filename") : std::string();
+    const json& ps = cs_obj_at(s.raw, "print_status");
+    return s.valid ? cs_str_at(ps, "filename") : std::string();
 }
 
 int current_layer(const Status& s)
 {
-    const json& ps = obj_at(s.raw, "print_status");
-    return s.valid ? int_at(ps, "current_layer", -1) : -1;
+    const json& ps = cs_obj_at(s.raw, "print_status");
+    return s.valid ? cs_int_at(ps, "current_layer", -1) : -1;
 }
 
 int total_layer(const Status& s)
 {
-    const json& ps = obj_at(s.raw, "print_status");
-    return s.valid ? int_at(ps, "total_layer", -1) : -1;
+    const json& ps = cs_obj_at(s.raw, "print_status");
+    return s.valid ? cs_int_at(ps, "total_layer", -1) : -1;
 }
 
 long long seconds_left(const Status& s)
 {
     double v = -1;
-    const json& ps = obj_at(s.raw, "print_status");
-    if (!s.valid || !num_at(ps, "remaining_time_sec", v) || v < 0) return -1;
+    const json& ps = cs_obj_at(s.raw, "print_status");
+    if (!s.valid || !cs_num_at(ps, "remaining_time_sec", v) || v < 0) return -1;
     return static_cast<long long>(v);
 }
 
@@ -168,21 +168,21 @@ std::vector<int> exception_codes(const Status& s)
 {
     std::vector<int> out;
     if (!s.valid) return out;
-    const json& ms = obj_at(s.raw, "machine_status");
+    const json& ms = cs_obj_at(s.raw, "machine_status");
     if (!ms.contains("exception_status") || !ms["exception_status"].is_array()) return out;
     for (const json& v : ms["exception_status"])
         if (v.is_number_integer()) out.push_back(v.get<int>());
     return out;
 }
 
-bool has_canvas_info(const Status& s) { return s.valid && obj_at(s.raw, "canvas_info").contains("canvas_list"); }
+bool has_canvas_info(const Status& s) { return s.valid && cs_obj_at(s.raw, "canvas_info").contains("canvas_list"); }
 
 bool canvas_from_status(const Status& s, CanvasInfo& out)
 {
     if (!has_canvas_info(s)) return false;
     std::string why;
     CanvasInfo  info;
-    if (!canvas_parse_payload(obj_at(s.raw, "canvas_info").dump(), info, why)) return false;
+    if (!canvas_parse_payload(cs_obj_at(s.raw, "canvas_info").dump(), info, why)) return false;
     out = std::move(info);
     return true;
 }
@@ -262,32 +262,32 @@ GUI::DeviceControls::Caps caps(const Snapshot& snap)
     const Status& s = snap.status;
     if (!s.valid) return c;
     double t = 0, tt = 0;
-    const json& bed = obj_at(s.raw, "heater_bed");
-    if (num_at(bed, "temperature", t)) {
+    const json& bed = cs_obj_at(s.raw, "heater_bed");
+    if (cs_num_at(bed, "temperature", t)) {
         tt = 0;
-        num_at(bed, "target", tt);
+        cs_num_at(bed, "target", tt);
         c.heaters.push_back(Heater { "bed", "Bed", t, tt, DEFAULT_BED_MAX, false, false });
     }
-    const json& ext = obj_at(s.raw, "extruder");
-    if (num_at(ext, "temperature", t)) {
+    const json& ext = cs_obj_at(s.raw, "extruder");
+    if (cs_num_at(ext, "temperature", t)) {
         tt = 0;
-        num_at(ext, "target", tt);
+        cs_num_at(ext, "target", tt);
         c.heaters.push_back(Heater { nozzle_id(0), "Nozzle", t, tt, DEFAULT_NOZZLE_MAX, false, true });
     }
-    const json& cham = obj_at(s.raw, "ztemperature_sensor");
-    if (num_at(cham, "temperature", t)) c.heaters.push_back(Heater { "chamber", "Chamber", t, 0, DEFAULT_CHAMBER_MAX, false, false });
-    const json& led = obj_at(s.raw, "led");
+    const json& cham = cs_obj_at(s.raw, "ztemperature_sensor");
+    if (cs_num_at(cham, "temperature", t)) c.heaters.push_back(Heater { "chamber", "Chamber", t, 0, DEFAULT_CHAMBER_MAX, false, false });
+    const json& led = cs_obj_at(s.raw, "led");
     double      lv  = 0;
-    if (num_at(led, "status", lv)) {
+    if (cs_num_at(led, "status", lv)) {
         c.has_light = true;
         c.light_on  = lv > 0;
     }
-    const json& fans = obj_at(s.raw, "fans");
+    const json& fans = cs_obj_at(s.raw, "fans");
     struct F { const char* key; const char* id; const char* label; };
     for (const F& f : { F { "fan", "part", "Part cooling" }, F { "aux_fan", "aux", "Auxiliary" }, F { "box_fan", "chamber", "Chamber" } }) {
         double sp = 0;
-        const json& fan = obj_at(fans, f.key);
-        if (num_at(fan, "speed", sp)) c.fans.push_back(Fan { f.id, f.label, clamp_pct(static_cast<int>(std::lround(sp))) });
+        const json& fan = cs_obj_at(fans, f.key);
+        if (cs_num_at(fan, "speed", sp)) c.fans.push_back(Fan { f.id, f.label, clamp_pct(static_cast<int>(std::lround(sp))) });
     }
     return c;
 }

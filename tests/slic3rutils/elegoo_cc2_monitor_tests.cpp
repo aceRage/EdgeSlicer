@@ -28,7 +28,7 @@ using json = nlohmann::json;
 
 namespace {
 
-const char* SN = "TESTSN0002";
+const char* MON_SN = "TESTSN0002";
 
 json whole_status(int status, int sub, int progress = 0)
 {
@@ -46,7 +46,7 @@ json whole_status(int status, int sub, int progress = 0)
     })");
 }
 
-std::string push(int id, const json& delta) { return json { { "id", id }, { "method", 6000 }, { "result", delta } }.dump(); }
+std::string push_msg(int id, const json& delta) { return json { { "id", id }, { "method", 6000 }, { "result", delta } }.dump(); }
 
 ElegooCc2::Status status_of(int status, int sub, int progress = 0)
 {
@@ -62,14 +62,14 @@ TEST_CASE("CC2 status: the whole answer and the pushes", "[ElegooCc2Monitor]")
     ElegooCc2::Status s;
     SECTION("a push before the whole status is not merged, and asks for it")
     {
-        CHECK(ElegooCc2::merge_push(s, push(5, json { { "machine_status", { { "progress", 9 } } } })) == ElegooCc2::PushResult::NeedFull);
+        CHECK(ElegooCc2::merge_push(s, push_msg(5, json { { "machine_status", { { "progress", 9 } } } })) == ElegooCc2::PushResult::NeedFull);
         CHECK_FALSE(s.valid);
         CHECK(ElegooCc2::hub_state(s).empty());
     }
     SECTION("pushes merge key by key, objects recursively")
     {
         ElegooCc2::merge_full(s, whole_status(2, 2075, 10));
-        CHECK(ElegooCc2::merge_push(s, push(7, json { { "machine_status", { { "progress", 11 } } },
+        CHECK(ElegooCc2::merge_push(s, push_msg(7, json { { "machine_status", { { "progress", 11 } } },
                                                       { "extruder", { { "temperature", 221.0 } } } })) == ElegooCc2::PushResult::Merged);
         CHECK(ElegooCc2::progress(s) == Approx(11));
         CHECK(s.machine() == 2);
@@ -87,16 +87,16 @@ TEST_CASE("CC2 status: the whole answer and the pushes", "[ElegooCc2Monitor]")
     SECTION("five gaps in a row ask for the whole status again; a continuous id resets the count")
     {
         ElegooCc2::merge_full(s, whole_status(2, 2075));
-        CHECK(ElegooCc2::merge_push(s, push(10, json::object())) == ElegooCc2::PushResult::Merged);
-        CHECK(ElegooCc2::merge_push(s, push(12, json::object())) == ElegooCc2::PushResult::Merged); // gap 1
-        CHECK(ElegooCc2::merge_push(s, push(13, json::object())) == ElegooCc2::PushResult::Merged); // continuous: 0
+        CHECK(ElegooCc2::merge_push(s, push_msg(10, json::object())) == ElegooCc2::PushResult::Merged);
+        CHECK(ElegooCc2::merge_push(s, push_msg(12, json::object())) == ElegooCc2::PushResult::Merged); // gap 1
+        CHECK(ElegooCc2::merge_push(s, push_msg(13, json::object())) == ElegooCc2::PushResult::Merged); // continuous: 0
         int id = 13;
         for (int i = 0; i < 4; ++i) {
             id += 2;
-            CHECK(ElegooCc2::merge_push(s, push(id, json::object())) == ElegooCc2::PushResult::Merged);
+            CHECK(ElegooCc2::merge_push(s, push_msg(id, json::object())) == ElegooCc2::PushResult::Merged);
         }
         id += 2;
-        CHECK(ElegooCc2::merge_push(s, push(id, json::object())) == ElegooCc2::PushResult::NeedFull);
+        CHECK(ElegooCc2::merge_push(s, push_msg(id, json::object())) == ElegooCc2::PushResult::NeedFull);
         CHECK(s.valid); // still shown while the whole status is asked for
     }
     SECTION("exception_code is replaced, never merged")
@@ -104,7 +104,7 @@ TEST_CASE("CC2 status: the whole answer and the pushes", "[ElegooCc2Monitor]")
         json w = whole_status(2, 2075);
         w["exception"] = { { "exception_code", { { "101", 1 }, { "102", 1 } } } };
         ElegooCc2::merge_full(s, w);
-        ElegooCc2::merge_push(s, push(1, json { { "exception", { { "exception_code", { { "103", 1 } } } } } }));
+        ElegooCc2::merge_push(s, push_msg(1, json { { "exception", { { "exception_code", { { "103", 1 } } } } } }));
         CHECK(s.raw["exception"]["exception_code"].size() == 1);
         CHECK(s.raw["exception"]["exception_code"].contains("103"));
     }
@@ -368,14 +368,14 @@ struct FakeTransport : ElegooCc2::MqttTransport
             answer_pause = p->answer_pause;
         }
         const json j = json::parse(payload, nullptr, false);
-        if (topic == ElegooCc2::register_topic(SN)) {
-            p->deliver(ElegooCc2::register_response_topic(SN, j["request_id"].get<std::string>()),
+        if (topic == ElegooCc2::register_topic(MON_SN)) {
+            p->deliver(ElegooCc2::register_response_topic(MON_SN, j["request_id"].get<std::string>()),
                        json { { "client_id", j["client_id"] }, { "error", "ok" } }.dump());
             return true;
         }
-        if (topic != ElegooCc2::request_topic(SN, cid) || !j.is_object()) return true;
+        if (topic != ElegooCc2::request_topic(MON_SN, cid) || !j.is_object()) return true;
         if (j.value("type", "") == "PING") {
-            p->deliver(ElegooCc2::response_topic(SN, cid), R"({"type":"PONG"})");
+            p->deliver(ElegooCc2::response_topic(MON_SN, cid), R"({"type":"PONG"})");
             return true;
         }
         const int method = j.value("method", -1);
@@ -393,9 +393,9 @@ struct FakeTransport : ElegooCc2::MqttTransport
                 std::lock_guard<std::mutex> lock(p->m);
                 p->sub = 2502;
             }
-            p->deliver(ElegooCc2::status_topic(SN), push(1000, json { { "machine_status", { { "sub_status", 2502 } } } }));
+            p->deliver(ElegooCc2::status_topic(MON_SN), push_msg(1000, json { { "machine_status", { { "sub_status", 2502 } } } }));
         }
-        p->deliver(ElegooCc2::response_topic(SN, cid), json { { "id", j["id"] }, { "method", method }, { "result", result } }.dump());
+        p->deliver(ElegooCc2::response_topic(MON_SN, cid), json { { "id", j["id"] }, { "method", method }, { "result", result } }.dump());
         return true;
     }
     bool receive(std::string& topic, std::string& payload, int timeout_ms) override
@@ -451,7 +451,7 @@ struct MonitorFixture
                 error = "the printer refused the access code";
                 return false;
             }
-            sn = SN;
+            sn = MON_SN;
             t  = std::make_unique<FakeTransport>(p);
             return true;
         });
@@ -486,7 +486,7 @@ TEST_CASE("CC2 monitor: on demand, pushes and controls", "[ElegooCc2Monitor]")
         f.printer->status = 2;
         f.printer->sub    = 2075;
     }
-    f.printer->deliver(ElegooCc2::status_topic(SN), push(1, json { { "machine_status", { { "status", 2 }, { "sub_status", 2075 }, { "progress", 33 } } } }));
+    f.printer->deliver(ElegooCc2::status_topic(MON_SN), push_msg(1, json { { "machine_status", { { "status", 2 }, { "sub_status", 2075 }, { "progress", 33 } } } }));
     REQUIRE(eventually([&]() { return ElegooCc2::progress(ElegooCc2Monitor::demand(host, "").status) == 33; }));
     CHECK(ElegooCc2Monitor::connected(host));
     // The heartbeat goes out on the request topic.
