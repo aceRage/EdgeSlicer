@@ -315,6 +315,12 @@ public:
             } catch (...) {}
             // And a cloud printer that has never reported its AMS / spools is asked to, so the
             // phone's printer screen has a filament list for it (DeviceManager::full_report_tick).
+            // And every online cloud printer is subscribed, so it reports at all: the plug-in only
+            // listens to the selected one by itself (DeviceManager::cloud_watch_tick). Before
+            // full_report_tick, whose pushall is only heard once the printer is subscribed.
+            try {
+                dm->cloud_watch_tick();
+            } catch (...) {}
             try {
                 dm->full_report_tick();
             } catch (...) {}
@@ -1156,8 +1162,21 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate, bool watching)
             }
             p["online"]       = m->is_online();
             p["connected"]    = m->is_connected();
-            p["status"]       = m->print_status;
-            p["printing"]     = m->is_in_printing();
+            // The status word and `printing` from one decision (BambuCloudWatch::row_status): a
+            // cloud printer that has not reported yet used to say printing: true (the cloud list's
+            // task_status, through is_in_printing's fallback) next to an empty status. Now the row
+            // says what the list says, and `status_source` and `report_age_s` say how much is behind
+            // it - the hub marks a row whose report is missing or old as stale (printers_json).
+            {
+                const BambuCloudWatch::RowStatus rs = BambuCloudWatch::row_status(m->print_status, m->iot_print_status);
+                p["status"]        = rs.status;
+                p["printing"]      = rs.printing;
+                p["status_source"] = rs.source;
+                p["report_age_s"]  = m->m_push_count > 0 ?
+                                         (long long) std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::system_clock::now() - m->last_push_time).count() :
+                                         (long long) -1;
+            }
             p["percent"]      = m->mc_print_percent;
             p["left_time_s"]  = m->mc_left_time;
             p["layer"]        = m->curr_layer;
