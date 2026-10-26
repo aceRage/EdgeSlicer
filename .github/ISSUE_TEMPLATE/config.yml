@@ -1,8 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Community Support (Discord channel)
-    url: https://discord.gg/P4VE9UY9gJ
-    about: Please ask and answer support "how do I?"questions here.
-  - name: Discussion Forum
-    url: https://github.com/Snapmaker/OrcaSlicer/discussions
-    about: Please raise ideas and feature suggestions here.
+  - name: 💬 Questions and help (Discord)
+    url: https://discord.gg/tb5GFGuz7Q
+    about: 'Questions like "how do I…?", setup help and general chat.'
+  - name: 💡 Ideas and discussion
+    url: https://github.com/aceRage/EdgeSlicer/discussions
+    about: Early ideas, show-and-tell and anything that isn't a bug or a concrete feature request.
+  - name: 📥 Downloads and release notes
+    url: https://github.com/aceRage/EdgeSlicer/releases/latest
+    about: Check the latest release first; your problem may already be fixed.
