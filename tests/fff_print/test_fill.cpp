@@ -2337,6 +2337,9 @@ TEST_CASE("Adaptive TPMS anchors match the printed infill", "[Fill][TpmsAdaptive
 // ---------------------------------------------------------------------------------------------------
 
 // Orca: Slices the meshes as the parts of one object, where they are.
+// EdgeSlicer: our Test::init_print() arranges and centres the first part, so the parts are added here
+// uncentred to one instance at a fixed bed offset: the same mesh then lands at the same bed position in
+// every print, which unmatched_between_prints() relies on.
 static Print &slice_parts(Print &print, DynamicPrintConfig config, const std::vector<TriangleMesh> &parts)
 {
     config.set_deserialize_strict({{"layer_height", 0.2},
@@ -2345,10 +2348,16 @@ static Print &slice_parts(Print &print, DynamicPrintConfig config, const std::ve
                                    {"top_shell_thickness", 0},
                                    {"bottom_shell_thickness", 0}});
     Model model;
-    Slic3r::Test::init_print({parts.front()}, print, model, config, false);
-    for (size_t i = 1; i < parts.size(); ++ i)
-        model.objects.front()->add_volume(TriangleMesh(parts[i]), ModelVolumeType::MODEL_PART, false);
+    ModelObject *object = model.add_object();
+    object->name = "parts.stl";
+    for (const TriangleMesh &part : parts)
+        object->add_volume(TriangleMesh(part), ModelVolumeType::MODEL_PART, false);
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
     print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
     print.process();
     return print;
 }
