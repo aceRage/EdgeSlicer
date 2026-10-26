@@ -1,6 +1,6 @@
 {
     "name": "OrcaFilamentLibrary",
-    "version": "02.04.00.21",
+    "version": "02.04.00.22",
     "force_update": "0",
     "description": "Orca Filament Library",
     "filament_list": [
@@ -729,8 +729,16 @@
             "sub_path": "filament/Overture/Overture TPU @base.json"
         },
         {
+            "name": "School House Spools TPU 95A @base",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools TPU 95A @base.json"
+        },
+        {
             "name": "Overture TPU @System",
             "sub_path": "filament/Overture/Overture TPU @System.json"
+        },
+        {
+            "name": "School House Spools TPU 95A @System",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools TPU 95A @System.json"
         },
         {
             "name": "Fiberon PA12-CF @base",
@@ -997,8 +1005,32 @@
             "sub_path": "filament/SUNLU/SUNLU PETG @base.json"
         },
         {
+            "name": "School House Spools Matte PETG @base",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Matte PETG @base.json"
+        },
+        {
+            "name": "School House Spools PETG @base",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools PETG @base.json"
+        },
+        {
+            "name": "School House Spools Transparent PETG @base",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Transparent PETG @base.json"
+        },
+        {
             "name": "SUNLU PETG @System",
             "sub_path": "filament/SUNLU/SUNLU PETG @System.json"
+        },
+        {
+            "name": "School House Spools Matte PETG @System",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Matte PETG @System.json"
+        },
+        {
+            "name": "School House Spools PETG @System",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools PETG @System.json"
+        },
+        {
+            "name": "School House Spools Transparent PETG @System",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Transparent PETG @System.json"
         },
         {
             "name": "SUNLU PLA Matte @base",
@@ -1037,8 +1069,40 @@
             "sub_path": "filament/SUNLU/SUNLU Wood PLA @base.json"
         },
         {
+            "name": "School House Spools Marble PLA @base",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Marble PLA @base.json"
+        },
+        {
+            "name": "School House Spools Matte PLA @base",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Matte PLA @base.json"
+        },
+        {
+            "name": "School House Spools PLA @base",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools PLA @base.json"
+        },
+        {
+            "name": "School House Spools Silk PLA @base",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Silk PLA @base.json"
+        },
+        {
             "name": "SUNLU Wood PLA @System",
             "sub_path": "filament/SUNLU/SUNLU Wood PLA @System.json"
+        },
+        {
+            "name": "School House Spools Marble PLA @System",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Marble PLA @System.json"
+        },
+        {
+            "name": "School House Spools Matte PLA @System",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Matte PLA @System.json"
+        },
+        {
+            "name": "School House Spools PLA @System",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools PLA @System.json"
+        },
+        {
+            "name": "School House Spools Silk PLA @System",
+            "sub_path": "filament/SchoolHouseSpools/School House Spools Silk PLA @System.json"
         },
         {
             "name": "Valment PLA @base",

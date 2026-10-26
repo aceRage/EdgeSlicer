@@ -836,6 +836,40 @@ TEST_CASE("CLI --align-to-y-axis is a misc bool whose default must stay implicit
     }
 }
 
+// Orca #15033: --allow-rotations is opt-in, as its name implies. The CLI reads the option's default when the flag is
+// absent, so the def's default decides whether a headless arrange may rotate objects.
+TEST_CASE("CLI --allow-rotations defaults off and is opt-in", "[Config][CLI][AllowRotations]")
+{
+    const ConfigOptionDef *def = cli_misc_config_def.get("allow_rotations");
+    REQUIRE(def != nullptr);
+    const ConfigOptionBool *dflt = def->get_default_value<ConfigOptionBool>();
+    REQUIRE(dflt != nullptr);
+    CHECK_FALSE(dflt->value);
+
+    auto parse = [](std::initializer_list<const char *> args) {
+        DynamicPrintAndCLIConfig config;
+        t_config_option_keys extra;
+        t_config_option_keys keys;
+        std::vector<const char *> argv(args);
+        REQUIRE(config.read_cli(int(argv.size()), argv.data(), &extra, &keys));
+        return std::make_pair(std::move(config), std::move(keys));
+    };
+    {
+        auto [config, keys] = parse({"prog"});
+        CHECK(std::find(keys.begin(), keys.end(), "allow_rotations") == keys.end());
+        // The CLI's own read: the option filled from its default is false.
+        const ConfigOptionBool *opt = config.option<ConfigOptionBool>("allow_rotations", true);
+        REQUIRE(opt != nullptr);
+        CHECK_FALSE(opt->value);
+    }
+    {
+        auto [config, keys] = parse({"prog", "--allow-rotations"});
+        CHECK(std::find(keys.begin(), keys.end(), "allow_rotations") != keys.end());
+        REQUIRE(config.has("allow_rotations"));
+        CHECK(config.opt_bool("allow_rotations"));
+    }
+}
+
 // The settings combo box of a plain enum option shows the option's NUMERIC value as the list index and saves the
 // picked index back as the value (Choice::set_value / Choice::get_value in src/slic3r/GUI/Field.cpp). So
 // enum_values[i] must be the key of enum value i: a key inserted in the middle of the list (seam_position
