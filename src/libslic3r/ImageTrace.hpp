@@ -217,6 +217,12 @@ std::string image_trace_part_name(const std::string &base, int layer, int layers
 // "#RRGGBB"
 std::string image_trace_color_to_hex(const std::array<uint8_t, 3> &color);
 
+// Layers for export_dxf (Format/DXF.hpp): shapes in mm, Y up, all levels in the frame of the
+// whole image (origin in the bottom left corner), so the levels stay aligned with each other.
+// names .. layer name of every level (e.g. filament or colour name), a level without a name is
+// called by its colour ("#RRGGBB") or "Level <n>"
+std::vector<std::pair<std::string, ExPolygons>> image_trace_dxf_layers(const ImageTraceResult &result, const std::vector<std::string> &names = {});
+
 } // namespace Slic3r
 
 #endif // slic3r_ImageTrace_hpp_

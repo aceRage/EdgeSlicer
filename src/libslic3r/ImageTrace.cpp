@@ -1270,4 +1270,30 @@ std::string image_trace_color_to_hex(const std::array<uint8_t, 3> &color)
     return buffer;
 }
 
+std::vector<std::pair<std::string, ExPolygons>> image_trace_dxf_layers(const ImageTraceResult &result, const std::vector<std::string> &names)
+{
+    std::vector<std::pair<std::string, ExPolygons>> out;
+    // SVG is Y down: mirror around the height of the image
+    const coord_t height = coord_t(std::llround(result.height / SCALING_FACTOR));
+    for (size_t i = 0; i < result.layers.size(); ++i) {
+        const ImageTraceLayer &layer = result.layers[i];
+        ExPolygons             shape = layer.shape;
+        for (ExPolygon &e : shape) {
+            auto flip = [height](Polygon &p) {
+                for (Point &pt : p.points)
+                    pt.y() = height - pt.y();
+                std::reverse(p.points.begin(), p.points.end()); // keep the orientation (contour CCW, holes CW)
+            };
+            flip(e.contour);
+            for (Polygon &h : e.holes)
+                flip(h);
+        }
+        std::string name = i < names.size() ? names[i] : std::string();
+        if (name.empty())
+            name = result.layers.size() == 1 ? "Trace" : "Level " + std::to_string(i + 1) + " " + image_trace_color_to_hex(layer.color);
+        out.emplace_back(std::move(name), std::move(shape));
+    }
+    return out;
+}
+
 } // namespace Slic3r

@@ -539,6 +539,8 @@ public:
     void export_stl(bool extended = false, bool selection_only = false, bool multi_stls = false);
     // Export just the one selected part (ModelVolume) as a binary STL, in world coordinates.
     void export_stl_part();
+    // Outline of the selected SVG / text part (the 2D shape it is embossed from) as DXF, in mm
+    void export_outline_dxf();
     // Export as a STEP file of B-rep solids (Format/STEPExport): the selected objects, or with no
     // object selected every object on the current plate (placed relative to that plate).
     void export_step(bool selection_only = false);

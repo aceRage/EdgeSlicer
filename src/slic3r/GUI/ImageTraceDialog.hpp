@@ -80,6 +80,7 @@ private:
     void             update_filament_rows();
     void             change_image();
     bool             finish();
+    void             export_dxf_file();
     void             save_to_config() const;
     std::string      level_color(size_t level) const;
     int              nearest_filament(const std::array<uint8_t, 3> &color) const;
@@ -127,6 +128,7 @@ private:
     wxStaticText   *m_info           = nullptr;
     wxStaticText   *m_warning        = nullptr;
     wxButton       *m_ok             = nullptr;
+    wxButton       *m_export_dxf     = nullptr;
 
     std::vector<wxWindow *> m_one_color;      // only for one colour level
     std::vector<wxWindow *> m_brightness;     // only for brightness threshold

@@ -9,6 +9,7 @@
 
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/CodeEmboss.hpp" // create_code_group_id
+#include "libslic3r/Format/DXF.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/NSVGUtils.hpp"
 
@@ -394,6 +395,9 @@ ImageTraceDialog::ImageTraceDialog(wxWindow                      *parent,
     right->Add(label(_L("Shapes") + ":"), 0, wxBOTTOM, FromDIP(4));
     m_preview_bitmap = new wxStaticBitmap(this, wxID_ANY, wxBitmap(blank_preview(px)));
     right->Add(m_preview_bitmap, 0);
+    m_export_dxf = new wxButton(this, wxID_ANY, _L("Export DXF") + dots);
+    m_export_dxf->SetToolTip(_L("Save the outlines of the colours as a DXF file in millimetres, one layer per colour, for CAD and laser software."));
+    right->Add(m_export_dxf, 0, wxTOP, FromDIP(6));
     m_info = new wxStaticText(this, wxID_ANY, wxEmptyString);
     right->Add(m_info, 0, wxTOP, FromDIP(6));
     m_warning = new wxStaticText(this, wxID_ANY, wxEmptyString);
@@ -455,6 +459,7 @@ ImageTraceDialog::ImageTraceDialog(wxWindow                      *parent,
         evt.Skip();
     });
     Bind(wxEVT_TIMER, [this](wxTimerEvent &) { refresh_preview(); });
+    m_export_dxf->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { export_dxf_file(); });
     m_ok->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         if (finish())
             EndModal(wxID_OK);
@@ -624,12 +629,14 @@ void ImageTraceDialog::refresh_preview()
             warnings += (warnings.empty() ? "" : "\n") + _L("Pixels are large compared to a nozzle, raise the resolution for finer details.");
         m_warning->SetLabel(warnings);
         m_ok->Enable(true);
+        m_export_dxf->Enable(true);
     } else {
         update_filament_rows();
         m_preview_bitmap->SetBitmap(wxBitmap(blank_preview(px)));
         m_info->SetLabel(wxEmptyString);
         m_warning->SetLabel(from_u8(m_preview.error));
         m_ok->Enable(false);
+        m_export_dxf->Enable(false);
     }
     m_info->Wrap(px);
     m_warning->Wrap(px);
@@ -693,6 +700,44 @@ void ImageTraceDialog::change_image()
     refresh_source_preview();
     update_enabled();
     refresh_preview();
+}
+
+void ImageTraceDialog::export_dxf_file()
+{
+    m_timer.Stop();
+    const ImageTraceParams params = collect();
+    ImageTraceResult       result;
+    {
+        wxBusyCursor busy;
+        // the final resolution, no SVG text needed
+        result = trace_image(m_image, params, {}, false);
+    }
+    if (!result.is_valid()) {
+        show_error(this, from_u8(result.error.empty() ? _u8L("There is nothing to export.") : result.error));
+        return;
+    }
+
+    // layer names are plain ASCII, as CAD programs expect them
+    std::vector<std::string> names;
+    for (size_t i = 0; i < result.layers.size(); ++i) {
+        std::string name = "Colour " + std::to_string(i + 1);
+        if (i < m_level_filament.size() && m_level_filament[i] != nullptr && m_level_filament[i]->GetSelection() > 0)
+            name = "Filament " + std::to_string(m_level_filament[i]->GetSelection());
+        names.push_back(name + " " + image_trace_color_to_hex(result.layers[i].color));
+    }
+    if (result.layers.size() == 1)
+        names[0] = m_image_name.empty() ? std::string("Trace") : m_image_name;
+
+    wxFileDialog dlg(this, _L("Export DXF file:"), wxEmptyString, from_u8((m_image_name.empty() ? std::string("trace") : m_image_name) + ".dxf"),
+                     _L("DXF files") + " (*.dxf)|*.dxf", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    wxString path = dlg.GetPath();
+    if (!path.Lower().EndsWith(".dxf"))
+        path += ".dxf";
+    std::string err;
+    if (!Slic3r::export_dxf(into_u8(path), image_trace_dxf_layers(result, names), &err))
+        show_error(this, from_u8(_u8L("Could not export the DXF file.") + " " + err));
 }
 
 bool ImageTraceDialog::finish()
