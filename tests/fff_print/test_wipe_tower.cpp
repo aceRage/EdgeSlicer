@@ -1,13 +1,19 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <limits>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
+#include "libslic3r/GCode/WipeTower2.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include "test_data.hpp"
@@ -263,4 +269,373 @@ TEST_CASE("The Snapmaker U1 tower flushes with M400 and never a seconds dwell", 
     CHECK_THAT(tower, Catch::Matchers::Contains("CP TOOLCHANGE"));
     CHECK_THAT(tower, Catch::Matchers::Contains("M400"));
     CHECK_THAT(tower, !Catch::Matchers::Contains("G4 S"));
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Orca #15144: wait for the toolchange temperature on the wipe tower (wait_for_temp_on_wipe_tower).
+// Ported from upstream's test_multifilament.cpp cases onto this file's two-filament WipeTower2 slice
+// (Edge has no slice_with_object_overrides / multifilament_config harness): one cube, outer wall in
+// filament 2 and the rest in filament 1, so every layer has a tool change on the tower.
+
+static const char *const WAIT_TAG = "_WAIT_FOR_TEMP_ON_WIPE_TOWER";
+
+static DynamicPrintConfig wait_for_temp_config(bool wait_on_tower)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00"};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = true;
+    config.option<ConfigOptionBool>("enable_support")->value       = false;
+    config.option<ConfigOptionBool>("spiral_mode")->value          = false;
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+    config.option<ConfigOptionBool>("purge_in_prime_tower")->value           = false;
+    config.option<ConfigOptionInt>("outer_wall_filament")->value    = 2;
+    config.option<ConfigOptionInt>("wall_filament")->value          = 1;
+    config.option<ConfigOptionInt>("sparse_infill_filament")->value = 1;
+    config.option<ConfigOptionInt>("solid_infill_filament")->value  = 1;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values       = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values       = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value    = 35.;
+    config.set_deserialize_strict({
+        // set_extruder's standby / restore pair (OozePrevention), which the option demotes and moves.
+        { "ooze_prevention", "1" },
+        { "standby_temperature_delta", "-40" },
+        // The post-processor's own preheat pass also inserts an M104 for the incoming filament ahead
+        // of the Tn; switch it off so the temperature commands under test are the only ones.
+        { "preheat_time", "0" },
+        { "wait_for_temp_on_wipe_tower", wait_on_tower ? "1" : "0" },
+    });
+    return config;
+}
+
+static std::string slice_wait_for_temp(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(print.has_wipe_tower());
+    return Test::gcode(print);
+}
+
+static std::vector<std::string> split_lines(const std::string &gcode)
+{
+    std::vector<std::string> lines;
+    std::istringstream       stream(gcode);
+    for (std::string line; std::getline(stream, line);) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        lines.emplace_back(std::move(line));
+    }
+    return lines;
+}
+
+static bool is_tool_line(const std::string &l) { return l.size() >= 2 && l[0] == 'T' && std::isdigit((unsigned char) l[1]); }
+static bool is_tagged_wait(const std::string &l) { return l.find(WAIT_TAG) != std::string::npos; }
+// Temperature of an M104/M109, or -1 when the line is neither.
+static int temp_of(const std::string &l)
+{
+    if (l.rfind("M104", 0) != 0 && l.rfind("M109", 0) != 0)
+        return -1;
+    const size_t s = l.find(" S");
+    return s == std::string::npos ? -1 : std::stoi(l.substr(s + 2));
+}
+
+// X where the nozzle sits while each tagged wait blocks: the nearest preceding G1 carrying an X
+// (the park travel emitted just before the wait).
+static std::vector<double> wait_park_xs(const std::string &gcode)
+{
+    const std::vector<std::string> lines = split_lines(gcode);
+    std::vector<double>            xs;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].rfind("M109", 0) != 0 || !is_tagged_wait(lines[i]))
+            continue;
+        for (size_t j = i; j-- > 0;) {
+            if (lines[j].rfind("G1 ", 0) != 0)
+                continue;
+            const size_t x_pos = lines[j].find('X');
+            if (x_pos == std::string::npos)
+                continue;
+            xs.push_back(std::stod(lines[j].substr(x_pos + 1)));
+            break;
+        }
+    }
+    return xs;
+}
+
+// Upstream: "Toolchange temperature wait moves to the wipe tower when enabled". With the option the
+// blocking M109 moves from right after the Tn to a stop beside the tower, tagged, after the tool change
+// and before the first extrusion of the purge; the restore that used to block there becomes a
+// non-blocking M104 ahead of the Tn, so the incoming tool heats up over the change itself.
+TEST_CASE("Toolchange temperature wait moves to the wipe tower when enabled", "[WipeTower][WaitForTemp]")
+{
+    const bool wait_on_tower = GENERATE(false, true);
+    DYNAMIC_SECTION("wait_for_temp_on_wipe_tower " << (wait_on_tower ? 1 : 0)) {
+        const std::string              gcode = slice_wait_for_temp(wait_for_temp_config(wait_on_tower));
+        const std::vector<std::string> lines = split_lines(gcode);
+
+        const auto is_m109_line     = [](const std::string &l) { return l.rfind("M109", 0) == 0; };
+        // A non-blocking set-temperature naming one specific tool, e.g. "M104 S255 T1".
+        const auto is_m104_for_tool = [](const std::string &l, int tool) {
+            if (l.rfind("M104", 0) != 0)
+                return false;
+            const std::string token = " T" + std::to_string(tool);
+            const size_t      at    = l.find(token);
+            return at != std::string::npos && (at + token.size() >= l.size() || !std::isdigit((unsigned char) l[at + token.size()]));
+        };
+        const auto is_extruding = [](const std::string &l) {
+            if (l.rfind("G1 ", 0) != 0)
+                return false;
+            const size_t e = l.find(" E");
+            return e != std::string::npos && l.find_first_of("XY") != std::string::npos && e + 2 < l.size() && l[e + 2] != '-';
+        };
+
+        int checked_blocks = 0;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].find("; CP TOOLCHANGE START") == std::string::npos)
+                continue;
+            size_t block_end = i;
+            while (block_end < lines.size() && lines[block_end].find("; CP TOOLCHANGE END") == std::string::npos)
+                ++block_end;
+            size_t tool_line = block_end;
+            for (size_t j = i; j < block_end; ++j)
+                if (is_tool_line(lines[j])) {
+                    tool_line = j;
+                    break;
+                }
+            if (tool_line == block_end) {
+                i = block_end;
+                continue; // a block without a tool change
+            }
+            ++checked_blocks;
+
+            // Where the incoming tool's target temperature is raised, relative to its Tn.
+            const int new_tool = std::stoi(lines[tool_line].substr(1));
+            size_t    preheat = tool_line, restore = block_end;
+            for (size_t j = i; j < tool_line; ++j)
+                if (is_m104_for_tool(lines[j], new_tool)) {
+                    preheat = j;
+                    break;
+                }
+            for (size_t j = tool_line + 1; j < block_end; ++j)
+                if (is_m104_for_tool(lines[j], new_tool)) {
+                    restore = j;
+                    break;
+                }
+
+            size_t tagged_wait = block_end, untagged_m109 = block_end, first_extrusion = block_end;
+            for (size_t j = tool_line + 1; j < block_end; ++j) {
+                if (is_m109_line(lines[j]) && tagged_wait == block_end && is_tagged_wait(lines[j]))
+                    tagged_wait = j;
+                if (is_m109_line(lines[j]) && untagged_m109 == block_end && !is_tagged_wait(lines[j]))
+                    untagged_m109 = j;
+                if (first_extrusion == block_end && is_extruding(lines[j]))
+                    first_extrusion = j;
+            }
+            INFO("toolchange block at line " << i + 1);
+            if (wait_on_tower) {
+                // The only blocking wait is the tagged one, parked beside the tower before the purge.
+                REQUIRE(tagged_wait < block_end);
+                CHECK(untagged_m109 == block_end);
+                // The target is raised ahead of the tool change and nothing sets it again afterwards.
+                CHECK(preheat < tool_line);
+                CHECK(restore == block_end);
+                REQUIRE(first_extrusion < block_end);
+                CHECK(tagged_wait < first_extrusion);
+                // The pre-heat names the temperature the tower waits on.
+                CHECK(temp_of(lines[preheat]) == temp_of(lines[tagged_wait]));
+                // The travel preceding the wait parks outside the purge area of this block.
+                size_t stop_line = block_end;
+                for (size_t j = tagged_wait; j-- > tool_line;)
+                    if (lines[j].rfind("G1 ", 0) == 0 && lines[j].find('X') != std::string::npos) {
+                        stop_line = j;
+                        break;
+                    }
+                REQUIRE(stop_line < block_end);
+                const double stop_x = std::stod(lines[stop_line].substr(lines[stop_line].find('X') + 1));
+                double purge_min_x = std::numeric_limits<double>::max(), purge_max_x = std::numeric_limits<double>::lowest();
+                for (size_t j = tagged_wait; j < block_end; ++j) {
+                    const size_t x_pos = lines[j].find('X');
+                    if (!is_extruding(lines[j]) || x_pos == std::string::npos)
+                        continue;
+                    const double x = std::stod(lines[j].substr(x_pos + 1));
+                    purge_min_x    = std::min(purge_min_x, x);
+                    purge_max_x    = std::max(purge_max_x, x);
+                }
+                REQUIRE(purge_min_x <= purge_max_x);
+                INFO("stop travel: " << lines[stop_line] << " purge x range: " << purge_min_x << ".." << purge_max_x);
+                const bool beside_tower = stop_x < purge_min_x - 0.5 || stop_x > purge_max_x + 0.5;
+                CHECK(beside_tower);
+            } else {
+                // Stock behaviour: the blocking wait follows the tool change command directly, and
+                // nothing raises the incoming tool's target before it.
+                REQUIRE(untagged_m109 < block_end);
+                CHECK(tagged_wait == block_end);
+                CHECK(preheat == tool_line);
+                if (first_extrusion < block_end)
+                    CHECK(untagged_m109 < first_extrusion);
+            }
+            i = block_end;
+        }
+        REQUIRE(checked_blocks > 0);
+        if (!wait_on_tower)
+            CHECK(gcode.find(WAIT_TAG) == std::string::npos);
+    }
+}
+
+// Upstream: "Wipe tower priming pre-heats to the first layer temperature". Priming runs before the first
+// layer is set up, so set_extruder sees no layer: on_first_layer() is false and print_z is the initial
+// layer height rather than 0. The tower blocks on the first layer temperature there, so the pre-heat
+// raised ahead of each priming Tn has to name that same temperature.
+TEST_CASE("Wipe tower priming pre-heats to the first layer temperature", "[WipeTower][WaitForTemp]")
+{
+    DynamicPrintConfig config = wait_for_temp_config(true);
+    config.set_deserialize_strict({
+        { "single_extruder_multi_material_priming", "1" },
+        // Distinct enough that picking the wrong one is unambiguous.
+        { "nozzle_temperature_initial_layer", "215,215" },
+        { "nozzle_temperature", "240,240" },
+    });
+    const std::vector<std::string> lines = split_lines(slice_wait_for_temp(config));
+
+    size_t start = lines.size(), end = lines.size();
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (start == lines.size() && lines[i].find("; CP PRIMING START") != std::string::npos)
+            start = i;
+        else if (start < lines.size() && lines[i].find("; CP PRIMING END") != std::string::npos) {
+            end = i;
+            break;
+        }
+    }
+    REQUIRE(start < end);
+
+    int checked_waits = 0;
+    for (size_t i = start; i < end; ++i) {
+        if (!is_tagged_wait(lines[i]))
+            continue;
+        ++checked_waits;
+        INFO("priming wait at line " << i + 1 << ": " << lines[i]);
+        CHECK(temp_of(lines[i]) == 215); // the tower waits on the first layer temperature
+        // The most recent set-temperature before it is the pre-heat, and must agree with it.
+        int preheat = -1;
+        for (size_t j = i; j-- > start;)
+            if ((preheat = temp_of(lines[j])) != -1)
+                break;
+        CHECK(preheat == 215);
+    }
+    REQUIRE(checked_waits > 0); // the feature under test is active
+}
+
+// Upstream: "Wipe tower temperature-wait park is regenerated when the tower moves". The park picks its
+// side of the tower from the tower position at psWipeTower time, while the export shifts the cached
+// moves by the current position. Moving the tower normally invalidates only psSkirtBrim, but the park
+// makes the tower G-code bed-relative, so a GUI-style move and re-slice on the same Print must
+// regenerate the tower. Contract: every tagged wait parks inside the printable area.
+TEST_CASE("Wipe tower temperature-wait park is regenerated when the tower moves", "[WipeTower][WaitForTemp]")
+{
+    // Rectangle wall and no brim keep the tower-local footprint inside [0, 35], so the park sits at the
+    // generator's 2 mm side gap. A 200 mm bed centred on the origin, where the test cube is arranged.
+    DynamicPrintConfig config = wait_for_temp_config(true);
+    config.set_deserialize_strict({
+        { "wipe_tower_wall_type", "rectangle" },
+        { "prime_tower_brim_width", "0" },
+        { "printable_area", "-100x-100,100x-100,100x100,-100x100" },
+        { "wipe_tower_x", "-100" },
+        { "wipe_tower_y", "30" },
+    });
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(print.has_wipe_tower());
+
+    const std::vector<double> at_edge_parks = wait_park_xs(Test::gcode(print));
+    REQUIRE(!at_edge_parks.empty()); // the feature under test is active
+    for (double x : at_edge_parks) {
+        INFO("wait park X " << x << " with the tower at x=-100 on a -100..100 bed");
+        CHECK(x >= -100.05);
+        CHECK(x <= 100.05);
+    }
+    REQUIRE(print.is_step_done(psWipeTower));
+
+    // Move the tower to the right bed edge (64 + 35 = 99 keeps the body printable) and re-apply on the
+    // SAME Print, assembled the way init_print assembled the first config so wipe_tower_x is the only
+    // difference. The cached right-side park would export at 64 + 37 = 101, off the bed; regeneration
+    // pulls it back against the bed edge.
+    config.set_deserialize_strict({ { "wipe_tower_x", "64" } });
+    DynamicPrintConfig moved_config = DynamicPrintConfig::full_print_config();
+    moved_config.apply(config);
+    print.apply(model, moved_config);
+    CHECK_FALSE(print.is_step_done(psWipeTower)); // the move must regenerate the tower
+
+    const std::vector<double> moved_parks = wait_park_xs(Test::gcode(print));
+    REQUIRE(!moved_parks.empty()); // the waits must survive the re-slice
+    for (double x : moved_parks) {
+        INFO("wait park X " << x << " with the tower at x=64 on a -100..100 bed");
+        CHECK(x >= -100.05);
+        CHECK(x <= 100.05);
+    }
+}
+
+// EDGE: the tower interface (#119) heats a filament to its interface temperature in interface_before_wipe.
+// With the option the tool change already waited for that temperature beside the tower, so the tower
+// waits once, tagged, at the interface temperature, and interface_before_wipe adds no second M109.
+TEST_CASE("Wipe tower temperature wait covers the tower interface temperature", "[WipeTower][WaitForTemp]")
+{
+    const bool wait_on_tower = GENERATE(false, true);
+    DynamicPrintConfig config = wait_for_temp_config(wait_on_tower);
+    config.set_deserialize_strict({
+        { "wipe_tower_interface_temp", "1" },
+        { "wipe_tower_interface_trigger", "every_toolchange" },
+        { "filament_tower_interface_print_temp", "250,250" },
+        { "nozzle_temperature_initial_layer", "220,220" },
+        { "nozzle_temperature", "220,220" },
+    });
+    const std::vector<std::string> lines = split_lines(slice_wait_for_temp(config));
+
+    int interface_blocks = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("; CP TOOLCHANGE START") == std::string::npos)
+            continue;
+        size_t block_end = i;
+        while (block_end < lines.size() && lines[block_end].find("; CP TOOLCHANGE END") == std::string::npos)
+            ++block_end;
+        bool interface = false;
+        int  waits_at_250 = 0, tagged_waits = 0;
+        for (size_t j = i; j < block_end; ++j) {
+            interface |= lines[j].find("; tower interface") != std::string::npos;
+            if (lines[j].rfind("M109", 0) == 0 && temp_of(lines[j]) == 250)
+                ++waits_at_250;
+            if (lines[j].rfind("M109", 0) == 0 && is_tagged_wait(lines[j]))
+                ++tagged_waits;
+        }
+        if (interface) {
+            ++interface_blocks;
+            INFO("interface toolchange block at line " << i + 1 << ", wait_for_temp_on_wipe_tower " << wait_on_tower);
+            CHECK(waits_at_250 == 1);
+            CHECK(tagged_waits == (wait_on_tower ? 1 : 0));
+        }
+        i = block_end;
+    }
+    REQUIRE(interface_blocks > 0);
+}
+
+// The option is off for single extruder multi-material whatever the profile says: SEMM runs its own
+// unload / load temperature sequence on the tower.
+TEST_CASE("Wipe tower temperature wait is off for single extruder multi-material", "[WipeTower][WaitForTemp]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    PrintConfig        print_config;
+    print_config.apply(config, true);
+    print_config.wait_for_temp_on_wipe_tower.value = true;
+    print_config.single_extruder_multi_material.value = false;
+    CHECK(WipeTower2::wait_for_temp_enabled(print_config));
+    print_config.single_extruder_multi_material.value = true;
+    CHECK_FALSE(WipeTower2::wait_for_temp_enabled(print_config));
+    print_config.wait_for_temp_on_wipe_tower.value    = false;
+    print_config.single_extruder_multi_material.value = false;
+    CHECK_FALSE(WipeTower2::wait_for_temp_enabled(print_config));
 }
