@@ -4168,6 +4168,18 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                                                                  MainFrame::PrintSelectType::eSendGcode;
             }
 
+            // A printer with no device page of its own (an Elegoo Centauri Carbon 2) gets the shared,
+            // vendor-neutral device page instead of its address (owner D6, 2026-10-26).
+            {
+                const bool        picked = ph_picked && !ph_picked->address.empty();
+                const std::string model  = printer_model_opt ? printer_model_opt->value : std::string();
+                const wxString    shared = PrinterWebView::shared_device_page_url(picked ? *ph_picked : PrintHostDevices::from_config(cfg), model,
+                                                                                  picked ? "ph:" + ph_picked->id : std::string("host"));
+                if (!shared.empty()) {
+                    url    = shared;
+                    apikey = wxString();
+                }
+            }
             p_mainframe->load_printer_url(url, apikey);
             if (p_mainframe->m_printer_view) {
                 p_mainframe->m_printer_view->set_devices(ph_model_key, ph_devices, ph_pick);

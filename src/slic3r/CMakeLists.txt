@@ -534,6 +534,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/StreamPanel.cpp
     GUI/StreamPanel.hpp
     GUI/PrintersPanel.cpp
+    GUI/PrinterRowsBridge.cpp
+    GUI/PrinterRowsBridge.hpp
     GUI/PrintersPanel.hpp
     GUI/HomePanel.cpp
     GUI/ModelBrowserPanel.cpp

@@ -18,6 +18,9 @@
 //   PrinterCards.sortRows(rows, 'status'|'name')  -> a sorted copy
 //   PrinterCards.stateOf(row)                     -> { key, word }  key: error|paused|printing|idle|offline
 //   PrinterCards.summary(rows)                    -> { printing, paused, error, idle, offline }
+//   PrinterCards.device(row, opts)                -> the shared device page for one row (device.html):
+//       the same opts as render(), one row; every vendor's device page converges on this template
+//       (tests/design_shared_device_page.md)
 (function(root) {
     'use strict';
 
@@ -372,6 +375,227 @@
         return c;
     }
 
+    // ---- the shared device page: one printer, every section the row can fill -------------------
+    //
+    // Sections, in the order of the Bambu Device tab: the printer (picture, name, model, address,
+    // state, how fresh the reading is), the job (plate picture, name, progress, time left, layers,
+    // step, Pause / Resume / Stop), temperatures, fans and light, filament (AMS / CANVAS units,
+    // external spools, toolheads), the error, and the connection details. A section the row has no
+    // data for is left out, so a plain printer gets a short page and a printer with a filament unit
+    // gets it drawn - nothing is vendor-specific here.
+    function section(cls, title) {
+        var s = el('section', 'dsec ' + cls);
+        var h = el('h2', 'dsec-title', title);
+        s.appendChild(h);
+        return s;
+    }
+    function kv(list, k, v, cls) {
+        var li = el('li', 'dkv' + (cls ? ' ' + cls : ''));
+        li.appendChild(el('span', 'k', k));
+        li.appendChild(el('span', 'v', v));
+        list.appendChild(li);
+        return li;
+    }
+    // How fresh the reading is, from the protocol details (cc2 / sdcp) the row carries.
+    function freshness(p) {
+        var d = (p.cc2 && typeof p.cc2 === 'object') ? p.cc2 : ((p.sdcp && typeof p.sdcp === 'object') ? p.sdcp : null);
+        if (p.online === false) return { key: 'off', text: p.status_error ? 'Not answering: ' + str(p.status_error) : 'Offline' };
+        if (p.status_error) return { key: 'warn', text: str(p.status_error) };
+        if (!d) return { key: '', text: '' };
+        var age = isNum(d.age_s) ? d.age_s : 0;
+        if (d.stale) return { key: 'warn', text: 'No news from the printer for ' + fmtTime(age) + '; the buttons wait for a fresh status.' };
+        if (d.live === false) return { key: 'idle', text: 'Last heard ' + (age > 60 ? fmtTime(age) + ' ago' : 'a moment ago') + ' (the connection opens while this page is open)' };
+        return { key: 'ok', text: 'Live' };
+    }
+    function protocolDetails(p) {
+        var d = (p.cc2 && typeof p.cc2 === 'object') ? p.cc2 : ((p.sdcp && typeof p.sdcp === 'object') ? p.sdcp : null);
+        var out = [];
+        if (!d) return out;
+        if (d.firmware) out.push(['Firmware', str(d.firmware)]);
+        if (d.protocol) out.push(['Connection', str(d.protocol).toUpperCase() + (d.live ? ', live' : ', on demand')]);
+        if (d.canvas_attached !== undefined) out.push(['CANVAS', d.canvas_attached ? 'attached' : 'not attached']);
+        if (d.auto_refill !== undefined) out.push(['Auto-refill', d.auto_refill ? 'on' : 'off']);
+        if (d.timelapse !== undefined) out.push(['Time-lapse', d.timelapse ? 'on' : 'off']);
+        return out;
+    }
+
+    function device(p, opts) {
+        opts = opts || {};
+        var st = stateOf(p), name = nameOf(p);
+        var page = el('article', 'dpage st-' + st.key);
+        page.setAttribute('data-printer-id', str(p.id));
+        page.setAttribute('aria-label', name + ', ' + st.word);
+
+        // ---- the printer ----
+        var head = el('header', 'dhead');
+        if (p.picture && /^\/profiles\//.test(str(p.picture))) {
+            var ic = el('img', 'dpic');
+            ic.src = str(p.picture);
+            ic.alt = '';
+            ic.setAttribute('aria-hidden', 'true');
+            ic.addEventListener('error', function() { ic.remove(); });
+            head.appendChild(ic);
+        }
+        var titles = el('div', 'dtitles');
+        titles.appendChild(el('h1', 'dname', name));
+        var sub = [];
+        var model = str(p.model_short) || str(p.model_name) || str(p.model);
+        if (model) sub.push(model);
+        if (p.ip) sub.push(str(p.ip));
+        if (sub.length) titles.appendChild(el('div', 'dmodel', sub.join(' \u00b7 ')));
+        var fr = freshness(p);
+        if (fr.text) titles.appendChild(el('div', 'dfresh' + (fr.key ? ' ' + fr.key : ''), fr.text));
+        head.appendChild(titles);
+        head.appendChild(el('span', 'ppill dpill', st.word));
+        page.appendChild(head);
+
+        var grid = el('div', 'dgrid');
+        page.appendChild(grid);
+        var left = el('div', 'dcol'), right = el('div', 'dcol');
+        grid.appendChild(left);
+        grid.appendChild(right);
+
+        // ---- the job ----
+        var job = section('djob', 'Print job');
+        var printingish = st.key === 'printing' || st.key === 'paused' || (st.key === 'error' && p.printing);
+        var jobrow = el('div', 'djobrow');
+        var src = opts.thumbFor ? opts.thumbFor(p) : '';
+        if (src) {
+            var th = el('img', 'dthumb');
+            th.src = src;
+            th.alt = 'Plate of ' + (str(p.task) || 'the current job');
+            th.referrerPolicy = 'no-referrer';
+            th.addEventListener('error', function() { th.remove(); });
+            jobrow.appendChild(th);
+        }
+        var jb = el('div', 'djobinfo');
+        jobrow.appendChild(jb);
+        if (p.task) { var t = el('div', 'dtask', str(p.task)); t.title = str(p.task); jb.appendChild(t); }
+        else jb.appendChild(el('div', 'dtask none', p.online === false ? 'Not connected' : 'No print running'));
+        if ((printingish || st.word === 'Finished') && isNum(p.percent)) {
+            var pct = Math.max(0, Math.min(100, Math.round(p.percent)));
+            var bar = el('div', 'pbar dbar');
+            bar.setAttribute('role', 'progressbar');
+            bar.setAttribute('aria-valuemin', '0');
+            bar.setAttribute('aria-valuemax', '100');
+            bar.setAttribute('aria-valuenow', String(pct));
+            bar.setAttribute('aria-label', 'Progress of ' + name);
+            var fill = el('div', 'pfill'); fill.style.width = pct + '%'; bar.appendChild(fill);
+            jb.appendChild(bar);
+            var facts = el('ul', 'dfacts');
+            kv(facts, 'Progress', pct + '%');
+            if (isNum(p.left_time_s) && p.left_time_s > 0) kv(facts, 'Time left', fmtTime(p.left_time_s));
+            if (isNum(p.total_layers) && p.total_layers > 0) kv(facts, 'Layer', (isNum(p.layer) ? p.layer : 0) + ' / ' + p.total_layers);
+            jb.appendChild(facts);
+        }
+        if (p.stage && str(p.stage) !== str(p.task)) jb.appendChild(el('div', 'pstage dstage', str(p.stage)));
+        job.appendChild(jobrow);
+
+        var err = errorText(p);
+        if (!err && p.hms && p.hms.count > 0 && p.hms.message) err = str(p.hms.message);
+        if (err) job.appendChild(el('div', 'perr', err));
+
+        var jobs = opts.jobs || {};
+        var js = jobs[p.id];
+        var busy = !!(js && js.phase === 'running');
+        var acts = el('div', 'pacts dacts');
+        [['pause', 'Pause', p.can_pause], ['resume', 'Resume', p.can_resume], ['stop', 'Stop', p.can_stop]].forEach(function(a) {
+            var on = a[2] === true && !busy;
+            var b = button(a[1], a[0] === 'stop' ? 'stop' : '', 'act:' + p.id + ':' + a[0], a[1] + ' ' + name);
+            setEnabled(b, on, on ? (a[0] === 'stop' ? 'Cancel this print on the printer' : a[1] + ' this print')
+                                 : (busy ? 'A command is already running' : whyNot(p, a[0])));
+            b.addEventListener('click', function() {
+                if (b.getAttribute('aria-disabled') === 'true') return;
+                if (opts.onAction) opts.onAction(p, a[0]);
+            });
+            acts.appendChild(b);
+        });
+        job.appendChild(acts);
+        if (js) job.appendChild(el('div', 'pjobline' + (js.phase === 'error' ? ' err' : js.phase === 'done' ? ' ok' : ''), js.phase === 'error' ? js.error : js.text));
+        left.appendChild(job);
+
+        if (p.online !== false) {
+            // ---- temperatures ----
+            var ts = temps(p);
+            if (ts.length) {
+                var tsec = section('dtemps', 'Temperatures');
+                var tl = el('ul', 'dlist');
+                var readOnly = false;
+                ts.forEach(function(h) {
+                    kv(tl, h.label, Math.round(h.temp) + '\u00b0C' + (h.target > 0 ? ' \u2192 ' + Math.round(h.target) + '\u00b0C' : ''));
+                    readOnly = readOnly || h.sensor;
+                });
+                tsec.appendChild(tl);
+                var hs = p.controls && Array.isArray(p.controls.heaters) ? p.controls.heaters : [];
+                if (hs.length && hs.every(function(h) { return h && h.settable === false; }))
+                    tsec.appendChild(el('div', 'dnote', 'Readings only: this printer takes no temperature from here.'));
+                right.appendChild(tsec);
+            }
+            // ---- fans and light ----
+            var fs = fans(p);
+            var light = p.controls && p.controls.light && typeof p.controls.light === 'object' ? p.controls.light : null;
+            if (fs.length || light) {
+                var fsec = section('dfans', light ? 'Fans and light' : 'Fans');
+                var fl = el('ul', 'dlist');
+                fs.forEach(function(f) { kv(fl, f.label, f.percent + '%'); });
+                if (light) kv(fl, 'Light', light.on ? 'On' : 'Off');
+                fsec.appendChild(fl);
+                right.appendChild(fsec);
+            }
+            // ---- filament ----
+            var fg = filaments(p);
+            if (fg.length) {
+                var fil = section('dfil', 'Filament');
+                fg.forEach(function(g) {
+                    var unit = el('div', 'dunit');
+                    unit.appendChild(el('div', 'dunit-name', g.name + (g.note ? ' \u00b7 ' + g.note : '')));
+                    var sws = el('ul', 'dslots');
+                    sws.setAttribute('aria-label', g.name);
+                    g.slots.forEach(function(s, i) {
+                        var li = el('li', 'dslot' + (s.present ? '' : ' vacant') + (s.active ? ' active' : ''));
+                        var text = s.label + ': ' + (s.present ? (s.type || 'filament') + (s.color ? ' ' + s.color : '') + (s.remain !== null ? ', ' + s.remain + '% left' : '') : 'empty') + (s.active ? ', in the toolhead' : '');
+                        li.title = text;
+                        li.setAttribute('aria-label', text);
+                        var sw = el('span', 'dswatch');
+                        if (s.present && s.color) sw.style.background = s.color;
+                        li.appendChild(sw);
+                        li.appendChild(el('span', 'dslot-n', String(i + 1)));
+                        li.appendChild(el('span', 'dslot-t', s.present ? (s.type || 'Filament') : 'Empty'));
+                        if (s.remain !== null && s.present) li.appendChild(el('span', 'dslot-r', s.remain + '%'));
+                        sws.appendChild(li);
+                    });
+                    unit.appendChild(sws);
+                    fil.appendChild(unit);
+                });
+                right.appendChild(fil);
+            }
+        }
+
+        // ---- the connection ----
+        var det = protocolDetails(p);
+        if (det.length) {
+            var dsec = section('dabout', 'Printer');
+            var dl = el('ul', 'dlist');
+            det.forEach(function(d) { kv(dl, d[0], d[1]); });
+            dsec.appendChild(dl);
+            right.appendChild(dsec);
+        }
+        return page;
+    }
+
+    // Redraws a device page and keeps a keyboard user's place across the redraw.
+    function renderDevice(container, row, opts) {
+        var a = document.activeElement;
+        var key = a && container.contains(a) && a.getAttribute ? a.getAttribute('data-fk') : '';
+        while (container.firstChild) container.removeChild(container.firstChild);
+        if (row) container.appendChild(device(row, opts));
+        if (key) {
+            var nodes = container.querySelectorAll('[data-fk]');
+            for (var i = 0; i < nodes.length; i++)
+                if (nodes[i].getAttribute('data-fk') === key) { try { nodes[i].focus({ preventScroll: true }); } catch (e) { nodes[i].focus(); } break; }
+        }
+    }
+
     // Redraws the cards and keeps a keyboard user's place across the redraw.
     function render(container, rows, opts) {
         var a = document.activeElement;
@@ -386,5 +610,6 @@
     }
 
     root.PrinterCards = { render: render, card: card, sortRows: sortRows, stateOf: stateOf, summary: summary,
-                          temps: temps, fans: fans, filaments: filaments, fmtTime: fmtTime, whyNot: whyNot, errorKey: errorKey };
+                          temps: temps, fans: fans, filaments: filaments, fmtTime: fmtTime, whyNot: whyNot, errorKey: errorKey,
+                          device: device, renderDevice: renderDevice };
 })(typeof window !== 'undefined' ? window : this);
