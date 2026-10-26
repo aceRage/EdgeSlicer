@@ -1820,6 +1820,36 @@ void Layer::set_outlook_range(LockRegionParam &lock_param)
     }
 }
 
+// Orca: Anchors and printed infill must share the same body origin. Keep the choice
+// here so per-model surface centering and separated sparse infill cannot drift apart.
+// EdgeSlicer: the helper is upstream's from #15206 (bridge anchors over Hilbert / Octagram
+// infill), which came after #14674 and whose anchor part we already carry.
+static BoundingBox infill_bounding_box(const Layer &layer, const SurfaceFill &fill, const ExPolygon &expoly, BoundingBox bbox)
+{
+    const auto &params = fill.params;
+    const auto &config = layer.regions()[fill.region_id]->region().config();
+    const bool external = params.extrusion_role == erTopSolidInfill || params.extrusion_role == erBottomSurface;
+    const bool per_model = external && params.center_of_surface_pattern == CenterOfSurfacePattern::Each_Model &&
+                           (params.pattern == ipArchimedeanChords || params.pattern == ipOctagramSpiral);
+    const bool separate = !external && params.separated_infills &&
+                          (is_separable_infill_pattern(params.pattern) || !config.solid_infill_rotate_template.value.empty() ||
+                           !config.sparse_infill_rotate_template.value.empty());
+    if (per_model || separate) {
+        double best_overlap = 0.;
+        for (size_t i = 0; i < layer.lslices.size() && i < layer.lslices_separated_component_bboxes.size(); ++i) {
+            const double overlap = area(intersection_ex(layer.lslices[i], expoly));
+            if (overlap > best_overlap) {
+                best_overlap = overlap;
+                // Re-use the whole-object (origin-centered) box, re-centered on this body.
+                const Point center = layer.lslices_separated_component_bboxes[i].center();
+                bbox = layer.object()->bounding_box();
+                bbox.translate(center.x(), center.y());
+            }
+        }
+    }
+    return bbox;
+}
+
 // friend to Layer
 void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator)
 {
@@ -1963,6 +1993,9 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 		                                                           float(surface_fill.params.flow.width()), image_row_ctx);
 
 		for (ExPolygon& expoly : surface_fill.expolygons) {
+
+            // Orca: Reuse the body origin used for bridge anchoring, resetting it for each surface.
+            f->set_bounding_box(infill_bounding_box(*this, surface_fill, expoly, bbox));
 
       f->no_overlap_expolygons = intersection_ex(surface_fill.no_overlap_expolygons, ExPolygons() = {expoly}, ApplySafetyOffset::Yes);
             if (params.symmetric_infill_y_axis) {
@@ -2173,6 +2206,8 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         params.extrusion_role            = surface_fill.params.extrusion_role;
 
         for (ExPolygon &expoly : surface_fill.expolygons) {
+            // Orca: Match the per-body origin of make_fills() before generating physical anchors.
+            f->set_bounding_box(infill_bounding_box(*this, surface_fill, expoly, bbox));
             // Spacing is modified by the filler to indicate adjustments. Reset it for each expolygon.
             f->spacing                     = surface_fill.params.spacing;
             surface_fill.surface.expolygon = std::move(expoly);
