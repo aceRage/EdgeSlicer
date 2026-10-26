@@ -306,7 +306,9 @@ public:
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, ExtrusionRole role = erNone);
     std::string     unretract() { return m_writer.unlift() + m_writer.unretract(); }
-    std::string     set_extruder(unsigned int extruder_id, double print_z, bool by_object=false);
+    // Orca #15144: defer_temp_wait (wait_for_temp_on_wipe_tower) raises the new filament's target ahead
+    // of the tool change and leaves the blocking wait to the wipe tower.
+    std::string     set_extruder(unsigned int extruder_id, double print_z, bool by_object=false, bool defer_temp_wait = false);
     // Emit PA for this filament's active flow variant (Standard / High-Flow), not raw column = id.
     // reset_adaptive=false keeps the two set_extruder sites that historically skipped the reset.
     std::string     set_filament_pressure_advance(unsigned filament_id, bool reset_adaptive = true);
