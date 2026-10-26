@@ -1,6 +1,7 @@
 {
   "type": "process",
-  "name": "0.12mm Fine @UltiMaker 2",
+  "name": "0.10mm Fine @UltiMaker 2",
+  "renamed_from": "0.12mm Fine @UltiMaker 2",
 
   "inherits": "fdm_process_common",
   "from": "system",

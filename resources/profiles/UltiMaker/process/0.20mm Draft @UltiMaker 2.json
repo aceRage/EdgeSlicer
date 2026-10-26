@@ -1,7 +1,7 @@
 {
   "type": "process",
-  "name": "0.25mm Draft @UltiMaker 2",
-  "renamed_from": "0.25mm Darft @UltiMaker 2",
+  "name": "0.20mm Draft @UltiMaker 2",
+  "renamed_from": "0.25mm Draft @UltiMaker 2;0.25mm Darft @UltiMaker 2",
 
   "inherits": "fdm_process_common",
   "from": "system",
