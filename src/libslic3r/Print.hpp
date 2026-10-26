@@ -1333,6 +1333,9 @@ public:
 
     // Wipe tower support.
     bool                        has_wipe_tower() const;
+    // Orca #15146: the error validate() reports, last, for a prime tower whose estimated body leaves the
+    // bed shape (a delta or custom bed's missing corner); empty when it fits or there is no tower.
+    std::string                 prime_tower_off_bed_error() const;
     const WipeTowerData&        wipe_tower_data(size_t filaments_cnt = 0) const;
     // Re-run clearance with current instance / tower / z_offset / toolhead values and
     // copy the matching TCR into wipe_tower_data().final_purge. Safe when the tower

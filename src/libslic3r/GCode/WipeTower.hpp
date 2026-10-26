@@ -67,6 +67,14 @@ public:
     static TriangleMesh its_make_rib_brim(const Polygon &brim, float layer_height);
     // Fillets the corners of a rib wall (Bambu Studio WipeTower.cpp:128 rounding_polygon()).
     static Polygon rounding_polygon(Polygon &polygon, double rounding = 2., double angle_tol = 30. / 180. * PI);
+    // Orca #15146: translation that brings a footprint inside the printable outline, padded by offset. The
+    // prime tower is validated against the real outline, so clamping against the bounding box alone would
+    // leave it off a delta or hexagonal bed. box and polygons must share one scaled coordinate frame; the
+    // translation comes back in millimeters.
+    static Vec2f move_box_inside_polygon(const BoundingBox &box, const Polygons &polygons, coord_t offset = 0);
+    // True when the outline fills its own bounding box (every rectangular bed), so a bounding-box clamp
+    // already keeps a footprint on it. Callers use it to leave rectangular beds on their historic clamp.
+    static bool outline_fills_bounding_box(const Polygons &polygons);
 
     struct Extrusion
     {

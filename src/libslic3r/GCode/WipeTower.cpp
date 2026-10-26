@@ -933,6 +933,76 @@ float WipeTower::get_auto_brim_by_height(float max_height)
     return 8.f;
 }
 
+bool WipeTower::outline_fills_bounding_box(const Polygons &polygons)
+{
+    if (polygons.empty())
+        return true;
+    const BoundingBox bed = get_extents(polygons);
+    // The tolerance is relative because an exact rectangle loses a few ulps once the areas are
+    // squared world coordinates.
+    double area = 0.;
+    for (const Polygon &poly : polygons)
+        area += std::abs(poly.area());
+    const double bed_area = double(bed.size().x()) * double(bed.size().y());
+    return area >= bed_area * (1. - EPSILON);
+}
+
+// Orca #15146 (move_box_inside_box -> move_box_inside_polygon).
+Vec2f WipeTower::move_box_inside_polygon(const BoundingBox &box, const Polygons &polygons, coord_t offset)
+{
+    if (polygons.empty())
+        return Vec2f{0.f, 0.f};
+
+    const BoundingBox bed = get_extents(polygons);
+    // No position fits the footprint.
+    if (box.size().x() >= bed.size().x() - 2 * offset || box.size().y() >= bed.size().y() - 2 * offset)
+        return Vec2f{0.f, 0.f};
+
+    // Clamp against the bounding box first, moving only along the axis that is violated so a dragged
+    // prime tower slides along the bed edge instead of jumping inwards.
+    Point shift(0, 0);
+    for (int axis = 0; axis < 2; ++axis) {
+        if (box.max[axis] > bed.max[axis] - offset)
+            shift[axis] = (bed.max[axis] - offset) - box.max[axis];
+        else if (box.min[axis] < bed.min[axis] + offset)
+            shift[axis] = (bed.min[axis] + offset) - box.min[axis];
+    }
+
+    // A bed that fills its own bounding box is fully clamped by that, so every rectangular bed - all
+    // but the delta-style profiles - stops here, including when a negative margin lets the footprint
+    // hang over the edge.
+    if (outline_fills_bounding_box(polygons))
+        return unscaled<float>(shift);
+
+    // Clamp a negative margin (an auto brim width that has not been resolved yet) to zero: padding by
+    // it would shrink the footprint and hand back a position the validation still rejects. The
+    // epsilon lets the move's round trip through millimeters land on the outline without counting as
+    // a violation.
+    BoundingBox padded = box.inflated(std::max<coord_t>(offset, 0) - SCALED_EPSILON);
+    padded.translate(shift);
+    auto fits = [&padded, &polygons](const Point &move) {
+        BoundingBox moved = padded;
+        moved.translate(move);
+        return diff(Polygons{moved.polygon()}, polygons).empty();
+    };
+    if (fits(Point(0, 0)))
+        return unscaled<float>(shift);
+
+    // Walk towards the middle of the bed. On every non-rectangular bed we ship, the fitting positions
+    // form a convex region around it, so bisecting stops just inside the outline.
+    Point lo(0, 0), hi = bed.center() - padded.center();
+    if (!fits(hi))
+        return unscaled<float>(shift);
+    for (int i = 0; i < 12; ++i) {
+        const Point mid = (lo + hi) / 2;
+        if (fits(mid))
+            hi = mid;
+        else
+            lo = mid;
+    }
+    return unscaled<float>(Point(shift + hi));
+}
+
 static const double wrapping_wipe_tower_depth = 10;
 static const std::map<float, float> nozzle_diameter_to_nozzle_change_width{{0.2f, 0.5f}, {0.4f, 1.0f}, {0.6f, 1.2f}, {0.8f, 1.4f}};
 

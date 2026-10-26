@@ -378,6 +378,10 @@ public:
     WipeTowerFootprint estimate_wipe_tower_footprint(const DynamicPrintConfig & config, int plate_extruder_size = 0, bool use_global_objects = false) const;
     arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, int plate_extruder_size = 0, bool use_global_objects = false) const;
     arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size = 0, bool use_global_objects = false) const;
+    // Orca #15146: move (mm) that pulls a prime tower footprint (world coordinates, mm) onto this plate's real
+    // printable outline (cut to the part every nozzle reaches on a dual-nozzle printer), `margin` mm inside it.
+    // Zero on a bed that fills its bounding box: the drag's bounding-box clamp already covers those.
+    Vec2d wipe_tower_move_onto_bed(const BoundingBoxf &tower_world, double margin) const;
     std::vector<int> get_extruders(bool conside_custom_gcode = false) const;
     std::vector<int> get_extruders(bool conside_custom_gcode, const DynamicPrintConfig& glb_config, const DynamicPrintConfig& project_config) const;
     // expand_mixed_slots = false keeps mixed filament slots as slots instead of their components.
