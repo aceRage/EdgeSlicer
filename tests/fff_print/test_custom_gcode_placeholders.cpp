@@ -97,3 +97,106 @@ TEST_CASE("Print statistics in custom G-code cannot be used in a calculation", "
     init_print({ TestMesh::cube_20x20x20 }, print, model, config);
     CHECK_THROWS_WITH(Slic3r::Test::gcode(print), Catch::Contains("known only after the G-code is generated"));
 }
+
+// Orca #16680: max_layer_z was set only after the layer change G-code was expanded, so [max_layer_z] stopped
+// the slice there.
+TEST_CASE("Layer change G-code gets max_layer_z", "[Print][Placeholders][Orca16680]")
+{
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = Test::slice({ TestMesh::cube_20x20x20 }, {
+                        { "layer_height",               0.2 },
+                        { "initial_layer_print_height", 0.2 },
+                        { "layer_change_gcode",         ";LC [layer_num] max [max_layer_z]" },
+                    }));
+    CHECK(gcode.find("\n;LC 0 max 0.2\n") != std::string::npos);
+    CHECK(gcode.find("\n;LC 99 max 20\n") != std::string::npos);
+}
+
+// Orca #16680: filament start and end G-code get the same placeholders on every tool change path. Bambu
+// printers change tools in the wipe tower (WipeTowerIntegration::append_tcr), whose filament end G-code had
+// no placeholders of its own ([filament_extruder_id] stopped the slice) and whose filament start G-code had
+// no layer placeholders. Other printers change tools through GCode::set_extruder().
+TEST_CASE("Filament start and end G-code get the same placeholders on every tool change path", "[Print][Placeholders][Orca16680]")
+{
+    const bool bbl = GENERATE(false, true);
+    CAPTURE(bbl);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+    config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF" };
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = true;
+    config.option<ConfigOptionBool>("enable_support")->value       = false;
+    config.option<ConfigOptionBool>("spiral_mode")->value          = false;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = { 15. };
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = { 15. };
+    config.option<ConfigOptionFloat>("prime_tower_width")->value   = 35.;
+    config.set_deserialize_strict({ { "brim_type", "no_brim" },
+                                    { "skirt_loops", "0" },
+                                    { "layer_height", "0.2" },
+                                    { "initial_layer_print_height", "0.2" } });
+    const std::string start = "; filament start [filament_extruder_id] [layer_num] [layer_z] [max_layer_z]";
+    const std::string end   = "; filament end [filament_extruder_id] [layer_num] [layer_z] [max_layer_z]";
+    config.set_key_value("filament_start_gcode", new ConfigOptionStrings({ start, start }));
+    config.set_key_value("filament_end_gcode", new ConfigOptionStrings({ end, end }));
+
+    Print        print;
+    Model        model;
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = bbl;
+    REQUIRE(print.has_wipe_tower());
+
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = Test::gcode(print));
+    // Loading filament 2 (index 1) on the first layer, and unloading it on a later layer.
+    CHECK(gcode.find("\n; filament start 1 0 ") != std::string::npos);
+    CHECK(gcode.find("\n; filament end 1 ") != std::string::npos);
+}
+
+// Orca #16680: time_lapse_gcode on printers other than Bambu's got only the layer placeholders, so
+// has_timelapse_safe_pos was always false and timelapse_pos_x / _y were 0 there.
+TEST_CASE("Timelapse G-code gets the snapshot placeholders on bed slingers and other printers", "[Print][Placeholders][Orca16680]")
+{
+    const std::string structure = GENERATE(as<std::string>{}, "i3", "corexy");
+    CAPTURE(structure);
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = Test::slice({ TestMesh::cube_20x20x20 }, {
+                        { "printer_structure",         structure },
+                        { "printable_area",            "0x0,200x0,200x200,0x200" },
+                        { "bed_exclude_area",          "0x0" },
+                        { "extruder_clearance_radius", 40 },
+                        { "timelapse_type",            "0" },
+                        { "time_lapse_gcode",  "; Timelapse {if has_timelapse_safe_pos}safe{else}none{endif} [timelapse_pos_x] "
+                                               "[clear_to_x0] [curr_physical_extruder_id]" },
+                    }));
+    CHECK(gcode.find("\n; Timelapse safe ") != std::string::npos);
+}
+
+// The first filament start G-code on a Bambu printer runs before the first layer (GCode::set_extruder() with
+// no filament loaded yet). Upstream had to add the layer placeholders there; ours already had them.
+TEST_CASE("The first filament start G-code on Bambu Lab printers gets the layer placeholders", "[Print][Placeholders][Orca16680]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_start_gcode", new ConfigOptionStrings({ "; Start [layer_num] [layer_z] [max_layer_z]" }));
+    Print print;
+    print.is_BBL_printer() = true;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = Slic3r::Test::gcode(print));
+    CHECK(gcode.find("\n; Start -1 ") != std::string::npos);
+}
