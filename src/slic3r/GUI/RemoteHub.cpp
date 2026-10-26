@@ -2460,6 +2460,59 @@ Testing::LinkRevocation Testing::revoke_push_for_old_link()
     return r;
 }
 
+static std::string job_name_stem(const std::string& s)
+{
+    size_t b = 0, e = s.size();
+    while (b < e && (s[b] == ' ' || s[b] == '\t')) ++b;
+    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t')) --e;
+    std::string lower = s.substr(b, e - b);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+    for (const char* ext : { ".gcode.3mf", ".3mf", ".gcode" }) {
+        const size_t n = std::strlen(ext);
+        if (lower.size() > n && lower.compare(lower.size() - n, n, ext) == 0) {
+            lower.resize(lower.size() - n);
+            break;
+        }
+    }
+    return lower;
+}
+
+bool Testing::same_job_name(const std::string& reported, const std::string& archived)
+{
+    const std::string a = job_name_stem(reported);
+    return !a.empty() && a == job_name_stem(archived);
+}
+
+std::map<std::string, std::string> Testing::pick_job_thumbnails(const std::vector<ArchiveRecord>& records,
+                                                                const std::map<std::string, std::string>& jobs)
+{
+    std::map<std::string, std::pair<long long, std::string>> best;
+    for (const ArchiveRecord& r : records) {
+        if (r.printer.empty() || r.id.empty()) continue;
+        const auto job = jobs.find(r.printer);
+        if (job == jobs.end() || job->second.empty()) continue;
+        if (!same_job_name(job->second, r.sent_name) && !same_job_name(job->second, r.file)) continue;
+        auto it = best.find(r.printer);
+        if (it == best.end() || r.time > it->second.first) best[r.printer] = { r.time, r.id };
+    }
+    std::map<std::string, std::string> out;
+    for (const auto& kv : best) out[kv.first] = kv.second.second;
+    return out;
+}
+
+std::string Testing::thumbnail_version(const std::string& job, const std::string& record_id)
+{
+    // FNV-1a over "<job>\n<record>": stable across runs and platforms, which std::hash is not.
+    uint64_t h = 1469598103934665603ull;
+    auto feed = [&h](const std::string& s) { for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; } };
+    feed(job);
+    feed("\n");
+    feed(record_id);
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long) h);
+    return std::string(buf, 12);
+}
+
 Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_row_json, long cached_instance, bool cached_fresh,
                                                      const std::string& incoming_row_json, long incoming_instance)
 {
@@ -4458,14 +4511,15 @@ std::string HubServer::archive_thumbnail(const std::string& id)
 
 // The running job's picture, from the G-code archive: the hub reads the sidecars itself (they are
 // plain JSON next to a <id>.png), so this works with every slicer window closed - which is the
-// case the app asked about. Preference goes to the record whose sent name is the job the printer
-// says it is running; failing that, the newest record for that printer, which is what a person
-// looking at a card would expect. "" when there is nothing to show, and the caller answers 404.
+// case the app asked about. Only the record whose sent name is the job the printer says it is
+// running (Testing::pick_job_thumbnails): the "newest record for that printer" fallback served the
+// previous job's picture for any job this PC did not send, and - because a Bambu printer reports
+// its subtask_name without the ".gcode.3mf" the archive recorded - for every Bambu job, so the
+// picture never changed. Absent when there is nothing to show, and the route answers 404.
 std::map<std::string, std::string> HubServer::printer_thumbnail_paths(const std::map<std::string, std::string>& jobs)
 {
-    struct Pick { std::string best, named; long long best_t { -1 }, named_t { -1 }; };
-    std::map<std::string, Pick>        picks;
-    std::map<std::string, std::string> out;
+    std::vector<Testing::ArchiveRecord> records;
+    std::map<std::string, std::string>  out;
 
     const fs::path            root(archive_dir());
     boost::system::error_code ec;
@@ -4483,18 +4537,18 @@ std::map<std::string, std::string> HubServer::printer_thumbnail_paths(const std:
         // is involved in building this path.
         const fs::path png = root / (id + ".png");
         if (!fs::is_regular_file(png, ig)) continue;
-        const long long t = j.value("time", (long long) 0);
-        Pick& p = picks[printer];
-        if (t > p.best_t) { p.best_t = t; p.best = png.string(); }
-        // The job the printer says it is running, matched against the name the printer was really
-        // given and against the archived file name: either can be what it reports.
-        const auto job = jobs.find(printer);
-        if (job != jobs.end() && !job->second.empty() &&
-            (j.value("sent_name", std::string()) == job->second || j.value("file", std::string()) == job->second))
-            if (t > p.named_t) { p.named_t = t; p.named = png.string(); }
+        Testing::ArchiveRecord r;
+        r.printer   = printer;
+        r.id        = id;
+        r.sent_name = j.value("sent_name", std::string());
+        r.file      = j.value("file", std::string());
+        r.time      = j.value("time", (long long) 0);
+        records.push_back(std::move(r));
     }
-    for (const auto& kv : picks)
-        out[kv.first] = kv.second.named.empty() ? kv.second.best : kv.second.named;
+    // The job the printer says it is running, matched against the name the printer was really
+    // given and against the archived file name: either can be what it reports.
+    for (const auto& kv : Testing::pick_job_thumbnails(records, jobs))
+        out[kv.first] = (root / (kv.second + ".png")).string();
     return out;
 }
 
@@ -4655,8 +4709,11 @@ json HubServer::summary_json()
         if (!cam.empty()) p["camera"] = cam;
         // The thumbnail URL is offered whenever there is a picture to serve, so the app can draw
         // it without a probe that would 404 most of the time.
-        if (thumbs.find(id) != thumbs.end())
-            p["thumbnail"] = "/r/" + token + "/printers/" + percent_encode(id) + "/thumbnail.png";
+        // `?job=` changes with the job and the picture behind it, so a client caching by URL fetches
+        // the new job's picture (the route itself ignores the query). No picture: no field.
+        if (const auto th = thumbs.find(id); th != thumbs.end())
+            p["thumbnail"] = "/r/" + token + "/printers/" + percent_encode(id) + "/thumbnail.png?job=" +
+                             Testing::thumbnail_version(p["job"].get<std::string>(), fs::path(th->second).stem().string());
         out["printers"].push_back(p);
     }
     return out;

@@ -242,6 +242,29 @@ struct CameraCandidate
 std::string camera_for_printer(const std::string& printer_id, const std::string& printer_ip,
                                const std::vector<CameraCandidate>& cams);
 
+// ---- a printer's running-job picture (/printers/<id>/thumbnail.png) ----
+// The picture is the plate image of a job this PC sent, out of the G-code archive's sidecars. It is
+// only shown for the job the printer says it is running: a printer running something this PC never
+// sent (another PC, the phone, the SD card) has no picture, not the previous job's.
+struct ArchiveRecord
+{
+    std::string printer;   // the sidecar's printer.id
+    std::string id;        // the record id, which is also the picture's file stem
+    std::string sent_name; // the name the printer was given
+    std::string file;      // the archived file name
+    long long   time { 0 };
+};
+// Whether a printer's reported job name is this archived name. A Bambu printer reports its
+// subtask_name without the ".gcode.3mf" it was sent with, so the extension is not compared.
+bool same_job_name(const std::string& reported, const std::string& archived);
+// printer id -> record id of the newest record matching the job in `jobs` (printer id -> job name).
+// Printers with no job, or no matching record, are absent.
+std::map<std::string, std::string> pick_job_thumbnails(const std::vector<ArchiveRecord>& records,
+                                                       const std::map<std::string, std::string>& jobs);
+// The `?job=` value on a row's thumbnail URL: a short hash of the job name and the record behind
+// the picture, so a client caching by URL sees a new URL for every job.
+std::string thumbnail_version(const std::string& job, const std::string& record_id);
+
 // ---- the Device tab's own live view (spike, opt-in "liveview_go2rtc") ----
 // The go2rtc stream a Bambu printer's camera plays through, for the desktop camera panel.
 //
