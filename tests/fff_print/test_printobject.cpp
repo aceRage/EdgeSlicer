@@ -576,6 +576,8 @@ TEST_CASE("Changing a fill-preparation option re-runs the infill preparation", "
     struct Change { const char *key; const char *from; const char *to; };
     const std::vector<Change> changes{
         { "top_surface_density", "100%", "50%" },
+        { "separated_infills", "0", "1" },
+        { "center_of_surface_pattern", "each_surface", "each_model" },
     };
     for (const Change &change : changes) {
         CAPTURE(change.key);
