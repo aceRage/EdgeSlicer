@@ -2338,7 +2338,7 @@ TEST_CASE("Adaptive TPMS anchors match the printed infill", "[Fill][TpmsAdaptive
 
 // Orca: Slices the meshes as the parts of one object, where they are.
 // EdgeSlicer: our Test::init_print() arranges and centres the first part, so the parts are added here
-// uncentred to one instance at a fixed bed offset: the same mesh then lands at the same bed position in
+// uncentred to one instance at the bed origin: the same mesh then lands at the same bed position in
 // every print, which unmatched_between_prints() relies on.
 static Print &slice_parts(Print &print, DynamicPrintConfig config, const std::vector<TriangleMesh> &parts)
 {
@@ -2352,7 +2352,7 @@ static Print &slice_parts(Print &print, DynamicPrintConfig config, const std::ve
     object->name = "parts.stl";
     for (const TriangleMesh &part : parts)
         object->add_volume(TriangleMesh(part), ModelVolumeType::MODEL_PART, false);
-    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    object->add_instance()->set_offset(Vec3d(0., 0., 0.)); // bed coordinates = mesh coordinates, as upstream's regions expect
     object->ensure_on_bed();
     print.auto_assign_extruders(object);
     print.apply(model, config);
