@@ -302,7 +302,7 @@ void PrinterWebView::set_canvas_device(const PrintHostDevices::Device& device, c
     m_canvas_model          = preset_model;
     const std::string model = device.printer_model.empty() ? preset_model : device.printer_model;
     const bool        was   = m_canvas->IsShown();
-    const bool        shown = m_canvas->set_target(device.host_type == "elegoolink" ? device.address : std::string(), model);
+    const bool        shown = m_canvas->set_target(device.host_type == "elegoolink" ? device.address : std::string(), model, device.apikey);
     if (was != shown)
         Layout();
 }

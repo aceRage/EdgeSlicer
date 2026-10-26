@@ -10057,7 +10057,8 @@ void Sidebar::show_canvas_sync_dialog()
 {
     if (!wxGetApp().plater())
         return;
-    const std::string address = canvas_address_for_current_printer();
+    std::string       token;
+    const std::string address = canvas_address_for_current_printer(&token);
     if (address.empty()) {
         SyncRichConfirmDialog dlg(this, _L("This printer has no address yet. Add one in its connection settings, then sync again."), wxOK);
         dlg.SetOKLabel(_L("Got it"));
@@ -10065,7 +10066,8 @@ void Sidebar::show_canvas_sync_dialog()
         dlg.ShowModal();
         return;
     }
-    const CanvasQueryResult result = query_canvas_with_progress(this, address);
+    const std::string model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
+    const CanvasQueryResult result = query_canvas_with_progress(this, address, model, token);
     if (!result.ok) {
         SyncRichConfirmDialog dlg(this, canvas_failure_text(result), wxOK);
         dlg.SetOKLabel(_L("Got it"));
@@ -20861,6 +20863,8 @@ void adjust_settings_for_flowrate_calib(ModelObjectPtrs& objects, bool linear, i
         _obj->config.set_key_value("top_solid_infill_flow_ratio", new ConfigOptionFloat(1.0f));
         _obj->config.set_key_value("infill_direction", new ConfigOptionFloat(45));
         _obj->config.set_key_value("solid_infill_direction", new ConfigOptionFloat(135));
+        _obj->config.set_key_value("center_of_surface_pattern", new ConfigOptionEnum<CenterOfSurfacePattern>(CenterOfSurfacePattern::Each_Surface));
+        _obj->config.set_key_value("separated_infills", new ConfigOptionBool(false));
         _obj->config.set_key_value("align_infill_direction_to_model", new ConfigOptionBool(true));
         _obj->config.set_key_value("ironing_type", new ConfigOptionEnum<IroningType>(IroningType::NoIroning));
         _obj->config.set_key_value("internal_solid_infill_speed", new ConfigOptionFloats { internal_solid_speed });
@@ -20868,7 +20872,13 @@ void adjust_settings_for_flowrate_calib(ModelObjectPtrs& objects, bool linear, i
         _obj->config.set_key_value("seam_slope_type", new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
         _obj->config.set_key_value("gap_fill_target", new ConfigOptionEnum<GapFillTarget>(GapFillTarget::gftNowhere));
         print_config->set_key_value("max_volumetric_extrusion_rate_slope", new ConfigOptionFloats { 0 });
+        // ORCA: request the calibration's special toolpath order (chords first, center spiral
+        // last and inside-out) so opposing directions collide into the tactile lip the test
+        // reads. The special order only applies while the fill order is Default, so reset the
+        // profile's fill order on the calibration objects; changing the setting on the object
+        // afterwards deliberately overrides the special order.
         _obj->config.set_key_value("calib_flowrate_topinfill_special_order", new ConfigOptionBool(true));
+        _obj->config.set_key_value("top_surface_fill_order", new ConfigOptionEnum<SurfaceFillOrder>(SurfaceFillOrder::Default));
 
         // extract flowrate from name, filename format: flowrate_xxx
         std::string obj_name = _obj->name;

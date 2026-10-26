@@ -53,6 +53,19 @@ enum class FuzzySkinMode {
     Combined,
 };
 
+// ORCA: direction in which top_surface_expansion grows the top surfaces.
+enum class TopSurfaceExpansionDirection {
+    InwardAndOutward,
+    Inward,
+    Outward,
+};
+
+enum class CenterOfSurfacePattern {
+    Each_Surface,
+    Each_Model,
+    Each_Assembly,
+};
+
 enum class NoiseType {
     Classic,
     Perlin,
@@ -82,6 +95,43 @@ enum InfillPattern : int {
     ipSupportBase, ipConcentricInternal,
     ipCount,
 };
+
+// Orca: Infill patterns that the "separated_infills" option can center on each connected body.
+inline bool is_separable_infill_pattern(InfillPattern pattern)
+{
+    switch (pattern) {
+    case ipMonotonic:
+    case ipMonotonicLine:
+    case ipRectilinear:
+    case ipAlignedRectilinear:
+    case ipZigZag:
+    case ipCrossZag:
+    case ipLockedZag:
+    case ipLine:
+    case ipGrid:
+    case ipTriangles:
+    case ipStars:          // tri-hexagon
+    case ipCubic:
+    case ipQuarterCubic:
+    case ipHoneycomb:
+    case ip3DHoneycomb:
+    case ipLateralHoneycomb:
+    case ipLateralLattice:
+    case ipCrossHatch:
+    case ipTpmsD:
+    case ipTpmsFK:
+    case ipGyroid:
+    case ipHilbertCurve:
+    case ipArchimedeanChords:
+    case ipOctagramSpiral:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Orca: Infill patterns laid out by an octree, which each connected body always gets of its own.
+inline bool is_octree_infill_pattern(InfillPattern pattern) { return pattern == ipAdaptiveCubic || pattern == ipSupportCubic; }
 
 // Orca: Infill patterns graded by the "adaptive_infill_mode" option.
 inline bool is_adaptive_infill_pattern(InfillPattern pattern) { return pattern == ipGyroid || pattern == ipTpmsD || pattern == ipTpmsFK; }
@@ -118,6 +168,18 @@ enum class IroningType {
 // and zero stops the fillers from making progress.
 constexpr double IRONING_SPACING_MIN = 0.05;
 
+// Orca #11194: the filament_ironing_* override for a 1-based filament id, or process_value when
+// the override is nil. Edge: an id outside the vector (a mixed / virtual filament id, or a
+// config carrying fewer filament slots than the print) also falls back to the process value,
+// instead of borrowing filament 1's override the way ConfigOptionVector::get_at() would.
+template<class TVectorOption>
+double ironing_filament_override(const TVectorOption &opt, int filament_id, double process_value)
+{
+    if (filament_id < 1 || size_t(filament_id) > opt.values.size() || opt.is_nil(size_t(filament_id - 1)))
+        return process_value;
+    return double(opt.get_at(size_t(filament_id - 1)));
+}
+
 //BBS
 enum class WallInfillOrder {
     InnerOuterInfill,
@@ -142,6 +204,15 @@ enum class WallDirection
     Auto,
     CounterClockwise,
     Clockwise,
+    Count,
+};
+
+// Orca: print order of surface fill loops/fragments for center-based fill patterns
+// (Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).
+enum class SurfaceFillOrder {
+    Default,
+    Outward,
+    Inward,
     Count,
 };
 
@@ -920,6 +991,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrinterTechnology)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeFlavor)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopSurfaceExpansionDirection)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CenterOfSurfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
@@ -961,6 +1034,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillGradient)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SurfaceFillOrder)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
@@ -1661,11 +1735,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>,  top_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>,  undertop_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>,  bottom_surface_pattern))
+    ((ConfigOptionEnum<SurfaceFillOrder>, top_surface_fill_order))
+    ((ConfigOptionEnum<SurfaceFillOrder>, bottom_surface_fill_order))
     ((ConfigOptionEnum<InfillPattern>, internal_solid_infill_pattern))
     ((ConfigOptionFloatOrPercent,       outer_wall_line_width))
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
+    ((ConfigOptionFloat,                top_layer_direction))
+    ((ConfigOptionFloat,                bottom_layer_direction))
     ((ConfigOptionString,               solid_infill_rotate_template))
     ((ConfigOptionBool,                 symmetric_infill_y_axis))
     ((ConfigOptionBool,                 infill_complete_top))
@@ -1681,6 +1759,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                lightning_prune_angle))
     ((ConfigOptionFloat,                lightning_straightening_angle))
     ((ConfigOptionBool,                 align_infill_direction_to_model))
+    ((ConfigOptionEnum<CenterOfSurfacePattern>, center_of_surface_pattern))
+    ((ConfigOptionBool,                 separated_infills))
     // FDM hollowing (FDMHollowing.hpp). Region settings, so a part can override the object.
     ((ConfigOptionBool,                 hollow_interior))
     ((ConfigOptionFloat,                hollow_shell_thickness))
@@ -1735,6 +1815,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, ironing_direction))
     ((ConfigOptionFloats, ironing_speed))
     ((ConfigOptionFloat, ironing_angle))
+    ((ConfigOptionBool, ironing_angle_fixed))
+    // Orca #11194: filament ironing overrides (per filament, nil = use the process value)
+    ((ConfigOptionPercentsNullable, filament_ironing_flow))
+    ((ConfigOptionFloatsNullable, filament_ironing_spacing))
+    ((ConfigOptionFloatsNullable, filament_ironing_inset))
+    ((ConfigOptionFloatsNullable, filament_ironing_speed))
     // Detect bridging perimeters
     ((ConfigOptionBool, detect_overhang_wall))
     ((ConfigOptionBool, unsupported_wall_last))
@@ -1757,6 +1843,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent, top_surface_line_width))
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
+    ((ConfigOptionFloat, top_surface_expansion))
+    ((ConfigOptionFloat, top_surface_expansion_margin))
+    ((ConfigOptionEnum<TopSurfaceExpansionDirection>, top_surface_expansion_direction))
     ((ConfigOptionInt, top_color_penetration_layers))
     ((ConfigOptionFloats, top_surface_speed))
     //BBS

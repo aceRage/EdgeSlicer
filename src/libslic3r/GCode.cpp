@@ -10788,6 +10788,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         } else if (path.role() == erIroning) {
             speed_setting = "ironing_speed";
             speed = this->process_flow_value(m_config.ironing_speed);
+            // Orca #15082: the active filament's ironing speed override wins when set.
+            const int iron_filament = int(m_writer.extruder()->id()) + 1;
+            const double override_speed = ironing_filament_override(m_config.filament_ironing_speed, iron_filament, -1.);
+            if (override_speed > 0.) {
+                speed         = override_speed;
+                speed_setting = "filament_ironing_speed";
+            }
         } else if (path.role() == erBottomSurface) {
             speed_setting = "initial_layer_infill_speed";
             speed = this->process_flow_value(m_config.initial_layer_infill_speed);
