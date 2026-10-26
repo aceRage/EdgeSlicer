@@ -329,6 +329,42 @@ def plain_monitor_tests(emu):
     m.close()
 
 
+def control_page_while_adding(emu):
+    """The control page polls GET /emu/printers while printers are added (the owner's hand test,
+    2026-10-26: "dictionary changed size during iteration" in core/control.py)."""
+    print("-- control page: polling while printers are added --")
+    import threading
+    stop, errors, reads = threading.Event(), [], [0]
+
+    def poll():
+        while not stop.is_set():
+            try:
+                emu.printers()
+                reads[0] += 1
+            except Exception as e:  # noqa: BLE001 - any failed read is the bug
+                errors.append(str(e)[:200])
+
+    t = threading.Thread(target=poll, daemon=True)
+    t.start()
+    added = []
+    try:
+        for i in range(8):
+            host = free_host(200 + i * 3)
+            r = emu._call("/emu/printers/add", {"preset": "moonraker_generic",
+                                                "overrides": {"id": "poll-%d" % i, "bind": host, "port": free_port(host)}})
+            added.append(r.get("id") or "poll-%d" % i)
+    finally:
+        stop.set()
+        t.join(5)
+    check(not errors and reads[0] > 0, "%d control-page reads while adding %d printers, none failed%s" %
+          (reads[0], len(added), (": " + errors[0]) if errors else ""))
+    for pid in added:
+        try:
+            emu._call("/emu/printers/%s/remove" % pid, {})
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main():
     emu_p = EmulatorProcess(os.path.join(WORK, "emuhome"), [combo, plain])
     emu_p.start()
@@ -338,6 +374,7 @@ def main():
         plain_tests(emu)
         monitor_tests(emu)
         plain_monitor_tests(emu)
+        control_page_while_adding(emu)
     finally:
         emu_p.stop()
     print("\n== CC2 emulator self-test: %d checks, %d failed ==" % (checks, len(fails)))

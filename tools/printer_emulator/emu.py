@@ -233,7 +233,7 @@ def serve(args):
     print("  control page  %s" % url)
     print("  home          %s" % home)
     print("  config        %s" % sup.config_path)
-    for p in sup.printers.values():
+    for p in sup.printer_list():
         h = p.personality.hint()
         print("  %-16s %-8s %s%s" % (p.id, p.personality.name, ", ".join(p.addresses()) or "(stopped)",
                                      "  ERROR: " + p.error if p.error else "  -> add in EdgeSlicer as %s, host %s"
