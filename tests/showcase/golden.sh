@@ -64,7 +64,7 @@ OUT=$(cd "$OUT" && pwd)
 MODEL="$REPO/resources/handy_models/3DBenchy.3mf"
 REPORT="$OUT/report.txt"
 : > "$REPORT"
-echo "golden:    $GEXE ($(cat "$GOLDEN_DIR/COMMIT.txt" 2>/dev/null | head -1))" | tee -a "$REPORT"
+echo "golden:    $GEXE ($(head -1 "$GOLDEN_DIR/COMMIT.txt" 2>/dev/null))" | tee -a "$REPORT"
 echo "candidate: $CEXE" | tee -a "$REPORT"
 echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$REPORT"
 
@@ -79,7 +79,8 @@ render() {   # exe datadir fixture out extra-args...
 run_still() {   # name [--alpha-exact] [render args...]
     name=$1; shift
     alpha=
-    if [ "${1:-}" = "--alpha-exact" ]; then alpha="--alpha-exact --premultiplied"; shift; fi
+    premul=
+    if [ "${1:-}" = "--alpha-exact" ]; then alpha=--alpha-exact; premul=--premultiplied; shift; fi
     [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && return 0
     fx="$OUT/fixtures/$name.3mf"
     "$PY" "$HERE/make_fixture.py" "$MODEL" "$HERE/fixtures/$name.json" "$fx" || { STATUS=2; return; }
@@ -91,7 +92,7 @@ run_still() {   # name [--alpha-exact] [render args...]
     fi
     rm -f "$c"
     render "$CEXE" "$OUT/datadir_candidate" "$fx" "$c" --still 0 "$@" || { echo "$name: candidate render FAILED (see $c.log)" | tee -a "$REPORT"; STATUS=2; return; }
-    line=$("$PY" "$HERE/compare.py" "$g" "$c" --max-delta "$MAXD" --mean-delta "$MEAND" $alpha \
+    line=$("$PY" "$HERE/compare.py" "$g" "$c" --max-delta "$MAXD" --mean-delta "$MEAND" ${alpha:+"$alpha"} ${premul:+"$premul"} \
         --diff "$OUT/diff/$name.png" --json "$OUT/diff/$name.json")
     rc=$?
     # A toolpath scene whose plate did not slice falls back to the model: say so.
