@@ -11,7 +11,11 @@
 //   approximation for the specular part.
 // - Procedural layer lines on the mesh at the object's real layer heights (design 2.6.2), faded
 //   out below ~1.5 px a layer so far shots do not moire (layer_fade, as layer_line_fade() in C++).
-// - Linear lighting, exposure, the Khronos PBR Neutral tone map (keeps filament colours), sRGB out.
+// - Linear lighting. 1a (tests/design_showcase_realism.md 2.1): with hdr_output the shader writes
+//   linear light into the objects' RGBA16F layer and the post pass (showcase_post.fs) applies the
+//   exposure, the tone curve and the sRGB encoding. Without it (the floor's mirror pass, or no float
+//   buffers) it does those itself: exposure, the Khronos PBR Neutral tone map (keeps filament
+//   colours) or the filmic curve, sRGB out.
 //
 // Optional: when it does not compile the Showcase canvas draws its objects with phong as in S1.
 
@@ -34,7 +38,12 @@ uniform int   light_count;
 uniform vec3  light_dir[3];
 uniform vec3  light_color[3];
 uniform vec3  camera_position;       // world
-uniform float exposure;              // linear multiplier (2^EV)
+uniform float exposure;              // linear multiplier (2^EV); not used with hdr_output
+// 1a: linear light out for the post pass; else tone-mapped sRGB as before.
+uniform bool  hdr_output;
+// 1a: the opaque pass writes full coverage into the HDR layer (blending is off there).
+uniform bool  force_opaque;
+uniform int   tone_curve;            // 0 Khronos PBR Neutral, 1 filmic (ToneCurve)
 
 // The key light's shadow map (unit 5, as phong).
 uniform sampler2D shadow_map;
@@ -99,6 +108,29 @@ vec3 tone_map(vec3 color)
     float g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
     return mix(color, vec3(new_peak), g);
 }
+
+// AgX-style filmic (showcase_post.fs, ShowcaseTone.cpp): the optional curve (ToneCurve::Filmic).
+vec3 tone_filmic(vec3 c)
+{
+    const mat3 inset = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+                            0.0784335999999992, 0.878468636469772, 0.0784336,
+                            0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+    const mat3 outset = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+                             -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+                             -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+    const float min_ev = -12.47393;
+    const float max_ev = 4.026069;
+    c = inset * max(c, vec3(0.0));
+    c = clamp(log2(max(c, vec3(1e-10))), min_ev, max_ev);
+    c = (c - min_ev) / (max_ev - min_ev);
+    vec3 x2 = c * c;
+    vec3 x4 = x2 * x2;
+    c = 15.5 * x4 * x2 - 40.14 * x4 * c + 31.96 * x4 - 6.868 * x2 * c + 0.4298 * x2 + 0.1191 * c - 0.00232;
+    c = outset * c;
+    return pow(clamp(c, 0.0, 1.0), vec3(2.2));
+}
+
+vec3 tone_curve_map(vec3 c) { return tone_curve == 1 ? tone_filmic(c) : tone_map(c); }
 
 // --- environment ---------------------------------------------------------------------------------
 
@@ -329,7 +361,7 @@ void main()
         specular += mat_clearcoat * coat * env_brdf(vec3(0.04), 0.08, n_dot_v);
     }
 
-    vec3 color = (diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5)) * exposure * 0.8;
+    vec3 lit = diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5);
 
     // Translucent: the body lets light through, the rim reflects (Fresnel edge brightening).
     float alpha = uniform_color.a * mat_alpha;
@@ -338,5 +370,13 @@ void main()
         alpha = clamp(mix(alpha, 1.0, edge * 0.7) + dot(specular, vec3(0.3)) * 0.5, 0.0, 1.0);
     }
 
-    out_color = vec4(linear_to_srgb(tone_map(color)), alpha);
+    if (hdr_output) {
+        // Linear light; the post pass applies the exposure, the curve and the encoding. Kept inside
+        // the half float range (and NaN-free) so one bad pixel cannot spread through later blurs.
+        vec3 radiance = min(max(lit * 0.8, vec3(0.0)), vec3(60000.0));
+        out_color = vec4(radiance, force_opaque ? 1.0 : alpha);
+        return;
+    }
+    vec3 color = lit * exposure * 0.8;
+    out_color = vec4(linear_to_srgb(tone_curve_map(color)), alpha);
 }

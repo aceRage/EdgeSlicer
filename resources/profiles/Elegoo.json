@@ -1,6 +1,6 @@
 {
     "name": "Elegoo",
-    "version": "02.04.00.16",
+    "version": "02.04.00.17",
     "force_update": "0",
     "description": "Elegoo configurations",
     "machine_model_list": [
@@ -993,6 +993,18 @@
         {
             "name": "fdm_process_elegoo_02010",
             "sub_path": "process/fdm_process_elegoo_02010.json"
+        },
+        {
+            "name": "fdm_process_elegoo_04020_cc2",
+            "sub_path": "process/CC2BASE/fdm_process_elegoo_04020_cc2.json"
+        },
+        {
+            "name": "fdm_process_elegoo_06030_cc2",
+            "sub_path": "process/CC2BASE/fdm_process_elegoo_06030_cc2.json"
+        },
+        {
+            "name": "fdm_process_elegoo_08040_cc2",
+            "sub_path": "process/CC2BASE/fdm_process_elegoo_08040_cc2.json"
         },
         {
             "name": "0.10mm Standard @Elegoo C2 0.2 nozzle",

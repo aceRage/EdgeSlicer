@@ -560,6 +560,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/BambuCloudWatch.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
     GUI/BambuNetInfo.hpp
@@ -979,6 +980,9 @@ set(SLIC3R_GUI_SOURCES
     Utils/ElegooCanvasMapping.cpp
     Utils/ElegooCanvasMapping.hpp
     Utils/ElegooCanvasQuery.cpp
+    Utils/ElegooCc2.cpp
+    Utils/ElegooCc2.hpp
+    Utils/ElegooCc2Net.cpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
     Utils/ElegooSdcp.cpp

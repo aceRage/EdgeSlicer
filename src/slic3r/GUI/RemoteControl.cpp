@@ -1411,7 +1411,9 @@ void describe_bambu(MachineObject* m, json& p)
     p["can_stop"]   = m->can_abort();
     // print_status under its own name: "status" has carried the same string since the first
     // version of this API, and the control UI reads the field the desktop's code names.
-    p["print_status"] = m->print_status;
+    // The same word as `status` (BambuCloudWatch::row_status): the cloud list's when the printer
+    // has not reported yet, so a row never says printing with no status beside it.
+    p["print_status"] = BambuCloudWatch::row_status(m->print_status, m->iot_print_status).status;
     p["stage"]        = std::string(m->get_curr_stage().ToUTF8().data());
     if (m->print_error != 0)
         p["print_error"] = print_error_json(m);

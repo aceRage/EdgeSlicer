@@ -10057,7 +10057,8 @@ void Sidebar::show_canvas_sync_dialog()
 {
     if (!wxGetApp().plater())
         return;
-    const std::string address = canvas_address_for_current_printer();
+    std::string       token;
+    const std::string address = canvas_address_for_current_printer(&token);
     if (address.empty()) {
         SyncRichConfirmDialog dlg(this, _L("This printer has no address yet. Add one in its connection settings, then sync again."), wxOK);
         dlg.SetOKLabel(_L("Got it"));
@@ -10065,7 +10066,8 @@ void Sidebar::show_canvas_sync_dialog()
         dlg.ShowModal();
         return;
     }
-    const CanvasQueryResult result = query_canvas_with_progress(this, address);
+    const std::string model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
+    const CanvasQueryResult result = query_canvas_with_progress(this, address, model, token);
     if (!result.ok) {
         SyncRichConfirmDialog dlg(this, canvas_failure_text(result), wxOK);
         dlg.SetOKLabel(_L("Got it"));
