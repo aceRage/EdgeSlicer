@@ -7,8 +7,9 @@
 //   decode (OpenCV imgcodecs, refused before decoding when the header announces a huge image)
 //   -> downscale to the working resolution (OpenCV INTER_AREA, alpha premultiplied)
 //   -> one colour level  : alpha or brightness (Otsu threshold by default) field
-//      several colours   : palette by a deterministic k-means over a colour histogram, the
-//                          background colour (most common at the border) can be left out
+//      several colours   : palette by a deterministic k-means over a colour histogram in CIE Lab
+//                          (blend pixels of edges and glow left out), the background colour
+//                          (most common at the border) can be left out
 //   -> per level: Gaussian blur -> marching squares with linear interpolation (sub-pixel)
 //   -> Clipper (holes by even-odd) -> remove specks -> Douglas-Peucker -> SVG in millimetres.
 //
@@ -216,6 +217,39 @@ std::string image_trace_part_name(const std::string &base, int layer, int layers
 
 // "#RRGGBB"
 std::string image_trace_color_to_hex(const std::array<uint8_t, 3> &color);
+
+// How the "Match filaments" menu of the trace dialog maps colour levels to project filaments
+enum class TraceFilamentMatch : int {
+    // Add a filament of the colour for every level without a close filament (reuses one within
+    // IMAGE_TRACE_REUSE_DELTA_E, also one added for an earlier level)
+    AddNew = 0,
+    // Level i goes to filament i: filaments 1..N get the traced colours, missing ones are added
+    ReplaceColours,
+    // Nearest existing filament colour, nothing changes
+    Nearest
+};
+
+// A traced colour this close (CIEDE2000) to a filament uses that filament instead of a new one
+constexpr double IMAGE_TRACE_REUSE_DELTA_E = 8.;
+
+struct TraceFilamentPlan
+{
+    // Per level: 1 based filament once the plan is applied (0 = default, no filament matched)
+    std::vector<int> filaments;
+    // Filaments to append, "#RRGGBB" in this order; they get the numbers after the existing ones
+    std::vector<std::string> add;
+    // Existing filaments (1 based) to recolour
+    std::vector<std::pair<int, std::string>> recolour;
+};
+
+/// <summary>
+/// Plan the filaments of traced colour levels. There is no limit by the printer (AMS slots, heads
+/// or nozzles): the user gets one filament per colour when asking to add or replace.
+/// </summary>
+/// <param name="levels">Traced colour of every level</param>
+/// <param name="filaments">"#rrggbb" of every physical filament of the project</param>
+TraceFilamentPlan plan_trace_filaments(const std::vector<std::array<uint8_t, 3>> &levels, const std::vector<std::string> &filaments,
+                                       TraceFilamentMatch mode);
 
 } // namespace Slic3r
 
