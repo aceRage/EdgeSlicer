@@ -2281,7 +2281,11 @@ void Layer::make_ironing()
                 ironing_params.inset 		= config.ironing_inset;
 				ironing_params.height 		= default_layer_height * 0.01 * config.ironing_flow;
 				ironing_params.speed 		= config.ironing_speed.values.front();
-                double ironing_angle = (config.ironing_angle >= 0 ? config.ironing_angle : config.infill_direction) * M_PI / 180.;
+                // Orca #13631: a set top_layer_direction is the ironing base direction too (fixed, see below).
+                // EdgeSlicer: our ironing_angle is still absolute when >= 0 (OD4 #716 turns it into an offset).
+                const bool top_layer_direction_set = config.top_layer_direction.value >= 0.;
+                double ironing_angle = (config.ironing_angle >= 0 ? config.ironing_angle :
+                                        top_layer_direction_set ? config.top_layer_direction.value : config.infill_direction) * M_PI / 180.;
                 // ORCA: Align ironing angle with model
                 if (config.align_infill_direction_to_model) {
                     auto m = this->object()->trafo().matrix();
@@ -2388,6 +2392,8 @@ void Layer::make_ironing()
         }
         f->spacing = ironing_params.line_spacing;
         f->angle = float(ironing_params.angle);
+        // Orca #13631: an ironing based on a set top_layer_direction does not alternate per layer.
+        f->is_using_template_angle = ironing_params.layerm->region().config().top_layer_direction.value >= 0.;
         f->link_max_length = (coord_t) scale_(3. * f->spacing);
 		double  extrusion_height = ironing_params.height * f->spacing / nozzle_dmr;
 		float  extrusion_width  = Flow::rounded_rectangle_extrusion_width_from_spacing(float(nozzle_dmr), float(extrusion_height));

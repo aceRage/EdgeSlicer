@@ -3276,7 +3276,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("top_layer_direction", coFloat);
     def->label = L("Top layer direction");
     def->category = L("Strength");
-    def->tooltip = L("Optional absolute angle for top-layer infill. Set to -1 to use the current solid infill direction behavior.");
+    def->tooltip = L("Optional absolute angle for top-layer infill and ironing base direction. Set to -1 to use the current solid infill direction behavior.");
     def->sidetext = "°";	// degrees, don't need translation
     def->min = -1;
     def->max = 360;
