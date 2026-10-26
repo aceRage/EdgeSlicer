@@ -63,6 +63,7 @@ std::vector<const ExtrusionPath *> ironing_paths(const Print &print, std::vector
 struct IroningStats
 {
     size_t      paths    = 0;
+    double      length   = 0.;  // total ironing length, mm
     double      mm3      = 0.;  // mm3_per_mm of the ironing paths (all equal on one surface)
     BoundingBox bbox;
 };
@@ -79,6 +80,7 @@ IroningStats ironing_stats(Items items)
     IroningStats stats;
     for (const ExtrusionPath *path : ironing_paths(print, keep_alive)) {
         ++stats.paths;
+        stats.length += unscaled(path->polyline.length());
         stats.mm3 = std::max(stats.mm3, path->mm3_per_mm);
         for (const Point &pt : path->polyline.points)
             stats.bbox.merge(pt);
@@ -234,10 +236,11 @@ TEST_CASE("Filament ironing flow and spacing overrides change the ironing extrus
         const IroningStats more = ironing_stats({ { "filament_ironing_flow", "20" } });
         CHECK(more.mm3 == Approx(2. * base.mm3).epsilon(0.01));
     }
-    SECTION("spacing 0.2 over a process 0.1 doubles the per-line flow and halves the lines") {
+    SECTION("spacing 0.2 over a process 0.1 doubles the per-line flow and halves the ironed length") {
         const IroningStats wide = ironing_stats({ { "filament_ironing_spacing", "0.2" } });
         CHECK(wide.mm3 == Approx(2. * base.mm3).epsilon(0.01));
-        CHECK(wide.paths < base.paths);
+        // Half as many lines over the same surface (monotonic ironing may be one single path).
+        CHECK(wide.length < 0.7 * base.length);
     }
     SECTION("the #249 minimum spacing clamp applies to the override too") {
         const IroningStats tight = ironing_stats({ { "filament_ironing_spacing", "0" } });
