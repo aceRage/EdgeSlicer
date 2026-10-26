@@ -1056,7 +1056,13 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         unsigned int       old_extruder_id    = gcodegen.writer().extruder()->id();
         const std::string& filament_end_gcode = gcodegen.config().filament_end_gcode.get_at(old_extruder_id);
         if (gcodegen.writer().extruder() != nullptr && !filament_end_gcode.empty()) {
-            end_filament_gcode_str = gcodegen.placeholder_parser_process("filament_end_gcode", filament_end_gcode, old_extruder_id);
+            // Orca #16680: the same placeholders as filament end G-code on the other tool change paths.
+            DynamicConfig config;
+            config.set_key_value("filament_extruder_id", new ConfigOptionInt((int) old_extruder_id));
+            config.set_key_value("layer_num", new ConfigOptionInt(gcodegen.m_layer_index));
+            config.set_key_value("layer_z", new ConfigOptionFloat(tcr.print_z));
+            config.set_key_value("max_layer_z", new ConfigOptionFloat(gcodegen.m_max_layer_z));
+            end_filament_gcode_str = gcodegen.placeholder_parser_process("filament_end_gcode", filament_end_gcode, old_extruder_id, &config);
             check_add_eol(end_filament_gcode_str);
         }
     }
@@ -1366,6 +1372,10 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         // Process the filament_start_gcode for the active filament only.
         DynamicConfig config;
         config.set_key_value("filament_extruder_id", new ConfigOptionInt(new_extruder_id));
+        // Orca #16680: the same layer placeholders as filament start G-code on the other tool change paths.
+        config.set_key_value("layer_num", new ConfigOptionInt(gcodegen.m_layer_index));
+        config.set_key_value("layer_z", new ConfigOptionFloat(tcr.print_z));
+        config.set_key_value("max_layer_z", new ConfigOptionFloat(gcodegen.m_max_layer_z));
         start_filament_gcode_str = gcodegen.placeholder_parser_process("filament_start_gcode", filament_start_gcode, new_extruder_id,
                                                                        &config);
         check_add_eol(start_filament_gcode_str);
@@ -3344,6 +3354,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     {
         const Vec2f plate_offset = m_writer.get_xy_offset();
         m_timelapse_pos_picker.init(&print, Point(coord_t(plate_offset.x()), coord_t(plate_offset.y())));
+        // Orca #16680: non-Bambu printers run the costly per-layer picker only for a template that names its results.
+        const std::string &templ     = print.config().time_lapse_gcode.value;
+        m_timelapse_uses_pos         = templ.find("timelapse_pos") != std::string::npos ||
+                                       templ.find("has_timelapse_safe_pos") != std::string::npos;
+        m_timelapse_uses_clear_to_x0 = templ.find("clear_to_x0") != std::string::npos;
     }
     m_printed_objects.clear();
     m_farthest_point_timelapse = FarthestPointTimelapseContext();
@@ -4164,12 +4179,22 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         this->placeholder_parser().set("filament_volume_type_list", new ConfigOptionString(std::move(joined)));
     }
 
-    this->placeholder_parser().set("print_time_total_sec", new ConfigOptionString(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Total_Sec_Placeholder)));
-    this->placeholder_parser().set("print_time_day", new ConfigOptionString(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Day_Placeholder)));
-    this->placeholder_parser().set("print_time_hour", new ConfigOptionString(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Hour_Placeholder)));
-    this->placeholder_parser().set("print_time_minute", new ConfigOptionString(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Minute_Placeholder)));
-    this->placeholder_parser().set("print_time_sec", new ConfigOptionString(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Sec_Placeholder)));
-    this->placeholder_parser().set("used_filament_length", new ConfigOptionString(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Used_Filament_Length_Placeholder)));
+    this->placeholder_parser().set_deferred("print_time_total_sec", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Total_Sec_Placeholder));
+    this->placeholder_parser().set_deferred("print_time_day", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Day_Placeholder));
+    this->placeholder_parser().set_deferred("print_time_hour", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Hour_Placeholder));
+    this->placeholder_parser().set_deferred("print_time_minute", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Minute_Placeholder));
+    this->placeholder_parser().set_deferred("print_time_sec", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Sec_Placeholder));
+    this->placeholder_parser().set_deferred("used_filament_length", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Used_Filament_Length_Placeholder));
+    // The final print statistics are known only after the whole G-code is generated, so they are filled in during post-processing too.
+    // The running extruded_* totals are left alone; profiles use them as numbers.
+    this->placeholder_parser().set_deferred("used_filament", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Used_Filament_Length_Placeholder));
+    this->placeholder_parser().set_deferred("print_time", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Normal_Print_Time_Placeholder));
+    this->placeholder_parser().set_deferred("normal_print_time", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Normal_Print_Time_Placeholder));
+    this->placeholder_parser().set_deferred("silent_print_time", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Silent_Print_Time_Placeholder));
+    this->placeholder_parser().set_deferred("total_weight", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Total_Weight_Placeholder));
+    this->placeholder_parser().set_deferred("total_cost", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Total_Cost_Placeholder));
+    this->placeholder_parser().set_deferred("total_wipe_tower_cost", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Total_Wipe_Tower_Cost_Placeholder));
+    this->placeholder_parser().set_deferred("total_wipe_tower_filament", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Total_Wipe_Tower_Filament_Placeholder));
 
     // Expand the file header only after the start-up placeholders and writer state are ready.
     // Use the regular custom G-code path so invalid placeholders report the template name.
@@ -4883,19 +4908,16 @@ int GCode::timelapse_physical_extruder(int extruder_id) const
     return (extruder_id >= 0 && extruder_id < int(map.values.size())) ? map.get_at(extruder_id) : extruder_id;
 }
 
-// BambuStudio GCode::generate_timelapse_gcode (v02.08.04.57): time_lapse_gcode for the active
-// filament, with the spot BambuStudio's picker chooses (timelapse_pos_x/y, has_timelapse_safe_pos).
-// With a safe spot the H2D/H2C/H2S templates hand it to the firmware (M9711 ... U<x> V<y>) for
-// whichever nozzle is active; without one they lift and park only when the active nozzle is not the
-// photo nozzle, which is what made the left and the right nozzle of an H2D look different.
-GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick)
+// The time_lapse_gcode placeholders for the active filament (BambuStudio's generate_timelapse_gcode,
+// v02.08.04.57). Orca #16680: every printer gets them, not only Bambu printers. The safe-spot picker
+// runs when always_pick (the Bambu path, which also places the photo with it) or when the template
+// names its results (m_timelapse_uses_pos / m_timelapse_uses_clear_to_x0), so a template that does
+// not use them costs nothing and writes the same G-code. Requires an active filament.
+DynamicConfig GCode::timelapse_gcode_config(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick,
+                                            bool always_pick, Point *safe_pos)
 {
-    TimelapseGCodeResult result;
-    const Extruder      *current_filament = m_writer.extruder();
-    if (current_filament == nullptr || print.config().time_lapse_gcode.value.empty())
-        return result;
-
-    const int curr_extruder  = timelapse_extruder_of_filament(int(current_filament->id()));
+    assert(m_writer.extruder() != nullptr);
+    const int curr_extruder  = timelapse_extruder_of_filament(int(m_writer.extruder()->id()));
     Point     timelapse_pos  = DefaultTimelapsePos;
     bool      is_clear_to_x0 = true;
     if (m_layer != nullptr) {
@@ -4911,11 +4933,13 @@ GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, 
         }
         if (m_config.print_sequence == PrintSequence::ByObject && print.objects().size() > 1 && !m_printed_objects.empty())
             ctx.printed_objects = m_printed_objects;
-        if (!skip_pos_pick)
+        if (!skip_pos_pick && (always_pick || m_timelapse_uses_pos))
             timelapse_pos = m_timelapse_pos_picker.pick_pos(ctx);
-        is_clear_to_x0 = m_timelapse_pos_picker.get_is_clear_to_x0(ctx);
+        if (always_pick || m_timelapse_uses_clear_to_x0)
+            is_clear_to_x0 = m_timelapse_pos_picker.get_is_clear_to_x0(ctx);
     }
-    result.safe_pos = timelapse_pos;
+    if (safe_pos != nullptr)
+        *safe_pos = timelapse_pos;
 
     DynamicConfig config;
     config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
@@ -4931,7 +4955,27 @@ GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, 
     // (layer_z + 0.4) when farthest-point timelapse is not active.
     config.set_key_value("farthest_point_timelapse_enabled", new ConfigOptionBool(m_farthest_point_timelapse.enabled));
     config.set_key_value("clear_to_x0", new ConfigOptionBool(is_clear_to_x0));
-    std::string timelapse_gcode = this->placeholder_parser_process("timelapse_gcode", print.config().time_lapse_gcode.value,
+    return config;
+}
+
+// BambuStudio GCode::generate_timelapse_gcode (v02.08.04.57): time_lapse_gcode for the active
+// filament, with the spot BambuStudio's picker chooses (timelapse_pos_x/y, has_timelapse_safe_pos).
+// With a safe spot the H2D/H2C/H2S templates hand it to the firmware (M9711 ... U<x> V<y>) for
+// whichever nozzle is active; without one they lift and park only when the active nozzle is not the
+// photo nozzle, which is what made the left and the right nozzle of an H2D look different.
+GCode::TimelapseGCodeResult GCode::generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick)
+{
+    TimelapseGCodeResult result;
+    const Extruder      *current_filament = m_writer.extruder();
+    if (current_filament == nullptr || print.config().time_lapse_gcode.value.empty())
+        return result;
+
+    const int           curr_extruder = timelapse_extruder_of_filament(int(current_filament->id()));
+    Point               timelapse_pos = DefaultTimelapsePos;
+    const DynamicConfig config        = timelapse_gcode_config(print, print_z, photo_extruder, skip_pos_pick, true, &timelapse_pos);
+    result.safe_pos = timelapse_pos;
+
+    std::string timelapse_gcode = this->placeholder_parser_process("time_lapse_gcode", print.config().time_lapse_gcode.value,
                                                                    current_filament->id(), &config) +
                                   "\n";
 
@@ -7185,11 +7229,9 @@ LayerResult GCode::process_layer(const Print& print,
             return generate_timelapse_gcode(print, print_z, m_timelapse_photo_extruder).gcode;
         std::string gcode_res;
         if (!m_config.time_lapse_gcode.value.empty() && m_writer.extruder() != nullptr) {
-            DynamicConfig config;
-            config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
-            config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
-            config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
-            gcode_res = this->placeholder_parser_process("timelapse_gcode", print.config().time_lapse_gcode.value,
+            // Orca #16680: the snapshot placeholders on every printer, not only the layer ones.
+            const DynamicConfig config = timelapse_gcode_config(print, print_z, m_timelapse_photo_extruder, false, false);
+            gcode_res = this->placeholder_parser_process("time_lapse_gcode", print.config().time_lapse_gcode.value,
                                                          m_writer.extruder()->id(), &config) +
                         "\n";
         }
@@ -7238,11 +7280,9 @@ LayerResult GCode::process_layer(const Print& print,
         // Orca #15734: an i3 printing by layer takes its photo later in the layer (the traditional
         // timelapse insertion below), so writing it here too took two photos per layer.
         if (!need_insert_timelapse_gcode_for_traditional && !m_config.time_lapse_gcode.value.empty()) {
-            DynamicConfig config;
-            config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
-            config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
-            config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
-            gcode += this->placeholder_parser_process("timelapse_gcode", print.config().time_lapse_gcode.value, m_writer.extruder()->id(),
+            // Orca #16680: the snapshot placeholders on every printer, not only the layer ones.
+            const DynamicConfig config = timelapse_gcode_config(print, print_z, m_timelapse_photo_extruder, false, false);
+            gcode += this->placeholder_parser_process("time_lapse_gcode", print.config().time_lapse_gcode.value, m_writer.extruder()->id(),
                                                       &config) +
                      "\n";
         }
@@ -7251,6 +7291,8 @@ LayerResult GCode::process_layer(const Print& print,
         DynamicConfig config;
         config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
         config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
+        // Orca #16680: was set only after the template was expanded, so [max_layer_z] failed here.
+        config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
         // Bambu Studio's bed-slinger variables (the A2L's layer change sets "M201 N1 Y[curr_y_acceleration_limit]"):
         // the mass printed so far (g, filament statistics as at the end of the print, wipe tower included),
         // the mass the previous layer added, and the Y acceleration limit that mass allows.
@@ -7271,7 +7313,6 @@ LayerResult GCode::process_layer(const Print& print,
         gcode += this->placeholder_parser_process("layer_change_gcode", print.config().layer_change_gcode.value, m_writer.extruder()->id(),
                                                   &config) +
                  "\n";
-        config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
     }
     // BBS: set layer time fan speed after layer change gcode
     gcode += ";_SET_FAN_SPEED_CHANGING_LAYER\n";

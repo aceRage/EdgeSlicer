@@ -4531,6 +4531,20 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Orca #16503. EDGE: the default is 0.5 mm, the Douglas-Peucker tolerance PrintInstance::get_convex_hull_2d()
+    // always used here (upstream's was 0.1 mm), so existing projects keep writing the same outlines.
+    def = this->add("exclude_object_tolerance", coFloat);
+    def->label = L("Outline tolerance");
+    def->tooltip = L("Maximum deviation of the object outline written to EXCLUDE_OBJECT_DEFINE from the "
+                     "original outline. Larger values give fewer points, which helps firmware that stalls "
+                     "while parsing G-code with many objects. 0 keeps every point. The points are rounded "
+                     "to 0.1 mm either way.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 5;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionFloat(0.5));
+
     def = this->add("gcode_comments", coBool);
     def->label = L("Verbose G-code");
     def->tooltip = L("Enable this to get a commented G-code file, with each line explained by a descriptive text. "
@@ -12295,8 +12309,8 @@ PrintStatisticsConfigDef::PrintStatisticsConfigDef()
     def->tooltip = L("Total cost of the material wasted on the wipe tower. Calculated from filament_cost value in Filament Settings.");
 
     def = this->add("total_wipe_tower_filament", coFloat);
-    def->label = L("Wipe tower volume");
-    def->tooltip = L("Total filament volume extruded on the wipe tower.");
+    def->label = L("Total wipe tower filament");
+    def->tooltip = L("Total length of filament used on the wipe tower, in mm.");
 
     def = this->add("used_filament", coFloat);
     def->label = L("Used filament");
@@ -12465,12 +12479,28 @@ static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificP
     // Machine G-code
     {"file_start_gcode",            {}},
     {"machine_start_gcode",         {}},
-    {"machine_end_gcode",           {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id"}},
+    {"machine_end_gcode",           {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id",
+                                      "current_filament_id", "current_nozzle_id",
+                                      "nozzle_diameter_at_nozzle_id", "nozzle_volume_types"}},
     {"before_layer_change_gcode",   {"layer_num", "layer_z", "max_layer_z"}},
-    {"layer_change_gcode",          {"layer_num", "layer_z", "max_layer_z", "curr_y_acceleration_limit", "curr_accumulated_mass", "curr_layer_mass"}},
-    {"timelapse_gcode",             {"layer_num", "layer_z", "max_layer_z"}},
-    {"change_filament_gcode",       {"layer_num", "layer_z", "max_layer_z", "next_extruder", "previous_extruder", "fan_speed",
+    {"layer_change_gcode",          {"layer_num", "layer_z", "max_layer_z", "most_used_physical_extruder_id",
+                                      "current_filament_id", "current_nozzle_id", "curr_y_acceleration_limit",
+                                      "curr_accumulated_mass", "curr_layer_mass"}},
+    {"time_lapse_gcode",            {"layer_num", "layer_z", "max_layer_z", "most_used_physical_extruder_id",
+                                      "curr_physical_extruder_id", "timelapse_pos_x", "timelapse_pos_y",
+                                      "has_timelapse_safe_pos", "timelapse_inline_photo",
+                                      "farthest_point_timelapse_enabled", "clear_to_x0"}},
+    {"change_filament_gcode",       {"layer_num", "layer_z", "max_layer_z", "next_extruder", "previous_extruder",
+                               "current_hotend", "next_hotend", "current_nozzle_id", "next_nozzle_id",
+                               "current_filament_id", "next_filament_id",
+                               "nozzle_diameter_at_nozzle_id", "nozzle_volume_types", "filament_retract_length_nc",
+                               "new_extruder_retracted_length", "outer_wall_volumetric_speed", "fan_speed",
                                "first_flush_volume", "flush_length_1", "flush_length_2", "flush_length_3", "flush_length_4",
+                               "flush_length", "flush_volumetric_speeds", "flush_temperatures", "filament_cooling_before_tower",
+                               "wipe_avoid_perimeter", "wipe_avoid_pos_x", "is_prime_tower_interface",
+                               "filament_tower_interface_purge_volume", "filament_tower_interface_print_temp",
+                               "wipe_tower_center_pos_x", "wipe_tower_center_pos_y", "wipe_tower_center_pos_valid",
+                               "temperature", "nozzle_temperature", "first_layer_temperature", "nozzle_temperature_initial_layer",
                                "new_filament_e_feedrate", "new_filament_temp", "new_retract_length",
                                "new_retract_length_toolchange", "old_filament_e_feedrate", "old_filament_temp", "old_retract_length",
                                "old_retract_length_toolchange", "relative_e_axis", "second_flush_volume", "toolchange_count", "toolchange_z",
@@ -12483,8 +12513,18 @@ static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificP
     {"machine_pause_gcode",         {}},
     {"template_custom_gcode",       {}},
     // Filament G-code
-    {"filament_start_gcode",        {"filament_extruder_id"}},
-    {"filament_end_gcode",          {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id"}},
+    {"filament_start_gcode",        {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id",
+                                      "current_filament_id", "current_nozzle_id",
+                                      "nozzle_diameter_at_nozzle_id", "nozzle_volume_types",
+                                      "retraction_distance_when_cut", "long_retraction_when_cut",
+                                      "temperature", "nozzle_temperature", "first_layer_temperature",
+                                      "nozzle_temperature_initial_layer"}},
+    {"filament_end_gcode",          {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id",
+                                      "current_filament_id", "current_nozzle_id",
+                                      "nozzle_diameter_at_nozzle_id", "nozzle_volume_types",
+                                      "retraction_distance_when_cut", "long_retraction_when_cut",
+                                      "temperature", "nozzle_temperature", "first_layer_temperature",
+                                      "nozzle_temperature_initial_layer"}},
 };
 
 const std::map<t_custom_gcode_key, t_config_option_keys>& custom_gcode_specific_placeholders()
@@ -12499,7 +12539,8 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
 // Common Defs
     def = this->add("layer_num", coInt);
     def->label = L("Layer number");
-    def->tooltip = L("Index of the current layer. Zero-based (i.e. first layer is number 0), except in extrusion role change G-code, where it is one-based.");
+    def->tooltip = L("Index of the current layer. The index is zero-based (first layer has index 0). Before the first "
+                     "layer starts, it is -1. In extrusion role change G-code, the index is one-based (first layer has index 1).");
 
     def = this->add("layer_z", coFloat);
     def->label = L("Layer Z");
@@ -12511,18 +12552,47 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
 
     def = this->add("filament_extruder_id", coInt);
     def->label = L("Filament extruder ID");
-    def->tooltip = L("The current extruder ID. The same as current_extruder.");
+    def->tooltip = L("In filament start G-code, the index of the filament that is being loaded. In filament end G-code, "
+                     "the index of the filament that is being unloaded. The index is zero-based (first filament has "
+                     "index 0). Machine end G-code gets the value from the last filament end G-code at the end of the print.");
+
+    new_def("current_filament_id", coInt, "Current filament ID", "Index of the currently active filament. The index is zero-based (first filament has index 0).");
+    new_def("current_nozzle_id", coInt, "Current nozzle ID", "Index of the currently active nozzle. The index is zero-based (first nozzle has index 0).");
+    new_def("nozzle_diameter_at_nozzle_id", coFloats, "Nozzle diameters", "Nozzle diameters indexed by nozzle ID.");
+    new_def("nozzle_volume_types", coStrings, "Nozzle volume types", "Nozzle volume variants indexed by nozzle ID.");
+    new_def("retraction_distance_when_cut", coFloat, "Retraction distance when cut", "Retraction distance used when cutting filament.");
+    new_def("long_retraction_when_cut", coBool, "Long retraction when cut", "Whether long retraction is used when cutting filament.");
+
+// layer_change_gcode
+    new_def("most_used_physical_extruder_id", coInt, "Most-used physical extruder ID", "Index of the physical extruder used most often on the current layer. The index is zero-based (first extruder has index 0).");
 
 // layer_change_gcode: Bambu Studio's bed-slinger mass model (GCode::process_layer)
     new_def("curr_y_acceleration_limit", coFloat, "Current Y acceleration limit", "The Y acceleration (mm/s^2) the printed mass so far allows: machine_max_force_Y / (machine_bed_mass_Y + printed mass), at most the machine's Y acceleration limit. The machine's Y acceleration limit when those two are not set.");
     new_def("curr_accumulated_mass", coFloat, "Accumulated mass", "Filament mass (g) printed before this layer change.");
     new_def("curr_layer_mass", coFloat, "Layer mass", "Filament mass (g) printed since the previous layer change.");
 
+// time_lapse_gcode
+    new_def("curr_physical_extruder_id", coInt, "Current physical extruder ID", "Index of the physical extruder active for the current layer. The index is zero-based (first extruder has index 0).");
+    new_def("timelapse_pos_x", coInt, "Timelapse position X", "Selected X position for timelapse capture.");
+    new_def("timelapse_pos_y", coInt, "Timelapse position Y", "Selected Y position for timelapse capture.");
+    new_def("has_timelapse_safe_pos", coBool, "Has timelapse safe position", "Whether a safe timelapse position was found.");
+    new_def("timelapse_inline_photo", coBool, "Timelapse inline photo", "Whether the timelapse photo is captured at the inline position.");
+    new_def("farthest_point_timelapse_enabled", coBool, "Farthest-point timelapse enabled", "Whether farthest-point timelapse positioning is active.");
+    new_def("clear_to_x0", coBool, "Clear to X0", "Whether the timelapse move is clear to X0.");
+
 // change_filament_gcode
-    new_def("previous_extruder", coInt, "Previous extruder", "Index of the extruder that is being unloaded. The index is zero based (first extruder has index 0).");
-    new_def("next_extruder", coInt, "Next extruder", "Index of the extruder that is being loaded. The index is zero based (first extruder has index 0).");
+    new_def("previous_extruder", coInt, "Previous extruder", "Index of the filament that is being unloaded. The index is zero-based (first filament has index 0). At the start of the print, when no filament is loaded yet, it is -1.");
+    new_def("next_extruder", coInt, "Next extruder", "Index of the filament that is being loaded. The index is zero-based (first filament has index 0).");
+    new_def("current_hotend", coInt, "Current hotend", "Zero-based extruder index of the outgoing filament. On Bambu printers it is -1, or the nozzle ID when a filament moves between nozzles across layers.");
+    new_def("next_hotend", coInt, "Next hotend", "Zero-based extruder index of the incoming filament. On Bambu printers it is -1, or the nozzle ID when a filament moves between nozzles across layers.");
+    new_def("next_nozzle_id", coInt, "Next nozzle ID", "Index of the nozzle associated with the incoming filament. The index is zero-based (first nozzle has index 0).");
+    new_def("next_filament_id", coInt, "Next filament ID", "Index of the incoming filament. The index is zero-based (first filament has index 0).");
+    new_def("filament_retract_length_nc", coFloat, "Filament nozzle-change retract length", "Nozzle-change retraction length of the outgoing filament.");
+    new_def("new_extruder_retracted_length", coFloat, "New extruder retracted length", "Currently parked retraction length of the incoming extruder.");
+    new_def("outer_wall_volumetric_speed", coFloat, "Outer wall volumetric speed", "Volumetric speed used for the outer wall.");
     new_def("relative_e_axis", coBool, "Relative e-axis", "Indicates if relative positioning is being used.");
     new_def("toolchange_count", coInt, "Toolchange count", "The number of toolchanges throught the print.");
+    new_def("toolchange_z", coFloat, "Toolchange Z", "The Z position during the toolchange.");
     new_def("fan_speed", coNone, "", ""); //Option is no longer used and is zeroed by placeholder parser for compatability
     new_def("old_retract_length", coFloat, "Old retract length", "The retraction length of the previous filament");
     new_def("new_retract_length", coFloat, "New retract length", "The retraction lenght of the new filament");
@@ -12547,6 +12617,22 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
     new_def("flush_length_2", coFloat, "Flush Length 2", "The second flush length");
     new_def("flush_length_3", coFloat, "Flush Length 3", "The third flush length");
     new_def("flush_length_4", coFloat, "Flush Length 4", "The fourth flush length");
+    new_def("flush_length", coFloat, "Flush length", "Total flush length.");
+    new_def("flush_volumetric_speeds", coFloats, "Flush volumetric speeds", "Flush volumetric speeds for each filament.");
+    new_def("flush_temperatures", coInts, "Flush temperatures", "Flush temperatures for each filament.");
+    new_def("filament_cooling_before_tower", coFloats, "Filament cooling before tower", "Temperature drop before entering filament tower");
+    new_def("wipe_avoid_perimeter", coBool, "Avoid wipe perimeter", "Whether travel should avoid the wipe perimeter.");
+    new_def("wipe_avoid_pos_x", coFloat, "Wipe avoidance X", "X position used to avoid the wipe area.");
+    new_def("is_prime_tower_interface", coBool, "Prime tower interface", "Whether the current purge is for a prime-tower interface.");
+    new_def("filament_tower_interface_purge_volume", coFloat, "Interface layer purge length", "Purge length for prime tower interface layer (where different materials meet).");
+    new_def("filament_tower_interface_print_temp", coInt, "Filament tower interface print temperature", "Print temperature used for the filament tower interface.");
+    new_def("wipe_tower_center_pos_x", coFloat, "Wipe tower center X", "X coordinate of the nozzle's wipe-tower wait position, 2 mm outside the tower edge.");
+    new_def("wipe_tower_center_pos_y", coFloat, "Wipe tower center Y", "Y coordinate of the nozzle's wipe-tower wait position.");
+    new_def("wipe_tower_center_pos_valid", coBool, "Wipe tower center position valid", "Whether the print has a wipe tower.");
+    new_def("temperature", coInts, "Temperature", "Nozzle temperatures indexed by filament.");
+    new_def("nozzle_temperature", coInts, "Nozzle temperature", "Nozzle temperatures indexed by filament.");
+    new_def("first_layer_temperature", coInts, "First layer temperature", "First-layer nozzle temperatures indexed by filament.");
+    new_def("nozzle_temperature_initial_layer", coInts, "Nozzle temperature initial layer", "First-layer nozzle temperatures indexed by filament.");
     new_def("next_wipe_x", coFloat, "Next Wipe X", "For Snapmaker Artision, next x after toolchange");
     new_def("next_wipe_y", coFloat, "Next Wipe Y", "For Snapmaker Artision, next y after toolchange");
 

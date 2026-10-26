@@ -375,6 +375,50 @@ TEST_CASE("A project 3MF keeps the prime tower rotation angle and position", "[3
     CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_y")->get_at(0) == Approx(80.5));
 }
 
+// Orca #16503: the exclude-object outline tolerance is an ordinary print setting, saved with the project.
+TEST_CASE("A project 3MF keeps the exclude object outline tolerance", "[3mf][Config][ExcludeObject]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    store_config.set_key_value("exclude_object_tolerance", new ConfigOptionFloat(0.2));
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "exclude_object_tolerance_project.3mf").string();
+
+    StoreParams store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored = store_bbs_3mf(store_params);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                               &is_bbl_3mf, &file_version, nullptr,
+                                               LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                                   LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file);
+
+    REQUIRE(stored);
+    REQUIRE(loaded);
+    REQUIRE(dst_config.has("exclude_object_tolerance"));
+    CHECK(dst_config.opt_float("exclude_object_tolerance") == Approx(0.2));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Ultra (support groups) - Stage 2 / T5: per-part support data through a project 3MF.
 //
