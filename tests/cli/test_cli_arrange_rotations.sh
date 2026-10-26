@@ -38,8 +38,9 @@ with open(out, "w") as f:
     f.write("endsolid box\n")
 PYEOF
 }
-# Longer than the 256 mm bed edge, shorter than its 362 mm diagonal: fits only turned.
-box "$(w "$WORK/bar.stl")" 300 10 5
+# --load-settings with only a machine and process file leaves the CLI on its 200 mm default bed (usable edge about
+# 193 mm). 230 mm is longer than that, but fits turned about 45 degrees: it fits only rotated.
+box "$(w "$WORK/bar.stl")" 230 10 5
 box "$(w "$WORK/cube.stl")" 10 10 10
 
 slice() { # <tag> <input> [option...]
@@ -55,10 +56,12 @@ exit_code() { "$PY" -I -c "import sys; rc = int(open(sys.argv[1]).read()); print
 fail() { echo "FAIL: $*"; exit 1; }
 
 slice default "$WORK/bar.stl"
-[ "$(exit_code default)" = "-50" ] || fail "default: expected -50, got $(exit_code default)"
+# The shell sees a truncated process exit code on Windows, so -50 is read from result.json when it is written.
+[ "$(exit_code default)" != "0" ] || fail "default: expected a non-zero exit, got 0"
 grep -q "Arrange ran without rotations" "$WORK/default/stderr" || fail "default: stderr does not mention rotations"
 if [ -f "$WORK/default/result.json" ]; then
     grep -q "Arrange ran without rotations" "$WORK/default/result.json" || fail "default: result.json does not mention rotations"
+    grep -q '"return_code": -50' "$WORK/default/result.json" || fail "default: result.json return_code is not -50"
 fi
 
 slice rotations "$WORK/bar.stl" --allow-rotations
