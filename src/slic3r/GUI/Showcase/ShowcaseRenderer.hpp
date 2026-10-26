@@ -14,6 +14,12 @@
 // an off-screen framebuffer at up to 8192 px a side (D11), supersampled and multisampled, with the
 // SSAO kernel scaled to the export size, and reads it back.
 //
+// Realism 1a (tests/design_showcase_realism.md 2.1): the lit objects are drawn into a floating-point
+// (RGBA16F) layer as linear light, and one post pass (showcase_post.fs) applies the exposure, the
+// tone curve and the sRGB encoding and lays them over the backdrop, plate and floor, which stay
+// display-referred in the RGBA8 scene buffer. The live view renders off-screen the same way. Without
+// float buffers or the post shader, everything is drawn as before (each shader tone-maps itself).
+//
 // A friend of GLCanvas3D: it drives that canvas's realistic-view passes (shadows, SSAO) through
 // GLCanvas3D::set_render_settings_override(), never through the user's preferences.
 
@@ -187,6 +193,10 @@ private:
         bool     run_ssao = true;
         float    ssao_radius_scale = 1.f;
         unsigned shadow_map_size   = 2048;
+        // 1a: the framebuffer the scene is drawn into, and the objects' HDR layer that shares its
+        // depth (0 = none: the objects tone-map in their shader and go straight into the scene).
+        unsigned scene_fbo = 0;
+        unsigned hdr_fbo   = 0;
         // The safe frame in [0,1] GL coordinates (origin bottom-left): x0, y0, x1, y1.
         float    frame[4] = { 0.f, 0.f, 1.f, 1.f };
     };
@@ -203,8 +213,16 @@ private:
     // S5: the plate's toolpaths through Preview's viewer (the toolpath source, the build-up).
     bool            draw_toolpaths();
     bool            use_toolpaths() const;
-    // S2: the objects through showcase_material; false when that shader is not there.
-    bool            draw_objects_material(bool mirrored);
+    // S2: the objects through showcase_material; false when that shader is not there. 1a: `hdr`
+    // writes linear light for the post pass instead of tone-mapped sRGB.
+    bool            draw_objects_material(bool mirrored, bool hdr = false);
+    // 1a: whether this frame can use the HDR layer and the post pass (the shaders are there, and
+    // EDGESLICER_SHOWCASE_NO_HDR is not set).
+    bool            want_hdr() const;
+    // 1a: tone-maps the resolved HDR layer `hdr_texture` over the bound scene framebuffer.
+    void            draw_post(unsigned int hdr_texture);
+    // 1a: the live view's finished frame from its off-screen buffer onto the window.
+    void            present(unsigned int color_texture);
     void            draw_overlay(int vp_w, int vp_h);
     void            ensure_fullscreen_quad();
     void            ensure_floor_model();
@@ -291,6 +309,12 @@ private:
     // S4
     bool                       m_batch = false;
     std::unique_ptr<ShowcaseFramebuffers> m_batch_fb;
+    // 1a: the live view's off-screen buffers (the window's size and sample count), and the size
+    // they could not be made at (not retried every frame).
+    std::unique_ptr<ShowcaseFramebuffers> m_live_fb;
+    int                        m_live_fb_failed_w = 0, m_live_fb_failed_h = 0;
+    // 1a: the last draw_scene() put objects into the HDR layer (the post pass has work).
+    bool                       m_hdr_drawn = false;
     int                        m_batch_w = 0, m_batch_h = 0, m_batch_msaa = -1;
 
     // S3

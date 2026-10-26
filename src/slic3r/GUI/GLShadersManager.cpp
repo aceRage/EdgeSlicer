@@ -136,6 +136,11 @@ std::pair<bool, std::string> GLShadersManager::init()
         appendOptionalShader("showcase_blur", { prefix + "background.vs", prefix + "showcase_blur.fs" });
         // S5: the layer build-up's shadow casters, cut at the height laid so far.
         appendOptionalShader("showcase_shadow_clip", { prefix + "showcase_material.vs", prefix + "showcase_shadow_clip.fs" });
+        // Realism 1a: the post pass (tone curve, exposure, sRGB) over the objects' HDR layer. Without
+        // it the objects tone-map in their own shader, as before.
+        appendOptionalShader("showcase_post", { prefix + "background.vs", prefix + "showcase_post.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_post"); s != nullptr)
+            s->set_sampler_units({ { "source", 0 } });
         if (GLShaderProgram* s = get_shader("showcase_background"); s != nullptr)
             s->set_sampler_units({ { "image_tex", 0 }, { "env_map", 6 } });
         if (GLShaderProgram* s = get_shader("showcase_floor"); s != nullptr)

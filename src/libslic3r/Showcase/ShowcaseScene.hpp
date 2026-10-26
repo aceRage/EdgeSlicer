@@ -12,6 +12,7 @@
 
 #include "ShowcaseCallouts.hpp"
 #include "ShowcaseMaterial.hpp"
+#include "ShowcaseTone.hpp"
 #include "ShowcaseVideo.hpp"
 
 #include <array>
@@ -146,6 +147,8 @@ struct Lighting
     float       env_rotation_deg = 0.f;   // around +Z
     float       exposure        = 0.f;    // EV, -3..3
     float       shadow_softness = 1.f;    // 0.5 (hard, sun) .. 4 (very soft)
+    // 1a: the post pass's tone curve (D-R1: Khronos PBR Neutral by default, filmic as an option).
+    ToneCurve   tone            = ToneCurve::Neutral;
 
     bool operator==(const Lighting &o) const;
     bool operator!=(const Lighting &o) const { return !(*this == o); }
