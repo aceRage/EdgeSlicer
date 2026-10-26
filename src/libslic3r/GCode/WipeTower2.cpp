@@ -1671,6 +1671,7 @@ void WipeTower2::copy_assign_from(const WipeTower2 &o)
     m_rib_footprint                      = o.m_rib_footprint;
     m_first_layer_wall                   = o.m_first_layer_wall;
     m_whole_row_wipe                     = o.m_whole_row_wipe;
+    m_wipe_tower_filament_forced         = o.m_wipe_tower_filament_forced;
     m_enable_arc_fitting                 = o.m_enable_arc_fitting;
     m_outer_wall                         = o.m_outer_wall;
     m_cooling_tube_retraction            = o.m_cooling_tube_retraction;
@@ -1728,6 +1729,11 @@ void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].material = config.filament_type.get_at(idx);
     m_filpar[idx].is_soluble = config.wipe_tower_filament == 0 ? config.filament_soluble.get_at(idx) :
                                (idx != size_t(config.wipe_tower_filament - 1));
+    // Orca #15035: support filaments bond poorly to what is printed on them, so like soluble ones they
+    // do not print the tower's shell when another filament is on the layer. A forced wipe tower
+    // filament (folded into is_soluble above) decides on its own.
+    m_wipe_tower_filament_forced = config.wipe_tower_filament > 0;
+    m_filpar[idx].is_support     = !m_wipe_tower_filament_forced && config.filament_is_support.get_at(idx);
     const unsigned int filament_id = (unsigned int) idx;
     m_filpar[idx].temperature = get_value_at(config, config.nozzle_temperature, ConfigFlowDomain::Filament, filament_id);
     m_filpar[idx].first_layer_temperature =
@@ -3326,16 +3332,25 @@ void WipeTower2::save_on_last_wipe()
     }
 }
 
-// Return index of first toolchange that switches to non-soluble extruder
-// ot -1 if there is no such toolchange.
+// Return the index of the toolchange whose new filament prints the layer's finish extrusions (sparse
+// infill, wall and brim), or -1 to print them with the layer's incoming filament before any toolchange.
+// Orca #15035 (first_toolchange_to_nonsoluble_nonsupport, like the Type1 tower): neither a soluble nor a
+// support filament prints the shell when another filament is on the layer.
 int WipeTower2::first_toolchange_to_nonsoluble(const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const
 {
-    // 使用 wipe_tower_filament 配置来决定哪个挤出机用于 wipe tower
+    if (tool_changes.empty())
+        return -1;
+    auto is_wall_filament = [this](size_t tool) { return !m_filpar[tool].is_soluble && !m_filpar[tool].is_support; };
     for (size_t idx = 0; idx < tool_changes.size(); ++idx) {
-        if (!m_filpar[tool_changes[idx].new_tool].is_soluble)
+        if (is_wall_filament(tool_changes[idx].new_tool))
             return idx;
     }
-    return -1;
+    // A forced wipe tower filament that is not changed to on this layer: the incoming filament, as before.
+    if (m_wipe_tower_filament_forced || is_wall_filament(tool_changes.front().old_tool))
+        return -1;
+    // Only support or soluble filaments on this layer: the first toolchange (upstream keeps it there so
+    // its depth and wipe volume accounting still applies).
+    return 0;
 }
 
 bool WipeTower2::layer_has_soluble_toolchange(const WipeTowerInfo &layer) const

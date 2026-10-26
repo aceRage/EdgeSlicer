@@ -211,6 +211,7 @@ public:
     struct FilamentParameters {
         std::string 	    material = "PLA";
         bool                is_soluble = false;
+        bool                is_support = false; // Orca #15035
         int  			    temperature = 0;
         int  			    first_layer_temperature = 0;
         float               loading_speed = 0.f;
@@ -313,6 +314,7 @@ private:
     // Orca #15035: the current toolchange prints no ram, so its box was planned as whole wipe rows that
     // continue the previous block's row lattice, and the wipe fills the box (set by emit_planned_tool_change()).
     bool   m_whole_row_wipe               = false;
+    bool   m_wipe_tower_filament_forced   = false; // wipe_tower_filament > 0
 
     bool   m_enable_arc_fitting           = false;
     std::map<float, Polylines> m_outer_wall; // for wipe tower out wall and brim
@@ -435,8 +437,8 @@ private:
     std::vector<float> m_used_filament_length;
 	std::vector<std::pair<float, std::vector<float>>> m_used_filament_length_until_layer;
 
-    // Return index of first toolchange that switches to non-soluble extruder
-    // ot -1 if there is no such toolchange.
+    // Index of the toolchange whose new filament prints the layer's shell (sparse infill, wall, brim):
+    // the first to a non-soluble, non-support filament; -1 for the incoming filament. See the .cpp.
     int first_toolchange_to_nonsoluble(
             const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const;
     bool layer_has_soluble_toolchange(const WipeTowerInfo &layer) const;
