@@ -1174,3 +1174,75 @@ TEST_CASE("A rotated WipeTower2 tower prints inside its rotated footprint", "[Wi
     CHECK_THAT(corners.min.y(), WithinAbs(anchor.y() + ext.min.y(), 0.1));
     CHECK_THAT(corners.max.y(), WithinAbs(anchor.y() + ext.max.y(), 0.1));
 }
+
+// Orca #15035: a WipeTower2 rib tower is shifted by its rib offset, so the ribs, which reach past
+// the body box, start at the tower position instead of hanging off its left and front edges, and it
+// is placed and checked by the box around its first-layer wall (the square the pre-slice estimate
+// reserves), like the Type1 rib tower.
+TEST_CASE("A WipeTower2 rib tower prints inside its footprint, from the tower position", "[WipeTower][RibOffset][GCode]")
+{
+    const double angle = GENERATE(0., 90.);
+    CAPTURE(angle);
+    Print              print;
+    DynamicPrintConfig cfg = stagger_slice_config(false);
+    cfg.set_deserialize_strict({ { "wipe_tower_wall_type", "rib" },
+                                 { "wipe_tower_rib_width", 8 },
+                                 { "wipe_tower_extra_rib_length", 0 },
+                                 { "wipe_tower_fillet_wall", true },
+                                 { "wipe_tower_rotation_angle", angle } });
+    const std::string gcode = slice_stagger_project(cfg, print);
+
+    const auto  &wtd  = print.wipe_tower_data();
+    const double brim = wtd.brim_width;
+    // A 6 mm tall tower is far below the stability minimum: the ribs, not the body, are extended
+    // to it, so the footprint is at least that deep.
+    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
+    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
+
+    const Vec2d              anchor(140., 140.);
+    const Eigen::Rotation2Dd unturn(-Geometry::deg2rad(angle));
+    const std::vector<Vec2d> pts = tower_extrusion_points(gcode);
+    REQUIRE(pts.size() > 20);
+    BoundingBoxf local;
+    for (const Vec2d &p : pts)
+        local.merge(Vec2d(unturn * (p - anchor)));
+    // The first layer's brim runs around the rib wall, whose box starts at the tower position:
+    // without the shift the ribs reached about 2.8 mm (half the 8 mm rib, diagonally) further out.
+    const double slack = 0.35; // a line's half width, plus the rounding of the G-code
+    CHECK(local.min.x() > -brim - slack);
+    CHECK(local.min.y() > -brim - slack);
+    CHECK(local.min.x() < -brim + slack);
+    CHECK(local.min.y() < -brim + slack);
+    CHECK(local.max.x() < wtd.width + brim + slack);
+    CHECK(local.max.y() < wtd.depth + brim + slack);
+    CHECK(local.max.x() > wtd.width + brim - slack);
+
+    // The post-slice footprint (bed check, timelapse keep-out, skirt) is that ribbed outline.
+    REQUIRE(wtd.wipe_tower_mesh_data.has_value());
+    const BoundingBox bottom = get_extents(wtd.wipe_tower_mesh_data->bottom);
+    CHECK_THAT(unscaled(bottom.min.x()), WithinAbs(-brim, 0.05));
+    CHECK_THAT(unscaled(bottom.min.y()), WithinAbs(-brim, 0.05));
+    CHECK_THAT(unscaled(bottom.max.x()), WithinAbs(wtd.width + brim, 0.05));
+    CHECK_THAT(unscaled(bottom.max.y()), WithinAbs(wtd.depth + brim, 0.05));
+    BoundingBoxf corners;
+    for (const Point &c : print.first_layer_wipe_tower_corners())
+        corners.merge(Vec2d(unscale<double>(c.x()), unscale<double>(c.y())));
+    const BoundingBoxf ext = wipe_tower_rotated_extents(wtd.width, wtd.depth, brim, angle);
+    CHECK_THAT(corners.min.x(), WithinAbs(anchor.x() + ext.min.x(), 0.1));
+    CHECK_THAT(corners.max.x(), WithinAbs(anchor.x() + ext.max.x(), 0.1));
+    CHECK_THAT(corners.min.y(), WithinAbs(anchor.y() + ext.min.y(), 0.1));
+    CHECK_THAT(corners.max.y(), WithinAbs(anchor.y() + ext.max.y(), 0.1));
+}
+
+TEST_CASE("A rectangle WipeTower2 tower is not shifted", "[WipeTower][RibOffset][GCode]")
+{
+    Print              print;
+    const std::string  gcode = slice_stagger_project(stagger_slice_config(false), print);
+    const auto        &wtd   = print.wipe_tower_data();
+    BoundingBoxf       local;
+    for (const Vec2d &p : tower_extrusion_points(gcode))
+        local.merge(Vec2d(p - Vec2d(140., 140.)));
+    CHECK(local.min.x() > -wtd.brim_width - 0.35);
+    CHECK(local.min.x() < -wtd.brim_width + 0.35);
+    CHECK(wtd.width == Approx(30.)); // the body, prime_tower_width
+}

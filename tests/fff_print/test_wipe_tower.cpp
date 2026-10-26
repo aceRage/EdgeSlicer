@@ -659,3 +659,245 @@ TEST_CASE("Wipe tower temperature wait is off for single extruder multi-material
     print_config.single_extruder_multi_material.value = false;
     CHECK_FALSE(WipeTower2::wait_for_temp_enabled(print_config));
 }
+
+// Orca #15035 + #15144 (8-3 review): the rib offset shifts the whole rib tower, so the heat-up park
+// beside it has to be shifted the same way, or the park on the far side lands on the ribs. The park
+// envelope is measured on generate_rib_polygon() and mapped through the writer, which adds the offset;
+// this checks the result against the extrusions the tower actually prints on the same layer.
+TEST_CASE("The temperature-wait park clears the shifted rib tower", "[WipeTower][WaitForTemp][RibOffset]")
+{
+    // Tower in the middle of the default 200 mm bed, so both sides are free and the near side is taken.
+    const char *tower_x = GENERATE("15", "80", "150");
+    CAPTURE(tower_x);
+    DynamicPrintConfig config = wait_for_temp_config(true);
+    config.set_deserialize_strict({
+        { "wipe_tower_wall_type", "rib" },
+        { "wipe_tower_rib_width", "8" },
+        { "wipe_tower_fillet_wall", "1" },
+        { "prime_tower_brim_width", "0" },
+        { "wipe_tower_x", tower_x },
+        { "wipe_tower_y", "120" },
+    });
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(print.has_wipe_tower());
+    Test::gcode(print);
+
+    const auto &layers = print.wipe_tower_data().tool_changes;
+    REQUIRE(!layers.empty());
+    int checked_parks = 0;
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        // The tower's printed envelope on this layer, tower-local like the tcr G-code.
+        BoundingBoxf envelope;
+        for (const WipeTower::ToolChangeResult &tcr : layers[layer_idx])
+            for (const WipeTower::Extrusion &e : tcr.extrusions)
+                if (e.width > 0.f)
+                    envelope.merge(e.pos.cast<double>());
+        if (!envelope.defined)
+            continue;
+        if (layer_idx == 0) {
+            // The ribs start at the tower position: the wall's first-layer box begins at 0/0.
+            CHECK_THAT(envelope.min.x(), Catch::Matchers::WithinAbs(0., 0.05));
+            CHECK_THAT(envelope.min.y(), Catch::Matchers::WithinAbs(0., 0.05));
+        }
+        for (const WipeTower::ToolChangeResult &tcr : layers[layer_idx]) {
+            const std::vector<std::string> lines = split_lines(tcr.gcode);
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (lines[i].rfind("M109", 0) != 0 || !is_tagged_wait(lines[i]))
+                    continue;
+                // The park travel is the never-skip G1 right before the wait.
+                size_t park = i;
+                while (park > 0 && lines[park - 1].find(WipeTower2::never_skip_tag()) == std::string::npos)
+                    --park;
+                REQUIRE(park > 0);
+                const std::string &move = lines[park - 1];
+                REQUIRE(move.find('X') != std::string::npos);
+                const double park_x = std::stod(move.substr(move.find('X') + 1));
+                INFO("layer " << layer_idx << " park " << move << " envelope x " << envelope.min.x() << ".." << envelope.max.x());
+                CHECK((park_x < envelope.min.x() - 0.4 || park_x > envelope.max.x() + 0.4));
+                ++checked_parks;
+            }
+        }
+    }
+    REQUIRE(checked_parks > 0); // the feature under test is active
+}
+
+// Orca #15035 (9292db2f9f, 36bd453ac8): on a multi-tool printer that does not ram (the U1), every purge
+// block is planned as whole wipe rows that continue the previous block's row lattice, and the wipe fills
+// its box. Before, the planner reserved one wipe line too few (it counted on a ramming row that is never
+// printed) and the wipe started a pitch inside the box, so adjacent blocks were two row pitches apart
+// (a blank band in the tower) and the last block of a layer was cut short at the box edge.
+static std::vector<double> wipe_rows_of(const std::string &tcr_gcode)
+{
+    std::vector<double> ys;
+    bool   in_wipe = false;
+    double x = 0., y = 0.;
+    for (const std::string &line : split_lines(tcr_gcode)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) { in_wipe = true; continue; }
+        if (line.find("; CP TOOLCHANGE END") != std::string::npos) { in_wipe = false; continue; }
+        if (line.rfind("G1 ", 0) != 0)
+            continue;
+        double nx = x, ny = y;
+        bool   extrudes = false;
+        std::istringstream words(line.substr(3, line.find(';') == std::string::npos ? std::string::npos : line.find(';') - 3));
+        for (std::string w; words >> w;) {
+            if (w.size() < 2) continue;
+            const double v = std::atof(w.c_str() + 1);
+            if (w[0] == 'X') nx = v;
+            else if (w[0] == 'Y') ny = v;
+            else if (w[0] == 'E' && v > 0.) extrudes = true;
+        }
+        if (in_wipe && extrudes && std::abs(ny - y) < 1e-6 && std::abs(nx - x) > 1e-6)
+            ys.push_back(std::round(ny * 1000.) / 1000.);
+        x = nx;
+        y = ny;
+    }
+    std::sort(ys.begin(), ys.end());
+    ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+    return ys;
+}
+
+TEST_CASE("Purge blocks of a non-ramming toolchanger tile the tower without blank bands", "[WipeTower][WholeRowWipe]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00", "#0000FF"};
+    config.set_deserialize_strict({
+        { "enable_prime_tower", "1" },
+        { "enable_support", "0" },
+        { "single_extruder_multi_material", "0" },
+        { "purge_in_prime_tower", "0" },
+        { "filament_multitool_ramming", "0,0,0" },
+        { "wipe_tower_wall_type", "rectangle" },
+        { "wipe_tower_stagger_toolchange_start", "0" },
+        { "prime_tower_width", "35" },
+        { "prime_tower_brim_width", "0" },
+        { "wipe_tower_x", "15" },
+        { "wipe_tower_y", "120" },
+        { "wall_filament", "1" },
+        { "outer_wall_filament", "2" },
+        { "sparse_infill_filament", "3" },
+        { "solid_infill_filament", "3" },
+        { "gcode_comments", "1" },
+    });
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(print.has_wipe_tower());
+    Test::gcode(print);
+
+    int checked_joints = 0;
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : print.wipe_tower_data().tool_changes) {
+        std::vector<std::vector<double>> blocks;
+        for (const WipeTower::ToolChangeResult &tcr : layer)
+            if (std::vector<double> rows = wipe_rows_of(tcr.gcode); rows.size() >= 2)
+                blocks.emplace_back(std::move(rows));
+        if (blocks.size() < 2)
+            continue;
+        const double dy = blocks.front()[1] - blocks.front()[0];
+        REQUIRE(dy > 0.1);
+        std::sort(blocks.begin(), blocks.end(), [](const auto &a, const auto &b) { return a.front() < b.front(); });
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            for (size_t k = 1; k < blocks[i].size(); ++k)
+                CHECK(blocks[i][k] - blocks[i][k - 1] == Approx(dy).margin(0.011));
+            if (i + 1 < blocks.size()) {
+                INFO("block " << i << " ends at " << blocks[i].back() << ", the next starts at " << blocks[i + 1].front() << ", pitch " << dy);
+                CHECK(blocks[i + 1].front() - blocks[i].back() == Approx(dy).margin(0.011));
+                ++checked_joints;
+            }
+        }
+    }
+    REQUIRE(checked_joints > 0);
+}
+
+// Orca #15035 (56810c8c7f, 5b475e5e98): with wall gaps (skip points) on, the travel to a toolchange's
+// tower entry goes around the tower and enters through the wall opening instead of crossing the printed
+// tower. On a toolchanger without ramming (the U1) the tool changes in place and the entry travel is
+// appended to the change_filament_gcode substitution. The tower turns 180 degrees every layer, so every
+// other layer's entry is on the far side of the tower from the part: a direct hop there crosses it.
+TEST_CASE("The tower entry travel goes around the tower when wall gaps are on", "[WipeTower][SkipPoints]")
+{
+    const bool gaps  = GENERATE(false, true);
+    // #700: a rotated tower's entry walls are not vertical; the routed hop still has to cross the wall.
+    const int  angle = GENERATE(0, 90);
+    DYNAMIC_SECTION("wipe_tower_wall_gap " << gaps << " rotation " << angle) {
+        DynamicPrintConfig config = wait_for_temp_config(false);
+        config.set_deserialize_strict({
+            { "wipe_tower_wall_type", "rectangle" },
+            { "wipe_tower_wall_gap", gaps ? "1" : "0" },
+            { "wipe_tower_rotation_angle", angle },
+            { "prime_tower_brim_width", "0" },
+            { "filament_multitool_ramming", "0,0" },
+            { "wipe_tower_x", "120" },
+            { "wipe_tower_y", "60" },
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.has_wipe_tower());
+        const std::string gcode = Test::gcode(print);
+
+        REQUIRE(print.wipe_tower_data().wipe_tower_mesh_data.has_value());
+        Polygon envelope = print.wipe_tower_data().wipe_tower_mesh_data->bottom;
+        envelope.rotate(double(angle) * M_PI / 180.);
+        envelope.translate(Point::new_scale(120., 60.));
+        const Eigen::Rotation2Dd to_local(-double(angle) * M_PI / 180.);
+        const Polygons inner = offset(envelope, -scale_(1.));
+        const Polygons outer = offset(envelope, scale_(1.));
+        REQUIRE(!outer.empty());
+        REQUIRE(!inner.empty());
+
+        // Travels from outside the tower to a point on it (the entries), and how far each runs over the
+        // tower's inside.
+        double x = 0., y = 0.;
+        int    entries = 0, crossing = 0;
+        const std::vector<std::string> all_lines = split_lines(gcode);
+        for (size_t line_idx = 0; line_idx < all_lines.size(); ++line_idx) {
+            const std::string &line = all_lines[line_idx];
+            if (line.rfind("G1 ", 0) != 0)
+                continue;
+            double nx = x, ny = y;
+            bool   extrudes = false;
+            std::istringstream words(line.substr(3, line.find(';') == std::string::npos ? std::string::npos : line.find(';') - 3));
+            for (std::string w; words >> w;) {
+                if (w.size() < 2)
+                    continue;
+                if (w[0] == 'X' || w[0] == 'Y')
+                    (w[0] == 'X' ? nx : ny) = std::atof(w.c_str() + 1);
+                else if (w[0] == 'E' && std::atof(w.c_str() + 1) > 0.)
+                    extrudes = true;
+            }
+            const Point from = Point::new_scale(x, y), to = Point::new_scale(nx, ny);
+            if (!extrudes && from != to && !envelope.contains(from) && envelope.contains(to)) {
+                ++entries;
+                double over = 0.;
+                for (const Polyline &piece : intersection_pl(Polylines{ Polyline{ from, to } }, inner))
+                    over += unscale<double>(piece.length());
+                std::string context;
+                for (size_t k = line_idx > 40 ? line_idx - 40 : 0; k <= line_idx; ++k)
+                    context += all_lines[k] + "\n";
+                INFO("entry travel " << x << "," << y << " -> " << nx << "," << ny << " runs " << over << " mm over the tower, after:\n" << context);
+                if (gaps) {
+                    CHECK(over < 0.5);
+                    // A hop from away from the tower (not a move along its edge between two purges) enters
+                    // across the entry's wall (tower-local X), not along it.
+                    if (!outer.front().contains(from)) {
+                        const Vec2d hop = to_local * Vec2d(nx - x, ny - y);
+                        CHECK(std::abs(hop.y()) <= 0.05 + 0.1 * std::abs(hop.x()));
+                    }
+                }
+                if (over > 5.)
+                    ++crossing;
+            }
+            x = nx;
+            y = ny;
+        }
+        REQUIRE(entries > 0);
+        if (!gaps && angle == 0)
+            CHECK(crossing > 0); // stock: the far-side entries hop straight over the tower
+    }
+}

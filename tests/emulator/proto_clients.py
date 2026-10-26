@@ -159,10 +159,15 @@ def _mstr(s):
 
 
 class MqttClient:
-    def __init__(self, host, port, client_id, timeout=5):
+    def __init__(self, host, port, client_id, timeout=5, user=None, password=None):
         assert_loopback(host)
         self.sock = socket.create_connection((host, port), timeout=timeout)
-        body = _mstr("MQTT") + bytes([4, 2]) + (30).to_bytes(2, "big") + _mstr(client_id)
+        flags = 2 | (0x80 if user is not None else 0) | (0x40 if password is not None else 0)
+        body = _mstr("MQTT") + bytes([4, flags]) + (30).to_bytes(2, "big") + _mstr(client_id)
+        if user is not None:
+            body += _mstr(user)
+        if password is not None:
+            body += _mstr(password)
         self.sock.sendall(bytes([0x10]) + _enc_len(len(body)) + body)
         first, body = self.read()
         self.connack = body[1] if first >> 4 == 2 and len(body) > 1 else -1

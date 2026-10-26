@@ -847,17 +847,49 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("spiral_mode_max_xy_smoothing", has_spiral_vase && config->opt_bool("spiral_mode_smooth"));
     toggle_line("spiral_starting_flow_ratio", has_spiral_vase);
     toggle_line("spiral_finishing_flow_ratio", has_spiral_vase);
-    bool has_top_shell    = config->opt_int("top_shell_layers") > 0 || (has_spiral_vase && config->opt_int("bottom_shell_layers") > 1);
+    bool has_top_shell_layers = config->opt_int("top_shell_layers") > 0 || (has_spiral_vase && config->opt_int("bottom_shell_layers") > 1);
+    bool has_top_shell    = has_top_shell_layers && config->option<ConfigOptionPercent>("top_surface_density")->value > 0;
     bool has_bottom_shell = config->opt_int("bottom_shell_layers") > 0;
-    bool has_solid_infill = has_top_shell || has_bottom_shell;
+    bool has_solid_infill = has_top_shell_layers || has_bottom_shell;
     toggle_field("top_surface_pattern", has_top_shell);
-    toggle_field("undertop_surface_pattern", has_top_shell);
+    // EdgeSlicer: the undertop pattern serves top surfaces below 100% density, 0% included, so it follows the
+    // top shell layers rather than has_top_shell (which, since Orca #14929, also needs a top surface density > 0).
+    toggle_field("undertop_surface_pattern", has_top_shell_layers);
     // Orca: undertop infill only applies when the top surface is not 100% dense and there is a solid layer under it
     toggle_line("undertop_surface_pattern",
                 config->option<ConfigOptionPercent>("top_surface_density")->value < 100 && config->opt_int("top_shell_layers") > 2);
     toggle_field("bottom_surface_pattern", has_bottom_shell);
-    toggle_field("top_surface_density", has_top_shell);
+    toggle_field("top_surface_density", has_top_shell_layers);
     toggle_field("bottom_surface_density", has_bottom_shell);
+    toggle_field("top_layer_direction", has_top_shell);
+    toggle_field("bottom_layer_direction", has_bottom_shell);
+
+    toggle_line("top_surface_expansion", has_top_shell);
+    toggle_line("top_surface_expansion_margin", has_top_shell);
+    bool has_top_surface_expansion = config->opt_float("top_surface_expansion") > 0;
+    toggle_field("top_surface_expansion_margin", has_top_surface_expansion);
+    toggle_line("top_surface_expansion_direction", has_top_shell);
+    toggle_field("top_surface_expansion_direction", has_top_surface_expansion);
+
+    // Orca: Archimedean Chords and Octagram Spiral are the centered surface patterns that the
+    // pattern-centering and separated-infill features act on.
+    auto is_centered_pattern = [](InfillPattern p) {
+        return p == InfillPattern::ipArchimedeanChords || p == InfillPattern::ipOctagramSpiral;
+    };
+    bool is_top_centered    = is_centered_pattern(config->option<ConfigOptionEnum<InfillPattern>>("top_surface_pattern")->value);
+    bool is_bottom_centered = is_centered_pattern(config->option<ConfigOptionEnum<InfillPattern>>("bottom_surface_pattern")->value);
+    bool has_centered_surface = (has_top_shell && is_top_centered) || (has_bottom_shell && is_bottom_centered);
+
+    // Orca: center of surface pattern
+    toggle_line("center_of_surface_pattern", has_centered_surface);
+
+    // Orca: separate infills
+    toggle_line("separated_infills", is_separable_infill_pattern(pattern));
+
+    // Fill order is only meaningful for the center-based surface fill patterns; hide it otherwise.
+    auto is_centered_fill = [](InfillPattern p) { return p == ipConcentric || p == ipSpiralInset || p == ipArchimedeanChords || p == ipOctagramSpiral; };
+    toggle_line("top_surface_fill_order", has_top_shell && is_centered_fill(config->opt_enum<InfillPattern>("top_surface_pattern")));
+    toggle_line("bottom_surface_fill_order", has_bottom_shell && is_centered_fill(config->opt_enum<InfillPattern>("bottom_surface_pattern")));
 
     for (auto el : { "infill_direction", "sparse_infill_line_width", "gap_fill_target","filter_out_gap_fill","infill_wall_overlap",
         "sparse_infill_speed", "bridge_speed", "internal_bridge_speed", "bridge_angle", "internal_bridge_angle", "relative_bridge_angle", "bridge_expansion_extra",
@@ -865,7 +897,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         })
         toggle_field(el, have_infill || has_solid_infill);
 
-    toggle_field("top_shell_thickness", ! has_spiral_vase && has_top_shell);
+    toggle_field("top_shell_thickness", ! has_spiral_vase && has_top_shell_layers);
     toggle_field("bottom_shell_thickness", ! has_spiral_vase && has_bottom_shell);
 
     toggle_field("wall_direction", !has_spiral_vase);
@@ -1071,7 +1103,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                  have_support_material && ((!support_is_normal_tree || support_style == smsTreeHybrid) || have_raft));
 
     bool has_ironing = (config->opt_enum<IroningType>("ironing_type") != IroningType::NoIroning);
-    for (auto el : { "ironing_pattern", "ironing_flow", "ironing_spacing", "ironing_angle", "ironing_inset"})
+    for (auto el : { "ironing_pattern", "ironing_flow", "ironing_spacing", "ironing_angle", "ironing_inset", "ironing_angle_fixed" })
         toggle_line(el, has_ironing);
     
     toggle_line("ironing_speed", has_ironing || has_support_ironing);
@@ -1237,11 +1269,18 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     if(gcf_is_klipper)
         toggle_field("accel_to_decel_factor", config->opt_bool("accel_to_decel_enable", 0));
 
+    // Only Klipper's EXCLUDE_OBJECT_DEFINE carries the outline.
+    toggle_line("exclude_object_tolerance", gcf_is_klipper && config->opt_bool("exclude_object"));
+
     bool have_make_overhang_printable = config->opt_bool("make_overhang_printable");
     toggle_line("make_overhang_printable_angle", have_make_overhang_printable);
     toggle_line("make_overhang_printable_hole_size", have_make_overhang_printable);
 
-    toggle_line("min_width_top_surface", config->opt_bool("only_one_wall_top") || ((config->opt_float("min_length_factor") > 0.5f) && have_arachne)); // 0.5 is default value
+    // Orca: the one-wall options act on top/bottom surfaces, which exist only with a shell. An unfilled surface
+    // (0% surface density) is still a surface, so these are gated on the layer counts alone.
+    toggle_line("only_one_wall_first_layer", has_bottom_shell);
+    toggle_line("only_one_wall_top", has_top_shell_layers);
+    toggle_line("min_width_top_surface", (has_top_shell_layers && config->opt_bool("only_one_wall_top")) || ((config->opt_float("min_length_factor") > 0.5f) && have_arachne)); // 0.5 is default value
 
     for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges" })
         toggle_line(el, config->opt_bool("hole_to_polyhole"));

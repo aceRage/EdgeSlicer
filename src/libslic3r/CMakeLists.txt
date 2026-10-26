@@ -113,6 +113,8 @@ set(lisbslic3r_sources
     Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
     Showcase/ShowcaseMaterial.hpp
+    Showcase/ShowcaseTone.cpp
+    Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp
     Showcase/ShowcaseWebP.hpp
     Showcase/ShowcaseVideo.cpp

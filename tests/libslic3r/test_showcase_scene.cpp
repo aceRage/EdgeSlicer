@@ -474,6 +474,7 @@ TEST_CASE("Showcase: scenes round-trip through the project 3MF and stay out of o
         sc.lighting.environment = "outdoor";
         sc.lighting.rim         = false;
         sc.lighting.exposure    = 0.5f;
+        sc.lighting.tone        = ToneCurve::Filmic;   // realism 1a
         sc.materials.layer_lines = LayerLines::Real;
         const Finish silk = Finish::Silk;
         sc.materials.set_override(1, &silk);
@@ -506,6 +507,8 @@ TEST_CASE("Showcase: scenes round-trip through the project 3MF and stay out of o
         CHECK(back.showcase.scenes[0].floor.color == "#ABCDEF");
         CHECK(back.showcase.scenes[0].lighting.azimuth_deg == 100.f);
         CHECK(back.showcase.scenes[0].materials == Materials());
+        // Realism 1a: a scene from before the tone curve keeps PBR Neutral (D-R1).
+        CHECK(back.showcase.scenes[0].lighting.tone == ToneCurve::Neutral);
         CHECK(json::parse(zip_entry(path.string(), "Metadata/showcase/scenes.json"))["schema"] == 2);
     }
 

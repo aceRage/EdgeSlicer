@@ -813,10 +813,12 @@ Status status_from_canvas(const CanvasQueryResult& r)
     return st;
 }
 
-// A Centauri Carbon 1: its CANVAS over SDCP. Any other Elegoo model has nothing this fork can read.
+// A Centauri Carbon 1: its CANVAS over SDCP. A Centauri Carbon 2 / Centauri 2: over MQTT, with the
+// device's API key as the access code; a CC2 without a CANVAS answers no_canvas, so nothing is
+// mapped and the plate goes out as sliced. Any other Elegoo model has nothing this fork can read.
 static Status probe_elegoo(const Device& d, int timeout_s)
 {
-    if (!canvas_capable_model(d.printer_model)) {
+    if (!canvas_reader_model(d.printer_model)) {
         Status st;
         st.note = no_filament_note(d.host_type);
         return st;
@@ -824,7 +826,7 @@ static Status probe_elegoo(const Device& d, int timeout_s)
     CanvasQueryOptions opts;
     opts.frame_timeout_ms = std::max(1, timeout_s) * 1000;
     opts.step_timeout_ms  = std::max(2, 2 * timeout_s) * 1000;
-    return status_from_canvas(canvas_query(d.address, opts));
+    return status_from_canvas(canvas_query_for(d.address, d.printer_model, d.apikey, opts));
 }
 
 Status probe(const Device& d, int timeout_s)
