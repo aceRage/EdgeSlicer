@@ -644,3 +644,64 @@ TEST_CASE("Trace the image of EDGESLICER_TRACE_IMAGE", "[ImageTraceFile][.]")
                   << int(l.color[2]) << ")  outlines " << l.contours << ", depth " << l.depth << " mm" << std::endl;
     CHECK(r.is_valid());
 }
+
+TEST_CASE("Match filaments to traced colours", "[ImageTrace]")
+{
+    using RGB = std::array<uint8_t, 3>;
+    const RGB red{220, 20, 20}, blue{20, 40, 220}, blue_too{24, 44, 216}, purple{150, 70, 235}, pink{240, 90, 200}, green{90, 225, 80},
+              white{245, 245, 245};
+
+    SECTION("Add new: a close existing filament is reused, every other colour is added once")
+    {
+        // filament 1 is almost the red, filament 2 is green-ish but not close to anything traced
+        std::vector<std::string> project{"#DA1616", "#20A020"};
+        TraceFilamentPlan        plan = plan_trace_filaments({red, blue, blue_too, purple}, project, TraceFilamentMatch::AddNew);
+        CHECK(plan.recolour.empty());
+        // blue and purple are added, the second blue reuses the added blue
+        REQUIRE(plan.add.size() == 2);
+        CHECK(plan.add[0] == image_trace_color_to_hex(blue));
+        CHECK(plan.add[1] == image_trace_color_to_hex(purple));
+        CHECK(plan.filaments == std::vector<int>{1, 3, 3, 4});
+    }
+
+    SECTION("Add new: six colours get six filaments, whatever the printer")
+    {
+        std::vector<std::string> project{"#808080"};
+        TraceFilamentPlan        plan = plan_trace_filaments({red, blue, purple, pink, green, white}, project, TraceFilamentMatch::AddNew);
+        CHECK(plan.add.size() == 6);
+        CHECK(plan.filaments == std::vector<int>{2, 3, 4, 5, 6, 7});
+    }
+
+    SECTION("Replace: filaments 1..N get the traced colours, missing ones are added")
+    {
+        std::vector<std::string> project{"#000000", image_trace_color_to_hex(blue)};
+        TraceFilamentPlan plan = plan_trace_filaments({red, blue, purple, pink, green, white}, project, TraceFilamentMatch::ReplaceColours);
+        CHECK(plan.filaments == std::vector<int>{1, 2, 3, 4, 5, 6});
+        // filament 2 already has the colour
+        REQUIRE(plan.recolour.size() == 1);
+        CHECK(plan.recolour[0].first == 1);
+        CHECK(plan.recolour[0].second == image_trace_color_to_hex(red));
+        CHECK(plan.add.size() == 4);
+        CHECK(plan.add.front() == image_trace_color_to_hex(purple));
+    }
+
+    SECTION("Replace: more filaments than colours, only the first ones change")
+    {
+        std::vector<std::string> project(8, "#FFFFFF");
+        TraceFilamentPlan        plan = plan_trace_filaments({red, blue, purple}, project, TraceFilamentMatch::ReplaceColours);
+        CHECK(plan.add.empty());
+        CHECK(plan.recolour.size() == 3);
+        CHECK(plan.filaments == std::vector<int>{1, 2, 3});
+    }
+
+    SECTION("Nearest: nothing changes")
+    {
+        std::vector<std::string> project{"#FFFFFF", "#E01010", "#1030E0"};
+        TraceFilamentPlan        plan = plan_trace_filaments({red, blue, white}, project, TraceFilamentMatch::Nearest);
+        CHECK(plan.add.empty());
+        CHECK(plan.recolour.empty());
+        CHECK(plan.filaments == std::vector<int>{2, 3, 1});
+        // no filament: the default
+        CHECK(plan_trace_filaments({red}, {}, TraceFilamentMatch::Nearest).filaments == std::vector<int>{0});
+    }
+}

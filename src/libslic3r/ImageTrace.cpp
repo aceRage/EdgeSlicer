@@ -25,6 +25,7 @@
 #include "EmbossShape.hpp"
 #include "Model.hpp"
 #include "NSVGUtils.hpp"
+#include "SvgSplit.hpp" // svg_split_nearest_filament
 #include "UntrustedInput.hpp"
 
 namespace Slic3r {
@@ -1453,6 +1454,49 @@ std::string image_trace_color_to_hex(const std::array<uint8_t, 3> &color)
     char buffer[8];
     std::snprintf(buffer, sizeof(buffer), "#%02X%02X%02X", color[0], color[1], color[2]);
     return buffer;
+}
+
+TraceFilamentPlan plan_trace_filaments(const std::vector<std::array<uint8_t, 3>> &levels, const std::vector<std::string> &filaments,
+                                       TraceFilamentMatch mode)
+{
+    TraceFilamentPlan plan;
+    switch (mode) {
+    case TraceFilamentMatch::AddNew: {
+        // filaments of the project followed by the ones added for earlier levels
+        std::vector<std::string> working = filaments;
+        for (const auto &color : levels) {
+            double d       = 0.;
+            int    nearest = svg_split_nearest_filament(color, working, &d);
+            if (nearest > 0 && d <= IMAGE_TRACE_REUSE_DELTA_E) {
+                plan.filaments.push_back(nearest);
+                continue;
+            }
+            std::string hex = image_trace_color_to_hex(color);
+            working.push_back(hex);
+            plan.add.push_back(hex);
+            plan.filaments.push_back(int(working.size()));
+        }
+        break;
+    }
+    case TraceFilamentMatch::ReplaceColours:
+        // level i on filament i, whatever the printer: recolour the existing ones, add the rest
+        for (size_t i = 0; i < levels.size(); ++i) {
+            std::string hex = image_trace_color_to_hex(levels[i]);
+            if (i < filaments.size()) {
+                std::array<uint8_t, 3> old;
+                if (!svg_split_parse_hex(filaments[i], old) || old != levels[i])
+                    plan.recolour.push_back({int(i) + 1, hex});
+            } else
+                plan.add.push_back(hex);
+            plan.filaments.push_back(int(i) + 1);
+        }
+        break;
+    case TraceFilamentMatch::Nearest:
+        for (const auto &color : levels)
+            plan.filaments.push_back(svg_split_nearest_filament(color, filaments));
+        break;
+    }
+    return plan;
 }
 
 } // namespace Slic3r
