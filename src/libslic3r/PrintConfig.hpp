@@ -168,6 +168,18 @@ enum class IroningType {
 // and zero stops the fillers from making progress.
 constexpr double IRONING_SPACING_MIN = 0.05;
 
+// Orca #11194: the filament_ironing_* override for a 1-based filament id, or process_value when
+// the override is nil. Edge: an id outside the vector (a mixed / virtual filament id, or a
+// config carrying fewer filament slots than the print) also falls back to the process value,
+// instead of borrowing filament 1's override the way ConfigOptionVector::get_at() would.
+template<class TVectorOption>
+double ironing_filament_override(const TVectorOption &opt, int filament_id, double process_value)
+{
+    if (filament_id < 1 || size_t(filament_id) > opt.values.size() || opt.is_nil(size_t(filament_id - 1)))
+        return process_value;
+    return double(opt.get_at(size_t(filament_id - 1)));
+}
+
 //BBS
 enum class WallInfillOrder {
     InnerOuterInfill,
@@ -1803,6 +1815,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, ironing_direction))
     ((ConfigOptionFloats, ironing_speed))
     ((ConfigOptionFloat, ironing_angle))
+    ((ConfigOptionBool, ironing_angle_fixed))
+    // Orca #11194: filament ironing overrides (per filament, nil = use the process value)
+    ((ConfigOptionPercentsNullable, filament_ironing_flow))
+    ((ConfigOptionFloatsNullable, filament_ironing_spacing))
+    ((ConfigOptionFloatsNullable, filament_ironing_inset))
+    ((ConfigOptionFloatsNullable, filament_ironing_speed))
     // Detect bridging perimeters
     ((ConfigOptionBool, detect_overhang_wall))
     ((ConfigOptionBool, unsupported_wall_last))
@@ -2384,6 +2402,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPercents,            filament_shrinkage_compensation_z))
     ((ConfigOptionBool,                gcode_label_objects))
     ((ConfigOptionBool,                exclude_object))
+    ((ConfigOptionFloat,               exclude_object_tolerance))
     ((ConfigOptionBool,                gcode_comments))
     ((ConfigOptionInts,                 slow_down_layers))
     ((ConfigOptionInts,                support_material_interface_fan_speed))

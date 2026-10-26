@@ -2789,7 +2789,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("ironing_flow", "quality_settings_ironing#flow");
         optgroup->append_single_option_line("ironing_spacing", "quality_settings_ironing#line-spacing");
         optgroup->append_single_option_line("ironing_inset", "quality_settings_ironing#inset");
-        optgroup->append_single_option_line("ironing_angle", "quality_settings_ironing#angle");
+        optgroup->append_single_option_line("ironing_angle", "quality_settings_ironing#angle-offset");
+        optgroup->append_single_option_line("ironing_angle_fixed", "quality_settings_ironing#fixed-angle");
 
         optgroup = page->new_optgroup(L("Z contouring"), L"param_z_contouring");
         optgroup->append_single_option_line("zaa_enabled", "quality_settings_z_contouring");
@@ -3297,6 +3298,7 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("gcode_comments", "others_settings_g_code_output#verbose-g-code");
         optgroup->append_single_option_line("gcode_label_objects", "others_settings_g_code_output#label-objects");
         optgroup->append_single_option_line("exclude_object", "others_settings_g_code_output#exclude-objects");
+        optgroup->append_single_option_line("exclude_object_tolerance", "others_settings_g_code_output#outline-tolerance");
         option = optgroup->get_option("filename_format");
         // option.opt.full_width = true;
         option.opt.is_code = true;
@@ -4679,6 +4681,59 @@ PageShp TabFilament::add_filament_overrides_page()
                                      })
         append_single_option_line(opt_key);
 
+    // Orca #11194: filament ironing overrides. Unlike the retraction overrides above, these
+    // fall back to the PROCESS preset (ironing_flow / ironing_spacing / ironing_inset /
+    // ironing_speed), not the printer preset.
+    ConfigOptionsGroupShp ironing_optgroup = page->new_optgroup(L("Ironing"), L"param_ironing");
+    auto append_ironing_option = [this, ironing_optgroup](const std::string& opt_key)
+    {
+        Line line = ironing_optgroup->create_single_option_line(ironing_optgroup->get_option(opt_key));
+
+        line.near_label_widget = [this, optgroup_wk = ConfigOptionsGroupWkp(ironing_optgroup), opt_key](wxWindow* parent) {
+            auto check_box = new ::CheckBox(parent); // ORCA modernize checkboxes
+            check_box->Bind(wxEVT_TOGGLEBUTTON, [this, optgroup_wk, opt_key](wxCommandEvent& evt) {
+                const bool is_checked = evt.IsChecked();
+                if (auto optgroup_sh = optgroup_wk.lock(); optgroup_sh) {
+                    if (Field *field = optgroup_sh->get_fieldc(opt_key, 0); field != nullptr) {
+                        field->toggle(is_checked);
+                        const std::string process_opt_key = opt_key.substr(strlen("filament_"));
+                        const auto &process_config = m_preset_bundle->prints.get_edited_preset().config;
+                        const boost::any process_value = optgroup_sh->get_config_value(process_config, process_opt_key, 0);
+                        if (is_checked) {
+                            // Start the override from the process value the slice uses today.
+                            const ConfigOption *opt = m_config->option(opt_key);
+                            const auto *vec = dynamic_cast<const ConfigOptionVectorBase *>(opt);
+                            if (vec != nullptr && vec->is_nil(0) && !process_value.empty())
+                                field->set_value(process_value, false);
+                            field->update_na_value(_(L("N/A")));
+                            field->set_last_meaningful_value();
+                        } else {
+                            field->update_na_value(process_value);
+                            const double nil_value = ConfigOptionFloatsNullable::nil_value();
+                            Slic3r::GUI::change_opt_value(*m_config, opt_key, nil_value, 0);
+                            field->set_value(process_value, false);
+                            on_value_change(opt_key, nil_value);
+                            update_dirty();
+                        }
+                    }
+                }
+                // Orca #11517: let the CheckBox widget's own handler run too, so its image follows the click.
+                evt.Skip();
+            }, check_box->GetId());
+
+            m_overrides_options[opt_key] = check_box;
+            return check_box;
+        };
+
+        ironing_optgroup->append_line(line);
+    };
+
+    for (const std::string opt_key : { "filament_ironing_flow",
+                                       "filament_ironing_spacing",
+                                       "filament_ironing_inset",
+                                       "filament_ironing_speed" })
+        append_ironing_option(opt_key);
+
     return page;
 }
 
@@ -4692,6 +4747,35 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
         return;
 
     Page* page = m_active_page;
+
+    // Orca #11194: ironing overrides. An unset override shows the process preset's value.
+    const auto og_ironing_it = std::find_if(page->m_optgroups.begin(), page->m_optgroups.end(), [](const ConfigOptionsGroupShp og) { return og->title == "Ironing"; });
+    if (og_ironing_it != page->m_optgroups.end()) {
+        ConfigOptionsGroupShp ironing_optgroup = *og_ironing_it;
+        const auto &process_config = m_preset_bundle->prints.get_edited_preset().config;
+        for (const std::string opt_key : { "filament_ironing_flow",
+                                           "filament_ironing_spacing",
+                                           "filament_ironing_inset",
+                                           "filament_ironing_speed" }) {
+            auto it = m_overrides_options.find(opt_key);
+            if (it == m_overrides_options.end())
+                continue;
+            const auto *option = dynamic_cast<const ConfigOptionVectorBase*>(m_config->option(opt_key));
+            const bool is_checked = option != nullptr && !option->is_nil(0);
+            it->second->Enable(true);
+            it->second->SetValue(is_checked);
+
+            Field* field = ironing_optgroup->get_fieldc(opt_key, 0);
+            if (field == nullptr)
+                continue;
+            if (!is_checked) {
+                const boost::any process_value = ironing_optgroup->get_config_value(process_config, opt_key.substr(strlen("filament_")), 0);
+                field->update_na_value(process_value);
+                field->set_value(process_value, false);
+            }
+            field->toggle(is_checked);
+        }
+    }
 
     const auto og_it = std::find_if(page->m_optgroups.begin(), page->m_optgroups.end(), [](const ConfigOptionsGroupShp og) { return og->title == "Retraction"; });
     if (og_it == page->m_optgroups.end())
