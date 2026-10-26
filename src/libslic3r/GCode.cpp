@@ -796,6 +796,188 @@ static inline Point wipe_tower_point_to_object_point(GCode& gcodegen, const Vec2
     return Point(scale_(wipe_tower_pt.x() - gcodegen.origin()(0)), scale_(wipe_tower_pt.y() - gcodegen.origin()(1)));
 }
 
+// Orca #15035 (BBS generate_path_to_wipe_tower, which Edge's Type1 append_tcr does not use): a travel
+// from start_pos (the last position before the tower) to end_pos (the tower entry), both in object
+// coordinates, around avoid_polygon grown by 2 mm, so it reaches end_pos from the side the first purge
+// row runs away from. Returns end_pos alone when the grown box leaves printer_bbx or nothing is in the way.
+// Edge: `outward` is the direction out of the tower through the entry's wall, in plate axes. BBS assumes
+// an unrotated tower (+-X); a WipeTower2 tower turns by its rotation angle (#700), so the caller passes it.
+Polyline WipeTowerIntegration::generate_path_to_wipe_tower(const Point &start_pos, const Point &end_pos, const BoundingBox &avoid_polygon,
+                                                           const BoundingBox &printer_bbx, const Vec2f &outward) const
+{
+    Polyline    res;
+    coord_t     alpha               = coord_t(scale_(2.)); // offset distance
+    BoundingBox avoid_polygon_inner = avoid_polygon;
+    avoid_polygon_inner.offset(alpha);
+    Polygon bed_polygon = printer_bbx.polygon();
+    const Vec2f v = outward; // leave the entry through its wall
+    // If the grown box leaves the printer area, go straight to end_pos.
+    Points avoid_points = avoid_polygon_inner.polygon().points;
+    for (const Point &wipe_tower_bbx_p : avoid_points)
+        if (ClipperLib::PointInPolygon(wipe_tower_bbx_p, bed_polygon.points) != 1) {
+            res.points.push_back(end_pos);
+            return res;
+        }
+    // Ray-line segment intersection.
+    auto ray_intersection_line = [](const Vec2d &a, const Vec2d &v1, const Vec2d &b, const Vec2d &c) -> std::pair<bool, Point> {
+        const Vec2d v2    = c - b;
+        double      denom = cross2(v1, v2);
+        if (std::fabs(denom) < EPSILON)
+            return {false, Point(0, 0)};
+        const Vec2d v12    = (a - b);
+        double      nume_a = cross2(v2, v12);
+        double      nume_b = cross2(v1, v12);
+        double      t1     = nume_a / denom;
+        double      t2     = nume_b / denom;
+        if (t1 >= 0 && t2 >= 0 && t2 <= 1.) {
+            const Vec2d hit = a + t1 * v1;
+            return {true, Point::new_scale(hit.x(), hit.y())};
+        }
+        return {false, Point(0, 0)};
+    };
+    struct Inter_info
+    {
+        int   inter_idx0 = -1;
+        Point inter_p;
+    };
+    auto calc_path_len = [](Points &points, Inter_info &beg_info, Inter_info &end_info, bool is_add) -> std::pair<std::vector<Point>, double> {
+        int                beg = is_add ? (beg_info.inter_idx0 + 1) % int(points.size()) : beg_info.inter_idx0;
+        int                end = is_add ? end_info.inter_idx0 : (end_info.inter_idx0 + 1) % int(points.size());
+        int                i   = beg;
+        double             len = 0;
+        std::vector<Point> path;
+        path.push_back(beg_info.inter_p);
+        len += (unscale(beg_info.inter_p) - unscale(points[beg])).squaredNorm();
+        while (i != end) {
+            int  ni = is_add ? (i + 1) % int(points.size()) : (i - 1 + int(points.size())) % int(points.size());
+            auto a  = unscale(points[i]);
+            auto b  = unscale(points[ni]);
+            len += (a - b).squaredNorm();
+            path.push_back(points[i]);
+            i = ni;
+        }
+        path.push_back(points[end]);
+        path.push_back(end_info.inter_p);
+        len += (unscale(end_info.inter_p) - unscale(points[end])).squaredNorm();
+        return {path, len};
+    };
+    // Where the ray from end_pos along v leaves the grown box: p.
+    Inter_info inter_info;
+    for (size_t i = 0; i < avoid_points.size(); i++) {
+        const auto &a            = avoid_points[i];
+        const auto &b            = avoid_points[(i + 1) % avoid_points.size()];
+        auto [is_inter, inter_p] = ray_intersection_line(unscale(end_pos), v.cast<double>(), unscale(a), unscale(b));
+        if (is_inter) {
+            inter_info.inter_idx0 = int(i);
+            inter_info.inter_p    = inter_p;
+            break;
+        }
+    }
+    if (inter_info.inter_idx0 == -1) {
+        res.points.push_back(end_pos);
+        return res;
+    }
+    // Where the line start -> p first meets the box: p_. Without it, go to p directly; otherwise go
+    // from p_ to p the shorter way round the box.
+    Inter_info inter_info2;
+    Linef      start_to_p(unscale(start_pos), unscale(inter_info.inter_p));
+    for (size_t i = 0; i < avoid_points.size(); i++) {
+        if (int(i) == inter_info.inter_idx0)
+            continue;
+        Vec2d a = unscale(avoid_points[i]);
+        Vec2d b = unscale(avoid_points[(i + 1) % avoid_points.size()]);
+        Linef tower_edge(a, b);
+        Vec2d inter;
+        if (line_alg::intersection(start_to_p, tower_edge, &inter)) {
+            inter_info2.inter_p    = Point::new_scale(inter.x(), inter.y());
+            inter_info2.inter_idx0 = int(i);
+            break;
+        }
+    }
+    if (inter_info2.inter_idx0 == -1) {
+        res.points.push_back(inter_info.inter_p);
+    } else {
+        auto [path1, len1] = calc_path_len(avoid_points, inter_info2, inter_info, true);
+        auto [path2, len2] = calc_path_len(avoid_points, inter_info2, inter_info, false);
+        for (const Point &p : (len1 < len2 ? path1 : path2))
+            res.points.push_back(p);
+    }
+    res.points.push_back(end_pos);
+    return res;
+}
+
+// Orca #15035: printable-area bounds for the tower-approach routing, in object coordinates (upstream's
+// single-nozzle branch; Edge sends no multi-nozzle printer through WipeTower2).
+BoundingBox WipeTowerIntegration::printer_travel_bounds(GCode &gcodegen) const
+{
+    const Vec2f plate_origin_2d(m_plate_origin(0), m_plate_origin(1));
+    Points      bed_points;
+    for (const Vec2d &p : gcodegen.config().printable_area.values)
+        bed_points.push_back(wipe_tower_point_to_object_point(gcodegen, p.cast<float>() + plate_origin_2d));
+    return BoundingBox(bed_points);
+}
+
+// Orca #15035: with skip points (wall gaps) on, the WipeTower2 wall has an opening at each toolchange's
+// entry (tcr.start_pos): route the approach around the tower's first-layer envelope so the nozzle enters
+// through that opening instead of dragging across the printed wall (BBS append_tcr parity). Emits only
+// the waypoints leading up to the opening; the caller still travels to start_wipe_pos itself. Empty when
+// the gap wall is off, the envelope is unknown, or the approach already starts inside the tower.
+std::string WipeTowerIntegration::travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const
+{
+    if (!WipeTower2::use_gap_wall(gcodegen.config()) || !m_wipe_tower_bbx.defined)
+        return {};
+    const Vec2f plate_origin_2d(m_plate_origin(0), m_plate_origin(1));
+    const float alpha = m_wipe_tower_rotation / 180.f * float(M_PI);
+    // The tower-local envelope corners, transformed like the tcr points; a rotated tower gets a
+    // conservative axis-aligned envelope.
+    const Vec2d corners[4] = { m_wipe_tower_bbx.min, Vec2d(m_wipe_tower_bbx.max.x(), m_wipe_tower_bbx.min.y()), m_wipe_tower_bbx.max,
+                               Vec2d(m_wipe_tower_bbx.min.x(), m_wipe_tower_bbx.max.y()) };
+    Points avoid_points;
+    for (const Vec2d &c : corners) {
+        const Vec2f bed_pt = Vec2f(Eigen::Rotation2Df(alpha) * c.cast<float>()) + m_wipe_tower_pos;
+        avoid_points.push_back(wipe_tower_point_to_object_point(gcodegen, bed_pt + plate_origin_2d));
+    }
+    const BoundingBox avoid_bbx(avoid_points);
+    if (avoid_bbx.contains(route_start))
+        return {};
+    // Edge (#700): the entry's wall faces tower-local -X or +X, whichever side of the tower the entry is on;
+    // turned into plate axes by the tower rotation, so on a 90 degree tower the hop crosses the wall.
+    const Vec2f  entry_bed   = unscaled<float>(start_wipe_pos) + gcodegen.origin().cast<float>() - plate_origin_2d;
+    const Vec2f  entry_local = Eigen::Rotation2Df(-alpha) * (entry_bed - m_wipe_tower_pos);
+    const float  side        = entry_local.x() < 0.5f * float(m_wipe_tower_bbx.min.x() + m_wipe_tower_bbx.max.x()) ? -1.f : 1.f;
+    const Vec2f  outward     = Eigen::Rotation2Df(alpha) * Vec2f(side, 0.f);
+    const Polyline travel_polyline = generate_path_to_wipe_tower(route_start, start_wipe_pos, avoid_bbx, printer_travel_bounds(gcodegen), outward);
+    std::string    gcode;
+    // The polyline's last point is start_wipe_pos itself, emitted by the caller.
+    for (size_t i = 0; i + 1 < travel_polyline.points.size(); ++i)
+        gcode += gcodegen.travel_to(travel_polyline.points[i], erMixed, "Travel to a Wipe Tower");
+    return gcode;
+}
+
+// Orca #15035: the last XY a G-code snippet moves to (absolute G0-G3 words), starting from pos. Stands in
+// for upstream's GCodeProcessor::get_last_position_from_gcode, which Edge does not have.
+static bool last_xy_of_gcode(const std::string &gcode, Vec2d &pos)
+{
+    bool               moved = false;
+    std::istringstream lines(gcode);
+    for (std::string line; std::getline(lines, line);) {
+        const size_t comment = line.find(';');
+        if (comment != std::string::npos)
+            line.erase(comment);
+        std::istringstream words(line);
+        std::string        cmd;
+        if (!(words >> cmd) || !(cmd == "G0" || cmd == "G1" || cmd == "G2" || cmd == "G3"))
+            continue;
+        for (std::string w; words >> w;) {
+            if (w.size() < 2 || (w[0] != 'X' && w[0] != 'Y'))
+                continue;
+            (w[0] == 'X' ? pos.x() : pos.y()) = std::atof(w.c_str() + 1);
+            moved                              = true;
+        }
+    }
+    return moved;
+}
+
 std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::ToolChangeResult& tcr, int new_extruder_id, double z) const
 {
     if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool)
@@ -1304,7 +1486,9 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                                                          || is_ramming
                                                          || tool_change_on_wipe_tower);
 
-    if (should_travel_to_tower || gcodegen.m_need_change_layer_lift_z) {
+    const Point start_wipe_pos      = wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d);
+    const bool  travel_to_tower_now = should_travel_to_tower || gcodegen.m_need_change_layer_lift_z;
+    if (travel_to_tower_now) {
         // FIXME: It would be better if the wipe tower set the force_travel flag for all toolchanges,
         // then we could simplify the condition and make it more readable.
 
@@ -1325,12 +1509,16 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
         }
 
         gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
-        gcode += gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
-                                    "Travel to a Wipe Tower");
+        // Orca #15035: with wall gaps, approach around the tower and enter through this tcr's opening.
+        if (!tcr.priming && gcodegen.last_pos_defined())
+            gcode += travel_to_tower_gap(gcodegen, gcodegen.last_pos(), start_wipe_pos);
+        gcode += gcodegen.travel_to(start_wipe_pos, erMixed, "Travel to a Wipe Tower");
         gcode += gcodegen.unretract();
     } else {
         // When this is multiextruder printer without any ramming, we can just change
-        // the tool without travelling to the tower.
+        // the tool without travelling to the tower. The tower entry travel then lives inside the
+        // tcr gcode; with wall gaps on it is rerouted below (Orca #15035), once the toolchange
+        // gcode (and the head position it ends at) is known.
     }
 
     if (will_go_down) {
@@ -1358,9 +1546,46 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
             restore_layer_z_str += gcodegen.writer().unretract();
             check_add_eol(restore_layer_z_str);
         }
+        // Orca #15035: where the head is before the tool change; set_extruder() may leave the last position
+        // undefined (Edge), and the in-place entry routing below starts from here then.
+        const bool  pos_before_toolchange_defined = gcodegen.last_pos_defined();
+        const Point pos_before_toolchange         = pos_before_toolchange_defined ? gcodegen.last_pos() : Point();
         // Orca #15144: with wait_for_temp_on_wipe_tower the blocking wait moves to the tower (toolchange_Change).
         toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id, tcr.print_z, false,
                                                      WipeTower2::wait_for_temp_enabled(gcodegen.config())); // TODO: toolchange_z vs print_z
+        if (!travel_to_tower_now && !tcr.priming && WipeTower2::use_gap_wall(gcodegen.config())) {
+            // Orca #15035: the tool changed in place (multi-tool printer without ramming), so the tower
+            // entry is the tcr's own positioning move, a straight line across the printed wall. Route it
+            // around the tower and in through the wall opening instead, riding at the end of the
+            // change_filament_gcode substitution so the generator's positioning move becomes a zero-length
+            // one (BBS append_tcr parity: travel after the filament change, with the new filament).
+            Vec2d last_gcode_pos = gcodegen.writer().get_position().head<2>() - plate_origin_2d.cast<double>(); // plate-local, as the text
+            Point route_start;
+            bool  have_start = false;
+            if (last_xy_of_gcode(toolchange_gcode_str, last_gcode_pos)) {
+                // A custom change_filament_gcode may have moved the head (tool docks etc.); recover the
+                // real position from the emitted gcode.
+                // G-code text is plate-local (GCodeWriter takes the plate offset off), hence the plate origin.
+                route_start = gcodegen.gcode_to_point(last_gcode_pos + plate_origin_2d.cast<double>());
+                have_start  = true;
+            } else if (gcodegen.last_pos_defined()) {
+                route_start = gcodegen.last_pos();
+                have_start  = true;
+            } else if (pos_before_toolchange_defined) {
+                // The tool change did not move the head in the G-code we can see.
+                route_start = pos_before_toolchange;
+                have_start  = true;
+            }
+            if (have_start) {
+                gcodegen.set_last_pos(route_start);
+                gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
+                std::string travel = travel_to_tower_gap(gcodegen, route_start, start_wipe_pos);
+                travel += gcodegen.travel_to(start_wipe_pos, erMixed, "Travel to a Wipe Tower");
+                check_add_eol(travel);
+                toolchange_gcode_str += travel;
+                gcodegen.set_last_pos(start_wipe_pos);
+            }
+        }
         if (gcodegen.config().enable_prime_tower) {
             deretraction_str += gcodegen.writer().travel_to_z(z, "Force restore layer Z", true);
             // Snapmaker #993 (Edge): the tower G-code after this may travel without an F word (U1: "G1 Y..."
@@ -4411,6 +4636,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                                             print.wipe_tower_data().local_z_reserve_boxes,
                                                             *print.wipe_tower_data().final_purge.get(),
                                                             print.wipe_tower_data().final_purge_drop));
+                // Orca #15035: the WipeTower2 tower's first-layer envelope (brim, ribs and cone included),
+                // tower-local, for the skip-point entry routing in append_tcr2.
+                if (!is_bbl_printers && print.wipe_tower_data().wipe_tower_mesh_data.has_value() &&
+                    !print.wipe_tower_data().wipe_tower_mesh_data->bottom.empty()) {
+                    const BoundingBox envelope = get_extents(print.wipe_tower_data().wipe_tower_mesh_data->bottom);
+                    m_wipe_tower->set_wipe_tower_bbx(BoundingBoxf(unscale(envelope.min), unscale(envelope.max)));
+                }
                 // BBS
                 file.write(m_writer.travel_to_z(initial_layer_print_height + m_config.z_offset.value, "Move to the first layer height"));
 
