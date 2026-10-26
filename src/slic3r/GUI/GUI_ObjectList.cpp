@@ -3808,6 +3808,7 @@ void ObjectList::delete_all_connectors_for_object(int obj_idx)
 
             if (obj->volumes.empty() || !obj->has_solid_mesh()) {
                 model.delete_object(idx);
+                wxGetApp().plater()->get_partplate_list().notify_instance_removed(idx, -1);
                 m_objects_model->Delete(m_objects_model->GetItemById(idx));
                 continue;
             }
