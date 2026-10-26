@@ -127,8 +127,12 @@ void FillPlanePath::_fill_surface_single(
         if (!polylines.empty()) {
             Polylines chained;
             if (params.dont_connect() || params.density > 0.5) {
-                // ORCA: special flag for flow rate calibration
-                auto is_flow_calib = params.extrusion_role == erTopSolidInfill &&
+                // ORCA: special flag for flow rate calibration. The chords chained ahead of the
+                // inside-out center spiral collide with it in opposing directions, raising a
+                // tactile lip that the calibration reads. Only applies while the fill order is
+                // Default, so it can be overridden from the calibration objects.
+                auto is_flow_calib = params.fill_order == SurfaceFillOrder::Default &&
+                                     params.extrusion_role == erTopSolidInfill &&
                                      this->print_object_config->has("calib_flowrate_topinfill_special_order") &&
                                      this->print_object_config->option("calib_flowrate_topinfill_special_order")->getBool() &&
                                      dynamic_cast<FillArchimedeanChords*>(this);
@@ -150,6 +154,20 @@ void FillPlanePath::_fill_surface_single(
 
                     // Then add the center spiral back
                     chained.push_back(std::move(center_spiral));
+                } else if (params.fill_order != SurfaceFillOrder::Default) {
+                    // Orca: print the fragments in the order they appear along the generated
+                    // path, which runs from the center outwards. The Euclidean distance from
+                    // the center cannot be used for this: along the Octagram Spiral the radius
+                    // oscillates by far more than the ring spacing, so fragments of different
+                    // rings would interleave.
+                    restore_source_path_order(polyline, polylines);
+                    chained = std::move(polylines);
+                    if (params.fill_order == SurfaceFillOrder::Inward) {
+                        // The source path runs from the center outwards; flip everything for inward.
+                        std::reverse(chained.begin(), chained.end());
+                        for (Polyline &pl : chained)
+                            pl.reverse();
+                    }
                 } else {
                     chained = chain_polylines(std::move(polylines));
                 }

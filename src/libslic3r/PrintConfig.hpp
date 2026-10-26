@@ -186,6 +186,15 @@ enum class WallDirection
     Count,
 };
 
+// Orca: print order of surface fill loops/fragments for center-based fill patterns
+// (Concentric, Archimedean Chords, Octagram Spiral).
+enum class SurfaceFillOrder {
+    Default,
+    Outward,
+    Inward,
+    Count,
+};
+
 // Orca #11582 / #11616: what the slicer does about the printer's power loss recovery.
 // PrinterConfiguration writes nothing and leaves the printer's own setting; Enable / Disable write
 // M1003 S1 / S0 (Bambu Lab) or M413 S1 / S0 (Marlin 2) at the start of the second layer.
@@ -1004,6 +1013,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillGradient)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SurfaceFillOrder)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
@@ -1704,6 +1714,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>,  top_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>,  undertop_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>,  bottom_surface_pattern))
+    ((ConfigOptionEnum<SurfaceFillOrder>, top_surface_fill_order))
+    ((ConfigOptionEnum<SurfaceFillOrder>, bottom_surface_fill_order))
     ((ConfigOptionEnum<InfillPattern>, internal_solid_infill_pattern))
     ((ConfigOptionFloatOrPercent,       outer_wall_line_width))
     ((ConfigOptionFloats,                outer_wall_speed))

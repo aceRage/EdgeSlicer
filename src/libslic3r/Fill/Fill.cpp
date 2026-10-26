@@ -322,6 +322,9 @@ struct SurfaceFillParams
     CenterOfSurfacePattern center_of_surface_pattern{CenterOfSurfacePattern::Each_Surface};
     bool                   separated_infills{false};
 
+    // Orca: forced print order of surface fill loops/fragments for center-based patterns.
+    SurfaceFillOrder fill_order = SurfaceFillOrder::Default;
+
     // Phase 3 (image row, sub-triangle resolution): the CONFIGURED 1-based virtual filament id
     // (region_config.solid_infill_filament.value, before mixed-filament resolution) when this is
     // an erTopSolidInfill fill whose row is an enabled ImageWeighted MixedFilament with a
@@ -383,6 +386,7 @@ struct SurfaceFillParams
         RETURN_COMPARE_NON_EQUAL(smooth_factor);
         RETURN_COMPARE_NON_EQUAL(center_of_surface_pattern);
         RETURN_COMPARE_NON_EQUAL(separated_infills);
+		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, fill_order);
 
 		return false;
 	}
@@ -421,7 +425,8 @@ struct SurfaceFillParams
                 this->adaptive_infill_gradient == rhs.adaptive_infill_gradient &&
                 this->smooth_factor         == rhs.smooth_factor &&
                 this->center_of_surface_pattern == rhs.center_of_surface_pattern &&
-                this->separated_infills     == rhs.separated_infills;
+                this->separated_infills     == rhs.separated_infills &&
+                this->fill_order            == rhs.fill_order;
 	}
 };
 
@@ -1420,6 +1425,15 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                         params.extrusion_role = erSolidInfill;
                     }
                 }
+                // Orca: forced fill order applies only to top/bottom surfaces filled with a
+                // center-based pattern; everything else stays at Default to keep batching together.
+                params.fill_order = SurfaceFillOrder::Default;
+                if (params.pattern == ipConcentric || params.pattern == ipArchimedeanChords || params.pattern == ipOctagramSpiral) {
+                    if (params.extrusion_role == erTopSolidInfill)
+                        params.fill_order = region_config.top_surface_fill_order.value;
+                    else if (params.extrusion_role == erBottomSurface)
+                        params.fill_order = region_config.bottom_surface_fill_order.value;
+                }
                 // Orca: apply fill multiline only for sparse infill
                 params.multiline = params.extrusion_role == erInternalInfill ? int(region_config.fill_multiline) : 1;
 
@@ -1675,6 +1689,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                     params.pattern 		 = ipRectilinear;
 	            params.density 		 = 100.f;
 		        params.extrusion_role = erSolidInfill;
+		        // EdgeSlicer: params is reused from the last surface above; a forced top/bottom fill order
+		        // must not carry over onto this internal solid fill.
+		        params.fill_order     = SurfaceFillOrder::Default;
 		        const PrintRegionConfig &region_config = layerm.region().config();
                 params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.solid_infill_direction.value,
                                                                region_config.solid_infill_rotate_template.value);
@@ -1951,6 +1968,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         auto &region_config = layerm->region().config();
         params.config               = &region_config;
         params.pattern              = surface_fill.params.pattern;
+        params.fill_order           = surface_fill.params.fill_order;
 
         // Orca: the centered top/bottom surface patterns are centered as center_of_surface_pattern says.
         if (params.extrusion_role == erTopSolidInfill || params.extrusion_role == erBottomSurface)

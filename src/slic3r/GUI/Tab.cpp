@@ -2863,6 +2863,7 @@ void TabPrint::build()
 
         optgroup = page->new_optgroup(L("Top/bottom shells"), L"param_shell");
         optgroup->append_single_option_line("top_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
+        optgroup->append_single_option_line("top_surface_fill_order", "strength_settings_top_bottom_shells#fill-order");
         optgroup->append_single_option_line("top_surface_density", "fill-patterns#Top and bottom surface density");
         // Shown only while top_surface_density < 100% (see ConfigManipulation::toggle_print_fff_options)
         optgroup->append_single_option_line("undertop_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
@@ -2874,6 +2875,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("top_surface_expansion_direction", "strength_settings_top_bottom_shells#surface-expansion-direction");
         optgroup->append_single_option_line("top_color_penetration_layers");
         optgroup->append_single_option_line("bottom_surface_pattern", "fill-patterns#Infill of the top surface and bottom surface");
+        optgroup->append_single_option_line("bottom_surface_fill_order", "strength_settings_top_bottom_shells#fill-order");
         optgroup->append_single_option_line("bottom_surface_density", "fill-patterns#Top and bottom surface density");
         optgroup->append_single_option_line("bottom_shell_layers");
         optgroup->append_single_option_line("bottom_shell_thickness");
