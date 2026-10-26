@@ -813,3 +813,77 @@ TEST_CASE("Purge blocks of a non-ramming toolchanger tile the tower without blan
     }
     REQUIRE(checked_joints > 0);
 }
+
+// Orca #15035 (56810c8c7f, 5b475e5e98): with wall gaps (skip points) on, the travel to a toolchange's
+// tower entry goes around the tower and enters through the wall opening instead of crossing the printed
+// tower. On a toolchanger without ramming (the U1) the tool changes in place and the entry travel is
+// appended to the change_filament_gcode substitution. The tower turns 180 degrees every layer, so every
+// other layer's entry is on the far side of the tower from the part: a direct hop there crosses it.
+TEST_CASE("The tower entry travel goes around the tower when wall gaps are on", "[WipeTower][SkipPoints]")
+{
+    const bool gaps = GENERATE(false, true);
+    DYNAMIC_SECTION("wipe_tower_wall_gap " << gaps) {
+        DynamicPrintConfig config = wait_for_temp_config(false);
+        config.set_deserialize_strict({
+            { "wipe_tower_wall_type", "rectangle" },
+            { "wipe_tower_wall_gap", gaps ? "1" : "0" },
+            { "prime_tower_brim_width", "0" },
+            { "filament_multitool_ramming", "0,0" },
+            { "wipe_tower_x", "120" },
+            { "wipe_tower_y", "60" },
+        });
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        REQUIRE(print.has_wipe_tower());
+        const std::string gcode = Test::gcode(print);
+
+        REQUIRE(print.wipe_tower_data().wipe_tower_mesh_data.has_value());
+        Polygon envelope = print.wipe_tower_data().wipe_tower_mesh_data->bottom;
+        envelope.translate(Point::new_scale(120., 60.));
+        const Polygons inner = offset(envelope, -scale_(1.));
+        REQUIRE(!inner.empty());
+
+        // Travels from outside the tower to a point on it (the entries), and how far each runs over the
+        // tower's inside.
+        double x = 0., y = 0.;
+        int    entries = 0, crossing = 0;
+        const std::vector<std::string> all_lines = split_lines(gcode);
+        for (size_t line_idx = 0; line_idx < all_lines.size(); ++line_idx) {
+            const std::string &line = all_lines[line_idx];
+            if (line.rfind("G1 ", 0) != 0)
+                continue;
+            double nx = x, ny = y;
+            bool   extrudes = false;
+            std::istringstream words(line.substr(3, line.find(';') == std::string::npos ? std::string::npos : line.find(';') - 3));
+            for (std::string w; words >> w;) {
+                if (w.size() < 2)
+                    continue;
+                if (w[0] == 'X' || w[0] == 'Y')
+                    (w[0] == 'X' ? nx : ny) = std::atof(w.c_str() + 1);
+                else if (w[0] == 'E' && std::atof(w.c_str() + 1) > 0.)
+                    extrudes = true;
+            }
+            const Point from = Point::new_scale(x, y), to = Point::new_scale(nx, ny);
+            if (!extrudes && from != to && !envelope.contains(from) && envelope.contains(to)) {
+                ++entries;
+                double over = 0.;
+                for (const Polyline &piece : intersection_pl(Polylines{ Polyline{ from, to } }, inner))
+                    over += unscale<double>(piece.length());
+                std::string context;
+                for (size_t k = line_idx > 40 ? line_idx - 40 : 0; k <= line_idx; ++k)
+                    context += all_lines[k] + "\n";
+                INFO("entry travel " << x << "," << y << " -> " << nx << "," << ny << " runs " << over << " mm over the tower, after:\n" << context);
+                if (gaps)
+                    CHECK(over < 0.5);
+                if (over > 5.)
+                    ++crossing;
+            }
+            x = nx;
+            y = ny;
+        }
+        REQUIRE(entries > 0);
+        if (!gaps)
+            CHECK(crossing > 0); // stock: the far-side entries hop straight over the tower
+    }
+}

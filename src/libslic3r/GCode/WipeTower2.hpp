@@ -34,6 +34,10 @@ public:
     // M109 can never disagree. SEMM runs its own unload/load temperature sequence; the GUI hides
     // the option there but a profile may still carry it set.
     static bool wait_for_temp_enabled(const PrintConfig& config);
+    // Orca #15035: whether the tower cuts wall openings ("skip points") at the toolchange entries
+    // (Edge: wipe_tower_wall_gap, Bambu's prime_tower_skip_points). Shared with the entry routing in
+    // GCode.cpp so the router and the tower agree. Edge's cone wall has the gaps too.
+    static bool use_gap_wall(const PrintConfig& config);
 	static std::pair<double, double> get_wipe_tower_cone_base(double width, double height, double depth, double angle_deg);
 	// First-layer outline of a cone-wall tower in tower-local (scaled) coordinates: body box
 	// unioned with the cone's base ellipse — the model first_layer_wipe_tower_corners uses,

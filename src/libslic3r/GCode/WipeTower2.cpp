@@ -1495,6 +1495,11 @@ bool WipeTower2::wait_for_temp_enabled(const PrintConfig& config)
     return config.wait_for_temp_on_wipe_tower.value && !config.single_extruder_multi_material.value;
 }
 
+bool WipeTower2::use_gap_wall(const PrintConfig& config)
+{
+    return config.wipe_tower_wall_gap.value;
+}
+
 WipeTower2::WipeTower2(const PrintConfig&                     config,
                        const PrintRegionConfig&               default_region_config,
                        int                                    plate_idx,
@@ -1530,7 +1535,7 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     , m_ramming_width_ratio(config.ramming_line_width_ratio)
     , m_enable_arc_fitting(config.enable_arc_fitting)
     , m_used_fillet(config.wipe_tower_fillet_wall)
-    , m_use_gap_wall(config.wipe_tower_wall_gap.value)
+    , m_use_gap_wall(use_gap_wall(config))
     , m_stagger_toolchange_start(config.wipe_tower_stagger_toolchange_start.value)
     , m_rib_width(config.wipe_tower_rib_width)
     , m_extra_rib_length(config.wipe_tower_extra_rib_length)
