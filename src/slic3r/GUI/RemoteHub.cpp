@@ -2474,6 +2474,14 @@ static std::string job_name_stem(const std::string& s)
             break;
         }
     }
+    // What a send does to a job name: Bambu Studio / the cloud turn '%' and other characters into
+    // '_' ("Dragon-Egg_120%(X1C)" runs as "Dragon-Egg_120_(X1C)"), and spaces become '_' too. Bytes
+    // >= 0x80 (UTF-8) are kept as they are.
+    for (char& c : lower) {
+        const unsigned char u = (unsigned char) c;
+        if (u >= 0x80 || std::isalnum(u) || c == '-' || c == '(' || c == ')' || c == '+' || c == '.') continue;
+        c = '_';
+    }
     return lower;
 }
 
@@ -2483,20 +2491,41 @@ bool Testing::same_job_name(const std::string& reported, const std::string& arch
     return !a.empty() && a == job_name_stem(archived);
 }
 
+bool Testing::same_project_plate(const std::string& reported, const ArchiveRecord& r)
+{
+    const std::string job     = job_name_stem(reported);
+    const std::string project = job_name_stem(r.title);
+    if (job.empty() || project.empty()) return false;
+    if (r.plate >= 0 && job == project + "_plate_" + std::to_string(r.plate + 1)) return true;
+    if (!r.plate_name.empty() && job == project + "_" + job_name_stem(r.plate_name)) return true;
+    return r.plate == 0 && r.plate_name.empty() && job == project;
+}
+
 std::map<std::string, std::string> Testing::pick_job_thumbnails(const std::vector<ArchiveRecord>& records,
                                                                 const std::map<std::string, std::string>& jobs)
 {
-    std::map<std::string, std::pair<long long, std::string>> best;
-    for (const ArchiveRecord& r : records) {
-        if (r.printer.empty() || r.id.empty()) continue;
-        const auto job = jobs.find(r.printer);
-        if (job == jobs.end() || job->second.empty()) continue;
-        if (!same_job_name(job->second, r.sent_name) && !same_job_name(job->second, r.file)) continue;
-        auto it = best.find(r.printer);
-        if (it == best.end() || r.time > it->second.first) best[r.printer] = { r.time, r.id };
-    }
     std::map<std::string, std::string> out;
-    for (const auto& kv : best) out[kv.first] = kv.second.second;
+    for (const auto& job : jobs) {
+        if (job.first.empty() || job.second.empty()) continue;
+        // Steps 1-3 in order; within a step the newest record wins.
+        for (int step = 1; step <= 3; ++step) {
+            const ArchiveRecord* best = nullptr;
+            for (const ArchiveRecord& r : records) {
+                if (r.printer.empty() || r.id.empty()) continue;
+                const bool same_printer = r.printer == job.first;
+                bool       hit          = false;
+                if (step == 1) hit = same_printer && (same_job_name(job.second, r.sent_name) || same_job_name(job.second, r.file));
+                else if (step == 2) hit = same_printer && same_project_plate(job.second, r);
+                else hit = !same_printer && (same_job_name(job.second, r.sent_name) || same_job_name(job.second, r.file) ||
+                                             same_project_plate(job.second, r));
+                if (hit && (!best || r.time > best->time)) best = &r;
+            }
+            if (best) {
+                out[job.first] = best->id;
+                break;
+            }
+        }
+    }
     return out;
 }
 
@@ -4511,8 +4540,9 @@ std::string HubServer::archive_thumbnail(const std::string& id)
 
 // The running job's picture, from the G-code archive: the hub reads the sidecars itself (they are
 // plain JSON next to a <id>.png), so this works with every slicer window closed - which is the
-// case the app asked about. Only the record whose sent name is the job the printer says it is
-// running (Testing::pick_job_thumbnails): the "newest record for that printer" fallback served the
+// case the app asked about. Only a record of the job the printer says it is running - by name,
+// then by project and plate, then the same on another printer (Testing::pick_job_thumbnails has
+// the order): the "newest record for that printer" fallback served the
 // previous job's picture for any job this PC did not send, and - because a Bambu printer reports
 // its subtask_name without the ".gcode.3mf" the archive recorded - for every Bambu job, so the
 // picture never changed. Absent when there is nothing to show, and the route answers 404.
@@ -4543,6 +4573,9 @@ std::map<std::string, std::string> HubServer::printer_thumbnail_paths(const std:
         r.sent_name = j.value("sent_name", std::string());
         r.file      = j.value("file", std::string());
         r.time      = j.value("time", (long long) 0);
+        r.title     = j.value("project_title", std::string());
+        if (j.contains("plate") && j["plate"].is_number_integer()) r.plate = j["plate"].get<int>();
+        r.plate_name = j.value("plate_name", std::string());
         records.push_back(std::move(r));
     }
     // The job the printer says it is running, matched against the name the printer was really
