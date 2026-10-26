@@ -2435,11 +2435,12 @@ std::optional<float> WipeTower2::wait_for_temp_park_x(const WipeTowerWriter2& wr
     return std::nullopt;
 }
 
-// Orca #15144: the blocking wait, tagged.
+// Orca #15144: the blocking wait, tagged. Edge: written for the G-code flavor like the tower interface
+// temperatures (RepRapFirmware G10 + M116), where upstream always writes M109.
 void WipeTower2::wait_for_temp_on_tower(WipeTowerWriter2& writer, int temperature) const
 {
     writer.flush_planner_queue();
-    writer.append("M109 S" + std::to_string(temperature) + " ;" + wait_for_temp_tag() + "\n");
+    writer.append(GCodeWriter::set_temperature(unsigned(temperature), m_gcode_flavor, true, -1, wait_for_temp_tag()));
 }
 
 // Change the tool, set a speed override for soluble and flex materials.

@@ -623,6 +623,26 @@ TEST_CASE("Wipe tower temperature wait covers the tower interface temperature", 
     REQUIRE(interface_blocks > 0);
 }
 
+// EDGE: the tower writes its wait for the G-code flavor, like the interface temperatures: RepRapFirmware
+// sets the temperature with G10 and waits with M116 (upstream always writes M109).
+TEST_CASE("Wipe tower temperature wait follows the gcode flavor", "[WipeTower][WaitForTemp]")
+{
+    DynamicPrintConfig config = wait_for_temp_config(true);
+    config.set_deserialize_strict({ { "gcode_flavor", "reprapfirmware" } });
+    const std::vector<std::string> lines = split_lines(slice_wait_for_temp(config));
+    int tagged = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (!is_tagged_wait(lines[i]))
+            continue;
+        ++tagged;
+        INFO("line " << i + 1 << ": " << lines[i]);
+        CHECK(lines[i].rfind("G10 S", 0) == 0);
+        REQUIRE(i + 1 < lines.size());
+        CHECK(lines[i + 1].rfind("M116", 0) == 0);
+    }
+    REQUIRE(tagged > 0);
+}
+
 // The option is off for single extruder multi-material whatever the profile says: SEMM runs its own
 // unload / load temperature sequence on the tower.
 TEST_CASE("Wipe tower temperature wait is off for single extruder multi-material", "[WipeTower][WaitForTemp]")
