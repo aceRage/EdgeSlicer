@@ -459,9 +459,9 @@ Palette compute_palette(const TraceImage &image, int k, bool exclude_dominant)
     // count of the colours around it: cells of the Lab space, 3 x 3 x 3 cells of 8 delta E
     std::vector<double> around(bins.size(), 0.);
     {
-        constexpr double CELL = 8.;
-        constexpr int    NL = 14, NA = 33; // L 0..100, a and b -128..128
-        constexpr int    SL = NL + 2, SA = NA + 2; // padded by one cell
+        static constexpr double CELL = 8.;
+        static constexpr int    NL = 14, NA = 33; // L 0..100, a and b -128..128
+        static constexpr int    SL = NL + 2, SA = NA + 2; // padded by one cell
         auto cell = [](const Lab &c) {
             return std::array<int, 3>{std::clamp(int(std::floor(c[0] / CELL)), 0, NL - 1) + 1,
                                       std::clamp(int(std::floor((c[1] + 128.) / CELL)), 0, NA - 1) + 1,
