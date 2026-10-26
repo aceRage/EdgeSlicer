@@ -1,56 +1,44 @@
 {
 	"type": "filament",
-	"name": "Sovol Zero PLA Basic HS Nozzle",
-	"inherits": "fdm_filament_pla",
+	"name": "Generic ABS @Sovol Zero",
+	"renamed_from": "Sovol Zero ABS",
+	"inherits": "fdm_filament_abs",
 	"from": "system",
-	"setting_id": "nZgETe4CTpicEjQX",
-	"filament_id": "OFDSrzZ8",
+	"setting_id": "g6sSyyIFYJUzlXsp",
+	"filament_id": "OFY9muEs",
 	"instantiation": "true",
 	"filament_flow_ratio": [
-		"1.0348"
+		"0.98"
 	],
 	"filament_max_volumetric_speed": [
 		"21"
 	],
-	"enable_pressure_advance": [
-		"1"
-	],
-	"pressure_advance": [
-		"0.03"
-	],
-	"compatible_printers": [
-		"Sovol Zero 0.2 Hardened Steel nozzle",
-		"Sovol Zero 0.4 Hardened Steel nozzle",
-		"Sovol Zero 0.6 Hardened Steel nozzle",
-		"Sovol Zero 0.8 Hardened Steel nozzle",
-		"Sovol Zero 1.0 Hardened Steel nozzle"
-	],
 	"nozzle_temperature_initial_layer": [
-		"245"
+		"280"
 	],
 	"nozzle_temperature": [
-		"230"
+		"270"
 	],
 	"nozzle_temperature_range_low": [
-		"190"
+		"230"
 	],
 	"nozzle_temperature_range_high": [
-		"250"
+		"300"
 	],
 	"hot_plate_temp": [
-		"65"
-	],
-	"hot_plate_temp_initial_layer": [
-		"65"
-	],
-	"fan_min_speed": [
-		"70"
-	],
-	"fan_max_speed": [
 		"100"
 	],
+	"hot_plate_temp_initial_layer": [
+		"100"
+	],
+	"fan_min_speed": [
+		"10"
+	],
+	"fan_max_speed": [
+		"30"
+	],
 	"fan_cooling_layer_time": [
-		"80"
+		"30"
 	],
 	"full_fan_speed_layer": [
 		"3"
@@ -61,11 +49,8 @@
 	"slow_down_min_speed": [
 		"10"
 	],
-	"dont_slow_down_outer_wall": [
-		"0"
-	],
 	"overhang_fan_speed": [
-		"100"
+		"30"
 	],
 	"overhang_fan_threshold": [
 		"50%"
@@ -73,37 +58,55 @@
 	"temperature_vitrification": [
 		"60"
 	],
-	"additional_cooling_fan_speed": [
-		"75%"
-	],
 	"activate_air_filtration": [
 		"1"
 	],
-	"during_print_exhaust_fan_speed": [
-		"80%"
+	"close_fan_the_first_x_layers": [
+		"1"
 	],
 	"complete_print_exhaust_fan_speed": [
-		"80%"
+		"50"
+	],
+	"during_print_exhaust_fan_speed": [
+		"50"
+	],
+	"additional_cooling_fan_speed": [
+		"0"
+	],
+	"compatible_printers": [
+		"Sovol Zero 0.2 nozzle",
+		"Sovol Zero 0.4 nozzle",
+		"Sovol Zero 0.6 nozzle",
+		"Sovol Zero 0.8 nozzle",
+		"Sovol Zero 1.0 nozzle",
+		"Sovol Zero 0.2 Hardened Steel nozzle",
+		"Sovol Zero 0.4 Hardened Steel nozzle",
+		"Sovol Zero 0.6 Hardened Steel nozzle",
+		"Sovol Zero 0.8 Hardened Steel nozzle",
+		"Sovol Zero 1.0 Hardened Steel nozzle"
 	],
 	"cool_plate_temp": [
-		"60"
+		"80"
 	],
 	"eng_plate_temp": [
-		"60"
+		"80"
 	],
 	"textured_plate_temp": [
-		"60"
+		"80"
 	],
 	"cool_plate_temp_initial_layer": [
-		"55"
+		"80"
 	],
 	"eng_plate_temp_initial_layer": [
-		"55"
+		"80"
+	],
+	"textured_plate_temp_initial_layer": [
+		"80"
 	],
 	"filament_end_gcode": [
 		"; filament end gcode \n"
 	],
-	"filament_start_gcode": [
-		"; filament start gcode\n"
+	"filament_density": [
+		"1.10"
 	]
 }
