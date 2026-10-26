@@ -2575,6 +2575,11 @@ Sidebar::Sidebar(Plater *parent)
                 // is still one click away, behind "Edit connection..." inside this dialog; it used
                 // to open unasked, which made a farm look like one printer's settings page.
                 show_print_host_devices_dialog(this->GetParent());
+                // A device added, edited or removed in there changes what the Device tab shows (a
+                // printer's own page, the shared device page, or "set up a connection"): follow it
+                // now, not at the next preset switch. The owner's CC2, added there with an empty API
+                // key and no serial, stayed on missing_connection.html until the slicer was closed.
+                update_all_preset_comboboxes(true);
             });
 
         combo_printer->bind_machine_connecting_button_handler([this]() {
@@ -4169,6 +4174,18 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                                                                  MainFrame::PrintSelectType::eSendGcode;
             }
 
+            // A printer with no device page of its own (an Elegoo Centauri Carbon 2) gets the shared,
+            // vendor-neutral device page instead of its address (owner D6, 2026-10-26).
+            {
+                const bool        picked = ph_picked && !ph_picked->address.empty();
+                const std::string model  = printer_model_opt ? printer_model_opt->value : std::string();
+                const wxString    shared = PrinterWebView::shared_device_page_url(picked ? *ph_picked : PrintHostDevices::from_config(cfg), model,
+                                                                                  picked ? "ph:" + ph_picked->id : std::string("host"));
+                if (!shared.empty()) {
+                    url    = shared;
+                    apikey = wxString();
+                }
+            }
             p_mainframe->load_printer_url(url, apikey);
             if (p_mainframe->m_printer_view) {
                 p_mainframe->m_printer_view->set_devices(ph_model_key, ph_devices, ph_pick);

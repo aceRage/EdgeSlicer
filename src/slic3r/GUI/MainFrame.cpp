@@ -4452,6 +4452,19 @@ bool MainFrame::open_printer_device_page(const std::string& id, const PrintersMo
             select_tab(size_t(idx));
         return true;
     }
+    case OpenWay::DevicePage: {
+        // The shared device page for that printer (a Centauri Carbon 2 has no web page of its own).
+        wxString url = PrinterWebView::shared_device_page_url(id);
+        if (url.empty()) {
+            why = "This printer has no device page.";
+            return false;
+        }
+        m_printer_view->load_url(url, wxString(), DevicePageLoad::Kind::Show);
+        const int idx = m_tabpanel->FindPage(m_printer_view);
+        if (idx != wxNOT_FOUND)
+            select_tab(size_t(idx));
+        return true;
+    }
     case OpenWay::Browser:
         if (wxLaunchDefaultBrowser(wxString::FromUTF8(target.url)))
             return true;

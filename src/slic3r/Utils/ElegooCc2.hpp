@@ -68,6 +68,12 @@ constexpr int ERR_MISSING_BED_LEVELING  = 1026;
 // models that speak this protocol. Not the Centauri Carbon 1, not anything else.
 bool is_cc2_model(const std::string& printer_model);
 
+// Whether a print-host device is drawn by the shared device page in the Device tab (owner D6): an
+// Elegoo Link device with an address whose model - its own, else the preset's - is a CC2. Nothing
+// else counts: the API key (empty = the factory access code) and the serial are not looked at.
+bool wants_shared_device_page(const std::string& host_type, const std::string& address, const std::string& device_model,
+                              const std::string& preset_model);
+
 // The access code the printer wants as X-Token and MQTT password: the preset's API key, else the
 // printer's factory default.
 std::string token_or_default(const std::string& apikey);

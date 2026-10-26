@@ -8,6 +8,7 @@
 
 #include "slic3r/Utils/PrintHost.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
+#include "slic3r/Utils/ElegooCc2.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
 #include "slic3r/GUI/ThirdPartyFilamentMap.hpp"
@@ -1347,4 +1348,48 @@ TEST_CASE("PrintHostDevices: bare_host reduces an address to its host", "[PrintH
     CHECK(bare_host("[fe80::1]:3030") == "fe80::1");
     CHECK(bare_host("fe80::1") == "fe80::1");
     CHECK(bare_host("").empty());
+}
+
+TEST_CASE("Elegoo CC2 device with no serial and an empty API key gets the shared device page (owner D6)", "[PrintHostDevices]")
+{
+    // The owner's hand test, 2026-10-26: a device "CC2-Combo" added in the sidebar's devices dialog -
+    // host 127.0.0.22, Elegoo Link, authorization API key, API key empty (the factory access code),
+    // serial empty - under the "Elegoo Centauri Carbon 2 0.4 nozzle" preset, whose own address is empty.
+    ScopedStore       store("cc2page");
+    const std::string key    = "Elegoo Centauri Carbon 2";
+    const std::string preset = "Elegoo Centauri Carbon 2";
+    Device            d      = make_device("CC2-Combo", "127.0.0.22", "elegoolink");
+    d.auth_type     = "key";
+    d.apikey        = "";
+    d.serial        = "";
+    d.printer_model = preset; // the devices dialog seeds a new device with the preset's model
+    std::string error;
+    REQUIRE(add(key, d, error));
+    const std::vector<Device> listed = devices(key);
+    REQUIRE(listed.size() == 1);
+    const Device& got = listed.front();
+    CHECK(got.apikey.empty());
+    CHECK(got.serial.empty());
+    // Neither the empty key nor the missing serial keeps it off; a device with no model of its own
+    // (hand-edited store) takes the preset's.
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, got.printer_model, preset));
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, "", preset));
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, "Elegoo Centauri Carbon 2", ""));
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, "http://127.0.0.22:80/", "", preset));
+
+    // The same printer as the preset's own address (Edit connection...), empty key and serial.
+    DynamicPrintConfig config;
+    config.opt_string("printer_model", true)            = preset;
+    config.opt_string("print_host", true)               = "127.0.0.22";
+    config.opt_string("printhost_apikey", true)         = "";
+    config.opt_string("flashforge_serial_number", true) = "";
+    config.set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(htElegooLink));
+    const Device own = from_config(config);
+    CHECK(own.host_type == "elegoolink");
+    CHECK(ElegooCc2::wants_shared_device_page(own.host_type, own.address, own.printer_model, preset));
+
+    // Not for a CC1, another host type, or a device with no address.
+    CHECK_FALSE(ElegooCc2::wants_shared_device_page("elegoolink", "127.0.0.22", "", "Elegoo Centauri Carbon"));
+    CHECK_FALSE(ElegooCc2::wants_shared_device_page("octoprint", "127.0.0.22", "", preset));
+    CHECK_FALSE(ElegooCc2::wants_shared_device_page("elegoolink", "", "", preset));
 }
