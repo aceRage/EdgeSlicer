@@ -567,3 +567,31 @@ TEST_CASE("Z contouring follows the surface of each instance as it is turned", "
         CHECK(lifted > 0);
     }
 }
+
+// OD2 review: options read by prepare_infill() (bridge_over_infill(), the separated-infill bodies) must
+// invalidate posPrepareInfill, or changing them after a first slice changes nothing in the GUI. Not crossing
+// zero, top_surface_density keeps the perimeters.
+TEST_CASE("Changing a fill-preparation option re-runs the infill preparation", "[PrintObject][Invalidation]")
+{
+    struct Change { const char *key; const char *from; const char *to; };
+    const std::vector<Change> changes{
+        { "top_surface_density", "100%", "50%" },
+    };
+    for (const Change &change : changes) {
+        CAPTURE(change.key);
+        Print              print;
+        Model              model;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({ { change.key, change.from } });
+        init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+        print.process();
+        REQUIRE(print.is_step_done(posPrepareInfill));
+        REQUIRE(print.is_step_done(posInfill));
+
+        config.set_deserialize_strict({ { change.key, change.to } });
+        CHECK(print.apply(model, config) == PrintBase::APPLY_STATUS_INVALIDATED);
+        CHECK_FALSE(print.is_step_done(posPrepareInfill));
+        CHECK_FALSE(print.is_step_done(posInfill));
+        CHECK(print.is_step_done(posPerimeters));
+    }
+}

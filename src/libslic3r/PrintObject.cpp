@@ -1657,7 +1657,9 @@ bool PrintObject::invalidate_state_by_config_options(
             assert(old_density && new_density);
             if (is_approx(old_density->value, 0.) || is_approx(new_density->value, 0.))
                 steps.emplace_back(posPerimeters);
-            steps.emplace_back(posInfill);
+            // EdgeSlicer: posPrepareInfill, not upstream's posInfill - our bridge_over_infill() reads the top
+            // density (prints_dense()), so a change has to re-run it.
+            steps.emplace_back(posPrepareInfill);
         } else if (opt_key == "top_surface_expansion") {
             // ORCA: without the expansion the top fill never reaches the space freed by only_one_wall_top, so the
             // walls over top surfaces are kept. Only crossing zero matters; posPerimeters cascades to posPrepareInfill.
