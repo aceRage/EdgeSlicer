@@ -9,6 +9,7 @@
 // after replying.
 
 #include "ElegooCanvas.hpp"
+#include "ElegooCc2.hpp"
 #include "ElegooSdcpMonitor.hpp"
 
 #include <boost/asio/connect.hpp>
@@ -188,6 +189,14 @@ private:
 };
 
 } // namespace
+
+CanvasQueryResult canvas_query_for(const std::string& address, const std::string& printer_model, const std::string& token,
+                                   const CanvasQueryOptions& opts)
+{
+    if (ElegooCc2::is_cc2_model(printer_model))
+        return ElegooCc2::canvas_query(address, token, opts);
+    return canvas_query(address, opts);
+}
 
 CanvasQueryResult canvas_query(const std::string& address, const CanvasQueryOptions& opts)
 {
