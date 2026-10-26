@@ -14,13 +14,24 @@
 #include "slic3r/Utils/CrealityPrintModel.hpp"
 
 #include <boost/asio.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/beast/websocket.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <ctime>
+#include <future>
+#include <iostream>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace Slic3r;
 using namespace Slic3r::PrintHostDevices;
@@ -862,6 +873,160 @@ TEST_CASE("CrealityPrint: WebSocket budget 0 does not start and does not UAF", "
         t.join();
         CHECK(ws.is_cancelled());
         CHECK(err.find("cancelled") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+}
+
+// OrcaSlicer #16772 timeout cases, ported onto CrealityWsClient (this fork's
+// AsioUtils/run_until_done equivalent). query_boxes_info stays on the #616 stack.
+namespace {
+
+namespace beast     = boost::beast;
+namespace http      = beast::http;
+namespace websocket = beast::websocket;
+namespace net       = boost::asio;
+using tcp           = net::ip::tcp;
+
+enum class SilentWs {
+    BeforeHandshake, // Accepts TCP, reads the upgrade, never answers
+    AfterHandshake,  // Completes the upgrade, then never reads or sends
+};
+
+class FakeSilentCrealityWs
+{
+public:
+    explicit FakeSilentCrealityWs(SilentWs behavior) : m_behavior(behavior)
+    {
+        m_accept_thread = std::thread([this] { accept_loop(); });
+    }
+
+    ~FakeSilentCrealityWs()
+    {
+        release();
+        m_stopping = true;
+        tcp::socket       wake{m_accept_ioc};
+        beast::error_code ec;
+        wake.connect(m_acceptor.local_endpoint(), ec);
+        if (m_accept_thread.joinable())
+            m_accept_thread.join();
+        for (std::thread& connection : m_connections)
+            if (connection.joinable())
+                connection.join();
+    }
+
+    std::string port() const { return std::to_string(m_acceptor.local_endpoint().port()); }
+
+    void release()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_released = true;
+        m_changed.notify_all();
+    }
+
+private:
+    void accept_loop()
+    {
+        for (;;) {
+            auto              ioc = std::make_unique<net::io_context>();
+            tcp::socket       socket{*ioc};
+            beast::error_code ec;
+            m_acceptor.accept(socket, ec);
+            if (ec || m_stopping)
+                return;
+            m_connections.emplace_back([this, ioc = std::move(ioc), socket = std::move(socket)]() mutable { serve(std::move(socket)); });
+        }
+    }
+
+    void serve(tcp::socket socket)
+    {
+        beast::flat_buffer               buffer;
+        http::request<http::string_body> request;
+        beast::error_code                ec;
+        http::read(socket, buffer, request, ec);
+        if (ec)
+            return;
+        if (!websocket::is_upgrade(request) || m_behavior == SilentWs::BeforeHandshake) {
+            wait_for_release();
+            return;
+        }
+
+        websocket::stream<tcp::socket> ws{std::move(socket)};
+        ws.accept(request, ec);
+        if (ec)
+            return;
+        wait_for_release();
+    }
+
+    void wait_for_release()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_changed.wait(lock, [this] { return m_released; });
+    }
+
+    const SilentWs           m_behavior;
+    net::io_context          m_accept_ioc;
+    tcp::acceptor            m_acceptor{m_accept_ioc, {net::ip::make_address("127.0.0.1"), 0}};
+    std::atomic<bool>        m_stopping{false};
+    std::thread              m_accept_thread;
+    std::vector<std::thread> m_connections;
+    std::mutex               m_mutex;
+    std::condition_variable  m_changed;
+    bool                     m_released = false;
+};
+
+// Runs `call`, giving it `limit` to return before the printer hangs up on it.
+template<class Call> bool finishes_within(FakeSilentCrealityWs& printer, std::chrono::milliseconds limit, Call&& call)
+{
+    auto       done    = std::async(std::launch::async, std::forward<Call>(call));
+    const bool in_time = done.wait_for(limit) == std::future_status::ready;
+    printer.release();
+    // The future destructor would wait forever for a call the hang-up cannot unblock.
+    if (done.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        std::cerr << "CrealityWsClient call still running 10 s after the printer hung up" << std::endl;
+        std::_Exit(EXIT_FAILURE);
+    }
+    return in_time;
+}
+
+} // namespace
+
+TEST_CASE("CrealityPrint: silent printer WebSocket steps stay inside their deadlines", "[CrealityPrint]")
+{
+    // start_print is open + write + best-effort read + close. A printer that
+    // never answers the upgrade fails open (the start command is never sent).
+    // One that upgrades and then goes silent still delivers the write; the
+    // read times out and is not a start failure.
+    SECTION("handshake never completes") {
+        FakeSilentCrealityWs printer(SilentWs::BeforeHandshake);
+        CrealityWsClient     ws(200);
+        std::string          err;
+        bool                 opened = true;
+        CHECK(finishes_within(printer, std::chrono::seconds(2), [&] { opened = ws.open("127.0.0.1", printer.port(), err); }));
+        CHECK_FALSE(opened);
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+
+    SECTION("upgrade completes then the printer goes silent") {
+        FakeSilentCrealityWs printer(SilentWs::AfterHandshake);
+        CrealityWsClient     ws(200);
+        std::string          err;
+        std::string          frame;
+        bool                 opened  = false;
+        bool                 wrote   = false;
+        bool                 read_ok = true;
+        CHECK(finishes_within(printer, std::chrono::seconds(3), [&] {
+            opened = ws.open("127.0.0.1", printer.port(), err);
+            if (!opened)
+                return;
+            wrote   = ws.write(R"({"method":"set","params":{"opGcodeFile":"printprt:/mnt/UDISK/printer_data/gcodes/test.gcode"}})", err);
+            read_ok = ws.read_once(frame, err);
+            ws.close();
+        }));
+        CHECK(opened);
+        CHECK(wrote);
+        CHECK_FALSE(read_ok);
+        CHECK(err.find("timed out") != std::string::npos);
         CHECK_FALSE(ws.is_open());
     }
 }
