@@ -76,6 +76,12 @@ trays; **Upload and Print** sends the chunked upload and then Cmd 128 with its `
 Stream tab and the Printers tab show the emulated camera (a test pattern with the printer's name and
 a clock).
 
+**Elegoo Centauri Carbon 2:** not created on first start; use **Add printer** with the preset
+`elegoo_cc2_combo` (CANVAS, `127.0.0.22`) or `elegoo_cc2_plain` (no CANVAS, `127.0.0.23`). Printer preset
+**Elegoo Centauri Carbon 2 0.4 nozzle**, host type **Elegoo Link**, hostname the address, API key empty (the
+default access code 123456). It answers `/system/info`, the chunked `PUT /upload` and MQTT on port 1883
+(registration, 1002 status, 2005 CANVAS, 1020 start with its `slot_map`). No camera and no SDCP.
+
 **Snapmaker U1:** add it by IP from the phone app or the Printers tab (**Add printer**, IP
 **127.0.0.31**; the hub's `POST /api/snapmaker/add?ip=127.0.0.31`). A send from the phone (or
 `/api/plates/{i}/send`) uploads the file with `print=false`, then sends the toolhead mapping
