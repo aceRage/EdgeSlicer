@@ -111,7 +111,15 @@ TEST_CASE("The filament flow ratio scales the extruded length once", "[GCode]")
     // Retraction off, so every positive relative E move is extrusion and scales with the ratio.
     auto extruded_length = [](double flow_ratio) {
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-        config.set_deserialize_strict({{"use_relative_e_distances", "1"}, {"retraction_length", "0"}, {"wipe", "0"}});
+        config.set_deserialize_strict({
+            {"use_relative_e_distances", "1"},
+            {"retraction_length",        "0"},
+            {"wipe",                     "0"},
+            {"skirt_loops",              "0"},
+            {"brim_type",                "no_brim"},
+            {"machine_start_gcode",      ""},
+            {"machine_end_gcode",        ""},
+        });
         config.set_key_value("filament_flow_ratio", new ConfigOptionFloats{flow_ratio});
         double     total = 0.;
         GCodeReader reader;
