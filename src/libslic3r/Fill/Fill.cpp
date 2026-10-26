@@ -2183,6 +2183,8 @@ void Layer::make_ironing()
 		double 		height;
 		double 		speed;
 		double 		angle;
+        // Orca #10841/#11195: the angle follows solid_infill_rotate_template or is fixed, so don't alternate it per layer.
+        bool        is_using_template_angle = false;
         double 		inset;
 
 		bool operator<(const IroningParams &rhs) const {
@@ -2210,6 +2212,10 @@ void Layer::make_ironing()
 				return true;
 			if (this->angle > rhs.angle)
 				return false;
+            if (int(this->is_using_template_angle) < int(rhs.is_using_template_angle))
+                return true;
+            if (int(this->is_using_template_angle) > int(rhs.is_using_template_angle))
+                return false;
             if (this->inset < rhs.inset)
                 return true;
             if (this->inset > rhs.inset)
@@ -2219,7 +2225,7 @@ void Layer::make_ironing()
 
 		bool operator==(const IroningParams &rhs) const {
 			return this->extruder == rhs.extruder && this->just_infill == rhs.just_infill &&
-				   this->line_spacing == rhs.line_spacing && this->height == rhs.height && this->speed == rhs.speed && this->angle == rhs.angle && this->pattern == rhs.pattern && this->inset == rhs.inset;
+				   this->line_spacing == rhs.line_spacing && this->height == rhs.height && this->speed == rhs.speed && this->angle == rhs.angle && this->is_using_template_angle == rhs.is_using_template_angle && this->pattern == rhs.pattern && this->inset == rhs.inset;
 		}
 
 		LayerRegion *layerm		= nullptr;
@@ -2269,17 +2275,29 @@ void Layer::make_ironing()
 			if (ironing_params.extruder != -1) {
 				//TODO just_infill is currently not used.
 				ironing_params.just_infill 	= false;
-				ironing_params.line_spacing = std::max(IRONING_SPACING_MIN, double(config.ironing_spacing));
-                ironing_params.inset 		= config.ironing_inset;
-				ironing_params.height 		= default_layer_height * 0.01 * config.ironing_flow;
-				ironing_params.speed 		= config.ironing_speed.values.front();
-                double ironing_angle = (config.ironing_angle >= 0 ? config.ironing_angle : config.infill_direction) * M_PI / 180.;
+				// Orca #11194: filament-specific overrides if configured, otherwise the process values.
+				const int iron_filament = ironing_params.extruder;
+				ironing_params.line_spacing = std::max(IRONING_SPACING_MIN,
+					ironing_filament_override(config.filament_ironing_spacing, iron_filament, double(config.ironing_spacing)));
+                ironing_params.inset 		= ironing_filament_override(config.filament_ironing_inset, iron_filament, double(config.ironing_inset));
+				ironing_params.height 		= default_layer_height * 0.01 *
+					ironing_filament_override(config.filament_ironing_flow, iron_filament, double(config.ironing_flow));
+				// Only a grouping key here; GCode resolves the printed speed (flow variant / filament override).
+				ironing_params.speed 		= ironing_filament_override(config.filament_ironing_speed, iron_filament, config.ironing_speed.values.front());
+                // Orca #10841: ironing_angle is an offset from the top surface (solid infill) direction,
+                // including its rotation template, instead of an absolute angle / the sparse infill direction.
+                // Orca #11195: ironing_angle_fixed makes ironing_angle an absolute angle that does not alternate.
+                double ironing_angle = (config.ironing_angle_fixed ? 0. :
+                                            calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
+                                                                            config.solid_infill_rotate_template.value)) +
+                                       config.ironing_angle * M_PI / 180.;
                 // ORCA: Align ironing angle with model
                 if (config.align_infill_direction_to_model) {
                     auto m = this->object()->trafo().matrix();
                     ironing_angle += atan2((double)m(1, 0), (double)m(0, 0));
                 }
                 ironing_params.angle        = ironing_angle;
+                ironing_params.is_using_template_angle = config.ironing_angle_fixed || !config.solid_infill_rotate_template.value.empty();
 				ironing_params.pattern      = config.ironing_pattern;
 				ironing_params.layerm 		= layerm;
 				by_extruder.emplace_back(ironing_params);
@@ -2380,6 +2398,7 @@ void Layer::make_ironing()
         }
         f->spacing = ironing_params.line_spacing;
         f->angle = float(ironing_params.angle);
+        f->is_using_template_angle = ironing_params.is_using_template_angle;
         f->link_max_length = (coord_t) scale_(3. * f->spacing);
 		double  extrusion_height = ironing_params.height * f->spacing / nozzle_dmr;
 		float  extrusion_width  = Flow::rounded_rectangle_extrusion_width_from_spacing(float(nozzle_dmr), float(extrusion_height));
