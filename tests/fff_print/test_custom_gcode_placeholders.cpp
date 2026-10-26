@@ -81,3 +81,19 @@ TEST_CASE("Print statistics in custom G-code match the final print statistics", 
         CHECK(value_of(key) == stats.opt_string(key));
     }
 }
+
+// Orca #16597: the tags are strings, so a calculation on one used to compute with the tag text
+// ("{print_time_sec + 1}" wrote "@PRINT_TIME_SEC@1"). It now stops the slice with a message that says why.
+TEST_CASE("Print statistics in custom G-code cannot be used in a calculation", "[Print][Placeholders][Orca16597]")
+{
+    const std::string key = GENERATE(as<std::string>{}, "total_weight", "used_filament", "total_cost", "print_time", "normal_print_time",
+                                     "silent_print_time", "total_wipe_tower_cost", "total_wipe_tower_filament", "print_time_total_sec",
+                                     "print_time_day", "print_time_hour", "print_time_minute", "print_time_sec", "used_filament_length");
+    CAPTURE(key);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "file_start_gcode", "; {" + key + " + 1}\n" } });
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    CHECK_THROWS_WITH(Slic3r::Test::gcode(print), Catch::Contains("known only after the G-code is generated"));
+}
