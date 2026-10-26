@@ -8,6 +8,7 @@
 #include <sstream>
 #include <utility>
 #include <algorithm>
+#include <optional>
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -24,6 +25,15 @@ class WipeTower2
 {
 public:
     static const std::string never_skip_tag() { return "_GCODE_WIPE_TOWER_NEVER_SKIP_TAG"; }
+    // Orca #15144: comment on the wait_for_temp_on_wipe_tower M109 the tower emits. Upstream needs it
+    // so its interface-temperature pass in append_tcr2 keeps the M109; EdgeSlicer has no such pass,
+    // the tag is kept so the G-code (and tests) identify the wait the same way upstream does.
+    static const std::string wait_for_temp_tag() { return "_WAIT_FOR_TEMP_ON_WIPE_TOWER"; }
+    // Orca #15144: whether the blocking toolchange temperature wait moves onto the wipe tower.
+    // Shared with the defer flag in GCode.cpp append_tcr2 so the deferral and the tower's tagged
+    // M109 can never disagree. SEMM runs its own unload/load temperature sequence; the GUI hides
+    // the option there but a profile may still carry it set.
+    static bool wait_for_temp_enabled(const PrintConfig& config);
 	static std::pair<double, double> get_wipe_tower_cone_base(double width, double height, double depth, double angle_deg);
 	// First-layer outline of a cone-wall tower in tower-local (scaled) coordinates: body box
 	// unioned with the cone's base ellipse — the model first_layer_wipe_tower_corners uses,
@@ -279,6 +289,8 @@ private:
     TowerInterface::Settings m_interface;
     BoundingBoxf           m_shared_bed;        // printable area every nozzle reaches, plate coordinates
     float                  m_run_in_reserve = 0.f;
+    bool                   m_wait_for_temp_on_wipe_tower = false; // Orca #15144
+    Polygon                m_bed_polygon;       // Orca #15144: printable_area contour (scaled, plate coordinates)
     float  m_rib_length                   = 0;
 
     bool   m_enable_arc_fitting           = false;
@@ -415,8 +427,15 @@ private:
 		const int 				old_temperature,
 		const int 				new_temperature);
 
-    void toolchange_Change(WipeTowerWriter2 &writer, const size_t new_tool, 
-        const std::string& new_material);
+    // Orca #15144: wait_for_temp > 0 with wait_for_temp_on_wipe_tower on blocks for that temperature
+    // here (the Tn was issued without a wait): parked beside the tower when wait_beside_tower,
+    // otherwise in place (priming lines, Local-Z reserve slots).
+    void toolchange_Change(WipeTowerWriter2 &writer, const size_t new_tool,
+        const std::string& new_material, const int wait_for_temp = 0, const bool wait_beside_tower = false);
+    // Orca #15144: tower-local X of the heat-up park beside the tower, or nullopt to wait in place.
+    std::optional<float> wait_for_temp_park_x(const WipeTowerWriter2 &writer);
+    // Orca #15144: the tagged blocking wait for `temperature`.
+    void wait_for_temp_on_tower(WipeTowerWriter2 &writer, int temperature) const;
 
 	void toolchange_Load(
 		WipeTowerWriter2 &writer,
