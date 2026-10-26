@@ -1358,7 +1358,9 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
             restore_layer_z_str += gcodegen.writer().unretract();
             check_add_eol(restore_layer_z_str);
         }
-        toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id, tcr.print_z); // TODO: toolchange_z vs print_z
+        // Orca #15144: with wait_for_temp_on_wipe_tower the blocking wait moves to the tower (toolchange_Change).
+        toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id, tcr.print_z, false,
+                                                     WipeTower2::wait_for_temp_enabled(gcodegen.config())); // TODO: toolchange_z vs print_z
         if (gcodegen.config().enable_prime_tower) {
             deretraction_str += gcodegen.writer().travel_to_z(z, "Force restore layer Z", true);
             // Snapmaker #993 (Edge): the tower G-code after this may travel without an F word (U1: "G1 Y..."
@@ -11973,7 +11975,7 @@ std::string GCode::reset_adaptive_pa(double pa)
     return {};
 }
 
-std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool by_object)
+std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool by_object, bool defer_temp_wait)
 {
     if (!m_writer.need_toolchange(extruder_id))
         return "";
@@ -12085,6 +12087,23 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     // BBS: if print_z == 0 use first layer temperature
     if (abs(print_z) < EPSILON)
         new_filament_temp = get_value_at(m_config, m_config.nozzle_temperature_initial_layer, ConfigFlowDomain::Filament, extruder_id);
+
+    // Orca #15144: with wait_for_temp_on_wipe_tower the blocking M109 is deferred to the wipe tower, so
+    // raise the incoming filament's target here, ahead of the tool change rather than after it, and let
+    // the heat-up overlap the change itself as well as the travel to the tower. The command carries an
+    // explicit tool index (the option is off for SEMM, so the writer emits one), leaving the outgoing
+    // filament that pre_toolchange (#113 standby / last-use S0) just set alone.
+    if (defer_temp_wait) {
+        // Target what the tower will wait on. It waits on the first layer temperature not only on the
+        // first layer but also while priming, which runs before any layer is set: there on_first_layer()
+        // is false and print_z is the initial layer height, so neither test above catches it.
+        // nozzle_temperature == 0 means "use the first layer temperature" as well.
+        int preheat_temp = new_filament_temp;
+        if (m_layer == nullptr || preheat_temp <= 0)
+            preheat_temp = get_value_at(m_config, m_config.nozzle_temperature_initial_layer, ConfigFlowDomain::Filament, extruder_id);
+        if (preheat_temp > 0)
+            gcode += m_writer.set_temperature(unsigned(preheat_temp), false, int(extruder_id));
+    }
 
     Vec3d nozzle_pos = m_writer.get_position();
     float old_retract_length, old_retract_length_toolchange, wipe_volume;
@@ -12301,8 +12320,10 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         gcode += this->placeholder_parser_process("filament_start_gcode", filament_start_gcode, extruder_id, &config);
         check_add_eol(gcode);
     }
-    // Set the new extruder to the operating temperature.
-    if (m_ooze_prevention.enable)
+    // Set the new extruder to the operating temperature. Orca #15144: with defer_temp_wait the target was
+    // already raised before the tool change and the blocking wait belongs to the wipe tower generator,
+    // so there is nothing left to restore here.
+    if (m_ooze_prevention.enable && !defer_temp_wait)
         gcode += m_ooze_prevention.post_toolchange(*this);
 
     gcode += this->set_filament_pressure_advance(extruder_id, false);

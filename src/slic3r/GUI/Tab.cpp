@@ -6160,6 +6160,7 @@ if (is_marlin_flavor)
         optgroup->append_single_option_line("purge_in_prime_tower", "semm");
         optgroup->append_single_option_line("enable_filament_ramming", "semm");
         optgroup->append_single_option_line("tool_change_on_wipe_tower", "semm");
+        optgroup->append_single_option_line("wait_for_temp_on_wipe_tower", "semm");
         optgroup->append_single_option_line("ramming_line_width_ratio");
         optgroup->append_single_option_line("enable_change_pressure_when_wiping");
         optgroup->append_single_option_line("ramming_pressure_advance_value");
@@ -6719,6 +6720,8 @@ void TabPrinter::toggle_options()
         // as part of the purge, so the option is irrelevant there.
         const size_t extruders_count = m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
         toggle_option("tool_change_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
+        // Orca #15144: same scope as the option above.
+        toggle_option("wait_for_temp_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
     }
     wxString extruder_number;
     long val = 1;

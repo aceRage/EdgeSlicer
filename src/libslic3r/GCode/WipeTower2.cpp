@@ -1476,6 +1476,13 @@ WipeTower::ToolChangeResult WipeTower2::construct_tcr(WipeTowerWriter2& writer, 
     return result;
 }
 
+bool WipeTower2::wait_for_temp_enabled(const PrintConfig& config)
+{
+    // SEMM runs its own unload/load temperature sequence; the GUI hides the option
+    // there but a profile may still carry it set.
+    return config.wait_for_temp_on_wipe_tower.value && !config.single_extruder_multi_material.value;
+}
+
 WipeTower2::WipeTower2(const PrintConfig&                     config,
                        const PrintRegionConfig&               default_region_config,
                        int                                    plate_idx,
@@ -1568,6 +1575,10 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
 
     m_interface  = TowerInterface::Settings::from_config(config);
     m_shared_bed = TowerInterface::shared_printable_box(config);
+
+    // Orca #15144.
+    m_wait_for_temp_on_wipe_tower = wait_for_temp_enabled(config);
+    m_bed_polygon                 = Polygon::new_scale(bed_points);
 }
 
 void reseat_wipe_tower2_iterators(WipeTower2 &dst, const WipeTower2 &src)
@@ -1640,6 +1651,8 @@ void WipeTower2::copy_assign_from(const WipeTower2 &o)
     m_interface_gap_points               = o.m_interface_gap_points;
     m_interface                          = o.m_interface;
     m_shared_bed                         = o.m_shared_bed;
+    m_wait_for_temp_on_wipe_tower        = o.m_wait_for_temp_on_wipe_tower;
+    m_bed_polygon                        = o.m_bed_polygon;
     m_run_in_reserve                     = o.m_run_in_reserve;
     m_rib_length                         = o.m_rib_length;
     m_enable_arc_fitting                 = o.m_enable_arc_fitting;
@@ -1835,8 +1848,11 @@ std::vector<WipeTower::ToolChangeResult> WipeTower2::prime(
 
         unsigned int tool = tools[idx_tool];
         m_left_to_right   = true;
-        toolchange_Change(writer, tool, m_filpar[tool].material); // Select the tool, set a speed override for soluble and flex materials.
-        toolchange_Load(writer, cleaning_box);                    // Prime the tool.
+        // Orca #15144: priming has no tower to park beside; with wait_for_temp_on_wipe_tower the tool
+        // waits for its first layer temperature right at the priming line.
+        toolchange_Change(writer, tool, m_filpar[tool].material, m_filpar[tool].first_layer_temperature,
+                          false); // Select the tool, set a speed override for soluble and flex materials.
+        toolchange_Load(writer, cleaning_box); // Prime the tool.
         if (idx_tool + 1 == tools.size()) {
             // Last tool should not be unloaded, but it should be wiped enough to become of a pure color.
             if (idx_tool == 0)
@@ -1946,10 +1962,20 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
         toolchange_Unload(writer, cleaning_box, m_filpar[m_current_tool].material,
                           (is_first_layer() ? m_filpar[m_current_tool].first_layer_temperature : m_filpar[m_current_tool].temperature),
                           new_tool_temp);
-        toolchange_Change(writer, tool, m_filpar[tool].material); // Change the tool, set a speed override for soluble and flex materials.
+        const bool at_interface = tool_change != nullptr && tool_change->is_interface;
+        // Orca #15144: wait-at-tower target. The tower interface temperature when interface_before_wipe
+        // would raise it on this change (Edge's #119 interface; upstream's own interface boost is a
+        // different implementation), otherwise the print temperature (nozzle_temperature == 0 means
+        // "use the first layer temperature").
+        const FilamentParameters &new_fp = m_filpar[tool];
+        const int wait_for_temp = at_interface && m_interface.temp && new_fp.interface_temperature > 0 &&
+                                          new_fp.interface_temperature != new_fp.temperature ?
+                                      new_fp.interface_temperature :
+                                      (is_first_layer() || new_fp.temperature == 0 ? new_fp.first_layer_temperature : new_fp.temperature);
+        toolchange_Change(writer, tool, m_filpar[tool].material, wait_for_temp,
+                          true); // Change the tool, set a speed override for soluble and flex materials.
         toolchange_Load(writer, cleaning_box);
         writer.travel(writer.x(), writer.y() - m_perimeter_width); // cooling and loading were done a bit down the road
-        const bool at_interface = tool_change != nullptr && tool_change->is_interface;
         if (at_interface)
             interface_before_wipe(writer, *tool_change);
         toolchange_Wipe(writer, cleaning_box, wipe_volume); // Wipe the newly loaded filament until the end of the assigned wipe area.
@@ -2051,7 +2077,10 @@ WipeTower::ToolChangeResult WipeTower2::local_z_tool_change(size_t new_tool,
     const int new_tool_temp = is_first_layer() ? m_filpar[new_tool].first_layer_temperature : m_filpar[new_tool].temperature;
 
     toolchange_Unload(writer, cleaning_box, m_filpar[m_current_tool].material, old_tool_temp, new_tool_temp);
-    toolchange_Change(writer, new_tool, m_filpar[new_tool].material);
+    // Orca #15144 (Edge Local-Z): this mini tower knows only its reserve slot, not where it sits on the
+    // bed, so with wait_for_temp_on_wipe_tower it waits in place, over the slot, instead of parking.
+    toolchange_Change(writer, new_tool, m_filpar[new_tool].material,
+                      new_tool_temp > 0 ? new_tool_temp : m_filpar[new_tool].first_layer_temperature, false);
     toolchange_Load(writer, cleaning_box);
     writer.travel(writer.x(), writer.y() - m_perimeter_width * m_filpar[m_current_tool].ramming_line_width_multiplicator);
     toolchange_Wipe(writer, cleaning_box, wipe_volume);
@@ -2333,8 +2362,90 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     writer.resume_preview().flush_planner_queue();
 }
 
+// Orca #15144: tower-local X of the heat-up park beside the tower. Nearest x side first, then that
+// side pulled back toward the bed edge, then the far side; nullopt (wait in place) if all would leave
+// the bed. The rib wall and the stabilization cone bulge past the nominal width rectangle (widest near
+// the bottom), and the first-layer brim is printed around the wall later in the layer: the park clears
+// the widest of them, so the park point and its drool stay off the tower.
+std::optional<float> WipeTower2::wait_for_temp_park_x(const WipeTowerWriter2& writer)
+{
+    float min_x = 0.f, max_x = m_wipe_tower_width;
+    if (m_wall_type == (int) wtwRib) {
+        WipeTower::box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, m_layer_info->depth + m_perimeter_width);
+        const BoundingBox rib_bbox = get_extents(generate_rib_polygon(wt_box)); // the fillet stays within this bbox
+        min_x = std::min(min_x, unscaled<float>(rib_bbox.min.x()));
+        max_x = std::max(max_x, unscaled<float>(rib_bbox.max.x()));
+    } else if (m_wall_type == (int) wtwCone) {
+        // Same radius and guard as generate_support_cone_wall.
+        const double support_scale = get_wipe_tower_cone_base(m_wipe_tower_width, m_wipe_tower_height, m_wipe_tower_depth,
+                                                              m_wipe_tower_cone_angle).second;
+        const double z = m_sparse_layers_skipped ? (m_current_height + m_layer_info->height) : m_layer_info->z;
+        const double r = std::tan(Geometry::deg2rad(m_wipe_tower_cone_angle / 2.f)) * (m_wipe_tower_height - z);
+        const double w = m_layer_info->depth + m_perimeter_width;
+        if (r > 0.5 * w + 0.01) {
+            const float bulge = float(std::sqrt(r * r - 0.25 * w * w) / support_scale);
+            min_x = std::min(min_x, m_wipe_tower_width / 2.f - bulge);
+            max_x = std::max(max_x, m_wipe_tower_width / 2.f + bulge);
+        }
+    }
+    if (is_first_layer()) {
+        // Edge: prime_tower_brim_width is the brim itself (no auto brim on WipeTower2); the run-in
+        // reserve (#119) widens the first-layer envelope the same way get_brim_width() reports it.
+        const float brim = std::max(std::max(0.f, m_wipe_tower_brim_width), m_run_in_reserve);
+        min_x -= brim;
+        max_x += brim;
+    }
+    constexpr float gap     = 2.f;
+    constexpr float min_gap = 0.5f;
+    const bool      on_left = writer.x() < m_wipe_tower_width / 2.f;
+    const float     near_x  = on_left ? min_x - gap : max_x + gap;
+    const float     far_x   = on_left ? max_x + gap : min_x - gap;
+    const float     alpha   = m_wipe_tower_rotation_angle * float(M_PI / 180.);
+    // Tower-local -> plate coordinates, as the run-in clamp (interface_before_wipe) and append_tcr2 map them.
+    auto park_pt_on_bed = [this, &writer, alpha](float side_x) {
+        const Vec2f bed_pt = Vec2f(Eigen::Rotation2Df(alpha) * writer.rotate(Vec2f(side_x, writer.y()))) + m_wipe_tower_pos;
+        if (!m_bed_polygon.empty() && !m_bed_polygon.contains(Point::new_scale(bed_pt.x(), bed_pt.y())))
+            return false;
+        // Edge: also stay inside the area every nozzle reaches (extruder_printable_area), as the run-in does.
+        if (m_shared_bed.defined &&
+            (bed_pt.x() < m_shared_bed.min.x() - EPSILON || bed_pt.x() > m_shared_bed.max.x() + EPSILON ||
+             bed_pt.y() < m_shared_bed.min.y() - EPSILON || bed_pt.y() > m_shared_bed.max.y() + EPSILON))
+            return false;
+        return true;
+    };
+    if (park_pt_on_bed(near_x))
+        return near_x;
+    // The ideal near point hangs off the bed: pull it back to the bed edge as long as that still clears
+    // the tower envelope by min_gap. Bisection, because with tower rotation and non-rectangular beds the
+    // bed edge is not axis-aligned.
+    const float limit_x = on_left ? min_x - min_gap : max_x + min_gap;
+    if (park_pt_on_bed(limit_x)) {
+        float on = limit_x, off = near_x;
+        for (int i = 0; i < 8; ++i) {
+            const float mid = 0.5f * (on + off);
+            if (park_pt_on_bed(mid))
+                on = mid;
+            else
+                off = mid;
+        }
+        return on;
+    }
+    if (park_pt_on_bed(far_x))
+        return far_x;
+    return std::nullopt;
+}
+
+// Orca #15144: the blocking wait, tagged. Edge: written for the G-code flavor like the tower interface
+// temperatures (RepRapFirmware G10 + M116), where upstream always writes M109.
+void WipeTower2::wait_for_temp_on_tower(WipeTowerWriter2& writer, int temperature) const
+{
+    writer.flush_planner_queue();
+    writer.append(GCodeWriter::set_temperature(unsigned(temperature), m_gcode_flavor, true, -1, wait_for_temp_tag()));
+}
+
 // Change the tool, set a speed override for soluble and flex materials.
-void WipeTower2::toolchange_Change(WipeTowerWriter2& writer, const size_t new_tool, const std::string& new_material)
+void WipeTower2::toolchange_Change(
+    WipeTowerWriter2& writer, const size_t new_tool, const std::string& new_material, const int wait_for_temp, const bool wait_beside_tower)
 {
     // Ask the writer about how much of the old filament we consumed:
     if (m_current_tool < m_used_filament_length.size())
@@ -2353,11 +2464,31 @@ void WipeTower2::toolchange_Change(WipeTowerWriter2& writer, const size_t new_to
     if (m_is_mk4mmu3)
         writer.switch_filament_monitoring(true);
 
+    // Orca #15144: the Tn above was issued without a blocking temperature wait (GCode::set_extruder
+    // only raised the target, ahead of the Tn); block here, before the deretraction below, which must
+    // not extrude on a cold nozzle. Like the Bambu H2C, park beside the tower for the heat-up so drool
+    // lands next to it instead of on its top surface. Raw pre-rotated moves (see the repositioning
+    // move below) keep the writer's tracked position at the tower entry.
+    const bool wait_for_temp_here = m_wait_for_temp_on_wipe_tower && wait_for_temp > 0;
+    if (wait_for_temp_here && wait_beside_tower) {
+        if (const std::optional<float> park_x = wait_for_temp_park_x(writer)) {
+            const Vec2f stop = writer.rotate(Vec2f(*park_x, writer.y()));
+            writer.feedrate(m_travel_speed * 60.f)
+                .append(std::string("G1 X") + Slic3r::float_to_string_decimal_point(stop.x()) + " Y" +
+                        Slic3r::float_to_string_decimal_point(stop.y()) + never_skip_tag() + "\n");
+        }
+        wait_for_temp_on_tower(writer, wait_for_temp);
+    }
+
     Vec2f current_pos = writer.pos_rotated();
     writer
         .feedrate(m_travel_speed * 60.f) // see https://github.com/prusa3d/PrusaSlicer/issues/5483
         .append(std::string("G1 X") + Slic3r::float_to_string_decimal_point(current_pos.x()) + " Y" +
             Slic3r::float_to_string_decimal_point(current_pos.y()) + never_skip_tag() + "\n");
+
+    // Orca #15144: no tower to park beside (priming lines, Edge Local-Z reserve slots): wait right here.
+    if (wait_for_temp_here && !wait_beside_tower)
+        wait_for_temp_on_tower(writer, wait_for_temp);
 
     writer.append("[deretraction_from_wipe_tower_generator]");
 
@@ -3330,7 +3461,9 @@ void WipeTower2::interface_before_wipe(WipeTowerWriter2 &writer, const WipeTower
 {
     const FilamentParameters &fp = m_filpar[tool_change.new_tool];
     writer.append("; tower interface\n");
-    if (m_interface.temp && fp.interface_temperature != fp.temperature)
+    // Orca #15144: with wait_for_temp_on_wipe_tower the toolchange already blocked for the interface temperature.
+    if (m_interface.temp && fp.interface_temperature != fp.temperature &&
+        !(m_wait_for_temp_on_wipe_tower && fp.interface_temperature > 0))
         writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, -1, "tower interface temperature"));
 
     const Vec2f start  = writer.pos();
