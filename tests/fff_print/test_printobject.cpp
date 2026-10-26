@@ -230,7 +230,7 @@ Print &tube_with_tab(Print &print, Model &model, const DynamicPrintConfig &confi
     return print;
 }
 
-DynamicPrintConfig narrow_wall_config(bool only_one_wall_top)
+DynamicPrintConfig narrow_wall_config(bool only_one_wall_top, double top_surface_expansion)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -244,6 +244,7 @@ DynamicPrintConfig narrow_wall_config(bool only_one_wall_top)
         { "precise_outer_wall",    true },
         { "wall_sequence",         "inner wall/outer wall" },
         { "only_one_wall_top",     only_one_wall_top },
+        { "top_surface_expansion", top_surface_expansion },
     });
     return config;
 }
@@ -298,14 +299,19 @@ double far_wall_inner_wall_length(const Print &print, double print_z)
 
 TEST_CASE("Only one wall on top surfaces keeps the inner walls of narrow walls away from the top surface", "[PrintObject][Perimeters]")
 {
+    // Orca #14929 (OD2): 0 re-onions the region beside the top surface, 2 clips the inner walls over it.
+    // Upstream's #16174 test runs both; #352 dropped the GENERATE as top_surface_expansion was not ported yet.
+    const double top_surface_expansion = GENERATE(0.0, 2.0);
+    CAPTURE(top_surface_expansion);
+
     struct TabTopLayer {
         double perimeters;
         double far_wall_inner_walls;
     };
-    auto tab_top_layer_for = [](bool only_one_wall_top) {
+    auto tab_top_layer_for = [top_surface_expansion](bool only_one_wall_top) {
         Print print;
         Model model;
-        tube_with_tab(print, model, narrow_wall_config(only_one_wall_top));
+        tube_with_tab(print, model, narrow_wall_config(only_one_wall_top, top_surface_expansion));
         print.process();
         REQUIRE_FALSE(print.objects().empty());
         return TabTopLayer{ perimeter_length_at(print, tab_top_z), far_wall_inner_wall_length(print, tab_top_z) };
