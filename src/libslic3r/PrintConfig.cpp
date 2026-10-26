@@ -3225,6 +3225,26 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(45));
 
+    def = this->add("top_layer_direction", coFloat);
+    def->label = L("Top layer direction");
+    def->category = L("Strength");
+    def->tooltip = L("Optional absolute angle for top-layer infill. Set to -1 to use the current solid infill direction behavior.");
+    def->sidetext = "°";	// degrees, don't need translation
+    def->min = -1;
+    def->max = 360;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(-1));
+
+    def = this->add("bottom_layer_direction", coFloat);
+    def->label = L("Bottom layer direction");
+    def->category = L("Strength");
+    def->tooltip = L("Optional absolute angle for bottom-layer infill. Set to -1 to use the current solid infill direction behavior.");
+    def->sidetext = "°";	// degrees, don't need translation
+    def->min = -1;
+    def->max = 360;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(-1));
+
     def = this->add("sparse_infill_density", coPercent);
     def->label = L("Sparse infill density");
     def->category = L("Strength");

@@ -1666,6 +1666,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
+    ((ConfigOptionFloat,                top_layer_direction))
+    ((ConfigOptionFloat,                bottom_layer_direction))
     ((ConfigOptionString,               solid_infill_rotate_template))
     ((ConfigOptionBool,                 symmetric_infill_y_axis))
     ((ConfigOptionBool,                 infill_complete_top))
