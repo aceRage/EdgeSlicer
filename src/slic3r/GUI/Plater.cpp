@@ -90,6 +90,7 @@
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/Format/DXF.hpp"
 #include "libslic3r/Format/STEP.hpp"
 #include "libslic3r/Format/STEPExport.hpp"
 #include "libslic3r/Format/AMF.hpp"
@@ -23764,6 +23765,88 @@ void Plater::export_stl_part()
         return;
 
     Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true);
+}
+
+// "Export outline as DXF": the 2D shape an SVG or text part is embossed from, in the plane of the
+// part (X right, Y up as in the gizmo), in millimetres. Size of the part (shape scale and the
+// scale of the volume and instance) is applied, the position on the plate is not.
+void Plater::export_outline_dxf()
+{
+    if (p->model.objects.empty())
+        return;
+    const Selection &selection = p->get_selection();
+    if (!selection.is_single_volume_or_modifier())
+        return;
+    const GLVolume *gl_volume = selection.get_first_volume();
+    if (gl_volume == nullptr)
+        return;
+    const int obj_idx = gl_volume->object_idx();
+    const int vol_idx = gl_volume->volume_idx();
+    if (obj_idx < 0 || obj_idx >= int(p->model.objects.size()))
+        return;
+    const ModelObject *model_object = p->model.objects[obj_idx];
+    if (vol_idx < 0 || vol_idx >= int(model_object->volumes.size()))
+        return;
+    const ModelVolume *model_volume = model_object->volumes[vol_idx];
+    if (!model_volume->emboss_shape.has_value())
+        return;
+
+    const EmbossShape &shape = *model_volume->emboss_shape;
+    ExPolygons         outline;
+    for (const ExPolygonsWithId &e : shape.shapes_with_ids)
+        expolygons_append(outline, e.expoly);
+    outline = union_ex(outline);
+    if (outline.empty()) {
+        show_error(this, _L("This part has no outline to export."));
+        return;
+    }
+
+    // shape units -> mm, then the scale of the part
+    double sx = shape.scale, sy = shape.scale;
+    sx *= model_volume->get_scaling_factor(X);
+    sy *= model_volume->get_scaling_factor(Y);
+    if (const ModelInstance *inst = selection.get_instance_idx() >= 0 && selection.get_instance_idx() < int(model_object->instances.size()) ?
+                                        model_object->instances[selection.get_instance_idx()] : nullptr) {
+        sx *= inst->get_scaling_factor(X);
+        sy *= inst->get_scaling_factor(Y);
+    }
+    const double kx = sx / SCALING_FACTOR, ky = sy / SCALING_FACTOR;
+    for (ExPolygon &e : outline) {
+        auto fix = [kx, ky](Polygon &poly) {
+            for (Point &pt : poly.points)
+                pt = Point(coord_t(std::llround(pt.x() * kx)), coord_t(std::llround(pt.y() * ky)));
+        };
+        fix(e.contour);
+        for (Polygon &h : e.holes)
+            fix(h);
+    }
+
+    const std::string obj_name  = sanitize_stl_filename(model_object->name);
+    const std::string part_name = sanitize_stl_filename(model_volume->name);
+    const std::string stem      = (obj_name == "part") ? part_name : (part_name == "part") ? obj_name : obj_name + " - " + part_name;
+
+    boost::filesystem::path output_file = p->get_export_file_path(FT_STL);
+    const std::string       out_dir     = output_file.parent_path().string();
+    wxFileDialog dlg(this, _L("Export DXF file:"),
+                     is_shapes_dir(out_dir) ? from_u8(wxGetApp().app_config->get_last_dir()) : from_path(output_file.parent_path()),
+                     from_u8(stem + ".dxf"), _L("DXF files") + " (*.dxf)|*.dxf", wxFD_SAVE | wxFD_OVERWRITE_PROMPT | wxPD_APP_MODAL);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    wxString out_path = dlg.GetPath();
+    if (!out_path.Lower().EndsWith(".dxf")) {
+        out_path += ".dxf";
+        boost::system::error_code ec;
+        if (boost::filesystem::exists(into_u8(out_path), ec) &&
+            wxMessageBox(wxString::Format(_L("The file %s already exists\nDo you want to replace it?"), out_path), _L("Confirm Save As"),
+                         wxYES_NO | wxICON_WARNING, this) != wxYES)
+            return;
+    }
+    wxGetApp().app_config->update_last_output_dir(into_path(out_path).parent_path().string());
+
+    wxBusyCursor wait;
+    std::string  err;
+    if (!Slic3r::export_dxf(into_u8(out_path), {{model_volume->name.empty() ? std::string("Outline") : model_volume->name, std::move(outline)}}, &err))
+        show_error(this, from_u8(_u8L("Could not export the DXF file.") + " " + err));
 }
 
 static bool selection_is_full_objects(const Selection &selection)

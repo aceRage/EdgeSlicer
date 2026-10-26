@@ -2006,6 +2006,26 @@ void MenuFactory::append_menu_item_edit_svg(wxMenu *menu)
     append_menu_item(menu, wxID_ANY, name, description, open_svg, icon, nullptr, can_edit_svg, m_parent);
 }
 
+// Outline of the selected SVG / text part as a DXF file (mm), for CAD and laser software.
+void MenuFactory::append_menu_item_export_outline_dxf(wxMenu *menu)
+{
+    append_menu_item(menu, wxID_ANY, _L("Export outline as DXF") + dots,
+        _L("Save the 2D shape of this SVG or text part as a DXF file in millimetres"),
+        [](wxCommandEvent&) { plater()->export_outline_dxf(); }, "", nullptr,
+        []() {
+            if (plater() == nullptr)
+                return false;
+            const Selection& selection = plater()->get_selection();
+            if (selection.volumes_count() != 1)
+                return false;
+            const GLVolume* gl_volume = selection.get_first_volume();
+            if (gl_volume == nullptr)
+                return false;
+            const ModelVolume *volume = get_model_volume(*gl_volume, selection.get_model()->objects);
+            return volume != nullptr && volume->emboss_shape.has_value() && !volume->emboss_shape->shapes_with_ids.empty();
+        }, m_parent);
+}
+
 // RE-EDITABLE CUTS. Reopen the Cut gizmo on the cut that produced the selected object,
 // with its original uncut shape and the surface and settings it was cut with.
 //
@@ -2385,6 +2405,7 @@ void MenuFactory::create_text_part_menu()
     append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
     append_menu_item_export_stl_part(menu);
+    append_menu_item_export_outline_dxf(menu);
     menu->AppendSeparator();
     append_menu_item_per_object_settings(menu);
     append_menu_item_change_type(menu);
@@ -2400,6 +2421,7 @@ void MenuFactory::create_svg_part_menu()
     append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
     append_menu_item_export_stl_part(menu);
+    append_menu_item_export_outline_dxf(menu);
     menu->AppendSeparator();
     append_menu_item_per_object_settings(menu);
     append_menu_item_change_type(menu);

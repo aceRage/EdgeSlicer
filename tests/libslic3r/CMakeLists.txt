@@ -42,6 +42,7 @@ add_executable(${_TEST_NAME}_tests
 	test_inline_text.cpp
 	test_simple_shape.cpp
 	test_image_trace.cpp
+	test_dxf.cpp
 	test_svg_split.cpp
 	test_svg_import.cpp
 	test_image_fill.cpp

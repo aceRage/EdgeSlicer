@@ -296,6 +296,8 @@ set(lisbslic3r_sources
     Format/GLTF.cpp
     Format/GLTF.hpp
     format.hpp
+    Format/DXF.cpp
+    Format/DXF.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
     Format/objparser.cpp
