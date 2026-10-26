@@ -3,6 +3,7 @@
 #include <libslic3r/Format/DXF.hpp>
 #include <libslic3r/ExPolygon.hpp>
 #include <libslic3r/ImageTrace.hpp>
+#include <libslic3r/BoundingBox.hpp>
 
 #include <boost/filesystem.hpp>
 
