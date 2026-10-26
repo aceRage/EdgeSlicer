@@ -15,6 +15,9 @@ Brim is a flat layer printed around a model's base to improve adhesion to the pr
     - [Ear detection radius](#ear-detection-radius)
 - [Width](#width)
 - [Brim-Object Gap](#brim-object-gap)
+- [Brim flow ratio](#brim-flow-ratio)
+- [Brim use EFC outline](#brim-use-efc-outline)
+- [Combine brims](#combine-brims)
 
 ## Type
 
@@ -100,3 +103,18 @@ Increasing this value widens the brim, which can improve adhesion but increases 
 
 Gap between the innermost brim line and the object.  
 Increasing the gap makes the brim easier to remove but reduces its adhesion benefit; very large gaps may eliminate contact and negate the brim's purpose.
+
+## Brim flow ratio
+
+Scales the amount of material used for the brim.  
+The brim flow is this value multiplied by the filament flow ratio and, if set, the object's flow ratio. Lower it if the brim is over-extruded and hard to remove; raise it for a stronger first layer.
+
+## Brim use EFC outline
+
+Shown as **Brim follows compensated outline**. When enabled, the brim follows the first-layer perimeter after Elephant Foot Compensation is applied, instead of the uncompensated outline.  
+Use it when Elephant Foot Compensation noticeably shrinks the first layer. If your setup already works well it is usually unnecessary, and it can make the brim fuse with the layers above.
+
+## Combine brims
+
+Merges the brims of objects that are close to each other into one brim. This can improve adhesion for groups of small parts.  
+A combined brim belongs to several objects, so it is printed before the first of them and is kept even if one of those objects is skipped during the print.

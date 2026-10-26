@@ -598,7 +598,8 @@ void PrinterWebView::OnRetryTimer(wxTimerEvent&)
 void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
 {
     evt.Skip();
-    if (evt.GetURL().IsEmpty())
+    // The web view's initial empty document (about:blank on WebKit) is not the requested page.
+    if (evt.GetURL().IsEmpty() || evt.GetURL() == "about:blank")
         return;
     if (evt.GetURL() != m_browser->GetCurrentURL())
         return;
