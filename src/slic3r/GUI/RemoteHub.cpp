@@ -10,6 +10,7 @@
 #include "WebPush.hpp"
 #include "AppPush.hpp"
 #include "HubEventDedupe.hpp"
+#include "BambuCloudWatch.hpp" // a Bambu row's age is its report's, not only the poll's
 #include "HubPushOwner.hpp"
 #include "GcodeArchive.hpp" // normalize_printer: the Reprint list's printer names
 #include "SnapmakerLan.hpp" // the LAN cards a "connect" record may belong to
@@ -4256,8 +4257,15 @@ json HubServer::printers_json()
         json row = kv.second.row;
         row["id"] = kv.first;
         const long long age_ms = now > kv.second.at ? now - kv.second.at : 0;
-        row["age_s"]  = (long long) (age_ms / 1000);
-        row["stale"]  = age_ms > PRINTERS_STALE_MS;
+        // A Bambu row also carries how old the printer's own report was when it was polled: a
+        // cloud printer nobody subscribed to was polled every ten seconds and served as fresh
+        // while it had never reported at all (BambuCloudWatch::row_freshness).
+        const bool has_report_age = row.contains("report_age_s") && row["report_age_s"].is_number_integer();
+        const BambuCloudWatch::Freshness fr = BambuCloudWatch::row_freshness(
+            age_ms, PRINTERS_STALE_MS, has_report_age, has_report_age ? row["report_age_s"].get<long long>() : 0,
+            row.value("printing", false));
+        row["age_s"]  = (long long) (fr.age_ms / 1000);
+        row["stale"]  = fr.stale;
         row["seen_at"] = kv.second.at;
         // The pid only stays in the row while that window is still there: the app addresses the
         // control route as /i/<pid>/..., so a pid that has gone would be worse than none.
@@ -4613,6 +4621,11 @@ json HubServer::summary_json()
         if (row.contains("ip"))          p["ip"]          = row["ip"];
         if (row.contains("print_error")) p["print_error"] = row["print_error"];
         if (row.contains("stage"))       p["stage"]       = row["stage"];
+        // A Bambu row's provenance: "report" (the printer's own push, with progress behind it),
+        // "cloud_list" (the account's printer list - a status word and nothing more) or "none",
+        // and how old the printer's last report was when the window was polled (-1: none yet).
+        if (row.contains("status_source")) p["status_source"] = row["status_source"];
+        if (row.contains("report_age_s"))  p["report_age_s"]  = row["report_age_s"];
         // How the job ended ("cancelled" for a stop the person asked for): the instance's watcher
         // keeps it after the printer drops print_error. Absent when there is nothing to say.
         if (row.contains("ended") && row["ended"].is_string() && !row["ended"].get<std::string>().empty()) p["ended"] = row["ended"];
