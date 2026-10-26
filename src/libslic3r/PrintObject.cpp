@@ -1581,6 +1581,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "skeleton_infill_line_width"
             || opt_key == "infill_direction"
             || opt_key == "solid_infill_direction"
+            // Orca: the connected bodies (and the bridge anchors) are worked out in prepare_infill().
+            || opt_key == "center_of_surface_pattern"
+            || opt_key == "separated_infills"
             || opt_key == "top_layer_direction"
             || opt_key == "top_surface_expansion_margin"
             || opt_key == "top_surface_expansion_direction"
@@ -1614,8 +1617,6 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "lateral_lattice_angle_2"
             || opt_key == "infill_overhang_angle"
             || opt_key == "gyroid_optimized"
-            || opt_key == "center_of_surface_pattern"
-            || opt_key == "separated_infills"
             || opt_key == "infill_complete_top") {
             steps.emplace_back(posInfill);
         } else if (opt_key == "sparse_infill_pattern"
