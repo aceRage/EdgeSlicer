@@ -396,6 +396,8 @@ public:
     Transform3d                  trafo_centered() const
         { Transform3d t = this->trafo(); t.pretranslate(Vec3d(- unscale<double>(m_center_offset.x()), - unscale<double>(m_center_offset.y()), 0)); return t; }
     const PrintInstances&        instances() const      { return m_instances; }
+    // Orca: Bounding box of each connected body, indexed by Layer::lslices_separated_component_ids.
+    const std::vector<BoundingBox>& separated_body_bboxes() const { return m_separated_body_bboxes; }
     PrintInstances &instances() { return m_instances; }
 
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.
@@ -766,8 +768,8 @@ private:
     void discover_horizontal_shells();
     void combine_infill();
     void _generate_support_material();
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data(
-        const std::vector<std::pair<const Surface*, float>>& surfaces_w_bottom_z) const;
+    std::pair<FillAdaptive::Octrees, FillAdaptive::Octrees> prepare_adaptive_infill_data(
+        const std::vector<std::pair<const Surface*, const Layer*>>& surfaces_w_layer) const;
     FillLightning::GeneratorPtr prepare_lightning_infill_data();
     AdaptiveInfillFields prepare_adaptive_infill_fields() const;
 
@@ -808,7 +810,8 @@ private:
     std::vector<Polygons>                   m_over_support_below;
     coord_t                                 m_over_support_bridgeable = 0;
 
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
+    std::pair<FillAdaptive::Octrees, FillAdaptive::Octrees> m_adaptive_fill_octrees;
+    std::vector<BoundingBox>                m_separated_body_bboxes;
     FillLightning::GeneratorPtr m_lightning_generator;
     AdaptiveInfillFields m_adaptive_infill_fields;
 

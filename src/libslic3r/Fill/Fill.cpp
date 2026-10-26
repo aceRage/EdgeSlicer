@@ -18,6 +18,7 @@
 
 #include "ExtrusionEntity.hpp"
 #include "Fill.hpp"
+#include "FillAdaptive.hpp"
 #include "FillRectilinear.hpp"
 #include "FillLightning.hpp"
 #include "FillConcentricInternal.hpp"
@@ -319,6 +320,12 @@ struct SurfaceFillParams
     // Orca: corner smoothing factor in the range [0, 1].
     double      smooth_factor { 0. };
 
+    CenterOfSurfacePattern center_of_surface_pattern{CenterOfSurfacePattern::Each_Surface};
+    bool                   separated_infills{false};
+
+    // Orca: forced print order of surface fill loops/fragments for center-based patterns.
+    SurfaceFillOrder fill_order = SurfaceFillOrder::Default;
+
     // Phase 3 (image row, sub-triangle resolution): the CONFIGURED 1-based virtual filament id
     // (region_config.solid_infill_filament.value, before mixed-filament resolution) when this is
     // an erTopSolidInfill fill whose row is an enabled ImageWeighted MixedFilament with a
@@ -378,6 +385,9 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(adaptive_infill_interior_density);
 		RETURN_COMPARE_NON_EQUAL(adaptive_infill_gradient);
         RETURN_COMPARE_NON_EQUAL(smooth_factor);
+        RETURN_COMPARE_NON_EQUAL(center_of_surface_pattern);
+        RETURN_COMPARE_NON_EQUAL(separated_infills);
+		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, fill_order);
 
 		return false;
 	}
@@ -414,7 +424,10 @@ struct SurfaceFillParams
                 this->adaptive_infill_mode         == rhs.adaptive_infill_mode           &&
                 this->adaptive_infill_interior_density == rhs.adaptive_infill_interior_density   &&
                 this->adaptive_infill_gradient == rhs.adaptive_infill_gradient &&
-                this->smooth_factor         == rhs.smooth_factor;
+                this->smooth_factor         == rhs.smooth_factor &&
+                this->center_of_surface_pattern == rhs.center_of_surface_pattern &&
+                this->separated_infills     == rhs.separated_infills &&
+                this->fill_order            == rhs.fill_order;
 	}
 };
 
@@ -1342,6 +1355,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 params.lateral_lattice_angle_1 = region_config.lateral_lattice_angle_1;
                 params.lateral_lattice_angle_2 = region_config.lateral_lattice_angle_2;
                 params.infill_overhang_angle = region_config.infill_overhang_angle;
+                params.center_of_surface_pattern = region_config.center_of_surface_pattern;
                 if (params.pattern == ipLockedZag) {
                     params.infill_lock_depth = scale_(region_config.infill_lock_depth);
                     params.skin_infill_depth = scale_(region_config.skin_infill_depth);
@@ -1411,6 +1425,15 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                         params.extrusion_role = erSolidInfill;
                     }
                 }
+                // Orca: forced fill order applies only to top/bottom surfaces filled with a
+                // center-based pattern; everything else stays at Default to keep batching together.
+                params.fill_order = SurfaceFillOrder::Default;
+                if (params.pattern == ipConcentric || params.pattern == ipSpiralInset || params.pattern == ipArchimedeanChords || params.pattern == ipOctagramSpiral) {
+                    if (params.extrusion_role == erTopSolidInfill)
+                        params.fill_order = region_config.top_surface_fill_order.value;
+                    else if (params.extrusion_role == erBottomSurface)
+                        params.fill_order = region_config.bottom_surface_fill_order.value;
+                }
                 // Orca: apply fill multiline only for sparse infill
                 params.multiline = params.extrusion_role == erInternalInfill ? int(region_config.fill_multiline) : 1;
 
@@ -1426,6 +1449,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 // (which would unnecessarily split fill batching). Adaptive density replaces it.
                 // Stored on SurfaceFillParams; copied to FillParams during conversion.
                 params.gyroid_optimized = (params.pattern == ipGyroid) && region_config.gyroid_optimized && !adaptive_infill_mode;
+                // Orca: Likewise separated_infills only where it can move the pattern.
+                params.separated_infills = region_config.separated_infills && is_separable_infill_pattern(params.pattern) &&
+                                           params.extrusion_role != erTopSolidInfill && params.extrusion_role != erBottomSurface;
 
                 if (params.extrusion_role == erInternalInfill) {
                     params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.infill_direction.value,
@@ -1437,9 +1463,17 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                     if (is_smoothable_infill_pattern(params.pattern, params.multiline))
                         params.smooth_factor = 0.01 * region_config.sparse_infill_smooth_factor.value;
                 } else {
-                    params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.solid_infill_direction.value,
-                                                                   region_config.solid_infill_rotate_template.value);
-                    params.is_using_template_angle = !region_config.solid_infill_rotate_template.value.empty();
+                    // Orca: optional absolute direction for the top / bottom surfaces (-1 keeps the solid infill direction).
+                    const bool top_layer_direction_set    = surface.is_top() && region_config.top_layer_direction.value >= 0.;
+                    const bool bottom_layer_direction_set = surface.is_bottom() && region_config.bottom_layer_direction.value >= 0.;
+                    if (top_layer_direction_set || bottom_layer_direction_set) {
+                        params.angle = Geometry::deg2rad(top_layer_direction_set ? region_config.top_layer_direction.value : region_config.bottom_layer_direction.value);
+                        params.is_using_template_angle = true;
+                    } else {
+                        params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.solid_infill_direction.value,
+                                                                       region_config.solid_infill_rotate_template.value);
+                        params.is_using_template_angle = !region_config.solid_infill_rotate_template.value.empty();
+                    }
                 }
                 params.bridge_angle = float(surface.bridge_angle);
 
@@ -1658,6 +1692,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                     params.pattern 		 = ipRectilinear;
 	            params.density 		 = 100.f;
 		        params.extrusion_role = erSolidInfill;
+		        // EdgeSlicer: params is reused from the last surface above; a forced top/bottom fill order
+		        // must not carry over onto this internal solid fill.
+		        params.fill_order     = SurfaceFillOrder::Default;
 		        const PrintRegionConfig &region_config = layerm.region().config();
                 params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.solid_infill_direction.value,
                                                                region_config.solid_infill_rotate_template.value);
@@ -1803,8 +1840,36 @@ void Layer::set_outlook_range(LockRegionParam &lock_param)
     }
 }
 
+// Orca: Anchors and printed infill must share the same body origin. Keep the choice
+// here so per-model surface centering and separated sparse infill cannot drift apart.
+// EdgeSlicer: the helper is upstream's from #15206 (bridge anchors over Hilbert / Octagram
+// infill), which came after #14674 and whose anchor part we already carry.
+// Returns the connected body the fill region is laid out on, or -1 to keep the object's origin.
+static int infill_body(const Layer &layer, const SurfaceFill &fill, const ExPolygon &expoly)
+{
+    const auto &params = fill.params;
+    const bool per_model = (params.extrusion_role == erTopSolidInfill || params.extrusion_role == erBottomSurface) &&
+                           params.center_of_surface_pattern == CenterOfSurfacePattern::Each_Model &&
+                           (params.pattern == ipArchimedeanChords || params.pattern == ipOctagramSpiral);
+    int body = -1;
+    if (per_model || params.separated_infills || is_octree_infill_pattern(params.pattern)) {
+        const BoundingBox box          = get_extents(expoly);
+        double            best_overlap = 0.;
+        for (size_t i = 0; i < layer.lslices.size() && i < layer.lslices_separated_component_ids.size(); ++i) {
+            if (! layer.lslices_bboxes[i].overlap(box))
+                continue;
+            const double overlap = area(intersection_ex(layer.lslices[i], expoly));
+            if (overlap > best_overlap) {
+                best_overlap = overlap;
+                body         = int(layer.lslices_separated_component_ids[i]);
+            }
+        }
+    }
+    return body;
+}
+
 // friend to Layer
-void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator)
+void Layer::make_fills(const FillAdaptive::Octrees* adaptive_fill_octrees, const FillAdaptive::Octrees* support_fill_octrees, FillLightning::Generator* lightning_generator)
 {
 	for (LayerRegion *layerm : m_regions)
 		layerm->fills.clear();
@@ -1840,7 +1905,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             const PrintRegionConfig &zaa_rcfg = this->regions()[surface_fill.region_id]->region().config();
             f->dont_alternate_fill_direction = zaa_rcfg.zaa_enabled && zaa_rcfg.zaa_dont_alternate_fill_direction;
         }
-        f->adapt_fill_octree   = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
+        const FillAdaptive::Octrees *octrees = surface_fill.params.pattern == ipSupportCubic ? support_fill_octrees : adaptive_fill_octrees;
         f->adaptive_infill_field   = this->object()->adaptive_infill_field(surface_fill.params.adaptive_infill_mode);
         f->print_config        = &this->object()->print()->config();
         f->print_object_config = &this->object()->config();
@@ -1904,6 +1969,11 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         auto &region_config = layerm->region().config();
         params.config               = &region_config;
         params.pattern              = surface_fill.params.pattern;
+        params.fill_order           = surface_fill.params.fill_order;
+
+        // Orca: the centered top/bottom surface patterns are centered as center_of_surface_pattern says.
+        if (params.extrusion_role == erTopSolidInfill || params.extrusion_role == erBottomSurface)
+            params.center_of_surface_pattern = surface_fill.params.center_of_surface_pattern;
 
         if( surface_fill.params.pattern == ipLockedZag ) {
 			params.locked_zag = true;
@@ -1942,6 +2012,12 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 		                                                           float(surface_fill.params.flow.width()), image_row_ctx);
 
 		for (ExPolygon& expoly : surface_fill.expolygons) {
+
+            // Orca: Reuse the body box and octree used for bridge anchoring, resetting them for each surface.
+            const int body = infill_body(*this, surface_fill, expoly);
+            f->set_bounding_box(body >= 0 ? this->object()->separated_body_bboxes()[body] : bbox);
+            f->align_to_box_center = body >= 0;
+            f->adapt_fill_octree = octrees ? octrees->get(body) : nullptr;
 
       f->no_overlap_expolygons = intersection_ex(surface_fill.no_overlap_expolygons, ExPolygons() = {expoly}, ApplySafetyOffset::Yes);
             if (params.symmetric_infill_y_axis) {
@@ -2042,7 +2118,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
  * - For lightning/adaptive patterns, the respective generators are wired so their
  *   polylines match the final infill layout.
  */
-Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree,  FillLightning::Generator* lightning_generator) const
+Polylines Layer::generate_sparse_infill_polylines_for_anchoring(const FillAdaptive::Octrees* adaptive_fill_octrees, const FillAdaptive::Octrees* support_fill_octrees,  FillLightning::Generator* lightning_generator) const
 {
     LockRegionParam skin_inner_param;
     std::vector<SurfaceFill> surface_fills = group_fills(*this, skin_inner_param);
@@ -2101,7 +2177,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
             const PrintRegionConfig &zaa_rcfg = this->regions()[surface_fill.region_id]->region().config();
             f->dont_alternate_fill_direction = zaa_rcfg.zaa_enabled && zaa_rcfg.zaa_dont_alternate_fill_direction;
         }
-        f->adapt_fill_octree   = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
+        const FillAdaptive::Octrees *octrees = surface_fill.params.pattern == ipSupportCubic ? support_fill_octrees : adaptive_fill_octrees;
         f->adaptive_infill_field   = this->object()->adaptive_infill_field(surface_fill.params.adaptive_infill_mode);
         f->print_config        = &this->object()->print()->config();
         f->print_object_config = &this->object()->config();
@@ -2152,6 +2228,11 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         params.extrusion_role            = surface_fill.params.extrusion_role;
 
         for (ExPolygon &expoly : surface_fill.expolygons) {
+            // Orca: Match the per-body box and octree of make_fills() before generating physical anchors.
+            const int body = infill_body(*this, surface_fill, expoly);
+            f->set_bounding_box(body >= 0 ? this->object()->separated_body_bboxes()[body] : bbox);
+            f->align_to_box_center = body >= 0;
+            f->adapt_fill_octree = octrees ? octrees->get(body) : nullptr;
             // Spacing is modified by the filler to indicate adjustments. Reset it for each expolygon.
             f->spacing                     = surface_fill.params.spacing;
             surface_fill.surface.expolygon = std::move(expoly);
@@ -2287,17 +2368,20 @@ void Layer::make_ironing()
                 // Orca #10841: ironing_angle is an offset from the top surface (solid infill) direction,
                 // including its rotation template, instead of an absolute angle / the sparse infill direction.
                 // Orca #11195: ironing_angle_fixed makes ironing_angle an absolute angle that does not alternate.
-                double ironing_angle = (config.ironing_angle_fixed ? 0. :
-                                            calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
-                                                                            config.solid_infill_rotate_template.value)) +
-                                       config.ironing_angle * M_PI / 180.;
+                // Orca #13631: a set top_layer_direction is the base direction instead of the solid infill direction.
+                const bool   top_layer_direction_set = config.top_layer_direction.value >= 0.;
+                const double top_layer_base_angle    = top_layer_direction_set ?
+                    Geometry::deg2rad(config.top_layer_direction.value) :
+                    calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
+                                                    config.solid_infill_rotate_template.value);
+                double ironing_angle = (config.ironing_angle_fixed ? 0. : top_layer_base_angle) + config.ironing_angle * M_PI / 180.;
                 // ORCA: Align ironing angle with model
                 if (config.align_infill_direction_to_model) {
                     auto m = this->object()->trafo().matrix();
                     ironing_angle += atan2((double)m(1, 0), (double)m(0, 0));
                 }
                 ironing_params.angle        = ironing_angle;
-                ironing_params.is_using_template_angle = config.ironing_angle_fixed || !config.solid_infill_rotate_template.value.empty();
+                ironing_params.is_using_template_angle = config.ironing_angle_fixed || top_layer_direction_set || !config.solid_infill_rotate_template.value.empty();
 				ironing_params.pattern      = config.ironing_pattern;
 				ironing_params.layerm 		= layerm;
 				by_extruder.emplace_back(ironing_params);
