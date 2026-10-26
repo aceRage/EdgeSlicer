@@ -81,8 +81,8 @@ TEST_CASE("CC2 status: the whole answer and the pushes", "[ElegooCc2Monitor]")
     SECTION("not a status push: ignored")
     {
         ElegooCc2::merge_full(s, whole_status(1, 0));
-        CHECK(ElegooCc2::merge_push(s, R"({"id":3,"method":1002,"result":{}})") == ElegooCc2::PushResult::Ignored);
-        CHECK(ElegooCc2::merge_push(s, "garbage") == ElegooCc2::PushResult::Ignored);
+        CHECK(ElegooCc2::merge_push(s, std::string(R"({"id":3,"method":1002,"result":{}})")) == ElegooCc2::PushResult::Ignored);
+        CHECK(ElegooCc2::merge_push(s, std::string("garbage")) == ElegooCc2::PushResult::Ignored);
     }
     SECTION("five gaps in a row ask for the whole status again; a continuous id resets the count")
     {
