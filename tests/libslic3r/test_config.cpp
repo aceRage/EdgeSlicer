@@ -842,8 +842,9 @@ TEST_CASE("CLI --allow-rotations defaults off and is opt-in", "[Config][CLI][All
 {
     const ConfigOptionDef *def = cli_misc_config_def.get("allow_rotations");
     REQUIRE(def != nullptr);
-    REQUIRE(def->default_value != nullptr);
-    CHECK_FALSE(static_cast<const ConfigOptionBool *>(def->default_value.get())->value);
+    const ConfigOptionBool *dflt = def->get_default_value<ConfigOptionBool>();
+    REQUIRE(dflt != nullptr);
+    CHECK_FALSE(dflt->value);
 
     auto parse = [](std::initializer_list<const char *> args) {
         DynamicPrintAndCLIConfig config;
