@@ -162,6 +162,47 @@ std::string register_response_topic(const std::string& sn, const std::string& re
 }
 std::string request_topic(const std::string& sn, const std::string& client_id) { return "elegoo/" + sn + "/" + client_id + "/api_request"; }
 std::string response_topic(const std::string& sn, const std::string& client_id) { return "elegoo/" + sn + "/" + client_id + "/api_response"; }
+std::string status_topic(const std::string& sn) { return "elegoo/" + sn + "/api_status"; }
+
+std::string ping_payload() { return R"({"type":"PING"})"; }
+
+bool is_pong(const std::string& payload)
+{
+    const json j = parse_object(payload);
+    return !j.is_null() && str_at(j, "type") == "PONG";
+}
+
+std::string auto_refill_params(bool enable)
+{
+    ojson j;
+    j["auto_refill"] = enable;
+    return j.dump();
+}
+
+std::string auto_refill_memory_key(const std::string& device_id, const std::string& address)
+{
+    if (!trimmed(device_id).empty())
+        return "dev:" + trimmed(device_id);
+    const std::string host = host_of(address);
+    return host.empty() ? std::string() : "addr:" + host;
+}
+
+bool auto_refill_initial(const std::string& remembered, int printer_auto_refill)
+{
+    if (remembered == "1")
+        return true;
+    if (remembered == "0")
+        return false;
+    return printer_auto_refill > 0;
+}
+
+int auto_refill_choice(const std::map<std::string, std::string>& extended_info)
+{
+    const auto it = extended_info.find("canvasAutoRefill");
+    if (it == extended_info.end() || ElegooStartPrint::flag(extended_info, "canvasAttached") != 1)
+        return -1;
+    return it->second == "1" ? 1 : 0;
+}
 
 std::string register_payload(const std::string& client_id, const std::string& request_id)
 {
@@ -358,6 +399,16 @@ bool Session::open(std::string& error)
     }
 }
 
+bool Session::send(int method, const std::string& params_json, int& id, std::string& error)
+{
+    if (!m_open) {
+        error = "not connected";
+        return false;
+    }
+    id = m_next_id++;
+    return m_transport.publish(request_topic(m_sn, m_client_id), request_payload(id, method, params_json), error);
+}
+
 bool Session::call(int method, const std::string& params_json, Reply& reply, std::string& error)
 {
     reply = Reply();
@@ -471,6 +522,22 @@ StartResult start_print_over(Session&                                  session,
     if (out.busy)
         return out;
     out.error.clear();
+    // The CANVAS auto-refill (feed the next tray of the same filament when one runs out), set before
+    // the start as ElegooSlicer does, and only when the dialog read a CANVAS and asked.
+    const int refill = auto_refill_choice(extended_info);
+    if (refill >= 0) {
+        Reply r;
+        if (!session.call(METHOD_SET_AUTO_REFILL, auto_refill_params(refill == 1), r, error)) {
+            out.error = "the CANVAS auto-refill setting was not answered (" + error + "), so the print was not started";
+            return out;
+        }
+        if (r.error_code != 0) {
+            out.error_code = r.error_code;
+            out.error      = "the printer refused the CANVAS auto-refill setting (" + error_text(r.error_code) + "), so the print was not started";
+            return out;
+        }
+        out.auto_refill_set = refill;
+    }
     bool force = false;
     for (int attempt = 0; attempt < 2; ++attempt) {
         out.payload = start_print_params(extended_info, pc_bed_type, filename, force);

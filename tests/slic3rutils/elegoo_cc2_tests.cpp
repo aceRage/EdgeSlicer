@@ -487,3 +487,98 @@ TEST_CASE("CC2 start print", "[ElegooCc2]")
         CHECK(r.error == "the printer cannot find the uploaded file");
     }
 }
+
+TEST_CASE("CC2 CANVAS auto-refill (owner D7)", "[ElegooCc2]")
+{
+    MockCc2         printer;
+    std::deque<int> refill_codes { 0 };
+    printer.answer = [&](int method, const json&) -> std::string {
+        if (method == ElegooCc2::METHOD_GET_STATUS)
+            return status_result(1);
+        if (method == ElegooCc2::METHOD_SET_AUTO_REFILL) {
+            const int code = refill_codes.front();
+            if (refill_codes.size() > 1)
+                refill_codes.pop_front();
+            return R"({"error_code":)" + std::to_string(code) + "}";
+        }
+        if (method == ElegooCc2::METHOD_START_PRINT)
+            return R"({"error_code":0})";
+        return "";
+    };
+    auto run = [&](const std::map<std::string, std::string>& info) {
+        ElegooCc2::Session s(printer, SN, quick());
+        std::string        error;
+        REQUIRE(s.open(error));
+        return ElegooCc2::start_print_over(s, info, 1, "two.gcode", 1, 0);
+    };
+    // The order the printer is sent things in: every request method, in order.
+    auto methods = [&]() {
+        std::vector<int> out;
+        for (const auto& p : printer.published)
+            if (p.first == ElegooCc2::request_topic(SN, printer.client_id))
+                out.push_back(json::parse(p.second)["method"].get<int>());
+        return out;
+    };
+
+    SECTION("the choice reaches the printer as 2004 before the start")
+    {
+        const ElegooCc2::StartResult r = run({ { "canvasAttached", "1" }, { "slotMap", "" }, { "canvasAutoRefill", "1" } });
+        CHECK(r.ok);
+        CHECK(r.auto_refill_set == 1);
+        const auto set = printer.requests(ElegooCc2::METHOD_SET_AUTO_REFILL);
+        REQUIRE(set.size() == 1);
+        CHECK(set[0]["params"] == json::parse(R"({"auto_refill":true})"));
+        CHECK(methods() == std::vector<int>{ ElegooCc2::METHOD_GET_STATUS, ElegooCc2::METHOD_SET_AUTO_REFILL, ElegooCc2::METHOD_START_PRINT });
+    }
+    SECTION("unticked is sent as off, as ElegooSlicer does")
+    {
+        const ElegooCc2::StartResult r = run({ { "canvasAttached", "1" }, { "canvasAutoRefill", "0" } });
+        CHECK(r.ok);
+        CHECK(r.auto_refill_set == 0);
+        const auto set = printer.requests(ElegooCc2::METHOD_SET_AUTO_REFILL);
+        REQUIRE(set.size() == 1);
+        CHECK(set[0]["params"]["auto_refill"] == false);
+    }
+    SECTION("no CANVAS, or no choice: nothing is set")
+    {
+        CHECK(run({ { "canvasAutoRefill", "1" } }).ok); // a plain CC2: the dialog never offers it, and a stray key is ignored
+        CHECK(run({ { "canvasAttached", "1" } }).ok);    // a send that did not ask (the phone)
+        CHECK(printer.requests(ElegooCc2::METHOD_SET_AUTO_REFILL).empty());
+        CHECK(printer.requests(ElegooCc2::METHOD_START_PRINT).size() == 2);
+    }
+    SECTION("a refusal stops the start")
+    {
+        refill_codes                   = { ElegooCc2::ERR_INVALID_PARAMETER2 };
+        const ElegooCc2::StartResult r = run({ { "canvasAttached", "1" }, { "canvasAutoRefill", "1" } });
+        CHECK_FALSE(r.ok);
+        CHECK(r.error_code == ElegooCc2::ERR_INVALID_PARAMETER2);
+        CHECK(r.error.find("auto-refill") != std::string::npos);
+        CHECK(printer.requests(ElegooCc2::METHOD_START_PRINT).empty());
+    }
+    SECTION("the helpers")
+    {
+        CHECK(ElegooCc2::auto_refill_params(true) == R"({"auto_refill":true})");
+        CHECK(ElegooCc2::auto_refill_choice({ { "canvasAttached", "1" }, { "canvasAutoRefill", "1" } }) == 1);
+        CHECK(ElegooCc2::auto_refill_choice({ { "canvasAttached", "1" }, { "canvasAutoRefill", "0" } }) == 0);
+        CHECK(ElegooCc2::auto_refill_choice({ { "canvasAttached", "1" } }) == -1);
+        CHECK(ElegooCc2::auto_refill_choice({ { "canvasAutoRefill", "1" } }) == -1);
+        // Remembered per printer: the device id first, else the bare address.
+        CHECK(ElegooCc2::auto_refill_memory_key("abc", "http://192.168.1.9") == "dev:abc");
+        CHECK(ElegooCc2::auto_refill_memory_key("", "http://192.168.1.9:80/") == "addr:192.168.1.9");
+        CHECK(ElegooCc2::auto_refill_memory_key("", "").empty());
+        // The remembered choice wins; else what the printer says; else off.
+        CHECK(ElegooCc2::auto_refill_initial("1", 0));
+        CHECK_FALSE(ElegooCc2::auto_refill_initial("0", 1));
+        CHECK(ElegooCc2::auto_refill_initial("", 1));
+        CHECK_FALSE(ElegooCc2::auto_refill_initial("", -1));
+    }
+}
+
+TEST_CASE("CC2 heartbeat and status topic", "[ElegooCc2]")
+{
+    CHECK(ElegooCc2::status_topic(SN) == "elegoo/TESTSN0001/api_status");
+    CHECK(json::parse(ElegooCc2::ping_payload()) == json::parse(R"({"type":"PING"})"));
+    CHECK(ElegooCc2::is_pong(R"({"type":"PONG"})"));
+    CHECK_FALSE(ElegooCc2::is_pong(R"({"id":1,"method":1002,"result":{}})"));
+    CHECK_FALSE(ElegooCc2::is_pong("not json"));
+}

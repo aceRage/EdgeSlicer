@@ -717,7 +717,9 @@ namespace Slic3r {
         const ElegooCc2::StartResult started = ElegooCc2::start_print(m_host, token, upload_data.extended_info,
                                                                       static_cast<int>(BedType::btPC), upload_filename);
         BOOST_LOG_TRIVIAL(info) << name << ": Centauri Carbon 2 start print, params: " << started.payload << " -> "
-                                << (started.ok ? std::string("started") : started.error);
+                                << (started.ok ? std::string("started") : started.error)
+                                << (started.auto_refill_set < 0 ? std::string() :
+                                                                  std::string(", CANVAS auto-refill ") + (started.auto_refill_set == 1 ? "on" : "off"));
         if (!started.ok) {
             error_fn(GUI::format_wxstr(_L("The file has been transferred, but the print did not start: %1%"),
                                        wxString::FromUTF8(started.error)));

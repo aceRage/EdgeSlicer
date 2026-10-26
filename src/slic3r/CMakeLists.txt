@@ -982,6 +982,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/ElegooCc2.cpp
     Utils/ElegooCc2.hpp
     Utils/ElegooCc2Net.cpp
+    Utils/ElegooCc2Monitor.cpp
+    Utils/ElegooCc2Monitor.hpp
+    Utils/ElegooCc2Status.cpp
+    Utils/ElegooCc2Status.hpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
     Utils/ElegooSdcp.cpp

@@ -42,6 +42,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/ElegooSdcpMonitor.hpp"
+#include "slic3r/Utils/ElegooCc2Monitor.hpp"
 #include "slic3r/Utils/LoopbackAcceptLoop.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -581,6 +582,7 @@ void RemoteAccess::stop()
         RemoteEvents::stop();
         RemoteTimelapse::shutdown();
         SdcpMonitor::shutdown(); // the Elegoo printers' connections
+        ElegooCc2Monitor::shutdown(); // ... and the Centauri Carbon 2s'
         if (s_heartbeat) s_heartbeat->Stop();
         boost::system::error_code ig;
         fs::remove(fs::path(RemoteHub::instances_dir()) / (std::to_string(wxGetProcessId()) + ".json"), ig);
@@ -2882,7 +2884,10 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         // The hub's own poll says whether anybody is subscribed to notifications (notify=1|0), which
         // decides whether an Elegoo printer's print is watched to its end (ElegooSdcpMonitor).
         const std::string notify = query_param(query, "notify");
-        if (!notify.empty()) SdcpMonitor::note_subscribers(notify == "1");
+        if (!notify.empty()) {
+            SdcpMonitor::note_subscribers(notify == "1");
+            ElegooCc2Monitor::note_subscribers(notify == "1");
+        }
         return api_printers(num(query_param(query, "plate"), -1), query_param(query, "watching") != "0");
     }
     // The timelapse list and pictures (the video itself is streamed by serve(), see there). The id

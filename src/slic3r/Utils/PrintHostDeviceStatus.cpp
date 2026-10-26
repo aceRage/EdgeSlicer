@@ -787,7 +787,8 @@ Status status_from_canvas(const CanvasQueryResult& r)
             st.note = no_filament_note("elegoolink");
         return st;
     }
-    st.canvas = true;
+    st.canvas             = true;
+    st.canvas_auto_refill = r.info.auto_refill;
     for (const CanvasTray& t : r.info.trays) {
         Slot s;
         s.index    = t.slot_index;
