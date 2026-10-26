@@ -7,8 +7,9 @@
 //   decode (OpenCV imgcodecs, refused before decoding when the header announces a huge image)
 //   -> downscale to the working resolution (OpenCV INTER_AREA, alpha premultiplied)
 //   -> one colour level  : alpha or brightness (Otsu threshold by default) field
-//      several colours   : palette by a deterministic k-means over a colour histogram, the
-//                          background colour (most common at the border) can be left out
+//      several colours   : palette by a deterministic k-means over a colour histogram in CIE Lab
+//                          (blend pixels of edges and glow left out), the background colour
+//                          (most common at the border) can be left out
 //   -> per level: Gaussian blur -> marching squares with linear interpolation (sub-pixel)
 //   -> Clipper (holes by even-odd) -> remove specks -> Douglas-Peucker -> SVG in millimetres.
 //

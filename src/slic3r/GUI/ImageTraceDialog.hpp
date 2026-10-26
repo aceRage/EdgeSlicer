@@ -124,6 +124,7 @@ private:
 
     wxStaticBitmap *m_source_preview = nullptr;
     wxStaticBitmap *m_preview_bitmap = nullptr;
+    wxChoice       *m_preview_colors = nullptr; // Show: filament colours / image colours
     wxStaticText   *m_info           = nullptr;
     wxStaticText   *m_warning        = nullptr;
     wxButton       *m_ok             = nullptr;

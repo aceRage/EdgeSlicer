@@ -6,7 +6,10 @@
 #include <libslic3r/UntrustedInput.hpp>
 
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <functional>
 #include <memory>
 
@@ -444,4 +447,194 @@ TEST_CASE("Sample images of the hand test", "[ImageTrace]")
         for (size_t i = 1; i < r.layers.size(); ++i)
             CHECK(area_mm2(r.layers[i].shape) < area_mm2(r.layers[i - 1].shape));
     }
+}
+
+namespace {
+
+// The owner's settings of the neon line art hand test
+ImageTraceParams line_art_params()
+{
+    ImageTraceParams p  = base_params();
+    p.colors            = 6;
+    p.remove_background = true;
+    p.blur              = 0.;
+    p.despeckle         = 0.05;
+    p.detail            = 0.1;
+    p.layout            = TraceLayout::Stacked;
+    p.depth_step        = 0.4;
+    return p;
+}
+
+// Index of the layer with this colour (every channel within tolerance), -1 when none
+int find_layer(const ImageTraceResult &r, const std::array<int, 3> &rgb, int tolerance = 30)
+{
+    for (size_t i = 0; i < r.layers.size(); ++i) {
+        bool same = true;
+        for (int c = 0; c < 3; ++c)
+            same &= std::abs(int(r.layers[i].color[size_t(c)]) - rgb[size_t(c)]) <= tolerance;
+        if (same)
+            return int(i);
+    }
+    return -1;
+}
+
+std::string layer_colors(const ImageTraceResult &r)
+{
+    std::string out;
+    for (const ImageTraceLayer &l : r.layers)
+        out += image_trace_color_to_hex(l.color) + " ";
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Line art on a large dark background keeps its small colours", "[ImageTrace]")
+{
+    // Five rings in distinct colours (pink next to purple, green next to teal) on a dark
+    // background which covers about 90 % of the image, optionally with a soft glow around them
+    const std::array<double, 3>                  background{30, 28, 34};
+    const std::vector<std::array<int, 3>>        colors{{150, 70, 235}, {240, 90, 200}, {50, 215, 205}, {90, 225, 80}, {245, 245, 245}};
+    const std::vector<std::pair<double, double>> centers{{40, 40}, {110, 50}, {160, 120}, {60, 150}, {130, 170}};
+    auto rings = [&](double radius, double half_width, bool glow) {
+        return make_image(200, 200, [&, radius, half_width, glow](double x, double y) -> Color {
+            std::array<double, 3> c = background;
+            for (size_t i = 0; i < centers.size(); ++i) {
+                double off = std::abs(std::hypot(x - centers[i].first, y - centers[i].second) - radius);
+                double g   = off <= half_width ? 1. : (glow ? std::clamp(1. - (off - half_width) / 7., 0., 1.) * 0.55 : 0.);
+                if (g > 0.)
+                    for (int k = 0; k < 3; ++k)
+                        c[size_t(k)] = background[size_t(k)] * (1. - g) + colors[i][size_t(k)] * g;
+            }
+            return {uint8_t(std::lround(c[0])), uint8_t(std::lround(c[1])), uint8_t(std::lround(c[2])), 255};
+        });
+    };
+    auto check_five = [&](const TraceImage &img, const ImageTraceParams &p) {
+        ImageTraceResult r = trace_image(img, p, {}, false);
+        INFO("colours: " << layer_colors(r));
+        REQUIRE(r.is_valid());
+        CHECK(r.colors_found == 5);
+        REQUIRE(r.layers.size() == 5);
+        std::vector<int> found;
+        for (const auto &c : colors)
+            found.push_back(find_layer(r, c));
+        INFO("layer of every colour: " << found[0] << " " << found[1] << " " << found[2] << " " << found[3] << " " << found[4]);
+        CHECK(std::find(found.begin(), found.end(), -1) == found.end());
+        std::sort(found.begin(), found.end());
+        CHECK(std::unique(found.begin(), found.end()) == found.end());
+    };
+
+    SECTION("Rings with a glow, the owner's settings")
+    {
+        TraceImage img  = rings(18., 3., true);
+        size_t     dark = 0;
+        for (size_t i = 0; i < img.rgba.size(); i += 4)
+            dark += img.rgba[i] < 40 && img.rgba[i + 1] < 40 && img.rgba[i + 2] < 45;
+        CHECK(double(dark) / double(img.width * img.height) > 0.8);
+        check_five(img, line_art_params());
+    }
+    SECTION("Rings with a glow, flat levels")
+    {
+        ImageTraceParams p = line_art_params();
+        p.layout           = TraceLayout::Flat;
+        check_five(rings(18., 3., true), p);
+    }
+    SECTION("Thin rings, every colour under 0.4 % of the image")
+    {
+        check_five(rings(7., 1., false), line_art_params());
+    }
+    SECTION("Thin rings with a glow")
+    {
+        check_five(rings(7., 1., true), line_art_params());
+    }
+}
+
+TEST_CASE("Anti-aliased two colour logo gives two levels", "[ImageTrace]")
+{
+    // red disc and blue square touching each other on white: the anti-aliased edges (pink, purple,
+    // light blue) are no colour of their own, however many colours are asked for
+    TraceImage img = make_image(200, 200, [](double x, double y) -> Color {
+        if (std::abs(x - 135) <= 35 && std::abs(y - 100) <= 35)
+            return {20, 50, 200, 255};
+        if (in_disc(x, y, 80, 100, 50))
+            return {200, 20, 30, 255};
+        return WHITE;
+    });
+    ImageTraceParams p  = base_params();
+    p.remove_background = true;
+    for (int colors : {2, 4, 6, 8}) {
+        p.colors           = colors;
+        ImageTraceResult r = trace_image(img, p, {}, false);
+        INFO("colours wanted " << colors << ", found: " << layer_colors(r));
+        REQUIRE(r.is_valid());
+        CHECK(r.layers.size() == 2);
+        CHECK(find_layer(r, {200, 20, 30}, 12) >= 0);
+        CHECK(find_layer(r, {20, 50, 200}, 12) >= 0);
+    }
+    SECTION("Background kept")
+    {
+        p.remove_background = false;
+        p.colors            = 6;
+        ImageTraceResult r  = trace_image(img, p, {}, false);
+        INFO("found: " << layer_colors(r));
+        REQUIRE(r.is_valid());
+        CHECK(r.layers.size() == 3);
+    }
+    SECTION("One colour still traces the whole logo")
+    {
+        p.colors           = 1;
+        ImageTraceResult r = trace_image(img, p, {}, false);
+        REQUIRE(r.is_valid());
+        CHECK(r.layers.size() == 1);
+        CHECK(r.layers.front().shape.size() == 1);
+    }
+}
+
+TEST_CASE("Neon line art JPEG keeps the tiny pink diamond", "[ImageTrace]")
+{
+    std::unique_ptr<std::string> data = read_from_disk(std::string(TEST_DATA_DIR) + "/image_trace/neon_on_dark.jpg");
+    REQUIRE(data != nullptr);
+    TraceImage img;
+    REQUIRE(decode_trace_image(*data, img));
+    ImageTraceParams p = line_art_params();
+    p.width            = 90.;
+    p.max_side         = 512;
+    ImageTraceResult r = trace_image(img, p, {}, false);
+    INFO("colours: " << layer_colors(r));
+    REQUIRE(r.is_valid());
+    // purple, mint, green, pink and white; no muddy glow level
+    CHECK(r.layers.size() == 5);
+    CHECK(find_layer(r, {235, 95, 235}, 35) >= 0);
+    CHECK(find_layer(r, {150, 85, 240}, 35) >= 0);
+    CHECK(find_layer(r, {125, 250, 215}, 35) >= 0);
+    CHECK(find_layer(r, {95, 225, 120}, 35) >= 0);
+    for (const ImageTraceLayer &l : r.layers)
+        CHECK(*std::max_element(l.color.begin(), l.color.end()) > 180);
+}
+
+// Hand test helper, not run by default: trace the image named by EDGESLICER_TRACE_IMAGE with the
+// owner's settings (6 colours, background left out, resolution 1536, width 90 mm) and print the
+// colours found, e.g.  EDGESLICER_TRACE_IMAGE=IMG_0125.jpg libslic3r_tests "[ImageTraceFile]"
+TEST_CASE("Trace the image of EDGESLICER_TRACE_IMAGE", "[ImageTraceFile][.]")
+{
+    const char *path = std::getenv("EDGESLICER_TRACE_IMAGE");
+    if (path == nullptr || *path == 0) {
+        WARN("EDGESLICER_TRACE_IMAGE is not set");
+        return;
+    }
+    std::unique_ptr<std::string> data = read_from_disk(path);
+    REQUIRE(data != nullptr);
+    TraceImage img;
+    REQUIRE(decode_trace_image(*data, img));
+    ImageTraceParams p = line_art_params();
+    p.width            = 90.;
+    p.max_side         = 1536;
+    if (const char *colors = std::getenv("EDGESLICER_TRACE_COLORS"))
+        p.colors = std::atoi(colors);
+    ImageTraceResult r = trace_image(img, p, {}, false);
+    std::cout << "image " << img.width << "x" << img.height << ", colours wanted " << p.colors << ", found " << r.colors_found
+              << ", levels " << r.layers.size() << (r.error.empty() ? "" : ", error: " + r.error) << std::endl;
+    for (const ImageTraceLayer &l : r.layers)
+        std::cout << "  " << image_trace_color_to_hex(l.color) << "  rgb(" << int(l.color[0]) << "," << int(l.color[1]) << ","
+                  << int(l.color[2]) << ")  outlines " << l.contours << ", depth " << l.depth << " mm" << std::endl;
+    CHECK(r.is_valid());
 }

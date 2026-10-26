@@ -391,7 +391,22 @@ ImageTraceDialog::ImageTraceDialog(wxWindow                      *parent,
     right->Add(label(_L("Image") + ":"), 0, wxBOTTOM, FromDIP(4));
     m_source_preview = new wxStaticBitmap(this, wxID_ANY, wxBitmap(blank_preview(px)));
     right->Add(m_source_preview, 0, wxBOTTOM, FromDIP(8));
-    right->Add(label(_L("Shapes") + ":"), 0, wxBOTTOM, FromDIP(4));
+    {
+        // The shapes are painted in the colours of their filaments by default; the traced image
+        // colours show which colours the palette really found (kept for this dialog only)
+        wxBoxSizer *shapes_row = new wxBoxSizer(wxHORIZONTAL);
+        shapes_row->Add(label(_L("Shapes") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+        shapes_row->AddStretchSpacer();
+        shapes_row->Add(label(_L("Show") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+        wxArrayString shows;
+        shows.Add(_L("Filament colours"));
+        shows.Add(_L("Image colours"));
+        m_preview_colors = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, shows);
+        m_preview_colors->SetSelection(0);
+        m_preview_colors->SetToolTip(_L("Paint the shapes in the colours of their filaments, or in the colours traced from the image."));
+        shapes_row->Add(m_preview_colors, 0, wxALIGN_CENTER_VERTICAL);
+        right->Add(shapes_row, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
+    }
     m_preview_bitmap = new wxStaticBitmap(this, wxID_ANY, wxBitmap(blank_preview(px)));
     right->Add(m_preview_bitmap, 0);
     m_info = new wxStaticText(this, wxID_ANY, wxEmptyString);
@@ -425,6 +440,11 @@ ImageTraceDialog::ImageTraceDialog(wxWindow                      *parent,
         evt.Skip();
     });
     m_colors->Bind(wxEVT_TEXT, changed);
+    m_preview_colors->Bind(wxEVT_CHOICE, [this](wxCommandEvent &evt) {
+        if (m_preview.is_valid())
+            m_preview_bitmap->SetBitmap(render_preview(m_preview, FromDIP(TRACE_PREVIEW_PX)));
+        evt.Skip();
+    });
     for (wxChoice *c : {m_shape_from, m_resolution})
         c->Bind(wxEVT_CHOICE, changed);
     for (wxCheckBox *c : {m_auto_threshold, m_invert, m_remove_bg, m_stacked, m_keep_source})
@@ -566,6 +586,9 @@ int ImageTraceDialog::nearest_filament(const std::array<uint8_t, 3> &color) cons
 
 std::string ImageTraceDialog::level_color(size_t level) const
 {
+    const bool image_colors = m_preview_colors != nullptr && m_preview_colors->GetSelection() == 1;
+    if (image_colors && level < m_preview.layers.size())
+        return image_trace_color_to_hex(m_preview.layers[level].color);
     if (level < m_level_filament.size() && m_level_filament[level] != nullptr) {
         int index = m_level_filament[level]->GetSelection();
         if (index > 0 && size_t(index) <= m_filament_colors.size() && !m_filament_colors[size_t(index - 1)].empty())
