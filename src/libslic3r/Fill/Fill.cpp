@@ -1437,9 +1437,17 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                     if (is_smoothable_infill_pattern(params.pattern, params.multiline))
                         params.smooth_factor = 0.01 * region_config.sparse_infill_smooth_factor.value;
                 } else {
-                    params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.solid_infill_direction.value,
-                                                                   region_config.solid_infill_rotate_template.value);
-                    params.is_using_template_angle = !region_config.solid_infill_rotate_template.value.empty();
+                    // Orca: optional absolute direction for the top / bottom surfaces (-1 keeps the solid infill direction).
+                    const bool top_layer_direction_set    = surface.is_top() && region_config.top_layer_direction.value >= 0.;
+                    const bool bottom_layer_direction_set = surface.is_bottom() && region_config.bottom_layer_direction.value >= 0.;
+                    if (top_layer_direction_set || bottom_layer_direction_set) {
+                        params.angle = Geometry::deg2rad(top_layer_direction_set ? region_config.top_layer_direction.value : region_config.bottom_layer_direction.value);
+                        params.is_using_template_angle = true;
+                    } else {
+                        params.angle = calculate_infill_rotation_angle(layer.object(), layer.id(), region_config.solid_infill_direction.value,
+                                                                       region_config.solid_infill_rotate_template.value);
+                        params.is_using_template_angle = !region_config.solid_infill_rotate_template.value.empty();
+                    }
                 }
                 params.bridge_angle = float(surface.bridge_angle);
 
@@ -2287,17 +2295,20 @@ void Layer::make_ironing()
                 // Orca #10841: ironing_angle is an offset from the top surface (solid infill) direction,
                 // including its rotation template, instead of an absolute angle / the sparse infill direction.
                 // Orca #11195: ironing_angle_fixed makes ironing_angle an absolute angle that does not alternate.
-                double ironing_angle = (config.ironing_angle_fixed ? 0. :
-                                            calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
-                                                                            config.solid_infill_rotate_template.value)) +
-                                       config.ironing_angle * M_PI / 180.;
+                // Orca #13631: a set top_layer_direction is the base direction instead of the solid infill direction.
+                const bool   top_layer_direction_set = config.top_layer_direction.value >= 0.;
+                const double top_layer_base_angle    = top_layer_direction_set ?
+                    Geometry::deg2rad(config.top_layer_direction.value) :
+                    calculate_infill_rotation_angle(this->object(), this->id(), config.solid_infill_direction.value,
+                                                    config.solid_infill_rotate_template.value);
+                double ironing_angle = (config.ironing_angle_fixed ? 0. : top_layer_base_angle) + config.ironing_angle * M_PI / 180.;
                 // ORCA: Align ironing angle with model
                 if (config.align_infill_direction_to_model) {
                     auto m = this->object()->trafo().matrix();
                     ironing_angle += atan2((double)m(1, 0), (double)m(0, 0));
                 }
                 ironing_params.angle        = ironing_angle;
-                ironing_params.is_using_template_angle = config.ironing_angle_fixed || !config.solid_infill_rotate_template.value.empty();
+                ironing_params.is_using_template_angle = config.ironing_angle_fixed || top_layer_direction_set || !config.solid_infill_rotate_template.value.empty();
 				ironing_params.pattern      = config.ironing_pattern;
 				ironing_params.layerm 		= layerm;
 				by_extruder.emplace_back(ironing_params);

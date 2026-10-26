@@ -1420,6 +1420,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "skeleton_infill_line_width"
             || opt_key == "infill_direction"
             || opt_key == "solid_infill_direction"
+            || opt_key == "top_layer_direction"
+            || opt_key == "top_surface_expansion_margin"
+            || opt_key == "top_surface_expansion_direction"
+            || opt_key == "bottom_layer_direction"
             || opt_key == "align_infill_direction_to_model" 
             || opt_key == "extra_solid_infills"
             || opt_key == "ensure_vertical_shell_thickness"
@@ -1440,7 +1444,6 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "infill_anchor"
             || opt_key == "infill_anchor_max"
             || opt_key == "top_surface_line_width"
-            || opt_key == "top_surface_density"
             || opt_key == "bottom_surface_density"
             || opt_key == "initial_layer_line_width"
             || opt_key == "small_area_infill_flow_compensation"
@@ -1479,6 +1482,26 @@ bool PrintObject::invalidate_state_by_config_options(
             //FIXME Vojtech is not quite sure about the 100% here, maybe it is not needed.
             if (is_approx(old_density->value, 0.) || is_approx(old_density->value, 100.) ||
                 is_approx(new_density->value, 0.) || is_approx(new_density->value, 100.))
+                steps.emplace_back(posPerimeters);
+            steps.emplace_back(posPrepareInfill);
+        } else if (opt_key == "top_surface_density") {
+            // ORCA: 0% means no top solid fill, which switches off both the top surface expansion and the wall
+            // removal over top surfaces. Only crossing zero matters; posPerimeters cascades to posPrepareInfill.
+            const auto *old_density = old_config.option<ConfigOptionPercent>(opt_key);
+            const auto *new_density = new_config.option<ConfigOptionPercent>(opt_key);
+            assert(old_density && new_density);
+            if (is_approx(old_density->value, 0.) || is_approx(new_density->value, 0.))
+                steps.emplace_back(posPerimeters);
+            // EdgeSlicer: posPrepareInfill, not upstream's posInfill - our bridge_over_infill() reads the top
+            // density (prints_dense()), so a change has to re-run it.
+            steps.emplace_back(posPrepareInfill);
+        } else if (opt_key == "top_surface_expansion") {
+            // ORCA: without the expansion the top fill never reaches the space freed by only_one_wall_top, so the
+            // walls over top surfaces are kept. Only crossing zero matters; posPerimeters cascades to posPrepareInfill.
+            const auto *old_expansion = old_config.option<ConfigOptionFloat>(opt_key);
+            const auto *new_expansion = new_config.option<ConfigOptionFloat>(opt_key);
+            assert(old_expansion && new_expansion);
+            if (old_expansion->value <= 0. || new_expansion->value <= 0.)
                 steps.emplace_back(posPerimeters);
             steps.emplace_back(posPrepareInfill);
         } else if (opt_key == "internal_solid_infill_line_width") {
@@ -2048,6 +2071,71 @@ void PrintObject::detect_surfaces_type()
                             top.clear();
                             surfaces_append(top, diff_ex(top_polygons, bottom), stTop);
                         }
+                    }
+
+                    // ORCA: Grow the top surfaces by top_surface_expansion, so the top solid infill also covers the
+                    // material left by features rising from the middle of a top surface (filling the holes and
+                    // joining the tops, so the features rest on solid infill). Each connected island is grown and
+                    // clipped separately: growing one island's top across a gap into another - which may have no top
+                    // surface at all, leaving a partially filled layer - is never allowed. The original top is
+                    // unioned back in and bottom surfaces are never claimed, so this can only add area.
+                    const PrintRegionConfig &region_config  = layerm->region().config();
+                    const double             top_expansion  = region_config.top_surface_expansion.value;
+                    // Nothing to expand without a top fill: a 0% top surface density leaves the top layer with
+                    // walls only, and zero top shell layers retypes it as internal in prepare_fill_surfaces().
+                    if (top_expansion > 0. && region_config.top_shell_layers.value > 0 &&
+                        region_config.top_surface_density.value > 0. && ! top.empty()) {
+                        const double     d = scale_(top_expansion);
+                        const ExPolygons T = union_ex(to_expolygons(top));
+                        // Walls are laid out on spacing, not width; and only_one_wall_top leaves a single wall over
+                        // a top surface, which is exactly the situation handled here.
+                        const int    wall_loops = region_config.only_one_wall_top.value ? std::min(region_config.wall_loops.value, 1)
+                                                                                        : region_config.wall_loops.value;
+                        const double wall_band  = wall_loops <= 0 ? 0. :
+                            double(layerm->flow(frExternalPerimeter).scaled_width()) +
+                            double(layerm->flow(frPerimeter).scaled_spacing()) * double(wall_loops - 1);
+                        const double margin     = scale_(region_config.top_surface_expansion_margin.value);
+                        // minimum real top to act on: ignore anything thinner than ~2 top-infill lines
+                        const float  min_top    = float(layerm->flow(frTopSolidInfill).scaled_width());
+                        const auto   direction  = region_config.top_surface_expansion_direction.value;
+
+                        ExPolygons grown;
+                        for (const ExPolygon &island : union_ex(layerm_slices_surfaces)) {
+                            // The top infill only exists inside the perimeters, so seed and measure from the infill
+                            // region (the island minus the wall band), not the raw slice: a section whose exposed top
+                            // is just the walls themselves is then skipped instead of being flooded inward. Clip the
+                            // layer's tops to the island first, to keep the boolean ops proportional to the island.
+                            const ExPolygons infill_region = wall_band > 0. ? offset_ex(island, -float(wall_band)) : ExPolygons{ island };
+                            const ExPolygons island_top    = intersection_ex(
+                                ClipperUtils::clip_clipper_polygons_with_subject_bbox(T, get_extents(island).inflated(SCALED_EPSILON)),
+                                infill_region);
+                            if (opening_ex(island_top, min_top).empty())
+                                continue; // no real top infill in this section - never expand into it
+
+                            // Grow, then keep only what the configured direction allows, using the top's own filled
+                            // outline (same outer edge, holes closed) to tell the two apart.
+                            // EdgeSlicer: upstream grows with Clipper2 (offset_ex_2, miter joins); we have no
+                            // Clipper2Utils, so this is the Clipper1 offset with miter joins and Clipper2's default
+                            // miter limit of 2.
+                            ExPolygons expanded = offset_ex(island_top, float(d), ClipperLib::jtMiter, 2.);
+                            if (direction != TopSurfaceExpansionDirection::InwardAndOutward) {
+                                ExPolygons outline;
+                                outline.reserve(island_top.size());
+                                for (const ExPolygon &ex : island_top)
+                                    outline.emplace_back(ex.contour);
+                                outline = union_ex(outline);
+                                expanded = direction == TopSurfaceExpansionDirection::Inward ?
+                                    intersection_ex(expanded, outline) :              // only growth into the holes
+                                    diff_ex(expanded, diff_ex(outline, island_top));  // only growth past the outer edge
+                            }
+                            // hold the expansion clear of the walls by the configured margin
+                            const ExPolygons allowed = margin > 0. ? offset_ex(infill_region, -float(margin)) : infill_region;
+                            append(grown, intersection_ex(expanded, allowed));
+                        }
+
+                        ExPolygons new_top = diff_ex(union_ex(T, grown), to_expolygons(bottom));
+                        top.clear();
+                        surfaces_append(top, std::move(new_top), stTop);
                     }
 
         #ifdef SLIC3R_DEBUG_SLICE_PROCESSING

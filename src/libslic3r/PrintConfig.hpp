@@ -53,6 +53,13 @@ enum class FuzzySkinMode {
     Combined,
 };
 
+// ORCA: direction in which top_surface_expansion grows the top surfaces.
+enum class TopSurfaceExpansionDirection {
+    InwardAndOutward,
+    Inward,
+    Outward,
+};
+
 enum class NoiseType {
     Classic,
     Perlin,
@@ -932,6 +939,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrinterTechnology)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeFlavor)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopSurfaceExpansionDirection)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
@@ -1678,6 +1686,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
+    ((ConfigOptionFloat,                top_layer_direction))
+    ((ConfigOptionFloat,                bottom_layer_direction))
     ((ConfigOptionString,               solid_infill_rotate_template))
     ((ConfigOptionBool,                 symmetric_infill_y_axis))
     ((ConfigOptionBool,                 infill_complete_top))
@@ -1775,6 +1785,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent, top_surface_line_width))
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
+    ((ConfigOptionFloat, top_surface_expansion))
+    ((ConfigOptionFloat, top_surface_expansion_margin))
+    ((ConfigOptionEnum<TopSurfaceExpansionDirection>, top_surface_expansion_direction))
     ((ConfigOptionInt, top_color_penetration_layers))
     ((ConfigOptionFloats, top_surface_speed))
     //BBS

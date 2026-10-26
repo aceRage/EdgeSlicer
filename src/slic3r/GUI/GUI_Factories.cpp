@@ -176,11 +176,11 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::PART_CAT
                     }},
     { L("Strength"), {{"wall_loops", "",1},{"top_shell_layers", L("Top Solid Layers"),1},{"top_shell_thickness", L("Top Minimum Shell Thickness"),1},{"top_color_penetration_layers", "",1},{"top_surface_density", L("Top Surface Density"),1},
                     {"bottom_shell_layers", L("Bottom Solid Layers"),1}, {"bottom_shell_thickness", L("Bottom Minimum Shell Thickness"),1},{"bottom_color_penetration_layers", "",1},{"bottom_surface_density", L("Bottom Surface Density"),1},
-                    {"sparse_infill_density", "",1},{"sparse_infill_pattern", "",1},{"adaptive_infill_mode", "",1},{"adaptive_infill_interior_density", "",1},{"adaptive_infill_gradient", "",1},{"sparse_infill_smooth_factor", "",1},{"sparse_infill_filament", "",1},{"lateral_lattice_angle_1", "",1},{"lateral_lattice_angle_2", "",1},{"infill_overhang_angle", "",1},{"lightning_overhang_angle", "",1},{"lightning_prune_angle", "",1},{"lightning_straightening_angle", "",1},{"infill_anchor", "",1},{"infill_anchor_max", "",1},{"top_surface_pattern", "",1},{"undertop_surface_pattern", "",1},{"bottom_surface_pattern", "",1}, {"internal_solid_infill_pattern", "",1},
+                    {"sparse_infill_density", "",1},{"sparse_infill_pattern", "",1},{"adaptive_infill_mode", "",1},{"adaptive_infill_interior_density", "",1},{"adaptive_infill_gradient", "",1},{"sparse_infill_smooth_factor", "",1},{"sparse_infill_filament", "",1},{"lateral_lattice_angle_1", "",1},{"lateral_lattice_angle_2", "",1},{"infill_overhang_angle", "",1},{"lightning_overhang_angle", "",1},{"lightning_prune_angle", "",1},{"lightning_straightening_angle", "",1},{"infill_anchor", "",1},{"infill_anchor_max", "",1},{"top_surface_pattern", "",1},{"top_surface_expansion", "",1},{"top_surface_expansion_margin", "",1},{"top_surface_expansion_direction", "",1},{"undertop_surface_pattern", "",1},{"bottom_surface_pattern", "",1}, {"internal_solid_infill_pattern", "",1},
                     {"align_infill_direction_to_model", "", 1},
                     {"hollow_interior", "", 1}, {"hollow_shell_thickness", "", 1},
                     {"extra_solid_infills", "", 1},
-        {"infill_combination", "",1}, {"infill_combination_max_layer_height", "",1}, {"infill_wall_overlap", "",1},{"top_bottom_infill_wall_overlap", "",1}, {"solid_infill_direction", "",1}, {"infill_direction", "",1}, {"bridge_angle", "",1}, {"internal_bridge_angle", "",1}, {"minimum_sparse_infill_area", "",1}
+        {"infill_combination", "",1}, {"infill_combination_max_layer_height", "",1}, {"infill_wall_overlap", "",1},{"top_bottom_infill_wall_overlap", "",1}, {"solid_infill_direction", "",1}, {"top_layer_direction", "",1}, {"bottom_layer_direction", "",1}, {"infill_direction", "",1}, {"bridge_angle", "",1}, {"internal_bridge_angle", "",1}, {"minimum_sparse_infill_area", "",1}
                     }},
     { L("Speed"), {{"outer_wall_speed", "",1},{"inner_wall_speed", "",2},{"sparse_infill_speed", "",3},{"top_surface_speed", "",4}, {"internal_solid_infill_speed", "",5},
                     {"enable_overhang_speed", "",6}, {"overhang_1_4_speed", "",7}, {"overhang_2_4_speed", "",8}, {"overhang_3_4_speed", "",9}, {"overhang_4_4_speed", "",10},
@@ -260,7 +260,7 @@ std::vector<SimpleSettingData> SettingsFactory::get_visible_options(const std::s
         //Quality
         "wall_infill_order", "ironing_type", "inner_wall_line_width", "outer_wall_line_width", "top_surface_line_width",
         //Shell
-        "wall_loops", "top_shell_layers", "bottom_shell_layers", "top_shell_thickness", "bottom_shell_thickness",
+        "wall_loops", "top_shell_layers", "bottom_shell_layers", "top_shell_thickness", "bottom_shell_thickness", "top_surface_expansion", "top_surface_expansion_margin", "top_surface_expansion_direction",
         //Infill
         "sparse_infill_density", "sparse_infill_pattern", "top_surface_pattern", "undertop_surface_pattern", "bottom_surface_pattern", "infill_combination", "infill_direction", "infill_wall_overlap",
         //speed
