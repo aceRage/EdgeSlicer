@@ -160,6 +160,11 @@ public:
     coord_t     loop_clipping;
     // In scaled coordinates. Bounding box of the 2D projection of the object.
     BoundingBox bounding_box;
+    // EdgeSlicer: set by Layer::make_fills() when bounding_box is a separated-infill body's box (Orca #16274), so
+    // the origin-aligned patterns are moved onto it. Upstream moves them onto the box centre whenever there is a
+    // box, relying on the object box being centred on the origin; other callers here (stabilizers) pass boxes
+    // that are not, and must keep their patterns where they were.
+    bool        align_to_box_center { false };
 
     // Octree builds on mesh for usage in the adaptive cubic infill
     FillAdaptive::Octree* adapt_fill_octree = nullptr;
@@ -202,6 +207,9 @@ public:
     // Return true if infill has a consistent pattern between layers.
     virtual bool has_consistent_pattern() const { return false; }
 
+    // Orca: Is the pattern laid out from the origin instead of the bounding box center?
+    virtual bool aligned_to_origin() const { return false; }
+
     // Perform the fill.
     virtual Polylines fill_surface(const Surface *surface, const FillParams &params);
     virtual ThickPolylines fill_surface_arachne(const Surface* surface, const FillParams& params);
@@ -224,6 +232,7 @@ public:
         link_max_length              = f->link_max_length;
         loop_clipping                = f->loop_clipping;
         bounding_box                 = f->bounding_box;
+        align_to_box_center          = f->align_to_box_center;
         print_config                 = f->print_config;
         print_object_config          = f->print_object_config;
         no_overlap_expolygons        = f->no_overlap_expolygons;
