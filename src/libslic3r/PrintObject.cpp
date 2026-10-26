@@ -1451,6 +1451,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "lateral_lattice_angle_2"
             || opt_key == "infill_overhang_angle"
             || opt_key == "gyroid_optimized"
+            || opt_key == "center_of_surface_pattern"
+            || opt_key == "separated_infills"
             || opt_key == "infill_complete_top") {
             steps.emplace_back(posInfill);
         } else if (opt_key == "sparse_infill_pattern"

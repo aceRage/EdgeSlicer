@@ -158,6 +158,12 @@ static t_config_enum_values s_keys_map_TopSurfaceExpansionDirection {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TopSurfaceExpansionDirection)
 
+static t_config_enum_values s_keys_map_CenterOfSurfacePattern{
+    {"each_surface", int(CenterOfSurfacePattern::Each_Surface)},
+    {"each_model", int(CenterOfSurfacePattern::Each_Model)},
+    {"each_assembly", int(CenterOfSurfacePattern::Each_Assembly)}};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(CenterOfSurfacePattern)
+
 static t_config_enum_values s_keys_map_InfillPattern {
     { "monotonic", ipMonotonic },
     { "monotonicline", ipMonotonicLine },
@@ -8496,6 +8502,37 @@ void PrintConfigDef::init_fff_params()
     def->max      = 100;
     def->set_default_value(new ConfigOptionPercent(100));
 
+    def           = this->add("separated_infills", coBool);
+    def->label    = L("Separated infills");
+    def->category = L("Strength");
+    def->tooltip  = L("Aligns the internal infill pattern of each part independently instead of across the whole object or assembly.\n"
+                       "By default, aligned infill patterns share a single origin for the entire object, so the pattern of every "
+                       "part is referenced to the same point. When enabled, each connected body is aligned on its own: parts that "
+                       "touch or overlap are treated as one body and share an origin, while parts detached from the rest each get "
+                       "their own.\n Useful when an assembly groups several distinct objects that should each keep a self-centered infill.\n"
+                       "Only affects centered infill patterns (Archimedean Chords, Octagram Spiral) and patterns driven by an "
+                       "infill rotation template.");
+    def->mode     = comExpert;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def                = this->add("center_of_surface_pattern", coEnum);
+    def->label         = L("Center surface pattern on");
+    def->category      = L("Strength");
+    def->tooltip       = L("Chooses where the centering point of centered top/bottom surface patterns (Archimedean Chords, "
+                                 "Octagram Spiral) is placed.\n"
+                                 " - Each Surface: centers the pattern on every individual surface region, so each island is symmetric on its own.\n"
+                                 " - Each Model: centers the pattern on each connected body. Parts that touch or overlap share one center; "
+                                 "parts detached from the rest each get their own.\n"
+                                 " - Each Assembly: uses a single shared center for the whole object or assembly.");
+    def->enum_keys_map = &ConfigOptionEnum<CenterOfSurfacePattern>::get_enum_values();
+    def->enum_values.push_back("each_surface");
+    def->enum_values.push_back("each_model");
+    def->enum_values.push_back("each_assembly");
+    def->enum_labels.push_back(L("Each Surface"));
+    def->enum_labels.push_back(L("Each Model"));
+    def->enum_labels.push_back(L("Each Assembly"));
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionEnum<CenterOfSurfacePattern>(CenterOfSurfacePattern::Each_Surface));
 
     def = this->add("travel_speed", coFloats);
     def->label = L("Travel");

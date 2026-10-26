@@ -60,6 +60,12 @@ enum class TopSurfaceExpansionDirection {
     Outward,
 };
 
+enum class CenterOfSurfacePattern {
+    Each_Surface,
+    Each_Model,
+    Each_Assembly,
+};
+
 enum class NoiseType {
     Classic,
     Perlin,
@@ -928,6 +934,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeFlavor)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopSurfaceExpansionDirection)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CenterOfSurfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
@@ -1691,6 +1698,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                lightning_prune_angle))
     ((ConfigOptionFloat,                lightning_straightening_angle))
     ((ConfigOptionBool,                 align_infill_direction_to_model))
+    ((ConfigOptionEnum<CenterOfSurfacePattern>, center_of_surface_pattern))
+    ((ConfigOptionBool,                 separated_infills))
     // FDM hollowing (FDMHollowing.hpp). Region settings, so a part can override the object.
     ((ConfigOptionBool,                 hollow_interior))
     ((ConfigOptionFloat,                hollow_shell_thickness))

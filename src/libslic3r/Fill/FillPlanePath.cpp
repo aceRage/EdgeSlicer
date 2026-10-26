@@ -78,17 +78,21 @@ void FillPlanePath::_fill_surface_single(
 
     //FIXME Vojtech: We are not sure whether the user expects the fill patterns on visible surfaces to be aligned across all the islands of a single layer.
     // One may align for this->centered() to align the patterns for Archimedean Chords and Octagram Spiral patterns.
-    const bool align = params.density < 0.995;
-
+    // Orca: the old implementation became obsolete when it became possible to change the density of the top and bottom surfaces
+    bool        align = params.extrusion_role == ExtrusionRole::erInternalInfill;
+    BoundingBox bounding_box;
     BoundingBox snug_bounding_box = get_extents(expolygon).inflated(SCALED_EPSILON);
 
-    // Rotated bounding box of the area to fill in with the pattern.
-    BoundingBox bounding_box = align ?
-        // Sparse infill needs to be aligned across layers. Align infill across layers using the object's bounding box.
-        this->bounding_box.rotated(-direction.first) :
-        // Solid infill does not need to be aligned across layers, generate the infill pattern
-        // around the clipping expolygon only.
-        snug_bounding_box;
+    // Sparse infill (or Internal where align == true) needs to be aligned across layers. Align infill across layers using the object's bounding box.
+    // Solid infill does not need to be aligned across layers, generate the infill pattern around the clipping expolygon only.
+    if (align)
+        bounding_box = this->bounding_box.rotated(-direction.first);
+    else if (params.center_of_surface_pattern == CenterOfSurfacePattern::Each_Surface)
+        bounding_box = snug_bounding_box;
+    else if (params.center_of_surface_pattern == CenterOfSurfacePattern::Each_Model)
+        bounding_box = this->bounding_box.rotated(-direction.first);
+    else
+        bounding_box = extended_object_bounding_box();
 
     Point shift = this->centered() ? 
         bounding_box.center() :

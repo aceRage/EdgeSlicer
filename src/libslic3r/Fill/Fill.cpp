@@ -319,6 +319,9 @@ struct SurfaceFillParams
     // Orca: corner smoothing factor in the range [0, 1].
     double      smooth_factor { 0. };
 
+    CenterOfSurfacePattern center_of_surface_pattern{CenterOfSurfacePattern::Each_Surface};
+    bool                   separated_infills{false};
+
     // Phase 3 (image row, sub-triangle resolution): the CONFIGURED 1-based virtual filament id
     // (region_config.solid_infill_filament.value, before mixed-filament resolution) when this is
     // an erTopSolidInfill fill whose row is an enabled ImageWeighted MixedFilament with a
@@ -378,6 +381,8 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(adaptive_infill_interior_density);
 		RETURN_COMPARE_NON_EQUAL(adaptive_infill_gradient);
         RETURN_COMPARE_NON_EQUAL(smooth_factor);
+        RETURN_COMPARE_NON_EQUAL(center_of_surface_pattern);
+        RETURN_COMPARE_NON_EQUAL(separated_infills);
 
 		return false;
 	}
@@ -414,7 +419,9 @@ struct SurfaceFillParams
                 this->adaptive_infill_mode         == rhs.adaptive_infill_mode           &&
                 this->adaptive_infill_interior_density == rhs.adaptive_infill_interior_density   &&
                 this->adaptive_infill_gradient == rhs.adaptive_infill_gradient &&
-                this->smooth_factor         == rhs.smooth_factor;
+                this->smooth_factor         == rhs.smooth_factor &&
+                this->center_of_surface_pattern == rhs.center_of_surface_pattern &&
+                this->separated_infills     == rhs.separated_infills;
 	}
 };
 
@@ -1342,6 +1349,8 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 params.lateral_lattice_angle_1 = region_config.lateral_lattice_angle_1;
                 params.lateral_lattice_angle_2 = region_config.lateral_lattice_angle_2;
                 params.infill_overhang_angle = region_config.infill_overhang_angle;
+                params.center_of_surface_pattern = region_config.center_of_surface_pattern;
+                params.separated_infills = region_config.separated_infills;
                 if (params.pattern == ipLockedZag) {
                     params.infill_lock_depth = scale_(region_config.infill_lock_depth);
                     params.skin_infill_depth = scale_(region_config.skin_infill_depth);
@@ -1912,6 +1921,10 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         auto &region_config = layerm->region().config();
         params.config               = &region_config;
         params.pattern              = surface_fill.params.pattern;
+
+        // Orca: the centered top/bottom surface patterns are centered as center_of_surface_pattern says.
+        if (params.extrusion_role == erTopSolidInfill || params.extrusion_role == erBottomSurface)
+            params.center_of_surface_pattern = surface_fill.params.center_of_surface_pattern;
 
         if( surface_fill.params.pattern == ipLockedZag ) {
 			params.locked_zag = true;
