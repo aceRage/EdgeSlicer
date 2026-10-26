@@ -144,6 +144,10 @@ public:
 
     bool enable_timelapse_print() const { return m_enable_timelapse_print; }
 
+    // Orca #15035: the WipeTower2 tower's first-layer envelope (brim included) in tower-local
+    // coordinates, which the skip-point entry routing goes around.
+    void set_wipe_tower_bbx(const BoundingBoxf &bbx) { m_wipe_tower_bbx = bbx; }
+
 private:
     WipeTowerIntegration& operator=(const WipeTowerIntegration&);
     std::string append_tcr(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, int new_extruder_id, double z = -1.) const;
@@ -154,6 +158,11 @@ private:
     // Left / right edges of the wipe tower, for the planning of wipe moves.
 
     Vec2d extruder_offset_at(size_t extruder_id) const;
+    // Orca #15035: the skip-point entry routing of WipeTower2 towers (BBS append_tcr parity).
+    Polyline    generate_path_to_wipe_tower(const Point &start_pos, const Point &end_pos, const BoundingBox &avoid_polygon, const BoundingBox &printer_bbx,
+                                            const Vec2f &outward) const;
+    BoundingBox printer_travel_bounds(GCode &gcodegen) const;
+    std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const;
 
 private:
     const float                                                  m_left;
@@ -184,6 +193,7 @@ private:
     // wipe_tower_no_sparse_layers, as answered by the shared compaction rule rather than by the raw
     // option: smooth timelapse keeps a tower on every layer regardless.
     const bool                                                   m_sparse_layers_skipped;
+    BoundingBoxf                                                 m_wipe_tower_bbx;
     // Print z of the compacted tower per planned layer. Empty when the tower is not compacted.
     std::vector<float>                                           m_compacted_tower_z;
 };

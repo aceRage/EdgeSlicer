@@ -6523,9 +6523,10 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
     Points corners;
     if (check_wipe_tower_existance && (!has_wipe_tower() || m_wipe_tower_data.tool_changes.empty()))
         return corners;
-    if (is_BBL_printer() && m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib && m_wipe_tower_data.wipe_tower_mesh_data.has_value() &&
+    if (m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib && m_wipe_tower_data.wipe_tower_mesh_data.has_value() &&
         m_wipe_tower_data.wipe_tower_mesh_data->bottom.size() > 4) {
-        // A Bambu Lab rib tower: its generated first-layer outline, brim included.
+        // A rib tower (Bambu Lab, and since Orca #15035 WipeTower2 too): its generated first-layer
+        // outline, brim included.
         Polygon outline = m_wipe_tower_data.wipe_tower_mesh_data->bottom;
         outline.rotate(Geometry::deg2rad(m_config.wipe_tower_rotation_angle.value));
         outline.translate(Point(scale_(m_config.wipe_tower_x.get_at(m_plate_index) + m_origin(0)), scale_(m_config.wipe_tower_y.get_at(m_plate_index) + m_origin(1))));
@@ -7024,8 +7025,13 @@ void Print::_make_wipe_tower()
         BOOST_LOG_TRIVIAL(debug) << "Wipe tower generation completed"
                                  << " nominal_layers=" << m_wipe_tower_data.tool_changes.size()
                                  << " local_z_layers=" << m_wipe_tower_data.local_z_tool_changes.size();
-        m_wipe_tower_data.depth             = wipe_tower.get_depth();
-        m_wipe_tower_data.width             = wipe_tower.width();
+        // Orca #15035: a rib tower is placed by the box around its first-layer wall (the generator
+        // shifts its output by the rib offset so that box starts at the tower position), which is
+        // also the square the pre-slice estimate reserves for it: report that box, not the body.
+        // Any other wall reports the body, as before.
+        const Vec2f wt_footprint            = wipe_tower.get_footprint_size();
+        m_wipe_tower_data.depth             = wt_footprint.y();
+        m_wipe_tower_data.width             = wt_footprint.x();
         m_wipe_tower_data.z_and_depth_pairs = wipe_tower.get_z_and_depth_pairs();
         m_wipe_tower_data.local_z_reserve_boxes = wipe_tower.get_local_z_reserve_boxes();
         m_wipe_tower_data.brim_width        = wipe_tower.get_brim_width();
@@ -7037,6 +7043,18 @@ void Print::_make_wipe_tower()
                                          wipe_tower.get_brim_width(), m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
                                          float(m_config.wipe_tower_rib_width), float(m_config.wipe_tower_extra_rib_length),
                                          m_config.wipe_tower_fillet_wall, cone_angle);
+        if (wipe_tower.is_rib_wall() && ! wipe_tower.get_first_layer_wall().empty()) {
+            // Orca #15035: the printed first layer, the rib wall and the brim loops laid around it (as the
+            // Type1 rib tower above), so the off-bed check, the timelapse keep-out and the skirt see the
+            // ribs instead of the body box.
+            Polygon bottom = wipe_tower.get_first_layer_wall();
+            if (wipe_tower.get_brim_width() > EPSILON) {
+                Polygons brimmed = offset(bottom, float(scale_(wipe_tower.get_brim_width())));
+                if (! brimmed.empty())
+                    bottom = brimmed.front();
+            }
+            m_wipe_tower_data.wipe_tower_mesh_data->bottom = std::move(bottom);
+        }
 
         // Unload the current filament over the purge tower when the printer is SEMM, or when the
         // current tool rams on a multi-tool. A toolchanger with ramming off (U1) has nothing to
