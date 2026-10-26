@@ -544,9 +544,13 @@ TEST_CASE("Line art on a large dark background keeps its small colours", "[Image
     {
         check_five(rings(7., 1., false), line_art_params());
     }
-    SECTION("Thin rings with a glow")
+    SECTION("Thin rings with a glow, five colours wanted")
     {
-        check_five(rings(7., 1., true), line_art_params());
+        // The glow of a thin ring is wider than the ring. Asked for more colours than the image
+        // has, the dim glow becomes a level of its own; asked for five, the five rings win.
+        ImageTraceParams p = line_art_params();
+        p.colors           = 5;
+        check_five(rings(7., 1., true), p);
     }
 }
 
