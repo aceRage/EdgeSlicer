@@ -159,7 +159,8 @@ private:
 
     Vec2d extruder_offset_at(size_t extruder_id) const;
     // Orca #15035: the skip-point entry routing of WipeTower2 towers (BBS append_tcr parity).
-    Polyline    generate_path_to_wipe_tower(const Point &start_pos, const Point &end_pos, const BoundingBox &avoid_polygon, const BoundingBox &printer_bbx) const;
+    Polyline    generate_path_to_wipe_tower(const Point &start_pos, const Point &end_pos, const BoundingBox &avoid_polygon, const BoundingBox &printer_bbx,
+                                            const Vec2f &outward) const;
     BoundingBox printer_travel_bounds(GCode &gcodegen) const;
     std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const;
 

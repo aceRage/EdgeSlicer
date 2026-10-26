@@ -800,18 +800,17 @@ static inline Point wipe_tower_point_to_object_point(GCode& gcodegen, const Vec2
 // from start_pos (the last position before the tower) to end_pos (the tower entry), both in object
 // coordinates, around avoid_polygon grown by 2 mm, so it reaches end_pos from the side the first purge
 // row runs away from. Returns end_pos alone when the grown box leaves printer_bbx or nothing is in the way.
+// Edge: `outward` is the direction out of the tower through the entry's wall, in plate axes. BBS assumes
+// an unrotated tower (+-X); a WipeTower2 tower turns by its rotation angle (#700), so the caller passes it.
 Polyline WipeTowerIntegration::generate_path_to_wipe_tower(const Point &start_pos, const Point &end_pos, const BoundingBox &avoid_polygon,
-                                                           const BoundingBox &printer_bbx) const
+                                                           const BoundingBox &printer_bbx, const Vec2f &outward) const
 {
     Polyline    res;
     coord_t     alpha               = coord_t(scale_(2.)); // offset distance
     BoundingBox avoid_polygon_inner = avoid_polygon;
     avoid_polygon_inner.offset(alpha);
-    coord_t width       = avoid_polygon_inner.max[0] - avoid_polygon_inner.min[0];
     Polygon bed_polygon = printer_bbx.polygon();
-    Vec2f   v(1, 0); // the first print direction of end_pos.
-    if (std::abs(end_pos[0] - avoid_polygon_inner.min[0]) < width / 2)
-        v = -v; // judge whether the wipe tower's infill goes to the left or right.
+    const Vec2f v = outward; // leave the entry through its wall
     // If the grown box leaves the printer area, go straight to end_pos.
     Points avoid_points = avoid_polygon_inner.polygon().points;
     for (const Point &wipe_tower_bbx_p : avoid_points)
@@ -941,7 +940,13 @@ std::string WipeTowerIntegration::travel_to_tower_gap(GCode &gcodegen, const Poi
     const BoundingBox avoid_bbx(avoid_points);
     if (avoid_bbx.contains(route_start))
         return {};
-    const Polyline travel_polyline = generate_path_to_wipe_tower(route_start, start_wipe_pos, avoid_bbx, printer_travel_bounds(gcodegen));
+    // Edge (#700): the entry's wall faces tower-local -X or +X, whichever side of the tower the entry is on;
+    // turned into plate axes by the tower rotation, so on a 90 degree tower the hop crosses the wall.
+    const Vec2f  entry_bed   = unscaled<float>(start_wipe_pos) + gcodegen.origin().cast<float>() - plate_origin_2d;
+    const Vec2f  entry_local = Eigen::Rotation2Df(-alpha) * (entry_bed - m_wipe_tower_pos);
+    const float  side        = entry_local.x() < 0.5f * float(m_wipe_tower_bbx.min.x() + m_wipe_tower_bbx.max.x()) ? -1.f : 1.f;
+    const Vec2f  outward     = Eigen::Rotation2Df(alpha) * Vec2f(side, 0.f);
+    const Polyline travel_polyline = generate_path_to_wipe_tower(route_start, start_wipe_pos, avoid_bbx, printer_travel_bounds(gcodegen), outward);
     std::string    gcode;
     // The polyline's last point is start_wipe_pos itself, emitted by the caller.
     for (size_t i = 0; i + 1 < travel_polyline.points.size(); ++i)

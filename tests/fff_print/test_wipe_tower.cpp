@@ -821,12 +821,15 @@ TEST_CASE("Purge blocks of a non-ramming toolchanger tile the tower without blan
 // other layer's entry is on the far side of the tower from the part: a direct hop there crosses it.
 TEST_CASE("The tower entry travel goes around the tower when wall gaps are on", "[WipeTower][SkipPoints]")
 {
-    const bool gaps = GENERATE(false, true);
-    DYNAMIC_SECTION("wipe_tower_wall_gap " << gaps) {
+    const bool gaps  = GENERATE(false, true);
+    // #700: a rotated tower's entry walls are not vertical; the routed hop still has to cross the wall.
+    const int  angle = GENERATE(0, 90);
+    DYNAMIC_SECTION("wipe_tower_wall_gap " << gaps << " rotation " << angle) {
         DynamicPrintConfig config = wait_for_temp_config(false);
         config.set_deserialize_strict({
             { "wipe_tower_wall_type", "rectangle" },
             { "wipe_tower_wall_gap", gaps ? "1" : "0" },
+            { "wipe_tower_rotation_angle", angle },
             { "prime_tower_brim_width", "0" },
             { "filament_multitool_ramming", "0,0" },
             { "wipe_tower_x", "120" },
@@ -840,8 +843,12 @@ TEST_CASE("The tower entry travel goes around the tower when wall gaps are on", 
 
         REQUIRE(print.wipe_tower_data().wipe_tower_mesh_data.has_value());
         Polygon envelope = print.wipe_tower_data().wipe_tower_mesh_data->bottom;
+        envelope.rotate(double(angle) * M_PI / 180.);
         envelope.translate(Point::new_scale(120., 60.));
+        const Eigen::Rotation2Dd to_local(-double(angle) * M_PI / 180.);
         const Polygons inner = offset(envelope, -scale_(1.));
+        const Polygons outer = offset(envelope, scale_(1.));
+        REQUIRE(!outer.empty());
         REQUIRE(!inner.empty());
 
         // Travels from outside the tower to a point on it (the entries), and how far each runs over the
@@ -874,8 +881,15 @@ TEST_CASE("The tower entry travel goes around the tower when wall gaps are on", 
                 for (size_t k = line_idx > 40 ? line_idx - 40 : 0; k <= line_idx; ++k)
                     context += all_lines[k] + "\n";
                 INFO("entry travel " << x << "," << y << " -> " << nx << "," << ny << " runs " << over << " mm over the tower, after:\n" << context);
-                if (gaps)
+                if (gaps) {
                     CHECK(over < 0.5);
+                    // A hop from away from the tower (not a move along its edge between two purges) enters
+                    // across the entry's wall (tower-local X), not along it.
+                    if (!outer.front().contains(from)) {
+                        const Vec2d hop = to_local * Vec2d(nx - x, ny - y);
+                        CHECK(std::abs(hop.y()) <= 0.05 + 0.1 * std::abs(hop.x()));
+                    }
+                }
                 if (over > 5.)
                     ++crossing;
             }
@@ -883,7 +897,7 @@ TEST_CASE("The tower entry travel goes around the tower when wall gaps are on", 
             y = ny;
         }
         REQUIRE(entries > 0);
-        if (!gaps)
+        if (!gaps && angle == 0)
             CHECK(crossing > 0); // stock: the far-side entries hop straight over the tower
     }
 }
