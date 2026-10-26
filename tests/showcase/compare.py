@@ -13,6 +13,9 @@ Prints one line of numbers and exits 0 when the candidate is within tolerance, 1
 - over2: how many pixels differ by more than 2 steps in any channel.
 - --alpha-exact: the alpha channel must be byte-identical wherever the golden is fully transparent
   (where there is no object or shadow: the transparent export's "nothing there").
+- --premultiplied: compare colour times alpha (what a transparent export looks like once laid over
+  anything). Straight alpha divides each colour by its alpha, so a one-step difference in a pixel
+  with alpha 32 shows up as eight steps there while nobody can see it.
 """
 import argparse
 import json
@@ -55,6 +58,7 @@ def main():
     ap.add_argument("--max-delta-e", type=float, default=4.0)
     ap.add_argument("--mean-delta-e", type=float, default=1.0)
     ap.add_argument("--alpha-exact", action="store_true")
+    ap.add_argument("--premultiplied", action="store_true")
     ap.add_argument("--diff", help="write an amplified difference image here")
     ap.add_argument("--json", help="write the numbers here")
     a = ap.parse_args()
@@ -67,6 +71,9 @@ def main():
     if g.shape != c.shape:
         print("ERROR size differs: %s vs %s" % (g.shape, c.shape))
         return 2
+    if a.premultiplied:
+        for im in (g, c):
+            im[..., :3] = np.round(im[..., :3] * im[..., 3:4] / 255.0)
     d = np.abs(g - c)
     max_delta = float(d.max())
     mean_delta = float(d.mean())
@@ -87,6 +94,7 @@ def main():
         "golden": a.golden, "candidate": a.candidate, "width": int(g.shape[1]), "height": int(g.shape[0]),
         "max_delta": max_delta, "mean_delta": mean_delta, "pixels_over_2": over2,
         "max_delta_e": max_de, "mean_delta_e": mean_de, "alpha_exact": alpha_ok if a.alpha_exact else None,
+        "premultiplied": a.premultiplied,
         "ok": ok,
     }
     if a.diff:

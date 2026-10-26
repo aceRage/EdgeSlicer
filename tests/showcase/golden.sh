@@ -79,7 +79,7 @@ render() {   # exe datadir fixture out extra-args...
 run_still() {   # name [--alpha-exact] [render args...]
     name=$1; shift
     alpha=
-    if [ "${1:-}" = "--alpha-exact" ]; then alpha=--alpha-exact; shift; fi
+    if [ "${1:-}" = "--alpha-exact" ]; then alpha="--alpha-exact --premultiplied"; shift; fi
     [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && return 0
     fx="$OUT/fixtures/$name.3mf"
     "$PY" "$HERE/make_fixture.py" "$MODEL" "$HERE/fixtures/$name.json" "$fx" || { STATUS=2; return; }
@@ -94,7 +94,12 @@ run_still() {   # name [--alpha-exact] [render args...]
     line=$("$PY" "$HERE/compare.py" "$g" "$c" --max-delta "$MAXD" --mean-delta "$MEAND" $alpha \
         --diff "$OUT/diff/$name.png" --json "$OUT/diff/$name.json")
     rc=$?
-    echo "$name: $line" | tee -a "$REPORT"
+    # A toolpath scene whose plate did not slice falls back to the model: say so.
+    note=
+    if grep -q '"source": *"toolpaths"' "$HERE/fixtures/$name.json" && ! grep -q '"source": *"toolpaths"' "$c.report.json"; then
+        note=" (NOT SLICED: the model was shown, see $c.report.json)"
+    fi
+    echo "$name: $line$note" | tee -a "$REPORT"
     [ $rc -ne 0 ] && [ $STATUS -eq 0 ] && STATUS=1
 }
 
