@@ -2331,6 +2331,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPercents,            filament_shrinkage_compensation_z))
     ((ConfigOptionBool,                gcode_label_objects))
     ((ConfigOptionBool,                exclude_object))
+    ((ConfigOptionFloat,               exclude_object_tolerance))
     ((ConfigOptionBool,                gcode_comments))
     ((ConfigOptionInts,                 slow_down_layers))
     ((ConfigOptionInts,                support_material_interface_fan_speed))

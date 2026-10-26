@@ -5191,7 +5191,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     "toolchange_ordering", "toolchange_cyclic_order", "toolchange_cyclic_first_layer",
     // Firmware / G-code output features.
     "timelapse_type",                        // camera timelapse moves differ per machine
-    "exclude_object", "gcode_label_objects", // object labelling for the firmware's exclude-object
+    "exclude_object", "exclude_object_tolerance", "gcode_label_objects", // object labelling for the firmware's exclude-object
     "enable_arc_fitting",                    // G2/G3 support
     "gcode_add_line_number", "gcode_comments",
     "filename_format", "post_process",       // output naming and machine-specific scripts
