@@ -90,8 +90,12 @@ struct ShowcaseFramebuffers
     GLuint msaa_fbo = 0, msaa_color = 0, msaa_depth = 0;
     GLuint fbo = 0, color = 0, depth = 0;
     // 1a: the HDR layer; 0 without one (no float buffers: the objects tone-map in their shader).
-    GLuint msaa_hdr_fbo = 0, msaa_hdr = 0;
+    // With multisampling the HDR layer and the scene colour are multisample textures (not
+    // renderbuffers), so the post pass can tone-map and composite each sample before averaging, in
+    // the same order as when every shader tone-mapped its own samples.
+    GLuint msaa_hdr_fbo = 0, msaa_hdr = 0;   // msaa_hdr: GL_TEXTURE_2D_MULTISAMPLE
     GLuint hdr_fbo = 0, hdr = 0;
+    bool   msaa_color_is_texture = false;
     int    width = 0, height = 0, samples = 0;
     // S4: the plan the buffers were made for, when a video keeps them between frames.
     int    ssaa = 1;
@@ -101,11 +105,12 @@ struct ShowcaseFramebuffers
     void release()
     {
         glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-        if (msaa_hdr) glsafe(::glDeleteRenderbuffers(1, &msaa_hdr));
+        if (msaa_hdr) glsafe(::glDeleteTextures(1, &msaa_hdr));
         if (msaa_hdr_fbo) glsafe(::glDeleteFramebuffers(1, &msaa_hdr_fbo));
         if (hdr) glsafe(::glDeleteTextures(1, &hdr));
         if (hdr_fbo) glsafe(::glDeleteFramebuffers(1, &hdr_fbo));
-        if (msaa_color) glsafe(::glDeleteRenderbuffers(1, &msaa_color));
+        if (msaa_color && msaa_color_is_texture) glsafe(::glDeleteTextures(1, &msaa_color));
+        else if (msaa_color) glsafe(::glDeleteRenderbuffers(1, &msaa_color));
         if (msaa_depth) glsafe(::glDeleteRenderbuffers(1, &msaa_depth));
         if (msaa_fbo) glsafe(::glDeleteFramebuffers(1, &msaa_fbo));
         if (color) glsafe(::glDeleteTextures(1, &color));
@@ -114,6 +119,7 @@ struct ShowcaseFramebuffers
         msaa_hdr = msaa_hdr_fbo = hdr = hdr_fbo = 0;
         msaa_fbo = msaa_color = msaa_depth = fbo = color = depth = 0;
         width = height = samples = 0;
+        msaa_color_is_texture = false;
     }
 
     bool   has_hdr() const { return hdr_fbo != 0; }
@@ -121,8 +127,8 @@ struct ShowcaseFramebuffers
     GLuint draw_fbo() const { return msaa_fbo != 0 ? msaa_fbo : fbo; }
     GLuint draw_hdr_fbo() const { return msaa_hdr_fbo != 0 ? msaa_hdr_fbo : hdr_fbo; }
 
-    // The multisampled buffers into the single-sampled ones: the scene's colour and depth (SSAO reads
-    // both and cannot read a multisampled buffer) and the HDR layer (the post pass reads it).
+    // The multisampled scene into the single-sampled buffers: its colour and depth (SSAO reads both
+    // and cannot read a multisampled buffer). The HDR layer is read per sample by the post pass.
     void resolve()
     {
         if (msaa_fbo == 0)
@@ -130,11 +136,6 @@ struct ShowcaseFramebuffers
         glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, msaa_fbo));
         glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo));
         glsafe(::glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST));
-        if (msaa_hdr_fbo != 0) {
-            glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, msaa_hdr_fbo));
-            glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, hdr_fbo));
-            glsafe(::glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST));
-        }
         glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fbo));
     }
 
@@ -142,7 +143,7 @@ struct ShowcaseFramebuffers
     // adds the HDR layer; false when anything (that layer included) cannot be made.
     bool create(int w, int h, int samples_, bool with_hdr)
     {
-        if (!create_scene(w, h, samples_))
+        if (!create_scene(w, h, samples_, with_hdr))
             return false;
         if (with_hdr && !create_hdr()) {
             release();
@@ -183,10 +184,12 @@ private:
         if (samples > 1) {
             glsafe(::glGenFramebuffers(1, &msaa_hdr_fbo));
             glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, msaa_hdr_fbo));
-            glsafe(::glGenRenderbuffers(1, &msaa_hdr));
-            glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, msaa_hdr));
-            glsafe(::glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA16F, width, height));
-            glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msaa_hdr));
+            glsafe(::glGenTextures(1, &msaa_hdr));
+            glsafe(::glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, msaa_hdr));
+            // Fixed sample locations: it shares the FBO with a renderbuffer (the depth).
+            glsafe(::glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, samples, GL_RGBA16F, width, height, GL_TRUE));
+            glsafe(::glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0));
+            glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, msaa_hdr, 0));
             glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, msaa_depth));
             glsafe(::glDrawBuffers(1, bufs));
             glsafe(::glReadBuffer(GL_COLOR_ATTACHMENT0));
@@ -199,7 +202,7 @@ private:
         return true;
     }
 
-    bool create_scene(int w, int h, int samples_)
+    bool create_scene(int w, int h, int samples_, bool color_texture)
     {
         release();
         width   = w;
@@ -230,10 +233,20 @@ private:
         if (samples > 1) {
             glsafe(::glGenFramebuffers(1, &msaa_fbo));
             glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, msaa_fbo));
-            glsafe(::glGenRenderbuffers(1, &msaa_color));
-            glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, msaa_color));
-            glsafe(::glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, w, h));
-            glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msaa_color));
+            if (color_texture) {
+                // 1a: read per sample by the post pass (see msaa_hdr).
+                msaa_color_is_texture = true;
+                glsafe(::glGenTextures(1, &msaa_color));
+                glsafe(::glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, msaa_color));
+                glsafe(::glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, samples, GL_RGBA8, w, h, GL_TRUE));
+                glsafe(::glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0));
+                glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, msaa_color, 0));
+            } else {
+                glsafe(::glGenRenderbuffers(1, &msaa_color));
+                glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, msaa_color));
+                glsafe(::glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, w, h));
+                glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, msaa_color));
+            }
             glsafe(::glGenRenderbuffers(1, &msaa_depth));
             glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, msaa_depth));
             glsafe(::glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH24_STENCIL8, w, h));
@@ -1495,18 +1508,52 @@ bool ShowcaseRenderer::want_hdr() const
         const char *v = std::getenv("EDGESLICER_SHOWCASE_NO_HDR");
         return v != nullptr && *v != '\0' && *v != '0';
     }();
-    return !disabled && wxGetApp().get_shader("showcase_post") != nullptr && wxGetApp().get_shader("showcase_material") != nullptr;
+    return !disabled && wxGetApp().get_shader("showcase_post") != nullptr && wxGetApp().get_shader("showcase_post_ms") != nullptr &&
+           wxGetApp().get_shader("showcase_material") != nullptr;
 }
 
-void ShowcaseRenderer::draw_post(unsigned int hdr_texture)
+void ShowcaseRenderer::draw_post(const ShowcaseFramebuffers &fb)
 {
-    GLShaderProgram *post = wxGetApp().get_shader("showcase_post");
-    if (post == nullptr || hdr_texture == 0 || m_scene == nullptr)
+    if (!fb.has_hdr() || m_scene == nullptr)
         return;
     ensure_fullscreen_quad();
     glsafe(::glDisable(GL_DEPTH_TEST));
     glsafe(::glDepthMask(GL_FALSE));
     glsafe(::glDisable(GL_CULL_FACE));
+    if (fb.msaa_hdr != 0) {
+        // Multisampled: per sample, from both layers' multisample textures, into the resolved buffer.
+        GLShaderProgram *post_ms = wxGetApp().get_shader("showcase_post_ms");
+        if (post_ms != nullptr) {
+            glsafe(::glDisable(GL_BLEND));
+            post_ms->start_using();
+            post_ms->set_uniform("samples", fb.samples);
+            post_ms->set_uniform("tone_curve", int(m_scene->lighting.tone));
+            post_ms->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
+            post_ms->set_uniform("scene_ms", 1);
+            post_ms->set_uniform("hdr_ms", 2);
+            glsafe(::glActiveTexture(GL_TEXTURE1));
+            glsafe(::glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, fb.msaa_color));
+            glsafe(::glActiveTexture(GL_TEXTURE2));
+            glsafe(::glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, fb.msaa_hdr));
+            m_canvas.m_background.render();
+            glsafe(::glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0));
+            glsafe(::glActiveTexture(GL_TEXTURE1));
+            glsafe(::glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+            post_ms->stop_using();
+        }
+        glsafe(::glEnable(GL_CULL_FACE));
+        glsafe(::glDepthMask(GL_TRUE));
+        glsafe(::glEnable(GL_DEPTH_TEST));
+        return;
+    }
+    GLShaderProgram *post = wxGetApp().get_shader("showcase_post");
+    if (post == nullptr) {
+        glsafe(::glEnable(GL_CULL_FACE));
+        glsafe(::glDepthMask(GL_TRUE));
+        glsafe(::glEnable(GL_DEPTH_TEST));
+        return;
+    }
     // The objects' old blending, now once for the finished layer: rgb premultiplied by coverage over
     // the scene, alpha accumulating as coverage (a transparent export keeps it).
     glsafe(::glEnable(GL_BLEND));
@@ -1517,7 +1564,7 @@ void ShowcaseRenderer::draw_post(unsigned int hdr_texture)
     post->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
     post->set_uniform("source", 0);
     glsafe(::glActiveTexture(GL_TEXTURE0));
-    glsafe(::glBindTexture(GL_TEXTURE_2D, GLuint(hdr_texture)));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, fb.hdr));
     m_canvas.m_background.render();
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     post->stop_using();
@@ -1733,7 +1780,7 @@ void ShowcaseRenderer::render_frame()
             fb.resolve();
             glsafe(::glViewport(0, 0, GLsizei(vp_w), GLsizei(vp_h)));
             if (m_hdr_drawn)
-                draw_post(fb.hdr);
+                draw_post(fb);
             // Ambient occlusion over the finished colour and depth, as before.
             if (m_canvas._is_ssao_enabled()) {
                 ensure_fullscreen_quad();
@@ -1955,7 +2002,7 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo));
     glsafe(::glViewport(0, 0, plan.internal_width, plan.internal_height));
     if (m_hdr_drawn)
-        draw_post(fb.hdr);
+        draw_post(fb);
     if (m_canvas._is_ssao_enabled()) {
         ensure_fullscreen_quad();
         m_canvas._render_ssao_pass(unsigned(plan.internal_width), unsigned(plan.internal_height));

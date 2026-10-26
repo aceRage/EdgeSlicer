@@ -219,8 +219,9 @@ private:
     // 1a: whether this frame can use the HDR layer and the post pass (the shaders are there, and
     // EDGESLICER_SHOWCASE_NO_HDR is not set).
     bool            want_hdr() const;
-    // 1a: tone-maps the resolved HDR layer `hdr_texture` over the bound scene framebuffer.
-    void            draw_post(unsigned int hdr_texture);
+    // 1a: tone-maps fb's HDR layer over the bound single-sampled scene buffer (per sample when fb is
+    // multisampled).
+    void            draw_post(const ShowcaseFramebuffers &fb);
     // 1a: the live view's finished frame from its off-screen buffer onto the window.
     void            present(unsigned int color_texture);
     void            draw_overlay(int vp_w, int vp_h);

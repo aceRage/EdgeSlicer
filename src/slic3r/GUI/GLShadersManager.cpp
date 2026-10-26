@@ -141,6 +141,11 @@ std::pair<bool, std::string> GLShadersManager::init()
         appendOptionalShader("showcase_post", { prefix + "background.vs", prefix + "showcase_post.fs" });
         if (GLShaderProgram* s = get_shader("showcase_post"); s != nullptr)
             s->set_sampler_units({ { "source", 0 } });
+        // The same with multisampling, per sample (sampler2DMS, GLSL 1.50). Without it a multisampled
+        // frame draws without the HDR layer.
+        appendOptionalShader("showcase_post_ms", { prefix + "showcase_post_ms.vs", prefix + "showcase_post_ms.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_post_ms"); s != nullptr)
+            s->set_sampler_units({ { "scene_ms", 1 }, { "hdr_ms", 2 } });
         if (GLShaderProgram* s = get_shader("showcase_background"); s != nullptr)
             s->set_sampler_units({ { "image_tex", 0 }, { "env_map", 6 } });
         if (GLShaderProgram* s = get_shader("showcase_floor"); s != nullptr)
