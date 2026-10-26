@@ -2269,10 +2269,15 @@ void Layer::make_ironing()
 			if (ironing_params.extruder != -1) {
 				//TODO just_infill is currently not used.
 				ironing_params.just_infill 	= false;
-				ironing_params.line_spacing = std::max(IRONING_SPACING_MIN, double(config.ironing_spacing));
-                ironing_params.inset 		= config.ironing_inset;
-				ironing_params.height 		= default_layer_height * 0.01 * config.ironing_flow;
-				ironing_params.speed 		= config.ironing_speed.values.front();
+				// Orca #11194: filament-specific overrides if configured, otherwise the process values.
+				const int iron_filament = ironing_params.extruder;
+				ironing_params.line_spacing = std::max(IRONING_SPACING_MIN,
+					ironing_filament_override(config.filament_ironing_spacing, iron_filament, double(config.ironing_spacing)));
+                ironing_params.inset 		= ironing_filament_override(config.filament_ironing_inset, iron_filament, double(config.ironing_inset));
+				ironing_params.height 		= default_layer_height * 0.01 *
+					ironing_filament_override(config.filament_ironing_flow, iron_filament, double(config.ironing_flow));
+				// Only a grouping key here; GCode resolves the printed speed (flow variant / filament override).
+				ironing_params.speed 		= ironing_filament_override(config.filament_ironing_speed, iron_filament, config.ironing_speed.values.front());
                 double ironing_angle = (config.ironing_angle >= 0 ? config.ironing_angle : config.infill_direction) * M_PI / 180.;
                 // ORCA: Align ironing angle with model
                 if (config.align_infill_direction_to_model) {
