@@ -1,10 +1,12 @@
 {
     "type": "filament",
-    "name": "Elegoo PLA Translucent2 @ECC2",
+    "name": "Elegoo PLA Translucent @ECC2",
+    "renamed_from": "Elegoo PLA Translucent2 @ECC2",
     "inherits": "Elegoo PLA Translucent2 @base",
     "from": "system",
     "setting_id": "K1pIYbrCCJUBwAOt",
     "instantiation": "true",
+    "filament_id": "EPLAB00",
     "pressure_advance": [
         "0.04"
     ],

@@ -5,6 +5,7 @@
     "from": "system",
     "setting_id": "GCMagCIZUPjPBpuH",
     "instantiation": "true",
+    "filament_id": "EPLAB00",
     "filament_max_volumetric_speed": [
         "20"
     ],

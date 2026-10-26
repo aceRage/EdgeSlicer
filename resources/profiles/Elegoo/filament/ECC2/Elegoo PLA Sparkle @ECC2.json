@@ -5,6 +5,7 @@
     "from": "system",
     "setting_id": "RoM3TYRuszinvW6b",
     "instantiation": "true",
+    "filament_id": "EPLAB00",
     "fan_min_speed": [
         "80"
     ],
