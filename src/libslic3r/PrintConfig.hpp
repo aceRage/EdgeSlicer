@@ -187,7 +187,7 @@ enum class WallDirection
 };
 
 // Orca: print order of surface fill loops/fragments for center-based fill patterns
-// (Concentric, Archimedean Chords, Octagram Spiral).
+// (Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).
 enum class SurfaceFillOrder {
     Default,
     Outward,

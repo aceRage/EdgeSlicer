@@ -2391,7 +2391,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Top surface fill order");
     def->category = L("Strength");
     def->tooltip = L("Direction in which top surfaces are filled when using a center-based pattern "
-                     "(Concentric, Archimedean Chords, Octagram Spiral).\n"
+                     "(Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).\n"
                      "Outward starts at the center of the surface, so any excess material is pushed "
                      "towards the edge where it is least visible. Inward starts at the edge and ends "
                      "with the tight curves at the center.\n"
@@ -2410,7 +2410,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Bottom surface fill order");
     def->category = L("Strength");
     def->tooltip = L("Direction in which bottom surfaces are filled when using a center-based pattern "
-                     "(Concentric, Archimedean Chords, Octagram Spiral).\n"
+                     "(Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).\n"
                      "Inward starts each surface with the wider outer curves, which improves first layer "
                      "adhesion on build plates where the tight curves at the center may not stick. "
                      "Outward starts at the center, pushing any excess material towards the edge.\n"

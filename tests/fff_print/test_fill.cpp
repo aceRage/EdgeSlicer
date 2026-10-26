@@ -1216,7 +1216,8 @@ TEST_CASE("Elephant foot layers density thins the solid layers above the first o
 // loops that only look adjacent. (Ported from OrcaSlicer #15085.)
 namespace {
 
-Slic3r::Polylines spiral_inset_fill(const Slic3r::ExPolygon &surface_shape, double spacing, float density = 1.f)
+Slic3r::Polylines spiral_inset_fill(const Slic3r::ExPolygon &surface_shape, double spacing, float density = 1.f,
+                                    Slic3r::SurfaceFillOrder fill_order = Slic3r::SurfaceFillOrder::Default)
 {
     std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("spiralinset"));
     filler->spacing = spacing;
@@ -1226,6 +1227,7 @@ Slic3r::Polylines spiral_inset_fill(const Slic3r::ExPolygon &surface_shape, doub
     Slic3r::FillParams fill_params;
     fill_params.density     = density;
     fill_params.dont_adjust = true;
+    fill_params.fill_order  = fill_order;
 
     Slic3r::Surface surface(Slic3r::stBottom, surface_shape);
     return filler->fill_surface(&surface, fill_params);
@@ -1416,13 +1418,15 @@ TEST_CASE("Spiral inset fill closes the gaps with variable width walls", "[Fill]
     CHECK(2 * spirals < walls_across);
 }
 
-// EdgeSlicer: the top/bottom surface fill order options (OrcaSlicer #14179) are not ported, so the
-// spiral always runs the way upstream's "Default" order does: outward, from the centre to the edge.
+// The top/bottom surface fill order (OrcaSlicer #14179, OD2): Default and Outward run the spiral from the
+// centre to the edge, Inward from the edge to the centre.
 TEST_CASE("Spiral inset fill runs outward from the centre", "[Fill][SpiralInset]")
 {
+    const Slic3r::SurfaceFillOrder order = GENERATE(Slic3r::SurfaceFillOrder::Default, Slic3r::SurfaceFillOrder::Outward);
+    CAPTURE(int(order));
     const double            spacing = 0.45;
     const Slic3r::ExPolygon square  = spiral_rectangle(0, 0, 10, 10);
-    const Slic3r::Polylines paths   = spiral_inset_fill(square, spacing);
+    const Slic3r::Polylines paths   = spiral_inset_fill(square, spacing, 1.f, order);
     REQUIRE(paths.size() == 1);
 
     const Slic3r::Point centre = Slic3r::Point::new_scale(5, 5);
@@ -1431,6 +1435,26 @@ TEST_CASE("Spiral inset fill runs outward from the centre", "[Fill][SpiralInset]
     // It starts near the middle and ends on the outermost ring, within a spacing of the outline.
     CHECK(spiral.first_point().distance_to(centre) < scale_(2.0 * spacing));
     CHECK(spiral.last_point().distance_to(centre) > scale_(5.0 - 1.5 * spacing));
+}
+
+TEST_CASE("Spiral inset fill runs inward with the Inward fill order", "[Fill][SpiralInset]")
+{
+    const double            spacing = 0.45;
+    const Slic3r::ExPolygon square  = spiral_rectangle(0, 0, 10, 10);
+    const Slic3r::Polylines outward = spiral_inset_fill(square, spacing, 1.f, Slic3r::SurfaceFillOrder::Default);
+    const Slic3r::Polylines inward  = spiral_inset_fill(square, spacing, 1.f, Slic3r::SurfaceFillOrder::Inward);
+    REQUIRE(inward.size() == 1);
+    REQUIRE(outward.size() == 1);
+
+    const Slic3r::Point centre = Slic3r::Point::new_scale(5, 5);
+    const Slic3r::Polyline &spiral = inward.front();
+    CAPTURE(unscale<double>(spiral.first_point().distance_to(centre)), unscale<double>(spiral.last_point().distance_to(centre)));
+    CHECK(spiral.first_point().distance_to(centre) > scale_(5.0 - 1.5 * spacing));
+    CHECK(spiral.last_point().distance_to(centre) < scale_(2.0 * spacing));
+    // The same path, only the other way round.
+    Slic3r::Polyline reversed = outward.front();
+    reversed.reverse();
+    CHECK(reversed.points == spiral.points);
 }
 
 TEST_CASE("Spiral inset fill is deterministic and covers a solid square", "[Fill][SpiralInset]")

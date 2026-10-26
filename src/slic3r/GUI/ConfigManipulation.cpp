@@ -890,7 +890,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("separated_infills", is_internal_infill_separable);
 
     // Fill order is only meaningful for the center-based surface fill patterns; hide it otherwise.
-    auto is_centered_fill = [](InfillPattern p) { return p == ipConcentric || p == ipArchimedeanChords || p == ipOctagramSpiral; };
+    auto is_centered_fill = [](InfillPattern p) { return p == ipConcentric || p == ipSpiralInset || p == ipArchimedeanChords || p == ipOctagramSpiral; };
     toggle_line("top_surface_fill_order", has_top_shell && is_centered_fill(config->opt_enum<InfillPattern>("top_surface_pattern")));
     toggle_line("bottom_surface_fill_order", has_bottom_shell && is_centered_fill(config->opt_enum<InfillPattern>("bottom_surface_pattern")));
 
