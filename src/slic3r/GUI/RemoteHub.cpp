@@ -2565,6 +2565,12 @@ Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_r
             out.keep_cached = true;
             return out;
         }
+        // The same for a Centauri Carbon 2's MQTT connection (ElegooCc2Monitor's lock).
+        if (incoming.contains("cc2_connected") && cached_fresh && cached_instance != incoming_instance &&
+            cached.value("cc2_connected", false) && !incoming.value("cc2_connected", false)) {
+            out.keep_cached = true;
+            return out;
+        }
         if (!row_has_filament(incoming) && row_has_filament(cached)) {
             for (const char* k : { "ams", "ext_spools" }) {
                 if (!cached.contains(k)) continue;
@@ -4723,7 +4729,7 @@ json HubServer::summary_json()
             if (row.contains(k)) p[k] = row[k];
         // An Elegoo SDCP printer's chamber reading, where its camera is found, and what the printer
         // itself says it is doing (ElegooSdcp::fill_row).
-        for (const char* k : { "chamber_temp", "chamber_target", "camera_hint", "sdcp" })
+        for (const char* k : { "chamber_temp", "chamber_target", "camera_hint", "sdcp", "cc2" })
             if (row.contains(k)) p[k] = row[k];
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);

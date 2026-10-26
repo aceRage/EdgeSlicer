@@ -3,6 +3,7 @@
 // limits its clients ("too many clients"), and the CC1 path behaves the same way.
 
 #include "ElegooCc2.hpp"
+#include "ElegooCc2Monitor.hpp"
 #include "Http.hpp"
 
 #include <algorithm>
@@ -113,6 +114,15 @@ public:
         return true;
     }
 
+    bool alive() const override
+    {
+        try {
+            return m_client && m_client->is_connected();
+        } catch (...) {
+            return false;
+        }
+    }
+
     void close() override
     {
         if (!m_client)
@@ -188,6 +198,24 @@ CanvasQueryResult canvas_query(const std::string& address, const std::string& to
                             << (out.print_state.empty() ? std::string() : ", printer " + out.print_state);
     return out;
 }
+
+} // namespace ElegooCc2
+
+namespace ElegooCc2Monitor {
+
+bool net_connector(const std::string& host, const std::string& token, std::string& sn,
+                   std::unique_ptr<ElegooCc2::MqttTransport>& transport, std::string& error)
+{
+    const std::string code = ElegooCc2::token_or_default(token);
+    if (!ElegooCc2::fetch_serial(host, code, sn, error, 4))
+        return false;
+    transport = std::make_unique<ElegooCc2::PahoTransport>(ElegooCc2::host_of(host), code, 4);
+    return true;
+}
+
+} // namespace ElegooCc2Monitor
+
+namespace ElegooCc2 {
 
 StartResult start_print(const std::string&                        address,
                         const std::string&                        token_in,

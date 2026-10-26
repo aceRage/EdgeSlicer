@@ -81,6 +81,11 @@ a clock).
 **Elegoo Centauri Carbon 2 0.4 nozzle**, host type **Elegoo Link**, hostname the address, API key empty (the
 default access code 123456). It answers `/system/info`, the chunked `PUT /upload` and MQTT on port 1883
 (registration, 1002 status, 2005 CANVAS, 1020 start with its `slot_map`). No camera and no SDCP.
+It also does what the hub's CC2 monitor uses: the whole status in 1002 (temperatures, fans, light,
+progress, layers), method 6000 status pushes on `elegoo/<sn>/api_status` (once a second while
+printing), `{"type":"PING"}` -> `{"type":"PONG"}`, pause / stop / resume (1021 / 1022 / 1023) and the
+CANVAS auto-refill (2004). Faults for the monitor: push ids that skip, no pushes, no PONG, a refused
+2004.
 
 **Snapmaker U1:** add it by IP from the phone app or the Printers tab (**Add printer**, IP
 **127.0.0.31**; the hub's `POST /api/snapmaker/add?ip=127.0.0.31`). A send from the phone (or

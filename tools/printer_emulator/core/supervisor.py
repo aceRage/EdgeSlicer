@@ -116,6 +116,12 @@ class Supervisor:
         p.reconcile()
         return p
 
+    def printer_list(self):
+        """A snapshot of the printers, taken under the lock: the control page polls while printers are
+        added or removed on other threads, and iterating the live dict then raises."""
+        with self.lock:
+            return list(self.printers.values())
+
     def get(self, pid):
         p = self.printers.get(pid)
         if p is None:
@@ -146,7 +152,7 @@ class Supervisor:
     def _free_alias(self, start, port):
         """A 127.0.0.x no other emulated printer uses with this port (fixed-port protocols need one
         address each; design 3.2)."""
-        used = {(q.cfg.get("bind"), int(q.cfg.get("port", 0))) for q in self.printers.values()}
+        used = {(q.cfg.get("bind"), int(q.cfg.get("port", 0))) for q in self.printer_list()}
         if (start, port) not in used:
             return start
         if not safety.is_loopback(start):
@@ -229,6 +235,6 @@ class Supervisor:
             return p
 
     def stop_all(self):
-        for p in list(self.printers.values()):
+        for p in self.printer_list():
             p.stop()
         self.log.close()

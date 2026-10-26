@@ -102,6 +102,8 @@ struct Status
     bool              qidi_polar_cooler { false };
     // The slots are CANVAS trays read over SDCP (Cmd 324), so the start command can carry a slot_map.
     bool              canvas { false };
+    // A CANVAS: the printer's own auto-refill setting (2005 auto_refill: 1 on, 0 off), -1 unknown.
+    int               canvas_auto_refill { -1 };
     // A CANVAS: the position in `slots` of the tray in the extruder now (active_canvas_id /
     // active_tray_id), -1 when there is none or the printer did not say.
     int               active_slot { -1 };

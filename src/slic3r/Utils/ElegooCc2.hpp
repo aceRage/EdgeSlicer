@@ -45,7 +45,15 @@ constexpr const char* DEFAULT_TOKEN = "123456";
 constexpr int METHOD_GET_ATTRIBUTES = 1001;
 constexpr int METHOD_GET_STATUS     = 1002;
 constexpr int METHOD_START_PRINT    = 1020;
+constexpr int METHOD_PAUSE_PRINT    = 1021;
+constexpr int METHOD_STOP_PRINT     = 1022;
+// elegoo-link's LAN table lists 1023 "Resume print" but leaves it commented out; its CC2 status table
+// has the pause / resume sub-states. Unverified on a real CC2 (the owner has none).
+constexpr int METHOD_RESUME_PRINT   = 1023;
+constexpr int METHOD_SET_AUTO_REFILL = 2004;
 constexpr int METHOD_GET_CANVAS     = 2005;
+// The printer's own status push on elegoo/<sn>/api_status: {"id":n,"method":6000,"result":{delta}}.
+constexpr int METHOD_STATUS_PUSH    = 6000;
 
 // Error codes the printer answers in result.error_code (elegoo-link's table).
 constexpr int ERR_FILAMENT_RUNOUT       = 109;
@@ -84,6 +92,11 @@ std::string register_topic(const std::string& sn);
 std::string register_response_topic(const std::string& sn, const std::string& request_id);
 std::string request_topic(const std::string& sn, const std::string& client_id);
 std::string response_topic(const std::string& sn, const std::string& client_id);
+// Where the printer pushes method 6000 (every client subscribes it; elegoo-link does).
+std::string status_topic(const std::string& sn);
+// elegoo-link's heartbeat on the request topic, every 10 s; the printer answers {"type":"PONG"}.
+std::string ping_payload();
+bool        is_pong(const std::string& payload);
 
 std::string register_payload(const std::string& client_id, const std::string& request_id);
 
@@ -102,6 +115,20 @@ std::string start_print_params(const std::map<std::string, std::string>& extende
                                int                                       pc_bed_type,
                                const std::string&                        filename,
                                bool                                      bedlevel_force);
+
+// 2004's params: {"auto_refill":true|false}.
+std::string auto_refill_params(bool enable);
+
+// What the send dialog chose for the CANVAS auto-refill (extended_info "canvasAutoRefill": "1" / "0").
+// -1 when the dialog offered no choice (no CANVAS, or a send that did not ask): nothing is set then.
+int auto_refill_choice(const std::map<std::string, std::string>& extended_info);
+
+// The send dialog remembers the auto-refill choice per printer (owner D7, 2026-10-26): under the
+// device id when the printer is a saved device, else under its bare address. "" when neither.
+std::string auto_refill_memory_key(const std::string& device_id, const std::string& address);
+// What the checkbox starts as: the remembered choice ("1" / "0") when there is one, else what the
+// printer itself reports (2005's auto_refill: 1 on, 0 off, -1 unknown), else off.
+bool auto_refill_initial(const std::string& remembered, int printer_auto_refill);
 
 struct Reply
 {
@@ -139,6 +166,8 @@ public:
     // One message, waiting at most timeout_ms. False on timeout or a dropped connection.
     virtual bool receive(std::string& topic, std::string& payload, int timeout_ms)                   = 0;
     virtual void close()                                                                             = 0;
+    // False once the connection is known to be gone (the broker closed it, the network dropped).
+    virtual bool alive() const { return true; }
 };
 
 struct SessionOptions
@@ -159,8 +188,13 @@ public:
     bool open(std::string& error);
     // Publish one request and wait for its answer (same id); other messages are skipped.
     bool call(int method, const std::string& params_json, Reply& reply, std::string& error);
+    // Publish one request without waiting; `id` is what its answer will carry. For a caller that
+    // reads the transport itself (ElegooCc2Monitor, which must not lose the status pushes).
+    bool send(int method, const std::string& params_json, int& id, std::string& error);
     void close();
+    bool is_open() const { return m_open; }
     const std::string& client_id() const { return m_client_id; }
+    const std::string& sn() const { return m_sn; }
 
 private:
     MqttTransport& m_transport;
@@ -183,9 +217,11 @@ struct StartResult
     int         error_code = -1;
     std::string error;              // English, for the log and the dialog
     std::string payload;            // the last start command sent, for the log and the tests
+    int         auto_refill_set = -1; // what 2004 set before the start (1 on, 0 off), -1 when not sent
 };
 // Status check (up to busy_checks answers, busy_interval_ms apart, while the printer is busy), then
-// 1020; one retry with bedlevel_force when the printer asks for leveling data and the person asked
+// - with a CANVAS and an auto-refill choice from the dialog - 2004, as ElegooSlicer sets it before every
+// start (a refusal stops the start, as there), then 1020; one retry with bedlevel_force when the printer asks for leveling data and the person asked
 // for leveling (ElegooSlicer does the same).
 StartResult start_print_over(Session&                                  session,
                              const std::map<std::string, std::string>& extended_info,

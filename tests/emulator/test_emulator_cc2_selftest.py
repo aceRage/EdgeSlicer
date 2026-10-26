@@ -1,17 +1,19 @@
 """Self-test of the Elegoo Centauri Carbon 2 personality alone (no EdgeSlicer): a private emulator with
 a CC2 Combo (CANVAS) and a plain CC2 on free loopback addresses, driven the way EdgeSlicer drives
 them (src/slic3r/Utils/ElegooCc2.hpp: /system/info, the chunked PUT /upload, MQTT registration,
-1002 / 2005 / 1020), checked through emu_assert.
+1002 / 2005 / 1020; ElegooCc2Monitor.hpp: the 6000 status pushes, the PING heartbeat, 1021 / 1022 /
+1023 pause, stop, resume and 2004 auto-refill), checked through emu_assert.
 
     python tests/emulator/test_emulator_cc2_selftest.py [--work=<scratch dir>]
 
-Exit 0 when every check passes. About 10 s.
+Exit 0 when every check passes. About 20 s.
 """
 import hashlib
 import json
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from emu_proc import EmulatorProcess, assert_loopback, free_port  # noqa: E402
@@ -111,8 +113,36 @@ class Cc2Mqtt:
         while True:
             topic, payload = self.c.next_message()
             j = json.loads(payload)
+            if topic.endswith("/api_status"):
+                self.pushes.append(j)
+                continue
             if topic.endswith("/api_response") and j.get("id") == self.next_id:
                 return j
+
+    pushes = []
+
+    def watch_status(self):
+        self.pushes = []
+        self.c.subscribe("elegoo/%s/api_status" % self.sn)
+
+    def next_push(self, timeout=5):
+        while True:
+            topic, payload = self.c.next_message(timeout)
+            if topic.endswith("/api_status"):
+                return json.loads(payload)
+
+    def ping(self, wait_s=3):
+        """The answer to a PING, or None when nothing came within wait_s (pushes are skipped)."""
+        self.c.publish("elegoo/%s/%s/api_request" % (self.sn, self.cid), json.dumps({"type": "PING"}))
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            try:
+                topic, payload = self.c.next_message(max(0.2, deadline - time.time()))
+            except Exception:  # noqa: BLE001 - a read timeout is the answer here
+                return None
+            if topic.endswith("/api_response"):
+                return json.loads(payload)
+        return None
 
     def close(self):
         self.c.close()
@@ -211,6 +241,130 @@ def plain_tests(emu):
     m.close()
 
 
+def merged(base, delta):
+    out = dict(base)
+    for k, v in delta.items():
+        out[k] = merged(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def monitor_tests(emu):
+    """What the hub's monitor (ElegooCc2Monitor) relies on: the whole status, the pushes, the heartbeat,
+    the print controls and the CANVAS auto-refill."""
+    print("-- CC2 Combo: status, pushes, controls, auto-refill --")
+    mark = emu.reset(COMBO)
+    st, j = info(COMBO_HOST, COMBO_HTTP, "123456")
+    sn = (j.get("system_info") or {}).get("sn", "")
+    m = Cc2Mqtt(COMBO_HOST, sn, "123456", cid="1_PC_7100")
+    m.register()
+    m.watch_status()
+    full = m.call(1002)["result"]
+    for key in ("machine_status", "print_status", "extruder", "heater_bed", "ztemperature_sensor", "fans", "led"):
+        check(key in full, "1002 carries %s" % key)
+    check(isinstance(full["extruder"].get("temperature"), float) and "target" in full["heater_bed"], "temperatures with targets")
+    check(all(k in full["fans"] for k in ("fan", "aux_fan", "box_fan")) and "speed" in full["fans"]["fan"], "fans with speed")
+    check(m.ping() == {"type": "PONG"}, "PING -> PONG on the response topic")
+    r = m.call(1021)["result"]
+    check(r["error_code"] == 1010, "pause while idle: 1010 not printing")
+    r = m.call(2004, {"auto_refill": True})["result"]
+    check(r["error_code"] == 0, "2004 auto_refill true accepted with a CANVAS")
+    expect(emu, COMBO, "2004 is logged", "auto_refill", mark, auto_refill=True, error_code=0)
+    c = m.call(2005)["result"]
+    check(c["canvas_info"]["auto_refill"] is True, "2005 reports auto_refill on afterwards")
+    r = m.call(2004, {"auto_refill": "yes"})["result"]
+    check(r["error_code"] == 1003, "2004 with a non-boolean: 1003")
+    put_upload(COMBO_HOST, COMBO_HTTP, "mon.gcode", GCODE, "123456", chunk=8000)
+    base = m.call(1002)["result"]
+    m.pushes = []
+    r = m.call(1020, {"storage_media": "local", "filename": "mon.gcode",
+                      "config": {"delay_video": False, "printer_check": False, "print_layout": "A", "bedlevel_force": False,
+                                 "slot_map": []}})["result"]
+    check(r["error_code"] == 0, "start for the monitor checks")
+    p1 = m.pushes[0] if m.pushes else m.next_push()
+    check(p1.get("method") == 6000 and isinstance(p1.get("id"), int), "a push on api_status: method 6000 with an id")
+    state = merged(base, p1["result"])
+    check(state["machine_status"]["status"] == 2 and state["machine_status"]["sub_status"] == 2075, "the push says printing (2 / 2075)")
+    check("extruder" in p1["result"] and "led" not in p1["result"], "a push carries only what changed")
+    p2 = m.next_push()
+    check(p2["id"] == p1["id"] + 1, "push ids count up by one (%s -> %s)" % (p1["id"], p2["id"]))
+    p3 = m.next_push()
+    state = merged(merged(state, p2["result"]), p3["result"])
+    check(state["print_status"]["print_duration"] >= 2, "while printing, pushes move the print on")
+    r = m.call(1021)["result"]
+    check(r["error_code"] == 0, "1021 pause while printing")
+    pp = m.pushes[-1] if m.pushes else m.next_push()
+    state = merged(state, pp["result"])
+    check(state["machine_status"]["sub_status"] == 2502, "the push after the pause says paused (2502)")
+    check(m.call(1021)["result"]["error_code"] == 1010, "a second pause while paused: 1010")
+    check(m.call(1023)["result"]["error_code"] == 0, "1023 resume while paused")
+    check(m.call(1022)["result"]["error_code"] == 0, "1022 stop while printing")
+    s2 = m.call(1002)["result"]
+    check(s2["machine_status"]["sub_status"] == 2504, "1002 after the stop: stopped (2504)")
+    expect(emu, COMBO, "the pause is logged", "control", mark, action="pause", error_code=0)
+    expect(emu, COMBO, "the stop is logged", "control", mark, action="stop", error_code=0)
+    print("-- CC2 faults: push gaps, no PONG, refused auto-refill --")
+    emu.set(COMBO, {"faults": {"push_gaps": True, "no_pong": True, "refuse_auto_refill": True}})
+    check(m.call(2004, {"auto_refill": False})["result"]["error_code"] == 1003, "fault refuse_auto_refill: 1003")
+    m.pushes = []
+    m.call(1021)  # stopped already: refused, no push
+    emu.set(COMBO, {"state": "printing"})
+    a = m.next_push()
+    b = m.next_push()
+    check(b["id"] == a["id"] + 2, "fault push_gaps: ids jump by two")
+    check(m.ping() is None, "fault no_pong: no answer")
+    emu.set(COMBO, {"faults": {"push_gaps": False, "no_pong": False, "refuse_auto_refill": False}, "state": "standby"})
+    m.close()
+
+
+def plain_monitor_tests(emu):
+    print("-- plain CC2: auto-refill refused, controls --")
+    emu.reset(PLAIN)
+    st, j = info(PLAIN_HOST, PLAIN_HTTP, "4321")
+    sn = (j.get("system_info") or {}).get("sn", "")
+    m = Cc2Mqtt(PLAIN_HOST, sn, "4321", cid="1_PC_7101")
+    m.register()
+    check(m.call(2004, {"auto_refill": True})["result"]["error_code"] == 1003, "2004 without a CANVAS: refused (1003, unverified)")
+    full = m.call(1002)["result"]
+    check("canvas_info" not in full, "a plain CC2's status has no canvas_info")
+    m.close()
+
+
+def control_page_while_adding(emu):
+    """The control page polls GET /emu/printers while printers are added (the owner's hand test,
+    2026-10-26: "dictionary changed size during iteration" in core/control.py)."""
+    print("-- control page: polling while printers are added --")
+    import threading
+    stop, errors, reads = threading.Event(), [], [0]
+
+    def poll():
+        while not stop.is_set():
+            try:
+                emu.printers()
+                reads[0] += 1
+            except Exception as e:  # noqa: BLE001 - any failed read is the bug
+                errors.append(str(e)[:200])
+
+    t = threading.Thread(target=poll, daemon=True)
+    t.start()
+    added = []
+    try:
+        for i in range(8):
+            host = free_host(200 + i * 3)
+            r = emu._call("/emu/printers/add", {"preset": "moonraker_generic",
+                                                "overrides": {"id": "poll-%d" % i, "bind": host, "port": free_port(host)}})
+            added.append(r.get("id") or "poll-%d" % i)
+    finally:
+        stop.set()
+        t.join(5)
+    check(not errors and reads[0] > 0, "%d control-page reads while adding %d printers, none failed%s" %
+          (reads[0], len(added), (": " + errors[0]) if errors else ""))
+    for pid in added:
+        try:
+            emu._call("/emu/printers/%s/remove" % pid, {})
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main():
     emu_p = EmulatorProcess(os.path.join(WORK, "emuhome"), [combo, plain])
     emu_p.start()
@@ -218,6 +372,9 @@ def main():
     try:
         combo_tests(emu)
         plain_tests(emu)
+        monitor_tests(emu)
+        plain_monitor_tests(emu)
+        control_page_while_adding(emu)
     finally:
         emu_p.stop()
     print("\n== CC2 emulator self-test: %d checks, %d failed ==" % (checks, len(fails)))

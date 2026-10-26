@@ -115,7 +115,7 @@ def live_keys(printers):
     keys_of(w.recv_json(want=is_response(128)), out["elegoo_cc1"])
     w.close()
 
-    # CC2: /system/info, a PUT upload, MQTT registration, 1002, 2005 and 1020.
+    # CC2: /system/info, a PUT upload, MQTT registration, 1001, 1002, 2005, 2004, 1020, a PING and a push.
     c2 = printers["elegoo_cc2"]
     keys_of(get_json(c2["bind"], c2["port"], "/system/info?X-Token=123456"), out["elegoo_cc2"])
     md5 = hashlib.md5(GCODE).hexdigest()
@@ -129,10 +129,20 @@ def live_keys(printers):
     m.subscribe("elegoo/%s/1_PC_5150_req/register_response" % sn)
     m.publish("elegoo/%s/api_register" % sn, json.dumps({"client_id": "1_PC_5150", "request_id": "1_PC_5150_req"}))
     keys_of(json.loads(m.next_message()[1]), out["elegoo_cc2"])
-    for i, (method, params) in enumerate(((1002, {}), (2005, {}), (1020, {"storage_media": "local", "filename": "c.gcode",
-                                                                          "config": {"slot_map": []}}))):
+    for i, (method, params) in enumerate(((1001, {}), (1002, {}), (2005, {}), (2004, {"auto_refill": True}),
+                                          (1020, {"storage_media": "local", "filename": "c.gcode", "config": {"slot_map": []}}))):
         m.publish("elegoo/%s/1_PC_5150/api_request" % sn, json.dumps({"id": 10 + i, "method": method, "params": params}))
         keys_of(json.loads(m.next_message()[1]), out["elegoo_cc2"])
+    # The heartbeat's PONG and a status push (method 6000): pause the print the 1020 above started.
+    m.publish("elegoo/%s/1_PC_5150/api_request" % sn, json.dumps({"type": "PING"}))
+    keys_of(json.loads(m.next_message()[1]), out["elegoo_cc2"])
+    m.subscribe("elegoo/%s/api_status" % sn)
+    m.publish("elegoo/%s/1_PC_5150/api_request" % sn, json.dumps({"id": 30, "method": 1021, "params": {}}))
+    for _ in range(4):
+        topic, payload = m.next_message()
+        keys_of(json.loads(payload), out["elegoo_cc2"])
+        if topic.endswith("/api_status"):
+            break
     m.close()
     return out
 

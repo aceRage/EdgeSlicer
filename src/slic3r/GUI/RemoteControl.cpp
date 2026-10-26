@@ -13,6 +13,9 @@
 #include "slic3r/Utils/ElegooCanvas.hpp"
 #include "slic3r/Utils/ElegooSdcp.hpp"
 #include "slic3r/Utils/ElegooSdcpMonitor.hpp"
+#include "slic3r/Utils/ElegooCc2.hpp"
+#include "slic3r/Utils/ElegooCc2Monitor.hpp"
+#include "slic3r/Utils/ElegooCc2Status.hpp"
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
@@ -403,12 +406,19 @@ bool speaks_sdcp(const std::string& host_type_key, const std::string& printer_mo
     return m.find("carbon 2") == std::string::npos && m.find("centauri 2") == std::string::npos;
 }
 
+bool speaks_cc2(const std::string& host_type_key, const std::string& printer_model)
+{
+    return host_type_key == "elegoolink" && !speaks_sdcp(host_type_key, printer_model);
+}
+
 // An Elegoo SDCP printer one of the control routes names: "host" (the printer preset's own print
 // host) or "ph:<device id>" (from any printer model's device list). GUI thread: the preset lives there.
 struct ElegooTarget
 {
     std::string host; // bare
     std::string name;
+    bool        cc2 { false }; // a Centauri Carbon 2: MQTT, not SDCP
+    std::string token;         // its access code (the device's API key)
 };
 
 static bool elegoo_target(const std::string& printer, ElegooTarget& out)
@@ -419,9 +429,11 @@ static bool elegoo_target(const std::string& printer, ElegooTarget& out)
         if (bundle->use_bbl_network()) return false;
         const DynamicPrintConfig&      cfg = bundle->printers.get_edited_preset().config;
         const PrintHostDevices::Device d   = PrintHostDevices::from_config(cfg);
-        if (!speaks_sdcp(d.host_type, cfg.opt_string("printer_model"))) return false;
-        out.host = sdcp_host_of(d.address);
-        out.name = "Elegoo " + d.address;
+        if (d.host_type != "elegoolink") return false;
+        out.cc2   = speaks_cc2(d.host_type, cfg.opt_string("printer_model"));
+        out.token = d.apikey;
+        out.host  = sdcp_host_of(d.address);
+        out.name  = "Elegoo " + d.address;
         return !out.host.empty();
     }
     if (printer.compare(0, 3, "ph:") != 0) return false;
@@ -430,8 +442,10 @@ static bool elegoo_target(const std::string& printer, ElegooTarget& out)
         for (const auto& kv : PrintHostDevices::all_devices())
             for (const PrintHostDevices::Device& d : kv.second) {
                 if (d.id != id) continue;
-                if (!speaks_sdcp(d.host_type, d.printer_model.empty() ? kv.first : d.printer_model)) return false;
-                out.host = sdcp_host_of(d.address);
+                if (d.host_type != "elegoolink") return false;
+                out.cc2   = speaks_cc2(d.host_type, d.printer_model.empty() ? kv.first : d.printer_model);
+                out.token = d.apikey;
+                out.host  = sdcp_host_of(d.address);
                 out.name = d.display_name();
                 return !out.host.empty();
             }
@@ -448,9 +462,51 @@ static std::string sdcp_state_words(const Sdcp::Snapshot& s)
 
 // Pause, resume or stop: SDCP Cmd 129 / 131 / 130 (specification; elegoo-link's command table),
 // sent over the hub's own connection. Gated by the printer's own state, as the desktop's buttons are.
+static std::string cc2_state_words(const ElegooCc2::Snapshot& s)
+{
+    const std::string st = ElegooCc2::hub_state(s.status);
+    const std::string ph = ElegooCc2::phase_text(s.status);
+    return ph.empty() ? (st.empty() ? std::string("no print state") : st) : st + ", " + ph;
+}
+
+// A Centauri Carbon 2: pause 1021, resume 1023, stop 1022 (elegoo-link's CC2 method table), over the
+// hub's MQTT connection, gated by the printer's own state as the CC1's are. Every setting verb is
+// refused with the reason: elegoo-link has no CC2 light, fan, temperature or speed method enabled.
+static std::pair<int, std::string> prepare_cc2(const Request& req, const ElegooTarget& t, std::shared_ptr<Prepared> p,
+                                               std::shared_ptr<Prepared>& out)
+{
+    if (is_setting_verb(req.action)) {
+        if (req.action == "set_temp") return { 409, "temperatures can only be read on " + t.name + " from here" };
+        if (req.action == "set_speed") return { 409, "the print speed can only be read on " + t.name + " from here" };
+        return { 409, "the light and fans can only be read on " + t.name + " from here" };
+    }
+    const ElegooCc2::Snapshot s = ElegooCc2Monitor::demand(t.host, t.token);
+    p->kind         = "elegoo";
+    p->cc2          = true;
+    p->cc2_token    = t.token;
+    p->printer_name = t.name;
+    p->sdcp_host    = t.host;
+    if (s.other_window) return { 409, "another EdgeSlicer window is connected to " + t.name };
+    if (!s.connected && s.failures > 0)
+        return { 409, t.name + " is not answering" + (s.error.empty() ? std::string() : " (" + s.error + ")") };
+    if (!s.status.valid) return { 409, "connecting to " + t.name + "; try again in a moment" };
+    const bool allowed = req.action == "pause" ? ElegooCc2::can_pause(s.status) :
+                         req.action == "resume" ? ElegooCc2::can_resume(s.status) : ElegooCc2::can_stop(s.status);
+    if (!allowed) {
+        const std::string what = req.action == "pause" ? "paused" : req.action == "resume" ? "resumed" : "stopped";
+        return { 409, t.name + " cannot be " + what + " right now (it reports " + cc2_state_words(s) + ")" };
+    }
+    p->cc2_method    = req.action == "pause" ? ElegooCc2::METHOD_PAUSE_PRINT :
+                       req.action == "resume" ? ElegooCc2::METHOD_RESUME_PRINT : ElegooCc2::METHOD_STOP_PRINT;
+    p->status_before = ElegooCc2::hub_state(s.status);
+    out              = p;
+    return { 200, "" };
+}
+
 static std::pair<int, std::string> prepare_elegoo(const Request& req, const ElegooTarget& t, std::shared_ptr<Prepared> p,
                                                   std::shared_ptr<Prepared>& out)
 {
+    if (t.cc2) return prepare_cc2(req, t, p, out);
     const Sdcp::Snapshot s = SdcpMonitor::demand(t.host);
     p->kind         = "elegoo";
     p->printer_name = t.name;
@@ -760,6 +816,7 @@ static std::string moonraker_setting_script(const Prepared& p)
 static std::pair<int, std::string> prepare_setting_elegoo(const Request& req, const ElegooTarget& t, std::shared_ptr<Prepared> p,
                                                           std::shared_ptr<Prepared>& out)
 {
+    if (t.cc2) return prepare_cc2(req, t, p, out); // refuses every setting with the reason
     const Sdcp::Snapshot s = SdcpMonitor::demand(t.host);
     p->kind         = "elegoo";
     p->printer_name = t.name;
@@ -1341,10 +1398,55 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
     sink.done(true, "", result);
 }
 
+// A Centauri Carbon 2: one method over the hub's MQTT connection, then a few seconds watching its
+// pushed status for the change.
+static void run_cc2(std::shared_ptr<Prepared> p, Sink& sink)
+{
+    json result;
+    result["kind"]      = p->kind;
+    result["action"]    = p->action;
+    result["printer"]   = { { "id", p->printer_id }, { "name", p->printer_name } };
+    result["transport"] = "mqtt";
+    result["method"]    = p->cc2_method;
+    if (p->dry_run) {
+        result["dry_run"] = true;
+        sink.progress(99, "dry run: nothing was sent");
+        sink.done(true, "", result);
+        return;
+    }
+    sink.progress(40, "sending " + p->action + " to the printer");
+    const ElegooCc2Monitor::CallResult r = ElegooCc2Monitor::call(p->sdcp_host, p->cc2_token, p->cc2_method, "{}", 12000);
+    result["error_code"] = r.error_code;
+    if (!r.answered) {
+        sink.done(false, p->printer_name + (r.sent ? " did not answer: " : " could not be reached: ") + r.error, result);
+        return;
+    }
+    if (r.error_code > 0) {
+        sink.done(false, p->printer_name + ": " + ElegooCc2::error_text(r.error_code), result);
+        return;
+    }
+    sink.progress(70, error_wait_text(p));
+    std::string state = "unknown";
+    for (int i = 0; i < 10 && state == "unknown"; ++i) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const ElegooCc2::Snapshot s  = ElegooCc2Monitor::demand(p->sdcp_host, p->cc2_token);
+        const std::string         st = ElegooCc2::hub_state(s.status);
+        if (p->action == "pause" && st == "paused") state = "paused";
+        else if (p->action == "resume" && st == "printing" && ElegooCc2::can_pause(s.status)) state = "printing";
+        else if (p->action == "stop" && !ElegooCc2::is_printing(s.status)) state = "stopped";
+    }
+    result["state"] = state;
+    sink.done(true, "", result);
+}
+
 // An Elegoo SDCP printer: one command over the hub's connection, then - for pause / resume / stop -
 // a few seconds watching its pushed status for the change, as watch_bambu does.
 static void run_elegoo(std::shared_ptr<Prepared> p, Sink& sink)
 {
+    if (p->cc2) {
+        run_cc2(p, sink);
+        return;
+    }
     json result;
     result["kind"]      = p->kind;
     result["action"]    = p->action;
@@ -1485,6 +1587,8 @@ void list_host_targets(std::vector<HostTarget>& out)
                             d.apikey, d.user, d.password });
         else if (speaks_sdcp(d.host_type, cfg.opt_string("printer_model")))
             out.push_back({ "host", sdcp_host_of(url), d.host_type, "", "", "", "", "Elegoo " + url });
+        else if (speaks_cc2(d.host_type, cfg.opt_string("printer_model")))
+            out.push_back({ "host", sdcp_host_of(url), d.host_type, "", d.apikey, "", "", "Elegoo " + url, "cc2" });
         else
             out.push_back({ "host", moonraker_base(url), "", "", "", "", "" });
     }
@@ -1503,9 +1607,12 @@ void list_host_targets(std::vector<HostTarget>& out)
         const PrintHostDevices::Device& d = l.device;
         if (d.address.empty()) continue;
         if (d.host_type == "elegoolink") {
-            if (!speaks_sdcp(d.host_type, d.printer_model.empty() ? l.model_key : d.printer_model)) continue;
             const std::string host = sdcp_host_of(d.address);
-            if (!host.empty()) out.push_back({ "ph:" + d.id, host, d.host_type, "", "", "", "", d.display_name() });
+            if (host.empty()) continue;
+            if (speaks_cc2(d.host_type, d.printer_model.empty() ? l.model_key : d.printer_model))
+                out.push_back({ "ph:" + d.id, host, d.host_type, "", d.apikey, "", "", d.display_name(), "cc2" });
+            else
+                out.push_back({ "ph:" + d.id, host, d.host_type, "", "", "", "", d.display_name() });
         } else if (PrintHostDevices::speaks_moonraker(d.host_type)) {
             out.push_back({ "ph:" + d.id, moonraker_base(d.address), "", "", "", "", "" });
         } else if (PrusaLinkStatus::speaks_prusalink(d.host_type)) {
@@ -1623,6 +1730,16 @@ void describe_hosts(const std::vector<HostTarget>& targets, json& printers, bool
     for (const HostTarget& t : targets) {
         if (t.host_type != "elegoolink") {
             others.push_back(t);
+            continue;
+        }
+        if (t.protocol == "cc2") {
+            // A Centauri Carbon 2: the same rule over its MQTT connection (ElegooCc2Monitor).
+            const ElegooCc2::Snapshot s = demand ? ElegooCc2Monitor::demand(t.base, t.apikey) : ElegooCc2Monitor::touch(t.base, t.apikey);
+            for (json& p : printers)
+                if (p.is_object() && p.value("id", std::string()) == t.id) {
+                    ElegooCc2::fill_row(s, p, ElegooCc2Monitor::stale_after_s());
+                    break;
+                }
             continue;
         }
         const Sdcp::Snapshot s = demand ? SdcpMonitor::demand(t.base) : SdcpMonitor::touch(t.base);
