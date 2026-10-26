@@ -335,34 +335,36 @@ std::vector<char> blend_pixels(const TraceImage &image, const std::vector<Lab> &
 
 std::vector<int> label_pixels(const TraceImage &image, const Palette &pal);
 
-// Remove colours which only blend two other colours along their common edges (anti-aliasing of
-// an exported logo): almost all of their pixels touch another colour and the colour lies between
-// two other colours. A real colour of the image (even a gradient level) covers areas.
+// Remove colours which only blend two other colours where these meet: anti-aliasing of an
+// exported logo, or the glow between a line and the background. The colour lies between two
+// other colours, and almost all of its pixels touch both colours of such a pair. A real colour of the
+// image covers areas (even a gradient level), and a thin line of its own colour on the
+// background touches only the background, so line art keeps its colours.
 void remove_edge_blends(const TraceImage &image, const std::vector<HistBin> &bins, Palette &pal)
 {
-    constexpr double MIN_EDGE_FRACTION = 0.6;
+    constexpr double MIN_TOUCH_FRACTION = 0.75;
+    constexpr int    RADIUS             = 1;
     while (pal.centers.size() >= 3) {
-        const size_t        k      = pal.centers.size();
-        std::vector<int>    labels = label_pixels(image, pal);
-        std::vector<double> total(k, 0.), edge(k, 0.);
-        const int           W = image.width, H = image.height;
+        const size_t     k      = pal.centers.size();
+        std::vector<int> labels = label_pixels(image, pal);
+        const int        W = image.width, H = image.height;
+        // labels around every pixel, one bit per colour (k <= IMAGE_TRACE_MAX_COLORS + 1)
+        std::vector<uint32_t> around(labels.size(), 0);
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
-                int l = labels[size_t(y) * size_t(W) + size_t(x)];
-                if (l < 0)
+                if (labels[size_t(y) * size_t(W) + size_t(x)] < 0)
                     continue;
-                total[size_t(l)] += 1.;
-                bool is_edge = false;
-                const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
-                for (int d = 0; d < 4 && !is_edge; ++d) {
-                    int nx = x + dx[d], ny = y + dy[d];
-                    if (nx < 0 || ny < 0 || nx >= W || ny >= H)
-                        continue;
-                    is_edge = labels[size_t(ny) * size_t(W) + size_t(nx)] != l;
-                }
-                if (is_edge)
-                    edge[size_t(l)] += 1.;
+                uint32_t mask = 0;
+                for (int ny = std::max(0, y - RADIUS); ny <= std::min(H - 1, y + RADIUS); ++ny)
+                    for (int nx = std::max(0, x - RADIUS); nx <= std::min(W - 1, x + RADIUS); ++nx)
+                        if (int l = labels[size_t(ny) * size_t(W) + size_t(nx)]; l >= 0)
+                            mask |= uint32_t(1) << l;
+                around[size_t(y) * size_t(W) + size_t(x)] = mask;
             }
+        std::vector<double> total(k, 0.);
+        for (int l : labels)
+            if (l >= 0)
+                total[size_t(l)] += 1.;
         // anti-aliasing blends sRGB values, so "between" is decided in sRGB
         std::vector<std::array<double, 3>> rgb;
         for (const Lab &c : pal.centers)
@@ -372,12 +374,11 @@ void remove_edge_blends(const TraceImage &image, const std::vector<HistBin> &bin
         for (size_t c = 0; c < k; ++c) {
             if (total[c] <= 0.)
                 continue;
-            double fraction = edge[c] / total[c];
-            if (fraction < MIN_EDGE_FRACTION || fraction <= worst_score)
-                continue;
-            bool between = false;
-            for (size_t a = 0; a < k && !between; ++a)
-                for (size_t b = a + 1; b < k && !between; ++b) {
+            // pairs of colours which c lies between (a glow can be between the background and
+            // each of several line colours)
+            std::vector<uint32_t> pairs;
+            for (size_t a = 0; a < k; ++a)
+                for (size_t b = a + 1; b < k; ++b) {
                     if (a == c || b == c)
                         continue;
                     const auto &ca = rgb[a], &cb = rgb[b], &cc = rgb[c];
@@ -389,9 +390,22 @@ void remove_edge_blends(const TraceImage &image, const std::vector<HistBin> &bin
                     if (t < 0.1 || t > 0.9)
                         continue;
                     std::array<double, 3> closest{ca[0] + t * seg[0], ca[1] + t * seg[1], ca[2] + t * seg[2]};
-                    between = dist2(cc, closest) <= 0.04 * len2; // within 20 % of the distance
+                    if (dist2(cc, closest) <= 0.04 * len2) // within 20 % of the distance
+                        pairs.push_back((uint32_t(1) << a) | (uint32_t(1) << b));
                 }
-            if (between) {
+            if (pairs.empty())
+                continue;
+            // pixels of c which touch both colours of one of these pairs
+            double touch = 0.;
+            for (size_t i = 0; i < labels.size(); ++i)
+                if (labels[i] == int(c))
+                    for (uint32_t both : pairs)
+                        if ((around[i] & both) == both) {
+                            touch += 1.;
+                            break;
+                        }
+            double fraction = touch / total[c];
+            if (fraction >= MIN_TOUCH_FRACTION && fraction > worst_score) {
                 worst       = int(c);
                 worst_score = fraction;
             }

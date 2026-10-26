@@ -525,12 +525,14 @@ TEST_CASE("Line art on a large dark background keeps its small colours", "[Image
 
     SECTION("Rings with a glow, the owner's settings")
     {
-        TraceImage img  = rings(18., 3., true);
-        size_t     dark = 0;
-        for (size_t i = 0; i < img.rgba.size(); i += 4)
-            dark += img.rgba[i] < 40 && img.rgba[i + 1] < 40 && img.rgba[i + 2] < 45;
-        CHECK(double(dark) / double(img.width * img.height) > 0.8);
-        check_five(img, line_art_params());
+        // without the glow, 90 % of the image is the background
+        TraceImage plain = rings(18., 3., false);
+        size_t     dark  = 0;
+        for (size_t i = 0; i < plain.rgba.size(); i += 4)
+            dark += plain.rgba[i] < 40 && plain.rgba[i + 1] < 40 && plain.rgba[i + 2] < 45;
+        CHECK(double(dark) / double(plain.width * plain.height) > 0.88);
+        check_five(plain, line_art_params());
+        check_five(rings(18., 3., true), line_art_params());
     }
     SECTION("Rings with a glow, flat levels")
     {
