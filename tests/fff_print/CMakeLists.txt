@@ -55,6 +55,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fdm_hollowing.cpp
 	test_extra_bridge_layer_determinism.cpp
 	test_bridge_controls.cpp
+	test_ironing_overrides.cpp
 	test_bed_temperature.cpp
 	test_chamber_temperature.cpp
 	test_texture_displacement.cpp
