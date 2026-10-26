@@ -1064,6 +1064,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // which is what every pre-phase-3 file's connectors were loaded as.
                 bool             processed{ true };
                 FlexiJointParams flexi;
+                // The push-fit Pin's parameters (type PushFit). `has_pushfit` false: none in
+                // the file, the defaults stand.
+                bool             has_pushfit{ false };
+                PushFitParams    pushfit;
             };
             CutObjectBase          id;
             std::vector<Connector> connectors;
@@ -2428,7 +2432,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // a 3MF (a project saved with the joint placed but not yet cut), so the
                     // bound is the last enumerator instead - still a range check on untrusted
                     // file content, just one that covers the whole enum.
-                    if (connector.type < 0 || connector.type > int(CutConnectorType::FlexiJoint)) {
+                    if (connector.type < 0 || connector.type > int(CutConnectorType::PushFit)) {
                         add_error("Invalid cut connector type " + std::to_string(connector.type));
                         continue;
                     }
@@ -2440,6 +2444,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // the defaults set by CutInfo stand.
                     if (connector.has_flexi)
                         model_object->volumes[connector.volume_id]->cut_info.flexi = connector.flexi;
+                    if (connector.has_pushfit)
+                        model_object->volumes[connector.volume_id]->cut_info.pushfit = connector.pushfit;
                 }
             }
 
@@ -2970,6 +2976,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 connector.processed = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
                                 connector.has_flexi = true;
                             }
+                            // The push-fit Pin's parameters. Untrusted file content: every value
+                            // is clamped by pushfit_from_attributes() (pushfit_sanitize).
+                            if (connector.type == int(CutConnectorType::PushFit) &&
+                                connector_tree.get_optional<double>("<xmlattr>.pushfit_diameter")) {
+                                connector.pushfit = pushfit_from_attributes([&connector_tree](const std::string& name) -> std::optional<double> {
+                                    if (boost::optional<double> v = connector_tree.get_optional<double>("<xmlattr>." + name))
+                                        return *v;
+                                    return std::nullopt;
+                                });
+                                connector.processed   = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
+                                connector.has_pushfit = true;
+                            }
                             connectors.emplace_back(connector);
                         }
                     }
@@ -3290,12 +3308,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     const int type  = ct.get<int>("<xmlattr>.type", 0);
                     const int style = ct.get<int>("<xmlattr>.style", 0);
                     const int shape = ct.get<int>("<xmlattr>.shape", 0);
-                    rc.type  = (type  >= 0 && type  <= int(CutConnectorType::FlexiJoint)) ? type  : 0;
+                    rc.type  = (type  >= 0 && type  <= int(CutConnectorType::PushFit)) ? type  : 0;
                     rc.style = (style >= 0 && style <= int(CutConnectorStyle::Undef))     ? style : 0;
                     rc.shape = (shape >= 0 && shape <= int(CutConnectorShape::Undef))     ? shape : 0;
                     // The Flexi joint's own parameters, when this is one. Same defaulting
                     // rule as cut_information.xml: every field falls back to the
                     // FlexiJointParams default, and the counts that drive loops are clamped.
+                    if (rc.type == int(CutConnectorType::PushFit))
+                        rc.pushfit = pushfit_from_attributes([&ct](const std::string& name) -> std::optional<double> {
+                            if (boost::optional<double> v = ct.get_optional<double>("<xmlattr>." + name))
+                                return *v;
+                            return std::nullopt;
+                        });
                     if (rc.type == int(CutConnectorType::FlexiJoint)) {
                         const FlexiJointParams def;
                         FlexiJointParams &fj = rc.flexi;
@@ -8604,6 +8628,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     connectors_tree.put("<xmlattr>.type",        int(volume->cut_info.connector_type));
                     connectors_tree.put("<xmlattr>.r_tolerance", volume->cut_info.radius_tolerance);
                     connectors_tree.put("<xmlattr>.h_tolerance", volume->cut_info.height_tolerance);
+                    // The push-fit Pin: its holes and the pin object are rebuilt from these by a
+                    // re-cut, and a reopened project shows them in the panel. Pin volumes only, so
+                    // nothing changes in a file without pins.
+                    if (volume->cut_info.is_pushfit()) {
+                        connectors_tree.put("<xmlattr>.processed", volume->cut_info.is_processed ? 1 : 0);
+                        for (const auto& [name, value] : pushfit_attributes(volume->cut_info.pushfit))
+                            connectors_tree.put("<xmlattr>." + name, value);
+                    }
                     // A Flexi joint regenerates its whole geometry from these parameters at
                     // cut time, so they have to survive a save/load or a project reopened
                     // before the cut would come back with a different joint. Written only for
@@ -9711,6 +9743,10 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                     ct.put("<xmlattr>.type",        c.type);
                     ct.put("<xmlattr>.style",       c.style);
                     ct.put("<xmlattr>.shape",       c.shape);
+                    // The push-fit Pin (recipe version 6), only for pins.
+                    if (c.type == int(CutConnectorType::PushFit))
+                        for (const auto& [name, value] : pushfit_attributes(c.pushfit))
+                            ct.put("<xmlattr>." + name, value);
                     // The Flexi joint rebuilds its whole geometry from these, so a re-cut that
                     // did not have them would produce a differently shaped joint. Written only
                     // for the flexi type, so nothing changes for any other connector.
