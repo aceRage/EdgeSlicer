@@ -659,3 +659,66 @@ TEST_CASE("Wipe tower temperature wait is off for single extruder multi-material
     print_config.single_extruder_multi_material.value = false;
     CHECK_FALSE(WipeTower2::wait_for_temp_enabled(print_config));
 }
+
+// Orca #15035 + #15144 (8-3 review): the rib offset shifts the whole rib tower, so the heat-up park
+// beside it has to be shifted the same way, or the park on the far side lands on the ribs. The park
+// envelope is measured on generate_rib_polygon() and mapped through the writer, which adds the offset;
+// this checks the result against the extrusions the tower actually prints on the same layer.
+TEST_CASE("The temperature-wait park clears the shifted rib tower", "[WipeTower][WaitForTemp][RibOffset]")
+{
+    // Tower in the middle of the default 200 mm bed, so both sides are free and the near side is taken.
+    const char *tower_x = GENERATE("15", "80", "150");
+    CAPTURE(tower_x);
+    DynamicPrintConfig config = wait_for_temp_config(true);
+    config.set_deserialize_strict({
+        { "wipe_tower_wall_type", "rib" },
+        { "wipe_tower_rib_width", "8" },
+        { "wipe_tower_fillet_wall", "1" },
+        { "prime_tower_brim_width", "0" },
+        { "wipe_tower_x", tower_x },
+        { "wipe_tower_y", "120" },
+    });
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(print.has_wipe_tower());
+    Test::gcode(print);
+
+    const auto &layers = print.wipe_tower_data().tool_changes;
+    REQUIRE(!layers.empty());
+    int checked_parks = 0;
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        // The tower's printed envelope on this layer, tower-local like the tcr G-code.
+        BoundingBoxf envelope;
+        for (const WipeTower::ToolChangeResult &tcr : layers[layer_idx])
+            for (const WipeTower::Extrusion &e : tcr.extrusions)
+                if (e.width > 0.f)
+                    envelope.merge(e.pos.cast<double>());
+        if (!envelope.defined)
+            continue;
+        if (layer_idx == 0) {
+            // The ribs start at the tower position: the wall's first-layer box begins at 0/0.
+            CHECK_THAT(envelope.min.x(), Catch::Matchers::WithinAbs(0., 0.05));
+            CHECK_THAT(envelope.min.y(), Catch::Matchers::WithinAbs(0., 0.05));
+        }
+        for (const WipeTower::ToolChangeResult &tcr : layers[layer_idx]) {
+            const std::vector<std::string> lines = split_lines(tcr.gcode);
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (lines[i].rfind("M109", 0) != 0 || !is_tagged_wait(lines[i]))
+                    continue;
+                // The park travel is the never-skip G1 right before the wait.
+                size_t park = i;
+                while (park > 0 && lines[park - 1].find(WipeTower2::never_skip_tag()) == std::string::npos)
+                    --park;
+                REQUIRE(park > 0);
+                const std::string &move = lines[park - 1];
+                REQUIRE(move.find('X') != std::string::npos);
+                const double park_x = std::stod(move.substr(move.find('X') + 1));
+                INFO("layer " << layer_idx << " park " << move << " envelope x " << envelope.min.x() << ".." << envelope.max.x());
+                CHECK((park_x < envelope.min.x() - 0.4 || park_x > envelope.max.x() + 0.4));
+                ++checked_parks;
+            }
+        }
+    }
+    REQUIRE(checked_parks > 0); // the feature under test is active
+}

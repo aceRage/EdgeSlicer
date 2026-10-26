@@ -103,6 +103,21 @@ public:
     // keep clear around the tower (see TowerInterface::run_in_reserve()).
     float get_brim_width() const { return std::max(m_wipe_tower_brim_width_real, m_run_in_reserve); }
 	float get_wipe_tower_height() const { return m_wipe_tower_height; }
+    // Orca #15035 (Edge: applied in the writer, like WipeTower::set_rib_offset()): shift of the whole
+    // tower output that puts the rib wall's first-layer bounding box at the configured tower position,
+    // so the ribs no longer reach past it to the left and front. Zero unless the rib wall is used.
+    // Every move, extrusion, wipe path and park the tower writes already includes it: tower-local
+    // coordinates of the body run from the rib offset to rib offset + (width, depth).
+    Vec2f get_rib_offset() const { return m_rib_offset; }
+    // The box around the first-layer wall that starts at the tower position: the rib footprint for a
+    // rib wall, the body otherwise.
+    Vec2f get_footprint_size() const;
+    // The rib wall's first-layer outline in the shifted tower-local frame (scaled, no brim); empty
+    // unless the rib wall is used.
+    const Polygon& get_first_layer_wall() const { return m_first_layer_wall; }
+    bool  is_rib_wall() const;
+    float get_rib_length() const { return m_rib_length; }
+    float get_rib_width() const { return m_rib_width; }
 
 
 
@@ -292,6 +307,9 @@ private:
     bool                   m_wait_for_temp_on_wipe_tower = false; // Orca #15144
     Polygon                m_bed_polygon;       // Orca #15144: printable_area contour (scaled, plate coordinates)
     float  m_rib_length                   = 0;
+    Vec2f  m_rib_offset                   = Vec2f::Zero(); // see get_rib_offset()
+    Vec2f  m_rib_footprint                = Vec2f::Zero(); // size of the rib wall's first-layer bounding box
+    Polygon m_first_layer_wall;                            // see get_first_layer_wall()
 
     bool   m_enable_arc_fitting           = false;
     std::map<float, Polylines> m_outer_wall; // for wipe tower out wall and brim
@@ -482,6 +500,12 @@ private:
 		const std::vector<TowerInterface::GapPoint>& interface_gaps = {});
 
     Polygon generate_rib_polygon(const WipeTower::box_coordinates& wt_box);
+    // The wall generate_support_rib_wall() prints for this box before any gap is cut: the rib or
+    // rectangle polygon, rounded and united with the box when the fillet is on.
+    Polygon support_rib_wall_polygon(const WipeTower::box_coordinates& wt_box, bool rib_wall);
+    // Orca #15035: measures the first printed layer's rib wall and sets m_rib_offset,
+    // m_rib_footprint and m_first_layer_wall from it (same state generate() sets for that layer).
+    void set_rib_offset();
 
     WipeTowerInfo::ToolChange set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume, bool first_layer = false);
 
