@@ -91,7 +91,7 @@ TEST_CASE("Showcase sRGB transfer", "[Showcase]")
         const float c = float(i) / 255.f;
         CHECK(int(std::lround(linear_to_srgb(srgb_to_linear(c)) * 255.f)) == i);
     }
-    CHECK(linear_to_srgb(2.f) == 1.f);
+    CHECK_THAT(linear_to_srgb(2.f), WithinAbs(1., 1e-6));   // clamped to 1 first
     CHECK(linear_to_srgb(-1.f) == 0.f);
 }
 
