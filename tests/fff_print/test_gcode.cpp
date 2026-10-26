@@ -1,14 +1,17 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include "test_data.hpp"
 
 #include <cmath>
@@ -583,4 +586,117 @@ TEST_CASE("The G-code header names the first object's filament when printing by 
 
     CHECK(header_int(gcode, "first_layer_bed_temperature") == 100);
     CHECK(header_int(gcode, "first_layer_temperature") == 250);
+}
+
+static DynamicPrintConfig two_filament_bed_temp_config(const std::string &first_layer_temps, const std::string &later_temps)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        {"nozzle_diameter",                        "0.4,0.4"},
+        {"filament_diameter",                      "1.75,1.75"},
+        {"enable_prime_tower",                     "0"},
+        {"single_extruder_multi_material",         "1"},
+        {"curr_bed_type",                          "High Temp Plate"},
+        {"supertack_plate_temp_initial_layer",     first_layer_temps},
+        {"cool_plate_temp_initial_layer",          first_layer_temps},
+        {"textured_cool_plate_temp_initial_layer", first_layer_temps},
+        {"eng_plate_temp_initial_layer",           first_layer_temps},
+        {"hot_plate_temp_initial_layer",           first_layer_temps},
+        {"textured_plate_temp_initial_layer",      first_layer_temps},
+        {"supertack_plate_temp",                   later_temps},
+        {"cool_plate_temp",                        later_temps},
+        {"textured_cool_plate_temp",               later_temps},
+        {"eng_plate_temp",                         later_temps},
+        {"hot_plate_temp",                         later_temps},
+        {"textured_plate_temp",                    later_temps},
+        {"skirt_loops",                            "0"},
+        {"brim_type",                              "no_brim"},
+        {"layer_height",                           "0.2"},
+        {"initial_layer_print_height",             "0.2"},
+        {"layer_change_gcode",                     "G92 E0\n"},
+        {"machine_start_gcode",                    "M190 S{bed_temperature_initial_layer_single}\n"},
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#0000FF"};
+    return config;
+}
+
+static std::vector<int> bed_command_temps(const std::string &gcode)
+{
+    std::vector<int> temps;
+    std::istringstream lines(gcode);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.compare(0, 6, "M140 S") == 0 || line.compare(0, 6, "M190 S") == 0)
+            temps.push_back(std::stoi(line.substr(6)));
+    }
+    return temps;
+}
+
+static std::string join_ints(const std::vector<int> &values)
+{
+    std::ostringstream out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i)
+            out << ',';
+        out << values[i];
+    }
+    return out.str();
+}
+
+// Orca #16770: a filament that starts above the first layer, such as a support interface,
+// never touches the bed. Heating the bed to its temperature would soften the filament the
+// part stands on, so only first-layer filaments count.
+TEST_CASE("The highest temperature bed policy ignores filaments that start above the first layer", "[GCode][BedTemperature]")
+{
+    // Filament 1: bed 65 on the first layer, 60 after it. Filament 2: bed 100. A 30 mm cap on
+    // a 10 mm tall stem prints with filament 1 and is supported from the bed, the support with
+    // filament 1 and its interface under the cap with filament 2.
+    TriangleMesh mesh = make_cube(10, 10, 10);
+    mesh.translate(10, 10, 0);
+    TriangleMesh cap = make_cube(30, 30, 2);
+    cap.translate(0, 0, 10);
+    mesh.merge(cap);
+
+    DynamicPrintConfig config = two_filament_bed_temp_config("65,100", "60,100");
+    config.set_deserialize_strict({
+        {"enable_support",             "1"},
+        {"support_type",               "normal(auto)"},
+        {"support_threshold_angle",    "30"},
+        {"support_filament",           "1"},
+        {"support_interface_filament", "2"},
+    });
+
+    const std::string gcode = Test::slice({mesh}, config);
+    REQUIRE(gcode.find("\nT1") != std::string::npos);
+
+    const std::vector<int> bed_temps = bed_command_temps(gcode);
+    INFO("bed temperatures: " << join_ints(bed_temps));
+    REQUIRE_FALSE(bed_temps.empty());
+    CHECK(bed_temps.front() == 65);
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 60) != bed_temps.end());
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 100) == bed_temps.end());
+}
+
+// Snapmaker OrcaSlicer #1074: print.extruders() counts a config-assigned support filament
+// even when the model needs no support and none is generated. That phantom filament must
+// not raise M140/M190 or bed_temperature_initial_layer_single.
+TEST_CASE("A support filament assigned but never generated does not raise the bed temperature", "[GCode][BedTemperature]")
+{
+    DynamicPrintConfig config = two_filament_bed_temp_config("60,80", "55,80");
+    config.set_deserialize_strict({
+        {"enable_support",             "1"},
+        {"support_type",               "normal(auto)"},
+        {"support_threshold_angle",    "30"},
+        {"support_filament",           "2"},
+        {"support_interface_filament", "2"},
+    });
+
+    const std::string      gcode     = Test::slice({TestMesh::cube_20x20x20}, config);
+    const std::vector<int> bed_temps = bed_command_temps(gcode);
+    INFO("bed temperatures: " << join_ints(bed_temps));
+    REQUIRE_FALSE(bed_temps.empty());
+    CHECK(bed_temps.front() == 60);
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 80) == bed_temps.end());
+    CHECK(gcode.find("M190 S60") != std::string::npos);
 }
