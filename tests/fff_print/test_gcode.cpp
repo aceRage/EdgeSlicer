@@ -106,6 +106,28 @@ TEST_CASE("Estimated printing time comment follows the config block", "[GCode]")
     REQUIRE(time_comment > config_block_end);
 }
 
+TEST_CASE("The filament flow ratio scales the extruded length once", "[GCode]")
+{
+    // Retraction off, so every positive relative E move is extrusion and scales with the ratio.
+    auto extruded_length = [](double flow_ratio) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({{"use_relative_e_distances", "1"}, {"retraction_length", "0"}, {"wipe", "0"}});
+        config.set_key_value("filament_flow_ratio", new ConfigOptionFloats{flow_ratio});
+        double     total = 0.;
+        GCodeReader reader;
+        reader.parse_buffer(Test::slice({TestMesh::cube_20x20x20}, config),
+                            [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+                                if ((line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) && line.has_e() && line.e() > 0.f)
+                                    total += line.e();
+                            });
+        return total;
+    };
+
+    const double full = extruded_length(1.);
+    REQUIRE(full > 0.);
+    CHECK_THAT(extruded_length(0.9) / full, Catch::Matchers::WithinRel(0.9, 1e-3));
+}
+
 // FanMover (active when fan_speedup_time or fan_kickstart != 0) can split a G1 to insert an
 // early fan command. GCode::set_extruder must bracket change_filament_gcode so those travels
 // stay intact. FanMover keys off a "; custom gcode" prefix and ignores comments shorter than

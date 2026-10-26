@@ -2490,6 +2490,44 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
+    // A flow ratio of 0 would extrude nothing, and a nil one would write NaN extrusion lengths.
+    // filament_flow_ratio is packed: one column per flow variant. Map each column to its filament
+    // through filament_flow_step_size (Edge packing) or filament_self_index (Bambu / Orca layout).
+    {
+        const std::vector<double> &flow_ratios = m_config.filament_flow_ratio.values;
+        const std::vector<int>    &self_index  = m_config.filament_self_index.values;
+        const std::vector<int>    &step_sizes  = m_config.filament_flow_step_size.values;
+        size_t                     span_sum    = 0;
+        bool                       variants    = false;
+        for (int step : step_sizes) {
+            variants |= step > 1;
+            span_sum += size_t(std::max(1, step));
+        }
+        for (size_t column = 0; column < flow_ratios.size(); ++column) {
+            unsigned int filament_id = static_cast<unsigned int>(column);
+            if (!step_sizes.empty() && (variants || span_sum == flow_ratios.size())) {
+                size_t start = 0;
+                for (size_t filament = 0; filament < step_sizes.size(); ++filament) {
+                    const size_t span = size_t(std::max(1, step_sizes[filament]));
+                    if (column < start + span) {
+                        filament_id = static_cast<unsigned int>(filament);
+                        break;
+                    }
+                    start += span;
+                }
+            } else if (self_index.size() == flow_ratios.size()) {
+                filament_id = static_cast<unsigned int>(self_index[column] - 1);
+            }
+            if (flow_ratios[column] > 0. || !std::binary_search(extruders.begin(), extruders.end(), filament_id))
+                continue;
+            StringObjectException err;
+            // TRN %1% is the filament number as shown in the filament list, starting from 1.
+            err.string  = Slic3r::format(L("The flow ratio of filament %1% must be greater than 0."), filament_id + 1);
+            err.opt_key = "filament_flow_ratio";
+            return err;
+        }
+    }
+
     if (m_config.print_sequence == PrintSequence::ByObject) {
         if (m_config.timelapse_type == TimelapseType::tlSmooth)
             return {L("Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.")};

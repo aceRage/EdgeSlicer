@@ -10719,10 +10719,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         _mm3_per_mm *= m_config.brim_flow_ratio;
     else if (sloped)
         _mm3_per_mm *= m_config.scarf_joint_flow_ratio;
-    // Effective extrusion length per distance unit = (filament_flow_ratio/cross_section) * mm3_per_mm / print flow ratio
-    // m_writer.extruder()->e_per_mm3() below is (filament flow ratio / cross-sectional area)
-    double e_per_mm = m_writer.extruder()->e_per_mm3() * _mm3_per_mm;
-    e_per_mm /= filament_flow_ratio;
+    // _mm3_per_mm already includes the filament flow ratio, so convert it with the bare cross-section
+    // rather than e_per_mm3(), which would apply the ratio a second time. Dividing by the ratio
+    // after that (the old path) is 0/0 = NaN when the ratio is 0.
+    double e_per_mm = _mm3_per_mm / m_writer.extruder()->filament_crossection();
 
     // set speed
     // Snapmaker: all role speeds are flow-variant vector options (coFloats / coFloatsOrPercents)

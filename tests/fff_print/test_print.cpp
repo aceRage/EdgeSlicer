@@ -2222,6 +2222,57 @@ TEST_CASE("Print::validate tolerates a null warnings pointer", "[Print][validate
     CHECK(err.string.empty());
 }
 
+TEST_CASE("Print::validate refuses a used filament with a flow ratio of 0", "[Print][validate][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_flow_ratio", new ConfigOptionFloats{0.});
+
+    std::vector<StringObjectException> warnings;
+    StringObjectException              err = validate_cubes(config, warnings);
+
+    CHECK_FALSE(err.string.empty());
+    CHECK_FALSE(err.is_warning);
+    CHECK(err.opt_key == "filament_flow_ratio");
+}
+
+TEST_CASE("Print::validate ignores a flow ratio of 0 on an unused filament", "[Print][validate]")
+{
+    // The cube prints with filament 1, so filament 2's ratio is never used.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionInts>("filament_self_index")->values = {1, 2};
+    config.set_key_value("filament_flow_ratio", new ConfigOptionFloats{1., 0.});
+
+    std::vector<StringObjectException> warnings;
+    StringObjectException              err = validate_cubes(config, warnings);
+
+    CHECK(err.string.empty());
+}
+
+TEST_CASE("Print::validate ignores a zero flow-variant column on an unused filament", "[Print][validate]")
+{
+    // F0 is Standard-only (the cube). F1 declares Standard+High-Flow; its High-Flow column is 0
+    // and must not fail the plate because that filament is unused.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values     = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values       = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values      = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionInts>("filament_flow_step_size")->values = {1, 2};
+    config.option<ConfigOptionInts>("filament_self_index")->values     = {1, 2, 2};
+    config.set_key_value("filament_flow_ratio", new ConfigOptionFloats{1., 1., 0.});
+
+    std::vector<StringObjectException> warnings;
+    StringObjectException              err = validate_cubes(config, warnings);
+
+    CHECK(err.string.empty());
+}
+
 TEST_CASE("Print::validate concatenates layered-clearance collisions into one warning", "[Print][validate]")
 {
     // Orca #12122: in by-layer mode, layered_print_cleareance_valid folds every too-close instance
