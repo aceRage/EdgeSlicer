@@ -7327,9 +7327,10 @@ LayerResult GCode::process_layer(const Print& print,
         break;
     }
     case CalibMode::Calib_Temp_Tower: {
-        // Name the tool printing the tower: on a multi-tool printer a bare M104 goes to
-        // whichever tool the firmware considers active. Map the filament through the
-        // physical hotend (U1 / Bambu) the same way other Edge nozzle-temp writers do.
+        // Orca #16898: name the tool printing the tower. A bare M104 goes to whichever
+        // tool the firmware considers active. Map the filament through the physical
+        // hotend (U1 / Bambu) — not a raw filament index — as the other Edge
+        // nozzle-temp writers do.
         int tool = -1;
         if (m_writer.extruder() != nullptr)
             tool = temperature_tool_for_filament(int(m_writer.extruder()->id()));
