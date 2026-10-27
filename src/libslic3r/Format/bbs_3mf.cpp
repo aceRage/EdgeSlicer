@@ -8977,6 +8977,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     bool _BBS_3MF_Exporter::_add_project_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, Model& model)
     {
         if (m_bambu_compat) {
+            // Bambu Connect hangs on import when the key is missing (see below); an empty list is accepted.
+            if (m_bambu_project.find("print_compatible_printers") == m_bambu_project.end()) {
+                BambuExport::Value empty;
+                empty.vector  = true;
+                empty.strings = true;
+                m_bambu_project["print_compatible_printers"] = empty;
+            }
             const std::string out = BambuExport::to_json(m_bambu_project, "project_settings", "project", BambuExport::export_version());
             if (!mz_zip_writer_add_mem(&archive, BBS_PROJECT_CONFIG_FILE.c_str(), (const void *) out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
                 add_error("Unable to add project config file to archive");
@@ -8995,10 +9002,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         const DynamicPrintConfig* to_write = &config;
         DynamicPrintConfig        aligned;
         if (m_save_gcode) {
+            // Bambu Connect turns white and hangs on import when project_settings.config has no
+            // print_compatible_printers key. PresetBundle::full_fff_config() only writes it when the
+            // print preset has a non-empty compatible_printers, which user process presets usually
+            // do not. An empty list is accepted by Bambu Connect, and on load PresetBundle ignores an
+            // empty list, so the reloaded preset is not restricted or marked modified.
+            if (config.option("print_compatible_printers") == nullptr) {
+                aligned = config;
+                aligned.option<ConfigOptionStrings>("print_compatible_printers", true);
+                to_write = &aligned;
+            }
             const auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour"));
             const auto* map     = config.option<ConfigOptionInts>("filament_map");
             if (colours != nullptr && map != nullptr && map->values.size() < colours->values.size()) {
-                aligned = config;
+                if (to_write != &aligned)
+                    aligned = config;
                 aligned.option<ConfigOptionInts>("filament_map")->values.resize(colours->values.size(), 1);
                 to_write = &aligned;
             }

@@ -24104,6 +24104,12 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     publish(p->model, strategy);
 
     DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config_secure();
+    // Bambu Connect checks print_compatible_printers against the printer it sends to, and hangs on
+    // import when the key is missing. A user process preset has an empty list, so a sliced or
+    // Bambu-compatible file names the current printer's system preset instead. Project saves keep
+    // the preset's own list; PresetBundle::load_config_file ignores a list that is only this name.
+    if ((strategy & SaveStrategy::WithGcode) || bambu_report != nullptr)
+        wxGetApp().preset_bundle->fill_print_compatible_printers_for_export(cfg);
     const std::string path_u8 = into_u8(path);
     wxBusyCursor wait;
 
