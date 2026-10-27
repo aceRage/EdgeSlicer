@@ -13,6 +13,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -514,6 +515,54 @@ TEST_CASE("A sliced export always carries print_compatible_printers", "[3mf][Bam
         REQUIRE(store(path, model, cfg, plates, PROJECT_SAVE));
         const json project = json::parse(zip_entry(path, "Metadata/project_settings.config"));
         CHECK(!project.contains("print_compatible_printers"));
+        release_PlateData_list(plates);
+        boost::filesystem::remove(path);
+    }
+}
+
+// Bambu Connect checks print_compatible_printers against the printer it sends to, so an empty list
+// fails ("selected printer is incompatible with the chosen printer profile"). The export names the
+// current printer's system preset instead; PresetBundle ignores that on load.
+TEST_CASE("The export fills print_compatible_printers with the printer's system name", "[3mf][BambuConnect]")
+{
+    PresetBundle bundle;
+    bundle.printers.get_edited_preset().config.opt_string("inherits", true) = "Bambu Lab H2C 0.4 nozzle";
+    REQUIRE(bundle.current_printer_system_name() == "Bambu Lab H2C 0.4 nozzle");
+
+    SECTION("an empty list gets the printer's system name") {
+        DynamicPrintConfig cfg;
+        bundle.fill_print_compatible_printers_for_export(cfg);
+        REQUIRE(cfg.option<ConfigOptionStrings>("print_compatible_printers")->values.size() == 1);
+        CHECK(cfg.option<ConfigOptionStrings>("print_compatible_printers")->values.front() == "Bambu Lab H2C 0.4 nozzle");
+    }
+
+    SECTION("a list the preset has is kept") {
+        DynamicPrintConfig cfg;
+        cfg.option<ConfigOptionStrings>("print_compatible_printers", true)->values = { "Bambu Lab X1 Carbon 0.4 nozzle" };
+        bundle.fill_print_compatible_printers_for_export(cfg);
+        REQUIRE(cfg.option<ConfigOptionStrings>("print_compatible_printers")->values.size() == 1);
+        CHECK(cfg.option<ConfigOptionStrings>("print_compatible_printers")->values.front() == "Bambu Lab X1 Carbon 0.4 nozzle");
+    }
+
+    SECTION("a printer without a system parent leaves the list empty") {
+        PresetBundle plain;
+        DynamicPrintConfig cfg;
+        plain.fill_print_compatible_printers_for_export(cfg);
+        CHECK(cfg.option<ConfigOptionStrings>("print_compatible_printers")->values.empty());
+    }
+
+    SECTION("the name reaches project_settings.config of a sliced export") {
+        Model model;
+        build_model(model, 1);
+        DynamicPrintConfig cfg = printer_config(1, true, "Bambu Lab H2C");
+        cfg.erase("print_compatible_printers");
+        bundle.fill_print_compatible_printers_for_export(cfg);
+        PlateDataPtrs     plates = { sliced_plate(0, 0, { 1 }, { 1, 3 }, cfg) };
+        const std::string path   = temp_file("compat_named.gcode.3mf");
+        REQUIRE(store(path, model, cfg, plates, CONNECT_EXPORT));
+        const json project = json::parse(zip_entry(path, "Metadata/project_settings.config"));
+        REQUIRE(project["print_compatible_printers"].size() == 1);
+        CHECK(project["print_compatible_printers"][0] == "Bambu Lab H2C 0.4 nozzle");
         release_PlateData_list(plates);
         boost::filesystem::remove(path);
     }

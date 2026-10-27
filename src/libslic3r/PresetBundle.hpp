@@ -678,6 +678,12 @@ private:
         const std::string &path, const boost::property_tree::ptree &tree, ForwardCompatibilitySubstitutionRule compatibility_rule);*/
 
     DynamicPrintConfig          full_fff_config() const;
+    // The system preset name of the current printer (its own name when it is a system preset, else the
+    // system preset it inherits), e.g. "Bambu Lab H2C 0.4 nozzle". Empty for a printer without a parent.
+    std::string                 current_printer_system_name() const;
+    // Sliced / Bambu-compatible 3MF export: if the config's print_compatible_printers is empty, set it to
+    // the current printer's system name. A non-empty list is kept.
+    void                        fill_print_compatible_printers_for_export(DynamicPrintConfig &config) const;
     DynamicPrintConfig          full_sla_config() const;
 
     // Orca: used for validation only
