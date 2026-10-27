@@ -94,8 +94,15 @@ macros and starts it.
 
 **U1 with third-party tags:** **Add printer** with the preset `u1_third_party_tag` (`127.0.0.32`):
 toolhead 1 reads an iBoss PLA Silk tag, 2 a Snapmaker PLA Matte, 3 an eSun PETG, 4 is empty. It is
-what the U1 reports for a spool with a third-party RFID tag, for the sidebar's Machine Filament
-section and the filament Sync.
+what the U1 reports for a spool with a third-party RFID tag (print_task_config), for the phone
+app, the hub and the send dialogs.
+
+**Not the desktop Device page.** Its *Add device > Bind Via IP* pairs over MQTT on port 1884 and
+then runs the session over MQTT/TLS with the printer's certificate on 8883. The emulator's brokers
+are off by default, plain TCP when on, and hand out placeholder certificates, so that bind cannot
+complete: the slicer must report a failed connection (before fix/mqtt-connect-refused it closed
+instead). The sidebar's Machine Filament section and filament Sync are fed only by that page, so
+they need a real U1.
 
 ## Set the slots
 
