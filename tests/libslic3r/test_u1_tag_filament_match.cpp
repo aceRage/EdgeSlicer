@@ -181,7 +181,7 @@ void write_parent(const fs::path &folder)
     std::ofstream(fs::path(folder / (std::string(k_parent) + ".json")).string())
         << R"({"type":"filament","name":")" << k_parent << R"(","from":"User","version":"1.0.0","inherits":"",)"
         << R"("filament_vendor":["Generic"],"filament_type":["PLA"],"enable_pressure_advance":["0"],"nozzle_temperature":["220"],)"
-        << R"("compatible_printers":["Snapmaker U1 (0.4 nozzle)"]})";
+        << R"json("compatible_printers":["Snapmaker U1 (0.4 nozzle)"]})json";
 }
 
 // Loads the parent from its own folder and makes it a system preset, then the user folder.
