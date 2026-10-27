@@ -92,6 +92,11 @@ CANVAS auto-refill (2004). Faults for the monitor: push ids that skip, no pushes
 `/api/plates/{i}/send`) uploads the file with `print=false`, then sends the toolhead mapping
 macros and starts it.
 
+**U1 with third-party tags:** **Add printer** with the preset `u1_third_party_tag` (`127.0.0.32`):
+toolhead 1 reads an iBoss PLA Silk tag, 2 a Snapmaker PLA Matte, 3 an eSun PETG, 4 is empty. It is
+what the U1 reports for a spool with a third-party RFID tag, for the sidebar's Machine Filament
+section and the filament Sync.
+
 ## Set the slots
 
 **QIDI Box:** set the number of Boxes (0 to 4) and, for each slot, tick **Loaded** and set the type
