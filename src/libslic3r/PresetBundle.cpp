@@ -4913,6 +4913,10 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
             };
 
             color_opt->values.resize(num_filaments, "#26A69A");
+            // filament_colour was just resized to the physical count; multi_colors / colour_mode
+            // must follow. Swatches read those two fields first, so a leftover tail (filament
+            // remove, or a same-count geometry-only 3MF) would otherwise keep stale colors.
+            EnsureFilamentColorFieldsAligned(this->project_config);
             this->mixed_filaments.auto_generate(color_opt->values);
 
             int   gradient_mode = get_mixed_mode(false) ? 1 : 0;
