@@ -360,10 +360,12 @@ static constexpr const char* NOZZLE_VOLUME_TYPE_ATTR = "nozzle_volume_type";
 static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
 static constexpr const char* LIMIT_FILAMENT_MAP_ATTR = "limit_filament_maps";
 // EdgeSlicer: the per-plate filament arrangement the user confirmed before slicing on a Bambu
-// two-extruder printer (DualNozzleSync::Confirmation JSON). Not written into Bambu exports.
+// two-extruder printer (DualNozzleSync::Confirmation JSON). Project files only: not written into
+// Bambu exports or sliced-plate files (m_sliced_plate_export).
 static constexpr const char* DUAL_NOZZLE_CONFIRM_ATTR = "edgeslicer_dual_nozzle_confirm";
 // EdgeSlicer: when and where the plate was sent (PlatePrintHistory.hpp). One metadata element per
-// plate, written only when the plate has a history and never into Bambu exports; a build that does
+// plate, written only when the plate has a history and never into Bambu exports or sliced-plate
+// files (.gcode.3mf, printer and Bambu Connect sends); a build that does
 // not know the key skips it.
 static constexpr const char* PRINT_HISTORY_ATTR = "edgeslicer_print_history";
 
@@ -6908,6 +6910,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_skip_auxiliary { false };    // skip normal axuiliary files
         bool m_use_loaded_id { false };        // whether to use loaded id for identify_id
         bool m_share_mesh { false };        // whether to share mesh between objects
+        // A sliced-plate file (.gcode.3mf export, a send to a printer or Bambu Connect, a cloud print's
+        // config 3MF), not a project save or backup. Such files leave the machine and get shared, so
+        // the EdgeSlicer-only plate metadata (print history with printer names, the dual-nozzle
+        // confirmation with the printer serial) stays out of them.
+        bool m_sliced_plate_export { false };
         // Export Bambu 3MF (StoreParams::bambu_compat): the project config converted once up front,
         // the context the per-object conversions need, and what was changed.
         bool m_bambu_compat { false };
@@ -7026,6 +7033,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_skip_auxiliary = store_params.strategy & SaveStrategy::SkipAuxiliary;
         m_share_mesh       = store_params.strategy & SaveStrategy::ShareMesh;
         m_from_backup_save = store_params.strategy & SaveStrategy::Backup;
+        m_sliced_plate_export = (m_save_gcode || (store_params.strategy & SaveStrategy::WithSliceInfo)) && !m_from_backup_save;
 
         m_use_loaded_id = store_params.strategy & SaveStrategy::UseLoadedId;
 
@@ -9415,10 +9423,10 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 }
                 stream << "\"/>\n";
 
-                if (!m_bambu_compat && !plate_data->dual_nozzle_confirm.empty())
+                if (!m_bambu_compat && !m_sliced_plate_export && !plate_data->dual_nozzle_confirm.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << DUAL_NOZZLE_CONFIRM_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape(plate_data->dual_nozzle_confirm) << "\"/>\n";
 
-                if (!m_bambu_compat && !plate_data->print_history.empty())
+                if (!m_bambu_compat && !m_sliced_plate_export && !plate_data->print_history.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINT_HISTORY_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape(plate_data->print_history) << "\"/>\n";
 
                 if (save_gcode)
