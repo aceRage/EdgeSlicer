@@ -3121,6 +3121,24 @@ const std::set<std::string> ignore_settings_list ={
     "print_settings_id", "filament_settings_id", "printer_settings_id"
 };
 
+std::string PresetBundle::current_printer_system_name() const
+{
+    const Preset &printer = this->printers.get_edited_preset();
+    if (printer.is_system)
+        return printer.name;
+    return printer.inherits();
+}
+
+void PresetBundle::fill_print_compatible_printers_for_export(DynamicPrintConfig &config) const
+{
+    auto *list = config.option<ConfigOptionStrings>("print_compatible_printers", true);
+    if (!list->values.empty())
+        return;
+    const std::string name = current_printer_system_name();
+    if (!name.empty())
+        list->values.push_back(name);
+}
+
 DynamicPrintConfig PresetBundle::full_fff_config() const
 {
     DynamicPrintConfig out;
@@ -3652,6 +3670,14 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         //}
         //else
             print_different_keys_set.insert(ignore_settings_list.begin(), ignore_settings_list.end());
+        // An export fills the list with the printer's system name when the preset has none (Bambu
+        // Connect needs the key). That is not a restriction the user set, so do not apply it.
+        if (print_compatible_printers.size() == 1) {
+            const std::string printer_system = !inherits_values[num_filaments + 1].empty() ?
+                inherits_values[num_filaments + 1] : config.opt_string("printer_settings_id");
+            if (print_compatible_printers.front() == printer_system)
+                print_compatible_printers.clear();
+        }
         if (!print_compatible_printers.empty()) {
             ConfigOptionStrings* compatible_printers = config.option<ConfigOptionStrings>("compatible_printers", true);
             compatible_printers->values = print_compatible_printers;
