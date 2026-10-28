@@ -70,7 +70,7 @@ exe_in() {
 }
 GEXE=$(exe_in "$GOLDEN_DIR") || { echo "no EdgeSlicer executable in $GOLDEN_DIR" >&2; exit 2; }
 CEXE=$(exe_in "$CAND") || { echo "no EdgeSlicer executable in $CAND" >&2; exit 2; }
-if [ -n "$PYTHON" ]; then PY=$PYTHON
+if [ -n "${PYTHON:-}" ]; then PY=$PYTHON
 elif command -v python3 > /dev/null 2>&1; then PY=python3   # macOS ships python3 only
 else PY=python; fi
 # A 900 s cap per render where the system has one (macOS has neither timeout nor gtimeout by default).
