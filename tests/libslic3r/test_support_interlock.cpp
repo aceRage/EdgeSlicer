@@ -5,6 +5,7 @@
 
 #include <cmath>
 
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Support/SupportInterlock.hpp"
