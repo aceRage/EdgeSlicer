@@ -327,6 +327,10 @@ public:
     // schedule it) and GCode (to print with it). Reset with the layer like the flag above.
     int                          chameleon_residual_extruder  = -1;
     bool                         chameleon_residual_all_roles = false;
+    // EdgeSlicer (support interface interlock): this layer carries woven body stripes
+    // (generate_support_toolpaths). Flush into support leaves the layer's support body alone, so purge
+    // never lands in the weave (design D5). Reset with the layer like the flags above.
+    bool                         interlock_woven = false;
     SupportInnerType            support_type = stInnerNormal;
 
     // for tree supports

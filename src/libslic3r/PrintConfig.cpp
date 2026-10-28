@@ -7660,6 +7660,45 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(true));
 
+    // EdgeSlicer: support interface interlock ("woven band"), phase 1.
+    // tests/design_support_interface_interlock.md, owner decisions D1-D7 (2026-10-26).
+    def = this->add("support_interface_interlock", coBool);
+    def->label    = L("Interlock interface with support body");
+    def->category = L("Support");
+    def->tooltip  = L("When the support interface is printed in a different filament from the support body, "
+                      "weave the interface layers under the top one into the body: they are cut into stripes "
+                      "that alternate the body and the interface filament, and each layer's stripes are turned "
+                      "90 degrees from the layer below. The interface then cannot peel off the body. "
+                      "The top interface layer, the one that touches the model, is not changed.\n"
+                      "Applies to top interfaces of normal and organic tree supports. Needs at least one top "
+                      "interface layer more than the woven layers. Not used when \"Support Filament Matching\" is on.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("support_interface_interlock_layers", coInt);
+    def->label    = L("Woven layers");
+    def->category = L("Support");
+    def->tooltip  = L("Number of interface layers under the top one that are woven into the support body. "
+                      "Top interface layers must be at least this plus one.\n"
+                      "With exactly one more top interface layer, the bottom (bonding) layer is woven too, "
+                      "which adds about 2 filament changes per height where a support roof starts on "
+                      "single-nozzle printers. With two or more extra layers the weave adds no filament changes.");
+    def->sidetext = L("layers");
+    def->min      = 2;
+    def->max      = 4;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(2));
+
+    def = this->add("support_interface_interlock_beam_lines", coInt);
+    def->label    = L("Stripe width");
+    def->category = L("Support");
+    def->tooltip  = L("Width of each woven stripe, in support lines. Islands narrower than two stripes are not woven.");
+    def->sidetext = L("lines");
+    def->min      = 1;
+    def->max      = 4;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(2));
+
     def = this->add("support_line_width", coFloatOrPercent);
     def->label = L("Support");
     def->category = L("Quality");
